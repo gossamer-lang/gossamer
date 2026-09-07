@@ -1,0 +1,84 @@
+// A generic function reaches its call site as a copy specialised for the
+// types it was called with, so its parameters, its element reads, and the
+// callable it takes all use those types rather than an opaque slot.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+trait Doubler {
+    fn twice(&self) -> i64
+}
+
+impl Doubler for i64 {
+    fn twice(&self) -> i64 {
+        *self * 2
+    }
+}
+
+impl Doubler for Point {
+    fn twice(&self) -> i64 {
+        (self.x + self.y) * 2
+    }
+}
+
+fn gfold<T, A>(xs: [T], init: A, f: Fn(A, T) -> A) -> A {
+    let mut acc = init
+    for x in xs {
+        acc = f(acc, x)
+    }
+    acc
+}
+
+fn gmap<T, U>(xs: [T], f: Fn(T) -> U) -> Vec<U> {
+    let mut out = #[]
+    for x in xs {
+        out.push(f(x))
+    }
+    out
+}
+
+fn first<T>(a: T, b: T) -> T {
+    a
+}
+
+fn sum_twice<T: Doubler>(items: Vec<T>) -> i64 {
+    let mut total = 0
+    for item in items {
+        total += item.twice()
+    }
+    total
+}
+
+fn main() {
+    let ns = #[1, 2, 3, 4]
+    println("fold-i64 {}", gfold(ns, 0, |a, v| a + v * 3 + 1))
+    println("map-i64 {}", gmap(ns, |v| v * 3 + 1))
+
+    let fs = #[1.5, 2.5]
+    println("fold-f64 {}", gfold(fs, 0.0, |a, v| a + v * 2.0))
+    println("map-f64 {}", gmap(fs, |v| v * 2.0))
+
+    let ws = #["ab", "cde"]
+    println("map-str-len {}", gmap(ws, |w| w.len()))
+    println("fold-str {}", gfold(ws, "", |a, w| a + w))
+
+    let ps = #[Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
+    println("map-struct {}", gmap(ps, |p| p.x + p.y))
+    println("fold-struct {}", gfold(ps, 0, |a, p| a + p.y))
+
+    let ts = #[(1, 2), (3, 4)]
+    println("map-tuple {}", gmap(ts, |t| t.0 * t.1))
+
+    // The same generic at two instantiations, and one whose argument is a
+    // scalar the flat slot could have carried without a copy.
+    println("first-i64 {}", first(10, 20))
+    println("first-str {}", first("x", "y"))
+    println("first-bool {}", first(true, false))
+
+    // A trait bound resolved per instantiation: a scalar receiver is borrowed
+    // for a `&self` method, an aggregate one is already an address.
+    println("scalar-bound {}", sum_twice(#[1, 2, 3]))
+    println("struct-bound {}", sum_twice(#[Point { x: 1, y: 1 }]))
+}

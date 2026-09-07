@@ -221,10 +221,20 @@ impl StringPool {
             let content_len = text.len();
             let index_slots = content_len / 32 + 2;
             let mut index = vec![0u32; index_slots];
-            index[0] = text.chars().count() as u32;
-            for (char_index, (byte_index, _)) in text.char_indices().enumerate() {
-                if char_index % 32 == 0 {
-                    index[1 + char_index / 32] = byte_index as u32;
+            // All-ASCII content states itself with the sentinel the runtime
+            // writes for the same case, so a character index is a byte offset
+            // and the per-block offsets are the identity. Both producers of a
+            // typed string agree on the convention, which is what lets a
+            // reader take one path whatever built the string.
+            if text.is_ascii() {
+                index[0] = gossamer_abi::string_layout::INDEX_ASCII;
+            } else {
+                index[0] = text.chars().count() as u32;
+                for (char_index, (byte_index, _)) in text.char_indices().enumerate() {
+                    if char_index.is_multiple_of(gossamer_abi::string_layout::INDEX_STRIDE) {
+                        index[1 + char_index / gossamer_abi::string_layout::INDEX_STRIDE] =
+                            byte_index as u32;
+                    }
                 }
             }
             let index_values = index

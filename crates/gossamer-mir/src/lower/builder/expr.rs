@@ -222,8 +222,8 @@ impl<'a> Builder<'a> {
                 receiver,
                 name,
                 args,
-                ..
-            } => self.lower_method_call(receiver, name, args, expr.ty, expr.span),
+                owner,
+            } => self.lower_method_call(receiver, name, args, expr.ty, expr.span, owner.as_ref()),
             HirExprKind::Select { arms } => {
                 // Real multiplexing via the runtime select builder. The arms
                 // are registered in source order; `gos_rt_select_wait` polls

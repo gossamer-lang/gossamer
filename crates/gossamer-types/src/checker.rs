@@ -1554,10 +1554,13 @@ impl<'a> TypeChecker<'a> {
         else {
             return;
         };
-        let self_ty = impl_self_ty_name(decl);
+        // The key is the name a dispatch identifies the receiver by, so two
+        // blocks it cannot separate collide here; the message names what the
+        // block was written for, which is what the reader is looking at.
+        let self_ty = written_type_name(&decl.self_ty);
         let key = (
             trait_name.clone(),
-            qualified_type_name(module_path, &self_ty),
+            qualified_type_name(module_path, &impl_self_ty_name(decl)),
         );
         // The collection pass is idempotent, so the same block may be visited
         // more than once; only a block at a different span is a second impl.
@@ -3365,12 +3368,16 @@ impl<'a> TypeChecker<'a> {
     /// receiver-typed lookup; the bare key stays for the sites that key
     /// on a written `Type::method` path instead.
     fn impl_owner_keys(
-        &self,
+        &mut self,
         self_ty: &gossamer_ast::Type,
         module_path: &[String],
     ) -> Option<Vec<String>> {
         let gossamer_ast::ty::TypeKind::Path(tp) = &self_ty.kind else {
-            return None;
+            // A structural type has no path to name it by; it keys on the
+            // spelling every layer shares for one.
+            let lowered = self.type_from_ast(self_ty);
+            let settled = self.deep_resolve(lowered);
+            return crate::printer::structural_impl_owner(self.tcx, settled).map(|name| vec![name]);
         };
         let segments: Vec<&str> = tp.segments.iter().map(|s| s.name.name.as_str()).collect();
         let bare = (*segments.last()?).to_string();
@@ -9240,6 +9247,16 @@ impl<'a> TypeChecker<'a> {
         if let Some(ty) = self.reject_method_on_receiver(receiver_ty, method, args, receiver.span) {
             return ty;
         }
+        // Which `impl` block this call reaches is decided by the receiver's
+        // type, which is known here and nowhere later: a container and a
+        // structural type both reach a method as an untyped handle below.
+        self.record_method_owner(call_id, receiver_ty, method);
+        // A method an `impl` block declared for a built-in type. Its own
+        // surface is dispatched below and answers first, so an impl adds
+        // names to a type rather than replacing any it already had.
+        if let Some(ty) = self.user_impl_method_on_builtin(receiver_ty, method, args) {
+            return ty;
+        }
         // `wg.wait_ctx(ctx)` answers whether the group completed. A sync
         // handle's receiver stays an inference variable by design, so the
         // name carries the return type; no other receiver declares it.
@@ -9727,30 +9744,196 @@ impl<'a> TypeChecker<'a> {
     /// Method names the checker resolves on `resolved`, in the order a
     /// diagnostic lists them. Empty for a receiver with no tabled surface,
     /// which leaves the diagnostic without a did-you-mean.
-    fn known_method_names(&self, resolved: Ty) -> Vec<String> {
-        let names: Vec<&str> = match self.tcx.kind(resolved) {
-            Some(TyKind::String) => STRING_METHODS.to_vec(),
-            // `to_vec` converts a borrowed or fixed sequence into an owned
-            // one, so it is not among a Vec's own names.
-            Some(TyKind::Vec(_)) => SLICE_SEQUENCE_METHODS
-                .iter()
-                .chain(VEC_ONLY_SEQUENCE_METHODS)
-                .chain(SEQUENCE_COMBINATOR_METHODS)
-                .filter(|name| **name != "to_vec")
-                .copied()
-                .collect(),
-            Some(TyKind::Slice(_)) => SLICE_SEQUENCE_METHODS.to_vec(),
-            Some(TyKind::Array { .. }) => SLICE_SEQUENCE_METHODS
-                .iter()
-                .chain(["clone", "into"].iter())
-                .copied()
-                .collect(),
-            Some(TyKind::HashMap { .. }) => MAP_METHODS.to_vec(),
-            Some(TyKind::Iterator(_) | TyKind::Range(_)) => ITERATOR_METHODS.to_vec(),
-            Some(TyKind::Tuple(_)) => TUPLE_METHODS.to_vec(),
-            Some(TyKind::Adt { def, .. }) => return self.adt_method_names(*def),
-            _ => Vec::new(),
+    /// The owner key an `impl` block for `resolved` registers its methods
+    /// under, when the type has a spelling an impl header can name.
+    ///
+    /// An impl's owner is the last segment of the path it is written for, so
+    /// a type reachable only as a structural spelling - `[T]`, `[T; N]`,
+    /// `(A, B)` - has no key here and registers its methods by name alone.
+    fn builtin_impl_owner(&self, resolved: Ty) -> Option<&'static str> {
+        match self.tcx.kind(resolved)? {
+            TyKind::String => Some("String"),
+            TyKind::Vec(_) => Some("Vec"),
+            TyKind::HashMap { ordered, .. } => Some(if *ordered { "BTreeMap" } else { "Map" }),
+            TyKind::Bool => Some("bool"),
+            TyKind::Char => Some("char"),
+            TyKind::Int(int) => Some(int.as_str()),
+            TyKind::Float(float) => Some(float.as_str()),
+            _ => None,
+        }
+    }
+
+    /// Records the `impl` block `method` reaches on `receiver_ty`, so the
+    /// lowering below calls that block's body rather than re-deriving the
+    /// owner from a type that no longer names it.
+    fn record_method_owner(&mut self, call_id: NodeId, receiver_ty: Ty, method: &str) {
+        let resolved = self.peel_refs(self.infer.resolve(self.tcx, receiver_ty));
+        // A receiver whose type is a parameter has one type per instantiation,
+        // and the bytecode VM runs one body for all of them, so there is no
+        // single block to name. Such a call is dispatched on the value in hand.
+        if self.ty_mentions_generic_param(resolved) {
+            return;
+        }
+        let Some(owner) = self.impl_owner_of(resolved) else {
+            return;
         };
+        if !self
+            .user_method_owners
+            .get(method)
+            .is_some_and(|owners| owners.contains(&owner))
+        {
+            return;
+        }
+        // A type's own surface answers first: an `impl` block adds names to a
+        // type rather than replacing any it already had, so a method the
+        // receiver already carries is not redirected to a block that happens
+        // to spell the same name. Checked last, so it costs nothing for the
+        // calls that reach no user block at all.
+        if self
+            .tabled_method_names(resolved)
+            .iter()
+            .any(|name| name == method)
+        {
+            return;
+        }
+        self.table.insert_method_owner(call_id, owner);
+    }
+
+    /// Types a call to a method an `impl` block declared for a built-in
+    /// receiver, when the receiver's own surface does not carry that name.
+    ///
+    /// Method resolution reads a tabled surface per built-in type, so without
+    /// this a program's `impl Trait for String` is rejected at every call
+    /// site even though the compiled tiers resolve and run it.
+    fn user_impl_method_on_builtin(
+        &mut self,
+        receiver_ty: Ty,
+        method: &str,
+        args: &[Expr],
+    ) -> Option<Ty> {
+        let resolved = self.peel_refs(self.infer.resolve(self.tcx, receiver_ty));
+        let owner = self.impl_owner_of(resolved)?;
+        if self.user_type_decls.contains(&owner) {
+            // A type the program declares resolves its methods through its own
+            // identity, which is checked against what that type owns.
+            return None;
+        }
+        if !self
+            .user_method_owners
+            .get(method)
+            .is_some_and(|owners| owners.contains(&owner))
+        {
+            return None;
+        }
+        if self
+            .tabled_method_names(resolved)
+            .iter()
+            .any(|name| name == method)
+        {
+            return None;
+        }
+        for arg in args {
+            self.check_expr(arg);
+        }
+        let key = (owner, method.to_string(), args.len());
+        Some(
+            self.method_ret_types
+                .get(&key)
+                .copied()
+                .unwrap_or_else(|| self.fresh()),
+        )
+    }
+
+    /// The name an `impl` block for `resolved` registers its methods under.
+    ///
+    /// A structural spelling - `[T]`, `[T; N]`, `(A, B)` - is not a path an
+    /// impl header can name, so it has no owner here and its methods register
+    /// by name alone.
+    fn impl_owner_of(&mut self, resolved: Ty) -> Option<String> {
+        if let Some(builtin) = self.builtin_impl_owner(resolved) {
+            return Some(builtin.to_string());
+        }
+        match self.tcx.kind(resolved)? {
+            TyKind::Adt { def, .. } => {
+                let def = *def;
+                self.tcx.def_name(def).map(str::to_string)
+            }
+            // A tuple has no path to name it by, so it registers under the
+            // spelling every layer shares for one.
+            TyKind::Tuple(_) => {
+                // The parts are what tell one structural type from another, so
+                // each has to be resolved before it is named: a tuple whose
+                // elements are still inference variables names them, and no
+                // impl registered under that spelling.
+                let settled = self.deep_resolve(resolved);
+                crate::printer::structural_impl_owner(self.tcx, settled)
+            }
+            _ => None,
+        }
+    }
+
+    /// Whether an `impl` block declared `method` for `resolved`'s type.
+    fn user_impl_declares(&mut self, resolved: Ty, method: &str) -> bool {
+        self.impl_owner_of(resolved).is_some_and(|owner| {
+            self.user_method_owners
+                .get(method)
+                .is_some_and(|owners| owners.contains(&owner))
+        })
+    }
+
+    /// Method names user `impl` blocks declared for the type named `owner`.
+    fn user_methods_for_owner(&self, owner: &str) -> Vec<String> {
+        self.user_method_owners
+            .iter()
+            .filter(|(_, owners)| owners.contains(owner))
+            .map(|(method, _)| method.clone())
+            .collect()
+    }
+
+    fn known_method_names(&self, resolved: Ty) -> Vec<String> {
+        // A type's own surface is what it always carried; an impl block adds
+        // to it, so a diagnostic lists both. Only the nominal owners are read
+        // here: rendering a structural one needs the interner mutably, and a
+        // diagnostic is a listing rather than a decision.
+        let mut out = self.tabled_method_names(resolved);
+        let owner = self
+            .builtin_impl_owner(resolved)
+            .map(str::to_string)
+            .or_else(|| match self.tcx.kind(resolved) {
+                Some(TyKind::Adt { def, .. }) => self.tcx.def_name(*def).map(str::to_string),
+                _ => None,
+            });
+        if let Some(owner) = owner {
+            for method in self.user_methods_for_owner(&owner) {
+                if !out.contains(&method) {
+                    out.push(method);
+                }
+            }
+        }
+        out
+    }
+
+    /// The method surface a receiver carries on its own, before any `impl`
+    /// block a program writes for it.
+    fn tabled_method_names(&self, resolved: Ty) -> Vec<String> {
+        let owner = match self.tcx.kind(resolved) {
+            Some(TyKind::String) => "String",
+            Some(TyKind::Vec(_)) => "Vec",
+            Some(TyKind::Slice(_)) => "Slice",
+            Some(TyKind::Array { .. }) => "Array",
+            Some(TyKind::HashMap { .. }) => "Map",
+            Some(TyKind::Iterator(_) | TyKind::Range(_)) => "Iterator",
+            Some(TyKind::Tuple(_)) => "Tuple",
+            Some(TyKind::Adt { def, .. }) => return self.adt_method_names(*def),
+            _ => return Vec::new(),
+        };
+        let mut names = core_type_own_method_names(owner).unwrap_or_default();
+        // A fixed array answers a copy and a conversion to the `Vec` of its
+        // element; neither is part of the sequence surface it shares with a
+        // view over one.
+        if owner == "Array" {
+            names.extend(["clone", "into"]);
+        }
         let mut seen = HashSet::new();
         names
             .into_iter()
@@ -10406,6 +10589,11 @@ impl<'a> TypeChecker<'a> {
         // its receiver declares. A lazy cursor is not a value, so it keeps the
         // rejection its own surface gives it.
         if method == "to_string" && args.is_empty() && self.is_displayable_value(resolved) {
+            return false;
+        }
+        // A method an `impl` block declared for this receiver is part of its
+        // surface, so the tabled list is not the whole answer.
+        if self.user_impl_declares(resolved, method) {
             return false;
         }
         let (available, resize_reported_separately) = match self.tcx.kind(resolved) {
@@ -19338,12 +19526,57 @@ fn builtin_trait_needs_impl(name: &str) -> bool {
 
 /// Head name of the type an `impl` block attaches to, as written.
 fn impl_self_ty_name(decl: &ImplDecl) -> String {
+    // A structural type keys on the name every tier identifies a receiver of
+    // it by, so two blocks a dispatch cannot separate are reported here rather
+    // than reaching one another's bodies.
     match &decl.self_ty.kind {
-        gossamer_ast::ty::TypeKind::Path(path) => path
+        gossamer_ast::ty::TypeKind::Tuple(elems) => format!("tuple_{}", elems.len()),
+        _ => written_type_name(&decl.self_ty),
+    }
+}
+
+/// The spelling an `impl` header wrote for its self type.
+///
+/// A structural type - `[T; N]`, `(A, B)`, `[T]`, `&T` - has no path to name
+/// it by, and answering one placeholder for every such type keys them all
+/// together: a second impl on a different structural type then reads as a
+/// second impl on the same one. The written spelling distinguishes them and
+/// is what a diagnostic about the block should print.
+fn written_type_name(ty: &gossamer_ast::Type) -> String {
+    use gossamer_ast::ty::TypeKind as K;
+    match &ty.kind {
+        K::Unit => "()".to_string(),
+        K::Never => "!".to_string(),
+        K::Infer => "_".to_string(),
+        K::Path(path) => path
             .segments
             .last()
             .map_or_else(|| "this type".to_string(), |s| s.name.name.clone()),
-        _ => "this type".to_string(),
+        K::Tuple(elems) => {
+            let rendered: Vec<String> = elems.iter().map(written_type_name).collect();
+            format!("({})", rendered.join(", "))
+        }
+        K::Array { elem, len } => {
+            let count = evaluate_const_int_from_expr(len)
+                .map_or_else(|| "_".to_string(), |n| n.to_string());
+            format!("[{}; {}]", written_type_name(elem), count)
+        }
+        K::Slice(inner) => format!("[{}]", written_type_name(inner)),
+        K::Ref { mutability, inner } => {
+            let prefix = match mutability {
+                gossamer_ast::Mutability::Mutable => "&mut ",
+                gossamer_ast::Mutability::Immutable => "&",
+            };
+            format!("{prefix}{}", written_type_name(inner))
+        }
+        K::Fn { kind, params, ret } => {
+            let rendered: Vec<String> = params.iter().map(written_type_name).collect();
+            let head = format!("{}({})", kind.as_str(), rendered.join(", "));
+            match ret {
+                Some(r) => format!("{head} -> {}", written_type_name(r)),
+                None => head,
+            }
+        }
     }
 }
 
@@ -19609,6 +19842,57 @@ fn is_plainly_not_callable(kind: &TyKind) -> bool {
             | TyKind::HashMap { .. }
             | TyKind::Range(..)
     )
+}
+
+/// Whether `owner` is a core type that already declares `name` itself.
+///
+/// The inverse-safe form of [`core_type_accepts_method`]: an owner with no
+/// table here answers `false`, so only a name a core type genuinely carries is
+/// reported. A type's own surface answers a call before any `impl` block a
+/// program writes for it, so a block declaring one of these names declares a
+/// method no call on that type can reach.
+#[must_use]
+pub fn core_type_declares_method(owner: &str, name: &str) -> bool {
+    core_type_own_method_names(owner).is_some_and(|names| names.contains(&name))
+}
+
+/// The method names a core type carries itself, keyed by the name an `impl`
+/// block's owner is written under. `None` is a type with no such surface.
+///
+/// One table answers both readers, which have to agree: the checker asks
+/// whether a call is already answered before it consults a user block, and
+/// the bytecode VM asks the same of an `impl` block as it loads one. A name
+/// every type derives - equality, ordering, hashing, formatting, copying - is
+/// absent here on purpose, because a written `impl` of one of those overrides
+/// the derived behaviour rather than being answered before it.
+fn core_type_own_method_names(owner: &str) -> Option<Vec<&'static str>> {
+    // A tuple `impl` registers under the arity its receiver carries; the
+    // surface is the one every tuple shares.
+    let owner = if owner.starts_with("tuple_") {
+        "Tuple"
+    } else {
+        owner
+    };
+    let names: Vec<&'static str> = match owner {
+        "String" => STRING_METHODS.to_vec(),
+        // `to_vec` converts a borrowed or fixed sequence into an owned one, so
+        // it is not among a Vec's own names.
+        "Vec" => SLICE_SEQUENCE_METHODS
+            .iter()
+            .chain(VEC_ONLY_SEQUENCE_METHODS)
+            .chain(SEQUENCE_COMBINATOR_METHODS)
+            .filter(|name| **name != "to_vec")
+            .copied()
+            .collect(),
+        "Slice" => SLICE_SEQUENCE_METHODS.to_vec(),
+        "Array" => SLICE_SEQUENCE_METHODS.to_vec(),
+        "Map" | "BTreeMap" => MAP_METHODS.to_vec(),
+        "Set" | "BTreeSet" => SET_METHODS.to_vec(),
+        "Iterator" | "Range" => ITERATOR_METHODS.to_vec(),
+        "Tuple" => TUPLE_METHODS.to_vec(),
+        _ => return None,
+    };
+    Some(names)
 }
 
 /// An owner this does not model answers `true`, so a surface it has no

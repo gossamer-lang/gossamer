@@ -44,12 +44,12 @@ mod lower;
 mod ty;
 
 pub use emit::{
-    BuildError, CompileOutcome, MINIMUM_LLVM_MAJOR, NativeObject, OptProfile, PREFERRED_LLVM_MAJOR,
-    PgoMode, active_target_triple, compile_to_object, compile_to_object_at_path,
-    compile_with_fallback, compile_with_fallback_at_path, pgo_mode, render_ir_to_string,
-    reproducible_enabled, set_cache_dir, set_debug_info, set_opt_profile, set_pgo_mode,
-    set_race_instrumentation, set_reproducible, set_source_lines, set_static_musl_link,
-    set_strict_lowering, set_target_triple, want_race_instrumentation,
+    BuildError, CodegenPhaseTimes, CompileOutcome, MINIMUM_LLVM_MAJOR, NativeObject, OptProfile,
+    PREFERRED_LLVM_MAJOR, PgoMode, active_target_triple, codegen_phase_times, compile_to_object,
+    compile_to_object_at_path, compile_with_fallback, compile_with_fallback_at_path, pgo_mode,
+    render_ir_to_string, reproducible_enabled, set_cache_dir, set_debug_info, set_opt_profile,
+    set_pgo_mode, set_race_instrumentation, set_reproducible, set_source_lines,
+    set_static_musl_link, set_strict_lowering, set_target_triple, want_race_instrumentation,
 };
 
 /// Read-only view of the LLVM backend's runtime-symbol declaration

@@ -1,6 +1,7 @@
 //! Module-level assembly: runtime symbol declarations +
 //! per-function lowering + `llc -O3` invocation.
 
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::path::{Path, PathBuf};
 
@@ -249,14 +250,19 @@ fn codegen_job_limit(_body_count: usize) -> usize {
 /// FNV-1a 64-bit hash - deterministic, no `std` hasher randomisation,
 /// so cache keys are stable across process restarts.
 fn fnv1a_64(data: &[u8]) -> u64 {
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
     const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    let mut h = OFFSET;
+    fnv1a_64_update(OFFSET, data)
+}
+
+/// Folds `data` into a running FNV-1a state, for a hash built from many
+/// pieces without joining them into one buffer first.
+fn fnv1a_64_update(mut hash: u64, data: &[u8]) -> u64 {
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
     for &b in data {
-        h ^= u64::from(b);
-        h = h.wrapping_mul(PRIME);
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(PRIME);
     }
-    h
+    hash
 }
 
 /// Fingerprint of implementation inputs that can change emitted LLVM IR.
@@ -266,27 +272,30 @@ fn fnv1a_64(data: &[u8]) -> u64 {
 fn compiler_fingerprint() -> u64 {
     static FP: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *FP.get_or_init(|| {
-        let mut s = format!(
-            "gossamer-llvm-{}|codegen={}",
-            env!("CARGO_PKG_VERSION"),
-            env!("GOSSAMER_LLVM_CODEGEN_CACHE_STAMP")
-        );
+        // The registry has well over a thousand entries and this runs on the
+        // first body of every build, so each field is folded in as its own
+        // bytes rather than through a formatter and a string per entry.
+        let mut hash = fnv1a_64(b"gossamer-llvm-");
+        hash = fnv1a_64_update(hash, env!("CARGO_PKG_VERSION").as_bytes());
+        hash = fnv1a_64_update(hash, b"|codegen=");
+        hash = fnv1a_64_update(hash, env!("GOSSAMER_LLVM_CODEGEN_CACHE_STAMP").as_bytes());
         for entry in gossamer_abi::REGISTRY {
-            s.push('|');
-            s.push_str(entry.name);
-            s.push(':');
-            s.push_str(&format!("{:?}", entry.sig.ret));
-            s.push('(');
+            hash = fnv1a_64_update(hash, b"|");
+            hash = fnv1a_64_update(hash, entry.name.as_bytes());
+            hash = fnv1a_64_update(
+                hash,
+                &[
+                    entry.sig.ret as u8,
+                    entry.tier as u8,
+                    u8::from(entry.noreturn),
+                    u8::from(entry.unwinds),
+                ],
+            );
             for param in entry.sig.params {
-                s.push_str(&format!("{param:?},"));
+                hash = fnv1a_64_update(hash, &[*param as u8]);
             }
-            s.push(')');
-            s.push_str(&format!(
-                ":tier={:?}:noreturn={}:unwinds={}",
-                entry.tier, entry.noreturn, entry.unwinds
-            ));
         }
-        fnv1a_64(s.as_bytes())
+        hash
     })
 }
 
@@ -323,6 +332,58 @@ impl DigestWriter {
     }
 }
 
+/// Wall time each codegen phase spent, in microseconds, accumulated for the
+/// life of the process.
+///
+/// A build reports these through `--timings`, where they say whether a slow
+/// codegen is the emitter writing IR, the identity hash that decides a cache
+/// hit, or the LLVM child compiling the result.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CodegenPhaseTimes {
+    /// Hashing MIR into the per-body object-cache identity.
+    pub cache_key_us: u64,
+    /// Lowering MIR to LLVM IR text and writing it out.
+    pub render_us: u64,
+    /// The LLVM child processes compiling that IR to objects.
+    pub tool_us: u64,
+}
+
+static CACHE_KEY_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static RENDER_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TOOL_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn record_phase(slot: &std::sync::atomic::AtomicU64, started: std::time::Instant) {
+    slot.fetch_add(
+        u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Records LLVM child-process time when the returned value is dropped, so
+/// every exit path out of the pipeline is measured.
+fn scopeguard_tool_time(started: std::time::Instant) -> ToolTimeGuard {
+    ToolTimeGuard(started)
+}
+
+struct ToolTimeGuard(std::time::Instant);
+
+impl Drop for ToolTimeGuard {
+    fn drop(&mut self) {
+        record_phase(&TOOL_US, self.0);
+    }
+}
+
+/// The codegen phase times recorded so far.
+#[must_use]
+pub fn codegen_phase_times() -> CodegenPhaseTimes {
+    use std::sync::atomic::Ordering::Relaxed;
+    CodegenPhaseTimes {
+        cache_key_us: CACHE_KEY_US.load(Relaxed),
+        render_us: RENDER_US.load(Relaxed),
+        tool_us: TOOL_US.load(Relaxed),
+    }
+}
+
 /// Stable cache key for one body: mixes the body name, its complete MIR
 /// representation, target triple, profile, and compiler fingerprint. The
 /// result is computed once per body per build and reused for cache lookup and
@@ -335,6 +396,7 @@ fn body_cache_key(
 ) -> String {
     use std::fmt::Write as _;
 
+    let started = std::time::Instant::now();
     let mut digest = DigestWriter::new(b"gossamer-llvm-body-cache-v3\0");
     digest.update(body.name.as_bytes());
     digest.update(b"\0");
@@ -359,7 +421,9 @@ fn body_cache_key(
     }
     digest.update(b"\0");
     write!(&mut digest, "{body:?}").expect("hashing MIR through fmt cannot fail");
-    digest.finish()
+    let key = digest.finish();
+    record_phase(&CACHE_KEY_US, started);
+    key
 }
 
 /// Every setting outside MIR that can change emitted machine code. Keeping
@@ -367,6 +431,28 @@ fn body_cache_key(
 /// different-LLVM build from reusing an incompatible object produced for the
 /// same body.
 fn codegen_configuration_fingerprint(triple: &str, profile: OptProfile) -> String {
+    // Every input here is a process-level setting or a tool on disk, and a
+    // build reads the fingerprint once per body, so the answer is kept for
+    // the settings it was computed under rather than restatted each time.
+    static CACHE: std::sync::OnceLock<parking_lot::Mutex<HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    let key = format!("{triple}|{profile:?}|{:?}", pgo_mode());
+    if let Some(hit) = CACHE
+        .get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+        .lock()
+        .get(&key)
+    {
+        return hit.clone();
+    }
+    let text = codegen_configuration_fingerprint_uncached(triple, profile);
+    CACHE
+        .get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
+        .lock()
+        .insert(key, text.clone());
+    text
+}
+
+fn codegen_configuration_fingerprint_uncached(triple: &str, profile: OptProfile) -> String {
     let mut text = format!(
         "triple={triple}|profile={profile:?}|mcpu={}|dwarf={}|repro={}|race={}|static_musl={}",
         mcpu_target(triple),
@@ -487,6 +573,19 @@ fn active_cache_dir() -> Option<PathBuf> {
     }
     if let Ok(d) = std::env::var("GOS_BUILD_CACHE") {
         return Some(PathBuf::from(d));
+    }
+    toolchain_cache_dir()
+}
+
+/// The user-wide cache directory, for notes about the machine's toolchain
+/// rather than about a program being built.
+///
+/// A project may point its object cache elsewhere; what LLVM version a tool
+/// on this machine is does not belong to any one project, and re-deriving it
+/// per project is what a cache is meant to avoid.
+fn toolchain_cache_dir() -> Option<PathBuf> {
+    if std::env::var("GOS_NO_CACHE").is_ok() {
+        return None;
     }
     if cfg!(windows) {
         return std::env::var_os("LOCALAPPDATA")
@@ -1013,6 +1112,7 @@ fn compile_bodies_parallel_incremental(
     // Phase 2 - render chunk .ll files (serial)
     // ---------------------------------------------------------------
     for (_, body_indices, _, ll_path, _) in &chunks_to_compile {
+        let started = std::time::Instant::now();
         let ir = render_chunk_module(body_indices, &ctx).map_err(|e| match e {
             BuildError::InternalLoweringBug(msg) => {
                 anyhow!("llvm backend internal lowering bug: {msg}")
@@ -1022,6 +1122,7 @@ fn compile_bodies_parallel_incremental(
         })?;
         std::fs::write(ll_path, ir.as_bytes())
             .with_context(|| format!("writing {}", ll_path.display()))?;
+        record_phase(&RENDER_US, started);
     }
 
     // Stitch chunk files into unit.ll for tools / tests that expect
@@ -2310,11 +2411,13 @@ fn invoke_llc_pipeline(
     triple: &str,
     announce: bool,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
     let keep_artifacts = std::env::var("GOS_LLVM_DUMP").is_ok();
     if keep_artifacts && announce {
         eprintln!("llvm backend: IR at {}", ll_path.display());
     }
     audit_llvm_ir_symbols(ll_path)?;
+    let _guard = scopeguard_tool_time(started);
     let profile = opt_profile();
     let mcpu = mcpu_target(triple);
     if let Some(clang) = integrated_clang_path(triple) {
@@ -2335,10 +2438,15 @@ fn invoke_llc_pipeline(
     // entirely sends those shapes straight to `llc`, which
     // rejects them.
     //
-    // Debug uses `default<O1>` with discretionary inlining disabled, then
-    // `llc -O0`. Profile-sensitive arithmetic checks remain observable. The
-    // zero inlining threshold prevents a large mutation-heavy body from being
-    // folded into its caller, a shape that LLVM handles poorly at `O1`.
+    // Debug runs the smallest pipeline that makes the emitter's output
+    // usable: `sroa` promotes the alloca per local that every lowered body
+    // starts with, and `early-cse` / `instcombine` / `simplifycfg` clean up
+    // after it. A full `default<O1>` costs several times as much for a
+    // binary that is already an order of magnitude behind `--release`, which
+    // is the wrong side of the trade for the profile people iterate on.
+    // Instcombine is asked not to verify its fixpoint because a pipeline of
+    // this length gives it one iteration, where the check expects the
+    // repeats a longer pipeline would run.
     //
     // Release profile uses `default<O3>` for full optimisation.
     //
@@ -2347,7 +2455,10 @@ fn invoke_llc_pipeline(
     // source-level context before any optimisation rewrites
     // obscure the offending value.
     let (opt_passes, llc_level) = match profile {
-        OptProfile::Debug => ("verify,default<O1>", "-O0"),
+        OptProfile::Debug => (
+            "verify,sroa,early-cse,instcombine<no-verify-fixpoint>,simplifycfg",
+            "-O0",
+        ),
         OptProfile::Release => ("verify,default<O3>", "-O3"),
     };
     let opt_tool = find_opt()?;
@@ -2385,9 +2496,6 @@ fn invoke_llc_pipeline(
         // benchmarks. The narrower `disable-memcpy-idiom` flag
         // no longer takes effect under LLVM 18's new pass manager.
         ;
-    if matches!(profile, OptProfile::Debug) {
-        opt_cmd.arg("-inline-threshold=0");
-    }
     if matches!(profile, OptProfile::Release) && disable_loop_idiom_for_target(triple) {
         opt_cmd.arg("--disable-loop-idiom-all");
     }
@@ -2777,6 +2885,54 @@ const _: () = assert!(MINIMUM_LLVM_MAJOR <= PREFERRED_LLVM_MAJOR);
 /// The LLVM major `tool` reports, or `None` when it does not answer a
 /// recognisable `--version`.
 fn llvm_tool_major(tool: &Path) -> Option<u32> {
+    if let Some(remembered) = remembered_llvm_major(tool) {
+        return remembered.0;
+    }
+    let major = probe_llvm_major(tool);
+    remember_llvm_major(tool, major);
+    major
+}
+
+/// A version answer read back from the cache. The inner `Option` is the
+/// answer itself, which is `None` for a tool whose banner said nothing.
+struct RememberedMajor(Option<u32>);
+
+/// Path of the note recording `tool`'s major version, or `None` when this
+/// build keeps no cache.
+///
+/// Asking a tool its version runs it, and an LLVM tool's startup maps the
+/// whole shared library, which on a small program costs more than every
+/// other piece of cache bookkeeping together. The answer changes only when
+/// the binary does, so the note is keyed by the binary's identity.
+fn llvm_major_note_path(tool: &Path) -> Option<PathBuf> {
+    let dir = toolchain_cache_dir()?;
+    let key = fnv1a_64(file_identity(tool).as_bytes());
+    Some(dir.join(format!("llvm-major-{key:016x}")))
+}
+
+fn remembered_llvm_major(tool: &Path) -> Option<RememberedMajor> {
+    let text = std::fs::read_to_string(llvm_major_note_path(tool)?).ok()?;
+    let text = text.trim();
+    if text == "unknown" {
+        return Some(RememberedMajor(None));
+    }
+    text.parse().ok().map(|major| RememberedMajor(Some(major)))
+}
+
+fn remember_llvm_major(tool: &Path, major: Option<u32>) {
+    let Some(path) = llvm_major_note_path(tool) else {
+        return;
+    };
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(
+        path,
+        major.map_or_else(|| "unknown".to_string(), |m| m.to_string()),
+    );
+}
+
+fn probe_llvm_major(tool: &Path) -> Option<u32> {
     let out = std::process::Command::new(tool)
         .arg("--version")
         .output()

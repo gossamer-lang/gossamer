@@ -208,3 +208,24 @@ fn write_dyn(tcx: &TyCtxt, trait_ref: &TraitRef, out: &mut String) {
         write_substs(tcx, &trait_ref.substs, out);
     }
 }
+
+/// The name an `impl` block for a structural type registers its methods under.
+///
+/// A tuple has no path to name it by, so it is named by the arity every tier
+/// identifies a receiver of it by: the bytecode VM does not specialise a
+/// generic, so a method reached through a type parameter is dispatched there on
+/// the value in hand, and that value carries its arity. Two tuple `impl` blocks
+/// of one arity are the same block to such a dispatch and are reported as
+/// conflicting rather than resolved by guess.
+///
+/// An array and a slice have no name here. A fixed array is stored inline on
+/// the compiled tiers and behind a handle on the bytecode VM, so no one name
+/// identifies a receiver of one on every tier; a sequence method is written on
+/// `Vec` instead.
+#[must_use]
+pub fn structural_impl_owner(tcx: &TyCtxt, ty: Ty) -> Option<String> {
+    match tcx.kind_of(ty) {
+        TyKind::Tuple(parts) => Some(format!("tuple_{}", parts.len())),
+        _ => None,
+    }
+}

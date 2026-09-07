@@ -1388,42 +1388,38 @@ fn main() -> i64 {
 ";
     let (mut bodies, mut tcx) = build(source);
     gossamer_mir::monomorphise(&mut bodies, &mut tcx);
-    let main = bodies.iter().find(|b| b.name == "main").expect("main");
-    // main has two call sites; both must resolve through FnRef with
-    // a non-empty `Substs`. After monomorphise the bodies list must
-    // contain a specialised body whose name is the mangled form for
-    // the i64 substitution.
-    let fnref_substs: Vec<_> = main
-        .blocks
-        .iter()
-        .filter_map(|b| match &b.terminator {
-            Terminator::Call {
-                callee: Operand::FnRef { def, substs },
-                ..
-            } => Some((*def, substs.clone())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        fnref_substs.len(),
-        2,
-        "expected two call sites to `first::<i64>`; got: {fnref_substs:?}"
-    );
-    assert!(
-        fnref_substs.iter().all(|(_, s)| !s.is_empty()),
-        "every call site must carry substs post-typecheck"
-    );
     // The distinct (def, substs) pair deduplicates to one specialised
     // body, shared between the two call sites.
-    let mangled: Vec<&String> = bodies
+    let mangled: Vec<String> = bodies
         .iter()
-        .map(|b| &b.name)
+        .map(|b| b.name.clone())
         .filter(|n| n.starts_with("fn#") && n.contains("__mono__"))
         .collect();
     assert_eq!(
         mangled.len(),
         1,
         "two calls with identical substs should share one specialised body; got {mangled:?}"
+    );
+    let main = bodies.iter().find(|b| b.name == "main").expect("main");
+    // Both call sites name the specialised body directly. A call left as a
+    // `FnRef` would run the template, whose locals are opaque parameter
+    // slots rather than the instantiation's real types.
+    let named: Vec<String> = main
+        .blocks
+        .iter()
+        .filter_map(|b| match &b.terminator {
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        })
+        .filter(|n| n.contains("__mono__"))
+        .collect();
+    assert_eq!(
+        named,
+        vec![mangled[0].clone(), mangled[0].clone()],
+        "both call sites must dispatch to the specialised name"
     );
 }
 

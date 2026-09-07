@@ -1,0 +1,105 @@
+// A built-in type carries a method surface of its own, and an `impl` block
+// adds names to it. A name the type already carries keeps its own meaning, so
+// which body a call reaches is settled by the receiver's type rather than by
+// which spelling was written last. A name the type does not carry reaches the
+// block that declares it.
+
+trait Labelled {
+    fn label(&self) -> String
+}
+
+// `label` is on no built-in surface, so each of these blocks answers calls on
+// its own receiver type.
+impl Labelled for i64 {
+    fn label(&self) -> String {
+        format("i64/{}", *self)
+    }
+}
+
+impl Labelled for String {
+    fn label(&self) -> String {
+        format("String/{}", self.len())
+    }
+}
+
+impl Labelled for Vec<i64> {
+    fn label(&self) -> String {
+        format("Vec/{}", self.len())
+    }
+}
+
+// `len` is a name a String and a Vec each carry, so the type answers it and
+// this block adds a second name rather than replacing the first.
+trait Sized2 {
+    fn len(&self) -> i64
+    fn doubled_len(&self) -> i64
+}
+
+impl Sized2 for String {
+    fn len(&self) -> i64 {
+        99
+    }
+    fn doubled_len(&self) -> i64 {
+        self.len() * 2
+    }
+}
+
+// `Display` is the rendering channel, and `to_string` is the spelling that
+// reaches it. A scalar has no `to_string` of its own to keep, so the block
+// answers.
+impl Display for i64 {
+    fn fmt(&self) -> String {
+        format("<{}>", *self)
+    }
+}
+
+// A container's rendering channel is one an `impl` block can answer, so both
+// `{}` and the `to_string` that reaches it read the written body, and the body
+// reads its receiver as the container it is.
+impl Display for Vec<i64> {
+    fn fmt(&self) -> String {
+        format("V[{} {}]", self.len(), self[0])
+    }
+}
+
+// A scalar receiver answering a scalar, called in a loop, so the native tier
+// has a body to compile and decides the same precedence there: `doubled` is a
+// name no scalar carries and reaches the block, while `len` is one a String
+// carries and reaches the type.
+trait Doubled {
+    fn doubled(&self) -> i64
+}
+
+impl Doubled for i64 {
+    fn doubled(&self) -> i64 {
+        *self * 2
+    }
+}
+
+fn hot_sum(n: i64, s: String) -> i64 {
+    let mut total = 0
+    let mut i = 0
+    while i < n {
+        total += i.doubled() + s.len()
+        i += 1
+    }
+    total
+}
+
+fn main() {
+    let n = 7
+    let s = "hello"
+    let v = #[1, 2, 3]
+
+    println("added:")
+    println("  {} {} {}", n.label(), s.label(), v.label())
+
+    println("kept:")
+    println("  {} {}", s.len(), s.doubled_len())
+
+    println("rendered:")
+    println("  {} {}", n, n.to_string())
+    println("  {} {}", v, v.to_string())
+
+    println("loop: {}", hot_sum(1000, s))
+}

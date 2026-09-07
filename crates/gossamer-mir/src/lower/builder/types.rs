@@ -203,6 +203,33 @@ impl<'a> Builder<'a> {
         .then(|| gossamer_types::printer::render_ty(self.tcx, cur))
     }
 
+    /// Name an `impl` block registers its methods under, for a receiver whose
+    /// type is a core one rather than a declared struct or enum.
+    ///
+    /// The spelling matches the checker's, which is what keeps one call
+    /// reaching one body: the checker records the owner an `impl` block was
+    /// written for, the bytecode VM registers the block under that name, and
+    /// this is where the compiled tiers look it up.
+    pub(crate) fn builtin_impl_owner_name(&self, ty: Ty) -> Option<String> {
+        use gossamer_types::TyKind;
+        if let Some(name) = self.primitive_impl_name(ty) {
+            return Some(name);
+        }
+        let mut cur = ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(cur) {
+            cur = *inner;
+        }
+        match self.tcx.kind_of(cur) {
+            TyKind::String => Some("String".to_string()),
+            TyKind::Vec(_) => Some("Vec".to_string()),
+            TyKind::HashMap { ordered, .. } => {
+                Some(if *ordered { "BTreeMap" } else { "Map" }.to_string())
+            }
+            TyKind::Tuple(parts) => Some(format!("tuple_{}", parts.len())),
+            _ => None,
+        }
+    }
+
     pub(crate) fn struct_name_of(&self, ty: Ty) -> Option<String> {
         use gossamer_types::TyKind;
         let mut cur = ty;

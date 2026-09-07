@@ -182,6 +182,7 @@ pub(crate) fn detect_for_loop(body: &HirExpr) -> Option<ForLoopShape<'_>> {
         receiver,
         name,
         args,
+        owner: None,
     } = &scrutinee.kind
     else {
         return None;

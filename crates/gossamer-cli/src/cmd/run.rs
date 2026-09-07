@@ -84,6 +84,9 @@ fn run_source_on_vm(
     // locations during load. The full source map can then be released before
     // execution, preserving the old frontend/runtime peak-memory boundary.
     vm.set_source_map(Arc::new(map));
+    // Running a program enters it at `main` and nowhere else, so the
+    // promotion snapshot covers what `main` reaches and leaves the rest.
+    vm.set_entry_points(&["main".to_string()]);
     profile_rss_stage("vm_created");
     // `load` consumes `tcx` (moves the interner into the JIT snapshot).
     vm.load(&program, tcx, true)

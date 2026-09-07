@@ -26,6 +26,65 @@ use crate::ir::{
 /// produces fresh specialisations.
 const MAX_MONOMORPHISE_ITERATIONS: u32 = 32;
 
+/// The receiver convention each method body was lowered with, keyed by the
+/// body's name.
+///
+/// A method states its own convention in its first local, and that is what
+/// decides whether a call site hands over a value or an address. The call
+/// site's own receiver type cannot answer it: below the checker a container,
+/// a string, and a fieldless enum all travel in a slot the flat value model
+/// types exactly the way it types an `i64`.
+struct ReceiverConventions {
+    by_reference: HashMap<String, bool>,
+    by_scalar_reference: HashMap<String, bool>,
+}
+
+impl ReceiverConventions {
+    /// Reads the convention off every method body in `bodies`.
+    fn of(bodies: &[Body], tcx: &mut TyCtxt) -> Self {
+        let mut by_reference = HashMap::new();
+        let mut by_scalar_reference = HashMap::new();
+        for body in bodies
+            .iter()
+            .filter(|b| b.arity >= 1 && b.name.contains("::"))
+        {
+            let Some(recv) = body.locals.get(1) else {
+                continue;
+            };
+            let kind = tcx.kind_of(recv.ty);
+            let scalar_ref = match kind {
+                TyKind::Ref { inner, .. } => matches!(
+                    tcx.kind_of(*inner),
+                    TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
+                ),
+                _ => false,
+            };
+            by_reference.insert(body.name.clone(), matches!(kind, TyKind::Ref { .. }));
+            by_scalar_reference.insert(body.name.clone(), scalar_ref);
+        }
+        Self {
+            by_reference,
+            by_scalar_reference,
+        }
+    }
+
+    /// Whether the program declares a method body under this name.
+    fn declares(&self, name: &str) -> bool {
+        self.by_reference.contains_key(name)
+    }
+
+    /// Whether the named method declares a reference receiver.
+    fn takes_reference(&self, name: &str) -> bool {
+        self.by_reference.get(name) == Some(&true)
+    }
+
+    /// Whether the named method reads its receiver by loading through it,
+    /// which is the case exactly when the reference names a scalar.
+    fn loads_receiver(&self, name: &str) -> bool {
+        self.by_scalar_reference.get(name) == Some(&true)
+    }
+}
+
 /// Monomorphises `bodies` by emitting one specialised copy per
 /// distinct `(def, substs)` pair observed at a call site whose
 /// substitution is non-empty. Monomorphic calls are untouched.
@@ -39,20 +98,7 @@ const MAX_MONOMORPHISE_ITERATIONS: u32 = 32;
 /// `map_i64_str` and `each_i64`. Cap at
 /// `MAX_MONOMORPHISE_ITERATIONS` as a runaway guard.
 pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
-    // A method's own body states the receiver type it was lowered with, which
-    // is what says whether a specialised call site has to hand it an address.
-    let receiver_is_ref: HashMap<String, bool> = bodies
-        .iter()
-        .filter(|b| b.arity >= 1 && b.name.contains("::"))
-        .filter_map(|b| {
-            b.locals.get(1).map(|recv| {
-                (
-                    b.name.clone(),
-                    matches!(tcx.kind_of(recv.ty), TyKind::Ref { .. }),
-                )
-            })
-        })
-        .collect();
+    let receivers = ReceiverConventions::of(bodies, tcx);
     let mut emitted: HashSet<String> = HashSet::new();
     let sources: HashMap<u32, usize> = bodies
         .iter()
@@ -66,11 +112,8 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
         .map(|(i, b)| (b.name.clone(), i))
         .collect();
     // Source defs whose specialisation rewrote a trait-method call on a
-    // type-parameter receiver. Only these need their call sites routed to
-    // the mangled copy (and their now-dead template dropped): a scalar
-    // generic keeps calling its template, which the compiled tiers lower
-    // through the uniform pointer-width ABI. Routing a scalar generic to a
-    // copy instead would mis-pass an `i64` argument as a pointer.
+    // type-parameter receiver. Their templates keep an unresolved callee, so
+    // once every call site routes to a copy the template is dropped below.
     let mut trait_specialised_defs: HashSet<u32> = HashSet::new();
     // Method templates whose specialisation resolved a trait call through a
     // type parameter. The template keeps the unresolved bare callee, so once
@@ -85,7 +128,7 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
             &sources,
             &mut emitted,
             &mut trait_specialised_defs,
-            &receiver_is_ref,
+            &receivers,
             tcx,
             function_scan_start,
         );
@@ -96,7 +139,7 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
             &method_bases,
             &mut emitted,
             &mut trait_specialised_methods,
-            &receiver_is_ref,
+            &receivers,
             tcx,
             method_scan_start,
         );
@@ -113,24 +156,18 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
             or the cap needs to be raised after auditing the offending bodies"
         );
     }
-    // Route every generic call whose argument is not an i64-slot scalar to its
-    // specialised concrete copy. The template's flat-i64 ABI carries an
-    // `i64`/`bool`/`char`/`()` argument correctly through the pointer-width
-    // slot, so those keep calling the template; everything else (structs,
-    // tuples, strings, `f64` - a float register class the i64 slot cannot hold)
-    // is mishandled by the template and routes to its concrete copy, which uses
-    // the real per-type ABI. Const-only instantiations have no copy.
+    // Route a generic call to its specialised concrete copy. The copy's
+    // locals carry the instantiation's real types, which is what lets the
+    // backends pick the per-type element read, the per-type register class,
+    // and the typed callable ABI; a call left pointing at the template runs
+    // a body whose every local is an opaque `Param` slot, so each element
+    // read is an out-of-line runtime call and each callable goes through the
+    // pointer-shaped thunk. Const-only instantiations have no copy.
     for body in bodies.iter_mut() {
         for block in &mut body.blocks {
             if let Terminator::Call { callee, .. } = &mut block.terminator
                 && let Operand::FnRef { def, substs } = callee
                 && !substs.is_empty()
-                // A template whose trait call was resolved per instantiation
-                // is dropped below, so every one of its call sites routes to
-                // a copy - including a scalar instantiation, which would
-                // otherwise keep pointing at a body that no longer exists.
-                && (substs_need_concrete_copy(substs, tcx)
-                    || trait_specialised_defs.contains(&def.local))
             {
                 let name = mangled_name(*def, substs);
                 if emitted.contains(&name) {
@@ -154,7 +191,7 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
     // the opaque slot value the parameter had; settle the convention here,
     // where every body - template and copy alike - is in its final form.
     for body in bodies.iter_mut() {
-        borrow_scalar_receivers_for_ref_methods(body, &receiver_is_ref, tcx);
+        borrow_scalar_receivers_for_ref_methods(body, &receivers, tcx);
     }
     // Resolve every local's type one last time so specialised
     // copies + originals share the resolved (no-Var) state.
@@ -177,7 +214,7 @@ fn specialise_functions_step(
     sources: &HashMap<u32, usize>,
     emitted: &mut HashSet<String>,
     trait_specialised_defs: &mut HashSet<u32>,
-    receiver_is_ref: &HashMap<String, bool>,
+    receivers: &ReceiverConventions,
     tcx: &mut TyCtxt,
     scan_start: usize,
 ) -> Vec<Body> {
@@ -218,14 +255,14 @@ fn specialise_functions_step(
             let subst_tys = subst_type_arguments(substs);
             // Do this while locals retain template parameters. The rewrite
             // recognises a parameter receiver and selects the concrete impl.
-            if rewrite_trait_method_calls(&mut copy, substs, receiver_is_ref, tcx) {
+            if rewrite_trait_method_calls(&mut copy, substs, receivers, tcx) {
                 trait_specialised_defs.insert(def.local);
             }
             for local in &mut copy.locals {
                 local.ty = subst_param_ty(tcx, local.ty, &subst_tys);
             }
             repair_generic_element_reads(&mut copy, tcx);
-            borrow_scalar_receivers_for_ref_methods(&mut copy, receiver_is_ref, tcx);
+            borrow_scalar_receivers_for_ref_methods(&mut copy, receivers, tcx);
             specialise_call_substs(&mut copy, &subst_tys, tcx);
             specialised.push(copy);
         }
@@ -291,7 +328,7 @@ fn repair_generic_element_reads(copy: &mut Body, tcx: &TyCtxt) {
 /// receiver type it was lowered with.
 fn borrow_scalar_receivers_for_ref_methods(
     copy: &mut Body,
-    receiver_is_ref: &HashMap<String, bool>,
+    receivers: &ReceiverConventions,
     tcx: &mut TyCtxt,
 ) {
     let local_tys: Vec<Ty> = copy.locals.iter().map(|l| l.ty).collect();
@@ -303,7 +340,7 @@ fn borrow_scalar_receivers_for_ref_methods(
         let Operand::Const(ConstValue::Str(name)) = callee else {
             continue;
         };
-        if receiver_is_ref.get(name) != Some(&true) {
+        if !receivers.takes_reference(name) {
             continue;
         }
         let Some(Operand::Copy(recv)) = args.first() else {
@@ -315,13 +352,16 @@ fn borrow_scalar_receivers_for_ref_methods(
         let Some(recv_ty) = local_tys.get(recv.local.0 as usize).copied() else {
             continue;
         };
-        // Only a receiver still typed as a parameter is settled here. A
-        // template serving scalar instantiations carries the value in that
-        // slot, and lowering could not have chosen the convention because the
-        // concrete type was not yet known. A receiver that already has a
-        // concrete type was lowered against the impl it resolves to, and
-        // overriding it here would break a convention that already holds.
-        if !matches!(tcx.kind_of(recv_ty), TyKind::Param { .. }) {
+        // A receiver that reaches the call as a value, where the callee reads
+        // one through a reference. A type parameter is one: the lowering could
+        // not choose a convention for its slot because the concrete type was
+        // not yet known. A scalar is the other, but only where the callee
+        // itself declares a reference to a scalar - the callee's own body is
+        // what decides whether it loads, and an enum's discriminant travels in
+        // a slot the flat model types the way it types a scalar.
+        let param_receiver = matches!(tcx.kind_of(recv_ty), TyKind::Param { .. });
+        let callee_loads = receivers.loads_receiver(name);
+        if !param_receiver && !callee_loads {
             continue;
         }
         work.push((block_index, recv.local, recv_ty));
@@ -393,7 +433,7 @@ fn specialise_methods_step(
     method_bases: &HashMap<String, usize>,
     emitted: &mut HashSet<String>,
     trait_specialised_methods: &mut HashSet<String>,
-    receiver_is_ref: &HashMap<String, bool>,
+    receivers: &ReceiverConventions,
     tcx: &mut TyCtxt,
     scan_start: usize,
 ) -> (bool, usize) {
@@ -490,7 +530,7 @@ fn specialise_methods_step(
         // through its type parameter, so the same receiver rewrite a generic
         // free function needs applies here. It runs while the locals still
         // carry the template parameter, which is what identifies the receiver.
-        if rewrite_trait_method_calls(&mut copy, &substs, receiver_is_ref, tcx) {
+        if rewrite_trait_method_calls(&mut copy, &substs, receivers, tcx) {
             trait_specialised_methods.insert(base_name);
         }
         reference_aggregate_trait_receivers(&mut copy, &subst_tys, tcx);
@@ -498,7 +538,7 @@ fn specialise_methods_step(
             local.ty = subst_param_ty(tcx, local.ty, &subst_tys);
         }
         repair_generic_element_reads(&mut copy, tcx);
-        borrow_scalar_receivers_for_ref_methods(&mut copy, receiver_is_ref, tcx);
+        borrow_scalar_receivers_for_ref_methods(&mut copy, receivers, tcx);
         specialise_call_substs(&mut copy, &subst_tys, tcx);
         bodies.push(copy);
     }
@@ -734,7 +774,7 @@ fn method_mangled_name(base: &str, substs: &Substs) -> String {
 fn rewrite_trait_method_calls(
     copy: &mut Body,
     substs: &Substs,
-    known_methods: &HashMap<String, bool>,
+    receivers: &ReceiverConventions,
     tcx: &TyCtxt,
 ) -> bool {
     let subst_tys: Vec<Option<Ty>> = substs
@@ -776,7 +816,7 @@ fn rewrite_trait_method_calls(
             // program actually declares it. A declared type keeps resolving
             // by name, which is how its derived methods are reached.
             let primitive_target = !matches!(tcx.kind_of(*concrete), TyKind::Adt { .. });
-            if !primitive_target || known_methods.contains_key(&resolved) {
+            if !primitive_target || receivers.declares(&resolved) {
                 *callee = Operand::Const(ConstValue::Str(resolved));
                 rewrote = true;
             }
@@ -921,11 +961,22 @@ fn param_index(tcx: &TyCtxt, ty: Ty) -> Option<usize> {
 /// and such an impl keys its methods by the primitive's spelling. Resolving
 /// only ADTs left a trait call on a parameter that turned out to be `i64`
 /// pointing at the unqualified trait name, which names no body.
+/// The name an `impl` block for `ty` registers its methods under, which is
+/// what a resolved trait call has to spell.
+///
+/// A container and a structural type carry the shape their receiver is
+/// dispatched by rather than a spelling of their own: every tuple is reached
+/// as a tuple, and an array shares its representation with a `Vec`.
 fn adt_name(tcx: &TyCtxt, ty: Ty) -> Option<String> {
     match tcx.kind_of(ty).clone() {
         TyKind::Adt { def, .. } => tcx.def_name(def).map(str::to_string),
         TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::String => {
             Some(gossamer_types::printer::render_ty(tcx, ty))
+        }
+        TyKind::Vec(_) => Some("Vec".to_string()),
+        TyKind::Tuple(_) => gossamer_types::printer::structural_impl_owner(tcx, ty),
+        TyKind::HashMap { ordered, .. } => {
+            Some(if ordered { "BTreeMap" } else { "Map" }.to_string())
         }
         _ => None,
     }
@@ -960,34 +1011,6 @@ fn collect_from_operand(operand: &Operand, out: &mut HashMap<DefId, Vec<Substs>>
 fn resolve(tcx: &mut TyCtxt, ty: Ty) -> Ty {
     let _ = tcx.kind(ty);
     ty
-}
-
-/// Whether any of `substs`' type arguments is a pointer-represented aggregate
-/// that needs a concrete specialised copy. These types all pass through the
-/// flat-i64 slot as a single pointer, so a routed call's pointer-width ABI
-/// matches the concrete copy's ABI exactly - the copy then sees the real
-/// layout (struct fields, tuple/string/vec contents) instead of an opaque
-/// `Param`. Scalars with ABI-sensitive register classes (`Float`/`Bool`/`Char`)
-/// also need concrete copies: keeping them behind an opaque `Param` leaves LLVM
-/// to treat the payload as an i64 slot and loses the real operation/display
-/// semantics.
-fn substs_need_concrete_copy(substs: &Substs, tcx: &TyCtxt) -> bool {
-    substs.as_slice().iter().any(|a| match a {
-        GenericArg::Type(t) => matches!(
-            tcx.kind_of(*t),
-            TyKind::Float(_)
-                | TyKind::Bool
-                | TyKind::Char
-                | TyKind::Adt { .. }
-                | TyKind::Tuple(_)
-                | TyKind::String
-                | TyKind::Vec(_)
-                | TyKind::Slice(_)
-                | TyKind::Array { .. }
-                | TyKind::HashMap { .. }
-        ),
-        GenericArg::Const(_) => false,
-    })
 }
 
 /// Substitutes a specialisation's concrete types for the template's type

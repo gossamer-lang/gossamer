@@ -1,0 +1,146 @@
+// A trait may be implemented for any type a program can name, and a call
+// reaches the impl whose receiver is the type in front of it. Several types
+// implementing one trait each keep their own body, tuples of different arity
+// included, because the receiver's type is what decides and it is known where
+// the call is checked.
+
+trait Tagged {
+    fn tag(&self) -> String
+}
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+enum Colour {
+    Red
+    Blue
+}
+
+impl Tagged for i64 {
+    fn tag(&self) -> String {
+        format("i64:{}", *self)
+    }
+}
+
+impl Tagged for f64 {
+    fn tag(&self) -> String {
+        format("f64:{}", *self)
+    }
+}
+
+impl Tagged for bool {
+    fn tag(&self) -> String {
+        format("bool:{}", *self)
+    }
+}
+
+impl Tagged for char {
+    fn tag(&self) -> String {
+        format("char:{}", *self)
+    }
+}
+
+impl Tagged for String {
+    fn tag(&self) -> String {
+        format("String:{}", self.len())
+    }
+}
+
+impl Tagged for Vec<i64> {
+    fn tag(&self) -> String {
+        format("Vec:{}", self.len())
+    }
+}
+
+impl Tagged for Map<String, i64> {
+    fn tag(&self) -> String {
+        format("Map:{}", self.len())
+    }
+}
+
+impl Tagged for Set<i64> {
+    fn tag(&self) -> String {
+        format("Set:{}", self.len())
+    }
+}
+
+impl Tagged for (i64, i64) {
+    fn tag(&self) -> String {
+        format("pair:{}", self.0 + self.1)
+    }
+}
+
+impl Tagged for (i64, i64, i64) {
+    fn tag(&self) -> String {
+        format("triple:{}", self.0 + self.2)
+    }
+}
+
+impl Tagged for Point {
+    fn tag(&self) -> String {
+        format("Point:{}", self.x + self.y)
+    }
+}
+
+impl Tagged for Colour {
+    fn tag(&self) -> String {
+        format("Colour:{}", *self)
+    }
+}
+
+fn through_bound<T: Tagged>(v: T) -> String {
+    v.tag()
+}
+
+// A scalar receiver answering a scalar, called in a loop, so the native tier
+// has a body to compile and the receiver read is exercised there too.
+trait Doubled {
+    fn twice(&self) -> i64
+}
+
+impl Doubled for i64 {
+    fn twice(&self) -> i64 {
+        self * 2
+    }
+}
+
+fn sum_doubled(n: i64) -> i64 {
+    let mut total = 0
+    let mut i = 0
+    while i < n {
+        total += i.twice()
+        i += 1
+    }
+    total
+}
+
+fn main() {
+    let n = 7
+    let f = 2.5
+    let b = true
+    let c = 'q'
+    let s = "hello"
+    let v = #[1, 2, 3]
+    let m = { "a": 1, "b": 2 }
+    let e = #{ 1, 2 }
+    let pair = (3, 4)
+    let triple = (3, 4, 5)
+    let p = Point { x: 1, y: 2 }
+    let col = Colour::Red
+
+    println("direct:")
+    println("  {} {} {} {}", n.tag(), f.tag(), b.tag(), c.tag())
+    println("  {} {} {} {}", s.tag(), v.tag(), m.tag(), e.tag())
+    println("  {} {}", pair.tag(), triple.tag())
+    println("  {} {}", p.tag(), col.tag())
+
+    println("bound:")
+    println("  {} {} {} {}", through_bound(7), through_bound(2.5), through_bound(true), through_bound('q'))
+    println("  {} {} {}", through_bound("hello"), through_bound(#[1, 2, 3]), through_bound(#{ 1, 2 }))
+    println("  {} {}", through_bound((3, 4)), through_bound((3, 4, 5)))
+    println("  {} {}", through_bound(Point { x: 5, y: 6 }), through_bound(Colour::Blue))
+
+    println("loop: {}", sum_doubled(1000))
+}

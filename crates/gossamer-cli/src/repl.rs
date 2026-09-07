@@ -5612,6 +5612,9 @@ fn rebuild_session(declarations: &[String]) -> std::result::Result<(), String> {
     }
     let program = gossamer_hir::lower_source_file(&sf, &res, &tbl, &mut tcx);
     let mut vm = gossamer_interp::Vm::new();
+    // A session's next call is whatever the user types next, so every body
+    // stays promotable.
+    vm.set_entry_points(&[]);
     vm.load(&program, tcx, true).map_err(|e| format!("{e}"))?;
     Ok(())
 }
@@ -5739,6 +5742,9 @@ fn build_and_call_with_type_inner(
         }
     }
     let mut vm = gossamer_interp::Vm::new();
+    // A session's next call is whatever the user types next, so every body
+    // stays promotable.
+    vm.set_entry_points(&[]);
     vm.load(&program, tcx, true).map_err(|e| format!("{e}"))?;
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| vm.call(entry, Vec::new())))

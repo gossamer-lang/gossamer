@@ -1780,6 +1780,7 @@ impl<'tcx> FnBuilder<'tcx> {
             receiver,
             name,
             args,
+            owner: None,
         } = &scrutinee.kind
         else {
             return Ok(None);
@@ -2001,6 +2002,7 @@ impl<'tcx> FnBuilder<'tcx> {
             receiver: next_recv,
             name: next_name,
             args: next_args,
+            owner: None,
         } = &scrutinee.kind
         else {
             return Ok(None);
@@ -2019,7 +2021,7 @@ impl<'tcx> FnBuilder<'tcx> {
         );
         let concrete_enumerate_method = matches!(
             &next_recv.kind,
-            HirExprKind::MethodCall { receiver, name, args }
+            HirExprKind::MethodCall { receiver, name, args, owner: None }
                 if name.name == "enumerate"
                     && args.is_empty()
                     && matches!(
@@ -2063,6 +2065,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 receiver: chain_recv,
                 name: chain_name,
                 args: chain_args,
+                owner: None,
             } if chain_name.name == "iter" && chain_args.is_empty() => {
                 (chain_recv.as_ref(), false, false)
             }
@@ -2070,6 +2073,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 receiver: enum_recv,
                 name: enum_name,
                 args: enum_args,
+                owner: None,
             } if enum_name.name == "enumerate" && enum_args.is_empty() => {
                 // `xs.iter().enumerate()` and the `.iter()`-less
                 // `xs.enumerate()` walk the same collection; both drive
@@ -2082,6 +2086,7 @@ impl<'tcx> FnBuilder<'tcx> {
                         receiver: chain_recv,
                         name: chain_name,
                         args: chain_args,
+                        owner: None,
                     } if chain_name.name == "iter" && chain_args.is_empty() => {
                         (chain_recv.as_ref(), true, false)
                     }

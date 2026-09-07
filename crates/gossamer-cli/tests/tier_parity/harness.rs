@@ -166,6 +166,29 @@ const SPECS: &[Spec] = &[
         ],
         ..spec("examples/cli_args.gos")
     },
+    // A trait implemented for every kind of receiver a program can name. A
+    // scalar carries its own type to the call, so several scalar impls of one
+    // trait pick by receiver; every other type reaches a method as a handle.
+    spec("feature-testing-examples/trait_impl_receiver_types.gos"),
+    // A built-in type's own surface answers a name it carries, and an `impl`
+    // block answers one it does not, so which body a call reaches follows from
+    // the receiver's type rather than from which spelling was written last.
+    spec("feature-testing-examples/builtin_impl_precedence.gos"),
+    // A `&self` method reads its receiver the same way whichever spelling the
+    // body uses: `*self` is the explicit load and a bare `self` is the same
+    // read written shorter, so an operator, a comparison, and a method call on
+    // `self` all answer what the receiver names rather than where it lives.
+    spec("feature-testing-examples/ref_self_receiver_reads.gos"),
+    // Character and byte reads over the same content. `s[i]` counts Unicode
+    // scalars and `s.byte_at(i)` counts bytes, so a string outside ASCII
+    // answers two different sequences, and a read past the first index block
+    // starts from a recorded offset rather than from the content's start.
+    spec("feature-testing-examples/string_scan_index.gos"),
+    // A generic reaches its call site as a copy specialised for the types it
+    // was called with: its element reads, its register classes, and the
+    // callable it takes all follow the instantiation rather than an opaque
+    // parameter slot.
+    spec("feature-testing-examples/generic_specialisation.gos"),
     spec("feature-testing-examples/triple_quoted_strings.gos"),
     // A field-less struct is the zero-slot aggregate: it compares, orders,
     // renders, keys a map, and pads a tuple element identically on every

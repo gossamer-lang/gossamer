@@ -1107,6 +1107,10 @@ fn run_tests_filtered_inner(
     // Publish the source map before `load` for runtime traceback locations and
     // per-statement coverage hits when `gos test --coverage` is active.
     vm.set_source_map(std::sync::Arc::new(map));
+    // A test run calls each test rather than the program entry, so those are
+    // the names whose bodies the promotion snapshot has to keep.
+    let entries: Vec<String> = tests.iter().map(|t| t.function.clone()).collect();
+    vm.set_entry_points(&entries);
     if vm.load(&program, tcx, false).is_err() {
         return Vec::new();
     }

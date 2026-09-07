@@ -637,6 +637,11 @@ impl Lowerer<'_> {
         self.ids.next()
     }
 
+    /// The `impl` block a method call resolves to, as the checker recorded it.
+    fn method_owner_of(&self, node: NodeId) -> Option<Ident> {
+        self.table.method_owner(node).map(Ident::new)
+    }
+
     fn ty_of(&mut self, node: NodeId) -> gossamer_types::Ty {
         // `Range<T>` is a type-layer spelling of `Iterator<T>`; lowering and
         // every backend below it know only the latter.
@@ -1186,7 +1191,9 @@ impl Lowerer<'_> {
                         .collect();
                     (!segments.is_empty()).then(|| Ident::new(segments.join("::")))
                 }),
-            _ => None,
+            // A tuple has no path to name it by, so it registers under the
+            // spelling every layer shares for one.
+            _ => gossamer_types::printer::structural_impl_owner(self.tcx, self_ty).map(Ident::new),
         };
         let trait_name = decl
             .trait_ref
@@ -1420,12 +1427,15 @@ impl Lowerer<'_> {
                         receiver: Box::new(lowered_receiver),
                         name: Ident::new(by),
                         args: vec![cmp],
+                        owner: None,
                     };
                 }
+                let owner = self.method_owner_of(expr.id);
                 HirExprKind::MethodCall {
                     receiver: Box::new(self.lower_expr(receiver)),
                     name: name.clone(),
                     args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                    owner,
                 }
             }
             AstExprKind::FieldAccess { receiver, field } => self.lower_field(receiver, field),
@@ -1626,10 +1636,12 @@ impl Lowerer<'_> {
             } => {
                 let mut new_args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
                 new_args.push(piped);
+                let owner = self.method_owner_of(rhs.id);
                 HirExprKind::MethodCall {
                     receiver: Box::new(self.lower_expr(receiver)),
                     name: name.clone(),
                     args: new_args,
+                    owner,
                 }
             }
             AstExprKind::Closure { params, ret, body } if params.len() == 1 => {
@@ -1980,6 +1992,7 @@ impl Lowerer<'_> {
                     receiver: Box::new(iter_expr),
                     name: Ident::new("chars"),
                     args: Vec::new(),
+                    owner: None,
                 },
             };
         } else if let HirExprKind::Range { start, .. } = &mut iter_expr.kind
@@ -2045,6 +2058,7 @@ impl Lowerer<'_> {
                     receiver,
                     name,
                     args,
+                    owner: None,
                 } if args.is_empty() && (name.name == "iter" || name.name == "enumerate") => {
                     cur = receiver;
                 }
@@ -2111,6 +2125,7 @@ impl Lowerer<'_> {
                 receiver: Box::new(iter_ref),
                 name: Ident::new("next"),
                 args: Vec::new(),
+                owner: None,
             },
         };
         let loop_expr = self.assemble_for_loop(pattern, next_call, body, label, span);
@@ -2146,6 +2161,7 @@ impl Lowerer<'_> {
                 receiver: Box::new(iter_expr),
                 name: Ident::new("next"),
                 args: Vec::new(),
+                owner: None,
             },
         };
         self.assemble_for_loop(pattern, next_call, body, label, span)
@@ -3120,6 +3136,7 @@ impl Lowerer<'_> {
                     receiver: Box::new(receiver),
                     name: Ident::new("insert"),
                     args: vec![self.lower_expr(key), self.lower_expr(value)],
+                    owner: None,
                 },
             };
             stmts.push(HirStmt {
@@ -3200,12 +3217,14 @@ impl Lowerer<'_> {
                 receiver: Box::new(lowered_receiver),
                 name: Ident::new("iter"),
                 args: Vec::new(),
+                owner: None,
             },
         };
         let walked = HirExprKind::MethodCall {
             receiver: Box::new(cursor),
             name: name.clone(),
             args: args.iter().map(|a| self.lower_expr(a)).collect(),
+            owner: None,
         };
         // An adapter answers another iterator, so a sequence result is
         // materialised the way the eager spelling promises.
@@ -3223,6 +3242,7 @@ impl Lowerer<'_> {
             receiver: Box::new(inner),
             name: Ident::new("collect"),
             args: Vec::new(),
+            owner: None,
         })
     }
 
@@ -3733,6 +3753,7 @@ impl Lowerer<'_> {
                 receiver: Box::new(map),
                 name: Ident::new("get"),
                 args: vec![k_for_get],
+                owner: None,
             },
         };
         let default_callee = HirExpr {
@@ -3777,6 +3798,7 @@ impl Lowerer<'_> {
                 receiver: Box::new(map),
                 name: Ident::new("insert"),
                 args: vec![k, v],
+                owner: None,
             },
         }
     }
@@ -3927,6 +3949,7 @@ impl Lowerer<'_> {
                 receiver: Box::new(v_for_call),
                 name: outer_name.clone(),
                 args: lowered_args,
+                owner: None,
             },
         };
         let mutate_stmt = HirStmt {

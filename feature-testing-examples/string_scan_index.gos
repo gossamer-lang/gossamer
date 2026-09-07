@@ -1,0 +1,85 @@
+// Character and byte reads over a string, in the shapes a scanner writes.
+// A character index counts Unicode scalars and a byte index counts bytes, so
+// the two disagree for every string outside ASCII; both are read here from the
+// same content, together with the boundaries of each index space.
+
+fn chars_of(s: String) -> Vec<i64> {
+    let mut out = #[]
+    let mut i = 0
+    while i < s.len() {
+        out.push(s[i] as i64)
+        i += 1
+    }
+    out
+}
+
+fn bytes_of(s: String) -> Vec<i64> {
+    let mut out = #[]
+    let mut i = 0
+    while i < s.byte_len() {
+        out.push(s.byte_at(i))
+        i += 1
+    }
+    out
+}
+
+fn count_digits(s: String) -> i64 {
+    let mut n = 0
+    let mut i = 0
+    while i < s.len() {
+        let c = s[i]
+        if c >= '0' && c <= '9' {
+            n += 1
+        }
+        i += 1
+    }
+    n
+}
+
+fn report(label: String, s: String) {
+    println("{}: len={} byte_len={}", label, s.len(), s.byte_len())
+    println("  chars={}", chars_of(s))
+    println("  bytes={}", bytes_of(s))
+    println("  digits={} first={} last={}", count_digits(s), s.len() > 0, s.byte_len())
+}
+
+fn main() {
+    report("ascii", "ab3xy7")
+    report("latin1", "héllo wörld")
+    report("cjk", "日本語")
+    report("mixed", "aé日z9")
+    report("empty", "")
+
+    // Past the first index block, whose stride is 32 characters, so the walk
+    // starts from a recorded offset rather than from the content's start.
+    let mut long = ""
+    let mut k = 0
+    while k < 40 {
+        long += "aé日"
+        k += 1
+    }
+    println("long: len={} byte_len={}", long.len(), long.byte_len())
+    println(
+        "long: c0={} c31={} c32={} c50={} c119={}"
+        long[0] as i64
+        long[31] as i64
+        long[32] as i64
+        long[50] as i64
+        long[119] as i64
+    )
+
+    // Bytes outside the content read as zero; characters outside it panic,
+    // which the parity fixture for that shape covers separately.
+    let s = "hé"
+    println("oob bytes: {} {} {}", s.byte_at(-1), s.byte_at(3), s.byte_at(99))
+
+    // A string built at run time carries the same two index spaces a literal
+    // does, whichever tier built it.
+    let mut built = ""
+    let mut j = 0
+    while j < 5 {
+        built += "é7"
+        j += 1
+    }
+    report("built", built)
+}

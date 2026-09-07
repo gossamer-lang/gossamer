@@ -309,6 +309,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 receiver,
                 name,
                 args,
+                owner: None,
             } if self.try_compile_inplace_vec_stmt(receiver, name, args)? => {
                 return Ok(());
             }

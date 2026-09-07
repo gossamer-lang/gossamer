@@ -1097,6 +1097,7 @@ fn is_get_or_zero(receiver: &HirExpr, key: &HirExpr, candidate: &HirExpr) -> boo
         receiver: inner_recv,
         name: inner_name,
         args: inner_args,
+        owner: None,
     } = &candidate.kind
     else {
         return false;

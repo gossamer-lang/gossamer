@@ -1,0 +1,172 @@
+// A `&self` method reads its receiver the same way whichever spelling the
+// body uses. `*self` is the explicit load and a bare `self` is the same read
+// written shorter, so an operator, a comparison, a method call on `self`, and
+// a value passed onward all answer what the receiver names rather than where
+// it lives. Every scalar is covered because a scalar is the case where the
+// address and the value differ.
+
+trait Probe {
+    fn by_deref(&self) -> String
+    fn by_method(&self) -> String
+    fn by_operator(&self) -> String
+    fn by_comparison(&self) -> String
+    fn by_forwarding(&self) -> String
+}
+
+fn take_int(v: i64) -> String {
+    format("{}", v)
+}
+
+fn take_float(v: f64) -> String {
+    format("{}", v)
+}
+
+fn take_bool(v: bool) -> String {
+    format("{}", v)
+}
+
+fn take_char(v: char) -> String {
+    format("{}", v)
+}
+
+impl Probe for i64 {
+    fn by_deref(&self) -> String {
+        format("{}", *self * 2)
+    }
+    fn by_method(&self) -> String {
+        format("{}", self.abs())
+    }
+    fn by_operator(&self) -> String {
+        format("{}", self + 1)
+    }
+    fn by_comparison(&self) -> String {
+        format("{}", self < 0)
+    }
+    fn by_forwarding(&self) -> String {
+        take_int(*self)
+    }
+}
+
+impl Probe for f64 {
+    fn by_deref(&self) -> String {
+        format("{}", *self * 2.0)
+    }
+    fn by_method(&self) -> String {
+        format("{}", self.floor())
+    }
+    fn by_operator(&self) -> String {
+        format("{}", self + 1.0)
+    }
+    fn by_comparison(&self) -> String {
+        format("{}", self < 0.0)
+    }
+    fn by_forwarding(&self) -> String {
+        take_float(*self)
+    }
+}
+
+impl Probe for bool {
+    fn by_deref(&self) -> String {
+        format("{}", *self)
+    }
+    fn by_method(&self) -> String {
+        self.to_string()
+    }
+    fn by_operator(&self) -> String {
+        format("{}", self && true)
+    }
+    fn by_comparison(&self) -> String {
+        format("{}", self || false)
+    }
+    fn by_forwarding(&self) -> String {
+        take_bool(*self)
+    }
+}
+
+impl Probe for char {
+    fn by_deref(&self) -> String {
+        format("{}", *self)
+    }
+    fn by_method(&self) -> String {
+        self.to_string()
+    }
+    fn by_operator(&self) -> String {
+        format("{}", self as i64)
+    }
+    fn by_comparison(&self) -> String {
+        format("{}", self > 'a')
+    }
+    fn by_forwarding(&self) -> String {
+        take_char(*self)
+    }
+}
+
+fn report<P: Probe>(label: String, p: P) {
+    println(
+        "{}: deref={} method={} operator={} comparison={} forwarding={}"
+        label
+        p.by_deref()
+        p.by_method()
+        p.by_operator()
+        p.by_comparison()
+        p.by_forwarding()
+    )
+}
+
+// One impl, so a direct call and a call on `self` both name it. The same
+// receiver reads are covered here through those two shapes.
+trait Solo {
+    fn doubled(&self) -> i64
+    fn doubled_plus(&self) -> i64
+}
+
+impl Solo for i64 {
+    fn doubled(&self) -> i64 {
+        self * 2
+    }
+    fn doubled_plus(&self) -> i64 {
+        self.doubled() + self
+    }
+}
+
+// A `&mut self` method writes through its receiver, so a read after the write
+// answers the value that is there now rather than the one the entry saw. Such
+// a body spells every read `*self`, which is what the checker asks for when
+// the receiver is mutable.
+trait Counter {
+    fn bump_twice(&mut self) -> i64
+}
+
+impl Counter for i64 {
+    fn bump_twice(&mut self) -> i64 {
+        *self += 1
+        let after_first = *self
+        *self += 1
+        after_first * 100 + *self
+    }
+}
+
+fn main() {
+    // Directly, where the receiver is a local the call site takes a reference to.
+    let n = -7
+    println("direct: {} {}", n.doubled(), n.doubled_plus())
+
+    // Through a type parameter, where the instantiation decides the receiver.
+    report("i64", -7)
+    report("f64", 2.5)
+    report("bool", true)
+    report("char", 'q')
+
+    // An element read out of a sequence, and a loop binding.
+    let ns = #[3, -4]
+    println("element: {} {}", ns[0].doubled(), ns[1].doubled_plus())
+    let mut walked = #[]
+    for v in ns {
+        walked.push(v.doubled_plus())
+    }
+    println("loop: {}", walked)
+
+    let mut m = 5
+    println("mut: {}", m.bump_twice())
+    println("mut after: {}", m)
+}

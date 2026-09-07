@@ -435,6 +435,7 @@ fn match_for_desugar(body: &HirExpr) -> Option<ForDesugar<'_>> {
         receiver,
         name,
         args,
+        owner: None,
     } = &scrutinee.kind
     else {
         return None;
@@ -476,6 +477,7 @@ fn strip_iter_chain(expr: &HirExpr) -> &HirExpr {
                 receiver,
                 name,
                 args,
+                owner: None,
             } if args.is_empty() && (name.name == "iter" || name.name == "enumerate") => {
                 cur = receiver;
             }

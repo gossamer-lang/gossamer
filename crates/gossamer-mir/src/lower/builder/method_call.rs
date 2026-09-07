@@ -153,6 +153,7 @@ impl<'a> Builder<'a> {
         args: &[HirExpr],
         ty: Ty,
         span: Span,
+        owner: Option<&Ident>,
     ) -> Option<Local> {
         // A `&mut <scalar / String>` reference is the address of the
         // caller's slot, so a method on it dispatches on the value the slot
@@ -171,7 +172,7 @@ impl<'a> Builder<'a> {
                     operand: Box::new(receiver.clone()),
                 },
             };
-            return self.lower_method_call(&deref, method, args, ty, span);
+            return self.lower_method_call(&deref, method, args, ty, span, owner);
         }
         // Some handle methods are the method spelling of a free stdlib
         // call, and only the free lowering knows how to build what they
@@ -211,6 +212,7 @@ impl<'a> Builder<'a> {
                     receiver: numeric,
                     name: stringify,
                     args: stringify_args,
+                    owner: None,
                 } if stringify.name == "to_string" && stringify_args.is_empty() => {
                     match self.tcx.kind_of(numeric.ty) {
                         TyKind::Int(int_ty) if int_ty.is_signed() => Some(numeric.as_ref()),
@@ -324,6 +326,7 @@ impl<'a> Builder<'a> {
                 receiver: left,
                 name: intersection,
                 args: intersection_args,
+                owner: None,
             } = &receiver.kind
             && intersection.name == "intersection"
             && intersection_args.len() == 1
@@ -634,8 +637,9 @@ impl<'a> Builder<'a> {
         // address of the actual place. Lowering `items[index]` as an ordinary
         // expression creates a value copy, so mutations would disappear and
         // native calls could use the wrong ABI.
-        let user_receiver_ref_ty = self
-            .struct_name_of(receiver_ty)
+        let user_receiver_ref_ty = owner
+            .map(|owner| owner.name.clone())
+            .or_else(|| self.struct_name_of(receiver_ty))
             .or_else(|| self.struct_name_from_expr(receiver))
             .or_else(|| self.primitive_impl_name(receiver_ty))
             .and_then(|name| {
@@ -644,20 +648,27 @@ impl<'a> Builder<'a> {
                     .copied()
             })
             .filter(|declared| matches!(self.tcx.kind_of(*declared), TyKind::Ref { .. }))
-            // An enum's value is the single word its methods decode - an
-            // inline variant tag, or the RC node a payload variant points at -
-            // so a shared receiver hands over that word. Borrowing the place
-            // holding it has the callee decode a stack address instead. A
-            // `&mut self` receiver still borrows the place, which is what
-            // carries a write back.
+            // A shared receiver is borrowed only where the value and the
+            // address differ, which is a scalar. Everything else - an enum, a
+            // container, a string, an aggregate - is already the one word its
+            // methods decode, so borrowing the place holding it would have the
+            // callee decode a stack address instead. The decision reads the
+            // CALLEE's declared receiver: the call site's own type is erased
+            // to a handle for every container, and a handle is typed the way
+            // an integer is. A `&mut self` receiver still borrows the place,
+            // which is what carries a write back.
             .filter(|declared| {
-                !matches!(
-                    self.tcx.kind_of(*declared),
-                    TyKind::Ref {
-                        mutability: gossamer_types::Mutbl::Not,
-                        ..
-                    }
-                ) || !(self.receiver_is_enum(receiver_ty) || self.receiver_is_enum(*declared))
+                let TyKind::Ref {
+                    mutability: gossamer_types::Mutbl::Not,
+                    inner,
+                } = self.tcx.kind_of(*declared)
+                else {
+                    return true;
+                };
+                matches!(
+                    self.tcx.kind_of(*inner),
+                    TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
+                )
             });
         let receiver_local = if let Some(declared_ref_ty) = user_receiver_ref_ty {
             // A chained by-value method result is not a source-level place,
@@ -852,6 +863,7 @@ impl<'a> Builder<'a> {
             span,
             runtime_symbol,
             receiver_ty,
+            owner,
         )
     }
 
@@ -2297,14 +2309,24 @@ impl<'a> Builder<'a> {
     /// declared inside a module is found under the same name its `impl`
     /// registered.
     fn user_impl_method_exists(&self, receiver_ty: Ty, receiver: &HirExpr, method: &str) -> bool {
-        let Some(owner) = self
-            .adt_dispatch_name(receiver_ty)
-            .or_else(|| self.struct_name_from_expr(receiver))
-        else {
-            return false;
-        };
-        self.impl_methods
-            .contains_key(&format!("{owner}::{method}"))
+        [
+            self.adt_dispatch_name(receiver_ty),
+            self.struct_name_from_expr(receiver),
+            self.builtin_impl_owner_name(receiver_ty),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|owner| {
+            // A core type's own surface answers before an `impl` block that
+            // spells one of its names, so such a block adds names to the type
+            // rather than replacing any it already had. A declared type has no
+            // surface of its own here, and a primitive's is not one an `impl`
+            // can collide with, so both keep the block they name.
+            !gossamer_types::core_type_declares_method(&owner, method)
+                && self
+                    .impl_methods
+                    .contains_key(&format!("{owner}::{method}"))
+        })
     }
 
     fn runtime_symbol_by_name(
@@ -5088,6 +5110,7 @@ impl<'a> Builder<'a> {
         span: Span,
         runtime_symbol: Option<&'static str>,
         receiver_ty: Ty,
+        owner: Option<&Ident>,
     ) -> Option<Local> {
         let method_inputs = self
             .struct_name_of(receiver_ty)
@@ -5312,6 +5335,7 @@ impl<'a> Builder<'a> {
             span,
             arg_operands,
             receiver_ty,
+            owner,
         )
     }
 
@@ -5626,7 +5650,15 @@ impl<'a> Builder<'a> {
         span: Span,
         arg_operands: Vec<Operand>,
         receiver_ty: Ty,
+        owner: Option<&Ident>,
     ) -> Option<Local> {
+        // The `impl` block the checker resolved this call to, which is the
+        // answer whenever it has one: the receiver's type decided it there,
+        // and below this point a container and a structural type both reach a
+        // method as an untyped handle that names no block.
+        let recorded = owner
+            .map(|owner| format!("{}::{}", owner.name, method.name))
+            .filter(|mangled| self.impl_methods.contains_key(mangled));
         // User-defined `impl` method dispatch: when the receiver's
         // static type names a known struct, look up the mangled
         // method name (`Struct::method`) and emit a direct call
@@ -5728,19 +5760,64 @@ impl<'a> Builder<'a> {
             return Some(dest);
         }
 
-        let mut unique_impl = None;
+        // Pick the impl whose receiver is the type in front of us. Choosing by
+        // the method name being unique in the program instead answers nothing
+        // once a second type implements the same trait, and the call is then
+        // left naming a method rather than a body - which the compiled tiers
+        // have no way to resolve and reject as an undefined symbol.
+        let receiver_key = self.peel_ref_ty(receiver_ty);
+        let mut named: Vec<&str> = Vec::new();
+        let mut on_receiver: Vec<&str> = Vec::new();
         for name in self.impl_methods.keys() {
-            if name
+            if !name
                 .rsplit_once("::")
                 .is_some_and(|(_, tail)| tail == method.name.as_str())
             {
-                if unique_impl.is_some() {
-                    unique_impl = None;
-                    break;
-                }
-                unique_impl = Some(name.as_str());
+                continue;
+            }
+            named.push(name.as_str());
+            if self
+                .impl_method_receivers
+                .get(name)
+                .is_some_and(|declared| self.peel_ref_ty(*declared) == receiver_key)
+            {
+                on_receiver.push(name.as_str());
             }
         }
+        // A container reaches a method as an untyped handle, which the flat
+        // model types the way it types an `i64`, so a receiver type only tells
+        // the impls apart when every candidate declares a scalar one. With a
+        // container among them the types collide and the name is left for the
+        // resolution below rather than answered wrongly.
+        let all_scalar_receivers = named.iter().all(|name| {
+            self.impl_method_receivers
+                .get(*name)
+                .is_some_and(|declared| {
+                    matches!(
+                        self.tcx.kind_of(self.peel_ref_ty(*declared)),
+                        gossamer_types::TyKind::Int(_)
+                            | gossamer_types::TyKind::Float(_)
+                            | gossamer_types::TyKind::Bool
+                            | gossamer_types::TyKind::Char
+                    )
+                })
+        });
+        if !all_scalar_receivers {
+            on_receiver.clear();
+        }
+        // The impl whose receiver is the type in front of us. Two impls on one
+        // type is a coherence error the checker reports, so more than one
+        // match names no single body and falls through with the rest.
+        let unique_impl = match recorded.as_deref() {
+            Some(mangled) => Some(mangled),
+            None => match on_receiver.as_slice() {
+                [only] => Some(*only),
+                _ => match named.as_slice() {
+                    [only] => Some(*only),
+                    _ => None,
+                },
+            },
+        };
         if let Some(mangled) = unique_impl {
             let dest_ty = match self.tcx.kind_of(ty) {
                 gossamer_types::TyKind::Error | gossamer_types::TyKind::Var(_) => self

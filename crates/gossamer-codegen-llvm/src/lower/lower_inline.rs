@@ -1422,6 +1422,337 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// Emits the test that `s` is a compiler-typed Gossamer string whose
+    /// header the caller may read inline, branching to `typed` or `slow`.
+    ///
+    /// A body pointer carries a fixed low-bit shape and is preceded by a tag
+    /// byte, and both are checked before anything reads in front of it: a
+    /// foreign C string reaching a `String` parameter has neither, and the
+    /// bytes before it belong to whoever placed it.
+    fn emit_typed_string_guard(&mut self, s: &str, typed: &str, slow: &str) {
+        use gossamer_abi::string_layout as sl;
+        let id = self.next_ssa;
+        self.next_ssa += 1;
+        let (shape_b, tag_b) = (format!("sg_shape_{id}"), format!("sg_tag_{id}"));
+        let isnull = self.fresh();
+        writeln!(self.out, "  {isnull} = icmp eq ptr {s}, null").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {isnull}, label %{slow}, label %{shape_b}"
+        )
+        .unwrap();
+        writeln!(self.out, "{shape_b}:").unwrap();
+        let addr = self.fresh();
+        let low = self.fresh();
+        let shaped = self.fresh();
+        writeln!(self.out, "  {addr} = ptrtoint ptr {s} to i64").unwrap();
+        writeln!(self.out, "  {low} = and i64 {addr}, {}", sl::BODY_ADDR_MASK).unwrap();
+        writeln!(
+            self.out,
+            "  {shaped} = icmp eq i64 {low}, {}",
+            sl::BODY_ADDR_TAG
+        )
+        .unwrap();
+        writeln!(self.out, "  br i1 {shaped}, label %{tag_b}, label %{slow}").unwrap();
+        writeln!(self.out, "{tag_b}:").unwrap();
+        let tag_ptr = self.fresh();
+        let tag = self.fresh();
+        let tag_z = self.fresh();
+        writeln!(
+            self.out,
+            "  {tag_ptr} = getelementptr i8, ptr {s}, i64 {}",
+            sl::TAG_OFFSET
+        )
+        .unwrap();
+        writeln!(self.out, "  {tag} = load i8, ptr {tag_ptr}{TBAA_HEADER}").unwrap();
+        writeln!(self.out, "  {tag_z} = zext i8 {tag} to i32").unwrap();
+        let mut acc: Option<String> = None;
+        for candidate in sl::HEADER_TAGS {
+            let eq = self.fresh();
+            writeln!(self.out, "  {eq} = icmp eq i32 {tag_z}, {candidate}").unwrap();
+            acc = Some(match acc {
+                None => eq,
+                Some(prev) => {
+                    let or = self.fresh();
+                    writeln!(self.out, "  {or} = or i1 {prev}, {eq}").unwrap();
+                    or
+                }
+            });
+        }
+        let typed_flag = acc.unwrap_or_else(|| "false".to_string());
+        writeln!(
+            self.out,
+            "  br i1 {typed_flag}, label %{typed}, label %{slow}"
+        )
+        .unwrap();
+    }
+
+    /// Loads a typed string's `len` field, its content's byte length.
+    fn emit_typed_string_byte_len(&mut self, s: &str) -> String {
+        use gossamer_abi::string_layout as sl;
+        let len_ptr = self.fresh();
+        let len32 = self.fresh();
+        let len = self.fresh();
+        writeln!(
+            self.out,
+            "  {len_ptr} = getelementptr i8, ptr {s}, i64 {}",
+            sl::LEN_OFFSET
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {len32} = load i32, ptr {len_ptr}, align 1{TBAA_HEADER}"
+        )
+        .unwrap();
+        writeln!(self.out, "  {len} = zext i32 {len32} to i64").unwrap();
+        len
+    }
+
+    /// Loads the first word of a typed string's character index, which is the
+    /// character count or [`INDEX_ASCII`] when a character index equals its
+    /// byte offset.
+    ///
+    /// [`INDEX_ASCII`]: gossamer_abi::string_layout::INDEX_ASCII
+    fn emit_typed_string_index_head(&mut self, s: &str) -> String {
+        use gossamer_abi::string_layout as sl;
+        let cap_ptr = self.fresh();
+        let cap32 = self.fresh();
+        let cap = self.fresh();
+        let foot_off = self.fresh();
+        let foot_ptr = self.fresh();
+        let head = self.fresh();
+        writeln!(
+            self.out,
+            "  {cap_ptr} = getelementptr i8, ptr {s}, i64 {}",
+            sl::CAP_OFFSET
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {cap32} = load i32, ptr {cap_ptr}, align 1{TBAA_HEADER}"
+        )
+        .unwrap();
+        writeln!(self.out, "  {cap} = zext i32 {cap32} to i64").unwrap();
+        writeln!(self.out, "  {foot_off} = add i64 {cap}, 1").unwrap();
+        writeln!(
+            self.out,
+            "  {foot_ptr} = getelementptr i8, ptr {s}, i64 {foot_off}"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {head} = load i32, ptr {foot_ptr}, align 1{TBAA_HEADER}"
+        )
+        .unwrap();
+        head
+    }
+
+    /// Inline fast path for `gos_rt_str_byte_at(s, i) -> i64`.
+    ///
+    /// The whole operation is a guarded byte load, and the shim is called once
+    /// per input byte by any scanner, so the call itself is the cost. An index
+    /// outside the content answers zero, as the shim does.
+    pub(crate) fn lower_str_byte_at_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        let s = self.lower_operand(&args[0])?;
+        let i_raw = self.lower_operand(&args[1])?;
+        let i = self.widen_to_i64(&args[1], &i_raw);
+        let id = self.next_ssa;
+        self.next_ssa += 1;
+        let (typed_b, read_b, zero_b, slow_b, cont_b) = (
+            format!("sba_t_{id}"),
+            format!("sba_r_{id}"),
+            format!("sba_z_{id}"),
+            format!("sba_s_{id}"),
+            format!("sba_c_{id}"),
+        );
+        self.emit_typed_string_guard(&s, &typed_b, &slow_b);
+        writeln!(self.out, "{typed_b}:").unwrap();
+        let len = self.emit_typed_string_byte_len(&s);
+        let neg = self.fresh();
+        let past = self.fresh();
+        let oob = self.fresh();
+        writeln!(self.out, "  {neg} = icmp slt i64 {i}, 0").unwrap();
+        writeln!(self.out, "  {past} = icmp sge i64 {i}, {len}").unwrap();
+        writeln!(self.out, "  {oob} = or i1 {neg}, {past}").unwrap();
+        writeln!(self.out, "  br i1 {oob}, label %{zero_b}, label %{read_b}").unwrap();
+        writeln!(self.out, "{read_b}:").unwrap();
+        let byte_ptr = self.fresh();
+        let byte = self.fresh();
+        let byte_z = self.fresh();
+        writeln!(
+            self.out,
+            "  {byte_ptr} = getelementptr i8, ptr {s}, i64 {i}"
+        )
+        .unwrap();
+        writeln!(self.out, "  {byte} = load i8, ptr {byte_ptr}{TBAA_DATA}").unwrap();
+        writeln!(self.out, "  {byte_z} = zext i8 {byte} to i64").unwrap();
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{zero_b}:").unwrap();
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{slow_b}:").unwrap();
+        declare_rt(&mut self.runtime_refs, "gos_rt_str_byte_at");
+        let slow = self.fresh();
+        writeln!(
+            self.out,
+            "  {slow} = call i64 @gos_rt_str_byte_at(ptr {s}, i64 {i})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{cont_b}:").unwrap();
+        let out = self.fresh();
+        writeln!(
+            self.out,
+            "  {out} = phi i64 [ {byte_z}, %{read_b} ], [ 0, %{zero_b} ], [ {slow}, %{slow_b} ]"
+        )
+        .unwrap();
+        self.store_inline_i64_result(&out, destination);
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Inline fast path for `gos_rt_str_byte_len(s) -> i64`.
+    pub(crate) fn lower_str_byte_len_inline(
+        &mut self,
+        arg: &Operand,
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        let s = self.lower_operand(arg)?;
+        let id = self.next_ssa;
+        self.next_ssa += 1;
+        let (typed_b, slow_b, cont_b) = (
+            format!("sbl_t_{id}"),
+            format!("sbl_s_{id}"),
+            format!("sbl_c_{id}"),
+        );
+        self.emit_typed_string_guard(&s, &typed_b, &slow_b);
+        writeln!(self.out, "{typed_b}:").unwrap();
+        let len = self.emit_typed_string_byte_len(&s);
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{slow_b}:").unwrap();
+        declare_rt(&mut self.runtime_refs, "gos_rt_str_byte_len");
+        let slow = self.fresh();
+        writeln!(
+            self.out,
+            "  {slow} = call i64 @gos_rt_str_byte_len(ptr {s})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{cont_b}:").unwrap();
+        let out = self.fresh();
+        writeln!(
+            self.out,
+            "  {out} = phi i64 [ {len}, %{typed_b} ], [ {slow}, %{slow_b} ]"
+        )
+        .unwrap();
+        self.store_inline_i64_result(&out, destination);
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Inline fast path for `gos_rt_str_char_at(s, i) -> i64`.
+    ///
+    /// Only the all-ASCII case is inline. There a character index is a byte
+    /// offset, so the read is the same guarded byte load `byte_at` does;
+    /// anything else needs the index blocks and the UTF-8 decode the shim
+    /// already implements.
+    pub(crate) fn lower_str_char_at_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        use gossamer_abi::string_layout as sl;
+        let s = self.lower_operand(&args[0])?;
+        let i_raw = self.lower_operand(&args[1])?;
+        let i = self.widen_to_i64(&args[1], &i_raw);
+        let id = self.next_ssa;
+        self.next_ssa += 1;
+        let (typed_b, ascii_b, read_b, slow_b, cont_b) = (
+            format!("sca_t_{id}"),
+            format!("sca_a_{id}"),
+            format!("sca_r_{id}"),
+            format!("sca_s_{id}"),
+            format!("sca_c_{id}"),
+        );
+        self.emit_typed_string_guard(&s, &typed_b, &slow_b);
+        writeln!(self.out, "{typed_b}:").unwrap();
+        let head = self.emit_typed_string_index_head(&s);
+        let is_ascii = self.fresh();
+        writeln!(
+            self.out,
+            "  {is_ascii} = icmp eq i32 {head}, {}",
+            sl::INDEX_ASCII
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {is_ascii}, label %{ascii_b}, label %{slow_b}"
+        )
+        .unwrap();
+        writeln!(self.out, "{ascii_b}:").unwrap();
+        let len = self.emit_typed_string_byte_len(&s);
+        let neg = self.fresh();
+        let past = self.fresh();
+        let oob = self.fresh();
+        writeln!(self.out, "  {neg} = icmp slt i64 {i}, 0").unwrap();
+        writeln!(self.out, "  {past} = icmp sge i64 {i}, {len}").unwrap();
+        writeln!(self.out, "  {oob} = or i1 {neg}, {past}").unwrap();
+        // An index outside the content panics, so it leaves the fast path for
+        // the shim that words and raises it.
+        writeln!(self.out, "  br i1 {oob}, label %{slow_b}, label %{read_b}").unwrap();
+        writeln!(self.out, "{read_b}:").unwrap();
+        let byte_ptr = self.fresh();
+        let byte = self.fresh();
+        let byte_z = self.fresh();
+        writeln!(
+            self.out,
+            "  {byte_ptr} = getelementptr i8, ptr {s}, i64 {i}"
+        )
+        .unwrap();
+        writeln!(self.out, "  {byte} = load i8, ptr {byte_ptr}{TBAA_DATA}").unwrap();
+        writeln!(self.out, "  {byte_z} = zext i8 {byte} to i64").unwrap();
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{slow_b}:").unwrap();
+        declare_rt(&mut self.runtime_refs, "gos_rt_str_char_at");
+        let slow = self.fresh();
+        writeln!(
+            self.out,
+            "  {slow} = call i64 @gos_rt_str_char_at(ptr {s}, i64 {i})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{cont_b}:").unwrap();
+        let out = self.fresh();
+        writeln!(
+            self.out,
+            "  {out} = phi i64 [ {byte_z}, %{read_b} ], [ {slow}, %{slow_b} ]"
+        )
+        .unwrap();
+        self.store_inline_i64_result(&out, destination);
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Stores an inline fast path's `i64` result, skipping a unit destination.
+    ///
+    /// The destination's own type decides the store: a character index answers
+    /// a `char`, which is narrower than the word the fast path computed.
+    fn store_inline_i64_result(&mut self, value: &str, destination: &Place) {
+        let dest_ty = self.body.local_ty(destination.local);
+        if is_unit(self.tcx, dest_ty) {
+            return;
+        }
+        let rendered = render_ty(self.tcx, dest_ty);
+        let slot = local_slot(destination.local);
+        self.store_i64_as(value, &rendered, &slot);
+    }
+
     /// Inline fast path for `gos_rt_str_len(s) -> i64`.
     pub(crate) fn lower_str_len_inline(
         &mut self,
@@ -1437,27 +1768,64 @@ impl<'a> Lowerer<'a> {
             emit_terminator_branch(&mut self.out, target);
             return Ok(());
         }
+        use gossamer_abi::string_layout as sl;
         let s_v = self.lower_operand(arg)?;
-        // Runtime strings carry an incrementally maintained Unicode-scalar
-        // length in their footer. Calling strlen here discarded that index
-        // and made every non-constant `String.len()` scan the full byte
-        // buffer. A loop such as `while i < s.len()` therefore became
-        // quadratic for large JSON documents. Keep the constant fold above,
-        // but route dynamic strings through the O(1) runtime lookup.
+        // A runtime string carries its character count in the index that
+        // follows its content, and the all-ASCII case states itself with a
+        // sentinel so the count is the byte length. Reading both inline is
+        // what lets `while i < s.len()` hoist its bound out of the loop: an
+        // opaque call there is re-evaluated on every iteration.
+        let id = self.next_ssa;
+        self.next_ssa += 1;
+        let (typed_b, ascii_b, slow_b, cont_b) = (
+            format!("sl_t_{id}"),
+            format!("sl_a_{id}"),
+            format!("sl_s_{id}"),
+            format!("sl_c_{id}"),
+        );
+        self.emit_typed_string_guard(&s_v, &typed_b, &slow_b);
+        writeln!(self.out, "{typed_b}:").unwrap();
+        let head = self.emit_typed_string_index_head(&s_v);
+        let is_ascii = self.fresh();
+        writeln!(
+            self.out,
+            "  {is_ascii} = icmp eq i32 {head}, {}",
+            sl::INDEX_ASCII
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {is_ascii}, label %{ascii_b}, label %{slow_b}"
+        )
+        .unwrap();
+        writeln!(self.out, "{ascii_b}:").unwrap();
+        let len = self.emit_typed_string_byte_len(&s_v);
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{slow_b}:").unwrap();
         declare_rt(&mut self.runtime_refs, "gos_rt_str_len");
         let tmp = self.fresh();
         writeln!(self.out, "  {tmp} = call i64 @gos_rt_str_len(ptr {s_v})").unwrap();
-        if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
-            let slot = local_slot(destination.local);
-            writeln!(self.out, "  store i64 {tmp}, ptr {slot}").unwrap();
-        }
+        writeln!(self.out, "  br label %{cont_b}").unwrap();
+        writeln!(self.out, "{cont_b}:").unwrap();
+        let out = self.fresh();
+        writeln!(
+            self.out,
+            "  {out} = phi i64 [ {len}, %{ascii_b} ], [ {tmp}, %{slow_b} ]"
+        )
+        .unwrap();
+        self.store_inline_i64_result(&out, destination);
         emit_terminator_branch(&mut self.out, target);
         Ok(())
     }
 
+    /// Character count of a string operand whose text is known here.
+    ///
+    /// `String::len` counts Unicode scalars, so a literal folds to its
+    /// character count rather than to the byte length its Rust `str` reports;
+    /// the two differ for every literal outside ASCII.
     fn const_string_len(&self, arg: &Operand) -> Option<usize> {
         match arg {
-            Operand::Const(gossamer_mir::ConstValue::Str(text)) => Some(text.len()),
+            Operand::Const(gossamer_mir::ConstValue::Str(text)) => Some(text.chars().count()),
             Operand::Copy(place) if place.projection.is_empty() => {
                 let decl = self.body.locals.get(place.local.0 as usize)?;
                 if decl.mutable {
@@ -1477,7 +1845,7 @@ impl<'a> Lowerer<'a> {
                             continue;
                         };
                         if assigned.local == place.local && assigned.projection.is_empty() {
-                            if found.replace(text.len()).is_some() {
+                            if found.replace(text.chars().count()).is_some() {
                                 return None;
                             }
                         }
@@ -2111,74 +2479,6 @@ impl<'a> Lowerer<'a> {
         .unwrap();
         let slot = local_slot(destination.local);
         writeln!(self.out, "  store i128 {packed}, ptr {slot}, align 8").unwrap();
-        emit_terminator_branch(&mut self.out, target);
-        Ok(())
-    }
-
-    /// Inline fast path for `gos_rt_str_byte_at(s, i) -> i64`.
-    ///
-    /// The bytecode is `*((s as *const u8) + i)` zero-extended
-    /// to i64. We skip the runtime's null check since the
-    /// caller already validated that the string handle is
-    /// non-null at construction; null pointers will segfault
-    /// rather than silently returning 0, but that matches
-    /// every other byte-load path in the language.
-    pub(crate) fn lower_str_byte_at_inline(
-        &mut self,
-        args: &[Operand],
-        destination: &Place,
-        target: Option<&gossamer_mir::BlockId>,
-    ) -> Result<(), BuildError> {
-        let s_v = self.lower_operand(&args[0])?;
-        let i_v = self.lower_operand(&args[1])?;
-        // The GEP indexes with i64; widen a narrow-typed index so the
-        // emitted `getelementptr ... i64 {idx}` doesn't reference an i32.
-        let i_v = self.widen_to_i64(&args[1], &i_v);
-        // Bound the read by the string's byte length so any index outside
-        // `[0, len)` yields 0 without dereferencing past the content.
-        // `gos_rt_str_len` is O(1) for header-carrying strings and is
-        // null-safe (returns 0 for a null pointer).
-        declare_rt(&mut self.runtime_refs, "gos_rt_str_len");
-        let len = self.fresh();
-        writeln!(self.out, "  {len} = call i64 @gos_rt_str_len(ptr {s_v})").unwrap();
-        let ge0 = self.fresh();
-        writeln!(self.out, "  {ge0} = icmp sge i64 {i_v}, 0").unwrap();
-        let ltlen = self.fresh();
-        writeln!(self.out, "  {ltlen} = icmp slt i64 {i_v}, {len}").unwrap();
-        let inb = self.fresh();
-        writeln!(self.out, "  {inb} = and i1 {ge0}, {ltlen}").unwrap();
-        let read = self.fresh_label("byte_in");
-        let oob = self.fresh_label("byte_oob");
-        let done = self.fresh_label("byte_done");
-        writeln!(self.out, "  br i1 {inb}, label %{read}, label %{oob}").unwrap();
-
-        writeln!(self.out, "{read}:").unwrap();
-        let addr = self.fresh();
-        writeln!(
-            self.out,
-            "  {addr} = getelementptr i8, ptr {s_v}, i64 {i_v}"
-        )
-        .unwrap();
-        let byte = self.fresh();
-        writeln!(self.out, "  {byte} = load i8, ptr {addr}{TBAA_DATA}").unwrap();
-        let ext = self.fresh();
-        writeln!(self.out, "  {ext} = zext i8 {byte} to i64").unwrap();
-        writeln!(self.out, "  br label %{done}").unwrap();
-
-        writeln!(self.out, "{oob}:").unwrap();
-        writeln!(self.out, "  br label %{done}").unwrap();
-
-        writeln!(self.out, "{done}:").unwrap();
-        let res = self.fresh();
-        writeln!(
-            self.out,
-            "  {res} = phi i64 [ {ext}, %{read} ], [ 0, %{oob} ]"
-        )
-        .unwrap();
-        if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
-            let slot = local_slot(destination.local);
-            writeln!(self.out, "  store i64 {res}, ptr {slot}").unwrap();
-        }
         emit_terminator_branch(&mut self.out, target);
         Ok(())
     }

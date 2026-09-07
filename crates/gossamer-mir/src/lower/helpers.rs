@@ -55,6 +55,7 @@ pub mod escape;
 mod for_loop;
 mod index;
 mod misc;
+mod self_deref;
 
 pub(crate) use collect::*;
 pub(crate) use drops::*;
@@ -62,5 +63,6 @@ pub(crate) use escape::*;
 pub(crate) use for_loop::*;
 pub(crate) use index::*;
 pub(crate) use misc::*;
+pub(crate) use self_deref::*;
 
 pub use misc::mangle_callable_shape;

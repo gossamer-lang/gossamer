@@ -427,7 +427,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 receiver,
                 name,
                 args,
-                ..
+                owner,
             } => {
                 if let Some(result) = self.try_compile_i64_wrapping_method(receiver, name, args)? {
                     return Ok(result);
@@ -482,7 +482,7 @@ impl<'tcx> FnBuilder<'tcx> {
                         }
                     }
                 }
-                let reg = self.compile_method_call(receiver, name, args)?;
+                let reg = self.compile_method_call(receiver, name, args, owner.as_ref())?;
                 Ok(TypedReg {
                     reg,
                     kind: RegKind::Value,
@@ -650,7 +650,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 receiver,
                 name,
                 args,
-                ..
+                owner,
             } => {
                 // `x.into()` converts to the inferred target `B` (the call's
                 // result type) via `B::from(x)`.
@@ -681,7 +681,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 {
                     return Ok(self.compile_struct_unary(&bname, "try_from", receiver)?.reg);
                 }
-                self.compile_method_call(receiver, name, args)
+                self.compile_method_call(receiver, name, args, owner.as_ref())
             }
             // Native indexed read.
             HirExprKind::Index { base, index } => {
@@ -2594,6 +2594,7 @@ impl<'tcx> FnBuilder<'tcx> {
         receiver: &HirExpr,
         name: &Ident,
         args: &[HirExpr],
+        owner: Option<&Ident>,
     ) -> RuntimeResult<Reg> {
         if name.name == "downgrade" && args.is_empty() {
             return self.compile_downgrade(receiver);
@@ -2937,7 +2938,16 @@ impl<'tcx> FnBuilder<'tcx> {
         // descriptor built from the static type is what tells them
         // apart, so it travels with the renderer's copy here as it does
         // with a format argument.
-        let receiver_reg = match self.render_receiver_desc(receiver.ty, &name.name, args.len()) {
+        // A user `impl` of the channel answers with the receiver itself, so
+        // the descriptor - which the built-in renderer reads and a written
+        // body cannot - is not put in its way.
+        let user_answers_channel = self.has_user_rendering(receiver.ty, &name.name);
+        let receiver_desc = if user_answers_channel {
+            None
+        } else {
+            self.render_receiver_desc(receiver.ty, &name.name, args.len())
+        };
+        let receiver_reg = match receiver_desc {
             Some(desc) => {
                 let dst = self.alloc_reg();
                 let desc_idx = self.const_idx(
@@ -3311,15 +3321,24 @@ impl<'tcx> FnBuilder<'tcx> {
         // value carries only its variant name at run time, so the receiver's
         // own type cannot be recovered there; naming the method by its
         // declaring type here is what reaches the user's body.
+        let recorded_owner = owner
+            .map(|owner| format!("{}::{}", owner.name, name.name))
+            .filter(|qualified| self.fn_param_tys.contains_key(qualified));
         let user_impl_method = match self.tcx.kind(resolved_receiver_ty) {
             Some(TyKind::Adt { def, .. }) => self
                 .tcx
                 .def_name(*def)
                 .map(|type_name| format!("{type_name}::{}", name.name))
                 .filter(|qualified| self.fn_param_tys.contains_key(qualified)),
-            // A non-`Adt` receiver still reaches an `impl Trait for i64` /
-            // `for String` / `for Vec<T>` through the name that `impl`
-            // block spells.
+            // A non-`Adt` receiver whose type is known reaches its `impl`
+            // block through the owner the checker recorded, and a name the
+            // type already carries is answered by the type. Guessing an owner
+            // from the name here would have an `impl Trait for String`
+            // declaring `len` take every `len` call on a string.
+            _ if !self.ty_is_unresolved(resolved_receiver_ty) => None,
+            // An open receiver - a type parameter, an inference variable -
+            // has no recorded owner, because one body serves every
+            // instantiation. The name is all there is to bind to.
             _ => self
                 .impl_target_names(resolved_receiver_ty)
                 .into_iter()
@@ -3420,8 +3439,12 @@ impl<'tcx> FnBuilder<'tcx> {
         } else {
             match traversal_owner {
                 Some(owner) => format!("{owner}::{}", name.name).leak(),
-                None => qualified_collection_method
+                // The `impl` block the checker resolved this call to answers
+                // first: the receiver's type decided it there, while here a
+                // container and a structural type are one runtime shape.
+                None => recorded_owner
                     .as_deref()
+                    .or(qualified_collection_method.as_deref())
                     .or(user_impl_method.as_deref())
                     .unwrap_or(&name.name),
             }
@@ -3490,6 +3513,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     receiver: map_expr,
                     name: entry_name,
                     args: entry_args,
+                    owner: None,
                 } if entry_name.name.as_str() == "or_insert" && entry_args.len() == 2 => {
                     let map_reg = self.compile_expr(map_expr)?;
                     let key_reg = self.compile_expr(&entry_args[0])?;
@@ -3840,7 +3864,12 @@ impl<'tcx> FnBuilder<'tcx> {
             )
             && let Some((receiver, method_args)) = args.split_first()
         {
-            return self.compile_method_call(peel_ref_wrappers_expr(receiver), method, method_args);
+            return self.compile_method_call(
+                peel_ref_wrappers_expr(receiver),
+                method,
+                method_args,
+                None,
+            );
         }
         // Qualified `Map` / `Set` mutators carry the same implicit
         // mutable-receiver contract as their method-call form (enforced by
@@ -3868,7 +3897,12 @@ impl<'tcx> FnBuilder<'tcx> {
             )
             && let Some((receiver, method_args)) = args.split_first()
         {
-            return self.compile_method_call(peel_ref_wrappers_expr(receiver), method, method_args);
+            return self.compile_method_call(
+                peel_ref_wrappers_expr(receiver),
+                method,
+                method_args,
+                None,
+            );
         }
         // A payload-less enum constructor is already represented by its
         // immutable global sentinel. Its HIR callee has the enum value type,
@@ -4814,7 +4848,7 @@ impl<'tcx> FnBuilder<'tcx> {
             let name = Ident {
                 name: method.to_string(),
             };
-            return self.compile_method_call(arg, &name, &[]).map(Some);
+            return self.compile_method_call(arg, &name, &[], None).map(Some);
         }
         // A container, tuple, or `Option` holding such a type renders its
         // elements the same way, at any depth. The value carries its type

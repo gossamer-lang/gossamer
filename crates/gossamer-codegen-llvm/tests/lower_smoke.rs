@@ -282,7 +282,7 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
     (body, tcx)
 }
 
-fn string_len_main() -> (Body, TyCtxt) {
+fn string_len_main(text: &str) -> (Body, TyCtxt) {
     let mut tcx = TyCtxt::new();
     let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
     let string_ty = tcx.intern(TyKind::String);
@@ -312,7 +312,7 @@ fn string_len_main() -> (Body, TyCtxt) {
                     span,
                     kind: StatementKind::Assign {
                         place: Place::local(Local(1)),
-                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Str("hello".to_string()))),
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Str(text.to_string()))),
                     },
                 }],
                 terminator: Terminator::Call {
@@ -436,28 +436,54 @@ fn llvm_acyclic_backward_numbered_edge_has_no_preemption_poll() {
 }
 
 #[test]
-fn llvm_string_len_of_literal_uses_scalar_length_helper() {
-    let (body, tcx) = string_len_main();
+fn llvm_string_len_of_ascii_literal_folds_to_its_scalar_count() {
+    let (body, tcx) = string_len_main("hello");
     let ir = gossamer_codegen_llvm::render_ir_to_string(&[body], &tcx, false)
         .expect("string length MIR must render to LLVM IR");
     assert!(
-        ir.contains("[2 x i32] [i32 5, i32 0]"),
-        "literal carrier must store its Unicode scalar length and first block: {ir}"
+        ir.contains("[2 x i32] [i32 4294967294, i32 0]"),
+        "an all-ASCII literal carrier must state the sentinel that makes a \
+         character index a byte offset: {ir}"
     );
     assert!(
-        ir.contains("call i64 @\"gos_rt_str_len\""),
-        "literal string length must use the scalar-aware runtime helper: {ir}"
+        ir.contains("store i64 5, ptr %l0"),
+        "a literal's scalar length is known while compiling: {ir}"
+    );
+    assert!(
+        !ir.contains("call i64 @gos_rt_str_len"),
+        "a folded length must not also call the runtime helper: {ir}"
     );
 }
 
 #[test]
-fn llvm_dynamic_string_len_calls_scalar_length_helper() {
+fn llvm_string_len_of_non_ascii_literal_counts_scalars_not_bytes() {
+    let (body, tcx) = string_len_main("h\u{e9}llo");
+    let ir = gossamer_codegen_llvm::render_ir_to_string(&[body], &tcx, false)
+        .expect("string length MIR must render to LLVM IR");
+    assert!(
+        ir.contains("[2 x i32] [i32 5, i32 0]"),
+        "a literal carrying multi-byte scalars states its scalar count and \
+         first index block: {ir}"
+    );
+    assert!(
+        ir.contains("store i64 5, ptr %l0"),
+        "length counts Unicode scalars, of which this literal has five in six \
+         bytes: {ir}"
+    );
+}
+
+#[test]
+fn llvm_dynamic_string_len_reads_the_typed_header_inline() {
     let (body, tcx) = dynamic_string_len_main();
     let ir = gossamer_codegen_llvm::render_ir_to_string(&[body], &tcx, false)
         .expect("string length MIR must render to LLVM IR");
     assert!(
-        ir.contains("call i64 @\"gos_rt_str_len\""),
-        "dynamic string length must call the scalar-aware helper: {ir}"
+        ir.contains("getelementptr i8, ptr %t0, i64 -5"),
+        "a typed string states its scalar length in its own header: {ir}"
+    );
+    assert!(
+        ir.contains("call i64 @gos_rt_str_len(ptr %t0)"),
+        "a carrier the guard declines must reach the scalar-aware helper: {ir}"
     );
     assert!(
         !ir.contains("call i64 @strlen"),

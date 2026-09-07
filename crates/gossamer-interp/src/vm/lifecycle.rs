@@ -28,6 +28,7 @@ impl Vm {
             struct_shape_defs: RefCell::new(None),
             struct_shape_handles: RefCell::new(None),
             jit_eager_names: RefCell::new(Arc::new(std::collections::HashSet::new())),
+            entry_points: RefCell::new(Vec::new()),
             jit_cache_key: RefCell::new(None),
             jit_droppable: Cell::new(false),
             jit: parking_lot::RwLock::new(JitState::default()),
@@ -87,6 +88,7 @@ impl Vm {
             struct_shape_defs: RefCell::new(struct_shape_defs),
             struct_shape_handles: RefCell::new(struct_shape_handles),
             jit_eager_names: RefCell::new(jit_eager_names),
+            entry_points: RefCell::new(Vec::new()),
             jit_cache_key: RefCell::new(jit_cache_key),
             // Worker VMs run pool tasks back-to-back; `reset_after_task`
             // manages their MIR lifetime, so they never self-drop.
@@ -113,6 +115,22 @@ impl Vm {
             // re-stamped per task rather than assumed.
             comptime_gate: Cell::new(false),
         }
+    }
+
+    /// Names this `Vm` will be asked to call, which bounds the bodies its
+    /// promotion snapshot keeps. Call it before [`Vm::load`], which is where
+    /// the snapshot is built.
+    ///
+    /// The default is to name nothing, which keeps every body: a host that
+    /// has not said what it calls gets a snapshot that covers whatever it
+    /// does. A host that knows - a program runner naming `main`, a test
+    /// runner naming each test, a benchmark runner naming each benchmark -
+    /// says so and pays for those bodies only. Naming a body the host then
+    /// does not call costs nothing; failing to name one it does call leaves
+    /// that body on the bytecode tier, which is why the default names
+    /// nothing rather than guessing an entry.
+    pub fn set_entry_points(&self, names: &[String]) {
+        self.entry_points.replace(names.to_vec());
     }
 
     /// Returns deferred-JIT counters and the current native dispatch footprint.
@@ -831,6 +849,18 @@ impl Vm {
             let mut bodies = gossamer_mir::lower_program(&lifted, &mut jit_tcx);
             drop(lifted);
             bodies.retain(|body| !slice_pattern_bodies.contains(body.name.as_str()));
+            // Drop what no entry reaches before the passes that are paid per
+            // body run over it. The snapshot exists to promote hot bodies, and
+            // a body no entry reaches is never entered, so this changes how
+            // much work the load does rather than what the program can call.
+            let roots = self.entry_points.borrow().clone();
+            if !roots.is_empty() {
+                gossamer_mir::prune_scoped(
+                    &mut bodies,
+                    &roots,
+                    gossamer_mir::Scope::BeforeSpecialisation,
+                );
+            }
             // Monomorphise before the JIT sees the bodies, exactly as the LLVM
             // AOT pipeline does. A generic function / method / struct
             // instantiated with a concrete type must reach the JIT as a
@@ -841,6 +871,9 @@ impl Vm {
             // unaffected - it runs the separately-compiled chunks, not these
             // MIR bodies, which are JIT-only.
             gossamer_mir::monomorphise(&mut bodies, &mut jit_tcx);
+            if !roots.is_empty() {
+                gossamer_mir::prune_unreachable(&mut bodies, &roots);
+            }
             // The in-process JIT's win is eliding repeated bytecode dispatch
             // inside native recursion. Gate the compile snapshot on that
             // shape so programs that cannot promote a useful body do not
@@ -2192,7 +2225,20 @@ impl Vm {
                     )?;
                     validate_chunk_for_execution(&chunk)?;
                     let shared = chunk.into_shared();
-                    if let Some(type_name) = &decl.self_name {
+                    // A core type's own surface answers a call before any
+                    // `impl` block a program writes for it, so a block that
+                    // declares one of those names registers no key for it: the
+                    // runtime would otherwise find the block under the very
+                    // spelling it builds for the type's own method.
+                    let shadows_core_method = decl.self_name.as_ref().is_some_and(|type_name| {
+                        gossamer_types::core_type_declares_method(
+                            &type_name.name,
+                            &method.name.name,
+                        )
+                    });
+                    if let Some(type_name) = &decl.self_name
+                        && !shadows_core_method
+                    {
                         let qualified = format!("{}::{}", type_name.name, method.name.name);
                         globals.insert(intern(&qualified), Global::Fn(shared.clone()));
                         if let Some(prefix) = &module_prefix {

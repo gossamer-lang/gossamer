@@ -657,11 +657,13 @@ impl<'a> LoopEligibility<'a> {
                 receiver,
                 name,
                 args,
+                owner: None,
             } if name.name == "len" && args.is_empty() => self.expr(receiver, false),
             HirExprKind::MethodCall {
                 receiver,
                 name,
                 args,
+                owner: None,
             } if matches!(name.name.as_str(), "wrapping_add" | "wrapping_mul")
                 && is_copy_ty(self.tcx, receiver.ty)
                 && args.iter().all(|arg| is_copy_ty(self.tcx, arg.ty)) =>

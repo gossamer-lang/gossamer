@@ -352,6 +352,14 @@ pub enum HirExprKind {
         name: Ident,
         /// Call arguments.
         args: Vec<HirExpr>,
+        /// The `impl` block this call resolves to, named by the type the block
+        /// was written for, when the checker knew the receiver's type.
+        ///
+        /// Below this point a container and a structural type both reach a
+        /// method as an untyped handle, so the receiver no longer says which
+        /// block to call. Carrying the answer is what lets two types implement
+        /// one trait and each call reach its own body.
+        owner: Option<Ident>,
     },
     /// Field access `receiver.name`.
     Field {
@@ -715,7 +723,7 @@ pub struct HirFieldPat {
 /// unvisited child edge. A pass that only needs "is this name mentioned
 /// anywhere below" recurses through this rather than repeating the match.
 #[allow(clippy::too_many_lines)]
-pub fn for_each_child_expr(expr: &HirExpr, f: &mut impl FnMut(&HirExpr)) {
+pub fn for_each_child_expr<'a>(expr: &'a HirExpr, f: &mut impl FnMut(&'a HirExpr)) {
     match &expr.kind {
         HirExprKind::Literal(_)
         | HirExprKind::Path { .. }
@@ -826,7 +834,7 @@ pub fn for_each_child_expr(expr: &HirExpr, f: &mut impl FnMut(&HirExpr)) {
 }
 
 /// Applies `f` to every expression directly under `block`, in source order.
-pub fn for_each_child_expr_in_block(block: &HirBlock, f: &mut impl FnMut(&HirExpr)) {
+pub fn for_each_child_expr_in_block<'a>(block: &'a HirBlock, f: &mut impl FnMut(&'a HirExpr)) {
     for stmt in &block.stmts {
         match &stmt.kind {
             HirStmtKind::Let { init, .. } => {

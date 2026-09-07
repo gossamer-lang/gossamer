@@ -260,6 +260,11 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
             }
         }
     }
+    // `&self` names the same value `self` does, so both spellings of a read of
+    // the receiver reach the backends as the same load. Runs before the RC and
+    // reuse passes walk these bodies, so what they account for is what the
+    // backends are handed.
+    load_reference_receiver_reads(&mut bodies, tcx);
     // RC retain/release last-use elision (item 3). Runs after the drop
     // passes so the teardown releases they insert are visible to the
     // pass's post-release liveness check; a value moved into a surviving

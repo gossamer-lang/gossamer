@@ -532,7 +532,7 @@ impl Vm {
                         Some(Global::Value(v)) => v.clone(),
                         Some(Global::MutStatic(cell)) => cell.lock().clone(),
                         Some(Global::Fn(_)) => Value::String(SmolStr::from(name)),
-                        None => return Err(self.unresolved(name)),
+                        None => return Err(RuntimeError::UnresolvedName(name.to_string())),
                     };
                     registers[dst as usize] = value;
                 }

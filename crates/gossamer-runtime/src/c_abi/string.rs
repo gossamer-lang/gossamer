@@ -74,7 +74,13 @@ const STRING_BODY_TAG: usize = STRING_BODY_OFFSET & 7;
 const OWNER_CHECK_SALT: u64 = 0x5347_4F53_5452_4F57;
 
 const _: () = assert!(STRING_OWNER_BYTES == 16);
-const _: () = assert!(STRING_BODY_TAG == 5);
+const _: () = assert!(STRING_BODY_TAG as u64 == gossamer_abi::string_layout::BODY_ADDR_TAG);
+// The back-ends read this header inline from the same constants, so a
+// change to either side that the other does not follow stops the build.
+const _: () =
+    assert!(STRING_LEGACY_HEADER_BYTES as i64 + gossamer_abi::string_layout::CAP_OFFSET == 4);
+const _: () = assert!(gossamer_abi::string_layout::LEN_OFFSET == -5);
+const _: () = assert!(gossamer_abi::string_layout::TAG_OFFSET == -1);
 
 #[inline]
 fn owner_check(body: *const c_char) -> u64 {
@@ -323,6 +329,68 @@ unsafe fn typed_str_text<'a>(s: *const c_char) -> &'a str {
     std::str::from_utf8(unsafe { typed_str_bytes(s) }).unwrap_or("")
 }
 
+/// Number of bytes in the UTF-8 scalar a leading byte begins.
+///
+/// A malformed leading byte answers one, so a walk over invalid content still
+/// advances and terminates.
+const fn utf8_encoded_len(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
+    }
+}
+
+/// Decodes the UTF-8 scalar starting at `at`, reading no more than the four
+/// bytes one scalar can occupy.
+///
+/// Validating a whole buffer to read one character makes any scan of it
+/// quadratic, so the window is bounded by the longest encoding rather than by
+/// the content's length. `at` is a character boundary, so the scalar it starts
+/// is complete inside the window even when the window's own tail is not.
+fn utf8_scalar_at(bytes: &[u8], at: usize) -> Option<char> {
+    let end = at.saturating_add(4).min(bytes.len());
+    let window = bytes.get(at..end)?;
+    match std::str::from_utf8(window) {
+        Ok(text) => text.chars().next(),
+        Err(err) => std::str::from_utf8(window.get(..err.valid_up_to())?)
+            .ok()?
+            .chars()
+            .next(),
+    }
+}
+
+/// Byte offset of the next character boundary at or after `at`.
+///
+/// Reads only the byte at each candidate offset: a UTF-8 continuation byte is
+/// `10xxxxxx`, and every other byte starts a scalar.
+fn utf8_boundary_at_or_after(bytes: &[u8], mut at: usize) -> Option<usize> {
+    if at > bytes.len() {
+        return None;
+    }
+    while at < bytes.len() && (bytes[at] & 0xC0) == 0x80 {
+        at += 1;
+    }
+    Some(at)
+}
+
+/// Byte offset of character `index`, walking scalars from `from_byte`.
+///
+/// Each step reads one leading byte, so a caller that starts from a nearby
+/// index block pays that block's stride rather than the content's length.
+fn utf8_offset_of_char(bytes: &[u8], from_byte: usize, steps: usize) -> Option<usize> {
+    let mut at = from_byte;
+    for _ in 0..steps {
+        if at >= bytes.len() {
+            return None;
+        }
+        at += utf8_encoded_len(bytes[at]);
+    }
+    (at <= bytes.len()).then_some(at)
+}
+
 #[inline]
 unsafe fn typed_str_char_len(s: *const c_char) -> usize {
     if let Some(cap) = unsafe { typed_str_cap(s) } {
@@ -353,41 +421,30 @@ unsafe fn typed_str_char_boundary(s: *const c_char, index: usize) -> Option<usiz
         if char_len == u32::MAX as usize {
             return None;
         }
-        let text = unsafe { typed_str_text(s) };
+        let bytes = unsafe { typed_str_bytes(s) };
         if index > char_len {
             return None;
         }
         if index == char_len {
-            return Some(text.len());
+            return Some(bytes.len());
         }
         let block = index / STR_INDEX_STRIDE;
         let block_char = block * STR_INDEX_STRIDE;
         let byte = unsafe { footer.add(1 + block).read_unaligned() } as usize;
-        return text[byte..]
-            .char_indices()
-            .nth(index - block_char)
-            .map(|(offset, _)| byte + offset);
+        return utf8_offset_of_char(bytes, byte, index - block_char);
     }
-    let text = unsafe { typed_str_text(s) };
+    // No index to start from, so the walk is the content's own. A string
+    // reaching here is a foreign C pointer, which no Gossamer value names.
+    let bytes = unsafe { typed_str_bytes(s) };
     if index == 0 {
         return Some(0);
     }
-    text.char_indices()
-        .nth(index)
-        .map(|(offset, _)| offset)
-        .or_else(|| (index == text.chars().count()).then_some(text.len()))
+    utf8_offset_of_char(bytes, 0, index)
 }
 
 #[inline]
-unsafe fn typed_str_next_char_boundary(s: *const c_char, mut index: usize) -> Option<usize> {
-    let text = unsafe { typed_str_text(s) };
-    if index > text.len() {
-        return None;
-    }
-    while index < text.len() && !text.is_char_boundary(index) {
-        index += 1;
-    }
-    Some(index)
+unsafe fn typed_str_next_char_boundary(s: *const c_char, index: usize) -> Option<usize> {
+    utf8_boundary_at_or_after(unsafe { typed_str_bytes(s) }, index)
 }
 
 /// Tests the private builder tag on a compiler-typed string.
@@ -407,7 +464,7 @@ unsafe fn is_typed_builder(s: *const c_char) -> bool {
 /// `ptr` is 9 bytes past the start of the allocation (at `content[0]`).
 /// `ptr[-1]` = tag, `ptr[-5..-1]` = len (u32 LE), `ptr[-9..-5]` = cap (u32 LE).
 /// Total allocation: cap + 10 bytes.
-const STR_BUILDER_TAG: u8 = 0xAB;
+const STR_BUILDER_TAG: u8 = gossamer_abi::string_layout::TAG_BUILDER;
 
 /// High bit of a `STR_BUILDER` string's `rc:u32` field, set once the string
 /// has escaped to another goroutine (`gos_rt_rc_mark_shared`). When set,
@@ -423,20 +480,20 @@ pub(crate) const STR_SHARED: u32 = 1 << 31;
 /// `is_gos_string` uses this only on values already known by typed runtime RC
 /// metadata to be Gossamer values; public raw-string entry points never probe
 /// this prefix.
-const STR_STATIC_TAG: u8 = 0xA8;
+const STR_STATIC_TAG: u8 = gossamer_abi::string_layout::TAG_STATIC;
 
 /// Tag for growable strings whose backing bytes live in an arena region.
 /// Same `[cap][len][tag][content][NUL]` layout as `STR_BUILDER_TAG` (so
 /// length reads and in-place append work identically), but the bytes are
 /// freed wholesale at `arena_pop`, so `gos_rt_str_free` skips them.
-const STR_REGION_TAG: u8 = 0xAA;
-const STR_INDEX_STRIDE: usize = 32;
+const STR_REGION_TAG: u8 = gossamer_abi::string_layout::TAG_REGION;
+const STR_INDEX_STRIDE: usize = gossamer_abi::string_layout::INDEX_STRIDE;
 /// Character-count sentinel meaning "every byte is one character", i.e. the
 /// content is ASCII. A character index then equals its byte offset, so the
 /// per-block offsets are the identity and are neither written nor read. This
 /// keeps the common case off the O(len) `char_indices` walk that building the
 /// index otherwise costs on every allocation and every append.
-const STR_INDEX_ASCII: u32 = u32::MAX - 1;
+const STR_INDEX_ASCII: u32 = gossamer_abi::string_layout::INDEX_ASCII;
 
 #[inline]
 const fn str_index_slots(cap: usize) -> usize {
@@ -1305,17 +1362,21 @@ pub unsafe extern "C" fn gos_rt_str_byte_at(s: *const c_char, i: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_char_at(s: *const c_char, i: i64) -> i64 {
-    if s.is_null() || i < 0 {
-        return 0;
+    // `s[i]` is an indexed read, and an index outside `[0, len)` panics, in the
+    // wording every sequence access reports so a failure's text does not
+    // depend on the tier that ran it.
+    if s.is_null() {
+        crate::c_abi::panic::panic_oob_text("vec index", i, 0);
+    }
+    let char_len = unsafe { typed_str_char_len(s) };
+    if i < 0 || i as usize >= char_len {
+        crate::c_abi::panic::panic_oob_text("vec index", i, char_len as i64);
     }
     let Some(byte) = (unsafe { typed_str_char_boundary(s, i as usize) }) else {
-        return 0;
+        crate::c_abi::panic::panic_oob_text("vec index", i, char_len as i64);
     };
-    let text = unsafe { typed_str_text(s) };
-    text[byte..]
-        .chars()
-        .next()
-        .map_or(0, |ch| i64::from(u32::from(ch)))
+    let bytes = unsafe { typed_str_bytes(s) };
+    utf8_scalar_at(bytes, byte).map_or(0, |ch| i64::from(u32::from(ch)))
 }
 
 /// `os::read_dir(path) -> Result<Vec<String>, errors::Error>` -

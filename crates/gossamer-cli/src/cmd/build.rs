@@ -398,10 +398,16 @@ struct BuildTimings {
     total: Duration,
 }
 
+/// Where a build's codegen time went, read from the LLVM backend.
+fn codegen_phases() -> gossamer_codegen_llvm::CodegenPhaseTimes {
+    gossamer_codegen_llvm::codegen_phase_times()
+}
+
 impl BuildTimings {
     fn print(&self, cache_hit: bool) {
+        let phases = codegen_phases();
         println!(
-            "build-timings: {{\"bundle_us\":{},\"stamp_us\":{},\"autoderive_us\":{},\"comptime_us\":{},\"frontend_us\":{},\"parse_us\":{},\"resolve_us\":{},\"typecheck_us\":{},\"exhaustiveness_us\":{},\"arena_escape_us\":{},\"parse_cache_hit\":{},\"body_count\":{},\"pruned_count\":{},\"llvm_object_count\":{},\"cranelift_companion\":{},\"codegen_us\":{},\"link_us\":{},\"total_us\":{},\"final_artifact_cache_hit\":{cache_hit}}}",
+            "build-timings: {{\"bundle_us\":{},\"stamp_us\":{},\"autoderive_us\":{},\"comptime_us\":{},\"frontend_us\":{},\"parse_us\":{},\"resolve_us\":{},\"typecheck_us\":{},\"exhaustiveness_us\":{},\"arena_escape_us\":{},\"parse_cache_hit\":{},\"body_count\":{},\"pruned_count\":{},\"llvm_object_count\":{},\"cranelift_companion\":{},\"codegen_us\":{},\"cachekey_us\":{},\"render_us\":{},\"llvm_tool_us\":{},\"link_us\":{},\"total_us\":{},\"final_artifact_cache_hit\":{cache_hit}}}",
             self.bundle.as_micros(),
             self.stamp.as_micros(),
             self.autoderive.as_micros(),
@@ -418,6 +424,9 @@ impl BuildTimings {
             self.llvm_object_count,
             self.cranelift_companion,
             self.codegen.as_micros(),
+            phases.cache_key_us,
+            phases.render_us,
+            phases.tool_us,
             self.link.as_micros(),
             self.total.as_micros(),
         );

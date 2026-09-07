@@ -12,6 +12,7 @@ use crate::ty::Ty;
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TypeTable {
     entries: HashMap<NodeId, Ty>,
+    method_owners: HashMap<NodeId, String>,
 }
 
 impl TypeTable {
@@ -30,6 +31,24 @@ impl TypeTable {
     #[must_use]
     pub fn get(&self, node: NodeId) -> Option<Ty> {
         self.entries.get(&node).copied()
+    }
+
+    /// Records the `impl` block a method call resolves to, named by the type
+    /// the block was written for.
+    ///
+    /// The receiver's type decides which block a call reaches, and it is known
+    /// here and nowhere later: a container and a structural type both reach a
+    /// method as an untyped handle, which the lowering below types the way it
+    /// types an integer. Resolving here is what lets two types implement one
+    /// trait and each call reach its own body.
+    pub fn insert_method_owner(&mut self, node: NodeId, owner: String) {
+        self.method_owners.insert(node, owner);
+    }
+
+    /// The `impl` owner recorded for a method call, if one was.
+    #[must_use]
+    pub fn method_owner(&self, node: NodeId) -> Option<&str> {
+        self.method_owners.get(&node).map(String::as_str)
     }
 
     /// Returns every `(NodeId, Ty)` pair in ascending node order.

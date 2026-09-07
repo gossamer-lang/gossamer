@@ -213,6 +213,13 @@ pub struct Vm {
     /// Immutable promotion metadata derived during load. Worker VMs share the
     /// same allocation instead of re-walking MIR when a goroutine starts.
     pub(crate) jit_eager_names: RefCell<Arc<std::collections::HashSet<String>>>,
+    /// Names a host may ask this `Vm` to call, which is what the promotion
+    /// snapshot has to keep. `gos run` calls one entry, a test run calls each
+    /// test, and a session that reads its next call from the user cannot say
+    /// in advance - that case is spelled as an empty list, which keeps every
+    /// body. A body outside the set is still callable; it simply stays on the
+    /// tier that is always correct.
+    pub(crate) entry_points: RefCell<Vec<String>>,
     /// Stable description of the optimized MIR/type snapshot used for JIT
     /// promotion. It keys the per-thread weak artifact cache: raw Cranelift
     /// handles never cross an OS-thread boundary, while overlapping VMs on one
@@ -1387,7 +1394,12 @@ impl Vm {
             Value::Map(_) | Value::IntMap(_) | Value::StrIntMap(_) => {
                 Some(self.intern_qualified("Map", method))
             }
-            Value::Tuple(_) => Some(self.intern_qualified("Tuple", method)),
+            // A tuple `impl` registers under the arity its receiver carries,
+            // which is what a value in hand can be identified as when the call
+            // reaches this dispatch through a type parameter.
+            Value::Tuple(inner) => {
+                Some(self.intern_qualified(&format!("tuple_{}", inner.len()), method))
+            }
             // Scalars, so a method on one cannot be captured by a free
             // function of the same name.
             Value::Int(_) => Some(self.intern_qualified("i64", method)),
@@ -1499,7 +1511,10 @@ pub(crate) fn type_token(v: &Value) -> u64 {
         Value::Array(_) | Value::FloatArray(_) | Value::IntArray(_) | Value::FloatVec(_) => {
             TAG_ARRAY
         }
-        Value::Tuple(_) => TAG_TUPLE,
+        // A tuple's arity is part of its identity here: an `impl` block for a
+        // tuple registers under it, so two arities reaching one call site are
+        // two receivers and must not share an inline-cache slot.
+        Value::Tuple(inner) => TAG_TUPLE ^ ((inner.len() as u64) << 8),
         Value::LazyIter(_) => TAG_LAZY_ITER,
         Value::Variant(inner) => {
             // Globally-interned canonical pointer (see the `Struct` arm).
@@ -1830,16 +1845,54 @@ fn has_jit_eligible_fn(program: &HirProgram) -> bool {
             HirItemKind::Const(_) | HirItemKind::Static(_) | HirItemKind::Adt(_) => {}
         }
     }
-    let names: Vec<&str> = bodies.iter().map(|decl| decl.name.name.as_str()).collect();
+    let names: rustc_hash::FxHashSet<&str> =
+        bodies.iter().map(|decl| decl.name.name.as_str()).collect();
+    // One walk per body, collecting the names it calls, rather than one walk
+    // per (body, name) pair: the second shape costs the square of the
+    // program's function count and dominates the load it guards.
+    let mut called: rustc_hash::FxHashSet<&str> = rustc_hash::FxHashSet::default();
     bodies.iter().any(|decl| {
         decl.body.as_ref().is_some_and(|body| {
-            !hir_block_has_slice_pattern(&body.block)
-                && (hir_block_has_loop(&body.block)
-                    || names
-                        .iter()
-                        .any(|name| hir_block_calls_name(&body.block, name)))
+            if hir_block_has_slice_pattern(&body.block) {
+                return false;
+            }
+            if hir_block_has_loop(&body.block) {
+                return true;
+            }
+            called.clear();
+            hir_block_direct_callees(&body.block, &mut called);
+            !called.is_disjoint(&names)
         })
     })
+}
+
+/// Collects the single-segment names `block` calls directly.
+///
+/// Recursion goes through the shared child walker, which has one arm per
+/// expression kind, so a new kind cannot silently acquire an unvisited edge.
+fn hir_block_direct_callees<'a>(
+    block: &'a gossamer_hir::HirBlock,
+    out: &mut rustc_hash::FxHashSet<&'a str>,
+) {
+    gossamer_hir::for_each_child_expr_in_block(block, &mut |expr| {
+        hir_expr_direct_callees(expr, out);
+    });
+}
+
+/// [`hir_block_direct_callees`] for one expression and everything below it.
+fn hir_expr_direct_callees<'a>(
+    expr: &'a gossamer_hir::HirExpr,
+    out: &mut rustc_hash::FxHashSet<&'a str>,
+) {
+    if let gossamer_hir::HirExprKind::Call { callee, .. } = &expr.kind
+        && let gossamer_hir::HirExprKind::Path { segments, .. } = &callee.kind
+        && segments.len() == 1
+    {
+        out.insert(segments[0].name.as_str());
+    }
+    gossamer_hir::for_each_child_expr(expr, &mut |child| {
+        hir_expr_direct_callees(child, out);
+    });
 }
 
 /// Inlining a `static mut` accessor into another body leaves the original MIR
@@ -2074,118 +2127,6 @@ fn hir_expr_has_loop(expr: &gossamer_hir::HirExpr) -> bool {
                 gossamer_hir::HirSelectOp::Default => false,
             };
             op_has_loop || hir_expr_has_loop(&arm.body)
-        }),
-        K::Path { .. } | K::Literal(_) | K::Continue { .. } | K::Placeholder => false,
-    }
-}
-
-fn hir_block_calls_name(block: &gossamer_hir::HirBlock, name: &str) -> bool {
-    block.stmts.iter().any(|stmt| match &stmt.kind {
-        gossamer_hir::HirStmtKind::Let { init, .. } => init
-            .as_ref()
-            .is_some_and(|expr| hir_expr_calls_name(expr, name)),
-        gossamer_hir::HirStmtKind::Expr { expr, .. } | gossamer_hir::HirStmtKind::Defer(expr) => {
-            hir_expr_calls_name(expr, name)
-        }
-        gossamer_hir::HirStmtKind::Item(_) => false,
-    }) || block
-        .tail
-        .as_deref()
-        .is_some_and(|expr| hir_expr_calls_name(expr, name))
-}
-
-fn hir_expr_calls_name(expr: &gossamer_hir::HirExpr, name: &str) -> bool {
-    use gossamer_hir::HirExprKind as K;
-    match &expr.kind {
-        K::Call { callee, args } => {
-            let direct = matches!(
-                &callee.kind,
-                K::Path { segments, .. }
-                    if segments.len() == 1 && segments[0].name.as_str() == name
-            );
-            direct
-                || hir_expr_calls_name(callee, name)
-                || args.iter().any(|arg| hir_expr_calls_name(arg, name))
-        }
-        K::MethodCall { receiver, args, .. } => {
-            hir_expr_calls_name(receiver, name)
-                || args.iter().any(|arg| hir_expr_calls_name(arg, name))
-        }
-        K::Field { receiver, .. } | K::TupleIndex { receiver, .. } => {
-            hir_expr_calls_name(receiver, name)
-        }
-        K::Index { base, index } => {
-            hir_expr_calls_name(base, name) || hir_expr_calls_name(index, name)
-        }
-        K::Unary { operand, .. } | K::Cast { value: operand, .. } => {
-            hir_expr_calls_name(operand, name)
-        }
-        K::Binary { lhs, rhs, .. } => {
-            hir_expr_calls_name(lhs, name) || hir_expr_calls_name(rhs, name)
-        }
-        K::Assign { place, value } => {
-            hir_expr_calls_name(place, name) || hir_expr_calls_name(value, name)
-        }
-        K::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            hir_expr_calls_name(condition, name)
-                || hir_expr_calls_name(then_branch, name)
-                || else_branch
-                    .as_deref()
-                    .is_some_and(|branch| hir_expr_calls_name(branch, name))
-        }
-        K::Match { scrutinee, arms } => {
-            hir_expr_calls_name(scrutinee, name)
-                || arms.iter().any(|arm| {
-                    arm.guard
-                        .as_ref()
-                        .is_some_and(|guard| hir_expr_calls_name(guard, name))
-                        || hir_expr_calls_name(&arm.body, name)
-                })
-        }
-        K::Loop { body, .. } => hir_expr_calls_name(body, name),
-        K::While {
-            condition, body, ..
-        } => hir_expr_calls_name(condition, name) || hir_expr_calls_name(body, name),
-        K::Block(block) => hir_block_calls_name(block, name),
-        K::Closure { body, .. } => hir_expr_calls_name(body, name),
-        K::LiftedClosure { captures, .. } => {
-            captures.iter().any(|cap| hir_expr_calls_name(cap, name))
-        }
-        K::Tuple(elems) => elems.iter().any(|elem| hir_expr_calls_name(elem, name)),
-        K::Array(arr) => match arr {
-            gossamer_hir::HirArrayExpr::List(elems) => {
-                elems.iter().any(|elem| hir_expr_calls_name(elem, name))
-            }
-            gossamer_hir::HirArrayExpr::Repeat { value, count } => {
-                hir_expr_calls_name(value, name) || hir_expr_calls_name(count, name)
-            }
-        },
-        K::Range { start, end, .. } => {
-            start
-                .as_deref()
-                .is_some_and(|start| hir_expr_calls_name(start, name))
-                || end
-                    .as_deref()
-                    .is_some_and(|end| hir_expr_calls_name(end, name))
-        }
-        K::Return(value) | K::Break { value, .. } => value
-            .as_deref()
-            .is_some_and(|value| hir_expr_calls_name(value, name)),
-        K::Select { arms } => arms.iter().any(|arm| {
-            let op_calls = match &arm.op {
-                gossamer_hir::HirSelectOp::Recv { channel, .. } => {
-                    hir_expr_calls_name(channel, name)
-                }
-                gossamer_hir::HirSelectOp::Send { channel, value } => {
-                    hir_expr_calls_name(channel, name) || hir_expr_calls_name(value, name)
-                }
-                gossamer_hir::HirSelectOp::Default => false,
-            };
-            op_calls || hir_expr_calls_name(&arm.body, name)
         }),
         K::Path { .. } | K::Literal(_) | K::Continue { .. } | K::Placeholder => false,
     }

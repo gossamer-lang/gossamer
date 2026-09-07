@@ -443,6 +443,26 @@ impl<'a> Lowerer<'a> {
             self.lower_vec_len_inline(&args[0], destination, target)?;
             return Ok(());
         }
+        // A string scan calls these once per character or byte, and each is a
+        // guarded header read that costs less than the call reaching it. The
+        // length shims matter twice over: an opaque call in `while i <
+        // s.len()` is re-evaluated every iteration and cannot be hoisted.
+        if name == "gos_rt_str_byte_at" && args.len() == 2 {
+            self.lower_str_byte_at_inline(args, destination, target)?;
+            return Ok(());
+        }
+        if name == "gos_rt_str_char_at" && args.len() == 2 {
+            self.lower_str_char_at_inline(args, destination, target)?;
+            return Ok(());
+        }
+        if name == "gos_rt_str_byte_len" && args.len() == 1 {
+            self.lower_str_byte_len_inline(&args[0], destination, target)?;
+            return Ok(());
+        }
+        if name == "gos_rt_str_len" && args.len() == 1 {
+            self.lower_str_len_inline(&args[0], destination, target)?;
+            return Ok(());
+        }
         // `.len()` on a Vec/Slice that routed through the generic
         // `gos_rt_len` dispatcher: same null-guarded header load, but
         // only when the static element type pins the receiver as a

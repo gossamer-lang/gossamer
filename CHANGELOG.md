@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.59.0 - Receiver types decide dispatch, and string reads stop squaring
+
+- A generic function called with a concrete type runs a copy specialised for
+  it, so `fn fold<T, A>(xs: [T], init: A, f: Fn(A, T) -> A)` over 20 million
+  integers takes 19 ms under `gos build --release` where it took 40 ms - what
+  the same function written for `i64` costs.
+- A `&self` method on a primitive reads its receiver the same way whichever
+  spelling its body uses. A bare `self` handed on the receiver's address, so
+  `self.abs()` answered one, `self == 0` compared one, and `self + 1` did not
+  compile under `gos build`.
+- A method call reaches the `impl` block whose receiver is the type in front of
+  it. Resolution took a block only when its method name was unique in the
+  program, so `impl P for i64` beside `impl P for bool` failed to link.
+- A trait implemented for `String`, `Vec`, `Map`, `Set`, or a tuple is callable
+  on a receiver of that type. Such a call reported GT0002 even though the impl
+  compiled.
+- Which `impl` a call reaches is decided where the receiver's type is known.
+  Below that a container and a tuple are untyped handles, so `impl P for i64`
+  beside `impl P for Set<i64>` reached one body from both calls.
+- Two `impl` blocks for different tuple arities are two impls. Every type with
+  no path to name it by was keyed alike, so the second was reported as
+  conflicting with the first and the diagnostic named neither.
+- A trait method on a tuple receiver runs on the bytecode VM, and two tuple
+  arities at one call site each reach their own body.
+- A user `impl` on a built-in type answers a call the type's own surface does
+  not, and the type answers one it does, on every tier. `gos build --release`
+  read the receiver as an address for a name both declared, so
+  `impl Display for i64` made `n.to_string()` print a pointer.
+- Reading a character no longer walks the string. Counting the digits in a
+  600 KB string took 4.3 s under `gos run` and now takes 3 ms.
+- `gos build --release` reads a string's characters, bytes, and lengths from
+  its header rather than through a call, so a length hoists out of a loop
+  condition. Scanning 24 MB of text is 16 ms by character and 10 ms by byte.
+- `s[i]` outside the content panics, as every other indexed read does. The
+  compiled tiers answered a NUL character. `s.byte_at(i)` still answers zero
+  there, which is its own contract.
+- A string literal outside ASCII reports the characters it has: `"héllo".len()`
+  answers 5 on every tier, where the literal's length had folded to its byte
+  count.
+- Loading a program no longer costs the square of its function count. Deciding
+  what to compile natively took 53 ms on a 12,000-line file and now takes
+  0.3 ms, and starting it takes 0.04 s where it took 0.10 s.
+- A program's promotion snapshot holds only the bodies its entry can reach,
+  cutting that file's peak memory about 7%. Each runner states what it enters:
+  `gos run` names `main`, a test run names its tests, a benchmark names the
+  function it times. A host that names nothing keeps every body.
+- `gos build` compiles about a third faster. The debug profile ran a full
+  `-O1` optimisation pipeline before a `-O0` backend, for a binary already an
+  order of magnitude behind `--release`; it now runs the smallest pipeline that
+  makes the emitted IR usable. A 1,900-line program builds in 0.27 s where it
+  took 0.38 s.
+- A build no longer asks the LLVM tools on the machine what version they are.
+  The two probes ran on every build, cost more than the rest of a small
+  program's bookkeeping together, and answer the same until the binary changes.
+- `gos build --timings` says where codegen went: hashing the identity that
+  decides a cache hit, emitting IR, and the LLVM child compiling it.
+
 ## 0.58.15 - One table per holder in a container-bearing element store
 
 - A `Vec` whose elements are aggregates carrying a `Map` field hands each copy

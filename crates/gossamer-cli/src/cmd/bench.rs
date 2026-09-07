@@ -217,6 +217,9 @@ fn run_one_inner(target: &BenchTarget) -> Result<BenchRecord> {
     let file_id = map.add_file(target.file.to_string_lossy().into_owned(), source.clone());
     let (program, _sf, tcx) = load_and_check_with_sf(&source, file_id, &map)?;
     let mut vm = gossamer_interp::Vm::new();
+    // A benchmark run enters the one function it times, so that is the body
+    // the promotion snapshot is built around.
+    vm.set_entry_points(std::slice::from_ref(&target.name));
     vm.load(&program, tcx, true)
         .map_err(|e| anyhow!("bench {} load failed: {e}", target.name))?;
 
