@@ -249,13 +249,16 @@ impl<'a> Lowerer<'a> {
             "  br i1 {cond}, label %{oob_label}, label %{ok_label}"
         )
         .unwrap();
+        let cold_start = self.out.len();
         writeln!(self.out, "{oob_label}:").unwrap();
+        self.emit_panic_site_line();
         writeln!(
             self.out,
             "  call void @gos_rt_panic_oob(ptr {label_global}, i64 {idx_ssa}, i64 {len_val})"
         )
         .unwrap();
         writeln!(self.out, "  unreachable").unwrap();
+        self.mark_cold(cold_start);
         writeln!(self.out, "{ok_label}:").unwrap();
     }
 

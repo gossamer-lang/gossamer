@@ -81,6 +81,7 @@ impl<'a> Lowerer<'a> {
     pub(crate) fn lower_panic(&mut self, message: &str) {
         declare_rt(&mut self.runtime_refs, "gos_rt_panic");
         let (msg_name, _) = self.strings.borrow_mut().intern(message);
+        self.emit_panic_site_line();
         writeln!(self.out, "  call void @gos_rt_panic(ptr {msg_name})").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
     }
@@ -129,9 +130,12 @@ impl<'a> Lowerer<'a> {
         // module - all reference one shared global instead of each
         // emitting a colliding `@.assert_msg_*` definition.
         let (msg_name, _) = self.strings.borrow_mut().intern(msg_text);
+        let cold_start = self.out.len();
         writeln!(self.out, "{fail_label}:").unwrap();
+        self.emit_panic_site_line();
         writeln!(self.out, "  call void @gos_rt_panic(ptr {msg_name})").unwrap();
         writeln!(self.out, "  unreachable").unwrap();
+        self.mark_cold(cold_start);
         Ok(())
     }
 

@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.59.2 - Debug binary build vs execution speed balance
+
+- A debug binary no longer calls into the runtime once per statement to keep
+  its panic report's line current. The update is written where a report can
+  read it: ahead of a call, which a report reaches through the callee, and
+  inside the cold block a trap raises from, so a run of arithmetic between two
+  calls carries none.
+- A function that calls nothing able to report carries no call-stack frame at
+  all. It can raise only from its own trap blocks, and those name the function
+  and the line where they raise, so an arithmetic kernel pays nothing per call
+  for a frame nothing reads while it runs.
+- A panic inside a `match` names the `match` rather than the function's first
+  line, which is the line the bytecode VM already named.
+- `gos build` runs the LLVM back end at `O1` rather than `O0`, so a debug
+  binary gets the greedy register allocator and the machine passes instead of
+  every value living in memory. It is worth up to 2.4x on the benchmark suite,
+  and the mid-end stays the same short pipeline: a fuller one costs more and
+  measures the same.
+- Debug codegen takes one chunk per core up to eight, where it took four, which
+  is what the back end's extra time overlaps with.
+- A send whose value has been received no longer reports `send on closed
+  channel` when the channel closes right after. A compiled binary re-read the
+  closed flag after its value had been taken, so workers that had all delivered
+  still raised a fault the bytecode VM never raised.
+
 ## 0.59.1 - Indexed loops proven in range, bounds the JIT honours, parallel debug codegen
 
 - An indexed read or write outside a vector panics when the code around it has

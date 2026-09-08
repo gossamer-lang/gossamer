@@ -84,6 +84,10 @@ impl<'a> Lowerer<'a> {
             next_ssa: 0,
             runtime_refs: std::collections::BTreeSet::new(),
             last_frame_line: None,
+            pending_frame_line: None,
+            cold_spans: Vec::new(),
+            frame_observed: false,
+            frame_globals: None,
             fn_name_by_def: std::collections::HashMap::new(),
             param_tys_by_name: std::collections::HashMap::new(),
             strings: std::rc::Rc::new(std::cell::RefCell::new(StringPool::default())),
@@ -135,12 +139,6 @@ impl<'a> Lowerer<'a> {
         // `local_slot`. MIR reserves `_1..=_arity` as
         // parameter locals.
         self.emit_param_stores();
-        // No per-call call-stack instrumentation: panic traces and
-        // SIGQUIT dumps for the compiled tier come from unwinding the
-        // real machine stack on demand (see `gos_rt_panic` /
-        // `sigquit::render_to`). A push/pop pair on every function
-        // entry blocks leaf-function inlining and serialises on a
-        // global lock, which is unacceptable in hot numeric loops.
         // Where the call-scoped temporaries the blocks ask for are spliced
         // back in: they belong to the entry block, and the blocks that need
         // them have not been lowered yet.
@@ -155,6 +153,7 @@ impl<'a> Lowerer<'a> {
             let hoisted = std::mem::take(&mut self.entry_allocas).concat();
             self.out.insert_str(entry_end, &hoisted);
         }
+        self.elide_unobserved_frame();
         Ok(std::mem::take(&mut self.out))
     }
 
@@ -250,6 +249,7 @@ impl<'a> Lowerer<'a> {
             "  call void @gos_rt_stack_push(ptr {name_global}, ptr {file_global}, i32 {line})"
         )
         .unwrap();
+        self.frame_globals = Some((name_global, file_global));
     }
 
     /// Drops this body's call-stack frame. Emitted on every return path.
@@ -261,8 +261,15 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  call void @gos_rt_stack_pop()").unwrap();
     }
 
-    /// Moves this body's frame to `span`'s line, so a panic names the
-    /// statement that raised it rather than the function's first line.
+    /// Records `span`'s line as the one this body's frame stands at, so a
+    /// panic names the statement that raised it rather than the function's
+    /// first line.
+    ///
+    /// The update is written where the line can be read - ahead of a call,
+    /// which a report can reach through its callee, and inside the cold block
+    /// a trap raises its own report from. A run of arithmetic between two
+    /// calls can raise nothing, so it carries no update: the call the frame
+    /// line is written for is what a report walks.
     pub(crate) fn emit_stack_frame_line(&mut self, offset: u32) {
         if !crate::emit::want_stack_frames() {
             return;
@@ -270,10 +277,103 @@ impl<'a> Lowerer<'a> {
         let Some((_, line)) = crate::emit::source_position(offset) else {
             return;
         };
-        if self.last_frame_line == Some(line) {
-            return;
+        self.pending_frame_line = Some(line);
+    }
+
+    /// Lowers through `f`, then writes the pending frame-line update ahead of
+    /// the text it produced when that text can reach a report through a call.
+    pub(crate) fn with_frame_line<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        if !crate::emit::want_stack_frames() {
+            return f(self);
+        }
+        let mark = self.out.len();
+        self.cold_spans.clear();
+        let result = f(self);
+        // A call on any path keeps this body's frame: a cold one can report
+        // and return, so the frame it names has to already be there.
+        self.frame_observed |= text_reads_frame_line(&self.out[mark..]);
+        let Some(line) = self.pending_frame_line else {
+            return result;
+        };
+        if self.last_frame_line == Some(line)
+            || !hot_text_reads_frame_line(&self.out, mark, &self.cold_spans)
+        {
+            return result;
         }
         self.last_frame_line = Some(line);
+        declare_rt(&mut self.runtime_refs, "gos_rt_stack_set_line");
+        self.out.insert_str(
+            mark,
+            &format!("  call void @gos_rt_stack_set_line(i32 {line})\n"),
+        );
+        result
+    }
+
+    /// Drops the entry push and its pops from a body no report can read a
+    /// frame of while it runs, and names the frame at each of its own panic
+    /// sites instead. A body that calls nothing that can report raises only
+    /// from its own cold blocks, so the frame is built where the report is,
+    /// and the call path pays nothing for it.
+    fn elide_unobserved_frame(&mut self) {
+        if !crate::emit::want_stack_frames() || self.frame_observed {
+            return;
+        }
+        let Some((name_global, file_global)) = self.frame_globals.clone() else {
+            return;
+        };
+        let push_prefix = "  call void @gos_rt_stack_push(";
+        let pop_line = "  call void @gos_rt_stack_pop()";
+        let set_line_prefix = "  call void @gos_rt_stack_set_line(i32 ";
+        let mut rewritten = String::with_capacity(self.out.len());
+        for line in self.out.lines() {
+            if line.starts_with(push_prefix) || line == pop_line {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix(set_line_prefix)
+                && let Some(number) = rest.strip_suffix(')')
+            {
+                writeln!(
+                    rewritten,
+                    "  call void @gos_rt_stack_push(ptr {name_global}, ptr {file_global}, i32 {number})"
+                )
+                .unwrap();
+                continue;
+            }
+            rewritten.push_str(line);
+            rewritten.push('\n');
+        }
+        self.out = rewritten;
+    }
+
+    /// Records everything written since `start` as reachable only on a
+    /// raising path. The calls in it say nothing about whether the hot path
+    /// needs its frame line written, and the block writes its own line with
+    /// [`Self::emit_panic_site_line`].
+    pub(crate) fn mark_cold(&mut self, start: usize) {
+        if !crate::emit::want_stack_frames() {
+            return;
+        }
+        self.cold_spans.push((start, self.out.len()));
+    }
+
+    /// Writes the frame-line update inside a cold block that is about to
+    /// raise. The block is reached only on the raising path, so this is
+    /// unconditional: the hot path's own last update says nothing about the
+    /// line this trap belongs to.
+    pub(crate) fn emit_panic_site_line(&mut self) {
+        if !crate::emit::want_stack_frames() {
+            return;
+        }
+        // A body whose raising statement carries no source position still
+        // needs its frame named, so the entry line stands in for it: a report
+        // that names the function at its first line beats one missing it.
+        let line = match self.pending_frame_line {
+            Some(line) => line,
+            None => match crate::emit::source_position(self.body.span.start) {
+                Some((_, line)) => line,
+                None => return,
+            },
+        };
         declare_rt(&mut self.runtime_refs, "gos_rt_stack_set_line");
         writeln!(self.out, "  call void @gos_rt_stack_set_line(i32 {line})").unwrap();
     }
@@ -400,4 +500,47 @@ impl<'a> Lowerer<'a> {
             }
         }
     }
+}
+
+/// `true` when `text` holds a call a panic report can be raised under, so the
+/// frame line the report shows has to be written ahead of it.
+///
+/// A panic helper is excluded: the cold block it sits in writes its own line.
+/// An LLVM intrinsic is excluded too - it runs no Gossamer code, so no report
+/// reads a frame while it runs. A call through a value is included, since a
+/// closure body raises like any other callee.
+fn text_reads_frame_line(text: &str) -> bool {
+    text.lines().any(|line| {
+        let trimmed = line.trim_start();
+        let after = trimmed
+            .strip_prefix("call ")
+            .or_else(|| trimmed.split_once(" = call ").map(|(_, rest)| rest));
+        let Some(after) = after else {
+            return false;
+        };
+        match after.find('@') {
+            None => true,
+            Some(at) => {
+                let symbol = &after[at..];
+                !(symbol.starts_with("@gos_rt_panic")
+                    || symbol.starts_with("@gos_rt_stack_")
+                    || symbol.starts_with("@llvm."))
+            }
+        }
+    })
+}
+
+/// `true` when the text written since `mark`, outside the `cold` ranges,
+/// holds a call a panic report can be raised under.
+fn hot_text_reads_frame_line(out: &str, mark: usize, cold: &[(usize, usize)]) -> bool {
+    let mut spans: Vec<(usize, usize)> = cold.iter().copied().filter(|(s, _)| *s >= mark).collect();
+    spans.sort_unstable();
+    let mut cursor = mark;
+    for (start, end) in spans {
+        if start > cursor && text_reads_frame_line(&out[cursor..start]) {
+            return true;
+        }
+        cursor = cursor.max(end);
+    }
+    cursor < out.len() && text_reads_frame_line(&out[cursor..])
 }

@@ -577,6 +577,7 @@ impl<'a> Lowerer<'a> {
         };
         self.store_i64_as(&loaded, &dest_ty, &dest_slot);
         writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
         if matches!(crate::emit::opt_profile(), crate::emit::OptProfile::Release) {
             declare_rt(&mut self.runtime_refs, "gos_rt_panic_oob");
             let (label, _) = self.strings.borrow_mut().intern("vec index");
@@ -598,6 +599,7 @@ impl<'a> Lowerer<'a> {
             declare_rt(&mut self.runtime_refs, "gos_rt_vec_get_i64");
             for label in [&slow_null, &slow_oob] {
                 writeln!(self.out, "{label}:").unwrap();
+                self.emit_panic_site_line();
                 let checked = self.fresh();
                 writeln!(
                     self.out,
@@ -608,6 +610,7 @@ impl<'a> Lowerer<'a> {
                 writeln!(self.out, "  br label %{cont}").unwrap();
             }
         }
+        self.mark_cold(cold_start);
         writeln!(self.out, "{cont}:").unwrap();
         emit_terminator_branch(&mut self.out, target);
         Ok(())
@@ -845,6 +848,7 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
         }
         writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
         if matches!(crate::emit::opt_profile(), crate::emit::OptProfile::Release) {
             declare_rt(&mut self.runtime_refs, "gos_rt_panic_oob");
             let (label, _) = self.strings.borrow_mut().intern("vec index");
@@ -866,6 +870,7 @@ impl<'a> Lowerer<'a> {
             declare_rt(&mut self.runtime_refs, "gos_rt_vec_set_i64");
             for label in [&slow_null, &slow_oob] {
                 writeln!(self.out, "{label}:").unwrap();
+                self.emit_panic_site_line();
                 writeln!(
                     self.out,
                     "  call void @gos_rt_vec_set_i64(ptr {vec_ptr}, i64 {idx}, i64 {val})"
@@ -874,6 +879,7 @@ impl<'a> Lowerer<'a> {
                 writeln!(self.out, "  br label %{cont}").unwrap();
             }
         }
+        self.mark_cold(cold_start);
         writeln!(self.out, "{cont}:").unwrap();
         let _ = destination;
         emit_terminator_branch(&mut self.out, target);

@@ -201,6 +201,13 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
         };
         loop {
             let mut guard = chan.buf.lock();
+            // A queued value that is no longer in the queue was taken by a
+            // receiver, which completes this send. The check comes before the
+            // closed check because a close that lands after the handoff says
+            // nothing about a send that is already done.
+            if queued_unbuffered && !storage_contains_id(&guard, send_id) {
+                return false;
+            }
             // A channel closed while this send was parked has no reader
             // left expecting the value, which is the same program error as
             // sending into one already closed.
@@ -208,21 +215,16 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
                 return true;
             }
             chan.sync_ready(storage_len(&guard));
-            if chan.cap == 0 {
-                if !queued_unbuffered {
-                    push_back(&mut guard, send_id, val, bytes_len);
-                    queued_unbuffered = true;
-                    chan.sync_ready(storage_len(&guard));
-                    drop(guard);
-                    chan.last_sender
-                        .store(i64::from(crate::race::current_gid()), Ordering::Release);
-                    wake_one_recv(chan);
-                    continue;
-                }
-                if !storage_contains_id(&guard, send_id) {
-                    return false;
-                }
-            } else if chan.cap < 0 || (storage_len(&guard) as i64) < chan.cap {
+            if chan.cap == 0 && !queued_unbuffered {
+                push_back(&mut guard, send_id, val, bytes_len);
+                queued_unbuffered = true;
+                chan.sync_ready(storage_len(&guard));
+                drop(guard);
+                chan.last_sender
+                    .store(i64::from(crate::race::current_gid()), Ordering::Release);
+                wake_one_recv(chan);
+                continue;
+            } else if chan.cap != 0 && (chan.cap < 0 || (storage_len(&guard) as i64) < chan.cap) {
                 push_back(&mut guard, 0, val, bytes_len);
                 chan.sync_ready(storage_len(&guard));
                 drop(guard);

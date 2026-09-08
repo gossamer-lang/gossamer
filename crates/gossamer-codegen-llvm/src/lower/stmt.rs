@@ -208,13 +208,13 @@ impl<'a> Lowerer<'a> {
         }
         for stmt in &block.stmts {
             self.emit_stack_frame_line(stmt.span.start);
-            self.lower_stmt(stmt)?;
+            self.with_frame_line(|lowerer| lowerer.lower_stmt(stmt))?;
         }
         for entry in cleanup.at_block_exit(block.id) {
             self.emit_cleanup_call(entry);
         }
         self.current_block = Some(block.id.as_u32());
-        self.lower_terminator(&block.terminator)?;
+        self.with_frame_line(|lowerer| lowerer.lower_terminator(&block.terminator))?;
         self.current_block = None;
         Ok(())
     }

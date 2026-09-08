@@ -119,6 +119,21 @@ pub(crate) struct Lowerer<'a> {
     /// Line this body's call-stack frame was last moved to, so a run of
     /// statements on one source line emits a single update.
     pub(crate) last_frame_line: Option<u32>,
+    /// Line of the statement being lowered. The frame update itself is
+    /// written only where a report can read it - ahead of a call, and inside
+    /// a panic's cold block - so arithmetic between two calls costs nothing.
+    pub(crate) pending_frame_line: Option<u32>,
+    /// Byte ranges of `out` that only a raising path reaches, so the calls
+    /// they hold do not make the hot path write a frame line. Recorded by
+    /// [`Lowerer::mark_cold`] and consumed once per statement.
+    pub(crate) cold_spans: Vec<(usize, usize)>,
+    /// Whether any call this body makes can reach a panic report, which is
+    /// what a call-stack frame for this body is read by. A body that makes
+    /// no such call raises only from its own cold blocks, which name the
+    /// frame themselves.
+    pub(crate) frame_observed: bool,
+    /// The `(function, file)` string globals this body's frame is named by.
+    pub(crate) frame_globals: Option<(String, String)>,
     /// `DefId.local` → function name map so `Operand::FnRef`
     /// resolves to the exported symbol. Populated by the
     /// emitter before calling [`Lowerer::lower`].

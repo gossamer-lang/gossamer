@@ -231,9 +231,11 @@ const PARALLEL_MAX_THREADS: usize = 8;
 const MIN_BODIES_PER_CHUNK: usize = 10;
 
 /// Ceiling on debug LLVM children. Each one commonly touches 45 to 65 MiB, so
-/// the fan-out buys wall time with resident memory; four keeps a debug build's
-/// process tree inside a few hundred MiB on the machines people iterate on.
-const DEBUG_JOB_CEILING: usize = 4;
+/// the fan-out buys wall time with resident memory. Eight is where the wall
+/// time stops falling on the build benchmarks - past it the chunk floor in
+/// [`MIN_BODIES_PER_CHUNK`] and the link bound the build - and a 42,000-line
+/// project's process tree stays around 140 MiB there.
+const DEBUG_JOB_CEILING: usize = 8;
 
 /// LLVM process fan-out. A release build stays in one child: a chunk boundary
 /// is an inlining boundary, so splitting the module costs the code quality the
@@ -1698,9 +1700,8 @@ pub fn want_race_instrumentation() -> bool {
 pub enum OptProfile {
     /// Release: full `opt -O3 | llc -O3` pipeline. Default.
     Release,
-    /// Debug: use LLVM's `O1` scalar and loop pipeline without discretionary
-    /// inlining, followed by the `O0` instruction selector. Checked arithmetic
-    /// remains enabled.
+    /// Debug: the smallest mid-end that makes the emitter's output usable,
+    /// followed by the `O1` back end. Checked arithmetic remains enabled.
     Debug,
 }
 
@@ -2447,15 +2448,22 @@ fn invoke_llc_pipeline(
     // entirely sends those shapes straight to `llc`, which
     // rejects them.
     //
-    // Debug runs the smallest pipeline that makes the emitter's output
+    // Debug runs the smallest mid-end that makes the emitter's output
     // usable: `sroa` promotes the alloca per local that every lowered body
     // starts with, and `early-cse` / `instcombine` / `simplifycfg` clean up
-    // after it. A full `default<O1>` costs several times as much for a
-    // binary that is already an order of magnitude behind `--release`, which
-    // is the wrong side of the trade for the profile people iterate on.
-    // Instcombine is asked not to verify its fixpoint because a pipeline of
-    // this length gives it one iteration, where the check expects the
-    // repeats a longer pipeline would run.
+    // after it. A full `default<O1>` or `default<O2>` mid-end costs more and
+    // measures the same, because after `sroa` the remaining distance to a
+    // release binary is not in the IR. Instcombine is asked not to verify its
+    // fixpoint because a pipeline of this length gives it one iteration,
+    // where the check expects the repeats a longer pipeline would run.
+    //
+    // The back end runs at `O1`, where the register allocator is the greedy
+    // one and the machine passes run. `O0` selects the fast allocator, which
+    // keeps every value in memory: it costs the benchmark suite 1.1x to 7x and
+    // saves two thirds of the back end's time, which the fan-out across cores
+    // (see [`DEBUG_JOB_CEILING`]) overlaps. `O2` costs more than `O1` and
+    // measures the same, and there is no setting between the two - `-O0
+    // -regalloc=greedy` is refused.
     //
     // Release profile uses `default<O3>` for full optimisation.
     //
@@ -2466,7 +2474,7 @@ fn invoke_llc_pipeline(
     let (opt_passes, llc_level) = match profile {
         OptProfile::Debug => (
             "verify,sroa,early-cse,instcombine<no-verify-fixpoint>,simplifycfg",
-            "-O0",
+            "-O1",
         ),
         OptProfile::Release => ("verify,default<O3>", "-O3"),
     };
