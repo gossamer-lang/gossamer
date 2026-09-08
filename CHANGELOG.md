@@ -24,6 +24,19 @@
   channel` when the channel closes right after. A compiled binary re-read the
   closed flag after its value had been taken, so workers that had all delivered
   still raised a fault the bytecode VM never raised.
+- A route answers from the handler it was registered with for as long as the
+  router lives. A compiled binary kept the registering frame's slot instead, so
+  a struct handler read its fields back as whatever later reused that memory,
+  and registering one could end the process before it printed a line.
+- A `match` over what a stdlib handle method answers dispatches on the result
+  it carries. `http::Server::listen`, `http::Router::serve`,
+  `http::FileServer::serve`, `http::NativeClient::get` and
+  `http::Proxy::forward` compiled their `Ok` arm as the only arm, so a compiled
+  binary reported a failure as a success carrying an empty value.
+- An `arena { }` region that allocated something larger than a slab no longer
+  hands a later region memory the first one still holds. An oversized slab
+  advanced the arena's cursor by a page rather than by a whole slab, so every
+  slab carved after it shared a recycling slot with its neighbour.
 
 ## 0.59.1 - Indexed loops proven in range, bounds the JIT honours, parallel debug codegen
 

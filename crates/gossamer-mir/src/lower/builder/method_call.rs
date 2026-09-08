@@ -4482,6 +4482,21 @@ impl<'a> Builder<'a> {
             | "gos_rt_unix_listener_close"
             | "gos_rt_unix_stream_close"
             | "gos_rt_udp_close" => self.tcx.unit(),
+            // A symbol the ABI declares as answering `I128` hands back the
+            // two-word carrier, whose low word is the discriminant a `match`
+            // over it reads. Typing the destination as the handle word every
+            // other dispatch answers erases that discriminant, which leaves
+            // `Ok` / `Some` unconditional and the other arm unreachable, so
+            // the carrier the checker resolved stands wherever no row above
+            // names a narrower shape.
+            _ if self.is_result_or_option_adt(ty)
+                && matches!(
+                    gossamer_abi::registry::lookup(rt).map(|entry| entry.sig.ret),
+                    Some(gossamer_abi::types::AbiType::I128)
+                ) =>
+            {
+                ty
+            }
             _ => self.tcx.int_ty(gossamer_types::IntTy::I64),
         }
     }

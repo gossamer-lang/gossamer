@@ -1317,8 +1317,20 @@ fn arena_acquire(slab_size: usize) -> *mut u8 {
             return std::ptr::null_mut();
         }
     }
-    let page_mask = os_page_size() - 1;
-    let rounded = (slab_size + page_mask) & !page_mask;
+    // Every carve advances the cursor by a whole number of standard slabs, so
+    // a standard slab always starts on a slab boundary and its offset names
+    // its index in the free list. An oversized slab rounds the same way: what
+    // the rounding leaves behind is reserved address space, not memory, since
+    // only the pages a slab commits are ever backed. A slab is a whole number
+    // of pages at every page size a host reports, so the commit stays
+    // page-aligned.
+    debug_assert_eq!(
+        REGION_SLAB_BYTES % os_page_size(),
+        0,
+        "a slab has to be a whole number of pages for the commit to be accepted"
+    );
+    let slab_mask = REGION_SLAB_BYTES - 1;
+    let rounded = (slab_size + slab_mask) & !slab_mask;
     let off = REGION_ARENA_NEXT.fetch_add(rounded, Ordering::Relaxed);
     if off + rounded > REGION_ARENA_BYTES {
         return std::ptr::null_mut();
@@ -3667,6 +3679,31 @@ mod tests {
         );
         gos_rt_arena_pop();
         assert!(!region_is_active());
+    }
+
+    /// A standard slab starts on a slab boundary whatever was carved before
+    /// it, which is what lets its offset name its index in the free list: two
+    /// slabs under one index would each be recycled onto the other's memory.
+    #[test]
+    #[cfg_attr(miri, ignore)] // arena uses mmap with non-RW protections; Miri can't model it
+    fn a_carve_leaves_the_cursor_on_a_slab_boundary() {
+        let base = region_arena_base();
+        if base == usize::MAX {
+            return;
+        }
+        let oversized = arena_acquire(REGION_SLAB_BYTES + os_page_size());
+        if oversized.is_null() {
+            return;
+        }
+        let standard = arena_acquire(REGION_SLAB_BYTES);
+        assert!(!standard.is_null(), "the arena still has room for a slab");
+        assert_eq!(
+            (standard as usize - base) % REGION_SLAB_BYTES,
+            0,
+            "a standard slab starts on a slab boundary"
+        );
+        arena_retire(standard, REGION_SLAB_BYTES);
+        arena_retire(oversized, REGION_SLAB_BYTES + os_page_size());
     }
 
     /// A pop with no region open still balances the depth it was called at.

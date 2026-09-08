@@ -319,16 +319,13 @@ impl<'a> Lowerer<'a> {
         self.maybe_heap_copy_aggregate_with(arg, /* leak */ true, /* map_owned */ false)
     }
 
-    /// Heap-copies an aggregate that becomes a `HashMap` entry. Structural
-    /// metadata is preferred over the guarded copy-blob metadata because the
-    /// map owns direct `String` / `Vec` fields as well as the outer blob.
-    /// Gives back the share a map insert's call-site copy was minted with.
+    /// Gives back the share a call-site copy was minted with.
     ///
-    /// `gos_rt_rc_alloc_copy` hands the frame a blob at strong 1 and the entry
+    /// `gos_rt_rc_alloc_copy` hands the frame a blob at strong 1 and the callee
     /// takes its own share inside the runtime, so the frame owes one release
     /// once the call has stored the value; the blob's children are given back
     /// by its destructor, which runs only when it reaches zero.
-    pub(crate) fn release_minted_map_blob(&mut self, blob: Option<&str>) {
+    pub(crate) fn release_minted_blob(&mut self, blob: Option<&str>) {
         let Some(blob) = blob else {
             return;
         };
@@ -338,8 +335,72 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  call void @gos_rt_rc_release(ptr {as_ptr})").unwrap();
     }
 
+    /// Heap-copies an aggregate that becomes a `HashMap` entry. Structural
+    /// metadata is preferred over the guarded copy-blob metadata because the
+    /// map owns direct `String` / `Vec` fields as well as the outer blob.
     pub(crate) fn maybe_heap_copy_aggregate_for_map(&mut self, arg: &Operand) -> Option<String> {
         self.maybe_heap_copy_aggregate_with(arg, /* leak */ false, /* map_owned */ true)
+    }
+
+    /// Copies a by-value aggregate into a reference-counted block and answers
+    /// its address as an i64 SSA value, for a callee that takes a share of
+    /// what it is given.
+    ///
+    /// This is the counted counterpart of
+    /// [`Self::maybe_heap_copy_aggregate`], which falls back to a plain heap
+    /// block for a type with no registered copy meta. A callee that retains
+    /// its argument reads the reference-count header in front of the payload,
+    /// so the block it is handed has to have one whatever the aggregate holds.
+    /// The frame owns the returned share and gives it back once the callee has
+    /// stored the value; [`Self::release_minted_blob`] is that release.
+    pub(crate) fn maybe_rc_copy_aggregate(&mut self, arg: &Operand) -> Option<String> {
+        let Operand::Copy(place) = arg else {
+            return None;
+        };
+        if !place.projection.is_empty() {
+            return None;
+        }
+        let local_ty = self.body.local_ty(place.local);
+        if !is_aggregate(self.tcx, local_ty) {
+            return None;
+        }
+        // A sentinel Adt (`Option` / `Result`) is a pointer in the slot
+        // already, so the slot is the value rather than storage to copy.
+        if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(local_ty)
+            && (def.local == u32::MAX || def.local == u32::MAX - 1)
+        {
+            return None;
+        }
+        // A field-less aggregate still occupies the one word its slot is laid
+        // out as, and the callee reads a header in front of it either way, so
+        // the copy is a word wide where the type has no slots of its own -
+        // with nothing to read from, since such a slot holds no field the
+        // block's own zeros do not already stand for.
+        let own_slots = slot_count(self.tcx, local_ty).unwrap_or(0);
+        let bytes = u64::from(own_slots.max(1)) * 8;
+        // The copy meta names the counted children the copy takes a share of;
+        // a leaf aggregate has none and passes `null`.
+        let meta = match self.tcx.aggr_copy_meta(local_ty) {
+            Some(sym) if !sym.is_empty() => format!("@\"{sym}\""),
+            _ => "null".to_string(),
+        };
+        declare_rt(&mut self.runtime_refs, "gos_rt_rc_alloc_copy");
+        let src = if own_slots == 0 {
+            "null".to_string()
+        } else {
+            local_slot(place.local)
+        };
+        // `noalias`: the block is freshly allocated, so nothing else live at
+        // this point addresses it.
+        let heap = self.fresh();
+        writeln!(
+            self.out,
+            "  {heap} = call noalias ptr @gos_rt_rc_alloc_copy(i64 {bytes}, ptr {meta}, ptr {src})"
+        )
+        .unwrap();
+        let heap_i64 = self.fresh();
+        writeln!(self.out, "  {heap_i64} = ptrtoint ptr {heap} to i64").unwrap();
+        Some(heap_i64)
     }
 
     /// Lowers the guarded copy-blob walk intrinsics emitted by the MIR

@@ -103,6 +103,52 @@ fn main() {
     path
 }
 
+fn write_source_returned_router() -> PathBuf {
+    let path = source_path("gos-router-parity-owned");
+    let src = r#"
+use std::http
+use std::http::router
+
+struct Health { body: String }
+impl Health {
+    fn serve(&self, _r: http::Request) -> Result<http::Response, http::Error> {
+        Ok(http::Response::text(200, self.body))
+    }
+}
+
+struct Echo { prefix: String }
+impl Echo {
+    fn serve(&self, r: http::Request) -> Result<http::Response, http::Error> {
+        Ok(http::Response::text(200, format("{}{}", self.prefix, r.path)))
+    }
+}
+
+fn routes() -> router::Router {
+    let r = router::Router::new()
+    r.get("/health", Health { body: "ok" })
+    r.get("/echo", Echo { prefix: "echo " })
+    r
+}
+
+fn main() {
+    let r = routes()
+    let s = http::Server::new()
+    match s.listen("127.0.0.1:0") {
+        Ok(_) => println("{}", s.addr())
+        Err(e) => eprintln("listen: {}", e)
+    }
+    // A server that stops answering says why: `serve` reports a listener
+    // that stopped, and reaching past it at all means the loop ended.
+    match s.serve(r) {
+        Ok(_) => eprintln("serve returned with no error")
+        Err(e) => eprintln("serve: {}", e)
+    }
+}
+"#;
+    std::fs::write(&path, src).unwrap();
+    path
+}
+
 /// One request's status code and body, or the error that stopped it in
 /// place of a code.
 ///
@@ -203,11 +249,16 @@ fn run_and_check(cmd: &mut Command) {
         .expect("read the address the server bound");
     let mut complaint = String::new();
     if bound == 0 {
-        let _ = child.wait();
+        // How the server ended is half the answer when it said nothing on the
+        // way out: a status names the signal that stopped it, where an empty
+        // stderr on its own leaves a crash and a clean early return alike.
+        let ended = child
+            .wait()
+            .map_or_else(|e| e.to_string(), |status| status.to_string());
         if let Some(mut stderr) = child.stderr.take() {
             let _ = stderr.read_to_string(&mut complaint);
         }
-        panic!("the server ended before it bound: {complaint}");
+        panic!("the server ended before it bound: {ended}; stderr: {complaint}");
     }
     let announced = announced.trim().to_string();
     let addr: SocketAddr = match announced.parse() {
@@ -303,6 +354,34 @@ fn router_bare_fn_interp_matches_compiled() {
     run_and_check(&mut interp);
 
     // Compiled build + run.
+    let build = Command::new(gos_bin())
+        .arg("build")
+        .arg(&src)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let stem = src.file_stem().unwrap().to_str().unwrap();
+    let bin = std::env::temp_dir().join("target").join("debug").join(stem);
+    let mut compiled = Command::new(&bin);
+    run_and_check(&mut compiled);
+    let _ = std::fs::remove_file(&src);
+}
+
+/// A router outlives the function that built it, so the handler it answers
+/// from does too: the value registered as a route is the route's for as long
+/// as the router lives, not the registering frame's.
+#[test]
+fn router_built_by_a_helper_outlives_its_frame() {
+    let src = write_source_returned_router();
+
+    let mut interp = Command::new(gos_bin());
+    interp.arg("run").arg(&src);
+    run_and_check(&mut interp);
+
     let build = Command::new(gos_bin())
         .arg("build")
         .arg(&src)

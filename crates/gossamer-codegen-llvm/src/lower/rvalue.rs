@@ -471,7 +471,7 @@ impl<'a> Lowerer<'a> {
         // reference-counted blob at the call site, at strong 1 - the frame's
         // own share, which the MIR passes cannot see to pair a release for.
         // Recorded here so it is given back right after the call stores it.
-        let mut minted_map_blob: Option<String> = None;
+        let mut minted_blob: Option<String> = None;
         for (i, arg) in args.iter().enumerate() {
             if i > 0 {
                 arg_text.push_str(", ");
@@ -522,7 +522,7 @@ impl<'a> Lowerer<'a> {
                     .or_else(|| self.maybe_heap_copy_aggregate_for_map(arg))
             {
                 let _ = write!(arg_text, "i64 {heap_v}");
-                minted_map_blob = Some(heap_v);
+                minted_blob = Some(heap_v);
                 continue;
             }
             if skey_insert_heap_copy
@@ -532,7 +532,7 @@ impl<'a> Lowerer<'a> {
                     .or_else(|| self.maybe_heap_copy_aggregate_for_map(arg))
             {
                 let _ = write!(arg_text, "i64 {heap_v}");
-                minted_map_blob = Some(heap_v);
+                minted_blob = Some(heap_v);
                 continue;
             }
             if chan_send_spill && i == 1 {
@@ -704,7 +704,7 @@ impl<'a> Lowerer<'a> {
         }
         if decl_ret == "void" {
             writeln!(self.out, "  call void @{name}({arg_text})").unwrap();
-            self.release_minted_map_blob(minted_map_blob.as_deref());
+            self.release_minted_blob(minted_blob.as_deref());
             // Rvalue-position void call: synthesise a sentinel value
             // matching the destination slot's type. Normally the dest
             // is unit-typed (a no-op store), but the drop pass may assign
@@ -719,7 +719,7 @@ impl<'a> Lowerer<'a> {
         } else {
             let tmp = self.fresh();
             writeln!(self.out, "  {tmp} = call {decl_ret} @{name}({arg_text})").unwrap();
-            self.release_minted_map_blob(minted_map_blob.as_deref());
+            self.release_minted_blob(minted_blob.as_deref());
 
             // Win64 Fat return: unwrap the `<16 x i8>` wire value back to the
             // `i128` the rest of the body manipulates.

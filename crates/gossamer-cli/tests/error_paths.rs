@@ -338,3 +338,35 @@ fn main() {
         "a=41\nb-err=missing\nc-err=missing",
     );
 }
+
+#[test]
+fn stdlib_handle_result_arms_dispatch_on_the_carrier() {
+    // A handle method answering `Result<T, E>` hands back the two-word
+    // carrier, and the arms of a `match` over it read its discriminant, so
+    // which arm runs is the runtime's answer rather than a shape the
+    // compiler picked. `http::Server::listen` is the case with both arms
+    // reachable without a network: an address that names no endpoint answers
+    // `Err`, and a loopback port zero answers `Ok` with an address to read
+    // back.
+    let src = r#"
+use std::http
+
+fn main() {
+    let bad = http::Server::new()
+    match bad.listen("not-an-address") {
+        Ok(_) => println("bad: bound")
+        Err(_) => println("bad: refused")
+    }
+    let good = http::Server::new()
+    match good.listen("127.0.0.1:0") {
+        Ok(_) => println("good: bound {}", !good.addr().is_empty())
+        Err(_) => println("good: refused")
+    }
+}
+"#;
+    assert_three_tier_parity(
+        "handle_result_carrier_arms",
+        src,
+        "bad: refused\ngood: bound true",
+    );
+}

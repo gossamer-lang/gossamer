@@ -515,7 +515,27 @@ impl<'a> Lowerer<'a> {
         // reference-counted blob at the call site, at strong 1 - the frame's
         // own share, which the MIR passes cannot see to pair a release for.
         // Recorded here so it is given back right after the call stores it.
-        let mut minted_map_blob: Option<String> = None;
+        let mut minted_blob: Option<String> = None;
+        // A route answers from its handler for as long as the router lives, so
+        // a handler that is a by-value aggregate cannot stay the registering
+        // frame's slot: the runtime takes a share of the environment and reads
+        // the reference-count header in front of it, which a stack slot does
+        // not have. Copy it into a counted block the route can own, and give
+        // the frame's own share back once the call has stored it. The
+        // argument position is the environment's: the verb entry points take
+        // `(router, pattern, env, fn_addr)` and `router_add` names the method
+        // between them.
+        let router_env_arg = match symbol {
+            "gos_rt_router_get"
+            | "gos_rt_router_post"
+            | "gos_rt_router_put"
+            | "gos_rt_router_delete"
+            | "gos_rt_router_patch"
+            | "gos_rt_router_head"
+            | "gos_rt_router_options" => Some(2),
+            "gos_rt_router_add" => Some(3),
+            _ => None,
+        };
         let map_insert_heap_copy = matches!(
             symbol,
             "gos_rt_map_insert_i64_i64"
@@ -596,7 +616,17 @@ impl<'a> Lowerer<'a> {
                     .or_else(|| self.maybe_heap_copy_aggregate_for_map(arg))
             {
                 let _ = write!(arg_text, "i64 {heap_v}");
-                minted_map_blob = Some(heap_v);
+                minted_blob = Some(heap_v);
+                continue;
+            }
+            if router_env_arg == Some(i)
+                && let Some(heap_v) = self.maybe_rc_copy_aggregate(arg)
+            {
+                let as_ptr = self.fresh();
+                writeln!(self.out, "  {as_ptr} = inttoptr i64 {heap_v} to ptr").unwrap();
+                let _ = write!(arg_text, "ptr {as_ptr}");
+                arg_tys_for_decl.push("ptr".to_string());
+                minted_blob = Some(heap_v);
                 continue;
             }
             if skey_insert_heap_copy
@@ -606,7 +636,7 @@ impl<'a> Lowerer<'a> {
                     .or_else(|| self.maybe_heap_copy_aggregate_for_map(arg))
             {
                 let _ = write!(arg_text, "i64 {heap_v}");
-                minted_map_blob = Some(heap_v);
+                minted_blob = Some(heap_v);
                 continue;
             }
             if chan_send_spill && i == 1 {
@@ -764,7 +794,7 @@ impl<'a> Lowerer<'a> {
             // slot with a zero of the dest's shape so any
             // accidental read doesn't see undefined memory.
             writeln!(self.out, "  call void @\"{symbol}\"({arg_text})").unwrap();
-            self.release_minted_map_blob(minted_map_blob.as_deref());
+            self.release_minted_blob(minted_blob.as_deref());
             if !dest_is_void {
                 self.store_zero_to_place(destination, &dest_ty);
             }
@@ -818,7 +848,7 @@ impl<'a> Lowerer<'a> {
                 "  {tmp} = call {wire_ret_ty} @\"{symbol}\"({arg_text})"
             )
             .unwrap();
-            self.release_minted_map_blob(minted_map_blob.as_deref());
+            self.release_minted_blob(minted_blob.as_deref());
             let tmp = if win_fat_ret {
                 let unwrapped = self.fresh();
                 writeln!(self.out, "  {unwrapped} = bitcast <16 x i8> {tmp} to i128").unwrap();
