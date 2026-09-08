@@ -15,9 +15,11 @@
 //! LLVM tier must materially outperform the debug LLVM tier on a workload
 //! where `-O3` can simplify the hot loop.
 //!
-//! This test builds a numeric-loop workload twice, runs each, and asserts a
-//! release win. The loop is deliberately large enough that startup noise does
-//! not hide a lost release pipeline.
+//! This test builds a numeric-loop workload twice, runs each, and asserts
+//! both a matching answer and a release win. The comparison is the wall clock
+//! of the whole process, so the loop is repeated until it dominates what a
+//! host spends starting one: a workload that finishes in the time an `exec`
+//! takes measures the host, not the back end.
 
 #![allow(missing_docs)]
 
@@ -85,10 +87,12 @@ fn build(src: &Path, release: bool, scratch: &Path) -> PathBuf {
     panic!("no binary in {}", scratch.display());
 }
 
-/// Runs `bin` `runs` times, returns the best (lowest) wall-clock
-/// duration. Best-of-N filters jitter from concurrent CI load.
-fn time_best(bin: &Path, runs: u32) -> Duration {
+/// Runs `bin` `runs` times, returns the best (lowest) wall-clock duration and
+/// what the workload printed. Best-of-N filters jitter from concurrent CI
+/// load, and the answer is what says both tiers ran the same program.
+fn time_best(bin: &Path, runs: u32) -> (Duration, String) {
     let mut best = Duration::from_secs(u64::MAX);
+    let mut answer = String::new();
     for _ in 0..runs {
         let start = Instant::now();
         let out = Command::new(bin).output().expect("spawn bin");
@@ -98,26 +102,36 @@ fn time_best(bin: &Path, runs: u32) -> Duration {
             "binary exited non-zero: stderr={}",
             String::from_utf8_lossy(&out.stderr),
         );
+        answer = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if dur < best {
             best = dur;
         }
     }
-    best
+    (best, answer)
 }
 
-/// A numeric loop where LLVM -O3 has a clear edge over LLVM -O0:
-/// i64 multiply-add chain, no allocations, no calls inside the loop. Outputs
-/// a final scalar so the optimizer can't dead-code-eliminate the loop.
+/// A numeric loop where the release pipeline has a clear edge over the debug
+/// one: an i64 multiply-add chain, no allocations, no calls inside the loop.
+/// The final scalar is printed so neither tier can drop the work, and the
+/// rounds are what put the debug tier's runtime an order of magnitude above
+/// the cost of starting the process it is measured through.
 const NUMERIC_LOOP_SOURCE: &str = r#"
 fn main() {
     let n: i64 = 2000000
-    let mut acc: i64 = 0
-    let mut i: i64 = 0
-    while i < n {
-        acc = acc + i * i - i
-        i = i + 1
+    let rounds: i64 = 16
+    let mut total: i64 = 0
+    let mut r: i64 = 0
+    while r < rounds {
+        let mut acc: i64 = 0
+        let mut i: i64 = 0
+        while i < n {
+            acc = acc + i * i - i
+            i = i + 1
+        }
+        total = total + acc % 1000003
+        r = r + 1
     }
-    println("acc={}", acc)
+    println("total={}", total)
 }
 "#;
 
@@ -142,12 +156,19 @@ fn release_tier_is_at_least_as_fast_as_debug_on_numeric_loop() {
     let dbg_bin = build(&src, false, &dbg_dir);
     let rel_bin = build(&src, true, &rel_dir);
 
-    let dbg_time = time_best(&dbg_bin, 3);
-    let rel_time = time_best(&rel_bin, 3);
+    let (dbg_time, dbg_answer) = time_best(&dbg_bin, 3);
+    let (rel_time, rel_answer) = time_best(&rel_bin, 3);
     let _ = fs::remove_dir_all(&dir);
 
-    eprintln!("debug (llvm O0):   {dbg_time:?}");
-    eprintln!("release (llvm):    {rel_time:?}");
+    eprintln!("debug (llvm):      {dbg_time:?} {dbg_answer}");
+    eprintln!("release (llvm):    {rel_time:?} {rel_answer}");
+
+    // A release pipeline that lowered the loop to a stub would be fast and
+    // wrong, which the clock alone reads as a pass.
+    assert_eq!(
+        rel_answer, dbg_answer,
+        "the tiers answer the same workload with the same value"
+    );
 
     // A 10% margin leaves room for runner jitter while rejecting the issue
     // #102 fingerprint where release and debug are effectively identical.
