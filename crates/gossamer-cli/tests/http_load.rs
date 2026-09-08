@@ -1,7 +1,7 @@
 //! HTTP load test (B1.3).
 //!
 //! Spins up the in-process HTTP/1.1 server, fires a high concurrent
-//! request rate at it for a fixed window, and asserts:
+//! request rate at it for a bounded window, and asserts:
 //!
 //! 1. Every request returns `200`.
 //! 2. The server worker does not panic.
@@ -20,6 +20,14 @@
 //! - The HTTP server's correctness regressions surface in the
 //!   shared `gossamer-std::http::server::run` path, not in the
 //!   tier-selection harness.
+//!
+//! The window is bounded by a connection budget as well as a deadline. A
+//! connection that closes leaves its local port unusable for the length of
+//! `TIME_WAIT`, and a host hands every process one range of them: BSD picks an
+//! ephemeral port that no control block holds, so a range covered by this
+//! test's own closed connections is a range every later test in the job asks
+//! for and is refused. The budget is what keeps this test's load inside its
+//! own run.
 
 #![allow(missing_docs)]
 
@@ -72,6 +80,39 @@ fn fire_one(addr: SocketAddr, deadline: Instant) -> Result<u16, String> {
     parts[1].parse::<u16>().map_err(|e| e.to_string())
 }
 
+/// Runs `workers` threads against `addr` until `deadline` passes or the
+/// window has opened `budget` connections between them, and answers the
+/// `(200s, failures)` they saw.
+fn drive_load(addr: SocketAddr, deadline: Instant, workers: usize, budget: usize) -> (u64, u64) {
+    let opened = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let opened = Arc::clone(&opened);
+        handles.push(thread::spawn(move || {
+            let mut sent = 0u64;
+            let mut failures = 0u64;
+            while Instant::now() < deadline {
+                if opened.fetch_add(1, Ordering::Relaxed) >= budget {
+                    break;
+                }
+                match fire_one(addr, deadline) {
+                    Ok(200) => sent += 1,
+                    Ok(_) | Err(_) => failures += 1,
+                }
+            }
+            (sent, failures)
+        }));
+    }
+    let mut total_sent = 0u64;
+    let mut total_failed = 0u64;
+    for h in handles {
+        let (sent, failed) = h.join().expect("worker join");
+        total_sent += sent;
+        total_failed += failed;
+    }
+    (total_sent, total_failed)
+}
+
 #[test]
 #[cfg_attr(target_os = "windows", ignore = "load test path is Linux/macOS-only")]
 fn http_server_survives_concurrent_load_without_panicking() {
@@ -85,6 +126,16 @@ fn http_server_survives_concurrent_load_without_panicking() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(8);
+    // Connections this window may open in total. A quarter of the smallest
+    // ephemeral range a supported host offers (macOS reserves 49152-65535),
+    // which leaves the rest of the range to the tests that run next while
+    // these ports sit in `TIME_WAIT`. Enough accepts to catch a server that
+    // stops serving, and the deadline above still cuts the window short on a
+    // slow runner.
+    let budget: usize = std::env::var("GOSSAMER_LOAD_CONNECTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4_000);
 
     let (listener, actual_addr) = bind_loopback();
 
@@ -129,30 +180,7 @@ fn http_server_survives_concurrent_load_without_panicking() {
 
     let started = Instant::now();
     let deadline = started + Duration::from_secs(secs);
-    let mut workers_handles = Vec::with_capacity(workers);
-    for _ in 0..workers {
-        let addr = actual_addr;
-        workers_handles.push(thread::spawn(move || {
-            let mut sent = 0u64;
-            let mut failures = 0u64;
-            while Instant::now() < deadline {
-                match fire_one(addr, deadline) {
-                    Ok(200) => sent += 1,
-                    Ok(_) => failures += 1,
-                    Err(_) => failures += 1,
-                }
-            }
-            (sent, failures)
-        }));
-    }
-
-    let mut total_sent = 0u64;
-    let mut total_failed = 0u64;
-    for h in workers_handles {
-        let (sent, failed) = h.join().expect("worker join");
-        total_sent += sent;
-        total_failed += failed;
-    }
+    let (total_sent, total_failed) = drive_load(actual_addr, deadline, workers, budget);
     shutdown.store(true, Ordering::Relaxed);
     // Self-connect to wake the accept loop so it observes shutdown.
     let _ = TcpStream::connect(actual_addr);
