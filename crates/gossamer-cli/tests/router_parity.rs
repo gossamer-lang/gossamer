@@ -145,10 +145,44 @@ fn request(addr: SocketAddr, path: &str) -> (String, i32, String) {
         conn.read_exact(&mut body)?;
         Ok((String::from_utf8_lossy(&body).into_owned(), code))
     };
-    match attempt() {
-        Ok((body, code)) => (body, code, String::new()),
-        Err(e) => (String::new(), 0, e.to_string()),
+    // A loopback connect is refused outright when the kernel has no local
+    // endpoint to give it, which says nothing about the server it was aimed
+    // at, so such an attempt is made again rather than recorded as the
+    // server's answer. Every other error is the answer: a refused connection
+    // means the listener is gone, and a short read means it stopped talking.
+    let mut note = String::new();
+    for attempt_index in 0..RETRIES {
+        match attempt() {
+            Ok((body, code)) => return (body, code, note),
+            Err(e) if transient_local(&e) => {
+                note = format!("{e} (retried {})", attempt_index + 1);
+                std::thread::sleep(Duration::from_millis(20 * (attempt_index + 1) as u64));
+            }
+            Err(e) => return (String::new(), 0, e.to_string()),
+        }
     }
+    (
+        String::new(),
+        0,
+        format!("no local endpoint after {RETRIES} attempts: {note}"),
+    )
+}
+
+/// How many times a request may be re-aimed at the same server before its
+/// silence is taken as the answer.
+const RETRIES: usize = 6;
+
+/// `true` when the error is the kernel declining a local endpoint for this
+/// connection rather than anything the server did. These are the states that
+/// clear on their own once an ephemeral port or an interrupted call is free
+/// again.
+fn transient_local(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable
+            | std::io::ErrorKind::AddrInUse
+            | std::io::ErrorKind::Interrupted
+    )
 }
 
 /// Runs one server and asks it for every route.
@@ -213,6 +247,23 @@ fn run_and_check(cmd: &mut Command) {
     assert_eq!(e_body, "echo /echo", "/echo body ({server})");
     assert_eq!(m_code, 404, "/missing status ({server})");
     assert_eq!(m_body, "not found", "/missing body ({server})");
+}
+
+/// A server that is not there is the answer, not a state to wait out: the
+/// retry exists for a kernel that has no local endpoint to give, and must not
+/// turn a refused connection into six attempts and a different complaint.
+#[test]
+fn a_refused_connection_is_reported_rather_than_retried() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind a port to release");
+    let addr = listener.local_addr().expect("the bound address");
+    drop(listener);
+    let (body, code, note) = request(addr, "/health");
+    assert_eq!(code, 0, "nothing answered on a released port");
+    assert!(body.is_empty(), "no body came back: {body:?}");
+    assert!(
+        !note.contains("no local endpoint"),
+        "the refusal is reported as itself, not as an exhausted retry: {note}"
+    );
 }
 
 #[test]
