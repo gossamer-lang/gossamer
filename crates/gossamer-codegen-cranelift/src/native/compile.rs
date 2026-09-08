@@ -701,7 +701,7 @@ pub(crate) fn lower_program_full(
     // body's ConstValue::Str list. Pre-interning them here so
     // the parallel-phase `OfflineModule` never sees a fresh
     // `declare_data` call from one of the helpers.
-    for &s in &["", " ", ", ", "<value>", "array index"] {
+    for &s in &["", " ", ", ", "<value>", "array index", "vec index"] {
         intrinsics.intern_string(module, s)?;
     }
     // Fixed diagnostic strings the Assert / Unreachable terminators

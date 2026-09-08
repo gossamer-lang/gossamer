@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.59.1 - Indexed loops proven in range, bounds the JIT honours, parallel debug codegen
+
+- An indexed read or write outside a vector panics when the code around it has
+  been compiled natively, as it already did on the bytecode VM and under
+  `gos build`. The in-process JIT read the element anyway and answered the word
+  it found there, and dropped an out-of-range write, so a program that indexed
+  past the end printed a value under `gos run` where every other tier stopped.
+- A loop indexes through a `let` binding at the speed of the expression it
+  binds. Proving an index in range looked through the arithmetic but not
+  through the name it was given, so `let i = base + c` left every access in the
+  loop checked.
+- An index shifted a second time is proven in range with the rest. A five-point
+  stencil reads `xs[i - 1]` and `xs[i + n]` beside `xs[i]`, and only the
+  unshifted one qualified, so the loop kept its checks and stayed scalar. A
+  1200 by 1200 stencil takes 0.023 s where it took 0.100 s.
+- A base a loop computes from values that do not change while it runs is a
+  base. `let i = r * n + c` names the same product on every iteration, and the
+  proof now rebuilds it once ahead of the loop rather than declining because
+  the multiplication is written inside the body. Division is never rebuilt this
+  way, since it panics on a zero divisor.
+- A loop may prove up to eight accesses in range rather than four, which is
+  what a stencil that reads its neighbours on each axis needs.
+- `gos build` uses the cores the machine has. Codegen ran in one LLVM child
+  whatever the host, on the reasoning that the fan-out costs resident memory; a
+  debug build has no inliner to lose at a chunk boundary, so it now takes one
+  chunk per core up to four. A 1,900-line project builds in 0.12 s where it
+  took 0.22 s, and a chess engine in 0.08 s where it took 0.12 s. A release
+  build still takes one chunk, because there a chunk boundary is an inlining
+  boundary. `GOS_LLVM_JOBS` overrides both.
+
 ## 0.59.0 - Receiver types decide dispatch, and string reads stop squaring
 
 - A generic function called with a concrete type runs a copy specialised for

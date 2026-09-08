@@ -742,10 +742,17 @@ const SPECS: &[Spec] = &[
         allow_nonzero: true,
         ..spec("feature-testing-examples/oob_index_scalar_panic.gos")
     },
+    // The same contract after the accessing body is compiled natively: the
+    // warm-up promotes it, so the failing access runs as machine code.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/oob_index_after_jit_promotion.gos")
+    },
     // Loop-versioning bounds-check elision for affine `xs[base + counter]`
     // accesses: the in-range unchecked clone and the out-of-range checked
     // fallback both stay bit-identical across the three tiers.
     spec("feature-testing-examples/bce_loop_versioning.gos"),
+    spec("feature-testing-examples/bce_affine_shapes.gos"),
     // Out-of-range read of an aggregate-element Vec panics identically on
     // every tier (was a compiled segfault / VM field-access error).
     Spec {

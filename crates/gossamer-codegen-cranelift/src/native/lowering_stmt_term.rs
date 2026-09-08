@@ -1218,9 +1218,9 @@ fn vec_operand_has_word_elem(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
 /// leaves the call to the generic dispatch unchanged.
 ///
 /// Only the provably-8-byte-stride elements ([`vec_operand_has_word_elem`])
-/// take this path. Semantics match the runtime exactly: a checked get with a
-/// null receiver or out-of-range index yields the zero word, and a checked
-/// set in the same case is a no-op. GosVec layout: `len@0`, `ptr@24`.
+/// take this path. Semantics match the runtime exactly: a checked access
+/// outside `[0, len)`, or through a null receiver, panics with the text every
+/// tier uses for an indexed read. GosVec layout: `len@0`, `ptr@24`.
 fn try_lower_vec_index_inline(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,
@@ -1283,9 +1283,17 @@ fn try_lower_vec_index_inline(
             let dflt_b = builder.create_block();
             let cont_b = builder.create_block();
             builder.append_block_param(cont_b, types::I64);
+            builder.append_block_param(dflt_b, types::I64);
             let null = builder.ins().iconst(ptr_ty, 0);
+            let zero_len = builder.ins().iconst(types::I64, 0);
             let isnull = builder.ins().icmp(IntCC::Equal, vec_ptr, null);
-            builder.ins().brif(isnull, dflt_b, &[], check_b, &[]);
+            builder.ins().brif(
+                isnull,
+                dflt_b,
+                &[ir::BlockArg::Value(zero_len)],
+                check_b,
+                &[],
+            );
             builder.switch_to_block(check_b);
             let len = builder
                 .ins()
@@ -1296,13 +1304,15 @@ fn try_lower_vec_index_inline(
                 .ins()
                 .icmp(IntCC::SignedGreaterThanOrEqual, idx, len);
             let bad = builder.ins().bor(lo, hi);
-            builder.ins().brif(bad, dflt_b, &[], load_b, &[]);
+            builder
+                .ins()
+                .brif(bad, dflt_b, &[ir::BlockArg::Value(len)], load_b, &[]);
             builder.switch_to_block(load_b);
             let v = load_vec_word(builder, ptr_ty, vec_ptr, idx_ptr);
             builder.ins().jump(cont_b, &[ir::BlockArg::Value(v)]);
             builder.switch_to_block(dflt_b);
-            let zero = builder.ins().iconst(types::I64, 0);
-            builder.ins().jump(cont_b, &[ir::BlockArg::Value(zero)]);
+            let oob_len = builder.block_params(dflt_b)[0];
+            emit_vec_index_panic(module, builder, intrinsics, idx, oob_len)?;
             builder.switch_to_block(cont_b);
             let result = builder.block_params(cont_b)[0];
             store_call_result(
@@ -1335,10 +1345,19 @@ fn try_lower_vec_index_inline(
         if checked {
             let check_b = builder.create_block();
             let store_b = builder.create_block();
+            let oob_b = builder.create_block();
             let cont_b = builder.create_block();
+            builder.append_block_param(oob_b, types::I64);
             let null = builder.ins().iconst(ptr_ty, 0);
+            let zero_len = builder.ins().iconst(types::I64, 0);
             let isnull = builder.ins().icmp(IntCC::Equal, vec_ptr, null);
-            builder.ins().brif(isnull, cont_b, &[], check_b, &[]);
+            builder.ins().brif(
+                isnull,
+                oob_b,
+                &[ir::BlockArg::Value(zero_len)],
+                check_b,
+                &[],
+            );
             builder.switch_to_block(check_b);
             let len = builder
                 .ins()
@@ -1349,7 +1368,12 @@ fn try_lower_vec_index_inline(
                 .ins()
                 .icmp(IntCC::SignedGreaterThanOrEqual, idx, len);
             let bad = builder.ins().bor(lo, hi);
-            builder.ins().brif(bad, cont_b, &[], store_b, &[]);
+            builder
+                .ins()
+                .brif(bad, oob_b, &[ir::BlockArg::Value(len)], store_b, &[]);
+            builder.switch_to_block(oob_b);
+            let set_oob_len = builder.block_params(oob_b)[0];
+            emit_vec_index_panic(module, builder, intrinsics, idx, set_oob_len)?;
             builder.switch_to_block(store_b);
             store_vec_word(builder, ptr_ty, vec_ptr, idx_ptr, val);
             builder.ins().jump(cont_b, &[]);
@@ -1368,6 +1392,27 @@ fn try_lower_vec_index_inline(
         }
     }
     Ok(true)
+}
+
+/// Emits the out-of-range exit of an inline vec access: the same
+/// `gos_rt_panic_oob("vec index", idx, len)` call the LLVM tier emits and the
+/// bytecode VM performs, so an index outside `[0, len)` fails with one text on
+/// every tier. The trap after the call gives the block a terminator, since the
+/// helper's Rust signature returns `!`.
+fn emit_vec_index_panic(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    idx: ir::Value,
+    len: ir::Value,
+) -> Result<()> {
+    let panic_fn = intrinsics.extern_fn_by_name(module, "gos_rt_panic_oob")?;
+    let panic_ref = module.declare_func_in_func(panic_fn, builder.func);
+    let what_data = intrinsics.intern_string(module, "vec index")?;
+    let what_ptr = intrinsics.static_string_body_ptr(module, builder, what_data);
+    let _ = builder.ins().call(panic_ref, &[what_ptr, idx, len]);
+    builder.ins().trap(ir::TrapCode::user(5).unwrap());
+    Ok(())
 }
 
 /// Element address for a word-stride `GosVec`: load the data pointer from

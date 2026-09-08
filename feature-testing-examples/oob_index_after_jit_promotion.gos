@@ -1,0 +1,27 @@
+// An indexed read is checked on every tier, including after the body holding
+// it has been compiled natively. The warm-up calls run the scanner far past
+// the promotion threshold, so the scan that walks one element too far is
+// executed by compiled code rather than interpreted; it must still terminate
+// with the same GX0005 bounds panic the bytecode VM and the ahead-of-time
+// build produce, rather than answering the word it finds past the end.
+//
+// The upper bound is a parameter rather than the vector's length, so the
+// in-range proof cannot hold for every call and the access keeps its check.
+
+fn scan(xs: [i64], upto: i64) -> i64 {
+    let mut acc = 0
+    for i in 0..upto { acc += xs[i] }
+    acc
+}
+
+fn main() {
+    let mut xs: Vec<i64> = Vec::new()
+    for i in 0..20 { xs.push(i) }
+
+    let mut warm = 0
+    for _ in 0..400000 { warm += scan(xs, 20) }
+    println("warm={}", warm)
+    println("in-range={}", scan(xs, 20))
+    println("past-the-end={}", scan(xs, 21))
+    println("unreachable={}", 0)
+}

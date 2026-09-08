@@ -1614,3 +1614,128 @@ fn main() { println("{}", f(Tree::Nil)) }
         }
     }
 }
+
+/// Counts how many of `body`'s vec accesses reach the unchecked runtime
+/// symbol, and how many stay checked.
+fn access_split(body: &gossamer_mir::Body) -> (usize, usize) {
+    let names = call_symbol_names(body);
+    let unchecked = names
+        .iter()
+        .filter(|n| n.as_str().ends_with("_unchecked"))
+        .count();
+    let checked = names
+        .iter()
+        .filter(|n| matches!(n.as_str(), "gos_rt_vec_get_i64" | "gos_rt_vec_set_i64"))
+        .count();
+    (unchecked, checked)
+}
+
+fn optimised_fn(source: &str, name: &str) -> gossamer_mir::Body {
+    let (mut bodies, tcx) = build(source);
+    let mut body = bodies
+        .drain(..)
+        .find(|b| b.name == name)
+        .unwrap_or_else(|| panic!("{name} body"));
+    optimise(&mut body, &tcx);
+    body
+}
+
+#[test]
+fn a_let_bound_affine_index_is_proven_in_range() {
+    let body = optimised_fn(
+        r#"
+fn f(a: [i64], b: &mut Vec<i64>, base: i64, m: i64) {
+    for c in 0..m { let i = base + c; b[i] = a[i] * 2 }
+}
+fn main() { let mut w: Vec<i64> = #[0, 0]; f(#[1, 2], &mut w, 0, 2); println("{}", w[0]) }
+"#,
+        "f",
+    );
+    let (unchecked, checked) = access_split(&body);
+    assert_eq!(unchecked, 2, "both accesses run unchecked in the clone");
+    assert_eq!(checked, 2, "the guarded original keeps its checks");
+}
+
+#[test]
+fn an_affine_index_shifted_again_is_proven_in_range() {
+    let body = optimised_fn(
+        r#"
+fn f(a: [i64], b: &mut Vec<i64>, base: i64, m: i64, n: i64) {
+    for c in 0..m {
+        let i = base + c
+        b[i] = a[i - 1] + a[i + 1] + a[i - n] + a[i + n]
+    }
+}
+fn main() {
+    let mut w: Vec<i64> = #[0, 0, 0, 0]
+    f(#[1, 2, 3, 4], &mut w, 1, 1, 1)
+    println("{}", w[1])
+}
+"#,
+        "f",
+    );
+    let (unchecked, _) = access_split(&body);
+    assert_eq!(unchecked, 5, "each neighbour read and the write run unchecked");
+}
+
+#[test]
+fn an_invariant_product_computed_in_the_body_is_a_base() {
+    let body = optimised_fn(
+        r#"
+fn f(a: [i64], b: &mut Vec<i64>, r: i64, n: i64, m: i64) {
+    for c in 0..m { let i = r * n + c; b[i] = a[i] * 2 }
+}
+fn main() {
+    let mut w: Vec<i64> = #[0, 0]
+    f(#[1, 2], &mut w, 0, 2, 2)
+    println("{}", w[0])
+}
+"#,
+        "f",
+    );
+    let (unchecked, _) = access_split(&body);
+    assert_eq!(unchecked, 2, "r * n is the same on every iteration, so it is a base");
+}
+
+#[test]
+fn an_index_the_loop_writes_keeps_its_check() {
+    let body = optimised_fn(
+        r#"
+fn f(a: [i64], b: &mut Vec<i64>, m: i64) {
+    let mut k = 0
+    for c in 0..m { k += c; b[k] = a[k] * 2 }
+}
+fn main() {
+    let mut w: Vec<i64> = #[0, 0]
+    f(#[1, 2], &mut w, 1)
+    println("{}", w[0])
+}
+"#,
+        "f",
+    );
+    let (unchecked, checked) = access_split(&body);
+    assert_eq!(unchecked, 0, "an index carried across iterations is not affine");
+    assert_eq!(checked, 2, "both accesses stay checked");
+}
+
+#[test]
+fn a_divisor_is_never_rebuilt_ahead_of_the_loop() {
+    let body = optimised_fn(
+        r#"
+fn f(a: [i64], b: &mut Vec<i64>, p: i64, q: i64, m: i64) {
+    for c in 0..m { let i = p / q + c; b[i] = a[i] * 2 }
+}
+fn main() {
+    let mut w: Vec<i64> = #[0, 0]
+    f(#[1, 2], &mut w, 0, 1, 1)
+    println("{}", w[0])
+}
+"#,
+        "f",
+    );
+    let (unchecked, _) = access_split(&body);
+    assert_eq!(
+        unchecked, 0,
+        "a division panics on a zero divisor, so its value is not hoisted ahead of the guard"
+    );
+}

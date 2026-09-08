@@ -230,13 +230,17 @@ const PARALLEL_MAX_THREADS: usize = 8;
 /// benefit from parallel codegen.
 const MIN_BODIES_PER_CHUNK: usize = 10;
 
-/// Default LLVM process fan-out is deliberately lower than CPU parallelism.
-/// Each integrated Clang child commonly touches 45 to 65 MiB, so eight small
-/// chunks can multiply a nominal 75 MiB compiler into a 450+ MiB process tree.
-/// Repeated module parsing and declarations also make one process competitive
-/// on small builds. The default is therefore one child regardless of source
-/// size. `GOS_LLVM_JOBS` is the explicit throughput-first override, keeping
-/// peak RAM a deliberate user choice rather than a surprise from host cores.
+/// Ceiling on debug LLVM children. Each one commonly touches 45 to 65 MiB, so
+/// the fan-out buys wall time with resident memory; four keeps a debug build's
+/// process tree inside a few hundred MiB on the machines people iterate on.
+const DEBUG_JOB_CEILING: usize = 4;
+
+/// LLVM process fan-out. A release build stays in one child: a chunk boundary
+/// is an inlining boundary, so splitting the module costs the code quality the
+/// profile exists for. A debug build has no inliner to lose, and its LLVM child
+/// is the longest phase of the build, so it takes one chunk per core up to
+/// [`DEBUG_JOB_CEILING`]. `GOS_LLVM_JOBS` overrides both, for a host where the
+/// memory or the throughput matters more than the default trade.
 fn codegen_job_limit(_body_count: usize) -> usize {
     if let Ok(value) = std::env::var("GOS_LLVM_JOBS")
         && let Ok(jobs) = value.parse::<usize>()
@@ -244,7 +248,12 @@ fn codegen_job_limit(_body_count: usize) -> usize {
     {
         return jobs.min(PARALLEL_MAX_THREADS);
     }
-    1
+    match opt_profile() {
+        OptProfile::Debug => std::thread::available_parallelism()
+            .map_or(1, std::num::NonZero::get)
+            .min(DEBUG_JOB_CEILING),
+        OptProfile::Release => 1,
+    }
 }
 
 /// FNV-1a 64-bit hash - deterministic, no `std` hasher randomisation,

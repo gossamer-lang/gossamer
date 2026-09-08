@@ -810,16 +810,48 @@ struct VersionedAccess {
 #[derive(Clone, PartialEq, Eq)]
 enum VersionedIndex {
     /// `base + counter`, where `base` is loop-invariant.
-    AffineCounter { base: Operand },
+    AffineCounter { base: InvExpr },
     /// An index expression that does not depend on the counted-loop counter.
-    Invariant { expr: InvariantIndex },
+    Invariant { expr: InvExpr },
 }
 
+/// A loop-invariant integer expression the preheader can rebuild from
+/// values that are live at the loop's entry edge. Only wrapping arithmetic
+/// appears here, so rematerialising the expression ahead of the loop cannot
+/// trap on a path where the original body never ran.
 #[derive(Clone, PartialEq, Eq)]
-enum InvariantIndex {
+enum InvExpr {
     Operand(Operand),
-    Add(Operand, Operand),
-    Sub(Operand, Operand),
+    Bin {
+        op: BinOp,
+        lhs: Box<InvExpr>,
+        rhs: Box<InvExpr>,
+    },
+}
+
+impl InvExpr {
+    fn constant(n: i64) -> Self {
+        InvExpr::Operand(Operand::Const(ConstValue::Int(i128::from(n))))
+    }
+
+    /// Number of preheader statements rebuilding this expression.
+    fn stmt_count(&self) -> usize {
+        match self {
+            InvExpr::Operand(_) => 0,
+            InvExpr::Bin { lhs, rhs, .. } => 1 + lhs.stmt_count() + rhs.stmt_count(),
+        }
+    }
+}
+
+/// Depth bound on a rebuilt invariant expression. An index nested deeper than
+/// this is left checked rather than growing the preheader without limit.
+const INV_EXPR_MAX_DEPTH: usize = 4;
+
+/// Wrapping integer operations, the only ones an invariant expression may
+/// rebuild: division and remainder panic on a zero divisor, so hoisting one
+/// ahead of the guard that made it reachable would change behaviour.
+fn is_wrapping_arith(op: BinOp) -> bool {
+    matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
 }
 
 /// Returns the single `Assign` rvalue defining `local` as a bare place,
@@ -886,56 +918,70 @@ fn invariant_base(
     }
 }
 
+/// Builds the loop-invariant expression `idx` denotes, or `None` when any
+/// part of it varies with the loop. A local whose own definition sits inside
+/// the loop body is still invariant when that definition is wrapping
+/// arithmetic over invariant parts: the value is the same on every
+/// iteration, so the preheader can compute it once from the same operands.
+fn invariant_expr(
+    body: &Body,
+    header: usize,
+    region: &[usize],
+    counter: Local,
+    idx: &Operand,
+    depth: usize,
+) -> Option<InvExpr> {
+    if let Some(op) = invariant_base(body, header, region, counter, idx) {
+        return Some(InvExpr::Operand(op));
+    }
+    if depth == 0 {
+        return None;
+    }
+    let Operand::Copy(p) = idx else {
+        return None;
+    };
+    if !p.projection.is_empty() || p.local == counter {
+        return None;
+    }
+    match unique_def_rvalue(body, p.local)? {
+        Rvalue::Use(op) => invariant_expr(body, header, region, counter, op, depth - 1),
+        Rvalue::BinaryOp { op, lhs, rhs } if is_wrapping_arith(*op) => {
+            let l = invariant_expr(body, header, region, counter, lhs, depth - 1)?;
+            let r = invariant_expr(body, header, region, counter, rhs, depth - 1)?;
+            Some(InvExpr::Bin {
+                op: *op,
+                lhs: Box::new(l),
+                rhs: Box::new(r),
+            })
+        }
+        _ => None,
+    }
+}
+
 fn invariant_index_expr(
     body: &Body,
     header: usize,
     region: &[usize],
     counter: Local,
     idx: &Operand,
-) -> Option<InvariantIndex> {
-    if let Some(op) = invariant_base(body, header, region, counter, idx) {
-        return Some(InvariantIndex::Operand(op));
-    }
-    let Operand::Copy(p) = idx else {
-        return None;
-    };
-    if !p.projection.is_empty() {
-        return None;
-    }
-    match unique_def_rvalue(body, p.local)? {
-        Rvalue::Use(op) => invariant_base(body, header, region, counter, op)
-            .map(InvariantIndex::Operand),
-        Rvalue::BinaryOp {
-            op: BinOp::Add,
-            lhs,
-            rhs,
-        } => Some(InvariantIndex::Add(
-            invariant_base(body, header, region, counter, lhs)?,
-            invariant_base(body, header, region, counter, rhs)?,
-        )),
-        Rvalue::BinaryOp {
-            op: BinOp::Sub,
-            lhs,
-            rhs,
-        } => Some(InvariantIndex::Sub(
-            invariant_base(body, header, region, counter, lhs)?,
-            invariant_base(body, header, region, counter, rhs)?,
-        )),
-        _ => None,
-    }
+) -> Option<InvExpr> {
+    invariant_expr(body, header, region, counter, idx, INV_EXPR_MAX_DEPTH)
 }
 
 /// Extracts the loop-invariant `base` of an affine index `base + counter`
-/// from the index operand of a vec get/set. Handles `xs[counter]`
-/// (base 0), `xs[inv + counter]` / `xs[counter + inv]`, `xs[counter + k]`,
-/// and `xs[counter - k]` (base `-k`). Returns `None` for anything else.
+/// from the index operand of a vec get/set. Handles `xs[counter]` (base 0),
+/// `xs[inv + counter]` / `xs[counter + inv]`, `xs[counter - inv]`, a
+/// `let`-bound copy of any of those, and an affine index shifted again by an
+/// invariant amount (`xs[i - 1]` where `i` is itself `base + counter`).
+/// Returns `None` for anything else.
 fn affine_base(
     body: &Body,
     header: usize,
     region: &[usize],
     counter: Local,
     idx: &Operand,
-) -> Option<Operand> {
+    depth: usize,
+) -> Option<InvExpr> {
     let Operand::Copy(p) = idx else {
         return None;
     };
@@ -943,21 +989,35 @@ fn affine_base(
         return None;
     }
     if p.local == counter {
-        return Some(Operand::Const(ConstValue::Int(0)));
+        return Some(InvExpr::constant(0));
     }
-    let def = unique_def_rvalue(body, p.local)?;
+    if depth == 0 {
+        return None;
+    }
     let is_counter = |op: &Operand| index_is_counter(body, region, counter, op);
-    match def {
-        Rvalue::Use(op) if is_counter(op) => Some(Operand::Const(ConstValue::Int(0))),
+    let affine = |op: &Operand| affine_base(body, header, region, counter, op, depth - 1);
+    let invariant = |op: &Operand| invariant_expr(body, header, region, counter, op, depth - 1);
+    let shift = |op: BinOp, base: InvExpr, by: InvExpr| InvExpr::Bin {
+        op,
+        lhs: Box::new(base),
+        rhs: Box::new(by),
+    };
+    match unique_def_rvalue(body, p.local)? {
+        Rvalue::Use(op) if is_counter(op) => Some(InvExpr::constant(0)),
+        Rvalue::Use(op) => affine(op),
         Rvalue::BinaryOp {
             op: BinOp::Add,
             lhs,
             rhs,
         } => {
             if is_counter(lhs) {
-                invariant_base(body, header, region, counter, rhs)
+                invariant(rhs)
             } else if is_counter(rhs) {
-                invariant_base(body, header, region, counter, lhs)
+                invariant(lhs)
+            } else if let (Some(base), Some(by)) = (affine(lhs), invariant(rhs)) {
+                Some(shift(BinOp::Add, base, by))
+            } else if let (Some(base), Some(by)) = (affine(rhs), invariant(lhs)) {
+                Some(shift(BinOp::Add, base, by))
             } else {
                 None
             }
@@ -966,11 +1026,12 @@ fn affine_base(
             op: BinOp::Sub,
             lhs,
             rhs,
-        } if is_counter(lhs) => {
-            if let Operand::Const(ConstValue::Int(k)) = rhs {
-                Some(Operand::Const(ConstValue::Int(k.checked_neg()?)))
+        } => {
+            let by = invariant(rhs)?;
+            if is_counter(lhs) {
+                Some(shift(BinOp::Sub, InvExpr::constant(0), by))
             } else {
-                None
+                Some(shift(BinOp::Sub, affine(lhs)?, by))
             }
         }
         _ => None,
@@ -1072,11 +1133,18 @@ pub(crate) fn bounds_check_versioning_with_limit(
     }
 }
 
+/// Ceiling on the distinct accesses one loop may prove in range. Each one
+/// costs two comparison blocks in the preheader plus at most one block
+/// rebuilding its base, so the guard stays a fixed, small prologue in front
+/// of a loop that then runs unchecked. Eight covers the shapes that motivate
+/// versioning at all - a stencil reads its neighbours on each axis - while
+/// keeping the preheader an order of magnitude smaller than the loop it
+/// guards.
 fn versioning_candidate_limit() -> usize {
     std::env::var("GOSSAMER_BOUNDS_VERSIONING_MAX_ACCESSES")
         .ok()
         .and_then(|raw| raw.parse::<usize>().ok())
-        .unwrap_or(4)
+        .unwrap_or(8)
 }
 
 /// Attempts to version the counted loop headed at block `h`. A no-op when
@@ -1175,7 +1243,9 @@ fn collect_affine_candidates(
         if !ok {
             continue;
         }
-        let index = if let Some(base) = affine_base(body, h, region, counter, &args[idx_i]) {
+        let index = if let Some(base) =
+            affine_base(body, h, region, counter, &args[idx_i], INV_EXPR_MAX_DEPTH)
+        {
             VersionedIndex::AffineCounter { base }
         } else if let Some(expr) = invariant_index_expr(body, h, region, counter, &args[idx_i]) {
             VersionedIndex::Invariant { expr }
@@ -1299,46 +1369,64 @@ fn range_check_block(
     }
 }
 
-fn invariant_index_needs_block(expr: &InvariantIndex) -> bool {
-    !matches!(expr, InvariantIndex::Operand(_))
+fn invariant_index_needs_block(expr: &InvExpr) -> bool {
+    expr.stmt_count() > 0
 }
 
+/// Appends the statements rebuilding `expr` to `stmts` and answers the
+/// operand holding its value. Sub-expressions are emitted before the
+/// operation that reads them, so the block reads only locals it has already
+/// written or that were live at the loop's entry edge.
+fn build_inv_expr(
+    body: &mut Body,
+    ctx: &PreheaderCtx,
+    stmts: &mut Vec<Statement>,
+    expr: &InvExpr,
+) -> Operand {
+    match expr {
+        InvExpr::Operand(op) => op.clone(),
+        InvExpr::Bin { op, lhs, rhs } => {
+            let l = build_inv_expr(body, ctx, stmts, lhs);
+            let r = build_inv_expr(body, ctx, stmts, rhs);
+            let tmp = fresh_local(body, ctx.i64t);
+            stmts.push(Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(tmp),
+                    rvalue: Rvalue::BinaryOp {
+                        op: *op,
+                        lhs: l,
+                        rhs: r,
+                    },
+                },
+                span: ctx.sp,
+            });
+            Operand::Copy(Place::local(tmp))
+        }
+    }
+}
+
+/// Emits one preheader block that rebuilds `expr`, and answers the operand
+/// holding it. Callers check [`invariant_index_needs_block`] first: an
+/// expression that is already an operand needs no block at all.
 fn invariant_index_operand(
     body: &mut Body,
     ctx: &PreheaderCtx,
     pre: &mut Vec<BasicBlock>,
     idx: usize,
     next: BlockId,
-    expr: &InvariantIndex,
+    expr: &InvExpr,
 ) -> Operand {
-    match expr {
-        InvariantIndex::Operand(op) => op.clone(),
-        InvariantIndex::Add(lhs, rhs) | InvariantIndex::Sub(lhs, rhs) => {
-            let tmp = fresh_local(body, ctx.i64t);
-            let op = match expr {
-                InvariantIndex::Add(_, _) => BinOp::Add,
-                InvariantIndex::Sub(_, _) => BinOp::Sub,
-                InvariantIndex::Operand(_) => unreachable!(),
-            };
-            pre.push(BasicBlock {
-                id: BlockId(idx as u32),
-                stmts: vec![Statement {
-                    kind: StatementKind::Assign {
-                        place: Place::local(tmp),
-                        rvalue: Rvalue::BinaryOp {
-                            op,
-                            lhs: lhs.clone(),
-                            rhs: rhs.clone(),
-                        },
-                    },
-                    span: ctx.sp,
-                }],
-                terminator: Terminator::Goto { target: next },
-                span: ctx.sp,
-            });
-            Operand::Copy(Place::local(tmp))
-        }
+    let mut stmts = Vec::new();
+    let op = build_inv_expr(body, ctx, &mut stmts, expr);
+    if !stmts.is_empty() {
+        pre.push(BasicBlock {
+            id: BlockId(idx as u32),
+            stmts,
+            terminator: Terminator::Goto { target: next },
+            span: ctx.sp,
+        });
     }
+    op
 }
 
 fn collect_version_checks(cands: &[VersionedAccess]) -> (Vec<(Local, VersionedIndex)>, Vec<Local>) {
@@ -1364,7 +1452,9 @@ fn version_preheader_len(checks: &[(Local, VersionedIndex)], xs_count: usize) ->
         + checks
             .iter()
             .map(|(_, index)| match index {
-                VersionedIndex::AffineCounter { .. } => 2,
+                VersionedIndex::AffineCounter { base } => {
+                    2 + usize::from(invariant_index_needs_block(base))
+                }
                 VersionedIndex::Invariant { expr } => {
                     2 + usize::from(invariant_index_needs_block(expr))
                 }
@@ -1448,13 +1538,32 @@ impl VersionPreheader<'_> {
         ));
     }
 
+    /// Materialises `expr` into an operand, consuming one preheader block
+    /// when the expression is more than a bare operand.
+    fn materialise(&mut self, p: &mut usize, expr: &InvExpr) -> Operand {
+        let needs_block = invariant_index_needs_block(expr);
+        let op = invariant_index_operand(
+            self.body,
+            self.ctx,
+            self.pre,
+            self.pbase + *p,
+            self.next(*p),
+            expr,
+        );
+        if needs_block {
+            *p += 1;
+        }
+        op
+    }
+
     fn push_affine_counter(
         &mut self,
         p: &mut usize,
         x: Local,
-        base: &Operand,
+        base_expr: &InvExpr,
         locals: VersionLoopLocals,
     ) {
+        let base = &self.materialise(p, base_expr);
         self.push_range(
             *p,
             RangeCheck {
@@ -1478,28 +1587,8 @@ impl VersionPreheader<'_> {
         *p += 1;
     }
 
-    fn push_invariant(&mut self, p: &mut usize, x: Local, expr: &InvariantIndex) {
-        let index_op = if invariant_index_needs_block(expr) {
-            let op = invariant_index_operand(
-                self.body,
-                self.ctx,
-                self.pre,
-                self.pbase + *p,
-                self.next(*p),
-                expr,
-            );
-            *p += 1;
-            op
-        } else {
-            invariant_index_operand(
-                self.body,
-                self.ctx,
-                self.pre,
-                self.pbase + *p,
-                self.next(*p),
-                expr,
-            )
-        };
+    fn push_invariant(&mut self, p: &mut usize, x: Local, expr: &InvExpr) {
+        let index_op = self.materialise(p, expr);
 
         self.push_range(
             *p,

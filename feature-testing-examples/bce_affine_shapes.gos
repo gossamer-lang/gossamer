@@ -1,0 +1,119 @@
+// Loop-versioning bounds-check elision over the affine index shapes that a
+// `let` binding, a second shift, or a body-computed invariant product put in
+// front of the analysis. Each shape runs three ways: with every index in range
+// so the unchecked clone runs, with a zero-trip loop so the guard is evaluated
+// and the body never is, and with a range the guard cannot prove so the
+// checked original runs and an early exit keeps each surviving access legal.
+// An index the loop carries across iterations is here to stay checked. Output
+// must be bit-identical across the VM, Cranelift, and LLVM tiers; the panic
+// these shapes reach when an index really does leave the range is covered by
+// the dedicated out-of-range fixtures.
+
+fn zeros(n: i64) -> Vec<i64> {
+    let mut values: Vec<i64> = Vec::with_capacity(n)
+    for _ in 0..n { values.push(0) }
+    values
+}
+
+// The index is a `let` binding rather than the expression itself.
+fn let_bound(xs: [i64], base: i64, m: i64) -> i64 {
+    let mut acc = 0
+    for c in 0..m {
+        let i = base + c
+        acc += xs[i]
+    }
+    acc
+}
+
+// A five-point stencil row: the base is shifted again by a constant and by a
+// loop-invariant local.
+fn stencil_row(xs: [i64], base: i64, n: i64, m: i64) -> i64 {
+    let mut acc = 0
+    for c in 0..m {
+        let i = base + c
+        acc += xs[i] + xs[i - 1] + xs[i + 1] + xs[i - n] + xs[i + n]
+    }
+    acc
+}
+
+// The base is a product computed inside the loop body from two values that do
+// not change while it runs.
+fn row_product(xs: [i64], r: i64, n: i64, m: i64) -> i64 {
+    let mut acc = 0
+    for c in 0..m {
+        let i = r * n + c
+        acc += xs[i]
+    }
+    acc
+}
+
+// A write through the same shapes, so the store path is covered too.
+fn write_row(n: i64, r: i64, m: i64) -> i64 {
+    let mut ys = zeros(n * n)
+    for c in 0..m {
+        let i = r * n + c
+        ys[i] = i * 2
+    }
+    let mut acc = 0
+    for i in 0..n * n { acc += ys[i] }
+    acc
+}
+
+// An index the loop carries across iterations is not affine and keeps its
+// check; reading past the end must still panic.
+fn carried(xs: [i64], m: i64) -> i64 {
+    let mut acc = 0
+    let mut k = 0
+    for c in 0..m {
+        k += c
+        acc += xs[k]
+    }
+    acc
+}
+
+// The last index would leave the range, so the precondition fails and the
+// checked loop runs; the early exit stops before any access that would panic.
+fn early_break(xs: [i64], base: i64, m: i64) -> i64 {
+    let mut acc = 0
+    let len = xs.len()
+    for c in 0..m {
+        let i = base + c
+        if i >= len { break }
+        acc += xs[i]
+    }
+    acc
+}
+
+// A base below zero fails the lower-bound precondition; the skip keeps every
+// surviving access in range.
+fn guarded_low(xs: [i64], base: i64, m: i64) -> i64 {
+    let mut acc = 0
+    for c in 0..m {
+        let i = base + c
+        if i >= 0 { acc += xs[i] }
+    }
+    acc
+}
+
+fn main() {
+    let mut xs = [0; 36]
+    for i in 0..36 { xs[i] = i + 1 }
+
+    println("let_bound={}", let_bound(xs, 4, 6))
+    println("stencil_row={}", stencil_row(xs, 7, 6, 4))
+    println("row_product={}", row_product(xs, 3, 6, 6))
+    println("write_row={}", write_row(6, 2, 6))
+    println("carried={}", carried(xs, 8))
+
+    // Zero-trip loops: the guard is evaluated, the body never runs.
+    println("empty_let={}", let_bound(xs, 0, 0))
+    println("empty_stencil={}", stencil_row(xs, 7, 6, 0))
+    println("empty_product={}", row_product(xs, 3, 6, 0))
+
+    // The guard cannot prove these in range, so the checked loop runs and the
+    // early exit keeps every access legal. The answer must match the
+    // unchecked path's arithmetic exactly.
+    println("break_in_range={}", early_break(xs, 30, 4))
+    println("break_past_end={}", early_break(xs, 30, 12))
+    println("negative_base={}", guarded_low(xs, 0 - 3, 8))
+}
