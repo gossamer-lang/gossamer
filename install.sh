@@ -83,6 +83,15 @@ install_unix() {
     $sudo_cmd chmod 755 "$bin_dir/$exe_name"
     $sudo_cmd cp --remove-destination "$lib" "$lib_dir/$lib_name"
 
+    # On Linux `gos build --release` links the static-musl runtime, which the
+    # CLI build emits beside the host archive. Both belong to the same
+    # toolchain, so they are installed together.
+    local musl_lib="$SCRIPT_DIR/target/release/libgossamer_runtime-musl.a"
+    if [ -f "$musl_lib" ]; then
+        $sudo_cmd cp --remove-destination "$musl_lib" \
+            "$lib_dir/libgossamer_runtime-musl.a"
+    fi
+
     # macOS only: ad-hoc resign so the freshly-copied binary
     # passes Gatekeeper / SIP for execution outside the build dir.
     if [ "$(uname)" = "Darwin" ]; then

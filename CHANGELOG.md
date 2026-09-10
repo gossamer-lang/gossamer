@@ -144,6 +144,9 @@
   aggregate whole.
 - Rebinding a name whose value a heap object was just given a share of returns
   the share the frame still held.
+- A source install places the static-musl runtime archive beside the host one,
+  so `gos build --release` on Linux links the archive the installed toolchain
+  owns.
 
 ## 0.59.2 - Debug binary build vs execution speed balance
 

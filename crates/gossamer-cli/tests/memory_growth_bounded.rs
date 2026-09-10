@@ -11,17 +11,7 @@ fn gos_bin() -> PathBuf {
 
 #[test]
 fn compiled_vec_alloc_and_drop_stays_under_rss_cap() {
-    if !std::path::Path::new("/usr/bin/time").exists() {
-        eprintln!("skipping: /usr/bin/time not available on this host");
-        return;
-    }
-    let probe = Command::new("/usr/bin/time").arg("-v").arg("true").output();
-    let is_gnu_time = probe.as_ref().is_ok_and(|o| {
-        let stderr = String::from_utf8_lossy(&o.stderr);
-        stderr.contains("Maximum resident set size")
-    });
-    if !is_gnu_time {
-        eprintln!("skipping: /usr/bin/time does not support GNU -v on this host");
+    if !gnu_time_available() {
         return;
     }
     let dir = env::temp_dir().join(format!("gos-mem-{}", std::process::id()));
@@ -104,17 +94,7 @@ fn main() {
 /// pipeline, where the old tracing GC was unsound.
 #[test]
 fn compiled_recursive_enum_loop_stays_under_rss_cap() {
-    if !std::path::Path::new("/usr/bin/time").exists() {
-        eprintln!("skipping: /usr/bin/time not available on this host");
-        return;
-    }
-    let probe = Command::new("/usr/bin/time").arg("-v").arg("true").output();
-    let is_gnu_time = probe.as_ref().is_ok_and(|o| {
-        let stderr = String::from_utf8_lossy(&o.stderr);
-        stderr.contains("Maximum resident set size")
-    });
-    if !is_gnu_time {
-        eprintln!("skipping: /usr/bin/time does not support GNU -v on this host");
+    if !gnu_time_available() {
         return;
     }
     let dir = env::temp_dir().join(format!("gos-rcmem-{}", std::process::id()));
@@ -204,16 +184,7 @@ fn main() {
 /// already released - this is the gap it missed.
 #[test]
 fn compiled_named_binding_loop_stays_under_rss_cap() {
-    if !std::path::Path::new("/usr/bin/time").exists() {
-        eprintln!("skipping: /usr/bin/time not available on this host");
-        return;
-    }
-    let probe = Command::new("/usr/bin/time").arg("-v").arg("true").output();
-    let is_gnu_time = probe
-        .as_ref()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("Maximum resident set size"));
-    if !is_gnu_time {
-        eprintln!("skipping: /usr/bin/time does not support GNU -v on this host");
+    if !gnu_time_available() {
         return;
     }
     let dir = env::temp_dir().join(format!("gos-rcnamed-{}", std::process::id()));
@@ -298,17 +269,7 @@ fn main() {
 /// single buffer's footprint. Runs under the full `-O3` release pipeline.
 #[test]
 fn compiled_container_and_accumulator_loops_stay_under_rss_cap() {
-    if !std::path::Path::new("/usr/bin/time").exists() {
-        eprintln!("skipping: /usr/bin/time not available on this host");
-        return;
-    }
-    let probe = Command::new("/usr/bin/time").arg("-v").arg("true").output();
-    let is_gnu_time = probe.as_ref().is_ok_and(|o| {
-        let stderr = String::from_utf8_lossy(&o.stderr);
-        stderr.contains("Maximum resident set size")
-    });
-    if !is_gnu_time {
-        eprintln!("skipping: /usr/bin/time does not support GNU -v on this host");
+    if !gnu_time_available() {
         return;
     }
     let dir = env::temp_dir().join(format!("gos-leakclass-{}", std::process::id()));
@@ -410,16 +371,7 @@ fn main() {
 /// drops, so peak RSS stays bounded across 300k iterations.
 #[test]
 fn compiled_struct_vec_field_loop_runs_correctly_on_all_tiers() {
-    if !std::path::Path::new("/usr/bin/time").exists() {
-        eprintln!("skipping: /usr/bin/time not available on this host");
-        return;
-    }
-    let probe = Command::new("/usr/bin/time").arg("-v").arg("true").output();
-    let is_gnu_time = probe
-        .as_ref()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("Maximum resident set size"));
-    if !is_gnu_time {
-        eprintln!("skipping: /usr/bin/time does not support GNU -v on this host");
+    if !gnu_time_available() {
         return;
     }
     let dir = env::temp_dir().join(format!("gos-structvec-{}", std::process::id()));
@@ -534,16 +486,7 @@ fn main() {
 /// where every such body is refused by JIT admission anyway.
 #[test]
 fn vm_builtin_callback_loop_rss_is_independent_of_iteration_count() {
-    if !std::path::Path::new("/usr/bin/time").exists() {
-        eprintln!("skipping: /usr/bin/time not available on this host");
-        return;
-    }
-    let probe = Command::new("/usr/bin/time").arg("-v").arg("true").output();
-    let is_gnu_time = probe
-        .as_ref()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stderr).contains("Maximum resident set size"));
-    if !is_gnu_time {
-        eprintln!("skipping: /usr/bin/time does not support GNU -v on this host");
+    if !gnu_time_available() {
         return;
     }
     let dir = env::temp_dir().join(format!("gos-cbpool-{}", std::process::id()));
@@ -1022,8 +965,7 @@ fn main() {
 /// read lands - so the copy dies there.
 #[test]
 fn popped_tuple_copies_do_not_accumulate() {
-    if !std::path::Path::new("/usr/bin/time").exists() {
-        eprintln!("skipping: /usr/bin/time not available on this host");
+    if !gnu_time_available() {
         return;
     }
     let dir = env::temp_dir().join(format!("gos-pop-{}", std::process::id()));
