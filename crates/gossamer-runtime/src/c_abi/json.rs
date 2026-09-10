@@ -327,6 +327,142 @@ pub unsafe extern "C" fn gos_rt_json_free(j: *mut GosJson) {
     drop(unsafe { Box::from_raw(j) });
 }
 
+/// Takes the value a builder box holds, consuming the box.
+///
+/// A box the encoder just built owns its whole tree, so the value moves out
+/// with no copy. A handle that shares a parsed document, or one viewing a
+/// subtree, answers a copy of what it views - the document stays whole.
+unsafe fn take_json_value(p: *mut GosJson) -> serde_json::Value {
+    if p.is_null() {
+        return serde_json::Value::Null;
+    }
+    let boxed = unsafe { Box::from_raw(p) };
+    let views_root = boxed.view.is_null()
+        || std::ptr::eq(
+            boxed.view.as_const_ptr(),
+            std::ptr::from_ref(boxed.tree.value()),
+        );
+    if !views_root {
+        return unsafe { &*boxed.view.as_const_ptr() }.clone();
+    }
+    match std::sync::Arc::try_unwrap(boxed.tree) {
+        Ok(JsonTree::Value(value)) => value,
+        Ok(other) => other.value().clone(),
+        Err(shared) => shared.value().clone(),
+    }
+}
+
+/// `json::Value::Array` over a builder vector whose element boxes it consumes.
+///
+/// The borrowing form copies every child into the array and leaves the boxes
+/// to the caller, which is a deep copy of the whole subtree at each level of a
+/// nested value. This one moves each child in and frees its box, so building
+/// an array of objects costs the objects and nothing more.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_value_array_owned(vec: *mut GosVec) -> *mut GosJson {
+    ffi_entry!(std::ptr::null_mut(), {
+        let mut out: Vec<serde_json::Value> = Vec::new();
+        if !vec.is_null() {
+            let header = unsafe { &*vec };
+            let len = usize::try_from(header.len.max(0)).unwrap_or(0);
+            if !header.ptr.is_null() && len > 0 {
+                out.reserve(len);
+                let base = header.ptr;
+                for i in 0..len {
+                    let addr = unsafe { base.add(i * 8).cast::<usize>().read_unaligned() };
+                    let elem: *mut GosJson = std::ptr::with_exposed_provenance_mut(addr);
+                    out.push(unsafe { take_json_value(elem) });
+                }
+            }
+        }
+        unsafe { crate::c_abi::gos_rt_vec_free(vec) };
+        GosJson::into_raw(serde_json::Value::Array(out))
+    })
+}
+
+/// `json::Value::Object` over a name/value builder vector whose value boxes it
+/// consumes. The name slots are borrowed C strings; only the values move.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_value_object_owned(vec: *mut GosVec) -> *mut GosJson {
+    ffi_entry!(std::ptr::null_mut(), {
+        let mut out = serde_json::Map::new();
+        if !vec.is_null() {
+            let header = unsafe { &*vec };
+            let raw_len = usize::try_from(header.len.max(0)).unwrap_or(0);
+            let elem_bytes = header.elem_bytes as usize;
+            let header_looks_valid =
+                matches!(elem_bytes, 8 | 16 | 24) && raw_len <= 16 * 1024 * 1024;
+            if header_looks_valid && !header.ptr.is_null() && raw_len > 0 {
+                let tuple_count = if elem_bytes == 16 {
+                    raw_len
+                } else {
+                    raw_len / 2
+                };
+                let pairs = unsafe {
+                    std::slice::from_raw_parts(header.ptr.cast::<[i64; 2]>(), tuple_count)
+                };
+                for pair in pairs {
+                    let key_ptr = pair[0] as *const c_char;
+                    let val_ptr = pair[1] as *mut GosJson;
+                    let key = if key_ptr.is_null() {
+                        String::new()
+                    } else {
+                        unsafe { crate::c_abi::gos_str_arg_string(key_ptr) }
+                    };
+                    out.insert(key, unsafe { take_json_value(val_ptr) });
+                }
+            }
+        }
+        unsafe { crate::c_abi::gos_rt_vec_free(vec) };
+        GosJson::into_raw(serde_json::Value::Object(out))
+    })
+}
+
+/// A second handle onto the same document, for a storage that duplicates a
+/// slot holding one.
+///
+/// A handle carries no count of its own - it is a box over a shared tree - so
+/// a copied slot takes a box of its own and the tree's `Arc` gains a holder.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_clone_handle(p: *const GosJson) -> *mut GosJson {
+    if p.is_null() {
+        return std::ptr::null_mut();
+    }
+    let src = unsafe { &*p };
+    Box::into_raw(Box::new(GosJson {
+        tree: std::sync::Arc::clone(&src.tree),
+        view: SyncRawPtr::new(src.view.as_const_ptr().cast_mut()),
+    }))
+}
+
+/// Frees the `GosJson` handles a builder vector holds, then the vector.
+///
+/// A container constructor copies every child it is handed, so the boxes the
+/// walk built are the caller's to reclaim. `first` is the index of the first
+/// owned slot and `stride` the step between them: a value array owns every
+/// slot, an object's name/value pairs own every second one.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_free_slots(vec: *mut GosVec, first: i64, stride: i64) {
+    if vec.is_null() {
+        return;
+    }
+    let header = unsafe { &*vec };
+    let len = usize::try_from(header.len.max(0)).unwrap_or(0);
+    let first = usize::try_from(first.max(0)).unwrap_or(0);
+    let stride = usize::try_from(stride.max(1)).unwrap_or(1);
+    if !header.ptr.is_null() {
+        let base = header.ptr;
+        let mut i = first;
+        while i < len {
+            let addr = unsafe { base.add(i * 8).cast::<usize>().read_unaligned() };
+            let child: *mut GosJson = std::ptr::with_exposed_provenance_mut(addr);
+            unsafe { gos_rt_json_free(child) };
+            i += stride;
+        }
+    }
+    unsafe { crate::c_abi::gos_rt_vec_free(vec) };
+}
+
 /// `serde_json::to_writer` sink backed directly by the compiled String ABI.
 /// Each write consumes the current unique builder and returns its possibly
 /// reallocated pointer. HTML-sensitive characters are escaped inline, so no
@@ -835,9 +971,10 @@ pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
                 // once from the source array's exact length instead of
                 // growing through every capacity tier.
                 let vec_ptr = unsafe {
-                    crate::c_abi::vec::gos_rt_vec_with_capacity(
+                    crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                         8,
                         items.len().min(i64::MAX as usize) as i64,
+                        crate::c_abi::vec::vec_elem_kind::JSON,
                     )
                 };
                 for item in items {

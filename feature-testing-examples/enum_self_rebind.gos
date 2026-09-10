@@ -1,0 +1,113 @@
+// `*self = Variant(..)` through a `&mut self` receiver rebinds the caller's
+// binding, for a tagged enum, a header-discriminant one, and a payload the
+// callee replaces with one of another shape.
+
+enum Small { A(i64), B(i64) }
+impl Small {
+    fn bump(&mut self) {
+        match self {
+            Small::A(n) => { *self = Small::B(n + 1) }
+            Small::B(n) => { *self = Small::A(n + 1) }
+        }
+    }
+    fn get(&self) -> i64 { match self { Small::A(n) => n, Small::B(n) => n } }
+}
+
+enum Wide { P(i64), Q(i64), R(i64), S(i64), T(i64) }
+impl Wide {
+    fn bump(&mut self) {
+        match self {
+            Wide::P(n) => { *self = Wide::Q(n + 1) }
+            Wide::Q(n) => { *self = Wide::R(n + 1) }
+            Wide::R(n) => { *self = Wide::S(n + 1) }
+            Wide::S(n) => { *self = Wide::T(n + 1) }
+            Wide::T(n) => { *self = Wide::P(n + 1) }
+        }
+    }
+    fn get(&self) -> i64 { match self { Wide::P(n) => n, Wide::Q(n) => n, Wide::R(n) => n, Wide::S(n) => n, Wide::T(n) => n } }
+}
+
+struct Bag { items: Vec<i64> }
+
+enum Node { Empty, Leaf(i64), Named(String), Holding(Bag) }
+impl Node {
+    fn step(&mut self) {
+        match self {
+            Node::Empty => { *self = Node::Leaf(1) }
+            Node::Leaf(n) => { *self = Node::Named(format("n{}", n)) }
+            Node::Named(s) => { *self = Node::Holding(Bag { items: #[s.len(), 2] }) }
+            Node::Holding(b) => { *self = Node::Leaf(b.items.len()) }
+        }
+    }
+    fn show(&self) -> String {
+        match self {
+            Node::Empty => "empty"
+            Node::Leaf(n) => format("leaf {}", n)
+            Node::Named(s) => format("named {}", s)
+            Node::Holding(b) => format("holding {}", b.items.len())
+        }
+    }
+}
+
+fn advance(n: &mut Node) { n.step() }
+
+fn drive_small(rounds: i64) -> i64 {
+    let mut s = Small::A(0)
+    let mut i = 0
+    while i < rounds { s.bump(); i += 1 }
+    s.get()
+}
+
+fn drive_wide(rounds: i64) -> i64 {
+    let mut w = Wide::P(0)
+    let mut i = 0
+    while i < rounds { w.bump(); i += 1 }
+    w.get()
+}
+
+fn drive_node(rounds: i64) -> String {
+    let mut n = Node::Empty
+    let mut i = 0
+    while i < rounds { advance(&mut n); i += 1 }
+    n.show()
+}
+
+// A payload the frame takes out of a node it built keeps its heap children
+// once that node is gone, so a binding that outlives the carrier still names
+// the sequence the payload held.
+fn build_holder(n: i64) -> Node { Node::Holding(Bag { items: #[n, n + 1, n + 2] }) }
+
+fn take_bag(n: i64) -> Bag {
+    match build_holder(n) {
+        Node::Holding(b) => b
+        _ => Bag { items: #[] }
+    }
+}
+
+fn escaped_payloads(rounds: i64) -> i64 {
+    let mut kept = #[]
+    let mut i = 0
+    while i < rounds { kept.push(take_bag(i)); i += 1 }
+    let mut total = 0
+    for b in kept { total += b.items[0] + b.items[2] }
+    total
+}
+
+fn main() {
+    println("escaped 3: {}", escaped_payloads(3))
+    println("escaped 400: {}", escaped_payloads(400))
+    println("small: {}", drive_small(3))
+    println("wide: {}", drive_wide(7))
+    println("node 1: {}", drive_node(1))
+    println("node 2: {}", drive_node(2))
+    println("node 3: {}", drive_node(3))
+    println("node 4: {}", drive_node(4))
+    let mut total = 0
+    let mut j = 0
+    while j < 3000 { total += drive_small(4) + drive_wide(6); j += 1 }
+    println("hot total: {}", total)
+    let mut hot = ""
+    let mut k = 0
+    while k < 3000 { hot = drive_node(5); k += 1 }
+    println("hot node: {}", hot)
+}

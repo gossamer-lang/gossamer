@@ -4162,6 +4162,15 @@ impl Vm {
                         _ => Value::Unit,
                     };
                 }
+                Op::VariantFieldSet { receiver, idx, src } => {
+                    let value = registers[src as usize].clone();
+                    if let Value::Variant(arc) = &mut registers[receiver as usize] {
+                        let inner = Arc::make_mut(arc);
+                        if let Some(slot) = inner.fields.get_mut(idx as usize) {
+                            *slot = value;
+                        }
+                    }
+                }
                 Op::StructIs { dst, src, name_idx } => {
                     let expected: &'static str = chunk.shape_names[name_idx as usize];
                     let matches = matches!(

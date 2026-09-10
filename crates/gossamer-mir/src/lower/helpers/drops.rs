@@ -114,6 +114,18 @@ impl FieldRcKind {
     /// "Retain" is a clone for these: a share of one container is a copy of
     /// its storage, since nothing counts holders. Both helpers take the
     /// FIELD's address and write the slot back.
+    /// The `(retain, release)` helper pair for one field of this kind.
+    pub(crate) const fn helpers(self) -> (&'static str, &'static str) {
+        match self.value_container_helpers() {
+            Some(pair) => pair,
+            None => match self {
+                Self::Weak => ("gos_rt_rc_weak_retain", "gos_rt_rc_weak_release"),
+                Self::Vec => ("gos_rt_vec_retain", "gos_rt_vec_free"),
+                _ => ("gos_rt_rc_retain", "gos_rt_rc_release"),
+            },
+        }
+    }
+
     pub(crate) const fn value_container_helpers(self) -> Option<(&'static str, &'static str)> {
         match self {
             Self::Map => Some(("gos_rt_map_field_clone", "gos_rt_map_field_release")),
@@ -672,6 +684,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     tcx.kind_of(body.locals[src.local.0 as usize].ty),
                     gossamer_types::TyKind::Ref { inner, .. }
                         if matches!(tcx.kind_of(*inner), gossamer_types::TyKind::String)
+                            || tcx.is_payload_enum(*inner)
                 )
             {
                 copyback_sites.insert((bi, si));
@@ -1068,7 +1081,9 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 // value for the rest of the frame.
                 stable_param[i] = false;
                 match rvalue {
-                    Rvalue::CallIntrinsic { name, args } if *name == "gos_enum_load" => {
+                    Rvalue::CallIntrinsic { name, args }
+                        if matches!(*name, "gos_enum_load" | "gos_enum_slot_ptr") =>
+                    {
                         match args.first() {
                             Some(Operand::Copy(src)) if src.projection.is_empty() => {
                                 copy_edges.push((i, src.local.0 as usize));
@@ -2333,7 +2348,10 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 {
                     match rvalue {
                         Rvalue::CallIntrinsic { name, args }
-                            if matches!(*name, "gos_rt_result_payload" | "gos_enum_load") =>
+                            if matches!(
+                                *name,
+                                "gos_rt_result_payload" | "gos_enum_load" | "gos_enum_slot_ptr"
+                            ) =>
                         {
                             if extracts_owned(args) {
                                 non_extraction[place.local.0 as usize] = true;
@@ -2899,6 +2917,40 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
         out
     };
 
+    // Locals holding a word read out of an owned aggregate's field. The
+    // aggregate still frees that field at its own death, so a store handing
+    // the word on has to give the destination a value container of its own.
+    let borrows_owned_field: Vec<bool> = {
+        let owners: std::collections::HashSet<usize> = agg_locals
+            .iter()
+            .chain(param_agg_locals.iter())
+            .chain(ref_agg_locals.iter())
+            .chain(borrow_copy_agg_locals.iter())
+            .map(|(l, _)| *l)
+            .collect();
+        let mut out = vec![false; n_locals];
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Copy(src)),
+                } = &stmt.kind
+                    && place.projection.is_empty()
+                    && (place.local.0 as usize) < n_locals
+                    && !src.projection.is_empty()
+                    && src
+                        .projection
+                        .iter()
+                        .all(|p| matches!(p, crate::ir::Projection::Field(_)))
+                    && owners.contains(&(src.local.0 as usize))
+                {
+                    out[place.local.0 as usize] = true;
+                }
+            }
+        }
+        out
+    };
+
     // Field-level retain/release for by-value aggregate locals: release the
     // previous value's RC fields before any reassignment (null-safe on the
     // first assignment via the entry zero-init), retain the shared fields after
@@ -2950,7 +3002,9 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     rvalue,
                     Rvalue::Use(Operand::Copy(src))
                         if src.projection.is_empty()
-                            && releasable_set.contains(&src.local.0)
+                            && ((src.local.0 as usize) < n_locals
+                                && (releasable_set.contains(&src.local.0)
+                                    || borrows_owned_field[src.local.0 as usize]))
                 );
                 let path: Vec<u32> = place
                     .projection
@@ -2960,23 +3014,61 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                         _ => 0,
                     })
                     .collect();
-                if let Some((_, kind)) = agg_locals
+                // A store whose path names a nested aggregate writes every RC
+                // leaf beneath it, so each one is what the gap pair is owed:
+                // the old leaf goes back before the store and the destination
+                // takes a share of the new one after it. Keying only on an
+                // exact leaf match left `outer.inner = Inner::new(..)`
+                // balancing nothing, so the source's own end-of-scope release
+                // freed what the field had just been handed.
+                let leaves: Vec<(Vec<u32>, FieldRcKind)> = agg_locals
                     .iter()
                     .chain(param_agg_locals.iter())
                     .chain(ref_agg_locals.iter())
                     .chain(borrow_copy_agg_locals.iter())
                     .find(|(l, _)| *l == place.local.0 as usize)
-                    .and_then(|(_, fields)| fields.iter().find(|(p, _)| *p == path))
-                    .map(|(p, k)| (p.clone(), *k))
-                {
-                    field_gaps[bi][si].push((false, place.local, path.clone(), kind));
-                    let wants_retain = if kind.is_value_container() {
+                    .map(|(_, fields)| {
+                        fields
+                            .iter()
+                            .filter(|(p, _)| p.starts_with(path.as_slice()))
+                            .map(|(p, k)| (p.clone(), *k))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                for (leaf, kind) in leaves {
+                    field_gaps[bi][si].push((false, place.local, leaf.clone(), kind));
+                    // A leaf reached below the stored path belongs to the
+                    // sub-aggregate the source still releases at its own
+                    // death, so the destination takes a share of every kind -
+                    // a value container's being a table of its own.
+                    let nested = leaf.len() > path.len();
+                    let wants_retain = if kind.is_value_container() && !nested {
                         map_source_kept
                     } else {
                         !source_moved
                     };
                     if wants_retain {
-                        field_gaps[bi][si + 1].push((true, place.local, path, kind));
+                        // The field's share is minted right here, so the
+                        // value is named once more than the frame accounts
+                        // for whenever the copy already minted one of its own
+                        // or the frame keeps no release to balance it.
+                        if matches!(kind, FieldRcKind::Vec | FieldRcKind::Rc)
+                            && !nested
+                            && let Rvalue::Use(Operand::Copy(src)) = rvalue
+                            && src.projection.is_empty()
+                            && (src.local.0 as usize) < n_locals
+                        {
+                            let copy_minted = retain_sites
+                                .iter()
+                                .any(|&(rb, rs, l, _)| rb == bi && rs == si && l == src.local);
+                            let frame_keeps = releasable_set.contains(&src.local.0)
+                                || vec_released.contains(&src.local.0)
+                                || borrows_owned_field[src.local.0 as usize];
+                            if copy_minted || !frame_keeps {
+                                gaps[bi][si + 1].push((false, src.local));
+                            }
+                        }
+                        field_gaps[bi][si + 1].push((true, place.local, leaf, kind));
                     }
                 }
             }
@@ -4884,7 +4976,7 @@ pub(crate) fn drop_unread_map_insert_results(body: &mut Body, tcx: &gossamer_typ
             continue;
         };
         if !destination.projection.is_empty()
-            || reads.get(&destination.local.0).copied().unwrap_or(0) != 0
+            || !answer_is_discarded(body, &reads, destination.local)
         {
             continue;
         }
@@ -4923,6 +5015,44 @@ pub(crate) fn drop_unread_map_insert_results(body: &mut Body, tcx: &gossamer_typ
     }
 }
 
+/// True when nothing looks at what a call answered.
+///
+/// A `let _ = m.insert(..)` binds the answer to a name no one reads, so the
+/// destination's only reader is that copy. Following the one hop keeps the
+/// discarded-answer form the same whether the call site names the answer or
+/// not.
+fn answer_is_discarded(
+    body: &Body,
+    reads: &std::collections::HashMap<u32, usize>,
+    dest: Local,
+) -> bool {
+    if reads.get(&dest.0).copied().unwrap_or(0) == 0 {
+        return true;
+    }
+    let mut hop: Option<Local> = None;
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            let Rvalue::Use(Operand::Copy(src)) = rvalue else {
+                continue;
+            };
+            if src.projection.is_empty() && src.local == dest {
+                if !place.projection.is_empty() || hop.is_some() {
+                    return false;
+                }
+                hop = Some(place.local);
+            }
+        }
+    }
+    // Any other shape of read - an argument, an operand - looks at the answer.
+    let copied_out = usize::from(hop.is_some());
+    if reads.get(&dest.0).copied().unwrap_or(0) != copied_out {
+        return false;
+    }
+    hop.is_some_and(|h| reads.get(&h.0).copied().unwrap_or(0) == 0)
+}
 /// Keyed containers whose storage COPIES a `String` key's text rather than
 /// keeping the pointer it was handed.
 ///
@@ -5059,6 +5189,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
             if *name != "gos_rt_result_payload"
                 && *name != "gos_rt_result_payload_f64"
                 && *name != "gos_enum_load"
+                && *name != "gos_enum_slot_ptr"
             {
                 return None;
             }
@@ -5562,35 +5693,153 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
     }
 }
 
-/// Clears the region flag on every call result.
+/// Gives a by-value payload-enum parameter a share of its own.
 ///
-/// A local created while a region is open is region storage only where the
-/// allocation came from the region's bump. A call result does not: a user
-/// function allocates under its own frame's rules, and the string helpers
-/// promote a copy of region-backed bytes to the heap so a recycled slab cannot
-/// land on its own source. Neither is reclaimed by the slab sweep at pop, so
-/// the frame has to release it.
+/// A `mut` parameter is the callee's value, not the caller's variable, so a
+/// body that rebinds one through a `&mut` borrow owns whatever the slot ends
+/// up holding: it takes a share at entry and gives one back at its death, so
+/// the release the rebinding makes is the frame's own and the value the slot
+/// ends with is the frame's to hand on.
+pub(crate) fn own_rebound_enum_parameters(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    let arity = body.arity as usize;
+    if arity == 0 || body.locals.is_empty() {
+        return;
+    }
+    let n_locals = body.locals.len();
+    let mut rebound: Vec<Local> = Vec::new();
+    for i in 1..=arity.min(n_locals - 1) {
+        if body.locals[i].region || !tcx.is_payload_enum(body.locals[i].ty) {
+            continue;
+        }
+        let local = Local(u32::try_from(i).expect("local index fits in u32"));
+        let borrowed = body.blocks.iter().flat_map(|b| b.stmts.iter()).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::Ref {
+                        mutable: true,
+                        place,
+                    },
+                    ..
+                } if place.local == local && place.projection.is_empty()
+            )
+        });
+        if borrowed {
+            rebound.push(local);
+        }
+    }
+    if rebound.is_empty() {
+        return;
+    }
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    let fresh_unit = |body: &mut Body| -> Local {
+        let local = Local(u32::try_from(body.locals.len()).expect("local index fits in u32"));
+        body.locals.push(LocalDecl {
+            ty: unit_ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        local
+    };
+    for &param in &rebound {
+        for bi in 0..body.blocks.len() {
+            if !matches!(body.blocks[bi].terminator, Terminator::Return) {
+                continue;
+            }
+            let span = body.blocks[bi].span;
+            let dest = fresh_unit(body);
+            body.blocks[bi]
+                .stmts
+                .push(rc_call_stmt("gos_rt_rc_release", dest, param, span));
+        }
+        let span = body.blocks[0].span;
+        let dest = fresh_unit(body);
+        body.blocks[0]
+            .stmts
+            .insert(0, rc_call_stmt("gos_rt_rc_retain", dest, param, span));
+    }
+}
+
+/// Releases the node a `&mut <payload enum>` reference displaced.
 ///
-/// Clearing the flag only lets the ownership rules apply; it never makes a
-/// borrowed result owned. Where a result really is region storage, every free
-/// path (`gos_rt_rc_release`, `gos_rt_vec_free`, `str_free_impl`) answers an
-/// address-range test and returns without touching the memory, so a release
-/// the region already reclaimed is a no-op.
-/// Emits the give-back for `carrier.map(f)`.
-///
-/// `map` hands the payload to the closure, which answers a value of its own (a
-/// parameter it returns unchanged mints the caller's share), so the receiver's
-/// payload has no holder left. A carrier never releases a `String` or `Vec`
-/// payload of its own accord, so the release is emitted at the call. The
-/// helper answers the arm: an `Err` / `None` payload word belongs to the value
-/// the mapped carrier still carries.
-/// Tells a channel what its element word owns, at each send.
-///
-/// The send mints the channel's share of the element's heap storage (see
-/// `stores_aggregate_by_pointer`); a receiver gives it back, and a value nobody
-/// receives is given back by the channel's teardown - which needs to know the
-/// shape of the word it is holding, and learns it here, where the element's
-/// static type is in hand.
+/// That receiver names the caller's slot, so `*self = Variant(..)` rebinds the
+/// caller's binding: the node the slot held loses the share the binding gave
+/// it, and the callee is the only side that can see both values. The release
+/// follows the store, so a replacement built from the old node keeps it alive
+/// until the slot no longer names it.
+pub(crate) fn release_displaced_enum_targets(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    let n_locals = body.locals.len();
+    let pointee_of = |local: Local| -> Option<gossamer_types::Ty> {
+        let i = local.0 as usize;
+        if i >= n_locals {
+            return None;
+        }
+        let gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner,
+        } = tcx.kind_of(body.locals[i].ty)
+        else {
+            return None;
+        };
+        tcx.is_payload_enum(*inner).then_some(*inner)
+    };
+    let mut sites: Vec<(usize, usize, Local, gossamer_types::Ty)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if place.projection.as_slice() != [crate::ir::Projection::Deref]
+                || matches!(rvalue, Rvalue::Use(Operand::Const(_)))
+            {
+                continue;
+            }
+            if let Some(pointee) = pointee_of(place.local) {
+                sites.push((bi, si, place.local, pointee));
+            }
+        }
+    }
+    if sites.is_empty() {
+        return;
+    }
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    for (bi, si, reference, pointee) in sites.into_iter().rev() {
+        let span = body.blocks[bi].stmts[si].span;
+        let mut push_local = |ty: gossamer_types::Ty| -> Local {
+            let local = Local(u32::try_from(body.locals.len()).expect("local index fits in u32"));
+            body.locals.push(LocalDecl {
+                ty,
+                debug_name: None,
+                mutable: false,
+                region: false,
+            });
+            local
+        };
+        let old = push_local(pointee);
+        let dest = push_local(unit_ty);
+        body.blocks[bi]
+            .stmts
+            .insert(si + 1, rc_call_stmt("gos_rt_rc_release", dest, old, span));
+        body.blocks[bi].stmts.insert(
+            si,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(old),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_load",
+                        args: vec![
+                            Operand::Copy(Place::local(reference)),
+                            Operand::Const(ConstValue::Int(0)),
+                        ],
+                    },
+                },
+                span,
+            },
+        );
+    }
+}
+
 /// Reclaims a channel that never leaves the function that made it.
 ///
 /// A channel is shared: the sender end, the receiver end, and any goroutine
@@ -5819,6 +6068,13 @@ fn emit_channel_drops(body: &mut Body, handle: Local) {
     );
 }
 
+/// Tells a channel what its element word owns, at each send.
+///
+/// The send mints the channel's share of the element's heap storage (see
+/// `stores_aggregate_by_pointer`); a receiver gives it back, and a value nobody
+/// receives is given back by the channel's teardown - which needs to know the
+/// shape of the word it is holding, and learns it here, where the element's
+/// static type is in hand.
 pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
 
@@ -5960,6 +6216,14 @@ pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &gossamer_types::Ty
     }
 }
 
+/// Emits the give-back for `carrier.map(f)`.
+///
+/// `map` hands the payload to the closure, which answers a value of its own (a
+/// parameter it returns unchanged mints the caller's share), so the receiver's
+/// payload has no holder left. A carrier never releases a `String` or `Vec`
+/// payload of its own accord, so the release is emitted at the call. The
+/// helper answers the arm: an `Err` / `None` payload word belongs to the value
+/// the mapped carrier still carries.
 pub(crate) fn release_mapped_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
 
@@ -6283,6 +6547,20 @@ fn successors_of(t: &Terminator) -> Vec<usize> {
     }
 }
 
+/// Clears the region flag on every call result.
+///
+/// A local created while a region is open is region storage only where the
+/// allocation came from the region's bump. A call result does not: a user
+/// function allocates under its own frame's rules, and the string helpers
+/// promote a copy of region-backed bytes to the heap so a recycled slab cannot
+/// land on its own source. Neither is reclaimed by the slab sweep at pop, so
+/// the frame has to release it.
+///
+/// Clearing the flag only lets the ownership rules apply; it never makes a
+/// borrowed result owned. Where a result really is region storage, every free
+/// path (`gos_rt_rc_release`, `gos_rt_vec_free`, `str_free_impl`) answers an
+/// address-range test and returns without touching the memory, so a release
+/// the region already reclaimed is a no-op.
 pub(crate) fn clear_region_on_call_results(body: &mut Body) {
     let mut results: Vec<Local> = Vec::new();
     for block in &body.blocks {
@@ -6918,6 +7196,7 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                         callee,
                         Operand::Const(ConstValue::Str(name))
                             if appends_through_container(name.as_str())
+                                || borrows_vec_receiver(name.as_str())
                     );
                     for (idx, op) in args.iter().enumerate() {
                         if in_place_container && idx == 0 {
@@ -7573,9 +7852,31 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
     // candidates to runtime container shapes; we trust the MIR's
     // type assignment and skip a redundant TyKind check here.
     let _ = TyKind::Bool; // silence unused-import lint outside the closure
+    // A store into a module global hands the container to a cell that outlives
+    // every frame, so the frame that built it keeps no claim on it.
+    let stored_in_static = {
+        let mut stored = vec![false; body.locals.len()];
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let StatementKind::StaticStore {
+                    value: Operand::Copy(p),
+                    ..
+                } = &stmt.kind
+                    && p.projection.is_empty()
+                    && (p.local.0 as usize) < stored.len()
+                {
+                    stored[p.local.0 as usize] = true;
+                }
+            }
+        }
+        stored
+    };
     let drop_targets_all: Vec<(Local, &'static str)> = (0..owner_ctor.len())
         .filter_map(|i| {
             let free = owner_ctor[i]?;
+            if stored_in_static[i] {
+                return None;
+            }
             if (moved_into_return[i] || moved_into_aggregate[i]) && !mints_own_share[i] {
                 return None;
             }
@@ -8677,6 +8978,23 @@ pub(crate) fn hoist_loop_carried_releases(body: &mut Body, tcx: &gossamer_types:
         after_stmt: usize,
         local: Local,
     }
+    // A borrowed local is pinned: the reference names its slot and outlives
+    // the statement that took it, so the local's last direct mention is not
+    // where its value stops being read. The same rule
+    // [`insert_early_releases`] applies for the same reason.
+    let mut borrowed: Vec<bool> = vec![false; n_locals];
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign {
+                rvalue: Rvalue::Ref { place, .. },
+                ..
+            } = &stmt.kind
+                && (place.local.0 as usize) < n_locals
+            {
+                borrowed[place.local.0 as usize] = true;
+            }
+        }
+    }
     let mut hoists: Vec<Hoist> = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
         for si in 0..block.stmts.len().saturating_sub(1) {
@@ -8698,7 +9016,7 @@ pub(crate) fn hoist_loop_carried_releases(body: &mut Body, tcx: &gossamer_types:
                 continue;
             }
             let x = xp.local;
-            if !is_rc(x) {
+            if !is_rc(x) || borrowed[x.0 as usize] {
                 continue;
             }
             let reassign = matches!(&block.stmts[si + 1].kind,
@@ -8919,6 +9237,15 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
         return;
     }
     let is_json_rt = |name: &str| name.starts_with("gos_rt_json_");
+    // A handle read out of a container is the container's, not the frame's:
+    // the container hands back the slot's word and reclaims it at its own
+    // death, so freeing it here would give the same handle back twice.
+    let borrows_from_container = |name: &str| {
+        name.starts_with("gos_rt_vec_get")
+            || name.starts_with("gos_rt_iter")
+            || name.starts_with("gos_rt_deque_get")
+            || name.starts_with("gos_rt_map_get")
+    };
     // Whole-local handle moves (`v = Copy(tmp)` with both sides
     // JSON-typed): ownership transfers when the move is the source's
     // ONLY value read and its only such move - the destination owns
@@ -9070,14 +9397,23 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
                 let i = place.local.0 as usize;
                 if candidate[i] {
                     match rvalue {
+                        Rvalue::CallIntrinsic { name, .. } if borrows_from_container(name) => {
+                            candidate[i] = false;
+                        }
                         Rvalue::CallIntrinsic { .. } => init_sites[i].push((bi, si)),
                         Rvalue::Use(Operand::Const(ConstValue::Int(_))) => {}
+                        // A move carries the source's ownership, so it hands
+                        // over a free only when the source had one to give.
                         Rvalue::Use(Operand::Copy(src))
                             if src.projection.is_empty()
                                 && (src.local.0 as usize) < n_locals
                                 && moved_from[src.local.0 as usize] =>
                         {
-                            init_sites[i].push((bi, si));
+                            if candidate[src.local.0 as usize] {
+                                init_sites[i].push((bi, si));
+                            } else {
+                                candidate[i] = false;
+                            }
                         }
                         _ => candidate[i] = false,
                     }
@@ -9114,7 +9450,11 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
                     && (destination.local.0 as usize) < n_locals
                     && candidate[destination.local.0 as usize]
                 {
-                    init_sites[destination.local.0 as usize].push((bi, usize::MAX));
+                    if callee_name.is_some_and(borrows_from_container) {
+                        candidate[destination.local.0 as usize] = false;
+                    } else {
+                        init_sites[destination.local.0 as usize].push((bi, usize::MAX));
+                    }
                 }
             }
             Terminator::SwitchInt { discriminant, .. } => {
@@ -9212,5 +9552,224 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
             mutable: false,
             region: false,
         });
+    }
+}
+
+/// Marks the payload read that takes an aggregate copy a container allocated.
+///
+/// A container whose elements are wider than a word answers an element as the
+/// address of a copy it allocates, so the value stays readable after the slot
+/// it came from is written over. The copy is the reader's, and the back ends
+/// reclaim it once its words are in the destination's own storage. Only an
+/// aggregate with no reference-counted field is marked; a guarded one carries
+/// its children through the copy passes.
+pub(crate) fn mark_owned_aggregate_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    use gossamer_types::TyKind;
+    let n_locals = body.locals.len();
+    if n_locals == 0 || body.blocks.is_empty() {
+        return;
+    }
+
+    // Container reads whose payload word is a freshly allocated copy of a
+    // multi-slot element rather than the element's own storage.
+    let mints_copy = |name: &str| {
+        matches!(
+            name,
+            "gos_rt_vec_pop_opt"
+                | "gos_rt_vec_remove_safe"
+                | "gos_rt_vec_first"
+                | "gos_rt_vec_last"
+                | "gos_rt_vec_get_opt"
+                | "gos_rt_deque_pop_front"
+                | "gos_rt_deque_pop_back"
+                | "gos_rt_deque_peek_front"
+                | "gos_rt_deque_peek_back"
+                | "gos_rt_bheap_max_pop_desc"
+                | "gos_rt_bheap_min_pop_desc"
+                | "gos_rt_bheap_peek_elem"
+        )
+    };
+
+    let mut carrier = vec![false; n_locals];
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign { place, rvalue } = &stmt.kind
+                && place.projection.is_empty()
+                && (place.local.0 as usize) < n_locals
+                && let Rvalue::CallIntrinsic { name, .. } = rvalue
+                && mints_copy(name)
+            {
+                carrier[place.local.0 as usize] = true;
+            }
+        }
+        if let Terminator::Call {
+            callee,
+            destination,
+            ..
+        } = &block.terminator
+            && let Operand::Const(ConstValue::Str(name)) = callee
+            && mints_copy(name)
+            && destination.projection.is_empty()
+            && (destination.local.0 as usize) < n_locals
+        {
+            carrier[destination.local.0 as usize] = true;
+        }
+    }
+    if !carrier.iter().any(|c| *c) {
+        return;
+    }
+
+    // A payload local owns its copy when the element is a multi-slot
+    // aggregate whose fields the runtime does not count.
+    let owns_copy = |ty: gossamer_types::Ty| -> bool {
+        if tcx.aggr_copy_meta(ty).is_some() {
+            return false;
+        }
+        matches!(
+            tcx.kind_of(ty),
+            TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. }
+        ) && aggr_size_bytes(tcx, ty) > 8
+    };
+
+    let mut renames: Vec<(usize, usize)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            let Rvalue::CallIntrinsic { name, args } = rvalue else {
+                continue;
+            };
+            if *name != "gos_rt_result_payload"
+                || !place.projection.is_empty()
+                || (place.local.0 as usize) >= n_locals
+                || !owns_copy(body.locals[place.local.0 as usize].ty)
+            {
+                continue;
+            }
+            if let Some(Operand::Copy(src)) = args.first()
+                && src.projection.is_empty()
+                && (src.local.0 as usize) < n_locals
+                && carrier[src.local.0 as usize]
+            {
+                renames.push((bi, si));
+            }
+        }
+    }
+    for (bi, si) in renames {
+        if let StatementKind::Assign {
+            rvalue: Rvalue::CallIntrinsic { name, .. },
+            ..
+        } = &mut body.blocks[bi].stmts[si].kind
+        {
+            *name = "gos_result_payload_owned";
+        }
+    }
+}
+
+/// A vector helper that reads or writes through the vector it is handed
+/// without taking a share of it or keeping a pointer to it.
+///
+/// Such a call stands beside the value rather than between it and the local a
+/// later move hands it to, so it does not make the vector's ownership
+/// ambiguous.
+fn borrows_vec_receiver(name: &str) -> bool {
+    if !name.starts_with("gos_rt_vec_") {
+        return matches!(name, "gos_rt_len");
+    }
+    !matches!(
+        name,
+        "gos_rt_vec_free"
+            | "gos_rt_vec_retain"
+            | "gos_rt_vec_mark_shared"
+            | "gos_rt_vec_assign"
+            | "gos_rt_vec_clone"
+            | "gos_rt_vec_set_slot_children"
+            | "gos_rt_vec_set_elem_meta"
+    )
+}
+
+/// Gives back the share a frame minted for a holder when the binding that
+/// minted it is rebound.
+///
+/// A store into a heap object takes a share of the value it writes, and the
+/// frame keeps its own. Rebinding the frame's name to the object that now
+/// holds the value leaves that share with no name, so it is returned here.
+pub(crate) fn release_rebound_rc_locals(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    let n_locals = body.locals.len();
+    let arity = body.arity as usize;
+    if n_locals == 0 {
+        return;
+    }
+    let is_rc = |l: Local| -> bool {
+        let i = l.0 as usize;
+        i > arity && i < n_locals && tcx.is_rc_managed(body.locals[i].ty) && !body.locals[i].region
+    };
+    let bare_arg = |args: &[Operand]| -> Option<Local> {
+        match args.first() {
+            Some(Operand::Copy(p)) if p.projection.is_empty() => Some(p.local),
+            _ => None,
+        }
+    };
+    let mut sites: Vec<(usize, usize, Local)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        // Locals this block minted a holder's share for, still unbalanced.
+        let mut minted: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if let Rvalue::CallIntrinsic { name, args } = rvalue {
+                match *name {
+                    "gos_rt_rc_retain" => {
+                        if let Some(l) = bare_arg(args)
+                            && is_rc(l)
+                        {
+                            minted.insert(l.0);
+                        }
+                        continue;
+                    }
+                    "gos_rt_rc_release" => {
+                        if let Some(l) = bare_arg(args) {
+                            minted.remove(&l.0);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            if !place.projection.is_empty() || !minted.contains(&place.local.0) {
+                continue;
+            }
+            // A rebinding that names another value, not one derived from the
+            // local itself.
+            let rebinds = match rvalue {
+                Rvalue::Use(Operand::Copy(src)) => {
+                    src.projection.is_empty() && src.local != place.local
+                }
+                _ => false,
+            };
+            if rebinds {
+                sites.push((bi, si, place.local));
+            }
+            minted.remove(&place.local.0);
+        }
+    }
+    if sites.is_empty() {
+        return;
+    }
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    for (bi, si, local) in sites.into_iter().rev() {
+        let span = body.blocks[bi].stmts[si].span;
+        let dest = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+        body.locals.push(LocalDecl {
+            ty: unit_ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        body.blocks[bi]
+            .stmts
+            .insert(si, rc_call_stmt("gos_rt_rc_release", dest, local, span));
     }
 }

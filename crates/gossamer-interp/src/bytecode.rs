@@ -1534,6 +1534,21 @@ pub enum Op {
         /// Positional field index.
         idx: u16,
     },
+    /// `receiver.fields[idx] = registers[src]` on a `Value::Variant`.
+    ///
+    /// A payload matched through a mutable place is named in place, but the
+    /// interpreter's values are copy-on-write, so a mutation lands on the
+    /// binding's own value. This publishes it back into the variant it came
+    /// from, which is what makes `match self { V(x) => x.set(..) }` reach the
+    /// enum a `&mut self` method was called on.
+    VariantFieldSet {
+        /// Register holding the `Value::Variant`.
+        receiver: Reg,
+        /// Positional field index.
+        idx: u16,
+        /// Register holding the replacement payload.
+        src: Reg,
+    },
     /// `dst = (src is Value::Struct named consts[name_idx])`. Drives
     /// native `match` arm tests on struct patterns.
     StructIs {

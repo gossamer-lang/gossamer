@@ -1,0 +1,25 @@
+// `regex::count` reports how many non-overlapping matches a pattern has
+// without building any of them, as a free function and as a method.
+
+use std::regex
+
+fn tally(p: regex::Pattern, text: String) -> i64 { regex::count(p, text) }
+
+fn main() {
+    let digits = regex::compile("[0-9]+").unwrap()
+    let text = "a1 bb22 ccc333 dddd4444"
+    println("free: {}", regex::count(digits, text))
+    println("method: {}", digits.count(text))
+    println("through a call: {}", tally(digits, text))
+    println("agrees with find_all: {}", regex::find_all(digits, text).len())
+    println("none: {}", regex::count(digits, "no digits here"))
+    println("empty text: {}", regex::count(digits, ""))
+
+    let word = regex::compile("\\w+").unwrap()
+    println("words: {}", word.count("one two three four five"))
+
+    let mut total = 0
+    let mut i = 0
+    while i < 20000 { total += digits.count(text); i += 1 }
+    println("hot total: {}", total)
+}

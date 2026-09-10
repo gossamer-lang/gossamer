@@ -2694,6 +2694,10 @@ impl<'a> TypeChecker<'a> {
                 }
                 ItemKind::Const(decl) => self.register_const(item.id, &decl.ty, &decl.value),
                 ItemKind::Static(decl) => {
+                    // A static's declared type is what a reference to it
+                    // reads, exactly as a `const`'s is. Without it every use
+                    // took a fresh variable and went unchecked.
+                    self.register_const(item.id, &decl.ty, &decl.value);
                     if let Some(def) = self.resolutions.definition_of(item.id) {
                         self.static_mutability.insert(
                             def,
@@ -7486,6 +7490,7 @@ impl<'a> TypeChecker<'a> {
             "is_match" => (vec![string], bool_ty),
             "find" => (vec![string], self.option_adt_ty(span_ty)),
             "find_all" => (vec![string], spans),
+            "count" => (vec![string], self.tcx.int_ty(IntTy::I64)),
             "captures" => (vec![string], self.option_adt_ty(groups)),
             "captures_all" => (vec![string], all_groups),
             "replace" | "replace_all" => (vec![string, string], string),
@@ -7880,6 +7885,25 @@ impl<'a> TypeChecker<'a> {
         args: &[Expr],
         arg_tys: &[Ty],
     ) -> Option<Ty> {
+        // Every query below reads a document. An `Option<json::Value>` - what
+        // `json::get` answers - is not one, and passing it read as `None` at
+        // run time rather than being refused where it was written.
+        if matches!(
+            last,
+            "get"
+                | "at"
+                | "set"
+                | "keys"
+                | "len"
+                | "is_null"
+                | "as_i64"
+                | "as_f64"
+                | "as_str"
+                | "as_bool"
+                | "as_array"
+        ) {
+            self.reject_optional_json_document(args, arg_tys);
+        }
         match last {
             "parse" | "decode" => {
                 let j = self.tcx.json_value_ty();
@@ -7920,6 +7944,31 @@ impl<'a> TypeChecker<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Reports the document argument of a `json::` query that is a carrier.
+    ///
+    /// The queries take the value itself, so an `Option` or a `Result` reaches
+    /// one only where the writer meant to unwrap it first.
+    fn reject_optional_json_document(&mut self, args: &[Expr], arg_tys: &[Ty]) {
+        let (Some(&first_ty), Some(first)) = (arg_tys.first(), args.first()) else {
+            return;
+        };
+        let mut peeled = self.infer.resolve(self.tcx, first_ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(peeled).cloned() {
+            peeled = self.infer.resolve(self.tcx, inner);
+        }
+        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(peeled) else {
+            return;
+        };
+        // The two carrier sentinels: `Option` and `Result`.
+        if def.local != u32::MAX && def.local != u32::MAX - 1 {
+            return;
+        }
+        let found = self.render_public_ty(peeled);
+        let json_ty = self.tcx.json_value_ty();
+        let expected = self.render_public_ty(json_ty);
+        self.emit(TypeError::TypeMismatch { expected, found }, first.span);
     }
 
     /// Return type of a `DynValue::<name>(..)` constructor, or `None` when
@@ -14535,6 +14584,32 @@ impl<'a> TypeChecker<'a> {
         ));
     }
 
+    /// Checks an expression whose value the statement discards.
+    ///
+    /// An `if` here answers nothing, so each branch is checked on its own
+    /// terms. Joining them would make two branches that merely differ - one
+    /// answering an `Option<i64>`, the next an `Option<String>` - a type
+    /// error about a value nothing reads.
+    fn check_discarded_expr(&mut self, expr: &Expr) -> Ty {
+        let ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = &expr.kind
+        else {
+            return self.check_expr(expr);
+        };
+        let cond_ty = self.check_expr(condition);
+        let bool_ty = self.tcx.bool_ty();
+        self.unify(bool_ty, cond_ty, condition.span);
+        self.check_discarded_expr(then_branch);
+        if let Some(else_branch) = else_branch {
+            self.check_discarded_expr(else_branch);
+        }
+        let unit = self.tcx.unit();
+        self.record(expr.id, unit)
+    }
+
     fn check_if(
         &mut self,
         condition: &Expr,
@@ -15114,7 +15189,7 @@ impl<'a> TypeChecker<'a> {
                 self.check_let_stmt(pattern, ty.as_ref(), init.as_deref());
             }
             StmtKind::Expr { expr, .. } => {
-                let expr_ty = self.check_expr(expr);
+                let expr_ty = self.check_discarded_expr(expr);
                 // SPEC §9: a `Result<T, E>` value used as a statement (value
                 // discarded) is a compile error. The explicit discard form
                 // `let _ = expr` goes through `StmtKind::Let` and is not
@@ -16082,7 +16157,7 @@ impl<'a> TypeChecker<'a> {
                     let substs = self.substs_from_path(path);
                     self.tcx.intern(TyKind::FnDef { def, substs })
                 }
-                gossamer_resolve::DefKind::Const => self
+                gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => self
                     .const_tys
                     .get(&def)
                     .copied()
@@ -16184,7 +16259,9 @@ impl<'a> TypeChecker<'a> {
                     substs: crate::Substs::new(),
                 }))
             }
-            gossamer_resolve::DefKind::Const => self.const_tys.get(&def).copied(),
+            gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => {
+                self.const_tys.get(&def).copied()
+            }
             _ => None,
         }
     }

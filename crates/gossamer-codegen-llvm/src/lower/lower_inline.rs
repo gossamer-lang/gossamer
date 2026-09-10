@@ -411,6 +411,34 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    /// True when the operand is a `Vec`/`[T]` whose element word is a handle
+    /// the vector owns, so a store has to give back the share the slot held.
+    /// Such a store goes through the runtime helper rather than the inline
+    /// write.
+    pub(crate) fn vec_operand_elem_owns_word(&self, op: &Operand) -> bool {
+        let Operand::Copy(pl) = op else {
+            return false;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let elem = match self.tcx.kind(ty) {
+            Some(TyKind::Vec(e) | TyKind::Slice(e)) => *e,
+            _ => return false,
+        };
+        matches!(
+            self.tcx.kind(elem),
+            Some(
+                TyKind::String
+                    | TyKind::Vec(_)
+                    | TyKind::Slice(_)
+                    | TyKind::HashMap { .. }
+                    | TyKind::JsonValue
+            )
+        ) || self.tcx.is_rc_managed(elem)
+    }
+
     /// True when the operand is a `Vec`/`[T]` whose element type is statically
     /// `bool` - the only primitive stored at a 1-byte stride. Lets the inline
     /// get/set emit a constant-stride byte access (load/store `i8`) instead of

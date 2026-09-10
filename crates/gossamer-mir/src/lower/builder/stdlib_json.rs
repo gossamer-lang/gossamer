@@ -501,6 +501,11 @@ impl<'a> Builder<'a> {
         });
         self.set_current(next);
 
+        // A `json::Value` field is handed over as the caller's own handle, so a
+        // struct carrying one leaves every box in the vector alone.
+        let owns_every_value = !field_tys
+            .iter()
+            .any(|&fty| matches!(self.tcx.kind_of(self.peel_ref_ty(fty)), TyKind::JsonValue));
         for (i, (name, &fty)) in field_names.iter().zip(field_tys.iter()).enumerate() {
             // Read the struct field by index projection.
             let field_local = self.fresh(fty);
@@ -591,16 +596,32 @@ impl<'a> Builder<'a> {
             self.set_current(next);
         }
 
-        // Build the json::Value object from the KV pairs vec.
+        // Build the json::Value object from the KV pairs vec. The constructor
+        // takes the boxes this walk built, so no level of a nested value is
+        // copied; a field that WAS a `json::Value` is the caller's own handle,
+        // so that shape keeps the borrowing form.
         let json_obj = self.fresh(json_val_ty);
         let next = self.new_block(span);
+        let ctor = if owns_every_value {
+            "gos_rt_json_value_object_owned"
+        } else {
+            "gos_rt_json_value_object"
+        };
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_json_value_object".to_string())),
+            callee: Operand::Const(ConstValue::Str(ctor.to_string())),
             args: vec![Operand::Copy(Place::local(pairs_vec))],
             destination: Place::local(json_obj),
             target: Some(next),
         });
         self.set_current(next);
+        if owns_every_value {
+            self.emit_assign(
+                Place::local(pairs_vec),
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                span,
+            );
+            return Some(json_obj);
+        }
 
         // Free the pairs vec immediately after use - it was only borrowed by
         // gos_rt_json_value_object, so we own it and must release it here.
@@ -609,6 +630,10 @@ impl<'a> Builder<'a> {
         // operates on all return paths unconditionally, so a pairs_vec drop
         // at the Return block would also fire along the text-mode arm where
         // pairs_vec was never initialised, producing gos_rt_vec_free(garbage).
+        //
+        // The constructor copied every value it was handed, so the boxes this
+        // walk built die with the vector. A field that WAS a `json::Value` is
+        // the caller's own handle and is left alone.
         let free_dest = self.fresh(unit_ty);
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
@@ -782,15 +807,32 @@ impl<'a> Builder<'a> {
         self.terminate(Terminator::Goto { target: header });
 
         self.set_current(exit);
+        // The constructor takes the element boxes this walk built; an element
+        // that WAS a `json::Value` is the caller's own handle, so that shape
+        // keeps the borrowing form.
+        let owns_elements = !matches!(self.tcx.kind_of(elem_ty), TyKind::JsonValue);
         let json_arr = self.fresh(json_val_ty);
         let next = self.new_block(span);
+        let ctor = if owns_elements {
+            "gos_rt_json_value_array_owned"
+        } else {
+            "gos_rt_json_value_array"
+        };
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_json_value_array".to_string())),
+            callee: Operand::Const(ConstValue::Str(ctor.to_string())),
             args: vec![Operand::Copy(Place::local(elems))],
             destination: Place::local(json_arr),
             target: Some(next),
         });
         self.set_current(next);
+        if owns_elements {
+            self.emit_assign(
+                Place::local(elems),
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                span,
+            );
+            return Some(json_arr);
+        }
 
         // The array constructor only borrowed the slots, so the vec holding
         // them is released here, and the sentinel keeps the drop-at-return
@@ -850,12 +892,231 @@ impl<'a> Builder<'a> {
                 Some(dest)
             }
             TyKind::Adt { def, .. } => self.build_struct_json_object(local, def, span),
+            TyKind::HashMap { key, value, .. } => {
+                self.build_json_object_from_map(local, key, value, span)
+            }
             TyKind::Tuple(elem_tys) => self.build_json_array_from_tuple(local, &elem_tys, span),
             TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => {
                 self.build_json_array_from_seq(local, ty, elem, span)
             }
             _ => None,
         }
+    }
+
+    /// Builds the `json::Value` object a `Map<String, V>` renders as, one
+    /// member per key in the map's own order.
+    ///
+    /// A JSON member name is text, so only a string-keyed map has a rendering;
+    /// every other key type answers `None` and the caller renders `null`.
+    pub(crate) fn build_json_object_from_map(
+        &mut self,
+        map_local: Local,
+        key_ty: gossamer_types::Ty,
+        value_ty: gossamer_types::Ty,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        if !matches!(self.tcx.kind_of(key_ty), TyKind::String) {
+            return None;
+        }
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let unit_ty = self.tcx.unit();
+        let string_ty = self.tcx.string_ty();
+        let json_val_ty = self.tcx.json_value_ty();
+        let vec_of_i64_ty = self.tcx.intern(TyKind::Vec(i64_ty));
+
+        let mut value_ty = value_ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(value_ty) {
+            value_ty = *inner;
+        }
+
+        let keys_ty = self.tcx.intern(TyKind::Vec(string_ty));
+        let keys = self.fresh(keys_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_map_keys_vec".to_string())),
+            args: vec![Operand::Copy(Place::local(map_local))],
+            destination: Place::local(keys),
+            target: Some(next),
+        });
+        self.set_current(next);
+
+        let pairs_vec = self.fresh(vec_of_i64_ty);
+        let elem_size = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(elem_size),
+            Rvalue::Use(Operand::Const(ConstValue::Int(8))),
+            span,
+        );
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("Vec::new".to_string())),
+            args: vec![Operand::Copy(Place::local(elem_size))],
+            destination: Place::local(pairs_vec),
+            target: Some(next),
+        });
+        self.set_current(next);
+
+        let len_local = self.fresh(i64_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_vec_len".to_string())),
+            args: vec![Operand::Copy(Place::local(keys))],
+            destination: Place::local(len_local),
+            target: Some(next),
+        });
+        self.set_current(next);
+
+        let counter = self.push_local(i64_ty, None, true);
+        self.emit_assign(
+            Place::local(counter),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+
+        let header = self.new_block(span);
+        let body_block = self.new_block(span);
+        let step_block = self.new_block(span);
+        let exit = self.new_block(span);
+        self.terminate(Terminator::Goto { target: header });
+
+        self.set_current(header);
+        let bool_ty = self.tcx.bool_ty();
+        let cmp = self.fresh(bool_ty);
+        self.emit_assign(
+            Place::local(cmp),
+            Rvalue::BinaryOp {
+                op: BinOp::Lt,
+                lhs: Operand::Copy(Place::local(counter)),
+                rhs: Operand::Copy(Place::local(len_local)),
+            },
+            span,
+        );
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(cmp)),
+            arms: vec![(0, exit)],
+            default: body_block,
+        });
+
+        self.set_current(body_block);
+        // The key word is the member's name text; it is read as a word so the
+        // object constructor copies the bytes it points at.
+        let key_local = self.fresh(i64_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_i64".to_string())),
+            args: vec![
+                Operand::Copy(Place::local(keys)),
+                Operand::Copy(Place::local(counter)),
+            ],
+            destination: Place::local(key_local),
+            target: Some(next),
+        });
+        self.set_current(next);
+
+        // The member's value word. A `String` carries its own reader so the
+        // pointer keeps its string identity; every other shape is one word.
+        let value_reader = if matches!(self.tcx.kind_of(value_ty), TyKind::String) {
+            "gos_rt_map_get_str_str"
+        } else {
+            "gos_rt_map_get_str_i64"
+        };
+        let value_local = self.fresh(value_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(value_reader.to_string())),
+            args: vec![
+                Operand::Copy(Place::local(map_local)),
+                Operand::Copy(Place::local(key_local)),
+            ],
+            destination: Place::local(value_local),
+            target: Some(next),
+        });
+        self.set_current(next);
+
+        let member = self
+            .build_json_value(value_local, value_ty, span)
+            .unwrap_or_else(|| self.build_json_null(span));
+
+        for pushed in [key_local, member] {
+            let push_dest = self.fresh(unit_ty);
+            let next = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_vec_push".to_string())),
+                args: vec![
+                    Operand::Copy(Place::local(pairs_vec)),
+                    Operand::Copy(Place::local(pushed)),
+                ],
+                destination: Place::local(push_dest),
+                target: Some(next),
+            });
+            self.set_current(next);
+        }
+        self.terminate(Terminator::Goto { target: step_block });
+
+        self.set_current(step_block);
+        self.emit_assign(
+            Place::local(counter),
+            Rvalue::BinaryOp {
+                op: BinOp::Add,
+                lhs: Operand::Copy(Place::local(counter)),
+                rhs: Operand::Const(ConstValue::Int(1)),
+            },
+            span,
+        );
+        self.terminate(Terminator::Goto { target: header });
+
+        self.set_current(exit);
+        // The constructor takes the value boxes this walk built, and the
+        // vector with them; a `json::Value` value is the caller's own handle,
+        // so that shape keeps the borrowing form.
+        let owns_values = !matches!(self.tcx.kind_of(value_ty), TyKind::JsonValue);
+        let json_obj = self.fresh(json_val_ty);
+        let next = self.new_block(span);
+        let ctor = if owns_values {
+            "gos_rt_json_value_object_owned"
+        } else {
+            "gos_rt_json_value_object"
+        };
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(ctor.to_string())),
+            args: vec![Operand::Copy(Place::local(pairs_vec))],
+            destination: Place::local(json_obj),
+            target: Some(next),
+        });
+        self.set_current(next);
+        self.emit_assign(
+            Place::local(pairs_vec),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+        if !owns_values {
+            let free_dest = self.fresh(unit_ty);
+            let next = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_vec_free".to_string())),
+                args: vec![Operand::Copy(Place::local(pairs_vec))],
+                destination: Place::local(free_dest),
+                target: Some(next),
+            });
+            self.set_current(next);
+        }
+        let free_dest = self.fresh(unit_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_vec_free".to_string())),
+            args: vec![Operand::Copy(Place::local(keys))],
+            destination: Place::local(free_dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        self.emit_assign(
+            Place::local(keys),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+
+        Some(json_obj)
     }
 
     /// Builds the `json::Value` array a tuple renders as. Its elements may
@@ -915,25 +1176,38 @@ impl<'a> Builder<'a> {
             self.set_current(next);
         }
 
+        // The constructor takes the element boxes this walk built; an element
+        // that WAS a `json::Value` is the caller's own handle, so a tuple
+        // carrying one keeps the borrowing form.
+        let owns_elements = !elem_tys
+            .iter()
+            .any(|&t| matches!(self.tcx.kind_of(t), TyKind::JsonValue));
         let json_arr = self.fresh(json_val_ty);
         let next = self.new_block(span);
+        let ctor = if owns_elements {
+            "gos_rt_json_value_array_owned"
+        } else {
+            "gos_rt_json_value_array"
+        };
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_json_value_array".to_string())),
+            callee: Operand::Const(ConstValue::Str(ctor.to_string())),
             args: vec![Operand::Copy(Place::local(elems))],
             destination: Place::local(json_arr),
             target: Some(next),
         });
         self.set_current(next);
 
-        let free_dest = self.fresh(unit_ty);
-        let next = self.new_block(span);
-        self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_vec_free".to_string())),
-            args: vec![Operand::Copy(Place::local(elems))],
-            destination: Place::local(free_dest),
-            target: Some(next),
-        });
-        self.set_current(next);
+        if !owns_elements {
+            let free_dest = self.fresh(unit_ty);
+            let next = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_vec_free".to_string())),
+                args: vec![Operand::Copy(Place::local(elems))],
+                destination: Place::local(free_dest),
+                target: Some(next),
+            });
+            self.set_current(next);
+        }
         self.emit_assign(
             Place::local(elems),
             Rvalue::Use(Operand::Const(ConstValue::Int(0))),

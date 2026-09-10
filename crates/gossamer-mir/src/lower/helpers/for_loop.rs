@@ -286,12 +286,21 @@ pub(crate) fn parse_int(text: &str) -> Option<i128> {
 }
 
 pub(crate) fn parse_float(text: &str) -> f64 {
+    strip_float_suffix(text)
+        .replace('_', "")
+        .parse::<f64>()
+        .unwrap_or(0.0)
+}
+
+/// Drops a float literal's width suffix, leaving the digits and any
+/// `_` separators the source wrote.
+pub(crate) fn strip_float_suffix(text: &str) -> &str {
     for suffix in &["f32", "f64"] {
         if let Some(stripped) = text.strip_suffix(suffix) {
-            return stripped.parse::<f64>().unwrap_or(0.0);
+            return stripped;
         }
     }
-    text.parse::<f64>().unwrap_or(0.0)
+    text
 }
 
 pub(crate) fn strip_int_suffix(text: &str) -> String {

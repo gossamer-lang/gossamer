@@ -82,7 +82,7 @@ gossamer-runtime = { workspace = true }
 gossamer-types = { workspace = true }
 parking_lot = { workspace = true }
 rustyline = { version = "18", default-features = false, features = ["custom-bindings", "with-file-history"] }
-regex = { version = "1", default-features = false, features = ["std", "unicode"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 terminal_size = "0.4"
 syn = { version = "2", features = ["full", "extra-traits"] }
 quote = "1"

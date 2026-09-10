@@ -1291,7 +1291,10 @@ pub(super) fn lower_intrinsic_call_io_math(
             );
             Ok(true)
         }
-        "gos_enum_load" => {
+        // The cranelift tier writes a payload aggregate into the slot as the
+        // address of the block carrying its words, so the slot's own contents
+        // are already where those words live.
+        "gos_enum_load" | "gos_enum_slot_ptr" => {
             // Load i64 at ((ptr & !7) + off) - enum payload read; mask is
             // a no-op for header-repr (aligned) pointers. A two-word
             // `Option` / `Result` / inline-enum field occupies both its words
@@ -1348,6 +1351,57 @@ pub(super) fn lower_intrinsic_call_io_math(
             let v = builder.block_params(done_b)[0];
             if !destination.projection.is_empty() {
                 bail!("native codegen: gos_enum_load destination cannot have projections");
+            }
+            // A multi-slot or counted-handle aggregate payload is stored as a
+            // pointer to a heap-boxed copy. The binding takes the words by
+            // value and a share of the box's own children, so it still names
+            // them once the node that carried it is gone.
+            let dest_ty = body.local_ty(destination.local);
+            let boxed_slots = boxed_payload_slots(tcx, dest_ty);
+            if let Some(slots) = boxed_slots {
+                let ptr_ty = module.target_config().pointer_type();
+                let slot =
+                    builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                        slots * 8,
+                        8,
+                    ));
+                let dst = builder.ins().stack_addr(ptr_ty, slot, 0);
+                let copy_b = builder.create_block();
+                let after_b = builder.create_block();
+                builder.ins().brif(v, copy_b, &[], after_b, &[]);
+                builder.switch_to_block(copy_b);
+                builder.seal_block(copy_b);
+                for word in 0..slots {
+                    let off = ir::immediates::Offset32::new(i32::try_from(word * 8).unwrap_or(0));
+                    let w = builder.ins().load(
+                        types::I64,
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        v,
+                        off,
+                    );
+                    builder.ins().store(
+                        cranelift_codegen::ir::MemFlagsData::trusted(),
+                        w,
+                        dst,
+                        off,
+                    );
+                }
+                let retain =
+                    intrinsics.extern_fn(module, "gos_rt_rc_retain_children", &[ptr_ty], &[])?;
+                let retain_ref = module.declare_func_in_func(retain, builder.func);
+                builder.ins().call(retain_ref, &[v]);
+                builder.ins().jump(after_b, &[]);
+                builder.switch_to_block(after_b);
+                builder.seal_block(after_b);
+                define_var_to(
+                    builder,
+                    locals,
+                    &intrinsics.body_cl_types,
+                    destination.local,
+                    dst,
+                );
+                return Ok(true);
             }
             define_var_to(
                 builder,

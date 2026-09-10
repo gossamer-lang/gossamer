@@ -620,12 +620,26 @@ unsafe fn heap_cmp(v: &GosVec, a: usize, b: usize, tags: *const u8) -> i64 {
     }
 }
 
+/// Element widths a sift's scratch buffer holds without touching the
+/// allocator. A heap element is a scalar, a handle, or a flat slot slab, so
+/// every ordinary one fits.
+const HEAP_SWAP_INLINE_BYTES: usize = 64;
+
 unsafe fn heap_swap(v: &GosVec, a: usize, b: usize) {
     if a == b {
         return;
     }
     let stride = v.elem_bytes as usize;
-    let mut scratch = vec![0u8; stride];
+    // A sift swaps once per level, so a scratch allocation here is one
+    // allocation per level per push and pop.
+    let mut inline = [0u8; HEAP_SWAP_INLINE_BYTES];
+    let mut spilled: Vec<u8>;
+    let scratch: &mut [u8] = if stride <= HEAP_SWAP_INLINE_BYTES {
+        &mut inline[..stride]
+    } else {
+        spilled = vec![0u8; stride];
+        &mut spilled[..]
+    };
     unsafe {
         std::ptr::copy_nonoverlapping(heap_elem(v, a), scratch.as_mut_ptr(), stride);
         std::ptr::copy_nonoverlapping(heap_elem(v, b), heap_elem(v, a), stride);

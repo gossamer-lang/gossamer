@@ -974,8 +974,14 @@ pub(crate) fn insert_rc_reuse(body: &mut Body, tcx: &TyCtxt) {
                     // being built retains it AFTER the constructor - and an
                     // alias of S reached through another local is invisible
                     // to a scan of this block. Pair only when nothing else in
-                    // the body reads S, so no reader can hold its block.
+                    // the body reads S, so no reader can hold its block. S
+                    // must also already hold its value where the drop-reuse
+                    // lands, so a definition of S between the constructor and
+                    // the release rules the pairing out.
                     reads_local_elsewhere(body, s_local, bi, ri)
+                        || (ci..ri).any(|k| {
+                            stmt_writes_bare(&body.blocks[bi].stmts[k], s_local)
+                        })
                 };
                 if clash {
                     continue;

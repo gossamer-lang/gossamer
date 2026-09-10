@@ -2085,6 +2085,7 @@ fn install_regex_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "is_match",
         "find",
         "find_all",
+        "count",
         "captures",
         "captures_all",
         "replace",

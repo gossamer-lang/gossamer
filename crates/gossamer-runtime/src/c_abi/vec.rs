@@ -101,6 +101,11 @@ pub mod vec_elem_kind {
     /// vec's teardown frees the one it holds via `gos_rt_set_free` - the
     /// same contract [`MAP`] carries inside an `AGGR_OWNED` layout.
     pub const SET: u8 = 11;
+    /// Element is a `*mut GosJson` handle into a parsed document. Each handle
+    /// holds a share of the document's tree, so `gos_rt_vec_free` gives every
+    /// one back - without it a vector of children keeps the whole document
+    /// alive for as long as the program runs.
+    pub const JSON: u8 = 12;
 }
 
 #[repr(C)]
@@ -1137,6 +1142,7 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
         | vec_elem_kind::VEC
         | vec_elem_kind::RC_ENUM
         | vec_elem_kind::MAP
+        | vec_elem_kind::JSON
             if s.elem_bytes == 8 =>
         {
             unsafe { (*out).elem_kind = s.elem_kind };
@@ -1155,6 +1161,12 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     },
                     vec_elem_kind::RC_ENUM => unsafe {
                         crate::c_abi::rc::gos_rt_rc_retain(child);
+                    },
+                    // A JSON handle carries no count, so the copy takes a box
+                    // of its own onto the same document.
+                    vec_elem_kind::JSON => unsafe {
+                        let cloned = crate::c_abi::json::gos_rt_json_clone_handle(child.cast());
+                        slot.write_unaligned((cloned.cast::<u8>()).expose_provenance());
                     },
                     // A `GosMap` carries no reference count, so a map element
                     // cannot be shared: the copy takes a table of its own and
@@ -1434,6 +1446,34 @@ pub(crate) unsafe fn vec_elem_shared_payload_word(v: &GosVec, idx: i64) -> i64 {
 /// Writes `value` to element `idx` of `v`, truncating to the
 /// header's `elem_bytes`. Same preconditions as
 /// [`vec_elem_load_i64`].
+/// Gives back the share the slot at `idx` holds, for an element kind whose
+/// word is a handle the vector owns.
+///
+/// The vector's teardown releases one share per slot, so a store that replaces
+/// a handle has to return the outgoing one here or the vector's own count is
+/// the only thing left naming it.
+pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64) {
+    if v.elem_bytes != 8 || v.ptr.is_null() || idx < 0 || idx >= v.len {
+        return;
+    }
+    let p = unsafe { v.ptr.add((idx as usize) * 8) };
+    let raw = unsafe { p.cast::<usize>().read_unaligned() };
+    // A slot storing back what it already holds keeps its one share.
+    if raw == 0 || raw == (incoming as usize) {
+        return;
+    }
+    let old: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+    match v.elem_kind {
+        vec_elem_kind::STRING => unsafe { crate::c_abi::string::gos_rt_str_free(old.cast()) },
+        vec_elem_kind::VEC => unsafe { crate::c_abi::map::gos_rt_vec_free(old.cast()) },
+        vec_elem_kind::MAP => unsafe { crate::c_abi::map::gos_rt_map_free(old.cast()) },
+        vec_elem_kind::SET => unsafe { crate::c_abi::map::gos_rt_set_free(old.cast()) },
+        vec_elem_kind::RC_ENUM => unsafe { crate::c_abi::rc::gos_rt_rc_release(old) },
+        vec_elem_kind::JSON => unsafe { crate::c_abi::json::gos_rt_json_free(old.cast()) },
+        _ => {}
+    }
+}
+
 pub(crate) unsafe fn vec_elem_store_i64(v: &GosVec, idx: i64, value: i64) {
     let p = unsafe { v.ptr.add((idx as usize) * (v.elem_bytes as usize)) };
     match v.elem_bytes {
@@ -1512,7 +1552,8 @@ fn header_elem_kind(requested: u8, site: &str) -> u8 {
         }
         kind if kind <= vec_elem_kind::ERROR
             || kind == vec_elem_kind::RC_ENUM
-            || kind == vec_elem_kind::AGGR_FLAT =>
+            || kind == vec_elem_kind::AGGR_FLAT
+            || kind == vec_elem_kind::JSON =>
         {
             kind
         }
@@ -1632,18 +1673,23 @@ pub unsafe extern "C" fn gos_rt_vec_repeat_primitive(
         let bytes = checked_buffer_bytes(count as usize, elem_bytes as usize);
         if bytes != 0 {
             let data = unsafe { (*vec).ptr.as_ptr() };
-            if value == 0 {
-                unsafe { std::ptr::write_bytes(data, 0, bytes) };
+            let encoded = value.to_ne_bytes();
+            let width = elem_bytes as usize;
+            let pattern = &encoded[..width];
+            if pattern.iter().all(|byte| *byte == pattern[0]) {
+                // Every byte of the element is the same, so the whole buffer is
+                // one fill - the case a zeroed or byte-repeating element takes.
+                unsafe { std::ptr::write_bytes(data, pattern[0], bytes) };
             } else {
-                let encoded = value.to_ne_bytes();
-                for index in 0..count as usize {
-                    unsafe {
-                        std::ptr::copy_nonoverlapping(
-                            encoded.as_ptr(),
-                            data.add(index * elem_bytes as usize),
-                            elem_bytes as usize,
-                        );
-                    }
+                // Write one element, then double the filled region until the
+                // buffer is covered: each step is one `memcpy` rather than one
+                // call per element.
+                unsafe { std::ptr::copy_nonoverlapping(pattern.as_ptr(), data, width) };
+                let mut filled = width;
+                while filled < bytes {
+                    let step = filled.min(bytes - filled);
+                    unsafe { std::ptr::copy_nonoverlapping(data, data.add(filled), step) };
+                    filled += step;
                 }
             }
         }
@@ -2164,6 +2210,7 @@ unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
             vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(ptr.cast()),
             vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(ptr.cast()),
             vec_elem_kind::RC_ENUM => crate::c_abi::rc::gos_rt_rc_release(ptr),
+            vec_elem_kind::JSON => crate::c_abi::json::gos_rt_json_free(ptr.cast()),
             _ => {}
         }
     }
@@ -2250,6 +2297,13 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_retain(ptr.cast()),
             vec_elem_kind::VEC => vec_retain_header(ptr.cast()),
             vec_elem_kind::RC_ENUM => crate::c_abi::rc::gos_rt_rc_retain(ptr),
+            // A JSON handle carries no count, so the copy takes a box of its
+            // own onto the same document and the slot names that one.
+            vec_elem_kind::JSON => {
+                let cloned = crate::c_abi::json::gos_rt_json_clone_handle(ptr.cast());
+                slot.cast::<usize>()
+                    .write_unaligned((cloned.cast::<u8>()).expose_provenance());
+            }
             // GosMap and GosError do not currently have a retain protocol.
             vec_elem_kind::MAP | vec_elem_kind::ERROR => return false,
             _ => {}

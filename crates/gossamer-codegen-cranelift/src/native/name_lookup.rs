@@ -158,7 +158,7 @@ pub(super) fn generic_rt_static_name(name: &str) -> Option<&'static str> {
     match name {
         "gos_rt_vec_get_i64_unchecked" => Some("gos_rt_vec_get_i64"),
         "gos_rt_vec_set_i64_unchecked" => Some("gos_rt_vec_set_i64"),
-        "gos_rt_weak_opt_payload" => Some("gos_rt_result_payload"),
+        "gos_rt_weak_opt_payload" | "gos_result_payload_owned" => Some("gos_rt_result_payload"),
         _ => gossamer_abi::lookup(name).map(|entry| entry.name),
     }
 }

@@ -2844,6 +2844,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::gos_rt_json_free as *const u8,
         ),
         (
+            "gos_rt_json_free_slots",
+            crate::c_abi::gos_rt_json_free_slots as *const u8,
+        ),
+        (
             "gos_rt_json_get",
             crate::c_abi::gos_rt_json_get as *const u8,
         ),
@@ -2890,6 +2894,14 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
         (
             "gos_rt_json_value_array",
             crate::c_abi::gos_rt_json_value_array as *const u8,
+        ),
+        (
+            "gos_rt_json_value_array_owned",
+            crate::c_abi::gos_rt_json_value_array_owned as *const u8,
+        ),
+        (
+            "gos_rt_json_value_object_owned",
+            crate::c_abi::gos_rt_json_value_object_owned as *const u8,
         ),
         (
             "gos_rt_json_value_bool",
@@ -4225,6 +4237,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
         (
             "gos_rt_regex_is_match",
             crate::c_abi::gos_rt_regex_is_match as *const u8,
+        ),
+        (
+            "gos_rt_regex_count",
+            crate::c_abi::gos_rt_regex_count as *const u8,
         ),
         (
             "gos_rt_regex_replace",

@@ -776,7 +776,7 @@ impl<'tcx> FnBuilder<'tcx> {
     /// `true` when the lvalue `place` is rooted at a `static mut` - the
     /// static side of [`Self::place_root_is_local`]. A field / index /
     /// deref chain bottoming out at a known mutable static matches.
-    fn place_root_is_mut_static(&self, place: &HirExpr) -> bool {
+    pub(crate) fn place_root_is_mut_static(&self, place: &HirExpr) -> bool {
         match &place.kind {
             HirExprKind::Path { segments, .. } => self.mut_static_global_name(segments).is_some(),
             HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {

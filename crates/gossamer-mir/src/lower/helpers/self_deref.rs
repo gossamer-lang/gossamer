@@ -36,7 +36,7 @@ pub(crate) fn load_reference_receiver_reads(bodies: &mut [Body], tcx: &mut TyCtx
     }
 }
 
-/// Names of the method bodies whose own receiver is a reference, so a call to
+/// Names of the method bodies whose own receiver is an address, so a call to
 /// one wants the reference rather than the value behind it.
 fn reference_receiver_methods(bodies: &[Body], tcx: &TyCtxt) -> HashSet<String> {
     bodies
@@ -45,10 +45,22 @@ fn reference_receiver_methods(bodies: &[Body], tcx: &TyCtxt) -> HashSet<String> 
         .filter(|body| {
             body.locals
                 .get(1)
-                .is_some_and(|recv| matches!(tcx.kind_of(recv.ty), TyKind::Ref { .. }))
+                .is_some_and(|recv| receiver_is_address(recv.ty, tcx))
         })
         .map(|body| body.name.clone())
         .collect()
+}
+
+/// Whether a receiver of type `ty` carries an address rather than a value.
+///
+/// A payload enum is a single word either way, so a shared receiver carries
+/// the node itself and only `&mut self` - the receiver a body rebinds whole -
+/// names the caller's slot.
+fn receiver_is_address(ty: Ty, tcx: &TyCtxt) -> bool {
+    let TyKind::Ref { mutability, inner } = tcx.kind_of(ty) else {
+        return false;
+    };
+    !tcx.is_payload_enum(*inner) || matches!(mutability, gossamer_types::Mutbl::Mut)
 }
 
 /// Whether `body` is a method, which is what makes local 1 its receiver.
@@ -56,22 +68,26 @@ fn is_method(body: &Body) -> bool {
     body.arity >= 1 && body.name.contains("::")
 }
 
-/// The scalar a body's receiver refers to, when it refers to one.
+/// The value a body's receiver refers to, when a read of that receiver has to
+/// load through it.
 ///
-/// Only a scalar is affected: for every other type the reference and the value
-/// are the same machine word, so a read of either answers the same.
+/// A scalar is one such: for every heap-backed type the reference and the
+/// value are the same machine word, so a read of either answers the same. A
+/// `&mut self` payload enum is the other, because that receiver names the
+/// caller's slot so the body can rebind the whole node through it.
 fn scalar_reference_receiver(body: &Body, tcx: &TyCtxt) -> Option<Ty> {
     if !is_method(body) {
         return None;
     }
-    let TyKind::Ref { inner, .. } = tcx.kind_of(body.locals.get(1)?.ty) else {
+    let TyKind::Ref { mutability, inner } = tcx.kind_of(body.locals.get(1)?.ty) else {
         return None;
     };
+    let is_mut = matches!(mutability, gossamer_types::Mutbl::Mut);
     let inner = *inner;
-    matches!(
+    (matches!(
         tcx.kind_of(inner),
         TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
-    )
+    ) || (is_mut && tcx.is_payload_enum(inner)))
     .then_some(inner)
 }
 
@@ -254,12 +270,9 @@ pub(crate) fn receiver_is_reference(bodies: &[Body], tcx: &TyCtxt) -> HashMap<St
         .iter()
         .filter(|body| is_method(body))
         .filter_map(|body| {
-            body.locals.get(1).map(|recv| {
-                (
-                    body.name.clone(),
-                    matches!(tcx.kind_of(recv.ty), TyKind::Ref { .. }),
-                )
-            })
+            body.locals
+                .get(1)
+                .map(|recv| (body.name.clone(), receiver_is_address(recv.ty, tcx)))
         })
         .collect()
 }

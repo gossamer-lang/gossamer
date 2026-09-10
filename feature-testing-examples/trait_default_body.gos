@@ -1,0 +1,83 @@
+// A trait's default method body belongs to every implementor that does not
+// override it.
+
+trait Bench {
+    fn prepare(&mut self) {}
+    fn label(&self) -> String { "unnamed" }
+    // A default body that calls another trait method: each implementor's copy
+    // has to reach its own, whatever the field layouts differ by.
+    fn warmup(&mut self, rounds: i64) { for i in 0..rounds { self.run(i) } }
+    fn run(&mut self, i: i64)
+    fn total(&self) -> i64
+}
+
+struct Counter { acc: i64 }
+impl Bench for Counter {
+    fn run(&mut self, i: i64) { self.acc += i }
+    fn total(&self) -> i64 { self.acc }
+}
+
+// A second implementor whose field the default body reaches sits at a
+// different offset, so a copy bound to the wrong impl reads past the struct.
+struct Wide { pad_a: i64, pad_b: String, pad_c: i64, acc: i64 }
+impl Bench for Wide {
+    fn label(&self) -> String { "wide" }
+    fn run(&mut self, i: i64) { self.acc += i * 2 }
+    fn total(&self) -> i64 { self.acc }
+}
+
+// A by-value generic parameter whose concrete type owns heap fields: the
+// driver holds a share of them across a `&mut self` call that replaces one.
+struct Doc { text: String, vars: Map<String, String>, acc: i64 }
+impl Doc {
+    fn build(n: i64) -> Doc {
+        let mut text = ""
+        let mut vars: Map<String, String> = Map::new()
+        let mut i = 0
+        while i < n {
+            text += format("l{}\n", i)
+            let _ = vars.insert(format("k{}", i), format("v{}", i))
+            i += 1
+        }
+        Doc { text: text, vars: vars, acc: 0 }
+    }
+}
+impl Bench for Doc {
+    fn prepare(&mut self) { let built = Doc::build(3); self.text = built.text; self.vars = built.vars }
+    fn label(&self) -> String { "doc" }
+    fn run(&mut self, i: i64) { self.acc += self.text.len() + self.vars.len() + i }
+    fn total(&self) -> i64 { self.acc }
+}
+
+struct Named { acc: i64 }
+impl Bench for Named {
+    fn prepare(&mut self) { self.acc = 100 }
+    fn label(&self) -> String { "named" }
+    fn run(&mut self, i: i64) { self.acc += i }
+    fn total(&self) -> i64 { self.acc }
+}
+
+fn drive<T: Bench>(mut b: T) -> String {
+    b.prepare()
+    b.warmup(2)
+    for i in 0..3 { b.run(i) }
+    format("{}={}", b.label(), b.total())
+}
+
+fn main() {
+    println("{}", drive(Counter { acc: 0 }))
+    println("{}", drive(Named { acc: 0 }))
+    println("{}", drive(Wide { pad_a: 0, pad_b: "p", pad_c: 0, acc: 0 }))
+    println("{}", drive(Doc::build(1)))
+    let mut docs = 0
+    let mut d = 0
+    while d < 2000 { docs += drive(Doc::build(1)).len(); d += 1 }
+    println("hot docs: {}", docs)
+    let mut hot = ""
+    let mut i = 0
+    while i < 4000 {
+        hot = drive(Wide { pad_a: 0, pad_b: "p", pad_c: 0, acc: i })
+        i += 1
+    }
+    println("hot: {}", hot)
+}

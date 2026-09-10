@@ -929,6 +929,97 @@ impl<'tcx> FnBuilder<'tcx> {
         Ok(dst)
     }
 
+    /// Publishes back into `scrut` every variant-payload binding the arm body
+    /// wrote through, then into the place the scrutinee names.
+    ///
+    /// A payload matched through a mutable place is the enum's own value, but
+    /// the interpreter's aggregates are copy-on-write, so a `&mut self` method
+    /// mutates the binding's copy. Writing that copy back is what makes the
+    /// enum see it.
+    fn writeback_variant_payload(
+        &mut self,
+        scrutinee: &HirExpr,
+        scrut: Reg,
+        arm: &gossamer_hir::HirMatchArm,
+    ) -> RuntimeResult<()> {
+        if !self.scrutinee_is_writable_place(scrutinee) {
+            return Ok(());
+        }
+        let HirPatKind::Variant { fields, .. } = &arm.pattern.kind else {
+            return Ok(());
+        };
+        // A body that replaces the scrutinee itself has already decided what
+        // the place holds; publishing the old payload over it would undo that.
+        if self
+            .scrutinee_root_name(scrutinee)
+            .is_some_and(|root| self.name_is_written(&arm.body, &root))
+        {
+            return Ok(());
+        }
+        let mut wrote_any = false;
+        for (i, field) in fields.iter().enumerate() {
+            let HirPatKind::Binding { name, .. } = &field.kind else {
+                continue;
+            };
+            if !self.name_is_written(&arm.body, &name.name) {
+                continue;
+            }
+            let Some(bound) = self.lookup_local(&name.name) else {
+                continue;
+            };
+            let src = self.as_value(bound);
+            let idx = match u16::try_from(i) {
+                Ok(idx) => idx,
+                Err(_) => continue,
+            };
+            self.emit(Op::VariantFieldSet {
+                receiver: scrut,
+                idx,
+                src,
+            });
+            wrote_any = true;
+        }
+        if wrote_any {
+            self.compile_place_store(scrutinee, scrut)?;
+        }
+        Ok(())
+    }
+
+    /// The single-segment binding a scrutinee place is rooted at.
+    fn scrutinee_root_name(&self, scrutinee: &HirExpr) -> Option<String> {
+        let mut cur = scrutinee;
+        loop {
+            match &cur.kind {
+                HirExprKind::Path { segments, .. } => {
+                    return match segments.as_slice() {
+                        [seg] => Some(seg.name.clone()),
+                        _ => None,
+                    };
+                }
+                HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                    cur = receiver
+                }
+                HirExprKind::Index { base, .. } => cur = base,
+                HirExprKind::Unary { operand, .. } => cur = operand,
+                _ => return None,
+            }
+        }
+    }
+
+    /// Whether a scrutinee names storage this frame can write back into.
+    fn scrutinee_is_writable_place(&self, scrutinee: &HirExpr) -> bool {
+        matches!(
+            &scrutinee.kind,
+            HirExprKind::Path { .. }
+                | HirExprKind::Field { .. }
+                | HirExprKind::TupleIndex { .. }
+                | HirExprKind::Index { .. }
+                | HirExprKind::Unary { .. }
+        ) && self
+            .scrutinee_root_name(scrutinee)
+            .is_some_and(|root| self.lookup_local(&root).is_some())
+    }
+
     /// Native `match` compilation. Emits the scrutinee once, then a
     /// test-and-branch chain per arm: each arm's pattern lowers to a
     /// sequence of shape tests (`VariantIs` / `StructIs` / literal
@@ -986,6 +1077,7 @@ impl<'tcx> FnBuilder<'tcx> {
             // uniquely owned this way).
             let consume_body = self.value_consumable_here(&arm.body);
             let body_reg = self.compile_expr(&arm.body)?;
+            self.writeback_variant_payload(scrutinee, scrut, arm)?;
             if consume_body {
                 self.emit(Op::MoveConsume {
                     dst: result,
@@ -1053,6 +1145,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 fails.push(self.emit(Op::BranchIfNot { cond: g, target: 0 }));
             }
             self.compile_expr_discarded(&arm.body)?;
+            self.writeback_variant_payload(scrutinee, scrut, arm)?;
             end_jumps.push(self.emit(Op::Jump { target: 0 }));
             self.pop_scope();
             let next = self.cur_idx();
@@ -1756,12 +1849,19 @@ impl<'tcx> FnBuilder<'tcx> {
             let rhs_peer = (lhs_tr.kind != RegKind::I64).then(|| self.as_value(rhs_tr));
             let lhs_i = self.as_i64_with_peer(lhs_tr, rhs_peer);
             let rhs_i = self.as_i64_with_peer(rhs_tr, lhs_peer);
-            let overflow_ty = [lhs.ty, rhs.ty].into_iter().find_map(|ty| {
-                match self.tcx.kind(self.unwrap_ref(ty)) {
-                    Some(TyKind::Int(int_ty)) => Some(*int_ty),
-                    _ => None,
-                }
-            });
+            let int_ty_of = |this: &Self, ty| match this.tcx.kind(this.unwrap_ref(ty)) {
+                Some(TyKind::Int(int_ty)) => Some(*int_ty),
+                _ => None,
+            };
+            // A shift's result carries the shifted operand's type; the count
+            // has a type of its own. Every other op takes the pair's.
+            let overflow_ty = if matches!(op, HirBinaryOp::Shl | HirBinaryOp::Shr) {
+                int_ty_of(self, lhs.ty)
+            } else {
+                [lhs.ty, rhs.ty]
+                    .into_iter()
+                    .find_map(|ty| int_ty_of(self, ty))
+            };
             return self.emit_binary_i64(op, lhs_i, rhs_i, lhs_unsigned, rhs_unsigned, overflow_ty);
         }
         // Struct `==` / `!=` routes to the derived `<Type>::eq` method,
@@ -2072,7 +2172,7 @@ impl<'tcx> FnBuilder<'tcx> {
     ) -> RuntimeResult<TypedReg> {
         match lit {
             HirLiteral::Float(text) => {
-                let value = strip_float_suffix(text).parse::<f64>().unwrap_or(0.0);
+                let value = float_literal_value(text);
                 let idx = self.f64_const_idx(value);
                 let dst = self.alloc_float();
                 self.emit(Op::LoadConstF64 { dst_f: dst, idx });
@@ -3488,6 +3588,13 @@ impl<'tcx> FnBuilder<'tcx> {
         if !is_map_pop && replacement_writeback && Self::is_mutating_method_name(name.name.as_str())
         {
             match &receiver.kind {
+                // A `static mut` receiver's storage is the shared cell, which
+                // the place store writes through. A read loads the cell into a
+                // register, so without this the mutation reached only that
+                // register.
+                _ if self.place_root_is_mut_static(receiver) => {
+                    self.compile_place_store(receiver, dst)?;
+                }
                 HirExprKind::Path { segments, .. } if segments.len() == 1 => {
                     if let Some(target) = self.lookup_local(&segments[0].name) {
                         if target.kind == RegKind::Value && target.reg == receiver_reg {
@@ -3626,9 +3733,22 @@ impl<'tcx> FnBuilder<'tcx> {
                 let qual = matches.next()?.clone();
                 matches.next().is_none().then_some(qual)
             });
-        let Some(qual) = qual else {
+        // A generic receiver names its type only at run time, so a method
+        // several implementors declare is dispatched on the value. The cell
+        // still carries the receiver, which is what publishes the mutation
+        // back; only the callee is chosen dynamically.
+        let dynamic = qual.is_none()
+            && matches!(
+                self.tcx.kind(self.unwrap_ref(place.ty)),
+                Some(TyKind::Param { .. })
+            )
+            && self
+                .method_muts
+                .iter()
+                .any(|entry| entry.ends_with(&format!("::{}", name.name)));
+        if qual.is_none() && !dynamic {
             return Ok(None);
-        };
+        }
         let total = args.len() + 1;
         let argc = u16::try_from(total).map_err(|_| RuntimeError::Arity {
             expected: u16::MAX as usize,
@@ -3637,11 +3757,14 @@ impl<'tcx> FnBuilder<'tcx> {
         // `Type::method` is registered for every user `impl` method, so
         // the global resolves; loading it yields the callee identity the
         // `Op::Call` inline cache keys on.
-        let global_idx = self.global_idx(&qual);
-        let callee_reg = self.alloc_reg();
-        self.emit(Op::LoadGlobal {
-            dst: callee_reg,
-            idx: global_idx,
+        let callee_reg = qual.map(|qual| {
+            let global_idx = self.global_idx(&qual);
+            let callee_reg = self.alloc_reg();
+            self.emit(Op::LoadGlobal {
+                dst: callee_reg,
+                idx: global_idx,
+            });
+            callee_reg
         });
         // Reserve the contiguous arg block (receiver cell + declared
         // args) before compiling any operand, so an operand whose
@@ -3741,14 +3864,28 @@ impl<'tcx> FnBuilder<'tcx> {
                 Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char)
             )
         });
-        self.emit(Op::Call {
-            dst,
-            callee: callee_reg,
-            args: args_start,
-            argc,
-            cache_idx,
-            may_have_cells,
-        });
+        match callee_reg {
+            Some(callee) => self.emit(Op::Call {
+                dst,
+                callee,
+                args: args_start,
+                argc,
+                cache_idx,
+                may_have_cells,
+            }),
+            None => {
+                let name_idx = self.global_idx(name.name.as_str());
+                let arg_block = args_start.checked_add(1).expect("register overflow");
+                self.emit(Op::MethodCall {
+                    dst,
+                    receiver: args_start,
+                    name_idx,
+                    args: arg_block,
+                    argc: argc.saturating_sub(1),
+                    cache_idx,
+                })
+            }
+        };
         let tmp = self.alloc_reg();
         self.emit(Op::CellTake { dst: tmp, cell });
         self.compile_place_store(place, tmp)?;

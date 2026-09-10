@@ -491,6 +491,9 @@ pub enum Rvalue {
 pub enum RawIntrinsic {
     /// `gos_enum_load(ptr, offset)`.
     EnumLoad,
+    /// `gos_enum_slot_ptr(ptr, offset)` - where a payload's words live, which
+    /// each back end answers in the representation its own slot holds.
+    EnumSlotPtr,
     /// `gos_enum_tag(ptr, disc)`.
     EnumTag,
     /// `gos_enum_disc_tag(ptr)`.
@@ -527,6 +530,10 @@ pub enum RawIntrinsic {
     FnAddr,
     /// `gos_rt_weak_opt_payload(option_carrier)`.
     WeakOptPayload,
+    /// `gos_result_payload_owned(carrier)` - the carrier's payload is an
+    /// aggregate copy the container allocated for this read, so the back ends
+    /// reclaim it once its words are in the destination's own storage.
+    OwnedAggregatePayload,
     /// Runtime helper with an ABI registry entry.
     Runtime,
     /// Floating point LLVM intrinsic facade.
@@ -605,6 +612,7 @@ impl RawIntrinsic {
     pub fn from_name(name: &str) -> Option<Self> {
         let intrinsic = match name {
             "gos_enum_load" => Self::EnumLoad,
+            "gos_enum_slot_ptr" => Self::EnumSlotPtr,
             "gos_enum_tag" => Self::EnumTag,
             "gos_enum_disc_tag" => Self::EnumDiscTag,
             "gos_enum_untag" => Self::EnumUntag,
@@ -627,6 +635,7 @@ impl RawIntrinsic {
             | "gos_rt_map_inc_ekey" => Self::MapEnumKey,
             "gos_fn_addr" => Self::FnAddr,
             "gos_rt_weak_opt_payload" => Self::WeakOptPayload,
+            "gos_result_payload_owned" => Self::OwnedAggregatePayload,
             "gos_jit_unsupported_user_iterator" => Self::JitUnsupportedUserIterator,
             "f64.sqrt" | "sqrt" => Self::F64Math(F64MathIntrinsic::Sqrt),
             "f64.sin" | "sin" => Self::F64Math(F64MathIntrinsic::Sin),
@@ -653,7 +662,7 @@ impl RawIntrinsic {
     #[must_use]
     pub fn arity_for_name(self, name: &str) -> RawIntrinsicArity {
         match self {
-            Self::EnumLoad | Self::EnumTag | Self::EnumSetDisc | Self::Load => {
+            Self::EnumLoad | Self::EnumSlotPtr | Self::EnumTag | Self::EnumSetDisc | Self::Load => {
                 RawIntrinsicArity::Exact(2)
             }
             Self::Store | Self::StoreI128 | Self::RcAllocReuse | Self::EnumStructEq => {
@@ -665,6 +674,7 @@ impl RawIntrinsic {
             | Self::EnumDisc
             | Self::FnAddr
             | Self::WeakOptPayload
+            | Self::OwnedAggregatePayload
             | Self::F64Math(_) => RawIntrinsicArity::Exact(1),
             Self::Alloc => RawIntrinsicArity::Range { min: 0, max: 1 },
             Self::RcAlloc | Self::RcAllocTagged => RawIntrinsicArity::Range { min: 0, max: 2 },

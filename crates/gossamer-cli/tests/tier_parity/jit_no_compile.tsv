@@ -297,6 +297,7 @@ feature-testing-examples/select_multiplex.gos	no hot body
 feature-testing-examples/sequence_method_compilability.gos	no hot body
 feature-testing-examples/sequence_spelling.gos	admission gate
 feature-testing-examples/serde_more_field_kinds.gos	entry shape
+feature-testing-examples/serde_typed_entry_points.gos	no hot user body
 feature-testing-examples/set_from_sequence.gos	no hot body
 feature-testing-examples/set_literal_rendering.gos	no hot body
 feature-testing-examples/shared_across_goroutines.gos	admission gate
@@ -352,6 +353,7 @@ feature-testing-examples/string_concat_chain.gos	no hot body
 feature-testing-examples/string_len_bytes.gos	no hot body
 feature-testing-examples/string_match_patterns.gos	no hot body
 feature-testing-examples/string_method_surface.gos	no hot body
+feature-testing-examples/string_place_mutators.gos	&mut aggregate param
 feature-testing-examples/string_push_char.gos	no hot body
 feature-testing-examples/string_unicode_boundaries.gos	no hot body
 feature-testing-examples/struct_map_keys.gos	entry shape

@@ -819,3 +819,264 @@ fn gnu_time_available() -> bool {
     }
     is_gnu
 }
+
+/// Runs `program` as a native binary at two argument values and answers the
+/// allocation ledger's live counts for each, as `(strings, vecs, aggregates)`.
+///
+/// The scale-invariance the callers assert is what makes these gates honest: a
+/// value leaked once per turn of a loop grows the live count with the turn
+/// count, while a program that reclaims what it builds ends both runs holding
+/// the same handful of values.
+fn live_counts_at(name: &str, program: &str, small: &str, large: &str) -> [(usize, usize); 2] {
+    let dir = env::temp_dir().join(format!("gos-own-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join(format!("{name}.gos"));
+    std::fs::write(&source, program).unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join(name);
+    let read = |field: &str, stderr: &str| -> usize {
+        stderr
+            .split(field)
+            .nth(1)
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("ledger must report {field}: {stderr}"))
+    };
+    let run = |iterations: &str| -> (usize, usize) {
+        let out = Command::new(&binary)
+            .arg(iterations)
+            .env("GOS_LEAK_LEDGER", "1")
+            .output()
+            .expect("run with the allocation ledger");
+        assert!(
+            out.status.success(),
+            "run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        (read("str=", &stderr), read("vec=", &stderr))
+    };
+    let counts = [run(small), run(large)];
+    let _ = std::fs::remove_dir_all(&dir);
+    counts
+}
+
+/// An indexed store gives back the element it replaces.
+///
+/// A `Vec<String>` owns each element - its teardown releases one share per
+/// slot - so a write over a slot has to return the outgoing string here.
+#[test]
+fn indexed_string_store_releases_the_element_it_replaces() {
+    let counts = live_counts_at(
+        "idxstore",
+        "
+use std::env
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut keys: Vec<String> = #[]
+    for i in 0..8 { keys.push(format(\"k{}\", i)) }
+    let mut i = 0
+    while i < n {
+        keys[i % 8] = format(\"item_{}\", i)
+        i += 1
+    }
+    println(\"{}\", keys.len())
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        counts[0].0, counts[1].0,
+        "live String count tracks the store count ({} at 64, {} at 4096)",
+        counts[0].0, counts[1].0
+    );
+}
+
+/// A store into a struct field leaves the value named once.
+///
+/// The field takes a share of what it is handed, so the frame gives its own
+/// back at the store rather than naming the value a second time.
+#[test]
+fn struct_field_store_leaves_one_share_per_value() {
+    let counts = live_counts_at(
+        "fieldstore",
+        "
+use std::env
+
+struct Doc { rendered: String, rows: Vec<i64>, total: i64 }
+
+fn build(i: i64) -> Vec<i64> { #[i, i + 1, i + 2] }
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut d = Doc { rendered: \"\", rows: #[], total: 0 }
+    let mut i = 0
+    while i < n {
+        let mut r = String::with_capacity(16)
+        r.push_str(\"row \")
+        r.push_char('x')
+        d.rendered = r
+        d.rows = build(i)
+        d.total += d.rendered.byte_len() + d.rows.len()
+        i += 1
+    }
+    println(\"{}\", d.total)
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        counts[0], counts[1],
+        "live counts track the iteration count ({:?} at 64, {:?} at 4096)",
+        counts[0], counts[1]
+    );
+}
+
+/// A map insert whose answer nothing reads gives back the value it replaced.
+///
+/// The answering form hands over the previous value, so a call site that binds
+/// it to a name no one reads takes the form that answers nothing.
+#[test]
+fn discarded_map_insert_answer_frees_the_replaced_value() {
+    let counts = live_counts_at(
+        "mapinsert",
+        "
+use std::env
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut m: Map<String, String> = Map::new()
+    let mut i = 0
+    while i < n {
+        let _ = m.insert(format(\"k{}\", i % 8), format(\"v{}\", i))
+        i += 1
+    }
+    println(\"{}\", m.len())
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        counts[0].0, counts[1].0,
+        "live String count tracks the insert count ({} at 64, {} at 4096)",
+        counts[0].0, counts[1].0
+    );
+}
+
+/// A buffer moved into an outer binding each turn reclaims the prior one.
+///
+/// The reads and writes through the buffer stand beside it rather than between
+/// it and the binding it is handed to, so the move still transfers.
+#[test]
+fn buffer_moved_into_an_outer_binding_reclaims_each_prior_one() {
+    let counts = live_counts_at(
+        "rankmove",
+        "
+use std::env
+
+fn work(n: i64, rounds: i64) -> i64 {
+    let mut rank: Vec<i64> = #[0; n]
+    let mut k = 0
+    while k < rounds {
+        let mut next: Vec<i64> = #[0; n]
+        for i in 1..n { next[i] = rank[i - 1] + 1 }
+        rank = next
+        k += 1
+    }
+    rank[0]
+}
+
+fn main() {
+    let rounds = env::args().first().unwrap_or(\"8\").to_i64().unwrap_or(8)
+    println(\"{}\", work(64, rounds))
+}
+",
+        "8",
+        "512",
+    );
+    assert_eq!(
+        counts[0].1, counts[1].1,
+        "live Vec count tracks the round count ({} at 8, {} at 512)",
+        counts[0].1, counts[1].1
+    );
+}
+
+/// A tuple popped out of a container is reclaimed where it is read.
+///
+/// An element wider than a word comes back as the address of a copy the
+/// container allocated, and the words are in the reader's own storage once the
+/// read lands - so the copy dies there.
+#[test]
+fn popped_tuple_copies_do_not_accumulate() {
+    if !std::path::Path::new("/usr/bin/time").exists() {
+        eprintln!("skipping: /usr/bin/time not available on this host");
+        return;
+    }
+    let dir = env::temp_dir().join(format!("gos-pop-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("poptuple.gos");
+    std::fs::write(
+        &source,
+        "
+use std::env
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut stack: Vec<(i64, i64)> = #[(0, 0)]
+    let mut total = 0
+    let mut i = 0
+    while i < n {
+        stack.push((i, i + 1))
+        while let Some(e) = stack.pop() { let a, b = e; total += a + b }
+        i += 1
+    }
+    println(\"{}\", total)
+}
+",
+    )
+    .unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("poptuple");
+    let rss = |iterations: &str| -> u64 {
+        let out = Command::new("/usr/bin/time")
+            .arg("-v")
+            .arg(&binary)
+            .arg(iterations)
+            .output()
+            .expect("run under /usr/bin/time");
+        parse_max_rss_kb(&String::from_utf8_lossy(&out.stderr))
+            .expect("GNU time reports a maximum resident set size")
+    };
+    let small = rss("1024");
+    let large = rss("1048576");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        large < small + 4096,
+        "peak RSS tracks the pop count ({small} KB at 1024 pops, {large} KB at \
+         1048576): every popped element's copy is still held"
+    );
+}

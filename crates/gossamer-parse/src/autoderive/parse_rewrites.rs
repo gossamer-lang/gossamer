@@ -274,6 +274,8 @@ pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<Par
     // `parse_source_file` and are unaffected.
     diags.extend(crate::entry_main::synthesize_entry_main(&mut sf));
     rewrite_tuple_struct_ctors(&mut sf);
+    materialize_trait_defaults(&mut sf);
+    initialize_heap_mut_statics(&mut sf);
     rewrite_open_range_take(&mut sf);
     infer_serde_turbofish(&mut sf);
     desugar_sort_by_key(&mut sf);
@@ -446,23 +448,23 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span)>
             let ExprKind::Path(path) = &callee.kind else {
                 return;
             };
-            let seg = match path.segments.len() {
-                1 => &path.segments[0],
+            let (op, seg) = match path.segments.len() {
+                1 => {
+                    let seg = &path.segments[0];
+                    (seg.name.name.clone(), seg)
+                }
                 2 => {
                     let head = path.segments[0].name.name.as_str();
                     let tail = path.segments[1].name.name.as_str();
-                    if !matches!(
-                        (head, tail),
-                        ("yaml", "from_yaml" | "to_yaml") | ("toml", "from_toml" | "to_toml")
-                    ) {
+                    let Some(op) = crate::autoderive::qualified_serde_op(head, tail) else {
                         return;
-                    }
-                    &path.segments[1]
+                    };
+                    (op.to_string(), &path.segments[1])
                 }
                 _ => return,
             };
             if !matches!(
-                seg.name.name.as_str(),
+                op.as_str(),
                 "to_json" | "from_json" | "to_toml" | "from_toml" | "to_yaml" | "from_yaml"
             ) || seg.generics.len() != 1
             {
@@ -474,14 +476,19 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span)>
             let TypeKind::Path(tp) = &ty.kind else {
                 return;
             };
-            let Some(type_seg) = tp.segments.last() else {
+            // The spelling as written, which is what the symbol index keys a
+            // module-qualified type by. Two modules may each declare a `Cell`,
+            // and the leaf alone names neither.
+            let written: Vec<&str> = tp
+                .segments
+                .iter()
+                .map(|segment| segment.name.name.as_str())
+                .filter(|segment| !matches!(*segment, "crate" | "self" | "super" | "root"))
+                .collect();
+            if written.is_empty() {
                 return;
-            };
-            self.calls.push((
-                seg.name.name.clone(),
-                type_seg.name.name.clone(),
-                callee.span,
-            ));
+            }
+            self.calls.push((op, written.join("::"), callee.span));
         }
     }
 

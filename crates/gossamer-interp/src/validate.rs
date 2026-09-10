@@ -765,6 +765,10 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 check_v(op_idx, cell)?;
                 check_v(op_idx, src)?;
             }
+            Op::VariantFieldSet { receiver, src, .. } => {
+                check_v(op_idx, receiver)?;
+                check_v(op_idx, src)?;
+            }
             Op::IntArrayGetI64 {
                 dst_i,
                 base,
@@ -1993,6 +1997,11 @@ pub(crate) fn register_effects(
         | Op::VariantField { src, .. }
         | Op::StructIs { src, .. }
         | Op::VariantFieldConsume { src, .. } => effect.v_reads.push(src),
+        Op::VariantFieldSet { receiver, src, .. } => {
+            effect.v_reads.push(src);
+            effect.v_reads.push(receiver);
+            effect.v_writes.push(receiver);
+        }
         Op::AddInt { lhs, rhs, .. }
         | Op::SubInt { lhs, rhs, .. }
         | Op::MulInt { lhs, rhs, .. }

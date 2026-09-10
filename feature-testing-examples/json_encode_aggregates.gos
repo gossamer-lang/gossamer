@@ -41,4 +41,39 @@ fn main() {
     println("{}", json::encode(empty))
     println("{} {} {} {}", json::encode(7), json::encode(true), json::encode(2.5), json::encode("s"))
     println("{} {}", json::encode(#[1, 2, 3]), json::encode(#["x", "y"]))
+    map_fields()
+}
+
+struct Opts { flags: Map<String, i64>, name: String }
+struct Pairs { table: Map<String, (i64, bool)> }
+struct Wrapped { rows: Vec<Opts> }
+
+// A `Map` field is a JSON object, whatever its values are, and an integer
+// value keeps its digits rather than picking up a fractional part.
+fn map_fields() {
+    let mut flags: Map<String, i64> = Map::new()
+    let _ = flags.insert("a", 1)
+    let _ = flags.insert("b", 22)
+    println("{}", json::encode(flags))
+    println("{}", json::encode(Opts { flags: flags, name: "n" }))
+    println("{}", json::encode(Wrapped { rows: #[Opts { flags: flags, name: "n" }] }))
+
+    let mut table: Map<String, (i64, bool)> = Map::new()
+    let _ = table.insert("t", (3, true))
+    println("{}", json::encode(Pairs { table: table }))
+
+    let mut texts: Map<String, String> = Map::new()
+    let _ = texts.insert("k", "v")
+    println("{}", json::encode(texts))
+
+    let empty: Map<String, i64> = Map::new()
+    println("{}", json::encode(empty))
+
+    let mut total = 0
+    let mut i = 0
+    while i < 3000 {
+        total += json::encode(Opts { flags: flags, name: "n" }).len()
+        i += 1
+    }
+    println("hot: {}", total)
 }

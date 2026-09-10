@@ -262,6 +262,11 @@ impl<'a> Lowerer<'a> {
                 let llvm_ty = render_ty(self.tcx, target.ty);
                 self.register_static_global(target, &llvm_ty);
                 let val = self.lower_operand(value)?;
+                // A constructor's answer is typed by its own destination
+                // local, which need not be the cell's shape: a handle read as
+                // a word still has to be stored as the pointer the cell holds.
+                let operand_ty = self.operand_llvm_ty(value);
+                let val = self.coerce_llvm_value(&val, &operand_ty, &llvm_ty);
                 writeln!(
                     self.out,
                     "  store {llvm_ty} {val}, ptr @{sym}",
@@ -313,6 +318,7 @@ impl<'a> Lowerer<'a> {
                         | "gos_enum_disc_tag"
                         | "gos_enum_untag"
                         | "gos_enum_load"
+                        | "gos_enum_slot_ptr"
                 )
             {
                 return self.lower_raw_intrinsic(name, args, place, None);
@@ -396,6 +402,7 @@ impl<'a> Lowerer<'a> {
                         | "gos_enum_disc_tag"
                         | "gos_enum_untag"
                         | "gos_enum_load"
+                        | "gos_enum_slot_ptr"
                 ) =>
             {
                 return self.lower_raw_intrinsic(name, args, place, None);
@@ -517,6 +524,17 @@ impl<'a> Lowerer<'a> {
                 "  call void @llvm.memcpy.p0.p0.i64(ptr {addr}, ptr {src_ptr}, i64 {bytes}, i1 false)"
             )
             .unwrap();
+            // The words are in the destination's own storage now, so the copy
+            // the container allocated for this read has no reader left.
+            if matches!(rvalue, Rvalue::CallIntrinsic { name, .. } if *name == "gos_result_payload_owned")
+            {
+                declare_rt(&mut self.runtime_refs, "gos_rt_aggr_free");
+                writeln!(
+                    self.out,
+                    "  call void @\"gos_rt_aggr_free\"(ptr {src_ptr}, i64 {bytes})"
+                )
+                .unwrap();
+            }
         } else if self.place_is_packed_byte_element(place) {
             self.store_value_to_place(place, &leaf_llvm, &value);
         } else {

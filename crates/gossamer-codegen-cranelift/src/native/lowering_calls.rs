@@ -404,7 +404,7 @@ fn lower_inline_result_carrier_call(
             let carrier = coerce_arg_to(builder, carrier, types::I128)?;
             builder.ins().ireduce(types::I64, carrier)
         }
-        "gos_rt_result_payload" | "gos_rt_weak_opt_payload" => {
+        "gos_rt_result_payload" | "gos_result_payload_owned" | "gos_rt_weak_opt_payload" => {
             let carrier = match args.first() {
                 Some(arg) => lower_operand(
                     module,

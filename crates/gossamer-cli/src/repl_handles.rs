@@ -637,6 +637,11 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     ),
     (
         "Pattern",
+        "count",
+        "fn count(self: regex::Pattern, text: String) -> i64",
+    ),
+    (
+        "Pattern",
         "find",
         "fn find(self: regex::Pattern, text: String) -> Option<(i64, i64, String)>",
     ),

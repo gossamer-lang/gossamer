@@ -276,15 +276,19 @@ pub(crate) fn collect_mut_static_defs(
         if !decl.mutable {
             continue;
         }
-        let Some(init) = const_value_of_expr(&decl.value, consts) else {
-            continue;
+        // A scalar cell carries its value in the global's own initializer. A
+        // cell holding a container or a string names heap storage instead,
+        // which only a running program can build: the global starts null and
+        // the entry's prologue writes what the declaration says.
+        let init = match const_value_of_expr(&decl.value, consts) {
+            Some(
+                value @ (ConstValue::Int(_)
+                | ConstValue::Float(_)
+                | ConstValue::Bool(_)
+                | ConstValue::Char(_)),
+            ) => value,
+            _ => ConstValue::Int(0),
         };
-        if !matches!(
-            init,
-            ConstValue::Int(_) | ConstValue::Float(_) | ConstValue::Bool(_) | ConstValue::Char(_)
-        ) {
-            continue;
-        }
         out.insert(
             def,
             crate::ir::StaticRef {

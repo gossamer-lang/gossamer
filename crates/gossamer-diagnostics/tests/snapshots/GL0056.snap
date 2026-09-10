@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GL0056]: An expression statement that only computes - a path, a literal, - here
+--- framed ---
+error[GL0056]: An expression statement that only computes - a path, a literal,
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

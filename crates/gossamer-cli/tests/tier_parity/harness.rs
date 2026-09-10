@@ -515,6 +515,18 @@ const SPECS: &[Spec] = &[
     // (`s.as_bytes()[i] == b'>'`); a byte literal is an `Int` value on
     // every tier.
     spec("feature-testing-examples/byte_literal_compare.gos"),
+    spec("feature-testing-examples/byte_literal_match.gos"),
+    spec("feature-testing-examples/narrow_int_width.gos"),
+    spec("feature-testing-examples/nested_container_places.gos"),
+    spec("feature-testing-examples/struct_field_reassign.gos"),
+    spec("feature-testing-examples/trait_default_body.gos"),
+    spec("feature-testing-examples/enum_payload_mut_dispatch.gos"),
+    spec("feature-testing-examples/enum_self_rebind.gos"),
+    spec("feature-testing-examples/enum_mut_receiver_places.gos"),
+    spec("feature-testing-examples/static_mut_cells.gos"),
+    spec("feature-testing-examples/string_place_mutators.gos"),
+    spec("feature-testing-examples/serde_typed_entry_points.gos"),
+    spec("feature-testing-examples/goroutine_shared_capture.gos"),
     // The two String index spaces stay distinct: `len`/`[]`/iteration count
     // Unicode scalars (`s[i]` is a `char`), while `byte_len`/`substring`/
     // `byte_at`/`as_bytes` take byte offsets and `byte_at` yields the byte
@@ -1224,6 +1236,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/enum_struct_eq.gos"),
     spec("feature-testing-examples/reference_alias_mutation.gos"),
     spec("feature-testing-examples/regex_unicode_categories.gos"),
+    spec("feature-testing-examples/regex_count.gos"),
     Spec {
         skip_parity: Some("poll-attempt count is scheduler-dependent; output varies across tiers"),
         ..spec("feature-testing-examples/select_default_timing.gos")

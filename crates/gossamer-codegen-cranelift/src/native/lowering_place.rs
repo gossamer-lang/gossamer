@@ -178,12 +178,18 @@ pub(super) fn lower_place_address(
         .or_else(|| stride_slots_from_ty(tcx, body.local_ty(place.local)))
         .unwrap_or(1);
     let last_proj = place.projection.len().saturating_sub(1);
+    // `current` alternates between the value the cursor names and the address
+    // of a slot holding it. A runtime-managed handle (`Vec`, `Slice`) is the
+    // value, so a step that consumes one loads it out of its slot first; a
+    // step that only walks an offset leaves an address behind.
+    let mut current_is_loaded = true;
     for (proj_idx, projection) in place.projection.iter().enumerate() {
         match projection {
             Projection::Field(idx) => {
                 let off_bytes = field_byte_offset(tcx, current_ty, *idx);
                 let offset = builder.ins().iconst(ptr_ty, i64::from(off_bytes));
                 current = builder.ins().iadd(current, offset);
+                current_is_loaded = false;
                 if let Some(ft) = field_ty_at(tcx, current_ty, *idx) {
                     current_ty = ft;
                     stride_slots = stride_slots_from_ty(tcx, current_ty).unwrap_or(1);
@@ -226,6 +232,16 @@ pub(super) fn lower_place_address(
                         t if t == types::I64 => idx_val,
                         _ => builder.ins().sextend(types::I64, idx_val),
                     };
+                    // The helper takes the header itself, so a handle still
+                    // sitting in a struct field or a Vec element slot is
+                    // loaded out of it here.
+                    let handle = if current_is_loaded {
+                        current
+                    } else {
+                        builder
+                            .ins()
+                            .load(ptr_ty, MemFlagsData::trusted(), current, 0)
+                    };
                     let get_ptr = intrinsics.extern_fn(
                         module,
                         "gos_rt_vec_get_ptr",
@@ -233,8 +249,9 @@ pub(super) fn lower_place_address(
                         &[ptr_ty],
                     )?;
                     let fref = module.declare_func_in_func(get_ptr, builder.func);
-                    let call = builder.ins().call(fref, &[current, idx_i64]);
+                    let call = builder.ins().call(fref, &[handle, idx_i64]);
                     current = builder.inst_results(call)[0];
+                    current_is_loaded = false;
                     current_ty = elem;
                     stride_slots = stride_slots_from_ty(tcx, current_ty).unwrap_or(1);
                     continue;
@@ -252,6 +269,7 @@ pub(super) fn lower_place_address(
                 let stride = builder.ins().iconst(ptr_ty, i64::from(stride_slots) * 8);
                 let byte_offset = builder.ins().imul(idx_ptr, stride);
                 current = builder.ins().iadd(current, byte_offset);
+                current_is_loaded = false;
                 // After indexing, the cursor sits inside a single
                 // element; advance `current_ty` to the element type
                 // so subsequent Field projections compute their
@@ -305,20 +323,32 @@ pub(super) fn lower_place_address(
                 // writes through it. Loading here would yield the value, which
                 // the consumer's own load then dereferences a second time -
                 // `*out += s` for `out: &mut String` faulting on `**out`.
+                // A `&mut` payload enum is the same shape: the callee rebinds
+                // the caller's binding whole (`*self = Variant(..)`), so its
+                // reference names the slot and the store writes into it. A
+                // shared reference to one carries the node itself.
+                let mut_enum_slot = matches!(
+                    tcx.kind_of(current_ty),
+                    TyKind::Ref {
+                        mutability: gossamer_types::Mutbl::Mut,
+                        inner,
+                    } if tcx.is_payload_enum(*inner)
+                );
                 let terminal_value = proj_idx == last_proj
-                    && matches!(
+                    && (matches!(
                         tcx.kind_of(peeled),
                         TyKind::Int(_)
                             | TyKind::Float(_)
                             | TyKind::Bool
                             | TyKind::Char
                             | TyKind::String
-                    );
+                    ) || mut_enum_slot);
                 if !inline_aggregate && !terminal_value {
                     let loaded = builder
                         .ins()
                         .load(ptr_ty, MemFlagsData::trusted(), current, 0);
                     current = loaded;
+                    current_is_loaded = true;
                 }
                 if let TyKind::Ref { inner, .. } = tcx.kind_of(current_ty).clone() {
                     current_ty = inner;
@@ -337,6 +367,7 @@ pub(super) fn lower_place_address(
                 // Downcast skips past the tag word to the payload.
                 let tag_bytes = builder.ins().iconst(ptr_ty, 8);
                 current = builder.ins().iadd(current, tag_bytes);
+                current_is_loaded = false;
                 stride_slots = 1;
             }
         }
@@ -362,10 +393,30 @@ pub(super) fn lower_place_store(
     // the old payload behind. That made `node.next = Some(new_node)` observe
     // the previous child and could turn cyclic aggregates into malformed
     // graphs in JIT code.
-    if value_type(value, builder) == types::I128
-        && type_slot_count(tcx, resolve_place_ty(tcx, body, place)) > 1
-    {
+    let leaf_place_ty = resolve_place_ty(tcx, body, place);
+    let leaf_slots = type_slot_count(tcx, leaf_place_ty);
+    if value_type(value, builder) == types::I128 && leaf_slots > 1 {
         store_i128_words(builder, value, addr, 0);
+        return Ok(());
+    }
+    // An inline aggregate leaf is a block of words the value names the
+    // address of, so the whole block is what the store replaces. One store
+    // would write its first field and leave the rest of the leaf as the
+    // previous value left it. A leaf whose value IS one word - a handle, a
+    // tagged enum pointer - keeps the single store, whatever width its
+    // contents occupy elsewhere.
+    if leaf_slots > 1 && inline_aggregate_leaf(tcx, leaf_place_ty) {
+        let ptr_ty = module.target_config().pointer_type();
+        let src = coerce_arg_to(builder, value, ptr_ty).unwrap_or(value);
+        for word_idx in 0..leaf_slots {
+            let off = ir::immediates::Offset32::new((word_idx as i32) * 8);
+            let word = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), src, off);
+            builder
+                .ins()
+                .store(MemFlagsData::trusted(), word, addr, off);
+        }
         return Ok(());
     }
     // Coerce the value to the leaf's cranelift type where possible;
@@ -462,4 +513,19 @@ pub(super) fn lower_place_read(
     // `arr+hi*8` *after* `arr+hi*8` had been overwritten with `t`,
     // collapsing the swap to a degenerate `arr[lo] = arr[lo]`.
     Ok(builder.ins().load(leaf_ty, MemFlagsData::new(), addr, 0))
+}
+
+/// Whether a place's leaf holds its words inline, so a store replaces the
+/// whole block rather than one handle-shaped word.
+fn inline_aggregate_leaf(tcx: &TyCtxt, ty: Ty) -> bool {
+    if is_inline_two_word_ty(tcx, ty) {
+        return false;
+    }
+    match tcx.kind_of(ty) {
+        TyKind::Tuple(_) | TyKind::Array { .. } => true,
+        TyKind::Adt { def, .. } => {
+            def.local < u32::MAX - 16 && tcx.struct_field_tys(*def).is_some()
+        }
+        _ => false,
+    }
 }

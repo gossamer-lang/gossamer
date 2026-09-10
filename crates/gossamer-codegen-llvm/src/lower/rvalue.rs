@@ -105,13 +105,23 @@ impl<'a> Lowerer<'a> {
                         self.tcx.kind(self.body.local_ty(place.local)),
                         Some(TyKind::String)
                     );
+                // A local whose slot holds a pointer to its value - which is
+                // what the place-read walk auto-derefs - names the referent
+                // through that pointer, not through the slot holding it.
+                let pointer_local = place.projection.is_empty()
+                    && Self::is_pointer_local_ty(self.tcx, self.body.local_ty(place.local));
+                // A `&mut` payload enum is the receiver a callee rebinds whole
+                // (`*self = Variant(..)`), so it names the caller's slot and
+                // the store lands where the caller reads its binding back.
+                let bare_mut_enum = *mutable
+                    && place.projection.is_empty()
+                    && self.tcx.is_payload_enum(self.body.local_ty(place.local));
                 if !bare_mut_string
+                    && !bare_mut_enum
                     && (leaf_is_heap_value
+                        || pointer_local
                         || place.projection.is_empty()
-                            && (matches!(
-                                self.tcx.kind(self.body.local_ty(place.local)),
-                                Some(TyKind::Ref { .. })
-                            ) || self.tcx.is_payload_enum(self.body.local_ty(place.local))))
+                            && self.tcx.is_payload_enum(self.body.local_ty(place.local)))
                 {
                     Ok(self.lower_place_read(place))
                 } else if place.projection.is_empty() {
@@ -232,7 +242,13 @@ impl<'a> Lowerer<'a> {
     /// shared cell at link time. `runtime_refs` is a `BTreeSet`, so the
     /// duplicate definitions a single module emits dedup to one line.
     pub(crate) fn register_static_global(&mut self, sref: &gossamer_mir::StaticRef, llvm_ty: &str) {
-        let init = render_const(&sref.init);
+        // A pointer-shaped cell starts empty; the entry's prologue writes the
+        // storage the declaration names before anything reads it.
+        let init = if llvm_ty == "ptr" {
+            "null".to_string()
+        } else {
+            render_const(&sref.init)
+        };
         self.runtime_refs.insert(format!(
             "@{sym} = linkonce_odr global {llvm_ty} {init}",
             sym = sref.symbol,
@@ -321,6 +337,7 @@ impl<'a> Lowerer<'a> {
             // drop pass.
             "gos_rt_result_disc"
             | "gos_rt_result_payload"
+            | "gos_result_payload_owned"
             | "gos_rt_weak_opt_payload"
             | "gos_rt_result_payload_f64"
                 if args.len() == 1 =>
@@ -812,6 +829,7 @@ impl<'a> Lowerer<'a> {
                 return self.lower_runtime_call_intrinsic(name, args, dest_local);
             }
             RawIntrinsic::EnumLoad
+            | RawIntrinsic::EnumSlotPtr
             | RawIntrinsic::EnumTag
             | RawIntrinsic::EnumDiscTag
             | RawIntrinsic::EnumUntag
@@ -828,6 +846,7 @@ impl<'a> Lowerer<'a> {
             | RawIntrinsic::MapEnumKey
             | RawIntrinsic::FnAddr
             | RawIntrinsic::WeakOptPayload
+            | RawIntrinsic::OwnedAggregatePayload
             | RawIntrinsic::JitUnsupportedUserIterator => {
                 return Err(BuildError::InternalLoweringBug(
                     "raw pointer intrinsic reached rvalue lowering",

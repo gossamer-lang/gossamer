@@ -116,10 +116,10 @@ impl<'tcx> FnBuilder<'tcx> {
         // to them below, once the declared parameters have claimed the
         // rest of the arity prefix.
         let capture_regs: Vec<Reg> = capture_names.iter().map(|_| b.alloc_reg()).collect();
-        b.capture_cell_names = crate::compile::capture_cell_names(
-            self.tcx,
-            &crate::compile::consume::closure_captured_locals_in_expr(params, body),
-        );
+        let (captured_locals, mutated_locals) =
+            crate::compile::consume::closure_captured_locals_in_expr(params, body);
+        b.capture_cell_names =
+            crate::compile::capture_cell_names(self.tcx, &captured_locals, &mutated_locals);
         // Declared parameters follow, mirroring `compile_fn`'s param
         // binding: the `&mut Vec<T>` write-back protocol and the
         // typed-storage fast-path tracking both carry over.

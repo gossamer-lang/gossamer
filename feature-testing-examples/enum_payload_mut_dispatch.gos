@@ -1,0 +1,44 @@
+// A variant payload matched through a `&mut` scrutinee is the enum's own
+// value, so a `&mut self` method called on it is seen by the enum.
+
+struct Counter { acc: i64 }
+impl Counter {
+    fn bump(&mut self) { self.acc += 1 }
+    fn total(&self) -> i64 { self.acc }
+}
+
+struct Collector { seen: Vec<i64>, tag: i64 }
+impl Collector {
+    fn bump(&mut self) { self.seen.push(self.tag) }
+    fn total(&self) -> i64 { self.seen.len() }
+}
+
+enum Bench { Count(Counter), Collect(Collector) }
+
+impl Bench {
+    fn bump(&mut self) {
+        match self {
+            Bench::Count(a) => a.bump()
+            Bench::Collect(b) => b.bump()
+        }
+    }
+    fn total(&self) -> i64 {
+        match self {
+            Bench::Count(a) => a.total()
+            Bench::Collect(b) => b.total()
+        }
+    }
+}
+
+fn drive(mut b: Bench, rounds: i64) -> i64 {
+    for _ in 0..rounds { b.bump() }
+    b.total()
+}
+
+fn main() {
+    println("count: {}", drive(Bench::Count(Counter { acc: 0 }), 2))
+    println("collect: {}", drive(Bench::Collect(Collector { seen: #[], tag: 7 }), 3))
+    let mut total = 0
+    for i in 0..2000 { total += drive(Bench::Count(Counter { acc: i }), 2) }
+    println("hot total: {}", total)
+}

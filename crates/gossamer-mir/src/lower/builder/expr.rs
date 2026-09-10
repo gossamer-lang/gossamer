@@ -1815,6 +1815,35 @@ impl<'a> Builder<'a> {
             self.set_current(join);
             return Some(result);
         }
+        // A shift moves bits past the operand's own width, and the ones that
+        // leave it are gone. The op runs at i64 width, so a narrower type
+        // takes its value back from the wide result.
+        if matches!(bin_op, BinOp::Shl)
+            && let gossamer_types::TyKind::Int(int_ty) = self.tcx.kind_of(ty)
+            && narrow_int_width(*int_ty).is_some()
+        {
+            let wide_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let wide = self.fresh(wide_ty);
+            self.emit_assign(
+                Place::local(wide),
+                Rvalue::BinaryOp {
+                    op: bin_op,
+                    lhs: Operand::Copy(Place::local(lhs_local)),
+                    rhs: Operand::Copy(Place::local(rhs_local)),
+                },
+                span,
+            );
+            let local = self.fresh(ty);
+            self.emit_assign(
+                Place::local(local),
+                Rvalue::Cast {
+                    operand: Operand::Copy(Place::local(wide)),
+                    target: ty,
+                },
+                span,
+            );
+            return Some(local);
+        }
         let local = self.fresh(ty);
         self.emit_assign(
             Place::local(local),
@@ -3869,6 +3898,18 @@ fn arith_overload_method(op: HirBinaryOp) -> Option<&'static str> {
         HirBinaryOp::BitXor => Some("bitxor"),
         HirBinaryOp::Shl => Some("shl"),
         HirBinaryOp::Shr => Some("shr"),
+        _ => None,
+    }
+}
+
+/// Bit width of an integer type narrower than the i64 the arithmetic ops
+/// run at, or `None` for a type that occupies the whole word.
+pub(crate) const fn narrow_int_width(ty: gossamer_types::IntTy) -> Option<u32> {
+    use gossamer_types::IntTy;
+    match ty {
+        IntTy::I8 | IntTy::U8 => Some(8),
+        IntTy::I16 | IntTy::U16 => Some(16),
+        IntTy::I32 | IntTy::U32 => Some(32),
         _ => None,
     }
 }

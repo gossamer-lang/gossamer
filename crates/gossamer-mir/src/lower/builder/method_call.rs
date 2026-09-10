@@ -297,12 +297,27 @@ impl<'a> Builder<'a> {
             ) {
                 let lhs = self.lower_expr(receiver)?;
                 let rhs = self.lower_expr(&args[0])?;
-                let dest = self.fresh(ty);
                 let op = if method.name == "wrapping_add" {
                     BinOp::WrappingAdd
                 } else {
                     BinOp::WrappingMul
                 };
+                // The op runs at i64 width. A type narrower than that wraps
+                // at its own width, so the wide result is narrowed back.
+                let narrow = match self.tcx.kind_of(receiver_ty) {
+                    TyKind::Int(int_ty)
+                        if crate::lower::builder::expr::narrow_int_width(*int_ty).is_some() =>
+                    {
+                        Some(receiver_ty)
+                    }
+                    _ => None,
+                };
+                let wide_ty = if narrow.is_some() {
+                    self.tcx.int_ty(gossamer_types::IntTy::I64)
+                } else {
+                    ty
+                };
+                let dest = self.fresh(wide_ty);
                 self.emit_assign(
                     Place::local(dest),
                     Rvalue::BinaryOp {
@@ -312,7 +327,19 @@ impl<'a> Builder<'a> {
                     },
                     span,
                 );
-                return Some(dest);
+                let Some(narrow_ty) = narrow else {
+                    return Some(dest);
+                };
+                let narrowed = self.fresh(narrow_ty);
+                self.emit_assign(
+                    Place::local(narrowed),
+                    Rvalue::Cast {
+                        operand: Operand::Copy(Place::local(dest)),
+                        target: narrow_ty,
+                    },
+                    span,
+                );
+                return Some(narrowed);
             }
         }
 
@@ -640,6 +667,11 @@ impl<'a> Builder<'a> {
         let user_receiver_ref_ty = owner
             .map(|owner| owner.name.clone())
             .or_else(|| self.struct_name_of(receiver_ty))
+            // An enum is not in the struct index, so its impl is reached
+            // through the enum index. Without it a receiver whose only
+            // evidence is its type - a parameter - misses the declared
+            // receiver and is handed over by value.
+            .or_else(|| self.enum_index_name_of(receiver_ty))
             .or_else(|| self.struct_name_from_expr(receiver))
             .or_else(|| self.primitive_impl_name(receiver_ty))
             .and_then(|name| {
@@ -737,13 +769,16 @@ impl<'a> Builder<'a> {
                 let receiver_ref = self.fresh(receiver_ref_ty);
                 // A mutable borrow of a scalar place points at a slot the
                 // backend materialises for it, so the place has to be reloaded
-                // from that slot once the callee has written through it.
+                // from that slot once the callee has written through it. A
+                // payload enum is the same case: `*self = Variant(..)` names a
+                // whole new node, so the reference has to name the receiver's
+                // slot rather than a copy of the node pointer.
                 if mutable
                     && receiver_place.projection.is_empty()
-                    && matches!(
+                    && (matches!(
                         self.tcx.kind_of(receiver_inner),
                         TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
-                    )
+                    ) || self.tcx.is_payload_enum(receiver_inner))
                 {
                     self.mut_receiver_reloads
                         .insert(receiver_ref, receiver_place.local);
@@ -1655,6 +1690,57 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `Some((string_ty, projected))` when `receiver` names a `String` place:
+    /// a binding, the slot a `&mut String` addresses, or the field or element
+    /// a projection reaches. `projected` marks the last of those, whose
+    /// storage belongs to the aggregate holding it rather than to a local.
+    fn string_receiver_shape(&self, receiver: &HirExpr) -> Option<(Ty, bool)> {
+        let peel = |this: &Self, mut ty: Ty| {
+            while let TyKind::Ref { inner, .. } = this.tcx.kind_of(ty) {
+                ty = *inner;
+            }
+            ty
+        };
+        if let Some(local) = self.receiver_local_from_path(receiver) {
+            let ty = peel(self, self.locals[local.0 as usize].ty);
+            return matches!(self.tcx.kind_of(ty), TyKind::String).then_some((ty, false));
+        }
+        if !matches!(
+            receiver.kind,
+            HirExprKind::Field { .. } | HirExprKind::TupleIndex { .. } | HirExprKind::Index { .. }
+        ) {
+            return None;
+        }
+        let ty = peel(self, receiver.ty);
+        matches!(self.tcx.kind_of(ty), TyKind::String).then_some((ty, true))
+    }
+
+    /// The place [`Self::string_receiver_shape`] described, materialised.
+    fn string_receiver_place(&mut self, receiver: &HirExpr) -> Option<Place> {
+        if let Some(local) = self.receiver_local_from_path(receiver) {
+            return Some(self.receiver_slot_place(local));
+        }
+        let place = self.lower_place_expr(receiver)?;
+        (!place.projection.is_empty()).then_some(place)
+    }
+
+    /// Mints the share a consuming string helper takes off a place whose
+    /// storage the holding aggregate owns. The rebinding store gives the
+    /// aggregate back a share of the replacement, so without this the helper
+    /// would spend the one the aggregate still names.
+    fn retain_string_place(&mut self, place: &Place, span: Span) {
+        let unit_ty = self.tcx.unit();
+        let retained = self.fresh(unit_ty);
+        self.emit_assign(
+            Place::local(retained),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_str_retain_typed",
+                args: vec![Operand::Copy(place.clone())],
+            },
+            span,
+        );
+    }
+
     /// Releases the String a receiver's slot currently holds. The push family
     /// hands its receiver to a helper that consumes it, so the replacement
     /// carries that share on; `clear` and `truncate` only read the receiver,
@@ -1674,13 +1760,6 @@ impl<'a> Builder<'a> {
             },
             span,
         );
-    }
-
-    /// Publishes a rebound receiver value into the place the receiver was
-    /// read from.
-    fn store_receiver_slot(&mut self, recv_local: Local, value: Local, span: Span) {
-        let place = self.receiver_slot_place(recv_local);
-        self.emit_assign(place, Rvalue::Use(Operand::Copy(Place::local(value))), span);
     }
 
     /// Pointee of a local typed `&mut <scalar / String>`.
@@ -1729,14 +1808,9 @@ impl<'a> Builder<'a> {
         // builders) must not copy the whole prefix for every append.
         if method.name.as_str() == "push_str"
             && args.len() == 1
-            && let Some(recv_local) = self.receiver_local_from_path(receiver)
+            && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
-            let recv_ty = self.locals[recv_local.0 as usize].ty;
-            let mut peeled = recv_ty;
-            while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-                peeled = *inner;
-            }
-            if matches!(self.tcx.kind_of(peeled), TyKind::String) {
+            {
                 let literal_len = match &args[0].kind {
                     HirExprKind::Literal(gossamer_hir::HirLiteral::String(text)) => {
                         Some(text.len() as i128)
@@ -1746,7 +1820,12 @@ impl<'a> Builder<'a> {
                 let Some(arg_local) = self.lower_expr(&args[0]) else {
                     return MethodLowering::Handled(None);
                 };
-                let recv_place = self.receiver_slot_place(recv_local);
+                let Some(recv_place) = self.string_receiver_place(receiver) else {
+                    return MethodLowering::Handled(None);
+                };
+                if projected {
+                    self.retain_string_place(&recv_place, span);
+                }
                 let dest = self.fresh(peeled);
                 let next = self.new_block(span);
                 let (callee, call_args) = match literal_len {
@@ -1773,7 +1852,11 @@ impl<'a> Builder<'a> {
                     target: Some(next),
                 });
                 self.set_current(next);
-                self.store_receiver_slot(recv_local, dest, span);
+                self.emit_assign(
+                    recv_place,
+                    Rvalue::Use(Operand::Copy(Place::local(dest))),
+                    span,
+                );
                 return MethodLowering::Handled(Some(self.lower_unit(span)));
             }
         }
@@ -1783,14 +1866,9 @@ impl<'a> Builder<'a> {
         // discriminant is the `bool` the call evaluates to.
         if method.name.as_str() == "push_utf8"
             && args.len() == 3
-            && let Some(recv_local) = self.receiver_local_from_path(receiver)
+            && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
-            let recv_ty = self.locals[recv_local.0 as usize].ty;
-            let mut peeled = recv_ty;
-            while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-                peeled = *inner;
-            }
-            if matches!(self.tcx.kind_of(peeled), TyKind::String) {
+            {
                 let mut lowered = Vec::with_capacity(3);
                 for arg in args {
                     let Some(a) = self.lower_expr(arg) else {
@@ -1798,7 +1876,12 @@ impl<'a> Builder<'a> {
                     };
                     lowered.push(a);
                 }
-                let recv_place = self.receiver_slot_place(recv_local);
+                let Some(recv_place) = self.string_receiver_place(receiver) else {
+                    return MethodLowering::Handled(None);
+                };
+                if projected {
+                    self.retain_string_place(&recv_place, span);
+                }
                 let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
                 // The shim answers the two-word carrier: the payload is the
                 // pointer the receiver takes and the discriminant is the flag.
@@ -1826,7 +1909,11 @@ impl<'a> Builder<'a> {
                     },
                     span,
                 );
-                self.store_receiver_slot(recv_local, updated, span);
+                self.emit_assign(
+                    recv_place,
+                    Rvalue::Use(Operand::Copy(Place::local(updated))),
+                    span,
+                );
                 let disc = self.fresh(i64_ty);
                 self.emit_assign(
                     Place::local(disc),
@@ -1857,18 +1944,18 @@ impl<'a> Builder<'a> {
         // to `gos_rt_vec_push`; this block claims only String ones.
         if method.name.as_str() == "push"
             && args.len() == 1
-            && let Some(recv_local) = self.receiver_local_from_path(receiver)
+            && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
-            let recv_ty = self.locals[recv_local.0 as usize].ty;
-            let mut peeled = recv_ty;
-            while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-                peeled = *inner;
-            }
-            if matches!(self.tcx.kind_of(peeled), TyKind::String) {
+            {
                 let Some(arg_local) = self.lower_expr(&args[0]) else {
                     return MethodLowering::Handled(None);
                 };
-                let recv_place = self.receiver_slot_place(recv_local);
+                let Some(recv_place) = self.string_receiver_place(receiver) else {
+                    return MethodLowering::Handled(None);
+                };
+                if projected {
+                    self.retain_string_place(&recv_place, span);
+                }
                 let dest = self.fresh(peeled);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
@@ -1881,7 +1968,11 @@ impl<'a> Builder<'a> {
                     target: Some(next),
                 });
                 self.set_current(next);
-                self.store_receiver_slot(recv_local, dest, span);
+                self.emit_assign(
+                    recv_place,
+                    Rvalue::Use(Operand::Copy(Place::local(dest))),
+                    span,
+                );
                 return MethodLowering::Handled(Some(self.lower_unit(span)));
             }
         }
@@ -1890,18 +1981,18 @@ impl<'a> Builder<'a> {
         // interprets the argument as a Unicode codepoint.
         if method.name.as_str() == "push_char"
             && args.len() == 1
-            && let Some(recv_local) = self.receiver_local_from_path(receiver)
+            && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
-            let recv_ty = self.locals[recv_local.0 as usize].ty;
-            let mut peeled = recv_ty;
-            while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-                peeled = *inner;
-            }
-            if matches!(self.tcx.kind_of(peeled), TyKind::String) {
+            {
                 let Some(arg_local) = self.lower_expr(&args[0]) else {
                     return MethodLowering::Handled(None);
                 };
-                let recv_place = self.receiver_slot_place(recv_local);
+                let Some(recv_place) = self.string_receiver_place(receiver) else {
+                    return MethodLowering::Handled(None);
+                };
+                if projected {
+                    self.retain_string_place(&recv_place, span);
+                }
                 let dest = self.fresh(peeled);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
@@ -1914,7 +2005,11 @@ impl<'a> Builder<'a> {
                     target: Some(next),
                 });
                 self.set_current(next);
-                self.store_receiver_slot(recv_local, dest, span);
+                self.emit_assign(
+                    recv_place,
+                    Rvalue::Use(Operand::Copy(Place::local(dest))),
+                    span,
+                );
                 return MethodLowering::Handled(Some(self.lower_unit(span)));
             }
         }
@@ -1923,18 +2018,18 @@ impl<'a> Builder<'a> {
         // interprets the argument as a raw byte value.
         if method.name.as_str() == "push_byte"
             && args.len() == 1
-            && let Some(recv_local) = self.receiver_local_from_path(receiver)
+            && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
-            let recv_ty = self.locals[recv_local.0 as usize].ty;
-            let mut peeled = recv_ty;
-            while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-                peeled = *inner;
-            }
-            if matches!(self.tcx.kind_of(peeled), TyKind::String) {
+            {
                 let Some(arg_local) = self.lower_expr(&args[0]) else {
                     return MethodLowering::Handled(None);
                 };
-                let recv_place = self.receiver_slot_place(recv_local);
+                let Some(recv_place) = self.string_receiver_place(receiver) else {
+                    return MethodLowering::Handled(None);
+                };
+                if projected {
+                    self.retain_string_place(&recv_place, span);
+                }
                 let dest = self.fresh(peeled);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
@@ -1947,7 +2042,11 @@ impl<'a> Builder<'a> {
                     target: Some(next),
                 });
                 self.set_current(next);
-                self.store_receiver_slot(recv_local, dest, span);
+                self.emit_assign(
+                    recv_place,
+                    Rvalue::Use(Operand::Copy(Place::local(dest))),
+                    span,
+                );
                 return MethodLowering::Handled(Some(self.lower_unit(span)));
             }
         }
@@ -1957,15 +2056,12 @@ impl<'a> Builder<'a> {
         if matches!(method.name.as_str(), "clear" | "truncate")
             && (method.name.as_str() == "clear" && args.is_empty()
                 || method.name.as_str() == "truncate" && args.len() == 1)
-            && let Some(recv_local) = self.receiver_local_from_path(receiver)
+            && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
-            let recv_ty = self.locals[recv_local.0 as usize].ty;
-            let mut peeled = recv_ty;
-            while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
-                peeled = *inner;
-            }
-            if matches!(self.tcx.kind_of(peeled), TyKind::String) {
-                let recv_place = self.receiver_slot_place(recv_local);
+            {
+                let Some(recv_place) = self.string_receiver_place(receiver) else {
+                    return MethodLowering::Handled(None);
+                };
                 let mut call_args = vec![Operand::Copy(recv_place.clone())];
                 let rt = if method.name.as_str() == "clear" {
                     call_args.clear();
@@ -1986,8 +2082,19 @@ impl<'a> Builder<'a> {
                     target: Some(next),
                 });
                 self.set_current(next);
-                self.release_receiver_slot(recv_local, span);
-                self.store_receiver_slot(recv_local, dest, span);
+                // A place the holding aggregate owns has its displaced value
+                // released by the projected-store schedule; a `&mut` slot has
+                // no such schedule, so the release is written here.
+                if !projected {
+                    if let Some(recv_local) = self.receiver_local_from_path(receiver) {
+                        self.release_receiver_slot(recv_local, span);
+                    }
+                }
+                self.emit_assign(
+                    recv_place,
+                    Rvalue::Use(Operand::Copy(Place::local(dest))),
+                    span,
+                );
                 return MethodLowering::Handled(Some(self.lower_unit(span)));
             }
         }
@@ -3361,6 +3468,7 @@ impl<'a> Builder<'a> {
             (Some("errors::Error"), "field") => Some("gos_rt_error_field"),
             (Some("errors::Error"), "fields") => Some("gos_rt_error_fields"),
             (Some("regex::Pattern"), "is_match") => Some("gos_rt_regex_is_match"),
+            (Some("regex::Pattern"), "count") => Some("gos_rt_regex_count"),
             (Some("regex::Pattern"), "find") => Some("gos_rt_regex_find"),
             (Some("regex::Pattern"), "find_all") => Some("gos_rt_regex_find_all"),
             (Some("regex::Pattern"), "replace") => Some("gos_rt_regex_replace"),
@@ -4750,6 +4858,7 @@ impl<'a> Builder<'a> {
             (Some("errors::Error"), "field") => Some("gos_rt_error_field"),
             (Some("errors::Error"), "fields") => Some("gos_rt_error_fields"),
             (Some("regex::Pattern"), "is_match") => Some("gos_rt_regex_is_match"),
+            (Some("regex::Pattern"), "count") => Some("gos_rt_regex_count"),
             (Some("regex::Pattern"), "find") => Some("gos_rt_regex_find"),
             (Some("regex::Pattern"), "find_all") => Some("gos_rt_regex_find_all"),
             (Some("regex::Pattern"), "replace") => Some("gos_rt_regex_replace"),

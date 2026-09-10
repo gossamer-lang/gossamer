@@ -291,6 +291,22 @@ impl FieldKind {
 pub(crate) fn serde_fn(op: &str, ty: &str) -> String {
     format!("__gos_serde_{op}_{ty}")
 }
+
+/// The canonical serde operation a `module::item` turbofish spelling names,
+/// or `None` when the pair is not one. `json::decode::<T>` and
+/// `from_json::<T>` name the same typed decode, so both reach the same
+/// synthesized function rather than one of them answering a dynamic value.
+pub(crate) const fn qualified_serde_op(head: &str, tail: &str) -> Option<&'static str> {
+    match (head.as_bytes(), tail.as_bytes()) {
+        (b"json", b"decode" | b"from_json") => Some("from_json"),
+        (b"json", b"encode" | b"to_json") => Some("to_json"),
+        (b"yaml", b"from_yaml") => Some("from_yaml"),
+        (b"yaml", b"to_yaml") => Some("to_yaml"),
+        (b"toml", b"from_toml") => Some("from_toml"),
+        (b"toml", b"to_toml") => Some("to_toml"),
+        _ => None,
+    }
+}
 fn to_json_fn(ty: &str) -> String {
     serde_fn("to_json", ty)
 }

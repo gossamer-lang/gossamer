@@ -854,34 +854,39 @@ pub fn rewrite_serde_generic_calls(sf: &mut SourceFile) {
             // Bare `from_json::<T>(s)` or the qualified spelling
             // `json::from_json::<T>(s)` (head must name the matching
             // format module); both collapse to the mangled free fn.
-            match path.segments.len() {
-                1 => {}
+            // A format module's own typed spelling (`json::decode::<T>`,
+            // `yaml::from_yaml::<T>`) names the same operation the bare
+            // turbofish does, so it collapses to the same mangled fn. The
+            // path is only rewritten once the call is known to carry the one
+            // type argument that names which synthesized function it is.
+            let qualified_op = match path.segments.len() {
+                1 => None,
                 2 => {
                     let head = path.segments[0].name.name.as_str();
                     let tail = path.segments[1].name.name.as_str();
-                    // The bare `from_json::<T>` turbofish is the canonical
-                    // spelling; the qualified `json::from_json::<T>` is not a
-                    // second path. `from_yaml` / `from_toml` keep their
-                    // qualified spellings (the format module disambiguates).
-                    let matched = matches!(
-                        (head, tail),
-                        ("yaml", "from_yaml" | "to_yaml") | ("toml", "from_toml" | "to_toml")
-                    );
-                    if !matched {
-                        return;
+                    match crate::autoderive::qualified_serde_op(head, tail) {
+                        Some(op) => Some(op),
+                        None => return,
                     }
-                    path.segments.remove(0);
                 }
                 _ => return,
-            }
-            let seg = &mut path.segments[0];
+            };
+            let seg_idx = usize::from(qualified_op.is_some());
+            let seg = &path.segments[seg_idx];
+            let op = qualified_op.unwrap_or(seg.name.name.as_str());
             if !matches!(
-                seg.name.name.as_str(),
+                op,
                 "to_json" | "from_json" | "to_toml" | "from_toml" | "to_yaml" | "from_yaml"
             ) || seg.generics.len() != 1
             {
                 return;
             }
+            let op = op.to_string();
+            if seg_idx == 1 {
+                path.segments.remove(0);
+            }
+            let seg = &mut path.segments[0];
+            seg.name.name = op;
             let GenericArg::Type(ty) = &seg.generics[0] else {
                 return;
             };

@@ -573,31 +573,28 @@ fn gossamer_to_json_value(value: &Value) -> json_std::Value {
             gossamer_to_json_value(&fallback)
         }
         Value::IntArray(data) => {
-            let arr: Vec<json_std::Value> = data
-                .iter()
-                .copied()
-                .map(|n| json_std::Value::Number(n as f64))
-                .collect();
+            let arr: Vec<json_std::Value> =
+                data.iter().copied().map(json_std::Value::Int).collect();
             json_std::Value::Array(arr)
         }
         Value::ByteArray(data) => {
             let arr = data
                 .iter()
-                .map(|value| json_std::Value::Number(f64::from(*value)))
+                .map(|value| json_std::Value::Int(i64::from(*value)))
                 .collect();
             json_std::Value::Array(arr)
         }
         Value::InlineByteArray(data) => {
             let arr = data
                 .iter()
-                .map(|value| json_std::Value::Number(f64::from(*value)))
+                .map(|value| json_std::Value::Int(i64::from(*value)))
                 .collect();
             json_std::Value::Array(arr)
         }
         Value::ByteVec(data) => {
             let arr = data
                 .iter()
-                .map(|value| json_std::Value::Number(f64::from(*value)))
+                .map(|value| json_std::Value::Int(i64::from(*value)))
                 .collect();
             json_std::Value::Array(arr)
         }
@@ -609,17 +606,20 @@ fn gossamer_to_json_value(value: &Value) -> json_std::Value {
         Value::IntMap(map) => {
             let mut out = std::collections::BTreeMap::new();
             for (k, v) in map.lock().iter() {
-                out.insert(k.to_string(), json_std::Value::Number(*v as f64));
+                out.insert(k.to_string(), json_std::Value::Int(*v));
             }
             json_std::Value::Object(out)
         }
         Value::StrIntMap(map) => {
             let mut out = std::collections::BTreeMap::new();
             for (k, v) in map.lock().iter() {
-                out.insert(k.as_str().to_string(), json_std::Value::Number(*v as f64));
+                out.insert(k.as_str().to_string(), json_std::Value::Int(*v));
             }
             json_std::Value::Object(out)
         }
-        Value::Uint(n) => json_std::Value::Number(*n as f64),
+        // An unsigned word past `i64::MAX` has no exact integer rendering,
+        // so only a value the signed form holds keeps its digits.
+        Value::Uint(n) => i64::try_from(*n)
+            .map_or_else(|_| json_std::Value::Number(*n as f64), json_std::Value::Int),
     }
 }

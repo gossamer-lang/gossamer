@@ -192,8 +192,9 @@ method, or function may carry any of these names. What claims each one:
 is reserved but has no role - source files do not declare a package;
 see §6. `move` is **not** a keyword: Gossamer has no ownership
 transfer, so the Rust-style `move` closure qualifier would be
-meaningless. Closures capture by managed reference for heap types and
-by copy for `Copy` types with no opt-in needed.
+meaningless. Closures capture by managed reference for the
+containers (`Vec`, `Map`, `Set`) and by value for everything else, with
+no opt-in needed.
 
 ### 2.5 Operators and punctuation
 

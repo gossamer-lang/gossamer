@@ -59,6 +59,11 @@ pub struct TyCtxt {
     /// by the LLVM backend at the heap-copy site and by the drop pass
     /// when emitting guarded retain/release walks for stack aggregates.
     aggr_copy_metas: HashMap<Ty, String>,
+    /// Aggregate types an enum variant payload holds by pointer to a
+    /// heap-boxed copy rather than inline in the payload word. Populated by
+    /// MIR lowering at the boxing site; consulted by the LLVM backend, whose
+    /// payload read has to materialise the binding through the box.
+    boxed_enum_payload_tys: std::collections::HashSet<Ty>,
     /// Interned self-types of every heap-allocated (RC-managed) user
     /// enum. Populated by MIR lowering from the enum index; consulted by
     /// the drop pass to recognise locals holding RC pointers that need a
@@ -133,7 +138,7 @@ impl TyCtxt {
 
         write!(
             output,
-            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?}",
+            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?};boxed_enum_payload_tys={:?}",
             self.kinds,
             self.primitives,
             sorted(
@@ -177,6 +182,7 @@ impl TyCtxt {
             sorted(self.rc_managed_enum_defs.iter().map(|v| format!("{v:?}"))),
             sorted(self.tuple_struct_defs.iter().map(|v| format!("{v:?}"))),
             sorted(self.inline_enum_defs.iter().map(|v| format!("{v:?}"))),
+            sorted(self.boxed_enum_payload_tys.iter().map(|v| format!("{v:?}"))),
         )
     }
 
@@ -611,6 +617,19 @@ impl TyCtxt {
     #[must_use]
     pub fn aggr_copy_meta(&self, ty: Ty) -> Option<&str> {
         self.aggr_copy_metas.get(&ty).map(String::as_str)
+    }
+
+    /// Records that an enum variant payload of type `ty` is stored as a
+    /// pointer to a heap-boxed copy.
+    pub fn register_boxed_enum_payload(&mut self, ty: Ty) {
+        self.boxed_enum_payload_tys.insert(ty);
+    }
+
+    /// Whether an enum variant payload of type `ty` is a pointer to a
+    /// heap-boxed copy rather than the aggregate's words in the payload slot.
+    #[must_use]
+    pub fn is_boxed_enum_payload(&self, ty: Ty) -> bool {
+        self.boxed_enum_payload_tys.contains(&ty)
     }
 
     /// Returns the RC type-meta blob registered under `symbol`, if any.

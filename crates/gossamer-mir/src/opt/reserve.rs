@@ -1029,3 +1029,291 @@ pub(crate) fn elide_vec_clone_of_fresh_temporary(body: &mut Body, tcx: &TyCtxt) 
     let rewrites = collect_fresh_vec_clone_rewrites(body, &fresh, &reads);
     apply_fresh_vec_clone_rewrites(body, unit_ty, rewrites);
 }
+
+/// Blocks reachable from `start`, following every successor edge.
+fn blocks_reachable_from(body: &Body, start: usize) -> Vec<bool> {
+    let mut seen = vec![false; body.blocks.len()];
+    let mut queue = vec![start];
+    while let Some(bi) = queue.pop() {
+        for succ in block_successors(&body.blocks[bi].terminator) {
+            let idx = succ.as_u32() as usize;
+            if idx < seen.len() && !seen[idx] {
+                seen[idx] = true;
+                queue.push(idx);
+            }
+        }
+    }
+    seen
+}
+
+/// Whether any statement or terminator in `block` reads `local` other than
+/// through the reference-count helpers that bracket an ownership transfer.
+fn block_reads_vec_local(block: &BasicBlock, local: Local, from_stmt: usize) -> bool {
+    let mentions = |op: &Operand| matches!(op, Operand::Copy(p) if p.local == local);
+    for stmt in block.stmts.iter().skip(from_stmt) {
+        let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+            continue;
+        };
+        if place.local == local && !place.projection.is_empty() {
+            return true;
+        }
+        match rvalue {
+            Rvalue::CallIntrinsic { name, args } => {
+                if matches!(
+                    name,
+                    &"gos_rt_vec_retain" | &"gos_rt_vec_free" | &"gos_rt_vec_mark_shared"
+                ) {
+                    continue;
+                }
+                if args.iter().any(mentions) {
+                    return true;
+                }
+            }
+            Rvalue::Use(op) | Rvalue::UnaryOp { operand: op, .. } | Rvalue::Cast { operand: op, .. } => {
+                if mentions(op) {
+                    return true;
+                }
+            }
+            Rvalue::BinaryOp { lhs, rhs, .. } => {
+                if mentions(lhs) || mentions(rhs) {
+                    return true;
+                }
+            }
+            Rvalue::Aggregate { operands, .. } => {
+                if operands.iter().any(mentions) {
+                    return true;
+                }
+            }
+            Rvalue::Repeat { value, .. } => {
+                if mentions(value) {
+                    return true;
+                }
+            }
+            Rvalue::Ref { place: p, .. } | Rvalue::Len(p) => {
+                if p.local == local {
+                    return true;
+                }
+            }
+            Rvalue::StaticLoad(_) => {}
+        }
+    }
+    match &block.terminator {
+        Terminator::Call { args, .. } => args.iter().any(mentions),
+        Terminator::SwitchInt { discriminant, .. } => mentions(discriminant),
+        _ => false,
+    }
+}
+
+/// Drops the deep copy a struct binding takes of a vector field when the
+/// vector the field was built from is never named again.
+///
+/// A binding gives its aggregate storage of its own so a later push through a
+/// field cannot reach the value the field was built from. When that value has
+/// no reader left, the two cannot be told apart, and the copy - which walks
+/// every nested vector - is work whose result nothing can observe.
+pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns: &HashSet<String>) {
+    let n_blocks = body.blocks.len();
+    if n_blocks == 0 {
+        return;
+    }
+    // (clone block, target block) pairs to rewrite.
+    let mut rewrites: Vec<(usize, usize, Local)> = Vec::new();
+
+    for bi in 0..n_blocks {
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            target: Some(target),
+        } = &body.blocks[bi].terminator
+        else {
+            continue;
+        };
+        if name != "gos_rt_vec_clone" || !destination.projection.is_empty() {
+            continue;
+        }
+        let [Operand::Copy(field)] = args.as_slice() else {
+            continue;
+        };
+        let [Projection::Field(index)] = field.projection.as_slice() else {
+            continue;
+        };
+        let (index, base, cloned, ti) = (*index, field.local, destination.local, target.as_u32() as usize);
+        if ti >= n_blocks {
+            continue;
+        }
+        // The target block re-publishes the copy: release the old field, store
+        // the copy, take a share of it.
+        let stmts = &body.blocks[ti].stmts;
+        if stmts.len() < 3
+            || !matches!(&stmts[0].kind, StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, args }, .. }
+                if *name == "gos_rt_vec_free"
+                    && matches!(args.as_slice(), [Operand::Copy(p)] if *p == *field))
+            || !matches!(&stmts[1].kind, StatementKind::Assign { place, rvalue: Rvalue::Use(Operand::Copy(src)) }
+                if *place == *field && src.projection.is_empty() && src.local == cloned)
+            || !matches!(&stmts[2].kind, StatementKind::Assign { rvalue: Rvalue::CallIntrinsic { name, args }, .. }
+                if *name == "gos_rt_vec_retain"
+                    && matches!(args.as_slice(), [Operand::Copy(p)] if *p == *field))
+        {
+            continue;
+        }
+
+        match aggregate_field_origin(body, base, index, user_fns) {
+            // A value a function answered is the caller's own; the callee's
+            // own binding rules gave it storage nothing else names.
+            Some(AggregateOrigin::CallResult) => {}
+            Some(AggregateOrigin::Field {
+                block: origin_block,
+                index: origin_stmt,
+                source,
+            }) => {
+                // A vector nothing names after the aggregate cannot be told
+                // apart from the field that now holds it.
+                let reachable = blocks_reachable_from(body, origin_block);
+                let mut live =
+                    block_reads_vec_local(&body.blocks[origin_block], source, origin_stmt + 1);
+                for (idx, block) in body.blocks.iter().enumerate() {
+                    if idx != origin_block
+                        && reachable[idx]
+                        && block_reads_vec_local(block, source, 0)
+                    {
+                        live = true;
+                        break;
+                    }
+                }
+                if live {
+                    continue;
+                }
+            }
+            None => continue,
+        }
+        rewrites.push((bi, ti, cloned));
+    }
+
+    for (bi, ti, cloned) in rewrites {
+        let span = body.blocks[bi].span;
+        let Terminator::Call { target, .. } = body.blocks[bi].terminator.clone() else {
+            continue;
+        };
+        let Some(target) = target else { continue };
+        // The clone destination keeps a defined value so its own sweep release
+        // reads a null handle rather than an uninitialised slot.
+        body.blocks[bi].stmts.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(cloned),
+                rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            },
+            span,
+        });
+        body.blocks[bi].terminator = Terminator::Goto { target };
+        body.blocks[ti].stmts.drain(0..3);
+    }
+}
+
+/// Where the aggregate a binding local holds came from.
+enum AggregateOrigin {
+    /// A function answered it, so its storage is this frame's own.
+    CallResult,
+    /// It was built here from a vector named by `source`.
+    Field {
+        block: usize,
+        index: usize,
+        source: Local,
+    },
+}
+
+/// The origin of the aggregate whose field `index` a binding local names.
+fn aggregate_field_origin(
+    body: &Body,
+    base: Local,
+    index: u32,
+    user_fns: &HashSet<String>,
+) -> Option<AggregateOrigin> {
+    let mut binding_init: Option<Local> = None;
+    let mut writes = 0u32;
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if place.local != base || !place.projection.is_empty() {
+                // A store into a field replaces what the field names; it
+                // cannot make the dead source observable again.
+                continue;
+            }
+            // The pre-init sentinel every aggregate slot starts at is not a
+            // value the binding ever holds.
+            if matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0)))) {
+                continue;
+            }
+            writes += 1;
+            if let Rvalue::Use(Operand::Copy(src)) = rvalue
+                && src.projection.is_empty()
+            {
+                binding_init = Some(src.local);
+            }
+        }
+        if let Terminator::Call { destination, .. } = &block.terminator
+            && destination.local == base
+            && destination.projection.is_empty()
+        {
+            return None;
+        }
+    }
+    if writes != 1 {
+        return None;
+    }
+    let temp = binding_init?;
+    // The binding may copy a temporary a user function answered directly.
+    let mut answered_by_call = false;
+    for block in &body.blocks {
+        if let Terminator::Call {
+            callee,
+            destination,
+            ..
+        } = &block.terminator
+            && destination.local == temp
+            && destination.projection.is_empty()
+        {
+            let user = match callee {
+                Operand::FnRef { .. } => true,
+                Operand::Const(ConstValue::Str(name)) => user_fns.contains(name),
+                _ => false,
+            };
+            if !user {
+                return None;
+            }
+            answered_by_call = true;
+        }
+    }
+    if answered_by_call {
+        return Some(AggregateOrigin::CallResult);
+    }
+    let mut found: Option<AggregateOrigin> = None;
+    let mut temp_writes = 0u32;
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if place.local != temp || !place.projection.is_empty() {
+                continue;
+            }
+            if matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0)))) {
+                continue;
+            }
+            temp_writes += 1;
+            if let Rvalue::Aggregate { operands, .. } = rvalue
+                && let Some(Operand::Copy(src)) = operands.get(index as usize)
+                && src.projection.is_empty()
+            {
+                found = Some(AggregateOrigin::Field {
+                    block: bi,
+                    index: si,
+                    source: src.local,
+                });
+            }
+        }
+    }
+    if temp_writes == 1 { found } else { None }
+}

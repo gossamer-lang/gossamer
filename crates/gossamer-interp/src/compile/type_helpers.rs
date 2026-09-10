@@ -567,4 +567,195 @@ impl<'tcx> FnBuilder<'tcx> {
         );
         key_is_string && value_is_i64
     }
+    /// Whether `body` writes through `name`: reassigning it, writing a field
+    /// or element of it, or calling a method on it that mutates its receiver.
+    pub(crate) fn name_is_written(&self, body: &HirExpr, name: &str) -> bool {
+        let mut found = false;
+        walk_hir_expr(body, &mut |expr| match &expr.kind {
+            HirExprKind::Assign { place, .. } if hir_place_root_is(place, name) => found = true,
+            HirExprKind::MethodCall {
+                receiver,
+                name: method,
+                ..
+            } if hir_place_root_is(receiver, name)
+                && self.method_writes_receiver(receiver, method) =>
+            {
+                found = true;
+            }
+            _ => {}
+        });
+        found
+    }
+
+    /// Whether a call to `method` on `receiver` writes through its receiver: a
+    /// container mutator, or a user method declared `&mut self`.
+    fn method_writes_receiver(&self, receiver: &HirExpr, method: &Ident) -> bool {
+        if gossamer_types::is_mutating_method_name(method.name.as_str()) {
+            return true;
+        }
+        self.impl_target_names(receiver.ty)
+            .into_iter()
+            .any(|target| {
+                self.method_muts
+                    .contains(&format!("{target}::{}", method.name))
+            })
+    }
+}
+
+/// Whether the place `expr` names is rooted at the binding `name`.
+fn hir_place_root_is(expr: &HirExpr, name: &str) -> bool {
+    let mut cur = expr;
+    loop {
+        match &cur.kind {
+            HirExprKind::Path { segments, .. } => {
+                return matches!(segments.as_slice(), [seg] if seg.name == name);
+            }
+            HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                cur = receiver;
+            }
+            HirExprKind::Index { base, .. } => cur = base,
+            HirExprKind::Unary { operand, .. } => cur = operand,
+            _ => return false,
+        }
+    }
+}
+
+/// Applies `f` to `expr` and every expression nested inside it.
+fn walk_hir_expr(expr: &HirExpr, f: &mut impl FnMut(&HirExpr)) {
+    use gossamer_hir::{HirArrayExpr, HirSelectOp, HirStmtKind};
+    f(expr);
+    match &expr.kind {
+        HirExprKind::Literal(_)
+        | HirExprKind::Path { .. }
+        | HirExprKind::Placeholder
+        | HirExprKind::Continue { .. } => {}
+        HirExprKind::Call { callee, args } => {
+            walk_hir_expr(callee, f);
+            for a in args {
+                walk_hir_expr(a, f);
+            }
+        }
+        HirExprKind::MethodCall { receiver, args, .. } => {
+            walk_hir_expr(receiver, f);
+            for a in args {
+                walk_hir_expr(a, f);
+            }
+        }
+        HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+            walk_hir_expr(receiver, f);
+        }
+        HirExprKind::Index { base, index } => {
+            walk_hir_expr(base, f);
+            walk_hir_expr(index, f);
+        }
+        HirExprKind::Unary { operand, .. } => walk_hir_expr(operand, f),
+        HirExprKind::Binary { lhs, rhs, .. } => {
+            walk_hir_expr(lhs, f);
+            walk_hir_expr(rhs, f);
+        }
+        HirExprKind::Assign { place, value } => {
+            walk_hir_expr(place, f);
+            walk_hir_expr(value, f);
+        }
+        HirExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            walk_hir_expr(condition, f);
+            walk_hir_expr(then_branch, f);
+            if let Some(e) = else_branch {
+                walk_hir_expr(e, f);
+            }
+        }
+        HirExprKind::Match { scrutinee, arms } => {
+            walk_hir_expr(scrutinee, f);
+            for arm in arms {
+                if let Some(g) = &arm.guard {
+                    walk_hir_expr(g, f);
+                }
+                walk_hir_expr(&arm.body, f);
+            }
+        }
+        HirExprKind::Loop { body, .. } => walk_hir_expr(body, f),
+        HirExprKind::While {
+            condition, body, ..
+        } => {
+            walk_hir_expr(condition, f);
+            walk_hir_expr(body, f);
+        }
+        HirExprKind::Block(block) => walk_hir_block(block, f),
+        HirExprKind::Closure { body, .. } => walk_hir_expr(body, f),
+        HirExprKind::LiftedClosure { captures, .. } => {
+            for c in captures {
+                walk_hir_expr(c, f);
+            }
+        }
+        HirExprKind::Select { arms } => {
+            for arm in arms {
+                match &arm.op {
+                    HirSelectOp::Recv { channel, .. } => walk_hir_expr(channel, f),
+                    HirSelectOp::Send { channel, value } => {
+                        walk_hir_expr(channel, f);
+                        walk_hir_expr(value, f);
+                    }
+                    HirSelectOp::Default => {}
+                }
+                walk_hir_expr(&arm.body, f);
+            }
+        }
+        HirExprKind::Return(value) => {
+            if let Some(v) = value {
+                walk_hir_expr(v, f);
+            }
+        }
+        HirExprKind::Break { value, .. } => {
+            if let Some(v) = value {
+                walk_hir_expr(v, f);
+            }
+        }
+        HirExprKind::Tuple(elems) => {
+            for e in elems {
+                walk_hir_expr(e, f);
+            }
+        }
+        HirExprKind::Array(arr) => match arr {
+            HirArrayExpr::List(elems) => {
+                for e in elems {
+                    walk_hir_expr(e, f);
+                }
+            }
+            HirArrayExpr::Repeat { value, count } => {
+                walk_hir_expr(value, f);
+                walk_hir_expr(count, f);
+            }
+        },
+        HirExprKind::Cast { value, .. } => walk_hir_expr(value, f),
+        HirExprKind::Range { start, end, .. } => {
+            if let Some(s) = start {
+                walk_hir_expr(s, f);
+            }
+            if let Some(e) = end {
+                walk_hir_expr(e, f);
+            }
+        }
+    }
+    fn walk_hir_block(block: &gossamer_hir::HirBlock, f: &mut impl FnMut(&HirExpr)) {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                HirStmtKind::Expr { expr, .. } | HirStmtKind::Defer(expr) => {
+                    walk_hir_expr(expr, f);
+                }
+                HirStmtKind::Let { init, .. } => {
+                    if let Some(e) = init {
+                        walk_hir_expr(e, f);
+                    }
+                }
+                HirStmtKind::Item(_) => {}
+            }
+        }
+        if let Some(tail) = &block.tail {
+            walk_hir_expr(tail, f);
+        }
+    }
 }

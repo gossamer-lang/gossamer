@@ -45,6 +45,9 @@ mod macos_deployment;
 /// Runtime symbols that intentionally have no codegen dispatch arm.
 /// Add a one-line comment justifying each entry.
 const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
+    // Reached only from inside the runtime: a vector duplicating a slot that
+    // holds a JSON handle takes a box of its own onto the same document.
+    "gos_rt_json_clone_handle",
     // Intentionally never called from generated code: a debug-only
     // helper used by manual `gdb`/`lldb` sessions.
     "gos_rt_result_dbg",

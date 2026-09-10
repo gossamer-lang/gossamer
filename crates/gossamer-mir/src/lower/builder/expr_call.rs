@@ -1499,6 +1499,9 @@ impl<'a> Builder<'a> {
             TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Iterator(_) => 2,
             TyKind::HashMap { .. } => 3,
             TyKind::DynError => 4,
+            // A `json::Value` element is a handle holding a share of the
+            // document it views, so the vector's teardown gives each back.
+            TyKind::JsonValue => 12,
             // A single-slot struct, tuple, or fixed array is held inline
             // and its slot address is the value; the store has to know,
             // since a one-word scalar element is the value itself.

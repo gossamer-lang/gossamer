@@ -406,10 +406,9 @@ pub fn compile_fn(
         cov,
     );
     builder.consumable = consume::consumable_locals(decl);
-    builder.capture_cell_names = capture_cell_names(
-        tcx,
-        &consume::closure_captured_locals(&decl.params, &body.block),
-    );
+    let (captured_locals, mutated_locals) =
+        consume::closure_captured_locals(&decl.params, &body.block);
+    builder.capture_cell_names = capture_cell_names(tcx, &captured_locals, &mutated_locals);
     let mut pending_cells: Vec<(String, Reg, gossamer_types::Ty)> = Vec::new();
     for (idx, param) in decl.params.iter().enumerate() {
         let reg = builder.alloc_reg();
@@ -495,10 +494,19 @@ pub fn compile_fn(
 fn capture_cell_names(
     tcx: &TyCtxt,
     captured: &[(String, gossamer_types::Ty)],
+    mutated: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
     captured
         .iter()
-        .filter(|(_, ty)| matches!(tcx.kind(*ty), Some(TyKind::Vec(_) | TyKind::Slice(_))))
+        .filter(|(name, ty)| {
+            // A cell exists so both sides of a capture name one buffer once
+            // either writes it. A binding nothing writes has no such reader
+            // to serve, and the cell's read - which empties the cell for the
+            // length of the instruction - is what two goroutines sharing one
+            // capture race on.
+            mutated.contains(name)
+                && matches!(tcx.kind(*ty), Some(TyKind::Vec(_) | TyKind::Slice(_)))
+        })
         .map(|(name, _)| name.clone())
         .collect()
 }
@@ -890,7 +898,7 @@ fn literal_const(lit: &HirLiteral) -> (ConstKey, Value) {
             (ConstKey::Int(value), Value::Int(value))
         }
         HirLiteral::Float(text) => {
-            let parsed = strip_float_suffix(text).parse::<f64>().unwrap_or(0.0);
+            let parsed = float_literal_value(text);
             (ConstKey::Float(parsed.to_bits()), Value::Float(parsed))
         }
         HirLiteral::Char(c) => (ConstKey::Char(*c), Value::Char(*c)),
@@ -1059,13 +1067,17 @@ fn strip_int_suffix(text: &str) -> String {
     text.to_string()
 }
 
-fn strip_float_suffix(text: &str) -> String {
+/// Numeric value of a float literal's source text, with its width suffix
+/// and any `_` visual separators removed.
+pub(crate) fn float_literal_value(text: &str) -> f64 {
+    let mut body = text;
     for suffix in &["f32", "f64"] {
         if let Some(stripped) = text.strip_suffix(suffix) {
-            return stripped.to_string();
+            body = stripped;
+            break;
         }
     }
-    text.to_string()
+    body.replace('_', "").parse::<f64>().unwrap_or(0.0)
 }
 
 /// Detects `m.insert(k, m.get_or(k, 0) + by)`. Returns `(key, by)`

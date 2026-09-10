@@ -22,6 +22,7 @@ pub(crate) const ENTRIES: &[(&str, Entry)] = &[
     ("is_match", builtin_regex_is_match),
     ("find", builtin_regex_find),
     ("find_all", builtin_regex_find_all),
+    ("count", builtin_regex_count),
     ("captures", builtin_regex_captures),
     ("captures_all", builtin_regex_captures_all),
     ("replace", builtin_regex_replace),
@@ -171,6 +172,15 @@ fn builtin_regex_find_all(args: &[Value]) -> RuntimeResult<Value> {
             .map(|(s, e, t)| match_triple(s, e, t))
             .collect(),
     )))
+}
+
+fn builtin_regex_count(args: &[Value]) -> RuntimeResult<Value> {
+    let handle = args
+        .first()
+        .ok_or_else(|| RuntimeError::Type("regex::count: missing Pattern".to_string()))?;
+    let text = arg_string(args, 1, "regex::count")?;
+    let hits = with_regex(handle, |p| regex_std::count(p, text))?;
+    Ok(Value::Int(i64::try_from(hits).unwrap_or(i64::MAX)))
 }
 
 fn builtin_regex_captures(args: &[Value]) -> RuntimeResult<Value> {

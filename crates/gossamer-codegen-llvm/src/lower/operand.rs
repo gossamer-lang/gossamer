@@ -252,11 +252,17 @@ impl<'a> Lowerer<'a> {
         // that lands on garbage (the case `*s = expr` where
         // `s: &mut i64`).
         let skip_auto_deref = matches!(place.projection.first(), Some(Projection::Deref));
+        // `current` alternates between a loaded pointer value and the address
+        // of a slot holding one. A runtime-managed handle (`Vec`, `Slice`) is
+        // the value, so a step that consumes one loads it out of its slot
+        // first; a step that only walks an offset leaves an address behind.
+        let mut current_is_loaded = false;
         if !skip_auto_deref && Self::is_pointer_local_ty(self.tcx, current_ty) {
             let next = self.fresh();
             writeln!(self.out, "  {next} = load ptr, ptr {current}").unwrap();
             current = next;
             current_ty = self.unwrap_ref(current_ty);
+            current_is_loaded = true;
         }
         let mut stride_slots: u32 = elem_slots(self.tcx, current_ty);
         for proj in &place.projection {
@@ -285,6 +291,7 @@ impl<'a> Lowerer<'a> {
                     )
                     .unwrap();
                     current = next;
+                    current_is_loaded = false;
                     // Advance current_ty so the next projection's
                     // stride and field-offset computation reflects
                     // the projected field, not the parent.
@@ -323,13 +330,24 @@ impl<'a> Lowerer<'a> {
                         self.tcx.kind(current_ty),
                         Some(TyKind::Vec(_) | TyKind::Slice(_))
                     ) {
+                        // The helper takes the header itself, so a handle
+                        // still sitting in a struct field or a Vec element
+                        // slot is loaded out of it here.
+                        let handle = if current_is_loaded {
+                            current.clone()
+                        } else {
+                            let loaded = self.fresh();
+                            writeln!(self.out, "  {loaded} = load ptr, ptr {current}").unwrap();
+                            loaded
+                        };
                         declare_rt(&mut self.runtime_refs, "gos_rt_vec_get_ptr");
                         writeln!(
                             self.out,
-                            "  {next} = call ptr @gos_rt_vec_get_ptr(ptr {current}, i64 {idx_raw})"
+                            "  {next} = call ptr @gos_rt_vec_get_ptr(ptr {handle}, i64 {idx_raw})"
                         )
                         .unwrap();
                         current = next;
+                        current_is_loaded = false;
                         current_ty = match self.tcx.kind(current_ty) {
                             Some(TyKind::Vec(elem) | TyKind::Slice(elem)) => *elem,
                             _ => current_ty,
@@ -360,6 +378,7 @@ impl<'a> Lowerer<'a> {
                         .unwrap();
                     }
                     current = next;
+                    current_is_loaded = false;
                     // Advance current_ty to the element type so
                     // subsequent projections (multi-dim array, nested
                     // field, …) see the right shape. Without this,
@@ -379,6 +398,7 @@ impl<'a> Lowerer<'a> {
                     let next = self.fresh();
                     writeln!(self.out, "  {next} = load ptr, ptr {current}").unwrap();
                     current = next;
+                    current_is_loaded = true;
                     stride_slots = 1;
                 }
                 Projection::Discriminant => {
@@ -397,6 +417,7 @@ impl<'a> Lowerer<'a> {
                     )
                     .unwrap();
                     current = next;
+                    current_is_loaded = false;
                     stride_slots = 1;
                 }
             }

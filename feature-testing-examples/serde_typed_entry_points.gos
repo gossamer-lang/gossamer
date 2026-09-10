@@ -1,0 +1,35 @@
+// The typed serde entry points name the same functions under every spelling,
+// and a type name two modules share reaches its own.
+
+use std::encoding::json
+
+mod grid {
+    pub struct Cell { pub alive: bool, pub weight: f64 }
+}
+mod maze {
+    pub struct Cell { pub open: bool, pub name: String }
+}
+
+struct Mapped { x: f64, y: f64 }
+struct Payload { coordinates: Vec<Mapped> }
+
+fn main() {
+    let a = grid::Cell { alive: true, weight: 0.5 }
+    let b = maze::Cell { open: false, name: "north" }
+    println("{}", to_json::<grid::Cell>(a).unwrap_or("?"))
+    println("{}", json::encode::<maze::Cell>(b).unwrap_or("?"))
+
+    let text = "{\"coordinates\":[{\"x\":1.5,\"y\":2.5},{\"x\":0.25,\"y\":0.5}]}"
+    let decoded = json::decode::<Payload>(text).unwrap()
+    println("{:?}", decoded)
+    println("first x: {}", decoded.coordinates[0].x)
+    let round = from_json::<Payload>(text).unwrap()
+    println("count: {}", round.coordinates.len())
+    let mut sum = 0
+    for i in 0..2000 { sum += scale(i) }
+    println("hot sum: {}", sum)
+}
+
+fn scale(i: i64) -> i64 {
+    (i * 3) % 7
+}

@@ -164,6 +164,24 @@ pub(super) fn is_carrier_ty(tcx: &TyCtxt, ty: Ty) -> bool {
     )
 }
 
+/// Slot count of an enum variant payload the constructor heap-boxes, or
+/// `None` when the payload is held in the node's own word.
+///
+/// A multi-slot aggregate does not fit one word; a single-slot one is boxed
+/// only when its word is a counted handle the node has to own a share of.
+pub(super) fn boxed_payload_slots(tcx: &TyCtxt, ty: Ty) -> Option<u32> {
+    let aggregate = match tcx.kind_of(ty) {
+        TyKind::Tuple(_) | TyKind::Array { .. } => true,
+        TyKind::Adt { def, .. } => tcx.struct_field_tys(*def).is_some(),
+        _ => false,
+    };
+    if !aggregate {
+        return None;
+    }
+    let slots = type_slot_count(tcx, ty);
+    (slots > 1 || tcx.is_boxed_enum_payload(ty)).then_some(slots)
+}
+
 pub(super) fn type_slot_count(tcx: &TyCtxt, ty: Ty) -> u32 {
     match tcx.kind_of(ty).clone() {
         TyKind::Tuple(elems) => elems

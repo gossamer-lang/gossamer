@@ -2720,6 +2720,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::regex",
+        name: "count",
+        signature: "fn count(pattern: regex::Pattern, text: String) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::regex",
         name: "is_match",
         signature: "fn is_match(pattern: regex::Pattern, text: String) -> bool",
     },

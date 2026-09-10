@@ -628,6 +628,7 @@ impl<'a> Lowerer<'a> {
         if name == "gos_rt_vec_set_i64"
             && args.len() == 3
             && is_inline_vec_scalar_llvm(&self.operand_llvm_ty(&args[2]))
+            && !self.vec_operand_elem_owns_word(&args[0])
         {
             self.lower_vec_set_i64_inline(args, destination, target)?;
             return Ok(());
@@ -636,7 +637,10 @@ impl<'a> Lowerer<'a> {
         // counted loop, where the index is proven in `[0, len)` and the
         // receiver non-null. Inline it without the null / bounds guard so
         // the inner loop is a straight store.
-        if name == "gos_rt_vec_set_i64_unchecked" && args.len() == 3 {
+        if name == "gos_rt_vec_set_i64_unchecked"
+            && args.len() == 3
+            && !self.vec_operand_elem_owns_word(&args[0])
+        {
             self.lower_vec_set_i64_unchecked_inline(args, destination, target)?;
             return Ok(());
         }
@@ -1516,6 +1520,40 @@ impl<'a> Lowerer<'a> {
         let dest_ty_mir = self.place_leaf_ty(destination);
         let dest_ty = render_ty(self.tcx, dest_ty_mir);
         match name {
+            "gos_enum_slot_ptr" => {
+                // The LLVM tier writes a payload aggregate's words into the
+                // slot itself, so the slot's address is where they live. A
+                // tagged null answers null, the read a unit variant gives.
+                if args.len() < 2 {
+                    return Err(BuildError::InternalLoweringBug("gos_enum_slot_ptr arity"));
+                }
+                let pv = self.lower_operand(&args[0])?;
+                let p_ty = self.operand_llvm_ty(&args[0]);
+                let p64 = self.coerce_llvm_value(&pv, &p_ty, "i64");
+                let off_v = self.lower_operand(&args[1])?;
+                let off_ty = self.operand_llvm_ty(&args[1]);
+                let off64 = self.coerce_llvm_value(&off_v, &off_ty, "i64");
+                let m = self.fresh();
+                writeln!(self.out, "  {m} = and i64 {p64}, -8").unwrap();
+                let is_null = self.fresh();
+                writeln!(self.out, "  {is_null} = icmp eq i64 {m}, 0").unwrap();
+                let base = self.fresh();
+                writeln!(self.out, "  {base} = inttoptr i64 {m} to ptr").unwrap();
+                let addr = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {addr} = getelementptr i8, ptr {base}, i64 {off64}"
+                )
+                .unwrap();
+                let slot_ptr = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {slot_ptr} = select i1 {is_null}, ptr null, ptr {addr}"
+                )
+                .unwrap();
+                self.store_value_to_place(destination, "ptr", &slot_ptr);
+                return Ok(());
+            }
             "gos_enum_load" => {
                 // gos_enum_load(ptr, off) -> i64 at (ptr & !7) + off.
                 // Enum payload read: the mask strips a tagged repr's disc
@@ -1582,8 +1620,11 @@ impl<'a> Lowerer<'a> {
                 // scope-end teardown release stays balanced. A null box (a
                 // unit variant with no fields) is skipped - those have no
                 // aggregate to read.
+                // A single-slot aggregate whose word is a counted handle is
+                // boxed too, so the node can own a share of what it holds.
                 let dest_slots = if is_aggregate(self.tcx, dest_ty_mir) {
-                    slot_count(self.tcx, dest_ty_mir).filter(|&n| n > 1)
+                    slot_count(self.tcx, dest_ty_mir)
+                        .filter(|&n| n > 1 || self.tcx.is_boxed_enum_payload(dest_ty_mir))
                 } else {
                     None
                 };

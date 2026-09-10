@@ -291,6 +291,17 @@ fn collect_module_fn_paths(
                     out.insert(def, segs);
                 }
             }
+            // A module's `static` is reached by the same module-relative path
+            // a function is, and the cell it names is registered under that
+            // spelling. Two modules may each declare one of the same name, so
+            // a bare reference has to carry the module that declared it.
+            AstItemKind::Static(decl) if !module_path.is_empty() => {
+                if let Some(def) = resolutions.definition_of(item.id) {
+                    let mut segs = module_path.clone();
+                    segs.push(decl.name.clone());
+                    out.insert(def, segs);
+                }
+            }
             _ => {}
         }
     }
@@ -642,6 +653,16 @@ impl Lowerer<'_> {
         self.table.method_owner(node).map(Ident::new)
     }
 
+    /// The annotation's type when it resolved to a concrete one, else the
+    /// initializer's.
+    fn declared_or_init_ty(&mut self, annotation: NodeId, init: NodeId) -> gossamer_types::Ty {
+        let declared = self.ty_of(annotation);
+        if !ty_has_unresolved_var(self.tcx, declared) {
+            return declared;
+        }
+        self.ty_of(init)
+    }
+
     fn ty_of(&mut self, node: NodeId) -> gossamer_types::Ty {
         // `Range<T>` is a type-layer spelling of `Iterator<T>`; lowering and
         // every backend below it know only the latter.
@@ -868,7 +889,10 @@ impl Lowerer<'_> {
             }),
             AstItemKind::Static(decl) => HirItemKind::Static(HirStatic {
                 name: decl.name.clone(),
-                ty: self.ty_of(decl.value.id),
+                // The declared type is what the cell holds; an initializer
+                // that names no element type (`Map::new()`, `#[]`) would
+                // otherwise leave the static's own type an inference var.
+                ty: self.declared_or_init_ty(decl.ty.id, decl.value.id),
                 mutable: matches!(decl.mutability, Mutability::Mutable),
                 value: self.lower_expr(&decl.value),
             }),
@@ -4341,5 +4365,31 @@ fn compound_assign_to_binary(op: AssignOp) -> HirBinaryOp {
         AssignOp::BitXorAssign => HirBinaryOp::BitXor,
         AssignOp::ShlAssign => HirBinaryOp::Shl,
         AssignOp::ShrAssign => HirBinaryOp::Shr,
+    }
+}
+
+/// Whether `ty` still names an inference variable, at its own head or inside
+/// one of its arguments.
+fn ty_has_unresolved_var(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> bool {
+    use gossamer_types::TyKind;
+    match tcx.kind_of(ty) {
+        TyKind::Var(_) | TyKind::Error => true,
+        TyKind::Vec(inner)
+        | TyKind::Slice(inner)
+        | TyKind::Array { elem: inner, .. }
+        | TyKind::Ref { inner, .. }
+        | TyKind::Iterator(inner)
+        | TyKind::Sender(inner)
+        | TyKind::Receiver(inner)
+        | TyKind::JoinHandle(inner) => ty_has_unresolved_var(tcx, *inner),
+        TyKind::HashMap { key, value, .. } => {
+            ty_has_unresolved_var(tcx, *key) || ty_has_unresolved_var(tcx, *value)
+        }
+        TyKind::Tuple(elems) => elems.iter().any(|e| ty_has_unresolved_var(tcx, *e)),
+        TyKind::Adt { substs, .. } => substs
+            .types()
+            .into_iter()
+            .any(|a| ty_has_unresolved_var(tcx, a)),
+        _ => false,
     }
 }

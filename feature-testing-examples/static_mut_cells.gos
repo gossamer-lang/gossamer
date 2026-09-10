@@ -1,0 +1,64 @@
+// A `static mut` holding a container is a live cell, not a frozen value.
+
+static mut ITEMS: Vec<i64> = #[]
+static mut TALLY: Map<String, i64> = {}
+static mut LABEL: String = "start"
+static mut COUNT: i64 = 0
+
+mod nested {
+    pub static mut HITS: Vec<String> = #[]
+}
+
+fn record(n: i64) {
+    ITEMS.push(n)
+    TALLY.inc("calls")
+    COUNT += 1
+    nested::HITS.push(format("hit{}", n))
+}
+
+fn main() {
+    record(1)
+    record(2)
+    record(3)
+    println("items: {} len={}", ITEMS, ITEMS.len())
+    println("tally: {}", TALLY.get_or("calls", -1))
+    println("count: {}", COUNT)
+    println("hits: {}", nested::HITS)
+    LABEL = "done"
+    println("label: {}", LABEL)
+    for i in 0..2000 { COUNT += tally(i) }
+    println("hot count: {}", COUNT)
+    cross_module_cells()
+}
+
+fn tally(i: i64) -> i64 {
+    if i % 2 == 0 { 1 } else { 0 }
+}
+
+// Two modules may each declare a `static mut` of the same name; a bare
+// reference inside one names that module's cell and no other's.
+mod left {
+    static mut SEED: i64 = 10
+    static mut TRAIL: Vec<i64> = #[]
+    pub fn reset() { SEED = 10 }
+    pub fn step() -> i64 { SEED = (SEED * 3 + 1) % 100003; TRAIL.push(SEED); SEED }
+    pub fn seen() -> i64 { TRAIL.len() }
+}
+
+mod right {
+    static mut SEED: i64 = 100
+    static mut TRAIL: Vec<i64> = #[]
+    pub fn reset() { SEED = 100 }
+    pub fn step() -> i64 { SEED = (SEED * 5 + 2) % 100019; TRAIL.push(SEED); SEED }
+    pub fn seen() -> i64 { TRAIL.len() }
+}
+
+fn cross_module_cells() {
+    left::reset()
+    right::reset()
+    println("left:  {} {} {}", left::step(), left::step(), left::seen())
+    println("right: {} {} {}", right::step(), right::step(), right::seen())
+    let mut i = 0
+    while i < 2000 { left::step(); right::step(); i += 1 }
+    println("hot: left={} right={}", left::seen(), right::seen())
+}

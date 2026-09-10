@@ -1598,7 +1598,7 @@ const STDLIB_SUPPORT: &[StdlibSupport] = &[
         Coverage::Full,
         Coverage::Full,
         Coverage::Full,
-        "compile, is_match, find, find_all, captures, replace, split.",
+        "compile, is_match, count, find, find_all, captures, replace, split.",
     ),
     item(
         "std::compress::gzip",

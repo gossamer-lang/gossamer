@@ -1214,6 +1214,10 @@ impl<'a> Builder<'a> {
                 ("gos_rt_regex_compile_result", ty)
             }
             "regex::is_match" => ("gos_rt_regex_is_match", self.tcx.bool_ty()),
+            "regex::count" => (
+                "gos_rt_regex_count",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
             // Returns Option<(start, end, text)> - disc=0 Some, disc=1 None.
             "regex::find" => ("gos_rt_regex_find_opt", self.option_tuple3_i64_i64_str_ty()),
             // Returns Option<Vec<String>> - disc=0 Some(caps), disc=1 None.

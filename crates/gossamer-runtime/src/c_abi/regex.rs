@@ -105,6 +105,18 @@ pub unsafe extern "C" fn gos_rt_regex_is_match(re: *const GosRegex, text: *const
     })
 }
 
+/// Counts the non-overlapping matches without building them.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_regex_count(re: *const GosRegex, text: *const c_char) -> i64 {
+    ffi_entry!(-1, {
+        if re.is_null() || text.is_null() {
+            return 0;
+        }
+        let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        i64::try_from(unsafe { (*re).inner.find_iter(s).count() }).unwrap_or(i64::MAX)
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_regex_find(
     re: *const GosRegex,

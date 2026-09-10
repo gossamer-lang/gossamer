@@ -782,6 +782,7 @@ pub unsafe extern "C" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64
         if idx < 0 || idx >= vec.len {
             crate::c_abi::panic::panic_oob_text("vec index", idx, vec.len);
         }
+        unsafe { crate::c_abi::vec::vec_release_owned_elem(vec, idx, value) };
         unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, idx, value) };
     });
 }
@@ -799,6 +800,7 @@ pub unsafe extern "C" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64
 pub unsafe extern "C" fn gos_rt_vec_set_i64_unchecked(v: *mut GosVec, idx: i64, value: i64) {
     ffi_entry!((), {
         let vec = unsafe { &mut *v };
+        unsafe { crate::c_abi::vec::vec_release_owned_elem(vec, idx, value) };
         unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, idx, value) };
     });
 }

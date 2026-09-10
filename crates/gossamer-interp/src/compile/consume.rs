@@ -66,6 +66,10 @@ struct Analyzer {
     /// Captured binding names paired with the type at their reading
     /// site, in first-seen order.
     captured: Vec<(String, Ty)>,
+    /// Names this body writes through: reassigned, written through a
+    /// projection, handed out as `&mut`, or the receiver of a method that
+    /// mutates it. A binding absent here is only ever read.
+    mutated: HashSet<String>,
 }
 
 impl Analyzer {
@@ -119,6 +123,27 @@ impl Analyzer {
         };
         if self.resolve(name).is_some_and(|idx| idx < mark) {
             self.captured.push((name.to_string(), ty));
+        }
+    }
+
+    /// Records that `expr`'s root binding is written through.
+    fn record_mutation(&mut self, expr: &HirExpr) {
+        let mut cur = expr;
+        loop {
+            match &cur.kind {
+                HirExprKind::Path { segments, .. } => {
+                    if let [seg] = segments.as_slice() {
+                        self.mutated.insert(seg.name.clone());
+                    }
+                    return;
+                }
+                HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                    cur = receiver
+                }
+                HirExprKind::Index { base, .. } => cur = base,
+                HirExprKind::Unary { operand, .. } => cur = operand,
+                _ => return,
+            }
         }
     }
 
@@ -179,7 +204,15 @@ impl Analyzer {
                     self.visit_expr(arg, depth, in_closure, true);
                 }
             }
-            HirExprKind::MethodCall { receiver, args, .. } => {
+            HirExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                ..
+            } => {
+                if gossamer_types::is_mutating_method_name(name.name.as_str()) {
+                    self.record_mutation(receiver);
+                }
                 self.visit_expr(receiver, depth, in_closure, false);
                 for arg in args {
                     self.visit_expr(arg, depth, in_closure, true);
@@ -192,9 +225,12 @@ impl Analyzer {
                 self.visit_expr(base, depth, in_closure, false);
                 self.visit_expr(index, depth, in_closure, true);
             }
-            HirExprKind::Unary { operand, .. } => {
+            HirExprKind::Unary { op, operand } => {
                 // `&x` / `&mut x` / `*x` / `-x` / `!x` are never a
                 // consuming read; keep the operand out of the set.
+                if matches!(op, gossamer_hir::HirUnaryOp::RefMut) {
+                    self.record_mutation(operand);
+                }
                 self.visit_expr(operand, depth, in_closure, false);
             }
             HirExprKind::Binary { lhs, rhs, .. } => {
@@ -202,6 +238,7 @@ impl Analyzer {
                 self.visit_expr(rhs, depth, in_closure, false);
             }
             HirExprKind::Assign { place, value } => {
+                self.record_mutation(place);
                 // Visiting `place` records the LHS path with `bare =
                 // false`, so an assignment target is never consumable.
                 self.visit_expr(place, depth, in_closure, false);
@@ -538,14 +575,17 @@ impl super::FnBuilder<'_> {
 /// with the type at the reading site. A name appears once per reading
 /// site; the caller filters by type and collects the names it stores in
 /// capture cells.
-pub(crate) fn closure_captured_locals(params: &[HirParam], body: &HirBlock) -> Vec<(String, Ty)> {
+pub(crate) fn closure_captured_locals(
+    params: &[HirParam],
+    body: &HirBlock,
+) -> (Vec<(String, Ty)>, HashSet<String>) {
     let mut a = Analyzer::default();
     a.push_scope();
     for param in params {
         a.record_bindings(&param.pattern, 0);
     }
     a.visit_block(body, 0, false);
-    a.captured
+    (a.captured, a.mutated)
 }
 
 /// [`closure_captured_locals`] for a closure body, which is a bare
@@ -553,14 +593,14 @@ pub(crate) fn closure_captured_locals(params: &[HirParam], body: &HirBlock) -> V
 pub(crate) fn closure_captured_locals_in_expr(
     params: &[HirParam],
     body: &HirExpr,
-) -> Vec<(String, Ty)> {
+) -> (Vec<(String, Ty)>, HashSet<String>) {
     let mut a = Analyzer::default();
     a.push_scope();
     for param in params {
         a.record_bindings(&param.pattern, 0);
     }
     a.visit_expr(body, 0, false, false);
-    a.captured
+    (a.captured, a.mutated)
 }
 
 /// Returns the set of local names that are safe to move at their single

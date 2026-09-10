@@ -1033,7 +1033,12 @@ pub(super) fn lower_rvalue_into(
                         | gossamer_types::TyKind::Char
                         | gossamer_types::TyKind::Param { .. }
                 ) || (*mutable
-                    && matches!(tcx.kind_of(ty), gossamer_types::TyKind::String));
+                    && (matches!(tcx.kind_of(ty), gossamer_types::TyKind::String)
+                        // A `&mut` payload enum is the receiver a callee
+                        // rebinds whole (`*self = Variant(..)`), so it names a
+                        // slot and the post-call reload carries the new node
+                        // back into the Variable.
+                        || tcx.is_payload_enum(ty)));
                 // An `Option` / `Result` / inline user enum is the packed
                 // two-word carrier held in a register, so it has no machine
                 // address either. Its slot is the pair of words, and the

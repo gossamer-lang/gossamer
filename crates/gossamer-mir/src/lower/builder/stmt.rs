@@ -235,7 +235,10 @@ impl<'a> Builder<'a> {
                 };
                 if !matches!(
                     *name,
-                    "gos_rt_result_payload" | "gos_rt_result_payload_f64" | "gos_enum_load"
+                    "gos_rt_result_payload"
+                        | "gos_rt_result_payload_f64"
+                        | "gos_enum_load"
+                        | "gos_enum_slot_ptr"
                 ) {
                     return None;
                 }

@@ -202,6 +202,8 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
             &mut bodies,
         );
     }
+    let user_fn_names: std::collections::HashSet<String> =
+        bodies.iter().map(|body| body.name.clone()).collect();
     for body in &mut bodies {
         // Rewrite `s = s + frag` to the in-place `gos_rt_str_concat_drop_a`
         // BEFORE inserting RC retain/release statements. The rewrite matches a
@@ -238,6 +240,9 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
         insert_copied_key_releases(body, tcx);
         drop_unread_map_insert_results(body, tcx);
         hoist_loop_carried_releases(body, tcx);
+        release_displaced_enum_targets(body, tcx);
+        own_rebound_enum_parameters(body, tcx);
+        release_rebound_rc_locals(body, tcx);
         // `insert_*` calls are ownership-acquiring operations: the drop pass
         // emitted a retain for the container's share immediately before the
         // call, and it must retain the source binding's ordinary release.
@@ -249,6 +254,10 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
         // three-way swap only after their temporary assignments settle.
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
         crate::opt::elide_vec_clone_of_fresh_temporary(body, tcx);
+        crate::opt::elide_vec_clone_of_dead_aggregate_source(body, &user_fn_names);
+        // Runs last so every pass above still reads the payload extract under
+        // its own name.
+        mark_owned_aggregate_payloads(body, tcx);
         if std::env::var("GOS_DUMP_MIR_RC").is_ok() {
             eprintln!("=== MIR(post-rc) {} ===", body.name);
             for block in &body.blocks {

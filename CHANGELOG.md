@@ -1,5 +1,150 @@
 # Changelog
 
+## 0.60.0 - A name reaches the values they mean across all tiers
+
+- A `match` arm's byte-literal pattern dispatches on the byte. The compiled
+  tiers' `SwitchInt` path decodes a fixed set of pattern shapes and hands
+  every other one to the if-chain, so a shape it does not decode can no
+  longer be taken for a wildcard and swallow the arms after it.
+- A float literal's `_` separators are stripped before it is read.
+- A shift narrows its result to the shifted operand's own width, and so do
+  `wrapping_add` and `wrapping_mul`: the ops run at i64 width, and a narrower
+  type wraps at its own.
+- A trait's default method body is copied into every impl that does not
+  override it, so a call to one reaches an ordinary method on every tier.
+- A place walk loads a runtime handle out of the slot holding it before
+  indexing through it, so `g.cells[i][j]` reads the vector the field names
+  rather than the field's own address.
+- `for x in c.iter()` drives the iterator state the receiver answers rather
+  than reading it as a vector header, and an address-carrying stream is
+  collected through the helper that copies each element out whole.
+- A store into a struct field releases the field's previous heap children and
+  gives the field its own share of the new ones for every RC leaf beneath the
+  stored path, not only for a leaf the path names exactly.
+- A projected store of an aggregate wider than one word writes the whole
+  block in JIT-compiled code.
+- `push_str`, `push`, `push_char`, `push_byte`, `push_utf8`, `clear` and
+  `truncate` take a `String` receiver reached through a field or an element,
+  not only a binding.
+- `json::decode::<T>` and `json::encode::<T>` name the same typed decode and
+  encode as `from_json::<T>` and `to_json::<T>`, so the turbofish decides
+  what the call answers.
+- A variant payload matched through a `&mut` scrutinee is named in place, so
+  a `&mut self` method called on it reaches the enum's own value. Where those
+  words live is each back end's own answer, which `gos_enum_slot_ptr` asks
+  for: one tier writes an aggregate payload into the slot, the other writes
+  the block holding it.
+- A capture cell backs only a binding that is written. Its read empties the
+  cell for the length of the instruction, which two goroutines sharing one
+  capture raced on.
+- The closure-capture rule in the skill card and the spec says what every
+  tier does: a container is captured by managed reference, a `String` or a
+  struct by value.
+- A reference to a `static` reads the type the declaration gives it, where it
+  took a fresh inference variable and left every use unchecked. An indexed
+  write into a `static mut` map is now the compile-time `GT0021` a local map
+  already gets.
+- A `static mut` holding a container or a string is a real cell: the global
+  starts empty and the entry writes what the declaration says, so a method
+  that mutates one keeps what it wrote and a compiled binary reads the same
+  value the bytecode VM does.
+- A serde turbofish keeps the spelling it was written with, so two modules
+  may each declare a type of the same name and both reach their own
+  synthesized functions.
+- An `if` whose value a statement discards checks each branch on its own
+  terms rather than joining them against each other.
+- A `&mut self` method called on a generic receiver is dispatched on the
+  value and keeps the write-back that publishes its mutation. A trait two
+  types implement had no single method to bind at compile time, and the call
+  fell through to a path that discarded every write.
+- `GL0056` reports an expression statement that only computes. A newline
+  before `-`, `*`, or `&` starts a new statement, so a continuation meant as
+  part of the line above lands as one of these.
+- A `&mut self` receiver on a payload enum names the caller's binding, so
+  `*self = Variant(..)` rebinds it on every tier. The reference carries the
+  binding's slot, a read of the receiver loads through it, and the node the
+  store displaced is released where both values are still in view.
+- An enum's `impl` is reached through the enum index, so a `&mut self` method
+  called on a receiver whose only evidence is its type - a parameter - binds
+  the same way one called on a binding does.
+- A by-value `mut` parameter holding a payload enum owns whatever its slot ends
+  up holding: it takes a share at entry and gives one back at its death.
+- An enum variant payload whose one word is a counted handle is held by
+  pointer to a counted copy, so the node owns a share of what it holds and
+  the value outlives the frame that built it.
+- A variant payload bound out of an enum node is materialised by value in
+  JIT-compiled code, taking a share of the box's children, so a binding that
+  outlives the node it came from still names them.
+- A release paired with a later allocation for block reuse keeps its place
+  when the released value is only computed after that allocation.
+- A borrowed local's release stays where the borrow can no longer reach it,
+  rather than moving up to its last direct mention.
+- `regex::count` reports how many non-overlapping matches a pattern has,
+  without building any of them.
+- The regex engine is built with its literal prefilters, lazy DFA and inlining
+  on. Every match ran on the backtracking-free fallback, which scanned a
+  megabyte-scale subject about 150 times slower than the engine's own path.
+- Encoding a value to JSON frees the `json::Value` boxes it builds on the way,
+  which had accumulated for the life of the program: one encode of a large
+  aggregate now costs what the text costs rather than the whole tree, and a
+  program that encodes in a loop holds a constant amount of memory. The array
+  and object constructors take the boxes they are handed rather than copying
+  each one, so no level of a nested value is deep-copied on the way out.
+- `#[v; n]` fills its buffer the way a memset does. Each element was written by
+  its own call, which is what a three-megabyte byte array spent its time on.
+- A heap's sift borrows a stack buffer to swap two elements rather than
+  allocating one per swap, and a tuple comparison stops at the first field that
+  decides the order.
+- A `Vec<json::Value>` gives back the handles it holds, so reading a document's
+  array no longer keeps the whole document alive for the rest of the run. A
+  handle read out of a container is that container's, so the frame that reads
+  one no longer gives it back a second time, and a copy of such a vector takes
+  handles of its own onto the same document.
+- Each impl's copy of a trait's default body carries identifiers of its own, so
+  a call inside one reaches that impl's own methods where a second implementor
+  of the trait had been answering for both.
+- A module's `static` is named by the module that declares it, so two modules
+  may each declare one of the same name and neither reads the other's cell. A
+  module's own heap-valued `static mut` is built by a function the module
+  declares, and the value it hands the cell is no longer released by the frame
+  that built it.
+- A specialised generic body holds a share of its by-value aggregate
+  parameter's heap fields across a `&mut self` call that replaces one, and
+  borrows the receiver that call declares. The ownership rules read a
+  parameter's concrete type, which a template does not have.
+- A store into a struct field whose value was read out of another aggregate's
+  field gives the destination a container of its own, since the aggregate it
+  came from still frees the one it holds.
+- `json::encode` renders a `Map` field as the object it is on the compiled
+  tiers, and an integer in a map or a byte sequence keeps its digits rather
+  than picking up a fractional part. A map's aggregate value is read where it
+  lives, so the map keeps the storage it owns while the member is built from
+  it, and a tuple's rendered elements are taken by the array that holds them.
+- A `json::` query refuses an `Option` or a `Result` where it reads a document,
+  which had typechecked and answered `None` at run time.
+- An indexed store gives back the element it replaces. A vector whose elements
+  are handles releases one share per slot at its own death, so a write over a
+  slot returns the outgoing one rather than leaving it named only by a count.
+- A store into a struct field leaves its value named once. The field takes a
+  share of what it is handed, so the frame gives its own back at the store
+  instead of holding a second one the field's death does not return.
+- A `Map::insert` whose answer nothing reads takes the form that answers
+  nothing, so the value it replaced is not handed back to a name no one holds.
+  A call site that binds the answer to a placeholder counts as reading nothing.
+- A container moved into an outer binding each turn of a loop reclaims each
+  prior buffer. The reads and writes that go through a vector stand beside it
+  rather than between it and the binding a later move hands it to.
+- An element wider than a word comes back from a container as the address of a
+  copy the container allocated; the back ends reclaim that copy once its words
+  are in the reader's own storage.
+- A vector literal is built at the size it names: one allocation sized to the
+  data rather than a growth path's reallocations and rounded-up capacity.
+- A binding of an aggregate does not deep-copy a vector field when the vector
+  it was built from is never named again, or when a function answered the
+  aggregate whole.
+- Rebinding a name whose value a heap object was just given a share of returns
+  the share the frame still held.
+
 ## 0.59.2 - Debug binary build vs execution speed balance
 
 - A debug binary no longer calls into the runtime once per statement to keep

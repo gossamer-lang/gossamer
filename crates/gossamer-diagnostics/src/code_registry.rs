@@ -283,6 +283,15 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `-> ()` to say the discard is deliberate.",
     ),
     (
+        "GL0056",
+        "An expression statement that only computes - a path, a literal,\n\
+            arithmetic over them - and hands its value to nothing. A newline\n\
+            followed by `-`, `*`, or `&` starts a NEW statement, so a\n\
+            continuation meant as part of the line above becomes one of these.\n\
+            Join it to that line (end the previous line with the operator, or\n\
+            parenthesise), or bind what it computes.",
+    ),
+    (
         "GM0001",
         "Generic monomorphization received a type substitution that the\n\
                      compiler does not yet support - typically a generic parameter\n\

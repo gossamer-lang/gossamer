@@ -1033,14 +1033,15 @@ impl<'a> Builder<'a> {
 
     pub(crate) fn is_boxable_aggregate_payload(&self, ty: Ty) -> bool {
         use gossamer_types::TyKind;
-        if self.type_slot_bytes(ty) <= 8 {
-            return false;
-        }
-        match self.tcx.kind_of(ty) {
+        let aggregate = match self.tcx.kind_of(ty) {
             TyKind::Adt { def, .. } => def.local < u32::MAX - 16 && !self.tcx.is_inline_enum_ty(ty),
             TyKind::Tuple(_) | TyKind::Array { .. } => true,
             _ => false,
-        }
+        };
+        // A single-slot aggregate fits the payload word and is stored in it,
+        // unless that word is a counted handle: the node owns a share of what
+        // it holds, and the box is what carries the child meta saying so.
+        aggregate && (self.type_slot_bytes(ty) > 8 || !self.aggr_child_entries(ty).is_empty())
     }
 
     /// Boxes the multi-slot aggregate in `payload_local` into an RC cell and
@@ -1049,6 +1050,7 @@ impl<'a> Builder<'a> {
     /// `String` / nested-node children) and retains those children at copy
     /// time (so they outlive the source aggregate's scope-end teardown).
     fn box_aggregate_payload(&mut self, payload_local: Local, agg_ty: Ty, span: Span) -> Local {
+        self.tcx.register_boxed_enum_payload(agg_ty);
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let size_bytes = i128::from(self.type_slot_bytes(agg_ty));
         let meta_sym = self.ensure_aggr_struct_meta(agg_ty).unwrap_or_default();

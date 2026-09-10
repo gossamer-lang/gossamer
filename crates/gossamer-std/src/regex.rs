@@ -78,6 +78,12 @@ pub fn find(pattern: &Pattern, text: &str) -> Option<(usize, usize, String)> {
         .map(|m| (m.start(), m.end(), m.as_str().to_string()))
 }
 
+/// Counts the non-overlapping matches in `text` without materialising them.
+#[must_use]
+pub fn count(pattern: &Pattern, text: &str) -> usize {
+    pattern.engine.find_iter(text).count()
+}
+
 /// Returns every non-overlapping match as `(start, end, text)`.
 #[must_use]
 pub fn find_all(pattern: &Pattern, text: &str) -> Vec<(usize, usize, String)> {

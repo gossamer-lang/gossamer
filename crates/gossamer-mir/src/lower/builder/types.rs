@@ -772,8 +772,14 @@ impl<'a> Builder<'a> {
                 | TyKind::Instant => true,
                 // An `Option` / `Result` is a carrier the callee replaces
                 // whole (`*o = Some(v)`), so the reference has to name the
-                // caller's slot rather than a copy of the carrier.
-                TyKind::Adt { def, .. } => def.local == u32::MAX || def.local == u32::MAX - 1,
+                // caller's slot rather than a copy of the carrier. A payload
+                // enum is the same shape: `*e = Variant(..)` names a new node,
+                // and the caller's binding has to end up holding that node.
+                TyKind::Adt { def, .. } => {
+                    def.local == u32::MAX
+                        || def.local == u32::MAX - 1
+                        || self.tcx.is_payload_enum(ty)
+                }
                 _ => false,
             }
         };
@@ -1774,6 +1780,7 @@ impl<'a> Builder<'a> {
                 }
             }
             TyKind::Tuple(elems) => elems.clone(),
+            TyKind::Array { elem, len } => vec![*elem; len.to_usize()],
             _ => return,
         };
         let mut word = base_word;
@@ -1796,8 +1803,12 @@ impl<'a> Builder<'a> {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word,
                 );
-            } else if matches!(self.tcx.kind_of(fty), TyKind::Tuple(_) | TyKind::Adt { .. }) {
-                // Inline sub-struct / tuple: its fields occupy these slots.
+            } else if matches!(
+                self.tcx.kind_of(fty),
+                TyKind::Tuple(_) | TyKind::Adt { .. } | TyKind::Array { .. }
+            ) {
+                // Inline sub-struct / tuple / array: its fields occupy these
+                // slots.
                 self.collect_aggr_child_entries(fty, word, depth + 1, out);
             }
             word += fwords;

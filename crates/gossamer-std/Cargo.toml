@@ -32,7 +32,7 @@ parking_lot = { workspace = true }
 crossbeam-channel = { workspace = true }
 
 # Regular expressions (`std::regex`).
-regex = { version = "1", default-features = false, features = ["std", "unicode"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 
 # Compression (`std::compress::{gzip,flate,zlib}`). The pure-Rust
 # `flate2` rust_backend covers gzip/flate/zlib on every target; the C

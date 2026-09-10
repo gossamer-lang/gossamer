@@ -2105,6 +2105,7 @@ fn compute_returns_fresh(bodies: &[Body], tcx: &TyCtxt) -> HashMap<String, bool>
                 if name.starts_with("gos_rc_alloc") {
                     false
                 } else if *name == "gos_enum_load"
+                    || *name == "gos_enum_slot_ptr"
                     || name.starts_with("gos_enum_tag")
                     || name.starts_with("gos_enum_set_disc")
                     || name.starts_with("gos_enum_disc_tag")
@@ -2691,6 +2692,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_error_with_field"    => rt::gos_rt_error_with_field,
         "gos_rt_regex_compile"       => rt::gos_rt_regex_compile,
         "gos_rt_regex_is_match"      => rt::gos_rt_regex_is_match,
+        "gos_rt_regex_count"         => rt::gos_rt_regex_count,
         "gos_rt_regex_find"          => rt::gos_rt_regex_find,
         "gos_rt_regex_find_opt"      => rt::gos_rt_regex_find_opt,
         "gos_rt_regex_captures"      => rt::gos_rt_regex_captures,
@@ -3221,7 +3223,10 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_json_value_float"    => rt::gos_rt_json_value_float,
         "gos_rt_json_value_bool"     => rt::gos_rt_json_value_bool,
         "gos_rt_json_value_null"     => rt::gos_rt_json_value_null,
+        "gos_rt_json_free_slots"     => rt::gos_rt_json_free_slots,
         "gos_rt_json_value_array"    => rt::gos_rt_json_value_array,
+        "gos_rt_json_value_array_owned" => rt::gos_rt_json_value_array_owned,
+        "gos_rt_json_value_object_owned" => rt::gos_rt_json_value_object_owned,
         "gos_rt_json_value_object"   => rt::gos_rt_json_value_object,
         "gos_rt_parse_f64"           => rt::gos_rt_parse_f64,
         "gos_rt_i64_chars"           => rt::gos_rt_i64_chars,

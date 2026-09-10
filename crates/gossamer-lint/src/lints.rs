@@ -36,6 +36,7 @@ pub(crate) fn run_lint(id: &str, sf: &SourceFile, src: &str) -> Vec<Finding> {
         "self_assignment" => lint_self_assignment(sf),
         "todo_macro" => lint_todo_macro(sf, src),
         "i64_only_container_family" => lint_i64_only_container_family(sf),
+        "no_effect_statement" => lint_no_effect_statement(sf),
         "bool_literal_in_condition" => lint_bool_literal_in_condition(sf),
         "let_and_return" => lint_let_and_return(sf),
         "collapsible_if" => lint_collapsible_if(sf),
@@ -862,6 +863,54 @@ fn lint_self_assignment(sf: &SourceFile) -> Vec<Finding> {
         });
     });
     out
+}
+
+/// An expression statement that computes a value and does nothing with it.
+///
+/// A newline followed by `-`, `*` or `&` starts a new statement, so a
+/// continuation the writer meant as part of the line above becomes a
+/// stand-alone expression whose value nothing reads.
+fn lint_no_effect_statement(sf: &SourceFile) -> Vec<Finding> {
+    let mut out = Vec::new();
+    each_fn_body(sf, |body| {
+        walk_expr(body, &mut |expr| {
+            let (ExprKind::Block(block) | ExprKind::Unsafe(block)) = &expr.kind else {
+                return;
+            };
+            for stmt in &block.stmts {
+                let StmtKind::Expr { expr, .. } = &stmt.kind else {
+                    continue;
+                };
+                if !computes_without_effect(expr) {
+                    continue;
+                }
+                out.push((
+                    expr.span,
+                    "this expression's value is not used".to_string(),
+                    Some("bind it, or join it to the line above".to_string()),
+                ));
+            }
+        });
+    });
+    out
+}
+
+/// Whether an expression only computes: no call, no assignment, no control
+/// flow, so evaluating it for effect does nothing.
+fn computes_without_effect(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Path(_) | ExprKind::Literal(_) => true,
+        ExprKind::Unary { operand, .. } => computes_without_effect(operand),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            computes_without_effect(lhs) && computes_without_effect(rhs)
+        }
+        ExprKind::FieldAccess { receiver, .. } => computes_without_effect(receiver),
+        ExprKind::Index { base, index } => {
+            computes_without_effect(base) && computes_without_effect(index)
+        }
+        ExprKind::Cast { value, .. } => computes_without_effect(value),
+        _ => false,
+    }
 }
 
 fn path_eq(a: &Expr, b: &Expr) -> bool {

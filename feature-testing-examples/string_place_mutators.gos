@@ -1,0 +1,35 @@
+// A `String` reached through a field or an element takes the same in-place
+// mutators a binding does.
+
+struct Document { text: String, tags: Vec<String> }
+
+fn build(doc: &mut Document) {
+    doc.text.push_str("hello")
+    doc.text.push(' ')
+    doc.text.push_str("world")
+}
+
+fn main() {
+    let mut d = Document { text: "", tags: #["a", "b"] }
+    build(&mut d)
+    println("text: [{}]", d.text)
+    d.text.truncate(5)
+    println("truncated: [{}]", d.text)
+    d.tags[0].push_str("!")
+    println("tags: {}", d.tags)
+    d.text.clear()
+    println("cleared: [{}] len={}", d.text, d.text.len())
+    let mut s = ""
+    s.push_str("bare")
+    println("bare: [{}]", s)
+    let mut acc = Document { text: "", tags: #[] }
+    for i in 0..2000 { grow(&mut acc, i) }
+    println("grown: {}", acc.text.len())
+}
+
+fn grow(doc: &mut Document, i: i64) {
+    doc.text.push('x')
+    if i % 500 == 0 {
+        doc.text.clear()
+    }
+}

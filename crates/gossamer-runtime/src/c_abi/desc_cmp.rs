@@ -169,23 +169,23 @@ pub(crate) unsafe fn compare_desc(
             let mut slot = 0usize;
             for _ in 0..arity {
                 let span = unsafe { desc_slot_span(tags, *cursor) };
-                let field = *cursor;
-                let mut c = field;
-                let ord = unsafe {
-                    compare_desc(
-                        a.add(slot * 8),
-                        b.add(slot * 8),
-                        tags,
-                        &mut c,
-                        CmpStorage::Inline,
-                        self_desc,
-                    )
-                };
+                // Field order decides the ordering, so once a field has
+                // answered the rest are only walked past, not compared.
+                if result == 0 {
+                    let mut c = *cursor;
+                    result = unsafe {
+                        compare_desc(
+                            a.add(slot * 8),
+                            b.add(slot * 8),
+                            tags,
+                            &mut c,
+                            CmpStorage::Inline,
+                            self_desc,
+                        )
+                    };
+                }
                 unsafe { skip_cmp_desc(tags, cursor) };
                 slot += span;
-                if result == 0 {
-                    result = ord;
-                }
             }
             result
         }

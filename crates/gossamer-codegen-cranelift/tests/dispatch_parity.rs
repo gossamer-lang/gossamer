@@ -53,6 +53,9 @@ const RUST_ONLY: &[&str] = &[
     // GC internals - called from vec_free and other runtime helpers,
     // never emitted from MIR.
     "gos_rt_gc_deregister",
+    // Slot duplication for a JSON-handle vector, called from the
+    // element-share walk; MIR never names it.
+    "gos_rt_json_clone_handle",
     // FFI / Rust-binding helpers - declared in c_abi.rs for external
     // callers (Rust bindings, runtime tests) but never lowered from
     // MIR. AOT codegen does not need to dispatch them.

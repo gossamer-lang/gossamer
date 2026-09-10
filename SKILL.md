@@ -108,11 +108,12 @@ extend(&mut items)           // items is now #[1, 2, 1]
 - **Passing a value twice is fine.** Nothing is consumed, so `f(xs)`
   then `g(xs)` needs no clone and no borrow.
 - **Scalars are copies** (`i64`, `f64`, `bool`, `char`).
-- **The one asymmetry is closure capture**: a closure captures a heap
-  value (`Vec`, `Map`, `Set`, `String`, a struct) by managed reference,
-  so `xs.push(v)` inside a closure IS visible outside it, while a `Copy`
-  scalar is captured by copy and `count += 1` is not. Accumulate into a
-  collection, never into a captured scalar.
+- **The one asymmetry is closure capture**: a closure captures a
+  container (`Vec`, `Map`, `Set`) by managed reference, so `xs.push(v)`
+  inside a closure IS visible outside it, while everything else - a
+  `Copy` scalar, a `String`, a struct - is captured by value, so
+  `count += 1` and `s.field = v` are not. Accumulate into a container,
+  never into a captured scalar or struct.
 
 The Rust habits that do not compile here, in the order they actually
 show up:
@@ -695,14 +696,14 @@ OS-thread spawn API. Use `cohort { }` with `spawn(f)`.
 Use `Fn(args) -> ret` for callback parameters. Plain `fn(args) -> ret`
 is a raw pointer shape; bare named functions coerce to `Fn(...) -> ...`
 at callback sites (no FnMut/FnOnce distinction in practice).
-**Capture splits by type**: a heap value (`Vec`, `Map`, `Set`, `String`,
-a struct) is captured by managed reference, so `xs.push(v)` inside a
-closure is visible outside it; a `Copy` scalar (`i64`, `bool`, `char`,
-`f64`) is captured BY COPY, so `count += 1` updates the closure's own
-copy and the outer binding does NOT change. To accumulate a count
-across a callback - `fs::walk_dir`, a sort comparator, a visitor -
-push into a `Vec` (or collect into a `Map`) rather than incrementing a
-scalar.
+**Capture splits by type**: a container (`Vec`, `Map`, `Set`) is
+captured by managed reference, so `xs.push(v)` inside a closure is
+visible outside it; everything else - a `Copy` scalar (`i64`, `bool`,
+`char`, `f64`), a `String`, a struct - is captured BY VALUE, so
+`count += 1` and `s.field = v` update the closure's own copy and the
+outer binding does NOT change. To accumulate across a callback -
+`fs::walk_dir`, a sort comparator, a visitor - push into a `Vec` (or
+collect into a `Map`) rather than writing a scalar or a struct field.
 
 **Iterators**: any type with `fn next(&mut self) -> Option<T>` works
 in `for`. Sequence combinators (`map`/`filter`/`take`/`skip`/`step_by`)

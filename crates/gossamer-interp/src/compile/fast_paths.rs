@@ -792,11 +792,27 @@ impl<'tcx> FnBuilder<'tcx> {
                 })
             }
             HirBinaryOp::Shl => {
-                let dst = self.alloc_int();
+                let shifted = self.alloc_int();
                 self.emit(Op::ShlI64 {
-                    dst_i: dst,
+                    dst_i: shifted,
                     lhs_i,
                     rhs_i,
+                });
+                // A shift moves bits past the operand's own width, and the
+                // ones that leave it are gone. The op runs at i64 width, so a
+                // narrower type takes its value back from the wide result.
+                let Some((shift, signed)) = overflow_ty.and_then(narrow_int_trunc) else {
+                    return Ok(TypedReg {
+                        reg: shifted,
+                        kind: RegKind::I64,
+                    });
+                };
+                let dst = self.alloc_int();
+                self.emit(Op::TruncCastI64 {
+                    dst_i: dst,
+                    src_i: shifted,
+                    shift,
+                    signed,
                 });
                 Ok(TypedReg {
                     reg: dst,
@@ -2427,5 +2443,22 @@ impl<'tcx> FnBuilder<'tcx> {
         let dst = self.alloc_reg();
         self.emit(Op::LoadConst { dst, idx });
         dst
+    }
+}
+
+/// `TruncCastI64` operands - the shift that clears the bits above the
+/// type's width, and whether the result sign-extends - for an integer
+/// type narrower than the i64 the ops run at. `None` for a full-width
+/// type, whose value already occupies the whole register.
+pub(crate) const fn narrow_int_trunc(ty: gossamer_types::IntTy) -> Option<(u8, bool)> {
+    use gossamer_types::IntTy;
+    match ty {
+        IntTy::I8 => Some((56, true)),
+        IntTy::I16 => Some((48, true)),
+        IntTy::I32 => Some((32, true)),
+        IntTy::U8 => Some((56, false)),
+        IntTy::U16 => Some((48, false)),
+        IntTy::U32 => Some((32, false)),
+        _ => None,
     }
 }

@@ -135,27 +135,24 @@ impl<'a> Builder<'a> {
         // below stays the fast path for flat int / bool /
         // single-variant matches whose discriminant fits one
         // word.
-        let needs_chain = arms.iter().any(|arm| {
-            arm.guard.is_some()
-                || matches!(
-                    arm.pattern.kind,
-                    HirPatKind::Tuple(_)
-                        | HirPatKind::Slice { .. }
-                        | HirPatKind::Or(_)
-                        | HirPatKind::Struct { .. }
-                        | HirPatKind::Range { .. }
-                        | HirPatKind::Ref { .. }
-                        | HirPatKind::At { .. }
-                        | HirPatKind::Literal(
-                            HirLiteral::String(_) | HirLiteral::Char(_) | HirLiteral::Float(_)
-                        )
-                )
-                || matches!(
-                    &arm.pattern.kind,
-                    HirPatKind::Variant { name, .. }
-                        if matches!(name.name.as_str(), "Ok" | "Err" | "Some" | "None")
-                            || self.enums.lookup(std::slice::from_ref(name)).is_some()
-                )
+        // The SwitchInt path below decodes exactly the shapes listed here.
+        // Anything else is the if-chain's, which either lowers the pattern
+        // or refuses the body: a shape this path does not decode would
+        // otherwise be classified as the default arm and swallow every
+        // arm written after it.
+        let needs_chain = !arms.iter().all(|arm| {
+            arm.guard.is_none()
+                && match &arm.pattern.kind {
+                    HirPatKind::Wildcard | HirPatKind::Binding { .. } => true,
+                    HirPatKind::Literal(
+                        HirLiteral::Int(_) | HirLiteral::Bool(_) | HirLiteral::Byte(_),
+                    ) => true,
+                    HirPatKind::Variant { name, .. } => {
+                        !matches!(name.name.as_str(), "Ok" | "Err" | "Some" | "None")
+                            && self.enums.lookup(std::slice::from_ref(name)).is_none()
+                    }
+                    _ => false,
+                }
         });
         if needs_chain {
             return self.lower_match_with_guards(scrutinee, arms, ty, span);
@@ -189,6 +186,9 @@ impl<'a> Builder<'a> {
                     switch_arms.push((v, arm_block));
                 }
                 HirPatKind::Literal(HirLiteral::Bool(b)) => {
+                    switch_arms.push((i128::from(*b), arm_block));
+                }
+                HirPatKind::Literal(HirLiteral::Byte(b)) => {
                     switch_arms.push((i128::from(*b), arm_block));
                 }
                 HirPatKind::Wildcard => {
@@ -721,6 +721,26 @@ impl<'a> Builder<'a> {
                 );
                 Some(cmp)
             }
+            HirPatKind::Literal(HirLiteral::Byte(b)) => {
+                let scrut_ty = self.locals[scrutinee.0 as usize].ty;
+                let lit_local = self.fresh(scrut_ty);
+                self.emit_assign(
+                    Place::local(lit_local),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(*b)))),
+                    span,
+                );
+                let cmp = self.fresh(bool_ty);
+                self.emit_assign(
+                    Place::local(cmp),
+                    Rvalue::BinaryOp {
+                        op: BinOp::Eq,
+                        lhs: Operand::Copy(Place::local(scrutinee)),
+                        rhs: Operand::Copy(Place::local(lit_local)),
+                    },
+                    span,
+                );
+                Some(cmp)
+            }
             HirPatKind::Literal(HirLiteral::Bool(b)) => {
                 let lit_local = self.fresh(bool_ty);
                 self.emit_assign(
@@ -786,7 +806,7 @@ impl<'a> Builder<'a> {
                 Some(cmp)
             }
             HirPatKind::Literal(HirLiteral::Float(text)) => {
-                let value: f64 = text.trim().parse().ok()?;
+                let value = crate::lower::helpers::parse_float(text.trim());
                 let scrut_ty = self.locals[scrutinee.0 as usize].ty;
                 let lit_local = self.fresh(scrut_ty);
                 self.emit_assign(
@@ -2476,7 +2496,40 @@ impl<'a> Builder<'a> {
                         })
                 })
                 .unwrap_or(i64_ty);
-            let payload_local = self.fresh(binding_ty);
+            // A payload matched through a `&mut` scrutinee is named in place:
+            // the binding takes the address of the payload the enum holds, so
+            // a `&mut self` method reaches the enum's own value. A payload
+            // matched by value is copied, which is what a read wants and what
+            // an immutable binding can promise.
+            // A payload matched through a `&mut` scrutinee names the enum's
+            // own value, so the binding takes the address of the words the
+            // slot stands for. Which address that is - the slot's, or the
+            // block it points at - is each back end's own answer, which
+            // `gos_enum_slot_ptr` asks for.
+            let payload_is_aggregate = matches!(
+                self.tcx.kind_of(binding_ty),
+                TyKind::Adt { .. } | TyKind::Tuple(_) | TyKind::Array { .. }
+            ) && !self.tcx.is_inline_enum_ty(binding_ty)
+                && !self.is_by_value_enum_ty(binding_ty)
+                && self.type_slot_bytes(binding_ty) >= 8;
+            let bind_in_place = !scrut_is_inline
+                && payload_is_aggregate
+                && matches!(
+                    self.tcx.kind_of(scrut_ty),
+                    TyKind::Ref {
+                        mutability: gossamer_types::Mutbl::Mut,
+                        ..
+                    }
+                );
+            let payload_local = if bind_in_place {
+                let ref_ty = self.tcx.intern(TyKind::Ref {
+                    mutability: gossamer_types::Mutbl::Mut,
+                    inner: binding_ty,
+                });
+                self.fresh(ref_ty)
+            } else {
+                self.fresh(binding_ty)
+            };
             if scrut_is_inline {
                 let getter = if matches!(self.tcx.kind_of(binding_ty), TyKind::Float(_)) {
                     "gos_rt_result_payload_f64"
@@ -2502,10 +2555,18 @@ impl<'a> Builder<'a> {
                     )))),
                     span,
                 );
+                // A boxed payload's slot holds the block its words live in,
+                // which the load answers. A slot-resident payload's words are
+                // the slot, whose home each back end names for itself.
+                let reader = if bind_in_place && !self.is_boxable_aggregate_payload(binding_ty) {
+                    "gos_enum_slot_ptr"
+                } else {
+                    "gos_enum_load"
+                };
                 self.emit_assign(
                     Place::local(payload_local),
                     Rvalue::CallIntrinsic {
-                        name: "gos_enum_load",
+                        name: reader,
                         args: vec![
                             Operand::Copy(Place::local(aggregate)),
                             Operand::Copy(Place::local(off_local)),
@@ -3398,11 +3459,32 @@ impl<'a> Builder<'a> {
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(stored_iter_ty) {
             stored_iter_ty = *inner;
         }
-        let collection_iter_method = matches!(
-            &for_loop.iter_expr.kind,
-            HirExprKind::MethodCall { name, args, .. }
-                if name.name == "iter" && args.is_empty()
-        );
+        // `c.iter()` over a sequence is the sequence's own walk, which the
+        // fallback below takes with nothing materialised. Every other
+        // receiver's `iter()` answers a real iterator state, and that is what
+        // the protocol below drives - reading one as a `GosVec` would take
+        // its first words for a header.
+        let collection_iter_method = match &for_loop.iter_expr.kind {
+            HirExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                ..
+            } if name.name == "iter" && args.is_empty() => {
+                let mut recv_ty = self
+                    .receiver_local_from_path(receiver)
+                    .map_or(receiver.ty, |l| self.locals[l.0 as usize].ty);
+                while let TyKind::Ref { inner, .. } = self.tcx.kind_of(recv_ty) {
+                    recv_ty = *inner;
+                }
+                // A map's `iter()` answers a real iterator state over its
+                // pairs; every other collection's is the collection's own
+                // walk, which the fallback below takes with nothing
+                // materialised.
+                !matches!(self.tcx.kind_of(recv_ty), TyKind::HashMap { .. })
+            }
+            _ => false,
+        };
         if let TyKind::Iterator(elem_ty) = self.tcx.kind_of(stored_iter_ty).clone()
             && !matches!(for_loop.iter_expr.kind, HirExprKind::Range { .. })
             && !collection_iter_method
@@ -3446,7 +3528,10 @@ impl<'a> Builder<'a> {
             };
             let iter_local = self.lower_expr(handle_expr)?;
             let vec_ty = self.tcx.intern(TyKind::Vec(elem_ty));
-            let helper = self.lazy_collect_symbol(elem_ty);
+            // An address-carrying stream is collected through the helper that
+            // copies each element out whole; the word form would keep the
+            // addresses themselves as the elements.
+            let helper = self.lazy_collect_symbol_for(iter_local, elem_ty);
             let vec_local = self.emit_combinator_call(
                 helper,
                 vec![Operand::Copy(Place::local(iter_local))],

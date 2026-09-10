@@ -1,0 +1,65 @@
+// Reassigning a struct into a struct field hands the field its own share of
+// every heap child, and the source's teardown leaves those alone.
+
+struct Inner { index: Map<String, i64>, names: Vec<String>, size: i64 }
+
+impl Inner {
+    fn new(size: i64) -> Inner { Inner { index: Map::new(), names: #[], size: size } }
+    fn put(&mut self, key: String) {
+        let _ = self.index.insert(key, self.size)
+        self.names.push(key)
+    }
+    fn count(&self) -> i64 { self.names.len() }
+}
+
+struct Sim { state: Inner, size: i64 }
+
+impl Sim {
+    fn new(size: i64) -> Sim { Sim { state: Inner::new(size), size: size } }
+    fn reset(&mut self) { self.state = Inner::new(self.size) }
+    fn run(&mut self, rounds: i64) {
+        for i in 0..rounds { self.state.put(format("k{}", i)) }
+    }
+}
+
+// A field taken out of a value the frame still owns: the destination takes a
+// container of its own, since the source frees the one it read.
+struct Doc { text: String, vars: Map<String, String>, n: i64 }
+
+fn build_doc(k: i64) -> Doc {
+    let mut vars: Map<String, String> = Map::new()
+    let mut i = 0
+    while i <= k { let _ = vars.insert(format("k{}", i), format("v{}", i)); i += 1 }
+    Doc { text: format("t{}", k), vars: vars, n: k }
+}
+
+impl Doc {
+    fn adopt(&mut self, k: i64) {
+        let built = build_doc(k)
+        self.text = built.text
+        self.vars = built.vars
+    }
+    fn size(&self) -> i64 { self.text.len() + self.vars.len() }
+}
+
+fn field_adoption() {
+    let mut d = build_doc(1)
+    println("adopt before: {}", d.size())
+    d.adopt(3)
+    println("adopt after: {}", d.size())
+    let mut total = 0
+    let mut i = 0
+    while i < 2000 { d.adopt(2); total += d.size(); i += 1 }
+    println("adopt hot: {}", total)
+}
+
+fn main() {
+    field_adoption()
+    let mut s = Sim::new(4)
+    s.run(3)
+    println("after run: {}", s.state.count())
+    s.reset()
+    println("after reset: {}", s.state.count())
+    s.run(5)
+    println("after second run: {}", s.state.count())
+}

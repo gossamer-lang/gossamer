@@ -1028,6 +1028,23 @@ pub(super) fn lower_statement(
                                 .ins()
                                 .store(MemFlagsData::trusted(), word, dst_ptr, off);
                         }
+                        // The words are in the destination's own slot now, so
+                        // the copy the container allocated for this read has
+                        // no reader left.
+                        if matches!(rvalue, Rvalue::CallIntrinsic { name, .. } if *name == "gos_result_payload_owned")
+                        {
+                            let free_fn = intrinsics.extern_fn(
+                                module,
+                                "gos_rt_aggr_free",
+                                &[ptr_ty, types::I64],
+                                &[],
+                            )?;
+                            let free_ref = module.declare_func_in_func(free_fn, builder.func);
+                            let size_val = builder
+                                .ins()
+                                .iconst(types::I64, i64::from((slots * 8).max(8)));
+                            builder.ins().call(free_ref, &[src_ptr, size_val]);
+                        }
                     }
                 } else if heap_agg_copy {
                     let slots = type_slot_count(tcx, body.local_ty(place.local)).max(1);
@@ -1209,6 +1226,30 @@ fn vec_operand_has_word_elem(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
     )
 }
 
+/// True when the operand is a `Vec`/`[T]` whose element word is a handle the
+/// vector owns, so a store has to give back the share the slot held.
+fn vec_operand_elem_owns_word(body: &Body, tcx: &TyCtxt, op: &Operand) -> bool {
+    let Operand::Copy(pl) = op else {
+        return false;
+    };
+    let mut ty = resolve_place_ty(tcx, body, pl);
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    let elem = match tcx.kind_of(ty) {
+        TyKind::Vec(e) | TyKind::Slice(e) => *e,
+        _ => return false,
+    };
+    matches!(
+        tcx.kind_of(elem),
+        TyKind::String
+            | TyKind::Vec(_)
+            | TyKind::Slice(_)
+            | TyKind::HashMap { .. }
+            | TyKind::JsonValue
+    ) || tcx.is_rc_managed(elem)
+}
+
 /// Inline the word-stride `Vec`/`Slice` element get/set runtime calls
 /// (`gos_rt_vec_get_i64` / `gos_rt_vec_set_i64` and their `_unchecked`
 /// variants) as direct loads/stores off the `GosVec` header, mirroring the
@@ -1242,6 +1283,11 @@ fn try_lower_vec_index_inline(
         _ => return Ok(false),
     };
     if args.len() != want_args || !vec_operand_has_word_elem(body, tcx, &args[0]) {
+        return Ok(false);
+    }
+    // A store that replaces a handle the vector owns has to give the outgoing
+    // one back, which is the runtime helper's job.
+    if !is_get && vec_operand_elem_owns_word(body, tcx, &args[0]) {
         return Ok(false);
     }
     let ptr_ty = module.target_config().pointer_type();

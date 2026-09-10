@@ -1,0 +1,33 @@
+// Several goroutines reading one captured container each see it whole.
+
+fn block(src: Vec<i64>, lo: i64, hi: i64) -> i64 {
+    let mut total = 0
+    for i in lo..hi { total += src[i] * 2 }
+    total
+}
+
+fn gather(src: Vec<i64>, workers: i64) -> i64 {
+    let n = src.len()
+    let mut total = 0
+    let _ = cohort {
+        let mut handles = #[]
+        for t in 0..workers {
+            let lo = n * t / workers
+            let hi = n * (t + 1) / workers
+            handles.push(spawn(|| block(src, lo, hi)))
+        }
+        for handle in handles {
+            match handle.join() {
+                Ok(part) => { total += part }
+                Err(e) => { eprintln("join error: {}", e) }
+            }
+        }
+    }
+    total
+}
+
+fn main() {
+    let src: Vec<i64> = #[1, 2, 3, 4, 5, 6, 7, 8]
+    for _ in 0..20 { print("{} ", gather(src, 4)) }
+    println("")
+}

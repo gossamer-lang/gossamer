@@ -35,15 +35,17 @@ const MAX_MONOMORPHISE_ITERATIONS: u32 = 32;
 /// a string, and a fieldless enum all travel in a slot the flat value model
 /// types exactly the way it types an `i64`.
 struct ReceiverConventions {
-    by_reference: HashMap<String, bool>,
-    by_scalar_reference: HashMap<String, bool>,
+    reference: HashMap<String, bool>,
+    mut_reference: HashMap<String, bool>,
+    scalar_reference: HashMap<String, bool>,
 }
 
 impl ReceiverConventions {
     /// Reads the convention off every method body in `bodies`.
     fn of(bodies: &[Body], tcx: &mut TyCtxt) -> Self {
-        let mut by_reference = HashMap::new();
-        let mut by_scalar_reference = HashMap::new();
+        let mut reference = HashMap::new();
+        let mut mut_reference = HashMap::new();
+        let mut scalar_reference = HashMap::new();
         for body in bodies
             .iter()
             .filter(|b| b.arity >= 1 && b.name.contains("::"))
@@ -59,29 +61,45 @@ impl ReceiverConventions {
                 ),
                 _ => false,
             };
-            by_reference.insert(body.name.clone(), matches!(kind, TyKind::Ref { .. }));
-            by_scalar_reference.insert(body.name.clone(), scalar_ref);
+            reference.insert(body.name.clone(), matches!(kind, TyKind::Ref { .. }));
+            mut_reference.insert(
+                body.name.clone(),
+                matches!(
+                    kind,
+                    TyKind::Ref {
+                        mutability: Mutbl::Mut,
+                        ..
+                    }
+                ),
+            );
+            scalar_reference.insert(body.name.clone(), scalar_ref);
         }
         Self {
-            by_reference,
-            by_scalar_reference,
+            reference,
+            mut_reference,
+            scalar_reference,
         }
     }
 
     /// Whether the program declares a method body under this name.
     fn declares(&self, name: &str) -> bool {
-        self.by_reference.contains_key(name)
+        self.reference.contains_key(name)
     }
 
     /// Whether the named method declares a reference receiver.
     fn takes_reference(&self, name: &str) -> bool {
-        self.by_reference.get(name) == Some(&true)
+        self.reference.get(name) == Some(&true)
+    }
+
+    /// Whether the named method declares a `&mut self` receiver.
+    fn takes_mut_reference(&self, name: &str) -> bool {
+        self.mut_reference.get(name) == Some(&true)
     }
 
     /// Whether the named method reads its receiver by loading through it,
     /// which is the case exactly when the reference names a scalar.
     fn loads_receiver(&self, name: &str) -> bool {
-        self.by_scalar_reference.get(name) == Some(&true)
+        self.scalar_reference.get(name) == Some(&true)
     }
 }
 
@@ -263,6 +281,7 @@ fn specialise_functions_step(
             }
             repair_generic_element_reads(&mut copy, tcx);
             borrow_scalar_receivers_for_ref_methods(&mut copy, receivers, tcx);
+            own_specialised_aggregate_params(&mut copy, tcx);
             specialise_call_substs(&mut copy, &subst_tys, tcx);
             specialised.push(copy);
         }
@@ -332,7 +351,7 @@ fn borrow_scalar_receivers_for_ref_methods(
     tcx: &mut TyCtxt,
 ) {
     let local_tys: Vec<Ty> = copy.locals.iter().map(|l| l.ty).collect();
-    let mut work: Vec<(usize, Local, Ty)> = Vec::new();
+    let mut work: Vec<(usize, Local, Ty, bool)> = Vec::new();
     for (block_index, block) in copy.blocks.iter().enumerate() {
         let Terminator::Call { callee, args, .. } = &block.terminator else {
             continue;
@@ -359,16 +378,25 @@ fn borrow_scalar_receivers_for_ref_methods(
         // itself declares a reference to a scalar - the callee's own body is
         // what decides whether it loads, and an enum's discriminant travels in
         // a slot the flat model types the way it types a scalar.
-        let param_receiver = matches!(tcx.kind_of(recv_ty), TyKind::Param { .. });
-        let callee_loads = receivers.loads_receiver(name);
-        if !param_receiver && !callee_loads {
+        // A receiver already borrowed at the call site needs nothing more.
+        if matches!(tcx.kind_of(recv_ty), TyKind::Ref { .. }) {
             continue;
         }
-        work.push((block_index, recv.local, recv_ty));
+        let param_receiver = matches!(tcx.kind_of(recv_ty), TyKind::Param { .. });
+        let callee_loads = receivers.loads_receiver(name);
+        // A `&mut self` callee writes through the reference, and the
+        // specialised body's own drop schedule reads the borrow as the
+        // ownership it is. Handing the value over instead leaves the frame
+        // with no claim on what its argument's heap fields name.
+        let callee_writes = receivers.takes_mut_reference(name);
+        if !param_receiver && !callee_loads && !callee_writes {
+            continue;
+        }
+        work.push((block_index, recv.local, recv_ty, callee_writes));
     }
-    for (block_index, recv_local, recv_ty) in work {
+    for (block_index, recv_local, recv_ty, mutable) in work {
         let ref_ty = tcx.intern(TyKind::Ref {
-            mutability: Mutbl::Not,
+            mutability: if mutable { Mutbl::Mut } else { Mutbl::Not },
             inner: recv_ty,
         });
         let tmp = Local(u32::try_from(copy.locals.len()).expect("local index fits"));
@@ -384,7 +412,7 @@ fn borrow_scalar_receivers_for_ref_methods(
             kind: StatementKind::Assign {
                 place: Place::local(tmp),
                 rvalue: Rvalue::Ref {
-                    mutable: false,
+                    mutable,
                     place: Place::local(recv_local),
                 },
             },
@@ -395,6 +423,106 @@ fn borrow_scalar_receivers_for_ref_methods(
         {
             *first = Operand::Copy(Place::local(tmp));
         }
+    }
+}
+
+/// Books the frame's own share of a by-value aggregate parameter's heap
+/// fields, for a specialised body whose parameter type only became concrete
+/// here.
+///
+/// The ownership passes run on the template, where the parameter is one opaque
+/// slot with no fields to own. A callee that writes through the borrow this
+/// body takes replaces those fields, so the frame has to hold a share of them
+/// across the call and give it back at its death, exactly as a body written
+/// against the concrete type does.
+fn own_specialised_aggregate_params(copy: &mut Body, tcx: &TyCtxt) {
+    let arity = copy.arity as usize;
+    if arity == 0 || copy.locals.is_empty() {
+        return;
+    }
+    let n_locals = copy.locals.len();
+    let mut booked: Vec<(Local, Vec<u32>, &'static str, &'static str)> = Vec::new();
+    for i in 1..=arity.min(n_locals - 1) {
+        let decl = &copy.locals[i];
+        if decl.region || matches!(tcx.kind_of(decl.ty), TyKind::Ref { .. }) {
+            continue;
+        }
+        let local = Local(u32::try_from(i).expect("local index fits in u32"));
+        let borrowed_mutably = copy.blocks.iter().flat_map(|b| b.stmts.iter()).any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::Ref {
+                        mutable: true,
+                        place,
+                    },
+                    ..
+                } if place.local == local && place.projection.is_empty()
+            )
+        });
+        if !borrowed_mutably {
+            continue;
+        }
+        for (path, kind) in crate::lower::aggregate_rc_field_paths(tcx, decl.ty) {
+            let (retain, release) = kind.helpers();
+            booked.push((local, path, retain, release));
+        }
+    }
+    if booked.is_empty() {
+        return;
+    }
+    let unit_ty = tcx.unit_interned().unwrap_or(copy.locals[0].ty);
+    let fresh_unit = |copy: &mut Body| -> Local {
+        let local = Local(u32::try_from(copy.locals.len()).expect("local index fits in u32"));
+        copy.locals.push(crate::ir::LocalDecl {
+            ty: unit_ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        local
+    };
+    let field_place = |local: Local, path: &[u32]| Place {
+        local,
+        projection: path.iter().map(|idx| Projection::Field(*idx)).collect(),
+    };
+    for (local, path, _, release) in &booked {
+        for bi in 0..copy.blocks.len() {
+            if !matches!(copy.blocks[bi].terminator, Terminator::Return) {
+                continue;
+            }
+            let span = copy.blocks[bi].span;
+            let dest = fresh_unit(copy);
+            let place = field_place(*local, path);
+            copy.blocks[bi].stmts.push(crate::ir::Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(dest),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: release,
+                        args: vec![Operand::Copy(place)],
+                    },
+                },
+                span,
+            });
+        }
+    }
+    let span = copy.blocks[0].span;
+    for (local, path, retain, _) in booked.iter().rev() {
+        let dest = fresh_unit(copy);
+        let place = field_place(*local, path);
+        copy.blocks[0].stmts.insert(
+            0,
+            crate::ir::Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(dest),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: retain,
+                        args: vec![Operand::Copy(place)],
+                    },
+                },
+                span,
+            },
+        );
     }
 }
 

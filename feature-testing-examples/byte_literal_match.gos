@@ -1,0 +1,26 @@
+// A byte-literal match arm dispatches on the byte, on every tier.
+
+fn classify(b: u8) -> String {
+    match b {
+        b'+' => "plus"
+        b'.' => "dot"
+        b'[' => "open"
+        b']' => "close"
+        _ => "other"
+    }
+}
+
+fn main() {
+    for b in "+.[]x".as_bytes() {
+        println("{} {}", b, classify(b))
+    }
+    let mut nested = 0
+    for b in "[[]]".as_bytes() {
+        match b {
+            b'[' => nested += 1
+            b']' => nested -= 1
+            _ => ()
+        }
+    }
+    println("nested balance: {}", nested)
+}

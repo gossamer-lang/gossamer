@@ -13302,6 +13302,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-regex-count",
+      "name": "std::regex::count",
+      "kind": "function",
+      "signature": "fn count(pattern: regex::Pattern, text: String) -> i64",
+      "description": "Counts the non-overlapping matches without building them.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdregex",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-regex-find",
       "name": "std::regex::find",
       "kind": "function",

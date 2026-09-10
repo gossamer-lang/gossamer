@@ -1,0 +1,25 @@
+// A shift and the wrapping ops answer at the shifted type's own width.
+
+fn djb2(text: String) -> u32 {
+    let mut hash: u32 = 5381
+    for b in text.bytes() {
+        hash = ((hash << 5).wrapping_add(hash)).wrapping_add(b as u32)
+    }
+    hash
+}
+
+fn main() {
+    let h: u32 = 3_000_000_000
+    println("u32 shl: {}", h << 5)
+    println("u32 shr: {}", h >> 1)
+    let e: u8 = 255
+    println("u8 shl: {}", e << 1)
+    let f: u16 = 60_000
+    println("u16 shl: {}", f << 4)
+    let g: i32 = 2_000_000_000
+    println("i32 shl: {}", g << 2)
+    let w: u64 = 1
+    println("u64 shl: {}", w << 63)
+    println("djb2: {}", djb2("hello world this is a much longer string"))
+    println("separators: {} {} {}", 1_000.5, 100_000_000.0, 2_147_483_647)
+}

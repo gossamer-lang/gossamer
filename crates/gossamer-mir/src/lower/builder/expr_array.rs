@@ -78,14 +78,35 @@ impl<'a> Builder<'a> {
             Rvalue::Use(Operand::Const(ConstValue::Int(elem_bytes_val))),
             span,
         );
-        // `Vec::new` is the codegen-side intrinsic name that
-        // routes to `gos_rt_vec_new(8)`; using it avoids pulling
-        // in the lower-level helper directly and keeps the call
+        // A literal knows how many elements it holds, so the vector is
+        // built at that size: one allocation sized to the data, rather
+        // than the growth path's reallocations and its rounded-up
+        // capacity. `Vec::new` is the codegen-side intrinsic name that
+        // routes to `gos_rt_vec_new(8)`; using it keeps the call
         // dispatch path identical to user-written `Vec::new()`.
+        let (ctor, ctor_args) = if elems.is_empty() {
+            ("Vec::new", vec![Operand::Copy(Place::local(elem_bytes))])
+        } else {
+            let cap = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(cap),
+                Rvalue::Use(Operand::Const(ConstValue::Int(
+                    i128::try_from(elems.len()).unwrap_or(0),
+                ))),
+                span,
+            );
+            (
+                "gos_rt_vec_with_capacity",
+                vec![
+                    Operand::Copy(Place::local(elem_bytes)),
+                    Operand::Copy(Place::local(cap)),
+                ],
+            )
+        };
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("Vec::new".to_string())),
-            args: vec![Operand::Copy(Place::local(elem_bytes))],
+            callee: Operand::Const(ConstValue::Str(ctor.to_string())),
+            args: ctor_args,
             destination: Place::local(local),
             target: Some(next),
         });

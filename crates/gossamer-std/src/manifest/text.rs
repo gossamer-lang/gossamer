@@ -176,6 +176,11 @@ pub const REGEX: StdModule = StdModule {
             doc: "Returns every non-overlapping match as `(start, end, text)`.",
         },
         StdItem {
+            name: "count",
+            kind: StdItemKind::Function,
+            doc: "Counts the non-overlapping matches without building them.",
+        },
+        StdItem {
             name: "captures",
             kind: StdItemKind::Function,
             doc: "Returns capture groups for the first match; index 0 is the full match.",

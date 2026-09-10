@@ -1,0 +1,84 @@
+// A `&mut self` enum method reaches its receiver wherever the value lives: a
+// binding, a by-value `mut` parameter, a struct field, a sequence element, and
+// through a free function that takes the reference.
+
+struct Bag { items: Vec<i64> }
+struct Pair { a: i64, b: i64 }
+
+enum E { Holder(Bag), Two(Pair), Num(i64), Nothing }
+impl E {
+    fn step(&mut self) {
+        match self {
+            E::Holder(b) => b.items.push(1)
+            E::Two(p) => { *self = E::Num(p.a + p.b) }
+            E::Num(_) => { *self = E::Nothing }
+            E::Nothing => { *self = E::Holder(Bag { items: #[9] }) }
+        }
+    }
+    fn show(&self) -> String {
+        match self {
+            E::Holder(b) => format("holder {}", b.items.len())
+            E::Two(p) => format("two {} {}", p.a, p.b)
+            E::Num(n) => format("num {}", n)
+            E::Nothing => "nothing"
+        }
+    }
+}
+
+struct Owner { node: E, tally: i64 }
+
+fn advance(e: &mut E) { e.step(); e.step() }
+
+fn drive_param(mut e: E, rounds: i64) -> String {
+    let mut i = 0
+    while i < rounds { e.step(); i += 1 }
+    e.show()
+}
+
+fn drive_field(rounds: i64) -> String {
+    let mut o = Owner { node: E::Nothing, tally: 0 }
+    let mut i = 0
+    while i < rounds { o.node.step(); o.tally += 1; i += 1 }
+    format("{} / {}", o.node.show(), o.tally)
+}
+
+fn drive_element(rounds: i64) -> String {
+    let mut xs = #[E::Nothing, E::Num(3), E::Two(Pair { a: 1, b: 2 })]
+    let mut i = 0
+    while i < rounds { xs[0].step(); xs[1].step(); xs[2].step(); i += 1 }
+    format("{} | {} | {}", xs[0].show(), xs[1].show(), xs[2].show())
+}
+
+fn drive_forward(rounds: i64) -> String {
+    let mut e = E::Two(Pair { a: 4, b: 5 })
+    let mut i = 0
+    while i < rounds { advance(&mut e); i += 1 }
+    e.show()
+}
+
+fn main() {
+    println("param 1: {}", drive_param(E::Nothing, 1))
+    println("param 3: {}", drive_param(E::Nothing, 3))
+    println("field 1: {}", drive_field(1))
+    println("field 3: {}", drive_field(3))
+    println("element 1: {}", drive_element(1))
+    println("element 2: {}", drive_element(2))
+    println("forward 1: {}", drive_forward(1))
+
+    let mut hot = ""
+    let mut j = 0
+    while j < 2000 { hot = drive_param(E::Two(Pair { a: 2, b: 3 }), 2); j += 1 }
+    println("hot param: {}", hot)
+    let mut hot2 = ""
+    let mut k = 0
+    while k < 2000 { hot2 = drive_field(4); k += 1 }
+    println("hot field: {}", hot2)
+    let mut hot3 = ""
+    let mut m = 0
+    while m < 2000 { hot3 = drive_element(3); m += 1 }
+    println("hot element: {}", hot3)
+    let mut hot4 = ""
+    let mut n = 0
+    while n < 2000 { hot4 = drive_forward(2); n += 1 }
+    println("hot forward: {}", hot4)
+}

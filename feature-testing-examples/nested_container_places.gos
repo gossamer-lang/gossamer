@@ -1,0 +1,36 @@
+// A container reached through a struct field is indexed through its own
+// handle, and an iterator a map answers is driven as one.
+
+struct Cell { alive: bool }
+struct Grid { cells: Vec<Vec<Cell>>, flat: Vec<Cell> }
+
+fn build(size: i64) -> Grid {
+    let mut rows: Vec<Vec<Cell>> = #[]
+    for y in 0..size {
+        let mut row: Vec<Cell> = #[]
+        for x in 0..size { row.push(Cell { alive: false }) }
+        rows.push(row)
+    }
+    let mut flat: Vec<Cell> = #[]
+    for i in 0..(size * size) { flat.push(Cell { alive: false }) }
+    Grid { cells: rows, flat: flat }
+}
+
+fn main() {
+    let mut g = build(4)
+    g.flat[5].alive = true
+    println("one level: {}", g.flat[5].alive)
+    g.cells[1][2].alive = true
+    println("two levels: {} {}", g.cells[1][2].alive, g.cells[1][1].alive)
+
+    let mut m: Map<String, i64> = Map::new()
+    m.inc("a")
+    m.inc("b", 2)
+    for (k, v) in m { println("direct {} {}", k, v) }
+    for entry in m.iter() { println("iter {} {}", entry.0, entry.1) }
+
+    let mut s: Set<i64> = #{}
+    let _ = s.insert(3)
+    let _ = s.insert(1)
+    for v in s.iter() { println("set {}", v) }
+}

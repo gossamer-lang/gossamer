@@ -61,7 +61,7 @@ parking_lot = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["arbitrary_precision", "unbounded_depth"] }
-regex = { version = "1", default-features = false, features = ["std", "unicode"] }
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 flate2 = { workspace = true }
 sha1 = { version = "0.10", default-features = false, features = ["std"] }
 rustc-hash = "2"

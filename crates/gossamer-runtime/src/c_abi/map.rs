@@ -3871,6 +3871,11 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
                             // through the node's own child meta.
                             unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
                         }
+                        vec_elem_kind::JSON => {
+                            // Each element is a handle holding a share of the
+                            // document's tree; the tree dies with its last one.
+                            unsafe { crate::c_abi::json::gos_rt_json_free(slot.cast()) };
+                        }
                         _ => {}
                     }
                 }
