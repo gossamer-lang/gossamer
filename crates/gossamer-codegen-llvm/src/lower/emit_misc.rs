@@ -786,6 +786,23 @@ impl<'a> Lowerer<'a> {
                 arg_tys_for_decl.join(", ")
             ));
         }
+        // A body that answers its aggregate through caller storage takes the
+        // destination's own slot as a trailing argument, so nothing is
+        // allocated for the value, copied out of it, or freed. Only a bare
+        // local qualifies: a projected destination is an address inside
+        // another value, whose own lowering owns when its slots are written.
+        let sret_slot = (!symbol.starts_with("gos_rt_")
+            && !symbol.starts_with("gos_binding_")
+            && self.callee_uses_sret(symbol)
+            && destination.projection.is_empty()
+            && crate::lower::sret_return_bytes(self.tcx, dest_ty_mir).is_some())
+        .then(|| local_slot(destination.local));
+        if let Some(slot) = &sret_slot {
+            if !arg_text.is_empty() {
+                arg_text.push_str(", ");
+            }
+            let _ = write!(arg_text, "ptr {slot}");
+        }
         if dest_is_void || registry_says_void {
             // Either the destination is unit-typed (caller
             // discards the return) or the registry declares the
@@ -882,6 +899,8 @@ impl<'a> Lowerer<'a> {
                     // aggregate slot directly instead of treating it as a heap
                     // pointer and memcpying through the packed integer.
                     writeln!(self.out, "  store i128 {tmp}, ptr {slot}, align 8").unwrap();
+                } else if sret_slot.is_some() {
+                    // The callee wrote the slots into this destination.
                 } else if let Some(slots) = slot_count(self.tcx, dest_ty_mir) {
                     // Inline aggregate (struct / tuple / array with a
                     // known field layout): the callee handed us a heap

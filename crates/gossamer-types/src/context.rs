@@ -544,6 +544,40 @@ impl TyCtxt {
         self.slot_bytes(ty) <= 8 && self.elem_is_addressed_aggregate(ty)
     }
 
+    /// Whether every leaf of this type is a scalar, so the value owns no
+    /// heap child and moving its bytes is moving the whole value.
+    #[must_use]
+    pub fn scalar_leaves_only(&self, ty: Ty) -> bool {
+        match self.kind_of(ty) {
+            TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char => true,
+            TyKind::Tuple(elems) => {
+                let elems = elems.clone();
+                elems.iter().all(|t| self.scalar_leaves_only(*t))
+            }
+            TyKind::Array { elem, .. } => {
+                let elem = *elem;
+                self.scalar_leaves_only(elem)
+            }
+            TyKind::Adt { def, substs } => {
+                let (def, substs) = (*def, substs.clone());
+                def.local < u32::MAX - 16
+                    && self
+                        .adt_field_tys(def, &substs)
+                        .is_some_and(|fields| fields.iter().all(|t| self.scalar_leaves_only(*t)))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a value of this type is an inline aggregate of more than one
+    /// slot whose every leaf is a scalar.
+    #[must_use]
+    pub fn is_scalar_inline_aggregate(&self, ty: Ty) -> bool {
+        self.slot_bytes(ty) > 8
+            && self.elem_is_addressed_aggregate(ty)
+            && self.scalar_leaves_only(ty)
+    }
+
     /// Inline slot size in bytes of a value of type `ty` on the compiled
     /// tiers, where every slot is 8-byte-aligned. Aggregates sum their
     /// fields' rounded-up slot widths; `Option`/`Result` are the 2-word

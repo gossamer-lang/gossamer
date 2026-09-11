@@ -311,7 +311,9 @@ fn lower_inline_result_carrier_call(
     name: &str,
 ) -> Result<bool> {
     let value = match name {
-        "gos_rt_result_new" => {
+        // The owning spelling differs only in who booked the payload's
+        // share; this backend's box takes the words as they stand either way.
+        "gos_rt_result_new" | "gos_rt_result_new_owned" => {
             let disc = match args.first() {
                 Some(arg) => lower_operand(
                     module,

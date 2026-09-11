@@ -14,7 +14,7 @@
 //   }) -> { run, reset, getSource, destroy, view }
 
 import { EditorView, basicSetup } from "https://esm.sh/codemirror@6.0.1";
-import { EditorState } from "https://esm.sh/@codemirror/state@6";
+import { EditorState, Prec } from "https://esm.sh/@codemirror/state@6";
 import { keymap } from "https://esm.sh/@codemirror/view@6";
 import { indentWithTab } from "https://esm.sh/@codemirror/commands@6";
 import { gossamer } from "./gossamer-lang.js";
@@ -266,17 +266,23 @@ export function mountPlayground(el, opts = {}) {
 
   const extensions = [
     basicSetup,
-    keymap.of([
-      {
-        key: "Mod-Enter",
-        preventDefault: true,
-        run: () => {
-          doRun();
-          return true;
+    // `basicSetup` carries the default keymap, which binds Mod-Enter to
+    // "insert a blank line". The run shortcut has to outrank it, so it is
+    // registered at the highest precedence rather than merely earlier in the
+    // extension list.
+    Prec.highest(
+      keymap.of([
+        {
+          key: "Mod-Enter",
+          preventDefault: true,
+          run: () => {
+            doRun();
+            return true;
+          },
         },
-      },
-      indentWithTab,
-    ]),
+      ]),
+    ),
+    keymap.of([indentWithTab]),
     gossamer(),
     editorTheme,
     heightTheme,

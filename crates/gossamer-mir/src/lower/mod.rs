@@ -258,6 +258,8 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
         // Runs last so every pass above still reads the payload extract under
         // its own name.
         mark_owned_aggregate_payloads(body, tcx);
+        // Reads the owned extract the pass above named, so it follows it.
+        crate::opt::pop_scalar_aggregates_in_place(body, tcx);
         if std::env::var("GOS_DUMP_MIR_RC").is_ok() {
             eprintln!("=== MIR(post-rc) {} ===", body.name);
             for block in &body.blocks {
@@ -286,6 +288,9 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
             crate::opt::elide_null_rc_accounting(body);
             crate::opt::elide_redundant_rc_pairs(body, tcx);
             crate::opt::elide_borrowed_holder_rc(body, tcx);
+            crate::opt::elide_moved_aggregate_shares(body, tcx);
+            crate::opt::elide_settled_guarded_walks(body);
+            crate::opt::reduce_materialised_counts(body);
         }
     }
     // Perceus reuse: recycle a uniquely-owned block being released into a

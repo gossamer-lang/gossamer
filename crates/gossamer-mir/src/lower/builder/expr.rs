@@ -3378,23 +3378,27 @@ impl<'a> Builder<'a> {
             target: Some(after_len),
         });
         self.set_current(after_len);
-        let ge0 = self.fresh(bool_ty);
+        // A `Vec` length is never negative, so `0 <= index < len` is exactly
+        // `(index as u64) < (len as u64)`: one unsigned compare, where the
+        // signed pair costs a second compare and a second branch that no
+        // back end can fold on its own - neither can prove the loaded length
+        // non-negative.
+        let u64_ty = self.tcx.int_ty(gossamer_types::IntTy::U64);
+        let index_u = self.fresh(u64_ty);
         self.emit_assign(
-            Place::local(ge0),
-            Rvalue::BinaryOp {
-                op: BinOp::Ge,
-                lhs: Operand::Copy(Place::local(index_local)),
-                rhs: Operand::Const(ConstValue::Int(0)),
+            Place::local(index_u),
+            Rvalue::Cast {
+                operand: Operand::Copy(Place::local(index_local)),
+                target: u64_ty,
             },
             span,
         );
-        let lt = self.fresh(bool_ty);
+        let len_u = self.fresh(u64_ty);
         self.emit_assign(
-            Place::local(lt),
-            Rvalue::BinaryOp {
-                op: BinOp::Lt,
-                lhs: Operand::Copy(Place::local(index_local)),
-                rhs: Operand::Copy(Place::local(len)),
+            Place::local(len_u),
+            Rvalue::Cast {
+                operand: Operand::Copy(Place::local(len)),
+                target: u64_ty,
             },
             span,
         );
@@ -3402,9 +3406,9 @@ impl<'a> Builder<'a> {
         self.emit_assign(
             Place::local(in_bounds),
             Rvalue::BinaryOp {
-                op: BinOp::BitAnd,
-                lhs: Operand::Copy(Place::local(ge0)),
-                rhs: Operand::Copy(Place::local(lt)),
+                op: BinOp::Lt,
+                lhs: Operand::Copy(Place::local(index_u)),
+                rhs: Operand::Copy(Place::local(len_u)),
             },
             span,
         );

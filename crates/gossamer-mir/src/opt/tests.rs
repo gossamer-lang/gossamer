@@ -4,7 +4,8 @@ mod elision_tests {
     use gossamer_types::TyCtxt;
 
     use super::{
-        bounds_check_elim, elide_borrowed_holder_rc, elide_redundant_rc_pairs,
+        bounds_check_elim, elide_borrowed_holder_rc, elide_moved_aggregate_shares,
+        elide_redundant_rc_pairs, elide_settled_guarded_walks,
         elide_vec_clone_of_fresh_temporary,
         fuse_slice_parse_ranges, local_branch_bounds_check_elim, loop_body_has_exactly_one_vec_push,
         reserve_bound_available_at_entry, reserve_vecs_for_counted_push_loops,
@@ -466,6 +467,646 @@ mod elision_tests {
         elide_borrowed_holder_rc(&mut body, &tcx);
         assert_eq!(intrinsic_name(&body.blocks[0].stmts[1]), Some("gos_rt_vec_retain"));
         assert_eq!(intrinsic_name(&body.blocks[1].stmts[0]), Some("gos_rt_vec_free"));
+    }
+
+    /// `L2 = Copy(L1.0); vec_retain(L2.0); f(L2)` then `vec_free(L2.0); Return`.
+    /// `L1` is a `&mut Outer` parameter and `L2` a copy of its `Inner` field,
+    /// whose `Vec` field is what carries the copy's share.
+    fn field_holder_body(tcx: &mut TyCtxt, mid: Vec<Statement>) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let vec_ty = tcx.intern(gossamer_types::TyKind::Vec(i64_ty));
+        let inner = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(1),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_struct_fields(gossamer_resolve::DefId::local(1), vec![vec_ty, i64_ty]);
+        let outer = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(2),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_struct_fields(gossamer_resolve::DefId::local(2), vec![inner, i64_ty]);
+        let outer_ref = tcx.intern(gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner: outer,
+        });
+        let field = |local: u32| Place {
+            local: Local(local),
+            projection: vec![Projection::Field(0)],
+        };
+        let locals = vec![
+            decl(unit),      // L0 return
+            decl(outer_ref), // L1 &mut Outer
+            decl(inner),     // L2 holder
+            decl(i64_ty),    // L3 call result
+            decl(unit),      // L4 retain dest
+            decl(unit),      // L5 release dest
+            decl(inner),     // L6 spare Inner
+        ];
+        let mut stmts = vec![assign(
+            Place::local(Local(2)),
+            Rvalue::Use(Operand::Copy(field(1))),
+        )];
+        stmts.push(rc_call(4, "gos_rt_vec_retain", field(2)));
+        stmts.extend(mid);
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts,
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("Inner::get".into())),
+                        args: vec![Operand::Copy(Place::local(Local(2)))],
+                        destination: Place::local(Local(3)),
+                        target: Some(BlockId(1)),
+                    },
+                    span: span(),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: vec![rc_call(5, "gos_rt_vec_free", field(2))],
+                    terminator: Terminator::Return,
+                    span: span(),
+                },
+            ],
+            span: span(),
+        }
+    }
+
+    /// A statement calling `name(Copy(local), Const(meta))`, the shape a
+    /// guarded aggregate's copy-blob walk takes.
+    fn walk_call(dst: u32, name: &'static str, local: u32, meta: &str) -> Statement {
+        assign(
+            Place::local(Local(dst)),
+            Rvalue::CallIntrinsic {
+                name,
+                args: vec![
+                    Operand::Copy(Place::local(Local(local))),
+                    Operand::Const(ConstValue::Str(meta.to_string())),
+                ],
+            },
+        )
+    }
+
+    /// `L2 = Copy(L1.0); aggr_retain_children(L2, meta); f(L2)` then
+    /// `aggr_release_children(L2, meta); Return`. `L1` is a tuple parameter
+    /// holding the guarded struct the holder copies.
+    fn guarded_holder_body(tcx: &mut TyCtxt, meta: &str) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let node = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(7),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_aggr_copy_meta(node, "gos_rc_meta_copyblob_1");
+        let pair = tcx.intern(gossamer_types::TyKind::Tuple(vec![node, i64_ty]));
+        let locals = vec![
+            decl(unit),   // L0 return
+            decl(pair),   // L1 parameter
+            decl(node),   // L2 holder
+            decl(i64_ty), // L3 call result
+            decl(unit),   // L4 retain dest
+            decl(unit),   // L5 release dest
+        ];
+        let stmts = vec![
+            assign(
+                Place::local(Local(2)),
+                Rvalue::Use(Operand::Copy(Place {
+                    local: Local(1),
+                    projection: vec![Projection::Field(0)],
+                })),
+            ),
+            walk_call(4, "gos_rt_aggr_retain_children", 2, "gos_rc_meta_copyblob_1"),
+        ];
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts,
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("Node::sym".into())),
+                        args: vec![Operand::Copy(Place::local(Local(2)))],
+                        destination: Place::local(Local(3)),
+                        target: Some(BlockId(1)),
+                    },
+                    span: span(),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: vec![walk_call(5, "gos_rt_aggr_release_children", 2, meta)],
+                    terminator: Terminator::Return,
+                    span: span(),
+                },
+            ],
+            span: span(),
+        }
+    }
+
+    /// `zero(L2); release(L2); L2 = <mint>; retain(L2); L3 = L2; retain(L3);
+    /// release(L2); zero(L2)` then a return sweep releasing both.
+    fn moved_aggregate_body(tcx: &mut TyCtxt) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let node = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(31),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_aggr_copy_meta(node, "gos_rc_meta_copyblob_5");
+        let meta = "gos_rc_meta_copyblob_5";
+        let locals = vec![
+            decl(unit),   // L0 return
+            decl(i64_ty), // L1 parameter
+            decl(node),   // L2 the minted value
+            decl(node),   // L3 where it moves
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(unit),
+        ];
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: vec![
+                        walk_call(4, "gos_rt_aggr_zero_guarded", 2, meta),
+                        walk_call(5, "gos_rt_aggr_release_children", 2, meta),
+                        assign(
+                            Place::local(Local(2)),
+                            Rvalue::Aggregate {
+                                kind: crate::ir::AggregateKind::Tuple,
+                                operands: vec![Operand::Copy(Place::local(Local(1)))],
+                            },
+                        ),
+                        walk_call(6, "gos_rt_aggr_retain_children", 2, meta),
+                        copy(3, 2),
+                        walk_call(7, "gos_rt_aggr_retain_children", 3, meta),
+                        walk_call(8, "gos_rt_aggr_release_children", 2, meta),
+                        walk_call(9, "gos_rt_aggr_zero_guarded", 2, meta),
+                        walk_call(10, "gos_rt_aggr_release_children", 2, meta),
+                    ],
+                    terminator: Terminator::Return,
+                    span: span(),
+                },
+            ],
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn cancels_the_pair_a_whole_aggregate_move_leaves_behind() {
+        let mut tcx = TyCtxt::new();
+        let mut body = moved_aggregate_body(&mut tcx);
+        elide_moved_aggregate_shares(&mut body, &tcx);
+        let names: Vec<Option<&str>> = body.blocks[0].stmts.iter().map(intrinsic_name).collect();
+        assert!(
+            is_nop(&body.blocks[0].stmts[5]),
+            "the destination's retain moves the source's share, so it goes: {names:?}"
+        );
+        assert!(
+            is_nop(&body.blocks[0].stmts[6]),
+            "the source's release goes with it: {names:?}"
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[0].stmts[3]),
+            Some("gos_rt_aggr_retain_children"),
+            "the mint's own share stays"
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[0].stmts[7]),
+            Some("gos_rt_aggr_zero_guarded"),
+            "the zero stays so every later walk is a no-op"
+        );
+    }
+
+    #[test]
+    fn drops_the_walk_that_stands_on_zeroed_words_and_the_zero_nothing_reads() {
+        let mut tcx = TyCtxt::new();
+        let mut body = moved_aggregate_body(&mut tcx);
+        elide_settled_guarded_walks(&mut body);
+        assert!(
+            is_nop(&body.blocks[0].stmts[1]),
+            "the release right after the entry zero walks nothing"
+        );
+        assert!(
+            is_nop(&body.blocks[0].stmts[0]),
+            "the entry zero has no reader left"
+        );
+        assert!(
+            is_nop(&body.blocks[0].stmts[8]),
+            "the sweep release stands on the words the second zero cleared"
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[0].stmts[6]),
+            Some("gos_rt_aggr_release_children"),
+            "the release of live words stays"
+        );
+    }
+
+    #[test]
+    fn elides_the_guarded_walk_of_a_holder_copied_out_of_a_parameter() {
+        let mut tcx = TyCtxt::new();
+        let mut body = guarded_holder_body(&mut tcx, "gos_rc_meta_copyblob_1");
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert!(
+            is_nop(&body.blocks[0].stmts[1]),
+            "the copy's walk over the children should go"
+        );
+        assert!(
+            is_nop(&body.blocks[1].stmts[0]),
+            "the matching release walk should go with it"
+        );
+    }
+
+    #[test]
+    fn keeps_a_guarded_walk_whose_release_names_another_copy_blob() {
+        let mut tcx = TyCtxt::new();
+        let mut body = guarded_holder_body(&mut tcx, "gos_rc_meta_copyblob_2");
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert_eq!(
+            intrinsic_name(&body.blocks[0].stmts[1]),
+            Some("gos_rt_aggr_retain_children")
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[1].stmts[0]),
+            Some("gos_rt_aggr_release_children")
+        );
+    }
+
+    /// `L2 = Copy(L1.1); option_slot_retain(L2); <mid>;
+    /// L3 = result_payload(L2); aggr_retain_children(L3, meta); f(L3)` then
+    /// both releases and `Return`. `L1` is a `&Outer` parameter.
+    fn payload_holder_body(tcx: &mut TyCtxt, mid: Vec<Statement>) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let node = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(11),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_aggr_copy_meta(node, "gos_rc_meta_copyblob_3");
+        let opt = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX),
+            substs: gossamer_types::Substs::from_types([node]),
+        });
+        let outer = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(12),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_struct_fields(gossamer_resolve::DefId::local(12), vec![i64_ty, opt]);
+        let outer_ref = tcx.intern(gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Not,
+            inner: outer,
+        });
+        let locals = vec![
+            decl(unit),      // L0 return
+            decl(outer_ref), // L1 &Outer
+            decl(opt),       // L2 carrier holder
+            decl(node),      // L3 payload holder
+            decl(i64_ty),    // L4 call result
+            decl(unit),      // L5 slot retain dest
+            decl(unit),      // L6 walk retain dest
+            decl(unit),      // L7 walk release dest
+            decl(unit),      // L8 slot release dest
+            decl(opt),       // L9 spare Option
+        ];
+        let mut stmts = vec![
+            assign(
+                Place::local(Local(2)),
+                Rvalue::Use(Operand::Copy(Place {
+                    local: Local(1),
+                    projection: vec![Projection::Field(1)],
+                })),
+            ),
+            rc_call(5, "gos_rt_option_slot_retain", Place::local(Local(2))),
+        ];
+        stmts.extend(mid);
+        stmts.push(assign(
+            Place::local(Local(3)),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_payload",
+                args: vec![Operand::Copy(Place::local(Local(2)))],
+            },
+        ));
+        stmts.push(walk_call(
+            6,
+            "gos_rt_aggr_retain_children",
+            3,
+            "gos_rc_meta_copyblob_3",
+        ));
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts,
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("Node::sum".into())),
+                        args: vec![Operand::Copy(Place::local(Local(3)))],
+                        destination: Place::local(Local(4)),
+                        target: Some(BlockId(1)),
+                    },
+                    span: span(),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: vec![
+                        walk_call(
+                            7,
+                            "gos_rt_aggr_release_children",
+                            3,
+                            "gos_rc_meta_copyblob_3",
+                        ),
+                        rc_call(8, "gos_rt_option_slot_release", Place::local(Local(2))),
+                    ],
+                    terminator: Terminator::Return,
+                    span: span(),
+                },
+            ],
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn elides_both_shares_of_a_payload_extracted_out_of_a_borrowed_carrier() {
+        let mut tcx = TyCtxt::new();
+        let mut body = payload_holder_body(&mut tcx, vec![]);
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert!(is_nop(&body.blocks[0].stmts[1]), "the slot retain should go");
+        assert!(is_nop(&body.blocks[0].stmts[3]), "the walk retain should go");
+        assert!(
+            is_nop(&body.blocks[1].stmts[0]),
+            "the walk release should go"
+        );
+        assert!(
+            is_nop(&body.blocks[1].stmts[1]),
+            "the slot release should go"
+        );
+    }
+
+    #[test]
+    fn keeps_both_shares_when_the_carrier_slot_is_replaced() {
+        let mut tcx = TyCtxt::new();
+        // `L1.1 = Copy(L9)` replaces the carrier the holder copied before the
+        // payload is read, so neither share is redundant.
+        let overwrite = assign(
+            Place {
+                local: Local(1),
+                projection: vec![Projection::Field(1)],
+            },
+            Rvalue::Use(Operand::Copy(Place::local(Local(9)))),
+        );
+        let mut body = payload_holder_body(&mut tcx, vec![overwrite]);
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert_eq!(
+            intrinsic_name(&body.blocks[0].stmts[1]),
+            Some("gos_rt_option_slot_retain")
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[1].stmts[1]),
+            Some("gos_rt_option_slot_release")
+        );
+    }
+
+    /// The walk shape: `L2` (the cursor) is written from the parameter and
+    /// from `L3`, `L3` from the payload `L4` extracts out of `L5`, and `L5` is
+    /// copied back out of `L2`. No member has a definition the others do not
+    /// feed, so only the set has one owner outside it.
+    fn cursor_class_body(tcx: &mut TyCtxt, mid: Vec<Statement>) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let node = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(21),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_aggr_copy_meta(node, "gos_rc_meta_copyblob_9");
+        let opt = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX),
+            substs: gossamer_types::Substs::from_types([node]),
+        });
+        tcx.register_struct_fields(gossamer_resolve::DefId::local(21), vec![i64_ty, opt]);
+        let meta = "gos_rc_meta_copyblob_9";
+        let locals = vec![
+            decl(unit),   // L0 return
+            decl(node),   // L1 by-value parameter
+            decl(node),   // L2 cursor
+            decl(node),   // L3 unwrapped child
+            decl(opt),    // L4 the child slot
+            decl(opt),    // L5 spare Option
+            decl(unit),   // L6..L11 accounting destinations
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(i64_ty), // L12 loop guard
+        ];
+        // bb0: seed the cursor from the parameter.
+        let mut bb0 = vec![
+            copy(2, 1),
+            walk_call(6, "gos_rt_aggr_retain_children", 2, meta),
+        ];
+        bb0.extend(mid);
+        // bb1: read the cursor's slot, unwrap it, and rebind the cursor.
+        let bb1 = vec![
+            rc_call(7, "gos_rt_option_slot_release", Place::local(Local(4))),
+            assign(
+                Place::local(Local(4)),
+                Rvalue::Use(Operand::Copy(Place {
+                    local: Local(2),
+                    projection: vec![Projection::Field(1)],
+                })),
+            ),
+            rc_call(8, "gos_rt_option_slot_retain", Place::local(Local(4))),
+            assign(
+                Place::local(Local(3)),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_payload",
+                    args: vec![Operand::Copy(Place::local(Local(4)))],
+                },
+            ),
+            walk_call(9, "gos_rt_aggr_retain_children", 3, meta),
+            walk_call(10, "gos_rt_aggr_release_children", 2, meta),
+            copy(2, 3),
+            walk_call(11, "gos_rt_aggr_retain_children", 2, meta),
+        ];
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: bb0,
+                    terminator: Terminator::Goto {
+                        target: BlockId(1),
+                    },
+                    span: span(),
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: bb1,
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(Local(12))),
+                        arms: vec![(0, BlockId(2))],
+                        default: BlockId(1),
+                    },
+                    span: span(),
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    stmts: vec![
+                        walk_call(6, "gos_rt_aggr_release_children", 2, meta),
+                        walk_call(7, "gos_rt_aggr_release_children", 3, meta),
+                        rc_call(8, "gos_rt_option_slot_release", Place::local(Local(4))),
+                    ],
+                    terminator: Terminator::Return,
+                    span: span(),
+                },
+            ],
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn elides_every_share_in_a_cursor_class_rooted_at_a_parameter() {
+        let mut tcx = TyCtxt::new();
+        let mut body = cursor_class_body(&mut tcx, vec![]);
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        let live: Vec<&str> = body
+            .blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter().filter_map(intrinsic_name))
+            .filter(|name| !crate::opt::extracts_carrier_payload(name))
+            .collect();
+        assert!(
+            live.is_empty(),
+            "every member's accounting should go, left: {live:?}"
+        );
+    }
+
+    #[test]
+    fn keeps_a_cursor_class_whose_root_is_written_inside_the_walk() {
+        let mut tcx = TyCtxt::new();
+        // A bare write of the root replaces the tree the whole class views.
+        let overwrite = copy(1, 3);
+        let mut body = cursor_class_body(&mut tcx, vec![overwrite]);
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        let live: Vec<&str> = body
+            .blocks
+            .iter()
+            .flat_map(|b| b.stmts.iter().filter_map(intrinsic_name))
+            .collect();
+        assert!(
+            live.contains(&"gos_rt_aggr_retain_children"),
+            "the class must keep its shares, left: {live:?}"
+        );
+    }
+
+    #[test]
+    fn elides_field_share_of_a_struct_holder_read_through_a_reference() {
+        let mut tcx = TyCtxt::new();
+        let mut body = field_holder_body(&mut tcx, vec![]);
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert!(
+            is_nop(&body.blocks[0].stmts[1]),
+            "the copy's share of the Vec field should go"
+        );
+        assert!(
+            is_nop(&body.blocks[1].stmts[0]),
+            "the matching field release should go with it"
+        );
+    }
+
+    #[test]
+    fn keeps_field_share_when_the_source_field_is_replaced() {
+        let mut tcx = TyCtxt::new();
+        // `L1.0 = Copy(L6)` replaces the struct the holder copied before the
+        // call reads it, so the copy's own share is what keeps the Vec alive.
+        let overwrite = assign(
+            Place {
+                local: Local(1),
+                projection: vec![Projection::Field(0)],
+            },
+            Rvalue::Use(Operand::Copy(Place::local(Local(6)))),
+        );
+        let mut body = field_holder_body(&mut tcx, vec![overwrite]);
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert_eq!(
+            intrinsic_name(&body.blocks[0].stmts[1]),
+            Some("gos_rt_vec_retain")
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[1].stmts[0]),
+            Some("gos_rt_vec_free")
+        );
+    }
+
+    #[test]
+    fn elides_share_of_holder_whose_read_is_an_element_store() {
+        let mut tcx = TyCtxt::new();
+        let mut body = holder_body(&mut tcx, vec![]);
+        let unit = tcx.unit();
+        body.locals.push(decl(unit)); // L7: the store's unit destination
+        body.blocks[0].terminator = Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_vec_set_i64".into())),
+            args: vec![
+                Operand::Copy(Place::local(Local(2))),
+                Operand::Copy(Place::local(Local(3))),
+                Operand::Copy(Place::local(Local(3))),
+            ],
+            destination: Place::local(Local(7)),
+            target: Some(BlockId(1)),
+        };
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert!(
+            is_nop(&body.blocks[0].stmts[1]),
+            "an element store leaves the receiver's count alone, so the retain should go"
+        );
+        assert!(
+            is_nop(&body.blocks[1].stmts[0]),
+            "the matching release should go with it"
+        );
+    }
+
+    #[test]
+    fn keeps_share_of_holder_written_through_before_its_read() {
+        let mut tcx = TyCtxt::new();
+        // A push through the holder changes the structure the chain aliases,
+        // so the later read is not covered by the source's own share.
+        let push = assign(
+            Place::local(Local(5)),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_push",
+                args: vec![
+                    Operand::Copy(Place::local(Local(2))),
+                    Operand::Copy(Place::local(Local(3))),
+                ],
+            },
+        );
+        let mut body = holder_body(&mut tcx, vec![push]);
+        elide_borrowed_holder_rc(&mut body, &tcx);
+        assert_eq!(
+            intrinsic_name(&body.blocks[0].stmts[1]),
+            Some("gos_rt_vec_retain")
+        );
     }
 
     #[test]

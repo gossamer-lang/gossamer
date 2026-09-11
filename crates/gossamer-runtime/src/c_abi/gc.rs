@@ -15,7 +15,9 @@
 #![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
-use std::alloc::{Layout, alloc_zeroed, dealloc};
+use std::alloc::Layout;
+#[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+use std::alloc::{alloc_zeroed, dealloc};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 // ---------------------------------------------------------------
@@ -65,6 +67,44 @@ fn aggregate_layout(size: usize) -> Result<Layout, GcError> {
     Layout::from_size_align(size, WORD_BYTES).map_err(|_| GcError::LayoutOverflow)
 }
 
+/// Zeroed storage for an aggregate block.
+///
+/// The Rust global-allocator facade routes every request through mimalloc's
+/// aligned entry, which pads a request by 8 to 16 bytes; a five-word struct
+/// then occupies the next bin up. Plain `mi_zalloc` returns the bin the size
+/// asks for and guarantees 16-byte alignment, which covers the runtime's
+/// 8-byte word alignment. The sanitizer and wasm builds keep the facade,
+/// where the global allocator is the system one and mixing would free across
+/// allocators.
+#[inline]
+fn aggregate_alloc_zeroed(size: usize) -> *mut u8 {
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    {
+        unsafe { libmimalloc_sys::mi_zalloc(size).cast() }
+    }
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    {
+        let Ok(layout) = aggregate_layout(size) else {
+            return std::ptr::null_mut();
+        };
+        unsafe { alloc_zeroed(layout) }
+    }
+}
+
+/// Companion to [`aggregate_alloc_zeroed`].
+#[inline]
+unsafe fn aggregate_free(ptr: *mut u8, layout: Layout) {
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    {
+        let _ = layout;
+        unsafe { libmimalloc_sys::mi_free(ptr.cast()) };
+    }
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    {
+        unsafe { dealloc(ptr, layout) };
+    }
+}
+
 /// Allocates `size` zeroed, 8-byte-aligned bytes for a user
 /// aggregate. Returns null on zero/oversized size; aborts on OOM
 /// (panicking across the FFI boundary into compiled code is UB).
@@ -87,9 +127,9 @@ pub extern "C" fn gos_rt_gc_alloc(size: u64) -> *mut u8 {
             return std::ptr::null_mut();
         };
         // SAFETY: layout validated by `aggregate_layout` (size > 0,
-        // <= MAX_AGGR_BYTES, 8-byte align); the global allocator is
-        // thread-safe; null is handled below.
-        let ptr = unsafe { alloc_zeroed(layout) };
+        // <= MAX_AGGR_BYTES, 8-byte align); the allocator is thread-safe;
+        // null is handled below.
+        let ptr = aggregate_alloc_zeroed(layout.size());
         if ptr.is_null() {
             eprintln!(
                 "gossamer runtime: OOM in gos_rt_gc_alloc (size={}, align={}); aborting",
@@ -151,7 +191,7 @@ pub extern "C" fn gos_rt_aggr_alloc_leak(size: u64) -> *mut u8 {
             return std::ptr::null_mut();
         };
         // SAFETY: as in `gos_rt_gc_alloc`.
-        let ptr = unsafe { alloc_zeroed(layout) };
+        let ptr = aggregate_alloc_zeroed(layout.size());
         if ptr.is_null() {
             eprintln!(
                 "gossamer runtime: OOM in gos_rt_aggr_alloc_leak (size={}, align={}); aborting",
@@ -186,9 +226,9 @@ pub extern "C" fn gos_rt_aggr_free(ptr: *mut u8, size: u64) {
             return;
         };
         crate::c_abi::ledger::aggr_dec();
-        // SAFETY: `ptr` came from `alloc_zeroed` with this exact
-        // layout; the drop pass guarantees a single matching free.
-        unsafe { dealloc(ptr, layout) };
+        // SAFETY: `ptr` came from `aggregate_alloc_zeroed` for this exact
+        // size; the drop pass guarantees a single matching free.
+        unsafe { aggregate_free(ptr, layout) };
     });
 }
 

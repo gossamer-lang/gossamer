@@ -905,9 +905,24 @@ static META_IDS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMa
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
 static META_NEXT: AtomicUsize = AtomicUsize::new(1);
 
+/// Slots in the per-thread intern cache. A program allocates a handful of
+/// shapes in any one loop - a node and the option that holds it, a row and its
+/// element - and interleaves them, so a single remembered pair is displaced on
+/// every other call and every allocation then takes the table lock.
+const META_MEMO_SLOTS: usize = 16;
+
 thread_local! {
-    /// Last (pointer, id) pair interned on this thread.
-    static META_MEMO: std::cell::Cell<(usize, u16)> = const { std::cell::Cell::new((0, 0)) };
+    /// Recently interned (pointer, id) pairs, direct-mapped by pointer. One
+    /// cell per slot, so a lookup reads only the slot it maps to.
+    static META_MEMO: [std::cell::Cell<(usize, u16)>; META_MEMO_SLOTS] =
+        const { [const { std::cell::Cell::new((0, 0)) }; META_MEMO_SLOTS] };
+}
+
+/// Cache slot for a blob pointer. Blobs are distinct allocations, so the bits
+/// above the alignment are what tell two of them apart.
+#[inline]
+const fn meta_memo_slot(key: usize) -> usize {
+    (key >> 4) & (META_MEMO_SLOTS - 1)
 }
 
 fn meta_intern(meta: *const i64) -> Option<u16> {
@@ -915,9 +930,12 @@ fn meta_intern(meta: *const i64) -> Option<u16> {
         return Some(0);
     }
     let key = meta as usize;
-    let memo = META_MEMO.with(std::cell::Cell::get);
-    if memo.0 == key {
-        return Some(memo.1);
+    let slot = meta_memo_slot(key);
+    if let Some(id) = META_MEMO.with(|cache| {
+        let entry = cache[slot].get();
+        (entry.0 == key).then_some(entry.1)
+    }) {
+        return Some(id);
     }
     let mut ids = META_IDS.lock();
     let id = if let Some(&id) = ids.get(&key) {
@@ -933,7 +951,7 @@ fn meta_intern(meta: *const i64) -> Option<u16> {
         id
     };
     drop(ids);
-    META_MEMO.with(|m| m.set((key, id)));
+    META_MEMO.with(|cache| cache[slot].set((key, id)));
     Some(id)
 }
 
@@ -2853,6 +2871,34 @@ const COPY_BLOB_DISC: u8 = 0xCB;
 const COPY_BLOB_OWNER_BYTES: usize = std::mem::size_of::<CopyBlobOwner>();
 static NEXT_COPY_BLOB_GENERATION: AtomicUsize = AtomicUsize::new(1);
 
+/// Identities a goroutine claims in one go. A blob's identity has to be
+/// unique across the process, which one process-wide counter gives at the
+/// cost of a read-modify-write on every allocation. Claiming a block at a
+/// time keeps the uniqueness and leaves the allocation path a thread-local
+/// increment.
+const COPY_BLOB_GENERATION_BLOCK: usize = 1 << 16;
+
+thread_local! {
+    /// The identities this thread still holds: the next one to hand out and
+    /// the end of its claimed block.
+    static COPY_BLOB_GENERATIONS: std::cell::Cell<(usize, usize)> =
+        const { std::cell::Cell::new((0, 0)) };
+}
+
+fn next_copy_blob_generation() -> u64 {
+    COPY_BLOB_GENERATIONS.with(|held| {
+        let (next, end) = held.get();
+        if next < end {
+            held.set((next + 1, end));
+            return next as u64;
+        }
+        let base =
+            NEXT_COPY_BLOB_GENERATION.fetch_add(COPY_BLOB_GENERATION_BLOCK, Ordering::Relaxed);
+        held.set((base + 1, base + COPY_BLOB_GENERATION_BLOCK));
+        base as u64
+    })
+}
+
 /// Whether `payload` could be a managed allocation this module may inspect.
 ///
 /// An `Option` / `Result` payload word is untyped: it carries a pointer for a
@@ -2940,6 +2986,34 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_copy(
     meta: *const i64,
     src: *const u8,
 ) -> *mut u8 {
+    unsafe { rc_alloc_from(size, meta, src, true) }
+}
+
+/// Allocates the same blob as [`gos_rt_rc_alloc_copy`] and takes the source's
+/// share of the children rather than minting one.
+///
+/// The caller is giving up the words it copied here - its own walk over them
+/// is what the compiler removed alongside this call - so the children keep the
+/// count they already had and the blob is the one holding it.
+///
+/// # Safety
+/// `src` must name `size` readable bytes laid out for `meta`, and the caller
+/// must not release the children of those words afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_rc_alloc_move(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+) -> *mut u8 {
+    unsafe { rc_alloc_from(size, meta, src, false) }
+}
+
+unsafe fn rc_alloc_from(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+    retain_children: bool,
+) -> *mut u8 {
     let in_region = region_active();
     if in_region {
         let payload = unsafe { gos_rt_rc_alloc(size, std::ptr::null()) };
@@ -2954,7 +3028,15 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_copy(
     let total = COPY_BLOB_OWNER_BYTES
         .saturating_add(RC_HEADER_SIZE)
         .saturating_add(size as usize);
-    let base = rc_block_alloc_zeroed(total);
+    // Every byte of the block is written below - the owner carrier, the
+    // header, and the payload the copy fills - so the zero fill would be
+    // overwritten wholesale. A source that covers the payload is the only
+    // shape that holds; anything else keeps the zeroed block.
+    let base = if src.is_null() {
+        rc_block_alloc_zeroed(total)
+    } else {
+        rc_block_alloc_unzeroed(total)
+    };
     if base.is_null() {
         return std::ptr::null_mut();
     }
@@ -2965,7 +3047,7 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_copy(
             abi_version: COPY_BLOB_OWNER_VERSION,
             kind: COPY_BLOB_OWNER_KIND,
             destructor: COPY_BLOB_OWNER_DTOR,
-            generation: NEXT_COPY_BLOB_GENERATION.fetch_add(1, Ordering::Relaxed) as u64,
+            generation: next_copy_blob_generation(),
             meta,
         });
         (*header).strong = 1;
@@ -2983,6 +3065,11 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_copy(
         // A leaf blob: its words are scalars, so the copy shares no RC
         // child with the source and there is nothing to retain. The
         // interning above already accepts null as "no child layout".
+        return payload;
+    }
+    if !retain_children {
+        // The source gave up its share of these words, so the blob holds the
+        // count they already carried.
         return payload;
     }
     unsafe {

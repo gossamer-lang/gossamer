@@ -775,6 +775,7 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
     // Windows for return thunks, but the collected set is still used by
     // function setup to bind raw runtime pointer params correctly.
     let cabi_handlers = collect_cabi_handlers(ctx.all_bodies);
+    let sret_bodies = collect_sret_bodies(ctx.all_bodies, ctx.tcx);
 
     for &idx in chunk_indices {
         let body = &ctx.all_bodies[idx];
@@ -788,6 +789,7 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
         lowerer.strings = string_pool.clone();
         lowerer.capture_summary = ctx.capture_summary.clone();
         lowerer.cabi_handlers.clone_from(&cabi_handlers);
+        lowerer.sret_bodies.clone_from(&sret_bodies);
 
         match lowerer.lower() {
             Ok(text) => {
@@ -824,7 +826,7 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
     // Extern declares for bodies outside the chunk.
     for (i, body) in ctx.all_bodies.iter().enumerate() {
         if !chunk_set.contains(&i) {
-            let decl = extern_declare(body, ctx.tcx);
+            let decl = extern_declare_with(body, ctx.tcx, &sret_bodies);
             out.push_str(decl.trim_end());
             writeln!(out).unwrap();
         }
@@ -1347,12 +1349,14 @@ fn render_module_to_path(
         .with_context(|| format!("creating {}", body_path.display()))?;
     let mut body_w = BufWriter::with_capacity(64 * 1024, body_file);
 
+    let sret_bodies = collect_sret_bodies(bodies, tcx);
     for body in bodies {
         let mut lowerer = Lowerer::new(body, tcx);
         lowerer.fn_name_by_def.clone_from(&fn_name_by_def);
         lowerer.param_tys_by_name.clone_from(&param_tys_by_name);
         lowerer.strings = string_pool.clone();
         lowerer.capture_summary = capture_summary.clone();
+        lowerer.sret_bodies.clone_from(&sret_bodies);
         match lowerer.lower() {
             Ok(text) => {
                 body_w
@@ -2157,6 +2161,87 @@ fn resolve_env_slot0_fn(body: &Body, env_local: gossamer_mir::Local) -> Option<S
 /// arrive as raw pointers.
 const CABI_HANDLER_REGISTRATIONS: &[(&str, usize)] = gossamer_abi::I128_HANDLER_REGISTRATIONS;
 
+/// Bodies that answer a multi-slot inline aggregate through storage the caller
+/// names, rather than a heap block of their own.
+///
+/// `GOS_NO_SRET` disables the convention for differential measurement and as a
+/// safety escape hatch, the way `GOS_RC_NO_ELIDE` does for the elider.
+///
+/// The convention only holds where every call to the body is one this module
+/// emits. A body whose address is taken can be reached through a function
+/// pointer, by another Gossamer body or by a runtime shim holding a callback,
+/// and such a call site writes the argument list from the pointer's type,
+/// which says nothing about a trailing slot. Those keep the heap return.
+fn collect_sret_bodies(all_bodies: &[Body], tcx: &TyCtxt) -> std::collections::BTreeSet<String> {
+    use gossamer_mir::{ConstValue, Operand, Rvalue, StatementKind, Terminator};
+
+    let name_of_def = |def: gossamer_resolve::DefId| -> Option<&str> {
+        all_bodies
+            .iter()
+            .find(|b| b.def == Some(def))
+            .map(|b| b.name.as_str())
+    };
+    let mut address_taken: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let note = |op: &Operand, taken: &mut std::collections::BTreeSet<String>| {
+        if let Operand::FnRef { def, .. } = op
+            && let Some(name) = name_of_def(*def)
+        {
+            taken.insert(name.to_string());
+        }
+    };
+    for body in all_bodies {
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let StatementKind::Assign { rvalue, .. } = &stmt.kind else {
+                    continue;
+                };
+                match rvalue {
+                    Rvalue::Use(op) => note(op, &mut address_taken),
+                    Rvalue::Aggregate { operands, .. } => {
+                        for op in operands {
+                            note(op, &mut address_taken);
+                        }
+                    }
+                    Rvalue::CallIntrinsic { name, args } => {
+                        // `gos_fn_addr("f")` is the spelling that puts a body's
+                        // address in a value.
+                        if *name == "gos_fn_addr"
+                            && let Some(Operand::Const(ConstValue::Str(fname))) = args.first()
+                        {
+                            address_taken.insert(fname.clone());
+                        }
+                        for op in args {
+                            note(op, &mut address_taken);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // A call's own callee is a direct one; every other operand of the
+            // call puts the body it names into a value.
+            if let Terminator::Call { args, .. } = &block.terminator {
+                for op in args {
+                    note(op, &mut address_taken);
+                }
+            }
+        }
+    }
+
+    if std::env::var_os("GOS_NO_SRET").is_some() {
+        return std::collections::BTreeSet::new();
+    }
+    all_bodies
+        .iter()
+        .filter(|body| {
+            body.name != "main"
+                && !address_taken.contains(&body.name)
+                && crate::lower::sret_return_bytes(tcx, body.local_ty(gossamer_mir::Local::RETURN))
+                    .is_some()
+        })
+        .map(|body| body.name.clone())
+        .collect()
+}
+
 /// Collects the gossamer functions invoked by the rustc-compiled runtime
 /// through `extern "C" fn(..) -> i128`, mapped to their parameter arity:
 /// handler registrations (the [`CABI_HANDLER_REGISTRATIONS`] table, keyed
@@ -2338,6 +2423,21 @@ fn validate_global_decl_shape(g: &str) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn extern_declare_with(
+    body: &Body,
+    tcx: &TyCtxt,
+    sret_bodies: &std::collections::BTreeSet<String>,
+) -> String {
+    let mut decl = extern_declare(body, tcx);
+    if sret_bodies.contains(&body.name) {
+        let close = decl.rfind(')').expect("declare ends with a parameter list");
+        let open = decl.find('(').expect("declare has a parameter list");
+        let sep = if close == open + 1 { "" } else { ", " };
+        decl.insert_str(close, &format!("{sep}ptr"));
+    }
+    decl
 }
 
 fn extern_declare(body: &Body, tcx: &TyCtxt) -> String {

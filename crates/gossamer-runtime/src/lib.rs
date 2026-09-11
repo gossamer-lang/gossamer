@@ -143,24 +143,31 @@ fn widen(value: impl Into<i64>) -> i64 {
 
 /// Default mimalloc purge delay for release programs, in milliseconds.
 ///
-/// A short delay lets mimalloc batch page purges. Immediate purging turns
-/// short-lived allocation loops into one `madvise` syscall per iteration,
-/// which can dominate otherwise CPU-local workloads. Set
-/// `GOS_ALLOC_PURGE_DELAY=0` when immediate return-to-OS behavior is required.
+/// How long a freed page waits before its memory is handed back to the
+/// kernel. This is mimalloc's own default, which the runtime keeps: the
+/// delay has to outlast an allocate-and-free cycle, or a loop that builds
+/// and drops a container pays an `madvise` round trip per iteration.
+///
+/// Resident memory does not pay for the wait. What a program holds is
+/// decided by its live set and by the segments mimalloc keeps whole, and
+/// neither moves with this delay - a burst allocated and dropped holds the
+/// same bytes a second later whatever it is set to. Set
+/// `GOS_ALLOC_PURGE_DELAY` to another millisecond value to tune it, or to
+/// `0` for immediate return-to-OS behaviour.
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 fn configured_purge_delay() -> std::os::raw::c_long {
     std::env::var("GOS_ALLOC_PURGE_DELAY")
         .ok()
         .and_then(|s| s.parse::<std::os::raw::c_long>().ok())
-        .unwrap_or(10)
+        .unwrap_or(1000)
 }
 
 /// Configures the process allocator for a predictable memory footprint.
 ///
-/// Uses a 10 ms mimalloc purge delay by default. Immediate purge made
-/// allocator-heavy native loops issue `madvise(MADV_DONTNEED)` for nearly
-/// every released object. Set `GOS_ALLOC_PURGE_DELAY=0` to opt into immediate
-/// return-to-OS behavior, or another millisecond value to tune batching.
+/// Keeps mimalloc's own purge delay, for the reason
+/// [`configured_purge_delay`] gives. Set `GOS_ALLOC_PURGE_DELAY=0` to opt
+/// into immediate return-to-OS behavior, or another millisecond value to
+/// tune batching.
 ///
 /// Compiled Gossamer programs reach this from their generated `main` via
 /// `gos_rt_set_args` -> `runtime_init`; the `gos` binary (which links

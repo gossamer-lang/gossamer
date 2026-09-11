@@ -425,6 +425,22 @@ pub(super) fn lower_body(
                 }
             }
         }
+        // An aggregate local handed to a call crosses as the address of its
+        // words, so a call that fills it - a pop that moves an element into
+        // the local that binds it - needs the local to own storage before
+        // any statement has given it one.
+        for block in &body.blocks {
+            let Terminator::Call { args, .. } = &block.terminator else {
+                continue;
+            };
+            for arg in args {
+                if let Operand::Copy(place) = arg
+                    && place.projection.is_empty()
+                {
+                    field_store_targets.insert(place.local.0);
+                }
+            }
+        }
         let mut targets: Vec<u32> = field_store_targets.into_iter().collect();
         targets.sort_unstable();
         for local_u32 in targets {

@@ -255,6 +255,15 @@ struct WorkerSlot {
     /// Replaces the previous `Mutex<Vec<Instant>>` on `Shared`,
     /// which serialised every Yield on a single global lock.
     last_yield_micros: AtomicU64,
+    /// Monotonic micros-since-process-start of the last targeted SIGURG the
+    /// watchdog sent this worker, or zero if it has sent none.
+    ///
+    /// A signal is a request to reach a safepoint, and a worker that cannot
+    /// reach one - a compiled numeric loop calling nothing - does not answer
+    /// it. Without this the watchdog re-sends on every pass for as long as
+    /// the loop runs, which is a kernel round trip per worker per pass on
+    /// both sides and interrupts the very work it is waiting for.
+    last_signal_micros: AtomicU64,
 }
 
 impl WorkerSlot {
@@ -731,6 +740,7 @@ impl MultiScheduler {
             retired: AtomicBool::new(false),
             thread_handle: AtomicU64::new(0),
             last_yield_micros: AtomicU64::new(now_micros_since_start()),
+            last_signal_micros: AtomicU64::new(0),
         });
         {
             let mut workers = self.inner.workers.lock();
@@ -751,6 +761,7 @@ impl MultiScheduler {
                         retired: AtomicBool::new(true),
                         thread_handle: AtomicU64::new(0),
                         last_yield_micros: AtomicU64::new(now_micros_since_start()),
+                        last_signal_micros: AtomicU64::new(0),
                     });
                     workers.push(placeholder);
                 }
@@ -1108,6 +1119,15 @@ fn watchdog_loop(shared: Arc<Shared>) {
                     if slot.retired.load(Ordering::Acquire) {
                         continue;
                     }
+                    // One signal per overstay window. The worker answers by
+                    // reaching a safepoint, which moves its yield timestamp
+                    // and takes it out of this list; until then a second
+                    // signal tells it nothing the first did not.
+                    let last_signal = slot.last_signal_micros.load(Ordering::Acquire);
+                    if last_signal != 0 && now_micros.saturating_sub(last_signal) < kill_micros {
+                        continue;
+                    }
+                    slot.last_signal_micros.store(now_micros, Ordering::Release);
                     let handle = slot.thread_handle.load(Ordering::Acquire);
                     let _ = crate::preempt::signal_thread_sigurg(handle);
                 }

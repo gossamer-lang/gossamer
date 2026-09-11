@@ -144,35 +144,6 @@ pub(crate) fn json_std_to_value(v: gossamer_std::json::Value) -> Value {
     }
 }
 
-pub(crate) fn value_to_json_std(v: &Value) -> gossamer_std::json::Value {
-    use gossamer_std::json::Value as JV;
-    match v {
-        Value::Unit => JV::Null,
-        Value::Bool(b) => JV::Bool(*b),
-        Value::Int(n) => JV::Int(*n),
-        Value::Float(f) => JV::Number(*f),
-        Value::String(s) => JV::String(s.as_str().to_string()),
-        Value::Array(arr) => JV::Array(arr.iter().map(value_to_json_std).collect()),
-        Value::Map(map) => {
-            let guard = map.lock();
-            let obj: std::collections::BTreeMap<String, JV> = guard
-                .iter()
-                .map(|(k, v)| {
-                    let key = match k {
-                        MapKey::Str(s) => s.to_string(),
-                        MapKey::Int(n) => n.to_string(),
-                        MapKey::Bool(b) => b.to_string(),
-                        _ => "<key>".to_string(),
-                    };
-                    (key, value_to_json_std(v))
-                })
-                .collect();
-            JV::Object(obj)
-        }
-        _ => JV::Null,
-    }
-}
-
 pub(crate) fn builtin_json_std_parse(args: &[Value]) -> RuntimeResult<Value> {
     let src = args.first().and_then(as_str).unwrap_or("");
     match gossamer_std::json::parse(src) {
@@ -191,7 +162,7 @@ pub(crate) fn builtin_json_std_encode(args: &[Value]) -> RuntimeResult<Value> {
             gossamer_std::json::encode(value.as_value()).into(),
         ));
     }
-    let jv = value_to_json_std(args.first().unwrap_or(&Value::Unit));
+    let jv = crate::builtins::gossamer_to_json_value(args.first().unwrap_or(&Value::Unit));
     Ok(Value::String(gossamer_std::json::encode(&jv).into()))
 }
 
@@ -201,7 +172,7 @@ pub(crate) fn builtin_json_std_encode_pretty(args: &[Value]) -> RuntimeResult<Va
             gossamer_std::json::encode_pretty(value.as_value()).into(),
         ));
     }
-    let jv = value_to_json_std(args.first().unwrap_or(&Value::Unit));
+    let jv = crate::builtins::gossamer_to_json_value(args.first().unwrap_or(&Value::Unit));
     Ok(Value::String(gossamer_std::json::encode_pretty(&jv).into()))
 }
 

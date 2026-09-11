@@ -353,6 +353,9 @@ impl<'a> Builder<'a> {
                 peeled = *inner;
             }
             if let gossamer_types::TyKind::Adt { def, .. } = self.tcx.kind_of(peeled).clone() {
+                if let Some(result) = self.lower_json_encode_stream(args, peeled, span, pretty) {
+                    return Some(result);
+                }
                 if let Some(result) = self.lower_json_render_adt(args, def, span, pretty) {
                     return Some(result);
                 }

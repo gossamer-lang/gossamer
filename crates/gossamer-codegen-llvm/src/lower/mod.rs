@@ -182,6 +182,26 @@ pub(crate) struct Lowerer<'a> {
     /// returns. One instruction per call site, executed once, is what these
     /// temporaries actually need.
     pub(crate) entry_allocas: Vec<String>,
+    /// Bodies that answer a multi-slot inline aggregate through storage the
+    /// caller names, keyed by body name. Both sides of every call read this,
+    /// so the parameter list and the argument list cannot disagree.
+    pub(crate) sret_bodies: std::collections::BTreeSet<String>,
+}
+
+/// Byte width of a return value an aggregate-returning body writes into
+/// caller-supplied storage, or `None` for every other return shape.
+///
+/// A multi-slot inline aggregate is the one return whose value does not fit a
+/// register: without somewhere to put it the callee has to allocate a block,
+/// copy its slots in, and hand back the pointer, and the caller then copies
+/// those slots into the local that binds them and frees the block. The
+/// caller's local is storage that already exists and already outlives the
+/// call, so the callee writes there instead.
+pub(crate) fn sret_return_bytes(tcx: &TyCtxt, ty: Ty) -> Option<u64> {
+    if crate::ty::is_unit(tcx, ty) || !crate::ty::is_aggregate(tcx, ty) {
+        return None;
+    }
+    crate::ty::slot_count(tcx, ty).map(|slots| u64::from(slots.max(1)) * 8)
 }
 
 /// Module-scoped string intern pool.
@@ -502,6 +522,34 @@ fn llvm_vec_elem_kind_from_local(body: &Body, tcx: &TyCtxt, dest_local: Local) -
 /// same stride a `[]` literal of the same type does. Returns `None`
 /// when the destination is not a statically-known vec/slice, so the
 /// caller keeps its scalar default.
+/// The element stride an element type settles on its own, matching what
+/// [`llvm_vec_elem_bytes_from_local`] writes into a vector's header when the
+/// vector is built. `None` for an element type that settles nothing - an
+/// unresolved one, or an opaque handle whose width only the header records -
+/// so an index into such a vector reads the width the header carries.
+pub(crate) fn settled_elem_bytes(tcx: &TyCtxt, elem: Ty) -> Option<i64> {
+    match tcx.kind(elem) {
+        Some(TyKind::Bool | TyKind::Int(gossamer_types::IntTy::U8)) => Some(1),
+        Some(
+            TyKind::Char
+            | TyKind::Int(_)
+            | TyKind::Float(_)
+            | TyKind::String
+            | TyKind::Vec(_)
+            | TyKind::Slice(_)
+            | TyKind::Iterator(_)
+            | TyKind::HashMap { .. },
+        ) => Some(8),
+        Some(TyKind::Tuple(_) | TyKind::Array { .. }) => Some(i64::from(tcx.slot_bytes(elem))),
+        // A user aggregate is stored as its own slots. The sentinel Adts - an
+        // opaque stdlib handle, `Option`, `Result` - are not user aggregates.
+        Some(TyKind::Adt { def, .. }) if def.local < u32::MAX - 16 => {
+            Some(i64::from(tcx.slot_bytes(elem)))
+        }
+        _ => None,
+    }
+}
+
 fn llvm_vec_elem_bytes_from_local(body: &Body, tcx: &TyCtxt, dest_local: Local) -> Option<i64> {
     let ty = body.local_ty(dest_local);
     let inner = match tcx.kind(ty) {

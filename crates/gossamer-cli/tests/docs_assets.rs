@@ -200,3 +200,33 @@ fn unescape_markup(fragment: &str) -> String {
         .replace("&#39;", "'")
         .replace("&amp;", "&")
 }
+
+/// The playground's advertised run shortcut has to outrank `CodeMirror`'s own
+/// binding for the same chord.
+///
+/// `basicSetup` carries the default keymap, whose `Mod-Enter` inserts a blank
+/// line. A binding registered at ordinary precedence sits behind it, so the
+/// chord the page advertises has to come in at the highest precedence.
+#[test]
+fn playground_run_shortcut_outranks_the_default_keymap() {
+    let root = workspace_root();
+    let source = std::fs::read_to_string(root.join("landing/playground/playground.js"))
+        .expect("read playground.js");
+    let page = std::fs::read_to_string(root.join("landing/playground/index.html"))
+        .expect("read playground index.html");
+    assert!(
+        page.contains("Ctrl / Cmd + Enter to run"),
+        "the playground page no longer advertises the run shortcut"
+    );
+    let binding = source
+        .find("\"Mod-Enter\"")
+        .expect("playground.js binds Mod-Enter");
+    let wrapper = source[..binding]
+        .rfind("Prec.highest(")
+        .expect("the Mod-Enter binding is registered through Prec.highest");
+    let between = &source[wrapper..binding];
+    assert!(
+        between.contains("keymap.of(") && !between.contains("basicSetup"),
+        "the Mod-Enter binding is not the keymap Prec.highest wraps"
+    );
+}

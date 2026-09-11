@@ -814,6 +814,228 @@ fn live_counts_at(name: &str, program: &str, small: &str, large: &str) -> [(usiz
     counts
 }
 
+/// The allocation ledger's whole line for `program` at two argument values.
+///
+/// A share taken per turn of a loop and never given back moves one of the
+/// counts with the argument; a program that reclaims what it names ends both
+/// runs holding the same handful of values.
+fn ledger_at(name: &str, program: &str, small: &str, large: &str) -> [String; 2] {
+    let dir = env::temp_dir().join(format!("gos-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join(format!("{name}.gos"));
+    std::fs::write(&source, program).unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join(name);
+    let run = |iterations: &str| -> String {
+        let out = Command::new(&binary)
+            .arg(iterations)
+            .env("GOS_LEAK_LEDGER", "1")
+            .output()
+            .expect("run with the allocation ledger");
+        assert!(
+            out.status.success(),
+            "run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .find(|line| line.contains("LEAK LEDGER"))
+            .unwrap_or_else(|| panic!("no ledger line for {name}"))
+            .to_string()
+    };
+    let lines = [run(small), run(large)];
+    let _ = std::fs::remove_dir_all(&dir);
+    lines
+}
+
+/// A typed decode gives back the document it read.
+///
+/// The decoder hands its parsed handle to the function that reads the fields;
+/// a frame that disowns the handle at that call leaves the whole document
+/// alive, so peak memory tracks the number of decodes rather than the size of
+/// one.
+#[test]
+fn typed_json_decode_holds_one_document_at_a_time() {
+    if !gnu_time_available() {
+        return;
+    }
+    let dir = env::temp_dir().join(format!("gos-decode-live-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("decodelive.gos");
+    std::fs::write(
+        &source,
+        "
+use std::encoding::json
+use std::env
+
+struct Point { x: f64, y: f64 }
+struct Cloud { points: Vec<Point> }
+
+fn main() {
+    let mut text = \"{\\\"points\\\":[\"
+    let mut i = 0
+    while i < 4000 {
+        if i > 0 { text += \",\" }
+        text += format(\"{{\\\"x\\\":{}.5,\\\"y\\\":{}.25}}\", i, i)
+        i += 1
+    }
+    text += \"]}\"
+    let rounds = env::args().first().unwrap_or(\"4\").to_i64().unwrap_or(4)
+    let mut total = 0
+    let mut k = 0
+    while k < rounds {
+        total += json::decode::<Cloud>(text).unwrap().points.len()
+        k += 1
+    }
+    println(\"{}\", total)
+}
+",
+    )
+    .unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--release", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("decodelive");
+    let rss = |rounds: &str| -> u64 {
+        let out = Command::new("/usr/bin/time")
+            .arg("-v")
+            .arg(&binary)
+            .arg(rounds)
+            .output()
+            .expect("run under /usr/bin/time");
+        parse_max_rss_kb(&String::from_utf8_lossy(&out.stderr))
+            .expect("GNU time reports a maximum resident set size")
+    };
+    let few = rss("4");
+    let many = rss("64");
+    let _ = std::fs::remove_dir_all(&dir);
+    // Sixteen times the decodes may cost allocator noise, never a share of
+    // the documents: one retained per call is tens of megabytes here.
+    assert!(
+        many < few + 16 * 1024,
+        "peak RSS tracks the decode count ({few} KiB at 4, {many} KiB at 64); \
+         each decode is holding on to the document it read"
+    );
+}
+
+/// A walk over a tree of guarded aggregates reclaims every hop.
+///
+/// Each step names a node the root already owns, so the cursor's own share of
+/// the node's children is redundant. Removing a share without its pair is what
+/// a count that tracks the step count reports.
+#[test]
+fn guarded_tree_walk_holds_a_constant_number_of_values() {
+    let lines = ledger_at(
+        "guardedwalk",
+        "
+use std::env
+
+struct Node { sym: i64, left: Option<Node>, right: Option<Node> }
+
+fn build(depth: i64) -> Node {
+    if depth == 0 {
+        Node { sym: 1, left: None, right: None }
+    } else {
+        Node { sym: -1, left: Some(build(depth - 1)), right: Some(build(depth - 1)) }
+    }
+}
+
+fn decode(root: Node, bits: Vec<i64>) -> i64 {
+    let mut node = root
+    let mut out = 0
+    for b in bits {
+        node = if b == 0 { node.left.unwrap() } else { node.right.unwrap() }
+        if node.sym >= 0 {
+            out += node.sym
+            node = root
+        }
+    }
+    out
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"1024\").to_i64().unwrap_or(1024)
+    let root = build(4)
+    let mut bits = #[]
+    for i in 0..n { bits.push((i * 7 + i / 3) % 2) }
+    println(\"{}\", decode(root, bits))
+}
+",
+        "1024",
+        "65536",
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "the walk holds a number of values that tracks its step count"
+    );
+}
+
+/// A `&self` call on an aggregate field reclaims each receiver copy.
+///
+/// The copy names the caller's own storage for the length of the call, so its
+/// share of the field is redundant; a share left behind per call moves the
+/// live count with the call count.
+#[test]
+fn reference_receiver_copies_hold_a_constant_number_of_values() {
+    let lines = ledger_at(
+        "refreceiver",
+        "
+use std::env
+
+struct Tape { cells: Vec<u8>, pos: i64 }
+
+impl Tape {
+    fn get(&self) -> i64 { self.cells[self.pos] as i64 }
+    fn add(&mut self, delta: i64) { self.cells[self.pos] = ((self.cells[self.pos] as i64 + delta) & 255) as u8 }
+}
+
+struct Machine { tape: Tape, result: i64 }
+
+impl Machine {
+    fn step(&mut self, n: i64) -> i64 {
+        let mut acc = 0
+        for _ in 0..n {
+            self.tape.add(1)
+            while self.tape.get() > 200 { self.tape.add(-100) }
+            acc += self.tape.get()
+        }
+        acc
+    }
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"1000\").to_i64().unwrap_or(1000)
+    let mut m = Machine { tape: Tape { cells: #[0; 4], pos: 1 }, result: 0 }
+    println(\"{}\", m.step(n))
+}
+",
+        "1000",
+        "64000",
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "the receiver copies hold a number of values that tracks the call count"
+    );
+}
+
 /// An indexed store gives back the element it replaces.
 ///
 /// A `Vec<String>` owns each element - its teardown releases one share per
@@ -1020,5 +1242,147 @@ fn main() {
         large < small + 4096,
         "peak RSS tracks the pop count ({small} KB at 1024 pops, {large} KB at \
          1048576): every popped element's copy is still held"
+    );
+}
+
+/// Gates ownership of the strings a split hands back.
+///
+/// A shim that answers `[String]` puts the pieces in the vector, so the vector
+/// has to own them: it is what frees them, and a vector built without the
+/// string element kind reclaims only its own buffer. The bound is
+/// scale-invariance - the same program is run at two iteration counts a
+/// thousand apart, and a leaked piece per word grows the live string count
+/// with that count.
+#[test]
+fn split_results_release_their_pieces() {
+    let dir = env::temp_dir().join(format!("gos-split-own-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("split_own.gos");
+    std::fs::write(
+        &source,
+        "
+use std::{env, strings}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"1\").to_i64().unwrap_or(1)
+    let text = \"alpha beta gamma delta epsilon zeta\".repeat(8)
+    let mut total = 0
+    for _ in 0..n {
+        total += text.split_whitespace().len()
+        total += strings::splitn(text, 4, \" \").len()
+        total += strings::split(text, \" \").len()
+    }
+    println(\"{}\", total)
+}
+",
+    )
+    .unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("split_own");
+
+    let live = |iterations: &str| -> usize {
+        let out = Command::new(&binary)
+            .arg(iterations)
+            .env("GOS_LEAK_LEDGER", "1")
+            .output()
+            .expect("run with the allocation ledger");
+        assert!(
+            out.status.success(),
+            "binary failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        stderr
+            .split("str=")
+            .nth(1)
+            .and_then(|tail| tail.split_whitespace().next())
+            .and_then(|n| n.parse::<usize>().ok())
+            .unwrap_or_else(|| panic!("ledger must report a live string count: {stderr}"))
+    };
+
+    let small = live("1");
+    let large = live("1000");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        large <= small + 8,
+        "live string count tracks the split count ({small} after 1 pass, \
+         {large} after 1000): the pieces are reaching nothing that frees them"
+    );
+}
+
+/// Gates ownership of the documents `yaml::parse_all` hands back.
+///
+/// Each element is a handle holding a share of its document's tree, so the
+/// vector that holds them has to give those shares back when it dies. The
+/// bound is scale-invariance: the same program is run at two iteration counts
+/// a hundred apart, and a document kept alive per parse grows peak memory with
+/// that count.
+#[test]
+fn yaml_parse_all_releases_its_documents() {
+    if !gnu_time_available() {
+        return;
+    }
+    let dir = env::temp_dir().join(format!("gos-yaml-own-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("yaml_own.gos");
+    std::fs::write(
+        &source,
+        "
+use std::{env, encoding::yaml}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"1\").to_i64().unwrap_or(1)
+    let text = \"a: 1\\nb: [1, 2, 3]\\n---\\nc: hello\\nd: [4, 5, 6]\\n\"
+    let mut total = 0
+    for _ in 0..n { total += yaml::parse_all(text).unwrap_or(#[]).len() }
+    println(\"{}\", total)
+}
+",
+    )
+    .unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("yaml_own");
+    let rss = |iterations: &str| -> u64 {
+        let out = Command::new("/usr/bin/time")
+            .arg("-v")
+            .arg(&binary)
+            .arg(iterations)
+            .output()
+            .expect("run under /usr/bin/time");
+        assert!(
+            out.status.success(),
+            "binary failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        parse_max_rss_kb(&String::from_utf8_lossy(&out.stderr))
+            .expect("GNU time reports a maximum resident set size")
+    };
+    let small = rss("100");
+    let large = rss("100000");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        large < small + 4096,
+        "peak RSS tracks the parse count ({small} KB at 100 parses, {large} KB \
+         at 100000): every parsed document is still held"
     );
 }

@@ -71,6 +71,22 @@ unsafe fn deque_compact(d: *mut GosDeque) {
     deque.head = 0;
 }
 
+/// Moves the live range down when the dead prefix has grown to half the
+/// store, leaving it in place otherwise.
+unsafe fn deque_compact_dead_prefix(d: *mut GosDeque) {
+    if d.is_null() {
+        return;
+    }
+    let deque = unsafe { &*d };
+    if deque.head <= 0 || deque.vec.is_null() {
+        return;
+    }
+    let len = unsafe { &*deque.vec }.len;
+    if deque.head.saturating_mul(2) >= len {
+        unsafe { deque_compact(d) };
+    }
+}
+
 /// The element store, with its live range starting at index zero: the shape
 /// every `Vec` entry point - rendering, ownership metadata, deep-free -
 /// reads.
@@ -175,7 +191,11 @@ unsafe fn deque_push_back_slot(d: *mut GosDeque, elem: *const u8) {
     if d.is_null() || elem.is_null() {
         return;
     }
-    unsafe { deque_compact(d) };
+    // The store grows at its end, which is past the live range wherever that
+    // range begins, so a dead prefix does not stand in the way of a push. It
+    // is reclaimed on the same terms a pop reclaims it, which is what keeps
+    // a queue drained and refilled from moving its contents each time.
+    unsafe { deque_compact_dead_prefix(d) };
     let deque = unsafe { &mut *d };
     if deque.vec.is_null() {
         deque.vec =
@@ -266,9 +286,12 @@ unsafe fn deque_payload_at(d: *const GosDeque, idx: i64) -> Option<i64> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_pop_front(d: *mut GosDeque) -> i128 {
     ffi_entry!(0i128, {
-        // Compact first: the returned payload of a wide element addresses
-        // the store, and a later compaction would move it.
-        unsafe { deque_compact(d) };
+        // A wide element's payload is a copy of its slots rather than an
+        // address into the store, so the live range may start anywhere and
+        // the dead prefix is reclaimed only once it is half the store. Every
+        // element then moves at most once per halving, which is what makes a
+        // drain cost its own length rather than its length squared.
+        unsafe { deque_compact_dead_prefix(d) };
         match unsafe { deque_payload_at(d, 0) } {
             Some(word) => {
                 unsafe { &mut *d }.head += 1;
@@ -295,6 +318,66 @@ pub unsafe extern "C" fn gos_rt_deque_pop_back(d: *mut GosDeque) -> i128 {
             }
             None => unsafe { gos_rt_result_new(1, 0) },
         }
+    })
+}
+
+/// Address of the live element at `idx` from the front, or null when there
+/// is none.
+unsafe fn deque_elem_ptr(d: *const GosDeque, idx: i64) -> *mut u8 {
+    if d.is_null() {
+        return std::ptr::null_mut();
+    }
+    let deque = unsafe { &*d };
+    if deque.vec.is_null() {
+        return std::ptr::null_mut();
+    }
+    let vec = unsafe { &*deque.vec };
+    let at = deque.head + idx;
+    if at < 0 || at >= vec.len || vec.ptr.is_null() || vec.elem_bytes == 0 {
+        return std::ptr::null_mut();
+    }
+    unsafe { vec.ptr.add((at as usize) * (vec.elem_bytes as usize)) }
+}
+
+/// `pop_front` whose element the caller already owns storage for: the front
+/// element's slots move into `out` and the answer is the `Option`
+/// discriminant (0 written, 1 empty).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_deque_pop_front_into(d: *mut GosDeque, out: *mut u8) -> i64 {
+    ffi_entry!(1, {
+        if out.is_null() {
+            return 1;
+        }
+        unsafe { deque_compact_dead_prefix(d) };
+        let src = unsafe { deque_elem_ptr(d, 0) };
+        if src.is_null() {
+            return 1;
+        }
+        let stride = unsafe { &*(*d).vec }.elem_bytes as usize;
+        unsafe { crate::c_abi::string::copy_small_bytes(src, out, stride) };
+        unsafe { &mut *d }.head += 1;
+        0
+    })
+}
+
+/// `pop_back` whose element the caller already owns storage for: the back
+/// element's slots move into `out` and the answer is the `Option`
+/// discriminant (0 written, 1 empty).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_deque_pop_back_into(d: *mut GosDeque, out: *mut u8) -> i64 {
+    ffi_entry!(1, {
+        if out.is_null() {
+            return 1;
+        }
+        let len = unsafe { deque_live_len(d) };
+        let src = unsafe { deque_elem_ptr(d, len - 1) };
+        if src.is_null() {
+            return 1;
+        }
+        let vec = unsafe { &mut *(*d).vec };
+        unsafe { crate::c_abi::string::copy_small_bytes(src, out, vec.elem_bytes as usize) };
+        vec.len -= 1;
+        0
     })
 }
 

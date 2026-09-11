@@ -341,11 +341,116 @@ impl<'a> Lowerer<'a> {
                             loaded
                         };
                         declare_rt(&mut self.runtime_refs, "gos_rt_vec_get_ptr");
-                        writeln!(
-                            self.out,
-                            "  {next} = call ptr @gos_rt_vec_get_ptr(ptr {handle}, i64 {idx_raw})"
-                        )
-                        .unwrap();
+                        // The helper answers `data + idx * stride` for every
+                        // receiver but one: a vector of scalar rows, which it
+                        // may pack into a row descriptor on the way, after
+                        // which the slots hold no addresses. Every other
+                        // element type gets the address math inline, with the
+                        // call kept for a null receiver and an index past the
+                        // end, which reach it exactly as before.
+                        let elem_ty = match self.tcx.kind(current_ty) {
+                            Some(TyKind::Vec(elem) | TyKind::Slice(elem)) => Some(*elem),
+                            _ => None,
+                        };
+                        let rows_may_pack = elem_ty.is_some_and(|elem| {
+                            matches!(
+                                self.tcx.kind(elem),
+                                Some(TyKind::Vec(inner) | TyKind::Slice(inner))
+                                    if matches!(
+                                        self.tcx.kind(*inner),
+                                        Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char)
+                                    )
+                            )
+                        });
+                        if rows_may_pack {
+                            writeln!(
+                                self.out,
+                                "  {next} = call ptr @gos_rt_vec_get_ptr(ptr {handle}, i64 {idx_raw})"
+                            )
+                            .unwrap();
+                        } else {
+                            let s = self.next_ssa;
+                            self.next_ssa += 1;
+                            let (check, fast, slow, cont) = (
+                                format!("ix_check_{s}"),
+                                format!("ix_fast_{s}"),
+                                format!("ix_slow_{s}"),
+                                format!("ix_cont_{s}"),
+                            );
+                            let isnull = self.fresh();
+                            writeln!(self.out, "  {isnull} = icmp eq ptr {handle}, null").unwrap();
+                            writeln!(self.out, "  br i1 {isnull}, label %{slow}, label %{check}")
+                                .unwrap();
+                            writeln!(self.out, "{check}:").unwrap();
+                            let len = self.fresh();
+                            writeln!(self.out, "  {len} = load i64, ptr {handle}{TBAA_HEADER}")
+                                .unwrap();
+                            // One unsigned compare catches a negative index
+                            // and one past the end.
+                            let bad = self.fresh();
+                            writeln!(self.out, "  {bad} = icmp uge i64 {idx_raw}, {len}").unwrap();
+                            writeln!(self.out, "  br i1 {bad}, label %{slow}, label %{fast}")
+                                .unwrap();
+                            writeln!(self.out, "{fast}:").unwrap();
+                            let off = self.fresh();
+                            match elem_ty
+                                .and_then(|elem| crate::lower::settled_elem_bytes(self.tcx, elem))
+                            {
+                                Some(bytes) => {
+                                    writeln!(self.out, "  {off} = mul i64 {idx_raw}, {bytes}")
+                                        .unwrap();
+                                }
+                                None => {
+                                    let stride_addr = self.fresh();
+                                    writeln!(
+                                        self.out,
+                                        "  {stride_addr} = getelementptr i8, ptr {handle}, i64 16"
+                                    )
+                                    .unwrap();
+                                    let stride32 = self.fresh();
+                                    writeln!(
+                                        self.out,
+                                        "  {stride32} = load i32, ptr {stride_addr}{TBAA_HEADER}"
+                                    )
+                                    .unwrap();
+                                    let stride = self.fresh();
+                                    writeln!(self.out, "  {stride} = zext i32 {stride32} to i64")
+                                        .unwrap();
+                                    writeln!(self.out, "  {off} = mul i64 {idx_raw}, {stride}")
+                                        .unwrap();
+                                }
+                            }
+                            let data_addr = self.fresh();
+                            writeln!(
+                                self.out,
+                                "  {data_addr} = getelementptr i8, ptr {handle}, i64 24"
+                            )
+                            .unwrap();
+                            let data = self.fresh();
+                            writeln!(
+                                self.out,
+                                "  {data} = load ptr, ptr {data_addr}{TBAA_HEADER}"
+                            )
+                            .unwrap();
+                            let ea = self.fresh();
+                            writeln!(self.out, "  {ea} = getelementptr i8, ptr {data}, i64 {off}")
+                                .unwrap();
+                            writeln!(self.out, "  br label %{cont}").unwrap();
+                            writeln!(self.out, "{slow}:").unwrap();
+                            let called = self.fresh();
+                            writeln!(
+                                self.out,
+                                "  {called} = call ptr @gos_rt_vec_get_ptr(ptr {handle}, i64 {idx_raw})"
+                            )
+                            .unwrap();
+                            writeln!(self.out, "  br label %{cont}").unwrap();
+                            writeln!(self.out, "{cont}:").unwrap();
+                            writeln!(
+                                self.out,
+                                "  {next} = phi ptr [ {ea}, %{fast} ], [ {called}, %{slow} ]"
+                            )
+                            .unwrap();
+                        }
                         current = next;
                         current_is_loaded = false;
                         current_ty = match self.tcx.kind(current_ty) {

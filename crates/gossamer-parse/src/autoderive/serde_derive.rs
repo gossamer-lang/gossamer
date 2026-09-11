@@ -164,6 +164,17 @@ fn emit_tuple_from_json(out: &mut String, ty: &TyId, fields: &[FieldKind]) {
         from_json_fn(&ty.symbol)
     ));
     out.push_str("    let v = json::parse(text)?\n");
+    out.push_str(&format!(
+        "    {}(v)\n}}\n\n",
+        from_json_value_fn(&ty.symbol)
+    ));
+    out.push_str(
+        "// Parse an already-read JSON node into a tuple struct. Auto-derived.\n",
+    );
+    out.push_str(&format!(
+        "pub fn {}(v: json::Value) -> Result<{name}, errors::Error> {{\n",
+        from_json_value_fn(&ty.symbol)
+    ));
     for (i, kind) in fields.iter().enumerate() {
         let path = format!("element `{i}`");
         let extract = kind.extract_strict("__child", &path);
@@ -289,6 +300,17 @@ fn emit_from_json(
         from_json_fn(&ty.symbol)
     ));
     out.push_str("    let v = json::parse(text)?\n");
+    out.push_str(&format!(
+        "    {}(v)\n}}\n\n",
+        from_json_value_fn(&ty.symbol)
+    ));
+    out.push_str(
+        "// Parse an already-read JSON node into a value. Auto-derived; a\n// nested member decodes from the node the walk stands on.\n",
+    );
+    out.push_str(&format!(
+        "pub fn {}(v: json::Value) -> Result<{name}, errors::Error> {{\n",
+        from_json_value_fn(&ty.symbol)
+    ));
     // The local a field decodes into is named by position, not by the
     // field. A field is free to carry any name the language allows -
     // including one a compiler-known call already has (`format`,

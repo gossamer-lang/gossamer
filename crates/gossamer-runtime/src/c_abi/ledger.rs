@@ -313,38 +313,62 @@ fn arm() {
 
 #[inline]
 pub fn aggr_inc() {
+    if !instrumentation_armed() {
+        return;
+    }
     arm();
     AGGR_LIVE.fetch_add(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn aggr_dec() {
+    if !instrumentation_armed() {
+        return;
+    }
     AGGR_LIVE.fetch_sub(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn rc_inc() {
+    if !instrumentation_armed() {
+        return;
+    }
     arm();
     RC_LIVE.fetch_add(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn rc_dec() {
+    if !instrumentation_armed() {
+        return;
+    }
     RC_LIVE.fetch_sub(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn str_inc() {
+    if !instrumentation_armed() {
+        return;
+    }
     arm();
     STR_LIVE.fetch_add(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn str_dec() {
+    if !instrumentation_armed() {
+        return;
+    }
     STR_LIVE.fetch_sub(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn vec_inc() {
+    if !instrumentation_armed() {
+        return;
+    }
     arm();
     VEC_LIVE.fetch_add(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn vec_dec() {
+    if !instrumentation_armed() {
+        return;
+    }
     VEC_LIVE.fetch_sub(1, Ordering::Relaxed);
 }
 
@@ -506,11 +530,17 @@ pub fn rc_alloc_stats() -> (u64, u64, u64, u64, u64) {
 }
 #[inline]
 pub fn map_inc() {
+    if !instrumentation_armed() {
+        return;
+    }
     arm();
     MAP_LIVE.fetch_add(1, Ordering::Relaxed);
 }
 #[inline]
 pub fn map_dec() {
+    if !instrumentation_armed() {
+        return;
+    }
     MAP_LIVE.fetch_sub(1, Ordering::Relaxed);
 }
 

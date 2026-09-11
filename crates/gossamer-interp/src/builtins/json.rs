@@ -510,7 +510,7 @@ fn json_child_to_lazy_value(parent: &JsonInner, child: &json_std::Value) -> Valu
 }
 
 #[allow(clippy::too_many_lines, reason = "one match whose length is the value set")]
-fn gossamer_to_json_value(value: &Value) -> json_std::Value {
+pub(crate) fn gossamer_to_json_value(value: &Value) -> json_std::Value {
     match value {
         Value::Json(value) => value.to_owned_value(),
         Value::NativeEnum(o) => gossamer_to_json_value(&crate::value::native_enum_to_variant(o)),
@@ -545,7 +545,13 @@ fn gossamer_to_json_value(value: &Value) -> json_std::Value {
             let name = inner.name.clone();
             let fields = &inner.fields;
             if fields.is_empty() {
-                json_std::Value::String(name.to_string())
+                // The absent value is what JSON spells `null`; every other
+                // payload-less variant is named by its own spelling.
+                if name.as_str() == "None" {
+                    json_std::Value::Null
+                } else {
+                    json_std::Value::String(name.to_string())
+                }
             } else if fields.len() == 1 {
                 gossamer_to_json_value(&fields[0])
             } else {

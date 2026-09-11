@@ -161,12 +161,31 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_encode(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_base64_decode(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match base64_decode(cstr_to_str(s)) {
-            Ok(bytes) => {
-                let v = bytes_to_gosvec(&bytes);
+        let text = unsafe { crate::c_abi::gos_str_arg_bytes(s) };
+        // Decoding straight into the answer's own storage is what keeps the
+        // result one allocation: an intermediate `Vec` would be built and
+        // then copied whole into it.
+        let v = unsafe {
+            super::vec::gos_rt_vec_with_capacity(1, base64_decoded_bound(text.len()) as i64)
+        };
+        let vref = unsafe { &mut *v };
+        if vref.ptr.is_null() {
+            return unsafe { super::vec::gos_rt_result_new(0, v as i64) };
+        }
+        // SAFETY: the vec was just built with room for the decoded bound, and
+        // its buffer is live and uniquely held here.
+        let out = unsafe {
+            std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), base64_decoded_bound(text.len()))
+        };
+        match base64_decode_into(text, out) {
+            Ok(written) => {
+                vref.len = written as i64;
                 unsafe { super::vec::gos_rt_result_new(0, v as i64) }
             }
-            Err(e) => err_result(&e),
+            Err(e) => {
+                unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+                err_result(&e)
+            }
         }
     })
 }
@@ -222,59 +241,136 @@ pub unsafe extern "C" fn gos_rt_html_template_render_json(
     })
 }
 
-pub(crate) fn base64_encode(data: &[u8]) -> String {
-    const ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0];
-        let b1 = chunk.get(1).copied().unwrap_or(0);
-        let b2 = chunk.get(2).copied().unwrap_or(0);
-        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
-        out.push(ALPHA[((n >> 18) & 0x3f) as usize] as char);
-        out.push(ALPHA[((n >> 12) & 0x3f) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            ALPHA[((n >> 6) & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            ALPHA[(n & 0x3f) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
-}
+const BASE64_ALPHA: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-fn base64_val(c: u8) -> Option<u8> {
-    match c {
-        b'A'..=b'Z' => Some(c - b'A'),
-        b'a'..=b'z' => Some(c - b'a' + 26),
-        b'0'..=b'9' => Some(c - b'0' + 52),
-        b'+' => Some(62),
-        b'/' => Some(63),
-        _ => None,
+/// Sextet value per input byte; `INVALID` for anything outside the alphabet.
+/// A table read replaces the range tests the decoder used to run per
+/// character.
+const BASE64_INVALID: u8 = 0xFF;
+static BASE64_VALUES: [u8; 256] = {
+    let mut table = [BASE64_INVALID; 256];
+    let mut i = 0;
+    while i < 64 {
+        table[BASE64_ALPHA[i] as usize] = i as u8;
+        i += 1;
     }
+    table
+};
+
+pub(crate) fn base64_encode(data: &[u8]) -> String {
+    // The output is pure ASCII from the alphabet, so it is built as bytes at
+    // its final length: a `String::push(char)` per character re-encodes each
+    // one as UTF-8 and re-checks the capacity four times per three input
+    // bytes.
+    let mut out = vec![0u8; data.len().div_ceil(3) * 4];
+    let mut written = 0usize;
+    let mut chunks = data.chunks_exact(3);
+    for chunk in &mut chunks {
+        let n = (u32::from(chunk[0]) << 16) | (u32::from(chunk[1]) << 8) | u32::from(chunk[2]);
+        out[written] = BASE64_ALPHA[((n >> 18) & 0x3f) as usize];
+        out[written + 1] = BASE64_ALPHA[((n >> 12) & 0x3f) as usize];
+        out[written + 2] = BASE64_ALPHA[((n >> 6) & 0x3f) as usize];
+        out[written + 3] = BASE64_ALPHA[(n & 0x3f) as usize];
+        written += 4;
+    }
+    let tail = chunks.remainder();
+    if !tail.is_empty() {
+        let b1 = tail.get(1).copied().unwrap_or(0);
+        let n = (u32::from(tail[0]) << 16) | (u32::from(b1) << 8);
+        out[written] = BASE64_ALPHA[((n >> 18) & 0x3f) as usize];
+        out[written + 1] = BASE64_ALPHA[((n >> 12) & 0x3f) as usize];
+        out[written + 2] = if tail.len() > 1 {
+            BASE64_ALPHA[((n >> 6) & 0x3f) as usize]
+        } else {
+            b'='
+        };
+        out[written + 3] = b'=';
+    }
+    // SAFETY: every byte written comes from the base64 alphabet or `=`, all
+    // of which are ASCII.
+    unsafe { String::from_utf8_unchecked(out) }
 }
 
 pub(crate) fn base64_decode(s: &str) -> Result<Vec<u8>, String> {
+    base64_decode_bytes(s.as_bytes())
+}
+
+/// The decoded bytes of base64 text.
+///
+/// The alphabet, the padding and the whitespace it skips are all ASCII, so
+/// the encoding of the surrounding text decides nothing here: reading the
+/// bytes answers the same result without validating them as UTF-8 first.
+pub(crate) fn base64_decode_bytes(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = vec![0u8; base64_decoded_bound(bytes.len())];
+    let written = base64_decode_into(bytes, &mut out)?;
+    out.truncate(written);
+    Ok(out)
+}
+
+/// Bytes `base64_decode_into` may write for an input of this length.
+///
+/// Every character carries six bits, so the output is at most three quarters
+/// of the input; the spare rounds the last partial group up.
+pub(crate) const fn base64_decoded_bound(input_len: usize) -> usize {
+    input_len / 4 * 3 + 3
+}
+
+/// Decodes base64 `bytes` into `out`, answering how many bytes it wrote.
+///
+/// Four characters carry exactly three bytes, so a group whose characters are
+/// all in the alphabet is one 24-bit assemble and three stores. A group
+/// holding padding or whitespace - and the tail - goes through the
+/// character-at-a-time accumulator beside it, which is also what keeps the
+/// group path entered only on a byte boundary.
+///
+/// # Panics
+/// If `out` is shorter than [`base64_decoded_bound`] of the input length.
+pub(crate) fn base64_decode_into(bytes: &[u8], out: &mut [u8]) -> Result<usize, String> {
+    assert!(
+        out.len() >= base64_decoded_bound(bytes.len()),
+        "base64 output buffer is shorter than the decoded bound"
+    );
     let mut bits: u32 = 0;
     let mut nbits = 0u32;
-    let mut out = Vec::new();
-    for ch in s.bytes() {
-        if ch == b'=' || ch.is_ascii_whitespace() {
+    let mut i = 0usize;
+    let mut written = 0usize;
+    while i < bytes.len() {
+        if nbits == 0
+            && i + 4 <= bytes.len()
+            && let a = u32::from(BASE64_VALUES[bytes[i] as usize])
+            && let b = u32::from(BASE64_VALUES[bytes[i + 1] as usize])
+            && let c = u32::from(BASE64_VALUES[bytes[i + 2] as usize])
+            && let d = u32::from(BASE64_VALUES[bytes[i + 3] as usize])
+            // Every alphabet value is below 64 and the refusal marker is
+            // 0xFF, so one compare of the union rejects the whole group.
+            && (a | b | c | d) < 64
+        {
+            let n = (a << 18) | (b << 12) | (c << 6) | d;
+            out[written] = (n >> 16) as u8;
+            out[written + 1] = (n >> 8) as u8;
+            out[written + 2] = n as u8;
+            written += 3;
+            i += 4;
             continue;
         }
-        let val =
-            base64_val(ch).ok_or_else(|| format!("base64: invalid character '{}'", ch as char))?;
+        let ch = bytes[i];
+        i += 1;
+        let val = BASE64_VALUES[ch as usize];
+        if val == BASE64_INVALID {
+            if ch == b'=' || ch.is_ascii_whitespace() {
+                continue;
+            }
+            return Err(format!("base64: invalid character '{}'", ch as char));
+        }
         bits = (bits << 6) | u32::from(val);
         nbits += 6;
         if nbits >= 8 {
             nbits -= 8;
-            out.push((bits >> nbits) as u8);
+            out[written] = (bits >> nbits) as u8;
+            written += 1;
         }
     }
-    Ok(out)
+    Ok(written)
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
@@ -1028,4 +1124,67 @@ pub unsafe extern "C" fn gos_rt_pem_encode_raw(
         out.push_str(&format!("-----END {label}-----\n"));
         alloc_cstring(out.as_bytes())
     })
+}
+
+#[cfg(test)]
+mod base64_roundtrip_tests {
+    use super::{base64_decode, base64_encode};
+
+    /// Every byte value and every padding length survives a round trip.
+    #[test]
+    fn base64_round_trips_every_byte_and_padding_length() {
+        let all: Vec<u8> = (0..=255u8).collect();
+        for len in 0..=all.len() {
+            let data = &all[..len];
+            let text = base64_encode(data);
+            assert_eq!(text.len(), len.div_ceil(3) * 4, "length for {len} bytes");
+            assert_eq!(
+                base64_decode(&text).expect("decodes"),
+                data,
+                "round trip for {len} bytes"
+            );
+        }
+    }
+
+    /// The padding characters land where the tail length says.
+    #[test]
+    fn base64_pads_the_tail_it_has() {
+        assert_eq!(base64_encode(b"f"), "Zg==");
+        assert_eq!(base64_encode(b"fo"), "Zm8=");
+        assert_eq!(base64_encode(b"foo"), "Zm9v");
+        assert_eq!(base64_encode(b"foob"), "Zm9vYg==");
+    }
+
+    /// Whitespace and padding are skipped; anything else is named.
+    #[test]
+    fn base64_decode_reports_the_character_it_refuses() {
+        assert_eq!(base64_decode(" Zm9v \n").expect("decodes"), b"foo");
+        let err = base64_decode("Zm9v*").expect_err("refuses");
+        assert!(err.contains('*'), "{err}");
+    }
+
+    /// The four-character group path and the character-at-a-time path agree.
+    ///
+    /// Whitespace at every offset of a document pushes a group off its byte
+    /// boundary, which is the one condition that decides which path a group
+    /// takes; the answer may not depend on it.
+    #[test]
+    fn base64_decode_is_the_same_wherever_whitespace_falls() {
+        let all: Vec<u8> = (0..=255u8).collect();
+        for len in 0..=64usize {
+            let data = &all[..len];
+            let text = base64_encode(data);
+            for cut in 0..=text.len() {
+                let mut spaced = String::with_capacity(text.len() + 2);
+                spaced.push_str(&text[..cut]);
+                spaced.push_str(" \n");
+                spaced.push_str(&text[cut..]);
+                assert_eq!(
+                    base64_decode(&spaced).expect("decodes"),
+                    data,
+                    "{len} bytes with whitespace at {cut}"
+                );
+            }
+        }
+    }
 }

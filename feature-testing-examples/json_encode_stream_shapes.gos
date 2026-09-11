@@ -1,0 +1,29 @@
+use std::encoding::json
+
+// Shapes the JIT does not admit as locals: a tuple field, a map of tuples, and
+// a `json::Value` field. Listed in jit_no_compile.tsv; the VM and LLVM tiers
+// carry the parity.
+
+struct Tupled { flags: (i64, bool), pair: (i64, String), opts: Map<String, (i64, bool)> }
+
+struct Wrapped { raw: json::Value, n: i64 }
+
+fn encode_tupled() -> String {
+    let mut opts: Map<String, (i64, bool)> = Map::new()
+    let _ = opts.insert("zz", (1, true))
+    let _ = opts.insert("a<b", (2, false))
+    let t = Tupled { flags: (7, false), pair: (9, "nine"), opts: opts }
+    let e = Tupled { flags: (0, true), pair: (0, ""), opts: Map::new() }
+    json::encode(t) + " " + json::encode(e)
+}
+
+fn encode_raw() -> String {
+    let w = Wrapped { raw: json::parse("{\"k\": [1, 2, \"v\"]}").unwrap(), n: 3 }
+    let e = Wrapped { raw: json::parse("null").unwrap(), n: 0 }
+    json::encode(w) + " " + json::encode(e)
+}
+
+fn main() {
+    println("{}", encode_tupled())
+    println("{}", encode_raw())
+}

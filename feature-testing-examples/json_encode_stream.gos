@@ -1,0 +1,49 @@
+use std::encoding::json
+
+struct Inner { label: String, ratio: f64 }
+
+struct Record {
+    zeta: i64
+    alpha: f64
+    name: String
+    ok: bool
+    inner: Inner
+    items: Vec<Inner>
+    opts: Map<String, i64>
+    counts: Vec<i64>
+}
+
+fn record() -> Record {
+    let mut opts: Map<String, i64> = Map::new()
+    let _ = opts.insert("zz", 1)
+    let _ = opts.insert("a<b", 2)
+    let _ = opts.insert("mid", 3)
+    let inner = Inner { label: "in \"quotes\" & <tags> \\ back", ratio: 0.1 }
+    let items = #[
+        Inner { label: "first", ratio: 1.5 }
+        Inner { label: "unicode: caf\u{e9} \u{2028} end", ratio: -2.25e10 }
+        Inner { label: "", ratio: 100000000.0 }
+    ]
+    Record {
+        zeta: -42
+        alpha: 3.14159
+        name: "top\nline\ttab"
+        ok: true
+        inner: inner
+        items: items
+        opts: opts
+        counts: #[1, 2, 3]
+    }
+}
+
+fn encode_record(r: Record) -> String { json::encode(r) }
+
+fn main() {
+    let r = record()
+    println("{}", json::encode(r))
+    let empty = Record { zeta: 0, alpha: 0.0, name: "", ok: false, inner: Inner { label: "", ratio: 0.0 }, items: #[], opts: Map::new(), counts: #[] }
+    println("{}", json::encode(empty))
+    let mut total = 0
+    for _ in 0..3 { total += encode_record(r).len() }
+    println("{}", total)
+}

@@ -290,7 +290,7 @@ impl<'a> Lowerer<'a> {
             }
         };
         match name {
-            "gos_rt_result_new" if args.len() == 2 => {
+            "gos_rt_result_new" | "gos_rt_result_new_owned" if args.len() == 2 => {
                 // A Unit / `void` operand (`Ok(())`, `Some(())`) carries no
                 // bits: pack it as 0, matching the runtime-call arg path's
                 // void guard. Coercing a `void` value would emit an invalid
@@ -311,9 +311,13 @@ impl<'a> Lowerer<'a> {
                 // Aggregate payloads (by-value struct / tuple / inline enum)
                 // must be heap-copied so the packed pointer outlives the
                 // constructing frame - identical to the runtime-call arg path.
+                // The owning spelling says the payload's own walk over its
+                // children was removed, so the box takes the share those words
+                // already carried instead of minting one.
+                let owned = name == "gos_rt_result_new_owned";
                 let payload = if let Some(hv) = self
                     .maybe_heap_copy_value_enum(&args[1])
-                    .or_else(|| self.maybe_heap_copy_aggregate(&args[1]))
+                    .or_else(|| self.maybe_heap_copy_aggregate_moved(&args[1], owned))
                 {
                     hv
                 } else {
@@ -368,8 +372,55 @@ impl<'a> Lowerer<'a> {
                 }
                 Ok(Some(coerce_dest(self, p64, "i64")))
             }
+            // `.unwrap()` is the discriminant test and the payload word, with
+            // a panic on the empty arm. The shim reaching it costs an FFI
+            // call and a two-register i128 argument for that, which a walk
+            // over a linked structure pays once per step.
+            "gos_rt_option_unwrap" | "gos_rt_result_unwrap" if args.len() == 1 => {
+                let r_ty = self.operand_llvm_ty(&args[0]);
+                let r_raw = self.lower_operand(&args[0])?;
+                let r = if r_ty == "i128" {
+                    r_raw
+                } else {
+                    self.coerce_llvm_value(&r_raw, &r_ty, "i128")
+                };
+                let message = if name == "gos_rt_option_unwrap" {
+                    "called `Option::unwrap()` on a `None` value"
+                } else {
+                    "called `Result::unwrap()` on an `Err` value"
+                };
+                let p64 = self.emit_carrier_unwrap(&r, message);
+                Ok(Some(coerce_dest(self, p64, "i64")))
+            }
             _ => Ok(None),
         }
+    }
+
+    /// Emits the payload of a carrier that must hold one, panicking with
+    /// `message` on the empty arm exactly as the shim does.
+    fn emit_carrier_unwrap(&mut self, carrier: &str, message: &str) -> String {
+        declare_rt(&mut self.runtime_refs, "gos_rt_panic");
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (empty, held) = (format!("uw_empty_{s}"), format!("uw_held_{s}"));
+        let disc = self.fresh();
+        writeln!(self.out, "  {disc} = trunc i128 {carrier} to i64").unwrap();
+        let bad = self.fresh();
+        writeln!(self.out, "  {bad} = icmp ne i64 {disc}, 0").unwrap();
+        writeln!(self.out, "  br i1 {bad}, label %{empty}, label %{held}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{empty}:").unwrap();
+        self.emit_panic_site_line();
+        let (label, _) = self.strings.borrow_mut().intern(message);
+        writeln!(self.out, "  call void @gos_rt_panic(ptr {label})").unwrap();
+        writeln!(self.out, "  unreachable").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{held}:").unwrap();
+        let hi = self.fresh();
+        writeln!(self.out, "  {hi} = lshr i128 {carrier}, 64").unwrap();
+        let p64 = self.fresh();
+        writeln!(self.out, "  {p64} = trunc i128 {hi} to i64").unwrap();
+        p64
     }
 
     pub(crate) fn lower_runtime_call_intrinsic(
@@ -425,7 +476,7 @@ impl<'a> Lowerer<'a> {
         // which becomes dangling the moment the caller's frame
         // pops. Heap-copy the aggregate before passing so the
         // pointer outlives the function return.
-        let result_new_heap_copy = matches!(name, "gos_rt_result_new");
+        let result_new_heap_copy = matches!(name, "gos_rt_result_new" | "gos_rt_result_new_owned");
         // HashMap insert with struct value - same rationale as
         // `gos_rt_result_new`: the value lives on the inserting
         // frame's stack and goes dangling once that frame returns.

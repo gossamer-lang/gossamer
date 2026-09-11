@@ -1066,7 +1066,10 @@ fn write_value_to<W: std::io::Write>(out: &mut W, value: &Value) -> std::io::Res
             }
         }
         Value::Int(n) => write!(out, "{n}"),
-        Value::Number(n) if n.is_finite() && n.fract() == 0.0 => write!(out, "{n}.0"),
+        // A non-finite float has no JSON spelling, so it renders as the zero
+        // the boxed form stores for it.
+        Value::Number(n) if !n.is_finite() => write!(out, "0.0"),
+        Value::Number(n) if n.fract() == 0.0 => write!(out, "{n}.0"),
         Value::Number(n) => write!(out, "{n}"),
         Value::String(s) => write_string_to(out, s),
         Value::Array(values) => {

@@ -210,6 +210,7 @@ feature-testing-examples/iterator_param_argument.gos	unlowerable local
 feature-testing-examples/iterator_trait_user_impl.gos	admission gate
 feature-testing-examples/jit_panic_trace.gos	unlowered call
 feature-testing-examples/json_encode_aggregates.gos	bytecode-only local
+feature-testing-examples/json_encode_stream_shapes.gos	bytecode-only local
 feature-testing-examples/json_null_rendering.gos	no hot body
 feature-testing-examples/json_round_trip_fuzz.gos	bytecode-only local
 feature-testing-examples/json_set_update.gos	no hot body

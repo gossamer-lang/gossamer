@@ -572,6 +572,14 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::deque::gos_rt_deque_pop_back as *const u8,
         ),
         (
+            "gos_rt_deque_pop_front_into",
+            crate::c_abi::deque::gos_rt_deque_pop_front_into as *const u8,
+        ),
+        (
+            "gos_rt_deque_pop_back_into",
+            crate::c_abi::deque::gos_rt_deque_pop_back_into as *const u8,
+        ),
+        (
             "gos_rt_deque_peek_front",
             crate::c_abi::deque::gos_rt_deque_peek_front as *const u8,
         ),
@@ -594,6 +602,14 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
         (
             "gos_rt_bheap_max_pop_desc",
             crate::c_abi::container_heap::gos_rt_bheap_max_pop_desc as *const u8,
+        ),
+        (
+            "gos_rt_bheap_max_pop_desc_into",
+            crate::c_abi::container_heap::gos_rt_bheap_max_pop_desc_into as *const u8,
+        ),
+        (
+            "gos_rt_bheap_min_pop_desc_into",
+            crate::c_abi::container_heap::gos_rt_bheap_min_pop_desc_into as *const u8,
         ),
         (
             "gos_rt_bheap_max_push_desc",
@@ -2884,6 +2900,62 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::gos_rt_json_render as *const u8,
         ),
         (
+            "gos_rt_json_writer_begin_array",
+            crate::c_abi::gos_rt_json_writer_begin_array as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_begin_object",
+            crate::c_abi::gos_rt_json_writer_begin_object as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_bool",
+            crate::c_abi::gos_rt_json_writer_bool as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_end_array",
+            crate::c_abi::gos_rt_json_writer_end_array as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_end_object",
+            crate::c_abi::gos_rt_json_writer_end_object as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_f64",
+            crate::c_abi::gos_rt_json_writer_f64 as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_finish",
+            crate::c_abi::gos_rt_json_writer_finish as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_i64",
+            crate::c_abi::gos_rt_json_writer_i64 as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_key",
+            crate::c_abi::gos_rt_json_writer_key as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_new",
+            crate::c_abi::gos_rt_json_writer_new as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_new_pretty",
+            crate::c_abi::gos_rt_json_writer_new_pretty as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_null",
+            crate::c_abi::gos_rt_json_writer_null as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_str",
+            crate::c_abi::gos_rt_json_writer_str as *const u8,
+        ),
+        (
+            "gos_rt_json_writer_value",
+            crate::c_abi::gos_rt_json_writer_value as *const u8,
+        ),
+        (
             "gos_rt_json_render_pretty",
             crate::c_abi::gos_rt_json_render_pretty as *const u8,
         ),
@@ -4063,6 +4135,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::rc::gos_rt_rc_alloc_copy as *const u8,
         ),
         (
+            "gos_rt_rc_alloc_move",
+            crate::c_abi::rc::gos_rt_rc_alloc_move as *const u8,
+        ),
+        (
             "gos_rt_rc_alloc_reuse",
             crate::c_abi::rc::gos_rt_rc_alloc_reuse as *const u8,
         ),
@@ -4481,6 +4557,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
         (
             "gos_rt_result_new",
             crate::c_abi::gos_rt_result_new as *const u8,
+        ),
+        (
+            "gos_rt_result_new_owned",
+            crate::c_abi::gos_rt_result_new_owned as *const u8,
         ),
         (
             "gos_rt_result_new_f64",
@@ -6792,6 +6872,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::gos_rt_vec_new_typed as *const u8,
         ),
         ("gos_rt_vec_pop", crate::c_abi::gos_rt_vec_pop as *const u8),
+        (
+            "gos_rt_vec_pop_into",
+            crate::c_abi::gos_rt_vec_pop_into as *const u8,
+        ),
         (
             "gos_rt_vec_pop_opt",
             crate::c_abi::gos_rt_vec_pop_opt as *const u8,

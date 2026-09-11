@@ -96,7 +96,22 @@ impl<'a> Lowerer<'a> {
             capture_summary: gossamer_mir::CaptureSummary::default(),
             cabi_handlers: std::collections::BTreeMap::new(),
             entry_allocas: Vec::new(),
+            sret_bodies: std::collections::BTreeSet::new(),
         }
+    }
+
+    /// Whether this body answers its aggregate through the caller's storage.
+    pub(crate) fn body_uses_sret(&self) -> Option<u64> {
+        if !self.sret_bodies.contains(&self.body.name) {
+            return None;
+        }
+        crate::lower::sret_return_bytes(self.tcx, self.body.local_ty(Local::RETURN))
+    }
+
+    /// Whether a direct call to `name` writes its answer into storage this
+    /// caller supplies.
+    pub(crate) fn callee_uses_sret(&self, name: &str) -> bool {
+        self.sret_bodies.contains(name)
     }
 
     /// Main entry point - emits the function's IR text in its
@@ -218,6 +233,16 @@ impl<'a> Lowerer<'a> {
         // function attribute in the IR: `clang -x ir` ignores
         // `-fno-omit-frame-pointer`, which only sets this attribute when
         // clang is the one generating the IR.
+        if self.body_uses_sret().is_some() {
+            if !params.is_empty() {
+                params.push_str(", ");
+            }
+            // Deliberately not `noalias`: the storage is the caller's own
+            // local, and `x = f(&mut x)` hands the same address through a
+            // parameter. The write lands once, at the return, after the body
+            // has finished reading through that parameter.
+            params.push_str("ptr %sret");
+        }
         writeln!(
             self.out,
             "define {ret_ty} @\"{name}\"({params}) #0 {{",

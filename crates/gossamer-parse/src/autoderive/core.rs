@@ -256,15 +256,15 @@ impl FieldKind {
                 "match json::as_f64({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected f64\")) }}"
             ),
             Self::Bool => format!(
-                "{{ let __rendered = json::render({value_expr})\n            if __rendered == \"true\" {{ true }} else if __rendered == \"false\" {{ false }} else {{ return Err(errors::new(\"{path}: expected bool\")) }} }}"
+                "match json::as_bool({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected bool\")) }}"
             ),
             Self::String => format!(
                 "match json::as_str({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected string\")) }}"
             ),
             Self::Vec(inner) => extract_vec_strict(value_expr, inner, path),
             Self::Struct(ty) => format!(
-                "match {}(&json::render({value_expr})) {{ Ok(__v) => __v, Err(__e) => return Err(errors::wrap(__e, \"{path}\")) }}",
-                from_json_fn(&ty.symbol)
+                "match {}({value_expr}) {{ Ok(__v) => __v, Err(__e) => return Err(errors::wrap(__e, \"{path}\")) }}",
+                from_json_value_fn(&ty.symbol)
             ),
             Self::Option(inner) => {
                 let some_extract = inner.extract_strict(value_expr, path);
@@ -312,6 +312,15 @@ fn to_json_fn(ty: &str) -> String {
 }
 fn from_json_fn(ty: &str) -> String {
     serde_fn("from_json", ty)
+}
+
+/// Name of the decoder that takes an already-parsed `json::Value`.
+///
+/// A nested value the walk is standing on is a handle onto the document it
+/// came from, so the member decodes from that node directly. The text-taking
+/// decoder is the same body behind one `json::parse`.
+pub(crate) fn from_json_value_fn(ty: &str) -> String {
+    serde_fn("from_json_value", ty)
 }
 
 /// How a synthesized body names one user type: `path` is what the emitted

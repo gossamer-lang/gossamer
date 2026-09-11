@@ -9209,6 +9209,48 @@ pub(crate) fn hoist_loop_carried_releases(body: &mut Body, tcx: &gossamer_types:
     }
 }
 
+/// `true` when a value of `ty` can carry a `json::Value` handle.
+///
+/// A callee that answers one may be handing back the very handle it was
+/// given, which is the one shape where a by-value argument is not a borrow.
+fn ty_reaches_json_value(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> bool {
+    fn walk(
+        tcx: &gossamer_types::TyCtxt,
+        ty: gossamer_types::Ty,
+        seen: &mut Vec<gossamer_types::Ty>,
+    ) -> bool {
+        use gossamer_types::TyKind;
+        if seen.contains(&ty) {
+            return false;
+        }
+        seen.push(ty);
+        match tcx.kind_of(ty) {
+            TyKind::JsonValue => true,
+            TyKind::Ref { inner, .. } => walk(tcx, *inner, seen),
+            TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => {
+                walk(tcx, *elem, seen)
+            }
+            TyKind::Tuple(elems) => elems.clone().iter().any(|e| walk(tcx, *e, seen)),
+            TyKind::HashMap { key, value, .. } => {
+                let (key, value) = (*key, *value);
+                walk(tcx, key, seen) || walk(tcx, value, seen)
+            }
+            TyKind::Adt { def, substs } => {
+                let def = *def;
+                if substs.types().iter().any(|t| walk(tcx, *t, seen)) {
+                    return true;
+                }
+                match tcx.struct_field_tys(def) {
+                    Some(fields) => fields.to_vec().iter().any(|f| walk(tcx, *f, seen)),
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+    walk(tcx, ty, &mut Vec::new())
+}
+
 /// Frees provably single-owner `json::Value` handle locals.
 ///
 /// `gos_rt_json_parse` / `gos_rt_json_get` mint one heap handle per
@@ -9436,7 +9478,16 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
                     Operand::Const(ConstValue::Str(n)) => Some(n.as_str()),
                     _ => None,
                 };
-                let allowed = callee_name.is_some_and(is_json_rt);
+                // A by-value argument to a named user function is a borrow:
+                // the callee cannot outlive the call, and a container it
+                // stores the handle in takes a handle of its own. The shape
+                // that would alias is a callee whose answer can carry the
+                // handle back out, so a destination type reaching a
+                // `json::Value` leaves the frame's handle disowned.
+                let user_call_borrows = matches!(callee, Operand::FnRef { .. })
+                    && (destination.local.0 as usize) < n_locals
+                    && !ty_reaches_json_value(tcx, body.locals[destination.local.0 as usize].ty);
+                let allowed = callee_name.is_some_and(is_json_rt) || user_call_borrows;
                 for a in args {
                     if let Operand::Copy(p) = a
                         && (p.local.0 as usize) < n_locals

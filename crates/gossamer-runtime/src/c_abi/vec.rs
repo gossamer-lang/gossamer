@@ -21,6 +21,11 @@ use super::*;
 // Vec runtime - a `{ elem_bytes, len, cap, ptr }` struct
 // ---------------------------------------------------------------
 
+// A vector whose element kind says STRING holds strings this runtime
+// allocated, so its teardown frees them through the typed entry point: the
+// untyped one re-derives what the kind already records, by asking the
+// allocator whether the bytes in front of each body may be read.
+
 /// Element kind tag carried in the `GosVec` header so
 /// `gos_rt_vec_free` can free element payloads instead of just the
 /// backing byte buffer. Default `0` (primitive) preserves the
@@ -167,6 +172,31 @@ const ABI_OWNER_VERSION: u16 = 1;
 const ABI_OWNER_KIND_VEC: u16 = 1;
 const ABI_OWNER_DTOR_VEC: u32 = 1;
 static NEXT_VEC_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Identities a goroutine claims in one go, so a vector's allocation identity
+/// stays unique across the process without a read-modify-write on every
+/// construction.
+const VEC_GENERATION_BLOCK: u64 = 1 << 16;
+
+thread_local! {
+    /// The identities this thread still holds: the next one to hand out and
+    /// the end of its claimed block.
+    static VEC_GENERATIONS: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+fn next_vec_generation() -> u64 {
+    VEC_GENERATIONS.with(|held| {
+        let (next, end) = held.get();
+        if next < end {
+            held.set((next + 1, end));
+            return next;
+        }
+        let base = NEXT_VEC_GENERATION
+            .fetch_add(VEC_GENERATION_BLOCK, std::sync::atomic::Ordering::Relaxed);
+        held.set((base + 1, base + VEC_GENERATION_BLOCK));
+        base
+    })
+}
 
 fn new_vec_owner() -> SyncRawPtr<VecOwner> {
     let owner = Box::new(VecOwner {
@@ -393,7 +423,7 @@ pub(crate) unsafe fn alloc_box_vec(
             region_flag: flag | VEC_COMPACT_HEADER_FLAG,
             rc: std::sync::atomic::AtomicU16::new(1),
             ptr: init_ptr,
-            generation: NEXT_VEC_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            generation: next_vec_generation(),
             mutation_generation: 0,
             elem_meta: SyncRawPtr::NULL,
             owner: SyncRawPtr::NULL,
@@ -421,7 +451,7 @@ pub(crate) unsafe fn alloc_box_vec(
             region_flag: flag,
             rc: std::sync::atomic::AtomicU16::new(1),
             ptr: init_ptr,
-            generation: NEXT_VEC_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            generation: next_vec_generation(),
             mutation_generation: 0,
             elem_meta: SyncRawPtr::NULL,
             owner: SyncRawPtr::NULL,
@@ -891,7 +921,7 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
     };
     unsafe {
         visit_slot_children(slot, children, |child, kind| match kind {
-            vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free(child.cast()),
+            vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(child.cast()),
             vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
             vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(child.cast()),
             vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
@@ -938,7 +968,7 @@ pub unsafe extern "C" fn gos_rt_vec_set_slots(v: *mut GosVec, idx: i64, slots: *
                 }
                 _ => {}
             }
-            std::ptr::copy_nonoverlapping(slots, destination, stride);
+            crate::c_abi::string::copy_small_bytes(slots, destination, stride);
             match kind {
                 vec_elem_kind::AGGR_OWNED => vec_retain_slot_children(vec, destination),
                 vec_elem_kind::AGGR_GUARDED if !meta.is_null() => {
@@ -976,7 +1006,7 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
     for i in 0..v.len.max(0) as usize {
         unsafe {
             visit_slot_children(v.ptr.add(i * stride), children, |child, kind| match kind {
-                vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free(child.cast()),
+                vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(child.cast()),
                 vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
                 vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(child.cast()),
                 vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
@@ -1406,7 +1436,7 @@ pub(crate) unsafe fn vec_elem_owned_payload_word(v: &GosVec, idx: i64) -> i64 {
         return 0;
     }
     let src = unsafe { v.ptr.add((idx as usize) * stride) };
-    unsafe { std::ptr::copy_nonoverlapping(src, copy, stride) };
+    unsafe { crate::c_abi::string::copy_small_bytes(src, copy, stride) };
     copy as i64
 }
 
@@ -1427,7 +1457,7 @@ pub(crate) unsafe fn vec_elem_shared_payload_word(v: &GosVec, idx: i64) -> i64 {
         return 0;
     }
     let src = unsafe { v.ptr.add((idx as usize) * stride) };
-    unsafe { std::ptr::copy_nonoverlapping(src, copy, stride) };
+    unsafe { crate::c_abi::string::copy_small_bytes(src, copy, stride) };
     match v.elem_kind {
         vec_elem_kind::AGGR_GUARDED => {
             let meta = vec_elem_meta(std::ptr::from_ref(v));
@@ -2151,7 +2181,7 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
             unsafe { dst.cast::<*mut u8>().write_unaligned(child) };
         } else {
             unsafe {
-                std::ptr::copy_nonoverlapping(elem, dst, vec.elem_bytes as usize);
+                crate::c_abi::string::copy_small_bytes(elem, dst, vec.elem_bytes as usize);
             }
         }
         vec.len += 1;
@@ -2206,7 +2236,7 @@ unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
     let ptr: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
     unsafe {
         match vec.elem_kind {
-            vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free(ptr.cast()),
+            vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(ptr.cast()),
             vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(ptr.cast()),
             vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(ptr.cast()),
             vec_elem_kind::RC_ENUM => crate::c_abi::rc::gos_rt_rc_release(ptr),
@@ -2465,6 +2495,18 @@ pub(crate) fn result_payload_of(r: i128) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_result_new(disc: i64, payload: i64) -> i128 {
+    pack_result(disc, payload)
+}
+
+/// `gos_rt_result_new` for a carrier whose aggregate payload took the share
+/// its source was holding.
+///
+/// The packing is the same two words; the spelling is what tells a back end
+/// to box the payload by taking those words rather than minting a second
+/// share of the children they name. A back end that boxes before the call
+/// reaches this entry unchanged.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_result_new_owned(disc: i64, payload: i64) -> i128 {
     pack_result(disc, payload)
 }
 

@@ -195,7 +195,11 @@ pub unsafe extern "C" fn gos_rt_yaml_parse_all(s: *const c_char) -> i128 {
         } else {
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
-        let vec = unsafe { crate::c_abi::vec::gos_rt_vec_new(8) };
+        // JSON-typed: each element is a handle holding a share of its
+        // document, which `gos_rt_vec_free` gives back with the vec.
+        let vec = unsafe {
+            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::JSON)
+        };
         for doc in serde_norway::Deserializer::from_str(text) {
             match serde_norway::Value::deserialize(doc) {
                 Ok(value) => {

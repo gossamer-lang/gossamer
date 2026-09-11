@@ -1,0 +1,77 @@
+// A pop of a multi-slot all-scalar element from a Vec, a Deque (both ends),
+// a MinHeap, and a MaxHeap, bound by `while let` and `if let`, and one whose
+// carrier is kept in a binding and matched later.
+
+struct Cell { row: i64, col: i64, weight: f64 }
+
+fn drain_vec() -> i64 {
+    let mut stack: Vec<(i64, i64)> = #[(1, 10), (2, 20), (3, 30)]
+    let mut total = 0
+    while let Some(entry) = stack.pop() {
+        let v, d = entry
+        total += v * d
+        if v == 3 { stack.push((4, 40)) }
+    }
+    total
+}
+
+fn drain_deque() -> i64 {
+    let mut q = Deque::new()
+    for i in 0..6 { q.push_back((i, i * i)) }
+    let mut total = 0
+    while let Some(front) = q.pop_front() {
+        let a, b = front
+        total += a + b
+        if let Some(back) = q.pop_back() {
+            let c, d = back
+            total += c * 100 + d
+        }
+    }
+    total
+}
+
+fn drain_heaps() -> String {
+    let mut lo = MinHeap::new()
+    let mut hi = MaxHeap::new()
+    for i in [5, 1, 4, 2, 3] {
+        lo.push((i, 10 - i))
+        hi.push((i, 10 - i))
+    }
+    let mut out = ""
+    while let Some(entry) = lo.pop() {
+        let k, v = entry
+        out += format("{}:{} ", k, v)
+    }
+    while let Some(entry) = hi.pop() {
+        out += format("{} ", entry.0)
+    }
+    out
+}
+
+fn drain_structs() -> f64 {
+    let mut cells: Vec<Cell> = #[]
+    for i in 0..4 { cells.push(Cell { row: i, col: i * 2, weight: 0.5 * (i as f64) }) }
+    let mut sum = 0.0
+    while let Some(cell) = cells.pop() {
+        sum += cell.weight + ((cell.row + cell.col) as f64)
+    }
+    sum
+}
+
+fn kept_carrier() -> i64 {
+    let mut xs: Vec<(i64, i64)> = #[(7, 8)]
+    let first = xs.pop()
+    let second = xs.pop()
+    let mut total = 0
+    if let Some(p) = first { total += p.0 * p.1 }
+    if let Some(p) = second { total += p.0 } else { total += 1000 }
+    total
+}
+
+fn main() {
+    println("vec {}", drain_vec())
+    println("deque {}", drain_deque())
+    println("heaps {}", drain_heaps())
+    println("structs {}", drain_structs())
+    println("kept {}", kept_carrier())
+}

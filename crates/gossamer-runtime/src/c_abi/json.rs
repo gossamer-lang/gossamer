@@ -73,9 +73,41 @@ fn checked_json_text(bytes: &[u8]) -> Result<&str, &'static str> {
 fn parse_checked_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     deserializer.disable_recursion_limit();
-    let value = serde_json::Value::deserialize(&mut deserializer)?;
+    let mut value = serde_json::Value::deserialize(&mut deserializer)?;
     deserializer.end()?;
+    narrow_numbers_to_language_range(&mut value);
     Ok(value)
+}
+
+/// Rewrites every integer above the `i64` range as the `f64` nearest it.
+///
+/// An integer a program cannot name is one it cannot read back: `as_i64`
+/// answers `None` for it and `as_f64` answers the approximation, so holding
+/// the exact value would let a document render digits no accessor agrees
+/// with. The bytecode VM's parser resolves these to `f64` for the same
+/// reason, and this keeps every tier's rendering and accessors identical.
+fn narrow_numbers_to_language_range(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Number(n) => {
+            if n.as_i64().is_none()
+                && let Some(as_float) = n.as_f64()
+                && let Some(narrowed) = serde_json::Number::from_f64(as_float)
+            {
+                *n = narrowed;
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                narrow_numbers_to_language_range(item);
+            }
+        }
+        serde_json::Value::Object(entries) => {
+            for (_, entry) in entries.iter_mut() {
+                narrow_numbers_to_language_range(entry);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Fully validates a document without constructing a DOM. Parsed documents
@@ -510,10 +542,23 @@ impl RuntimeJsonWriter {
     }
 }
 
+/// Offset of the first byte that may need a JSON escape sequence: one of the
+/// three HTML-significant ASCII bytes, or the lead byte of U+2028 / U+2029.
+#[inline]
+fn first_escape_candidate(bytes: &[u8]) -> Option<usize> {
+    bytes
+        .iter()
+        .position(|&b| matches!(b, b'<' | b'>' | b'&' | 0xe2))
+}
+
 impl std::io::Write for RuntimeJsonWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let Some(first) = first_escape_candidate(bytes) else {
+            self.append(bytes);
+            return Ok(bytes.len());
+        };
         let mut start = 0;
-        let mut offset = 0;
+        let mut offset = first;
         while offset < bytes.len() {
             let (source_len, replacement): (usize, Option<&[u8]>) = match bytes[offset] {
                 b'<' => (1, Some(b"\\u003c")),
@@ -527,7 +572,11 @@ impl std::io::Write for RuntimeJsonWriter {
                 _ => (1, None),
             };
             let Some(replacement) = replacement else {
-                offset += source_len;
+                let rest = offset + source_len;
+                offset = match first_escape_candidate(&bytes[rest..]) {
+                    Some(next) => rest + next,
+                    None => bytes.len(),
+                };
                 continue;
             };
             self.append(&bytes[start..offset]);
@@ -552,17 +601,146 @@ impl Drop for RuntimeJsonWriter {
     }
 }
 
+/// Writes a JSON float the way the language writes the same value, so a
+/// number inside a document reads as the one `{}` shows for it. Rust's
+/// shortest-round-trip float writer would spell large and small magnitudes in
+/// exponent form, which no other rendering in the language uses. A value with
+/// no fractional part keeps a `.0` so it stays a float on the way back in.
+fn write_language_float<W: std::io::Write + ?Sized>(
+    writer: &mut W,
+    value: f64,
+) -> std::io::Result<()> {
+    if !value.is_finite() {
+        return writer.write_all(b"0.0");
+    }
+    if value.fract() == 0.0 {
+        write!(writer, "{value}.0")
+    } else {
+        write!(writer, "{value}")
+    }
+}
+
+/// Compact JSON with the language's own float spelling. Every method but the
+/// float writers is serde's compact default.
+struct LanguageFloatsCompact;
+
+impl serde_json::ser::Formatter for LanguageFloatsCompact {
+    fn write_f32<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        value: f32,
+    ) -> std::io::Result<()> {
+        write_language_float(writer, f64::from(value))
+    }
+
+    fn write_f64<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        value: f64,
+    ) -> std::io::Result<()> {
+        write_language_float(writer, value)
+    }
+}
+
+/// Indented JSON with the language's own float spelling: serde's pretty
+/// layout for structure, [`write_language_float`] for numbers.
+struct LanguageFloatsPretty<'a>(serde_json::ser::PrettyFormatter<'a>);
+
+impl serde_json::ser::Formatter for LanguageFloatsPretty<'_> {
+    fn write_f32<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        value: f32,
+    ) -> std::io::Result<()> {
+        write_language_float(writer, f64::from(value))
+    }
+
+    fn write_f64<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        value: f64,
+    ) -> std::io::Result<()> {
+        write_language_float(writer, value)
+    }
+
+    fn begin_array<W: std::io::Write + ?Sized>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.0.begin_array(writer)
+    }
+
+    fn end_array<W: std::io::Write + ?Sized>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.0.end_array(writer)
+    }
+
+    fn begin_array_value<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.0.begin_array_value(writer, first)
+    }
+
+    fn end_array_value<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.0.end_array_value(writer)
+    }
+
+    fn begin_object<W: std::io::Write + ?Sized>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.0.begin_object(writer)
+    }
+
+    fn end_object<W: std::io::Write + ?Sized>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        self.0.end_object(writer)
+    }
+
+    fn begin_object_key<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+        first: bool,
+    ) -> std::io::Result<()> {
+        self.0.begin_object_key(writer, first)
+    }
+
+    fn begin_object_value<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.0.begin_object_value(writer)
+    }
+
+    fn end_object_value<W: std::io::Write + ?Sized>(
+        &mut self,
+        writer: &mut W,
+    ) -> std::io::Result<()> {
+        self.0.end_object_value(writer)
+    }
+}
+
+/// Serializes `value` into `sink` in the language's number spelling.
+fn serialize_language_json<W: std::io::Write>(
+    sink: W,
+    value: &serde_json::Value,
+    pretty: bool,
+) -> Result<(), serde_json::Error> {
+    use serde::Serialize as _;
+    if pretty {
+        let formatter = LanguageFloatsPretty(serde_json::ser::PrettyFormatter::new());
+        let mut serializer = serde_json::Serializer::with_formatter(sink, formatter);
+        value.serialize(&mut serializer)
+    } else {
+        let mut serializer = serde_json::Serializer::with_formatter(sink, LanguageFloatsCompact);
+        value.serialize(&mut serializer)
+    }
+}
+
 fn render_json_direct(value: &serde_json::Value, pretty: bool) -> *mut c_char {
     // A recursive exact-size pass formats every number and walks the complete
     // tree before serde immediately repeats the work. Start large enough to
     // avoid churn for ordinary documents and let the builder double for large
     // payloads. Peak growth stays bounded while serialization remains one pass.
     let mut writer = RuntimeJsonWriter::new(64 * 1024);
-    let result = if pretty {
-        serde_json::to_writer_pretty(&mut writer, value)
-    } else {
-        serde_json::to_writer(&mut writer, value)
-    };
+    let result = serialize_language_json(&mut writer, value, pretty);
     if result.is_err() {
         return alloc_cstring(b"");
     }
@@ -1027,7 +1205,9 @@ pub unsafe extern "C" fn gos_rt_json_value_bool(b: i32) -> *mut GosJson {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_float(x: f64) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
-        let n = serde_json::Number::from_f64(x).unwrap_or_else(|| serde_json::Number::from(0));
+        let n = serde_json::Number::from_f64(x)
+            .or_else(|| serde_json::Number::from_f64(0.0))
+            .unwrap_or_else(|| serde_json::Number::from(0));
         GosJson::into_raw(serde_json::Value::Number(n))
     })
 }
@@ -1238,6 +1418,273 @@ pub unsafe extern "C" fn gos_rt_json_set(
         let mut out = existing.clone();
         out.insert(key_str, new_val);
         GosJson::into_raw(serde_json::Value::Object(out))
+    })
+}
+
+/// A compact JSON document written one token at a time by the compiled
+/// encoder of a typed value: the sink and escaping are the tree renderer's,
+/// so the bytes are the ones `gos_rt_json_render` answers for the same
+/// value, and the open containers are tracked here so each token knows
+/// whether a comma precedes it.
+pub struct JsonTokenWriter {
+    sink: RuntimeJsonWriter,
+    /// One entry per open container: whether it is an array, and whether its
+    /// next member is the first.
+    open: Vec<(bool, bool)>,
+    /// Indented form, matching `serde_json::to_writer_pretty`: two spaces per
+    /// level, a newline before every member, and an empty container written
+    /// without one.
+    pretty: bool,
+}
+
+impl JsonTokenWriter {
+    /// Writes the newline and indent that precede a member at the current
+    /// depth. Nothing in compact form.
+    fn newline_indent(&mut self) {
+        if !self.pretty {
+            return;
+        }
+        self.sink.append(b"\n");
+        for _ in 0..self.open.len() {
+            self.sink.append(b"  ");
+        }
+    }
+
+    /// Separates a value from the one before it inside an array. An object
+    /// member's separator is written with its key.
+    fn begin_value(&mut self) {
+        if let Some((true, first)) = self.open.last_mut() {
+            let separate = !*first;
+            *first = false;
+            if separate {
+                self.sink.append(b",");
+            }
+            self.newline_indent();
+        }
+    }
+
+    /// Closes the innermost container: an empty one keeps its delimiters
+    /// together, a populated one puts the closer on its own line.
+    fn end_container(&mut self, close: &[u8]) {
+        let was_empty = matches!(self.open.last(), Some(&(_, first)) if first);
+        self.open.pop();
+        if self.pretty && !was_empty {
+            self.sink.append(b"\n");
+            for _ in 0..self.open.len() {
+                self.sink.append(b"  ");
+            }
+        }
+        self.sink.append(close);
+    }
+
+    fn write_escaped(&mut self, text: &str) {
+        let _ = serde_json::to_writer(&mut self.sink, text);
+    }
+}
+
+unsafe fn token_writer<'a>(w: *mut JsonTokenWriter) -> Option<&'a mut JsonTokenWriter> {
+    if w.is_null() {
+        None
+    } else {
+        Some(unsafe { &mut *w })
+    }
+}
+
+/// Opens a compact JSON document for the token writers below; closed by
+/// `gos_rt_json_writer_finish`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_new() -> *mut JsonTokenWriter {
+    ffi_entry!(std::ptr::null_mut(), {
+        Box::into_raw(Box::new(JsonTokenWriter {
+            sink: RuntimeJsonWriter::new(64 * 1024),
+            open: Vec::new(),
+            pretty: false,
+        }))
+    })
+}
+
+/// Opens an indented JSON document, in the form
+/// `gos_rt_json_render_pretty` answers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_new_pretty() -> *mut JsonTokenWriter {
+    ffi_entry!(std::ptr::null_mut(), {
+        Box::into_raw(Box::new(JsonTokenWriter {
+            sink: RuntimeJsonWriter::new(64 * 1024),
+            open: Vec::new(),
+            pretty: true,
+        }))
+    })
+}
+
+/// Writes `{` as the next value and opens the object.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_begin_object(w: *mut JsonTokenWriter) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            writer.sink.append(b"{");
+            writer.open.push((false, true));
+        }
+    });
+}
+
+/// Closes the innermost object with `}`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_end_object(w: *mut JsonTokenWriter) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.end_container(b"}");
+        }
+    });
+}
+
+/// Writes `[` as the next value and opens the array.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_begin_array(w: *mut JsonTokenWriter) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            writer.sink.append(b"[");
+            writer.open.push((true, true));
+        }
+    });
+}
+
+/// Closes the innermost array with `]`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_end_array(w: *mut JsonTokenWriter) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.end_container(b"]");
+        }
+    });
+}
+
+/// Writes the name of the next member of the innermost object, with the
+/// comma that separates it from the member before.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_key(w: *mut JsonTokenWriter, key: *const c_char) {
+    ffi_entry!((), {
+        let Some(writer) = (unsafe { token_writer(w) }) else {
+            return;
+        };
+        if let Some((false, first)) = writer.open.last_mut() {
+            let separate = !*first;
+            *first = false;
+            if separate {
+                writer.sink.append(b",");
+            }
+            writer.newline_indent();
+        }
+        let text = unsafe { crate::c_abi::gos_str_arg_lossy(key) };
+        writer.write_escaped(&text);
+        writer.sink.append(if writer.pretty { b": " } else { b":" });
+    });
+}
+
+/// Writes a string value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_str(w: *mut JsonTokenWriter, s: *const c_char) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            let text = unsafe { crate::c_abi::gos_str_arg_lossy(s) };
+            writer.write_escaped(&text);
+        }
+    });
+}
+
+/// Writes an integer value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_i64(w: *mut JsonTokenWriter, n: i64) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            let _ = serde_json::to_writer(&mut writer.sink, &n);
+        }
+    });
+}
+
+/// Writes a float value; a non-finite one renders as `0`, as the tree
+/// constructor stores it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_f64(w: *mut JsonTokenWriter, x: f64) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            let _ = write_language_float(&mut writer.sink, x);
+        }
+    });
+}
+
+/// Writes a boolean value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_bool(w: *mut JsonTokenWriter, b: i32) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            writer.sink.append(if b != 0 { b"true" } else { b"false" });
+        }
+    });
+}
+
+/// Writes `null`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_null(w: *mut JsonTokenWriter) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            writer.sink.append(b"null");
+        }
+    });
+}
+
+/// Writes a `json::Value` the caller keeps, as the tree renderer would
+/// render it in place.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_value(w: *mut JsonTokenWriter, j: *const GosJson) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            match unsafe { json_handle(j) } {
+                Some(json) if writer.pretty => {
+                    // `to_writer_pretty` always indents from column zero, so
+                    // the rendered lines are shifted to the depth this value
+                    // sits at before they are appended.
+                    let mut nested = Vec::new();
+                    if serialize_language_json(&mut nested, json.value(), true).is_ok() {
+                        let depth = writer.open.len();
+                        let text = String::from_utf8_lossy(&nested).into_owned();
+                        for (i, line) in text.split('\n').enumerate() {
+                            if i > 0 {
+                                writer.sink.append(b"\n");
+                                for _ in 0..depth {
+                                    writer.sink.append(b"  ");
+                                }
+                            }
+                            writer.sink.append(line.as_bytes());
+                        }
+                    }
+                }
+                Some(json) => {
+                    let _ = serialize_language_json(&mut writer.sink, json.value(), false);
+                }
+                None => writer.sink.append(b"null"),
+            }
+        }
+    });
+}
+
+/// Closes the document and answers its text as a `String`; the writer is
+/// released.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_finish(w: *mut JsonTokenWriter) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        if w.is_null() {
+            return alloc_cstring(b"");
+        }
+        let writer = unsafe { Box::from_raw(w) };
+        writer.sink.finish()
     })
 }
 

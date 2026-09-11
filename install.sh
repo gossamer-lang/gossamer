@@ -50,15 +50,31 @@ build_release() {
     cargo build --release -p gossamer-cli -p gossamer-runtime
 }
 
+# Copies `src` over `dest` through a staged sibling. Replacing a file the
+# kernel still has mapped - `gos` itself, or an archive a concurrent link is
+# reading - fails with ETXTBSY on a plain write, while a rename swaps the
+# inode and leaves every open handle on the old one.
+install_over() {
+    local src="$1" dest="$2" mode="$3" sudo_cmd="$4"
+    local staged="${dest}.install.$$"
+    trap "${sudo_cmd} rm -f '${staged}'" EXIT HUP INT TERM
+    $sudo_cmd cp "$src" "$staged"
+    $sudo_cmd chmod "$mode" "$staged"
+    $sudo_cmd mv -f "$staged" "$dest"
+    trap - EXIT HUP INT TERM
+}
+
 install_unix() {
     local exe_name="$1"      # gos
     local lib_name="$2"      # libgossamer_runtime.a
     local sudo_cmd=""        # populated for --system
+    local musl_lib_name="libgossamer_runtime-musl.a"
 
     build_release
 
     local exe="$SCRIPT_DIR/target/release/$exe_name"
     local lib="$SCRIPT_DIR/target/release/$lib_name"
+    local musl_lib="$SCRIPT_DIR/target/release/$musl_lib_name"
     [ -f "$exe" ] || die "binary not found at $exe"
     [ -f "$lib" ] || die "runtime lib not found at $lib"
 
@@ -73,23 +89,20 @@ install_unix() {
     lib_dir="$prefix/lib"
 
     $sudo_cmd mkdir -p "$bin_dir" "$lib_dir"
-    # --remove-destination: when `gos` (or any installed binary) is
-    # running, plain `cp` fails with "Text file busy" because the
-    # kernel keeps the executable inode mapped. Removing the
-    # destination first unlinks the inode without disturbing the
-    # running process, then the new binary is written to the same
-    # path.
-    $sudo_cmd cp --remove-destination "$exe" "$bin_dir/$exe_name"
-    $sudo_cmd chmod 755 "$bin_dir/$exe_name"
-    $sudo_cmd cp --remove-destination "$lib" "$lib_dir/$lib_name"
+    install_over "$exe" "$bin_dir/$exe_name" 755 "$sudo_cmd"
+    install_over "$lib" "$lib_dir/$lib_name" 644 "$sudo_cmd"
 
-    # On Linux `gos build --release` links the static-musl runtime, which the
-    # CLI build emits beside the host archive. Both belong to the same
-    # toolchain, so they are installed together.
-    local musl_lib="$SCRIPT_DIR/target/release/libgossamer_runtime-musl.a"
+    # `gos build --release` on Linux links the static-musl runtime out of
+    # `<prefix>/lib`, which outranks the archive baked into this tree. The two
+    # archives are one toolchain and export one `gos_rt_*` surface, so the
+    # install either replaces both or leaves the musl slot empty, where the
+    # release link reports the fallback instead of resolving half a surface
+    # against the other half.
     if [ -f "$musl_lib" ]; then
-        $sudo_cmd cp --remove-destination "$musl_lib" \
-            "$lib_dir/libgossamer_runtime-musl.a"
+        install_over "$musl_lib" "$lib_dir/$musl_lib_name" 644 "$sudo_cmd"
+    elif [ -e "$lib_dir/$musl_lib_name" ]; then
+        $sudo_cmd rm -f "$lib_dir/$musl_lib_name"
+        echo "Removed $lib_dir/$musl_lib_name; this build produced no musl runtime"
     fi
 
     # macOS only: ad-hoc resign so the freshly-copied binary
@@ -104,6 +117,9 @@ install_unix() {
     echo
     echo "Installed gos ${version:-?} to $bin_dir/$exe_name"
     echo "Runtime lib at $lib_dir/$lib_name"
+    if [ -f "$lib_dir/$musl_lib_name" ]; then
+        echo "Static-musl runtime lib at $lib_dir/$musl_lib_name"
+    fi
 
     if [ "$SYSTEM" -eq 0 ] && [[ ":${PATH}:" != *":$bin_dir:"* ]]; then
         echo

@@ -606,83 +606,185 @@ unsafe fn heap_elem(v: &GosVec, idx: usize) -> *mut u8 {
     unsafe { v.ptr.add(idx * (v.elem_bytes as usize)) }
 }
 
-unsafe fn heap_cmp(v: &GosVec, a: usize, b: usize, tags: *const u8) -> i64 {
-    let mut cursor = 0usize;
-    unsafe {
-        crate::c_abi::desc_cmp::compare_desc(
-            heap_elem(v, a),
-            heap_elem(v, b),
-            tags,
-            &mut cursor,
-            crate::c_abi::desc_cmp::CmpStorage::Inline,
-            None,
-        )
-    }
-}
-
 /// Element widths a sift's scratch buffer holds without touching the
 /// allocator. A heap element is a scalar, a handle, or a flat slot slab, so
 /// every ordinary one fits.
 const HEAP_SWAP_INLINE_BYTES: usize = 64;
+
+/// A sift's held element: the one the sift is placing, kept out of the
+/// storage while the elements it passes move up or down into the hole it
+/// leaves. One element move per level, where an exchange per level costs
+/// three.
+struct HeapHole {
+    inline: [u8; HEAP_SWAP_INLINE_BYTES],
+    spilled: Vec<u8>,
+    stride: usize,
+}
+
+impl HeapHole {
+    /// Lifts the element at `idx` out of the storage.
+    unsafe fn lift(v: &GosVec, idx: usize) -> Self {
+        let stride = v.elem_bytes as usize;
+        let mut hole = Self {
+            inline: [0u8; HEAP_SWAP_INLINE_BYTES],
+            spilled: if stride > HEAP_SWAP_INLINE_BYTES {
+                vec![0u8; stride]
+            } else {
+                Vec::new()
+            },
+            stride,
+        };
+        unsafe {
+            crate::c_abi::string::copy_small_bytes(heap_elem(v, idx), hole.as_mut_ptr(), stride);
+        }
+        hole
+    }
+
+    fn as_ptr(&self) -> *const u8 {
+        if self.stride > HEAP_SWAP_INLINE_BYTES {
+            self.spilled.as_ptr()
+        } else {
+            self.inline.as_ptr()
+        }
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        if self.stride > HEAP_SWAP_INLINE_BYTES {
+            self.spilled.as_mut_ptr()
+        } else {
+            self.inline.as_mut_ptr()
+        }
+    }
+
+    /// Drops the held element back into the storage at `idx`.
+    unsafe fn settle(&self, v: &GosVec, idx: usize) {
+        unsafe {
+            crate::c_abi::string::copy_small_bytes(self.as_ptr(), heap_elem(v, idx), self.stride);
+        }
+    }
+}
+
+/// Moves the element at `from` to `to`, both inside one heap.
+unsafe fn heap_move(v: &GosVec, from: usize, to: usize) {
+    let stride = v.elem_bytes as usize;
+    unsafe { crate::c_abi::string::copy_small_bytes(heap_elem(v, from), heap_elem(v, to), stride) };
+}
 
 unsafe fn heap_swap(v: &GosVec, a: usize, b: usize) {
     if a == b {
         return;
     }
     let stride = v.elem_bytes as usize;
-    // A sift swaps once per level, so a scratch allocation here is one
-    // allocation per level per push and pop.
-    let mut inline = [0u8; HEAP_SWAP_INLINE_BYTES];
-    let mut spilled: Vec<u8>;
-    let scratch: &mut [u8] = if stride <= HEAP_SWAP_INLINE_BYTES {
-        &mut inline[..stride]
-    } else {
-        spilled = vec![0u8; stride];
-        &mut spilled[..]
-    };
-    unsafe {
-        std::ptr::copy_nonoverlapping(heap_elem(v, a), scratch.as_mut_ptr(), stride);
-        std::ptr::copy_nonoverlapping(heap_elem(v, b), heap_elem(v, a), stride);
-        std::ptr::copy_nonoverlapping(scratch.as_ptr(), heap_elem(v, b), stride);
+    unsafe { std::ptr::swap_nonoverlapping(heap_elem(v, a), heap_elem(v, b), stride) };
+}
+
+/// Sifts the element at `start` towards the root while it outranks its
+/// parent, under a comparison the caller has already specialised.
+unsafe fn sift_up_by(
+    v: &GosVec,
+    start: usize,
+    max: bool,
+    cmp: impl Fn(*const u8, *const u8) -> i64,
+) {
+    if start == 0 {
+        return;
     }
+    let hole = unsafe { HeapHole::lift(v, start) };
+    let held = hole.as_ptr();
+    let mut i = start;
+    while i > 0 {
+        let parent = (i - 1) / 2;
+        let ord = cmp(unsafe { heap_elem(v, parent) }, held);
+        let outranks = if max { ord < 0 } else { ord > 0 };
+        if !outranks {
+            break;
+        }
+        unsafe { heap_move(v, parent, i) };
+        i = parent;
+    }
+    unsafe { hole.settle(v, i) };
+}
+
+/// Sifts the element at `start` down while a child outranks it, under a
+/// comparison the caller has already specialised.
+unsafe fn sift_down_by(
+    v: &GosVec,
+    len: usize,
+    start: usize,
+    max: bool,
+    cmp: impl Fn(*const u8, *const u8) -> i64,
+) {
+    let hole = unsafe { HeapHole::lift(v, start) };
+    let held = hole.as_ptr();
+    let mut i = start;
+    loop {
+        let left = 2 * i + 1;
+        if left >= len {
+            break;
+        }
+        let right = left + 1;
+        let mut best = left;
+        if right < len {
+            let ord = cmp(unsafe { heap_elem(v, left) }, unsafe {
+                heap_elem(v, right)
+            });
+            let right_outranks = if max { ord < 0 } else { ord > 0 };
+            if right_outranks {
+                best = right;
+            }
+        }
+        let ord = cmp(unsafe { heap_elem(v, best) }, held);
+        let outranks = if max { ord > 0 } else { ord < 0 };
+        if !outranks {
+            break;
+        }
+        unsafe { heap_move(v, best, i) };
+        i = best;
+    }
+    unsafe { hole.settle(v, i) };
+}
+
+/// Runs `sift` with the comparison the element's descriptor settles, decided
+/// once per sift so each level costs the comparison itself rather than a
+/// walk of the descriptor.
+macro_rules! sift_under_plan {
+    ($tags:expr, $sift:ident ( $($arg:expr),* )) => {{
+        let tags = $tags;
+        let plan = unsafe { crate::c_abi::desc_cmp::plan_cmp(tags) };
+        use crate::c_abi::desc_cmp::CmpPlan;
+        match plan {
+            CmpPlan::IntWord => unsafe {
+                $sift($($arg),*, |a, b| crate::c_abi::desc_cmp::compare_int_word(a, b))
+            },
+            CmpPlan::IntTuple(slots) => unsafe {
+                $sift($($arg),*, |a, b| {
+                    crate::c_abi::desc_cmp::compare_int_slots(slots, a, b)
+                })
+            },
+            CmpPlan::Flat(tag) => unsafe {
+                $sift($($arg),*, |a, b| crate::c_abi::desc_cmp::compare_flat(tag, a, b))
+            },
+            CmpPlan::FlatTuple(fields) => unsafe {
+                $sift($($arg),*, |a, b| {
+                    crate::c_abi::desc_cmp::compare_flat_slots(fields, a, b)
+                })
+            },
+            CmpPlan::Walk => unsafe {
+                $sift($($arg),*, |a, b| crate::c_abi::desc_cmp::compare_whole(a, b, tags))
+            },
+        }
+    }};
 }
 
 /// Sifts the element at `start` towards the root while it outranks its
 /// parent. `max` selects which end of the ordering the root holds.
 unsafe fn heap_sift_up_desc(v: &GosVec, start: usize, tags: *const u8, max: bool) {
-    let mut i = start;
-    while i > 0 {
-        let parent = (i - 1) / 2;
-        let ord = unsafe { heap_cmp(v, parent, i, tags) };
-        let outranks = if max { ord < 0 } else { ord > 0 };
-        if !outranks {
-            break;
-        }
-        unsafe { heap_swap(v, parent, i) };
-        i = parent;
-    }
+    sift_under_plan!(tags, sift_up_by(v, start, max));
 }
 
 /// Sifts the element at `start` down while a child outranks it.
 unsafe fn heap_sift_down_desc(v: &GosVec, len: usize, start: usize, tags: *const u8, max: bool) {
-    let mut i = start;
-    loop {
-        let mut best = i;
-        for child in [2 * i + 1, 2 * i + 2] {
-            if child < len {
-                let ord = unsafe { heap_cmp(v, best, child, tags) };
-                let outranks = if max { ord < 0 } else { ord > 0 };
-                if outranks {
-                    best = child;
-                }
-            }
-        }
-        if best == i {
-            break;
-        }
-        unsafe { heap_swap(v, best, i) };
-        i = best;
-    }
+    sift_under_plan!(tags, sift_down_by(v, len, start, max));
 }
 
 unsafe fn bheap_push_desc(v: *mut GosVec, elem: *const u8, tags: *const u8, max: bool) {
@@ -717,6 +819,30 @@ unsafe fn bheap_pop_desc(v: *mut GosVec, tags: *const u8, max: bool) -> i128 {
     }
     let word = unsafe { crate::c_abi::vec::vec_elem_owned_payload_word(vec, last as i64) };
     unsafe { super::vec::pack_result(0, word) }
+}
+
+/// The heap pop whose element the caller already owns storage for: the root
+/// leaves through the slot past the new end, and its slots move into `out`.
+/// Answers the `Option` discriminant (0 written, 1 empty).
+unsafe fn bheap_pop_desc_into(v: *mut GosVec, tags: *const u8, out: *mut u8, max: bool) -> i64 {
+    if v.is_null() || tags.is_null() || out.is_null() {
+        return 1;
+    }
+    let vec = unsafe { &mut *v };
+    if vec.len <= 0 || vec.ptr.is_null() {
+        return 1;
+    }
+    let last = (vec.len - 1) as usize;
+    unsafe { heap_swap(vec, 0, last) };
+    vec.len -= 1;
+    let new_len = vec.len.max(0) as usize;
+    if new_len > 1 {
+        unsafe { heap_sift_down_desc(vec, new_len, 0, tags, max) };
+    }
+    let stride = vec.elem_bytes as usize;
+    let src = unsafe { vec.ptr.add(last * stride) };
+    unsafe { crate::c_abi::string::copy_small_bytes(src, out, stride) };
+    0
 }
 
 unsafe fn bheap_from_vec_desc(v: *mut GosVec, tags: *const u8, max: bool) -> *mut GosVec {
@@ -772,6 +898,28 @@ pub unsafe extern "C" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: *const 
     ffi_entry!(super::vec::pack_result(1, 0), {
         unsafe { bheap_pop_desc(v, tags, false) }
     })
+}
+
+/// Remove the greatest element into caller-owned storage; see
+/// [`bheap_pop_desc_into`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_bheap_max_pop_desc_into(
+    v: *mut GosVec,
+    tags: *const u8,
+    out: *mut u8,
+) -> i64 {
+    ffi_entry!(1, { unsafe { bheap_pop_desc_into(v, tags, out, true) } })
+}
+
+/// Remove the least element into caller-owned storage; see
+/// [`bheap_pop_desc_into`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_bheap_min_pop_desc_into(
+    v: *mut GosVec,
+    tags: *const u8,
+    out: *mut u8,
+) -> i64 {
+    ffi_entry!(1, { unsafe { bheap_pop_desc_into(v, tags, out, false) } })
 }
 
 /// The root element as `Option<T>` without removing it. The payload of a

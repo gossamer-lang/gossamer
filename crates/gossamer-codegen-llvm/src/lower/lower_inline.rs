@@ -71,6 +71,16 @@ use gossamer_abi as abi;
 use gossamer_mir::{BasicBlock, Body, ConstValue, Operand, Place, Projection, UnOp};
 use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 
+/// The width one Vec element occupies, as an indexed access sees it.
+enum ElemStride {
+    /// Eight bytes, settled by the element type.
+    Word,
+    /// One byte, settled by the element type.
+    Byte,
+    /// The width the header records, named by an SSA value.
+    Header(String),
+}
+
 impl<'a> Lowerer<'a> {
     /// Inline fast path for `gos_rt_stream_write_byte(stream, b)`.
     ///
@@ -462,6 +472,28 @@ impl<'a> Lowerer<'a> {
         )
     }
 
+    /// True when `op` is a `Vec` / slice whose length the header records at
+    /// offset zero, so a `.len()` is that one load.
+    ///
+    /// Every `GosVec` keeps its length there whatever the element type. The
+    /// one receiver that does not is the `env::args()` sentinel, whose length
+    /// lives in the runtime's own `ARGS_LEN`; it is a `Vec<String>`, so a
+    /// string element keeps the call that consults the sentinel.
+    pub(crate) fn vec_operand_len_is_header(&self, op: &Operand) -> bool {
+        let Operand::Copy(pl) = op else {
+            return false;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let elem = match self.tcx.kind(ty) {
+            Some(TyKind::Vec(e) | TyKind::Slice(e)) => *e,
+            _ => return false,
+        };
+        !matches!(self.tcx.kind(elem), Some(TyKind::String))
+    }
+
     /// True when `op` is a Vec/Slice whose element is itself a
     /// Vec/Slice - an 8-byte heap-pointer slot. Indexing one returns
     /// the borrowed inner-vec pointer, a plain word load with no
@@ -480,6 +512,145 @@ impl<'a> Lowerer<'a> {
             _ => return false,
         };
         matches!(self.tcx.kind(elem), Some(TyKind::Vec(_) | TyKind::Slice(_)))
+    }
+
+    /// Byte offset of element `idx` in the vector `op` names.
+    ///
+    /// The stride is the element type's own slot width wherever the type
+    /// settles it, so an index becomes a multiply by a constant the address
+    /// arithmetic folds away. A vector whose element type does not settle it
+    /// reads the width its header records, which is the width the vector was
+    /// built with.
+    fn vec_elem_offset(&mut self, vec_ptr: &str, idx: &str, op: &Operand) -> (String, String) {
+        let off = self.fresh();
+        if let Some(bytes) = self.vec_operand_elem_bytes(op) {
+            writeln!(self.out, "  {off} = mul i64 {idx}, {bytes}").unwrap();
+            return (off, bytes.to_string());
+        }
+        let eb_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {eb_addr} = getelementptr i8, ptr {vec_ptr}, i64 16"
+        )
+        .unwrap();
+        let eb32 = self.fresh();
+        writeln!(self.out, "  {eb32} = load i32, ptr {eb_addr}{TBAA_HEADER}").unwrap();
+        let eb = self.fresh();
+        writeln!(self.out, "  {eb} = zext i32 {eb32} to i64").unwrap();
+        writeln!(self.out, "  {off} = mul i64 {idx}, {eb}").unwrap();
+        (off, eb)
+    }
+
+    /// The element stride a `Vec` / slice operand's own type settles, for a
+    /// caller outside this module.
+    pub(crate) fn vec_operand_elem_bytes_settled(&self, op: &Operand) -> Option<i64> {
+        self.vec_operand_elem_bytes(op)
+    }
+
+    /// The element stride a `Vec` / slice operand's own type settles.
+    fn vec_operand_elem_bytes(&self, op: &Operand) -> Option<i64> {
+        let Operand::Copy(pl) = op else {
+            return None;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let elem = match self.tcx.kind(ty) {
+            Some(TyKind::Vec(e) | TyKind::Slice(e)) => *e,
+            _ => return None,
+        };
+        crate::lower::settled_elem_bytes(self.tcx, elem)
+    }
+
+    /// `true` when the operand's element type is an inline aggregate, so its
+    /// element address is `ptr + idx * elem_bytes` for every receiver: the two
+    /// element kinds that answer otherwise hold rows, never struct slots.
+    pub(crate) fn vec_operand_elem_is_inline_aggregate(&self, op: &Operand) -> bool {
+        let Operand::Copy(pl) = op else {
+            return false;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let elem = match self.tcx.kind(ty) {
+            Some(TyKind::Vec(e) | TyKind::Slice(e)) => *e,
+            _ => return false,
+        };
+        is_aggregate(self.tcx, elem)
+            && !matches!(self.tcx.kind(elem), Some(TyKind::Vec(_) | TyKind::Slice(_)))
+    }
+
+    /// Inline fast path for `gos_rt_vec_get_ptr(vec, idx)` whose destination
+    /// is the element itself.
+    ///
+    /// A nested index reaches one of these per level and the element is then
+    /// copied out of the address it answers. Where the element type is an
+    /// inline aggregate the address is the header's data pointer plus the
+    /// index times the stride, so the call is worth only the receiver shapes
+    /// it guards: a null one and an index past the end, which reach it here
+    /// exactly as before.
+    pub(crate) fn lower_vec_get_ptr_aggregate_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+        bytes: u64,
+    ) -> Result<(), BuildError> {
+        let vec_ptr = self.vec_operand_ptr(&args[0])?;
+        let idx = self.lower_operand(&args[1])?;
+        let idx = self.widen_to_i64(&args[1], &idx);
+        let slot = if destination.projection.is_empty() {
+            local_slot(destination.local)
+        } else {
+            self.lower_place_address(destination)
+        };
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (check, fast, slow, cont) = (
+            format!("vga_check_{s}"),
+            format!("vga_fast_{s}"),
+            format!("vga_slow_{s}"),
+            format!("vga_cont_{s}"),
+        );
+        let isnull = self.fresh();
+        writeln!(self.out, "  {isnull} = icmp eq ptr {vec_ptr}, null").unwrap();
+        writeln!(self.out, "  br i1 {isnull}, label %{slow}, label %{check}").unwrap();
+        writeln!(self.out, "{check}:").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
+        let (off, _eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
+        // One unsigned compare catches a negative index and one past the end.
+        let bad = self.fresh();
+        writeln!(self.out, "  {bad} = icmp uge i64 {idx}, {len}").unwrap();
+        writeln!(self.out, "  br i1 {bad}, label %{slow}, label %{fast}").unwrap();
+        writeln!(self.out, "{fast}:").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        writeln!(
+            self.out,
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {slot}, ptr {ea}, i64 {bytes}, i1 false)"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
+        declare_rt(&mut self.runtime_refs, "gos_rt_vec_get_ptr");
+        writeln!(self.out, "{slow}:").unwrap();
+        let called = self.fresh();
+        writeln!(
+            self.out,
+            "  {called} = call ptr @gos_rt_vec_get_ptr(ptr {vec_ptr}, i64 {idx})"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {slot}, ptr {called}, i64 {bytes}, i1 false)"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{cont}:").unwrap();
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
     }
 
     /// Inline fast path for `gos_rt_vec_get_i64(vec, idx) -> i64`. The valid
@@ -521,8 +692,31 @@ impl<'a> Lowerer<'a> {
         )
         .unwrap();
         writeln!(self.out, "{check}:").unwrap();
-        let len = self.fresh();
-        writeln!(self.out, "  {len} = load i64, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
+        // Word-stride elements skip the header `elem_bytes` load: the
+        // index scales by a constant 8 that folds into the address
+        // mode, instead of a dependent load + mul on every access.
+        // Other vecs read the stride from the header and pick the
+        // load width to match: shims like `fs::read` / `crypto::
+        // rand_bytes` / HTTP `raw_bytes` hand out packed
+        // `elem_bytes == 1` byte buffers, where an i64-wide load
+        // would pull in neighbouring bytes (and read past the
+        // buffer tail on the last elements). The stride read, where the
+        // element type does not settle it, is a header read like the two
+        // above and belongs in the same block.
+        let (off, stride) = if word_elem {
+            let off = self.fresh();
+            writeln!(self.out, "  {off} = mul i64 {idx}, 8").unwrap();
+            (off, ElemStride::Word)
+        } else if byte_elem {
+            // Statically-bool element: 1-byte stride, so the offset is the
+            // index itself. One `i8` load, no header `elem_bytes` load and no
+            // `is_byte` branch.
+            (idx.clone(), ElemStride::Byte)
+        } else {
+            let (off, eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
+            (off, ElemStride::Header(eb))
+        };
         // One unsigned compare catches both `idx < 0` (wraps to a huge
         // unsigned value, >= len) and `idx >= len`. A `GosVec` length is
         // always non-negative, so `(idx as u64) >= (len as u64)` is exactly
@@ -532,76 +726,52 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  {bad} = icmp uge i64 {idx}, {len}").unwrap();
         writeln!(self.out, "  br i1 {bad}, label %{slow_oob}, label %{load}").unwrap();
         writeln!(self.out, "{load}:").unwrap();
-        // Word-stride elements skip the header `elem_bytes` load: the
-        // index scales by a constant 8 that folds into the address
-        // mode, instead of a dependent load + mul on every access.
-        // Other vecs read the stride from the header and pick the
-        // load width to match: shims like `fs::read` / `crypto::
-        // rand_bytes` / HTTP `raw_bytes` hand out packed
-        // `elem_bytes == 1` byte buffers, where an i64-wide load
-        // would pull in neighbouring bytes (and read past the
-        // buffer tail on the last elements).
-        let loaded = if word_elem {
-            let off = self.fresh();
-            writeln!(self.out, "  {off} = mul i64 {idx}, 8").unwrap();
-            let ea = self.vec_elem_addr(&vec_ptr, &off);
-            let loaded = self.fresh();
-            writeln!(self.out, "  {loaded} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
-            loaded
-        } else if byte_elem {
-            // Statically-bool element: 1-byte stride, so the offset is the
-            // index itself. One `i8` load, no header `elem_bytes` load and no
-            // `is_byte` branch.
-            let ea = self.vec_elem_addr(&vec_ptr, &idx);
-            let b8 = self.fresh();
-            writeln!(self.out, "  {b8} = load i8, ptr {ea}{TBAA_DATA}").unwrap();
-            let b64 = self.fresh();
-            writeln!(self.out, "  {b64} = zext i8 {b8} to i64").unwrap();
-            b64
-        } else {
-            let eb_addr = self.fresh();
-            writeln!(
-                self.out,
-                "  {eb_addr} = getelementptr i8, ptr {vec_ptr}, i64 16"
-            )
-            .unwrap();
-            let eb32 = self.fresh();
-            writeln!(self.out, "  {eb32} = load i32, ptr {eb_addr}{TBAA_HEADER}").unwrap();
-            let eb = self.fresh();
-            writeln!(self.out, "  {eb} = zext i32 {eb32} to i64").unwrap();
-            let off = self.fresh();
-            writeln!(self.out, "  {off} = mul i64 {idx}, {eb}").unwrap();
-            let ea = self.vec_elem_addr(&vec_ptr, &off);
-            let (byte_b, word_b, join_b) = (
-                format!("vg_byte_{s}"),
-                format!("vg_word_{s}"),
-                format!("vg_join_{s}"),
-            );
-            let is_byte = self.fresh();
-            writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
-            writeln!(
-                self.out,
-                "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
-            )
-            .unwrap();
-            writeln!(self.out, "{byte_b}:").unwrap();
-            let b8 = self.fresh();
-            writeln!(self.out, "  {b8} = load i8, ptr {ea}{TBAA_DATA}").unwrap();
-            let b64 = self.fresh();
-            writeln!(self.out, "  {b64} = zext i8 {b8} to i64").unwrap();
-            writeln!(self.out, "  br label %{join_b}").unwrap();
-            writeln!(self.out, "{word_b}:").unwrap();
-            let w64 = self.fresh();
-            writeln!(self.out, "  {w64} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
-            writeln!(self.out, "  br label %{join_b}").unwrap();
-            writeln!(self.out, "{join_b}:").unwrap();
-            let loaded = self.fresh();
-            writeln!(
-                self.out,
-                "  {loaded} = phi i64 [ {b64}, %{byte_b} ], [ {w64}, %{word_b} ]"
-            )
-            .unwrap();
-            loaded
+        let ea = self.elem_addr(&data, &off);
+        let loaded = match stride {
+            ElemStride::Word => {
+                let loaded = self.fresh();
+                writeln!(self.out, "  {loaded} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
+                loaded
+            }
+            ElemStride::Byte => {
+                let b8 = self.fresh();
+                writeln!(self.out, "  {b8} = load i8, ptr {ea}{TBAA_DATA}").unwrap();
+                let b64 = self.fresh();
+                writeln!(self.out, "  {b64} = zext i8 {b8} to i64").unwrap();
+                b64
+            }
+            ElemStride::Header(eb) => {
+                let (byte_b, word_b, join_b) = (
+                    format!("vg_byte_{s}"),
+                    format!("vg_word_{s}"),
+                    format!("vg_join_{s}"),
+                );
+                let is_byte = self.fresh();
+                writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
+                writeln!(
+                    self.out,
+                    "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
+                )
+                .unwrap();
+                writeln!(self.out, "{byte_b}:").unwrap();
+                let b8 = self.fresh();
+                writeln!(self.out, "  {b8} = load i8, ptr {ea}{TBAA_DATA}").unwrap();
+                let b64 = self.fresh();
+                writeln!(self.out, "  {b64} = zext i8 {b8} to i64").unwrap();
+                writeln!(self.out, "  br label %{join_b}").unwrap();
+                writeln!(self.out, "{word_b}:").unwrap();
+                let w64 = self.fresh();
+                writeln!(self.out, "  {w64} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
+                writeln!(self.out, "  br label %{join_b}").unwrap();
+                writeln!(self.out, "{join_b}:").unwrap();
+                let loaded = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {loaded} = phi i64 [ {b64}, %{byte_b} ], [ {w64}, %{word_b} ]"
+                )
+                .unwrap();
+                loaded
+            }
         };
         self.store_i64_as(&loaded, &dest_ty, &dest_slot);
         writeln!(self.out, "  br label %{cont}").unwrap();
@@ -694,18 +864,7 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  {b64} = zext i8 {b8} to i64").unwrap();
             b64
         } else {
-            let eb_addr = self.fresh();
-            writeln!(
-                self.out,
-                "  {eb_addr} = getelementptr i8, ptr {vec_ptr}, i64 16"
-            )
-            .unwrap();
-            let eb32 = self.fresh();
-            writeln!(self.out, "  {eb32} = load i32, ptr {eb_addr}{TBAA_HEADER}").unwrap();
-            let eb = self.fresh();
-            writeln!(self.out, "  {eb} = zext i32 {eb32} to i64").unwrap();
-            let off = self.fresh();
-            writeln!(self.out, "  {off} = mul i64 {idx}, {eb}").unwrap();
+            let (off, eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
             let ea = self.vec_elem_addr(&vec_ptr, &off);
             let (byte_b, word_b, join_b) = (
                 format!("vgu_byte_{s}"),
@@ -809,8 +968,29 @@ impl<'a> Lowerer<'a> {
         )
         .unwrap();
         writeln!(self.out, "{check}:").unwrap();
-        let len = self.fresh();
-        writeln!(self.out, "  {len} = load i64, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
+        // Word-stride elements skip the header `elem_bytes` load: the
+        // index scales by a constant 8 that folds into the address
+        // mode, instead of a dependent load + mul on every access.
+        // Other vecs match the store width to the header stride -
+        // an i64-wide store into a packed `elem_bytes == 1` byte
+        // buffer (`fs::read` / `crypto::rand_bytes` / HTTP
+        // `raw_bytes`) would clobber the seven neighbouring bytes
+        // and write past the buffer tail on the last elements. The stride
+        // read is a header read like the two above and stays with them.
+        let (off, stride) = if word_elem {
+            let off = self.fresh();
+            writeln!(self.out, "  {off} = mul i64 {idx}, 8").unwrap();
+            (off, ElemStride::Word)
+        } else if byte_elem {
+            // Statically-bool element: 1-byte stride, so the offset is the
+            // index itself. One `i8` store, no header `elem_bytes` load and no
+            // `is_byte` branch.
+            (idx.clone(), ElemStride::Byte)
+        } else {
+            let (off, eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
+            (off, ElemStride::Header(eb))
+        };
         // One unsigned compare catches both `idx < 0` (wraps to a huge
         // unsigned value, >= len) and `idx >= len`. A `GosVec` length is
         // always non-negative, so `(idx as u64) >= (len as u64)` is exactly
@@ -824,56 +1004,33 @@ impl<'a> Lowerer<'a> {
         )
         .unwrap();
         writeln!(self.out, "{store_b}:").unwrap();
-        // Word-stride elements skip the header `elem_bytes` load: the
-        // index scales by a constant 8 that folds into the address
-        // mode, instead of a dependent load + mul on every access.
-        // Other vecs match the store width to the header stride -
-        // an i64-wide store into a packed `elem_bytes == 1` byte
-        // buffer (`fs::read` / `crypto::rand_bytes` / HTTP
-        // `raw_bytes`) would clobber the seven neighbouring bytes
-        // and write past the buffer tail on the last elements.
-        if word_elem {
-            let off = self.fresh();
-            writeln!(self.out, "  {off} = mul i64 {idx}, 8").unwrap();
-            let ea = self.vec_elem_addr(&vec_ptr, &off);
-            writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
-        } else if byte_elem {
-            // Statically-bool element: 1-byte stride, so the offset is the
-            // index itself. One `i8` store, no header `elem_bytes` load and no
-            // `is_byte` branch.
-            let ea = self.vec_elem_addr(&vec_ptr, &idx);
-            let v8 = self.fresh();
-            writeln!(self.out, "  {v8} = trunc i64 {val} to i8").unwrap();
-            writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
-        } else {
-            let eb_addr = self.fresh();
-            writeln!(
-                self.out,
-                "  {eb_addr} = getelementptr i8, ptr {vec_ptr}, i64 16"
-            )
-            .unwrap();
-            let eb32 = self.fresh();
-            writeln!(self.out, "  {eb32} = load i32, ptr {eb_addr}{TBAA_HEADER}").unwrap();
-            let eb = self.fresh();
-            writeln!(self.out, "  {eb} = zext i32 {eb32} to i64").unwrap();
-            let off = self.fresh();
-            writeln!(self.out, "  {off} = mul i64 {idx}, {eb}").unwrap();
-            let ea = self.vec_elem_addr(&vec_ptr, &off);
-            let (byte_b, word_b) = (format!("vs_byte_{s}"), format!("vs_word_{s}"));
-            let is_byte = self.fresh();
-            writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
-            writeln!(
-                self.out,
-                "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
-            )
-            .unwrap();
-            writeln!(self.out, "{byte_b}:").unwrap();
-            let v8 = self.fresh();
-            writeln!(self.out, "  {v8} = trunc i64 {val} to i8").unwrap();
-            writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
-            writeln!(self.out, "  br label %{cont}").unwrap();
-            writeln!(self.out, "{word_b}:").unwrap();
-            writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        match stride {
+            ElemStride::Word => {
+                writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
+            }
+            ElemStride::Byte => {
+                let v8 = self.fresh();
+                writeln!(self.out, "  {v8} = trunc i64 {val} to i8").unwrap();
+                writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
+            }
+            ElemStride::Header(eb) => {
+                let (byte_b, word_b) = (format!("vs_byte_{s}"), format!("vs_word_{s}"));
+                let is_byte = self.fresh();
+                writeln!(self.out, "  {is_byte} = icmp eq i64 {eb}, 1").unwrap();
+                writeln!(
+                    self.out,
+                    "  br i1 {is_byte}, label %{byte_b}, label %{word_b}"
+                )
+                .unwrap();
+                writeln!(self.out, "{byte_b}:").unwrap();
+                let v8 = self.fresh();
+                writeln!(self.out, "  {v8} = trunc i64 {val} to i8").unwrap();
+                writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
+                writeln!(self.out, "  br label %{cont}").unwrap();
+                writeln!(self.out, "{word_b}:").unwrap();
+                writeln!(self.out, "  store i64 {val}, ptr {ea}{TBAA_DATA}").unwrap();
+            }
         }
         writeln!(self.out, "  br label %{cont}").unwrap();
         let cold_start = self.out.len();
@@ -958,18 +1115,7 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  {v8} = trunc i64 {val} to i8").unwrap();
             writeln!(self.out, "  store i8 {v8}, ptr {ea}{TBAA_DATA}").unwrap();
         } else {
-            let eb_addr = self.fresh();
-            writeln!(
-                self.out,
-                "  {eb_addr} = getelementptr i8, ptr {vec_ptr}, i64 16"
-            )
-            .unwrap();
-            let eb32 = self.fresh();
-            writeln!(self.out, "  {eb32} = load i32, ptr {eb_addr}{TBAA_HEADER}").unwrap();
-            let eb = self.fresh();
-            writeln!(self.out, "  {eb} = zext i32 {eb32} to i64").unwrap();
-            let off = self.fresh();
-            writeln!(self.out, "  {off} = mul i64 {idx}, {eb}").unwrap();
+            let (off, eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
             let ea = self.vec_elem_addr(&vec_ptr, &off);
             let (byte_b, word_b, join_b) = (
                 format!("vsu_byte_{s}"),
@@ -1034,8 +1180,7 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  br i1 {isnull}, label %{cont}, label %{check}").unwrap();
 
         writeln!(self.out, "{check}:").unwrap();
-        let len = self.fresh();
-        writeln!(self.out, "  {len} = load i64, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
         let i_bad = self.fresh();
         writeln!(self.out, "  {i_bad} = icmp uge i64 {i}, {len}").unwrap();
         writeln!(self.out, "  br i1 {i_bad}, label %{cont}, label %{check_j}").unwrap();
@@ -1051,8 +1196,8 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  {i_off} = mul i64 {i}, 8").unwrap();
             let j_off = self.fresh();
             writeln!(self.out, "  {j_off} = mul i64 {j}, 8").unwrap();
-            let i_addr = self.vec_elem_addr(&vec_ptr, &i_off);
-            let j_addr = self.vec_elem_addr(&vec_ptr, &j_off);
+            let i_addr = self.elem_addr(&data, &i_off);
+            let j_addr = self.elem_addr(&data, &j_off);
             let a = self.fresh();
             writeln!(self.out, "  {a} = load i64, ptr {i_addr}{TBAA_DATA}").unwrap();
             let b = self.fresh();
@@ -1060,8 +1205,8 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  store i64 {b}, ptr {i_addr}{TBAA_DATA}").unwrap();
             writeln!(self.out, "  store i64 {a}, ptr {j_addr}{TBAA_DATA}").unwrap();
         } else {
-            let i_addr = self.vec_elem_addr(&vec_ptr, &i);
-            let j_addr = self.vec_elem_addr(&vec_ptr, &j);
+            let i_addr = self.elem_addr(&data, &i);
+            let j_addr = self.elem_addr(&data, &j);
             let a = self.fresh();
             writeln!(self.out, "  {a} = load i8, ptr {i_addr}{TBAA_DATA}").unwrap();
             let b = self.fresh();
@@ -1126,8 +1271,7 @@ impl<'a> Lowerer<'a> {
         .unwrap();
 
         writeln!(self.out, "{check}:").unwrap();
-        let len = self.fresh();
-        writeln!(self.out, "  {len} = load i64, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
         let i_bad = self.fresh();
         writeln!(self.out, "  {i_bad} = icmp uge i64 {i}, {len}").unwrap();
         writeln!(
@@ -1156,8 +1300,8 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  {i_off} = mul i64 {i}, 8").unwrap();
             let j_off = self.fresh();
             writeln!(self.out, "  {j_off} = mul i64 {j}, 8").unwrap();
-            let i_addr = self.vec_elem_addr(&vec_ptr, &i_off);
-            let j_addr = self.vec_elem_addr(&vec_ptr, &j_off);
+            let i_addr = self.elem_addr(&data, &i_off);
+            let j_addr = self.elem_addr(&data, &j_off);
             let a = self.fresh();
             writeln!(self.out, "  {a} = load i64, ptr {i_addr}{TBAA_DATA}").unwrap();
             let b = self.fresh();
@@ -1165,8 +1309,8 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  store i64 {b}, ptr {i_addr}{TBAA_DATA}").unwrap();
             writeln!(self.out, "  store i64 {a}, ptr {j_addr}{TBAA_DATA}").unwrap();
         } else {
-            let i_addr = self.vec_elem_addr(&vec_ptr, &i);
-            let j_addr = self.vec_elem_addr(&vec_ptr, &j);
+            let i_addr = self.elem_addr(&data, &i);
+            let j_addr = self.elem_addr(&data, &j);
             let a = self.fresh();
             writeln!(self.out, "  {a} = load i8, ptr {i_addr}{TBAA_DATA}").unwrap();
             let b = self.fresh();
@@ -1273,6 +1417,22 @@ impl<'a> Lowerer<'a> {
         destination: &Place,
         target: Option<&gossamer_mir::BlockId>,
     ) -> Result<(), BuildError> {
+        self.lower_vec_get_ptr_inline_as(args, destination, target, false)
+    }
+
+    /// [`Self::lower_vec_get_ptr_inline`], storing the address as an integer
+    /// word when the destination slot holds one.
+    ///
+    /// A walk over a sequence of aggregates binds the element's address as a
+    /// word and copies the element out of it, so the destination is typed
+    /// `i64` where the same address elsewhere is typed `ptr`.
+    pub(crate) fn lower_vec_get_ptr_inline_as(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+        as_word: bool,
+    ) -> Result<(), BuildError> {
         let vec_ptr = self.vec_operand_ptr(&args[0])?;
         let idx = self.lower_operand(&args[1])?;
         let idx = self.widen_to_i64(&args[1], &idx);
@@ -1289,31 +1449,29 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  {isnull} = icmp eq ptr {vec_ptr}, null").unwrap();
         writeln!(self.out, "  br i1 {isnull}, label %{dflt}, label %{check}").unwrap();
         writeln!(self.out, "{check}:").unwrap();
-        let len = self.fresh();
-        writeln!(self.out, "  {len} = load i64, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
+        let (off, _eb) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
         // One unsigned compare catches both `idx < 0` and `idx >= len`; a
         // GosVec length is always non-negative.
         let bad = self.fresh();
         writeln!(self.out, "  {bad} = icmp uge i64 {idx}, {len}").unwrap();
         writeln!(self.out, "  br i1 {bad}, label %{dflt}, label %{load}").unwrap();
         writeln!(self.out, "{load}:").unwrap();
-        let eb_addr = self.fresh();
-        writeln!(
-            self.out,
-            "  {eb_addr} = getelementptr i8, ptr {vec_ptr}, i64 16"
-        )
-        .unwrap();
-        let eb32 = self.fresh();
-        writeln!(self.out, "  {eb32} = load i32, ptr {eb_addr}{TBAA_HEADER}").unwrap();
-        let eb = self.fresh();
-        writeln!(self.out, "  {eb} = zext i32 {eb32} to i64").unwrap();
-        let off = self.fresh();
-        writeln!(self.out, "  {off} = mul i64 {idx}, {eb}").unwrap();
-        let ea = self.vec_elem_addr(&vec_ptr, &off);
-        writeln!(self.out, "  store ptr {ea}, ptr {dest_slot}").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        if as_word {
+            let word = self.fresh();
+            writeln!(self.out, "  {word} = ptrtoint ptr {ea} to i64").unwrap();
+            writeln!(self.out, "  store i64 {word}, ptr {dest_slot}").unwrap();
+        } else {
+            writeln!(self.out, "  store ptr {ea}, ptr {dest_slot}").unwrap();
+        }
         writeln!(self.out, "  br label %{cont}").unwrap();
         writeln!(self.out, "{dflt}:").unwrap();
-        writeln!(self.out, "  store ptr null, ptr {dest_slot}").unwrap();
+        if as_word {
+            writeln!(self.out, "  store i64 0, ptr {dest_slot}").unwrap();
+        } else {
+            writeln!(self.out, "  store ptr null, ptr {dest_slot}").unwrap();
+        }
         writeln!(self.out, "  br label %{cont}").unwrap();
         writeln!(self.out, "{cont}:").unwrap();
         emit_terminator_branch(&mut self.out, target);
@@ -1323,6 +1481,18 @@ impl<'a> Lowerer<'a> {
     /// Emits the element address for a GosVec: loads the data
     /// pointer from header offset 24 and offsets it by `off` bytes.
     fn vec_elem_addr(&mut self, vec_ptr: &str, off: &str) -> String {
+        let dptr = self.vec_data_ptr(vec_ptr);
+        self.elem_addr(&dptr, off)
+    }
+
+    /// The GosVec data pointer, read from header offset 24.
+    ///
+    /// A checked access reads this beside the length, in the block that
+    /// already dominates the bounds branch, so both header reads stay
+    /// unconditional on the path that takes them. An access whose receiver
+    /// is loop-invariant then has both hoisted out of the loop, which a
+    /// read placed after the bounds branch cannot be.
+    fn vec_data_ptr(&mut self, vec_ptr: &str) -> String {
         let dptr_addr = self.fresh();
         writeln!(
             self.out,
@@ -1335,9 +1505,22 @@ impl<'a> Lowerer<'a> {
             "  {dptr} = load ptr, ptr {dptr_addr}{TBAA_HEADER}"
         )
         .unwrap();
+        dptr
+    }
+
+    /// Element address `data + off` for a data pointer already in hand.
+    fn elem_addr(&mut self, data: &str, off: &str) -> String {
         let ea = self.fresh();
-        writeln!(self.out, "  {ea} = getelementptr i8, ptr {dptr}, i64 {off}").unwrap();
+        writeln!(self.out, "  {ea} = getelementptr i8, ptr {data}, i64 {off}").unwrap();
         ea
+    }
+
+    /// The length and data pointer of a GosVec, emitted together.
+    fn vec_header_len_data(&mut self, vec_ptr: &str) -> (String, String) {
+        let len = self.fresh();
+        writeln!(self.out, "  {len} = load i64, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        let dptr = self.vec_data_ptr(vec_ptr);
+        (len, dptr)
     }
 
     /// Store an i64 SSA value into `dest_slot` coerced to `dest_ty`.
@@ -2153,6 +2336,503 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// The element stride a slot container's own type settles, where the
+    /// element owns no reference-counted child.
+    ///
+    /// `Deque`, `Queue` and `Stack` all hold their elements in one `GosVec`
+    /// at the same stride a `Vec<T>` would, so an element whose leaves are
+    /// all scalars is moved in and out by its bytes alone.
+    pub(crate) fn container_operand_scalar_stride(&self, op: &Operand) -> Option<i64> {
+        /// `Deque`, `Queue`, and `Stack`, by the sentinel `DefId` each carries.
+        const CONTAINER_DEF_LOCALS: [u32; 3] = [u32::MAX - 19, u32::MAX - 31, u32::MAX - 32];
+        let Operand::Copy(pl) = op else {
+            return None;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let Some(TyKind::Adt { def, substs }) = self.tcx.kind(ty) else {
+            return None;
+        };
+        if !CONTAINER_DEF_LOCALS.contains(&def.local) {
+            return None;
+        }
+        let elem = *substs.types().first()?;
+        self.tcx
+            .scalar_leaves_only(elem)
+            .then(|| crate::lower::settled_elem_bytes(self.tcx, elem))
+            .flatten()
+    }
+
+    /// Inline the spare-capacity path of a slot container's back push.
+    ///
+    /// The element store grows at its end, so a push with capacity in hand is
+    /// one copy and a length bump. A store whose dead prefix has grown enough
+    /// to be reclaimed, and one that has to grow, stay with the shim - both
+    /// move the whole live range, which is not a fast path.
+    pub(crate) fn lower_deque_push_back_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+        bytes: i64,
+    ) -> Result<(), BuildError> {
+        declare_rt(&mut self.runtime_refs, "gos_rt_deque_push_back_wide");
+        let deque_ptr = self.vec_operand_ptr(&args[0])?;
+        let elem_addr = self.elem_slot_address(&args[1])?;
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (check, fast, slow, cont) = (
+            format!("dpb_check_{s}"),
+            format!("dpb_fast_{s}"),
+            format!("dpb_slow_{s}"),
+            format!("dpb_cont_{s}"),
+        );
+        let (len, data, vecp) = self.emit_deque_store_probe(&deque_ptr, &check, &slow);
+        let head = self.fresh();
+        let head_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {head_addr} = getelementptr i8, ptr {deque_ptr}, i64 8"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {head} = load i64, ptr {head_addr}{TBAA_HEADER}"
+        )
+        .unwrap();
+        let cap_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {cap_addr} = getelementptr i8, ptr {vecp}, i64 8"
+        )
+        .unwrap();
+        let cap = self.fresh();
+        writeln!(self.out, "  {cap} = load i64, ptr {cap_addr}{TBAA_HEADER}").unwrap();
+        let head2 = self.fresh();
+        writeln!(self.out, "  {head2} = mul i64 {head}, 2").unwrap();
+        let reclaim = self.fresh();
+        writeln!(self.out, "  {reclaim} = icmp sge i64 {head2}, {len}").unwrap();
+        let full = self.fresh();
+        writeln!(self.out, "  {full} = icmp sge i64 {len}, {cap}").unwrap();
+        let bad = self.fresh();
+        writeln!(self.out, "  {bad} = or i1 {reclaim}, {full}").unwrap();
+        writeln!(self.out, "  br i1 {bad}, label %{slow}, label %{fast}").unwrap();
+        writeln!(self.out, "{fast}:").unwrap();
+        let off = self.fresh();
+        writeln!(self.out, "  {off} = mul i64 {len}, {bytes}").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        writeln!(
+            self.out,
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {ea}, ptr {elem_addr}, i64 {bytes}, i1 false)"
+        )
+        .unwrap();
+        let len1 = self.fresh();
+        writeln!(self.out, "  {len1} = add i64 {len}, 1").unwrap();
+        writeln!(self.out, "  store i64 {len1}, ptr {vecp}{TBAA_HEADER}").unwrap();
+        self.emit_vec_mutation_bump(&vecp);
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow}:").unwrap();
+        writeln!(
+            self.out,
+            "  call void @gos_rt_deque_push_back_wide(ptr {deque_ptr}, ptr {elem_addr})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{cont}:").unwrap();
+        if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
+            let dest_ty = render_ty(self.tcx, self.body.local_ty(destination.local));
+            let dslot = local_slot(destination.local);
+            let zero = match dest_ty.as_str() {
+                "ptr" => "null",
+                "double" | "float" => "0.0",
+                _ => "0",
+            };
+            writeln!(self.out, "  store {dest_ty} {zero}, ptr {dslot}").unwrap();
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Inline the front pop of a slot container whose dead prefix is not yet
+    /// due for reclamation: the front element's bytes move into the caller's
+    /// storage and the live range starts one element later.
+    pub(crate) fn lower_deque_pop_front_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+        bytes: i64,
+    ) -> Result<(), BuildError> {
+        declare_rt(&mut self.runtime_refs, "gos_rt_deque_pop_front_into");
+        let deque_ptr = self.vec_operand_ptr(&args[0])?;
+        let out = self.vec_operand_ptr(&args[1])?;
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (check, fast, slow, cont) = (
+            format!("dpf_check_{s}"),
+            format!("dpf_fast_{s}"),
+            format!("dpf_slow_{s}"),
+            format!("dpf_cont_{s}"),
+        );
+        let (len, data, _vecp) = self.emit_deque_store_probe(&deque_ptr, &check, &slow);
+        let head_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {head_addr} = getelementptr i8, ptr {deque_ptr}, i64 8"
+        )
+        .unwrap();
+        let head = self.fresh();
+        writeln!(
+            self.out,
+            "  {head} = load i64, ptr {head_addr}{TBAA_HEADER}"
+        )
+        .unwrap();
+        // Reclaiming the dead prefix is the push's business: it is what
+        // needs the room, and it is the only side that can bound the store.
+        // A pop only moves the live range's start, so it stays fast for as
+        // long as there is an element there.
+        let empty = self.fresh();
+        writeln!(self.out, "  {empty} = icmp sge i64 {head}, {len}").unwrap();
+        writeln!(self.out, "  br i1 {empty}, label %{slow}, label %{fast}").unwrap();
+        writeln!(self.out, "{fast}:").unwrap();
+        let off = self.fresh();
+        writeln!(self.out, "  {off} = mul i64 {head}, {bytes}").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        writeln!(
+            self.out,
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {out}, ptr {ea}, i64 {bytes}, i1 false)"
+        )
+        .unwrap();
+        let head1 = self.fresh();
+        writeln!(self.out, "  {head1} = add i64 {head}, 1").unwrap();
+        writeln!(
+            self.out,
+            "  store i64 {head1}, ptr {head_addr}{TBAA_HEADER}"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow}:").unwrap();
+        let called = self.fresh();
+        writeln!(
+            self.out,
+            "  {called} = call i64 @gos_rt_deque_pop_front_into(ptr {deque_ptr}, ptr {out})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{cont}:").unwrap();
+        let disc = self.fresh();
+        writeln!(
+            self.out,
+            "  {disc} = phi i64 [ 0, %{fast} ], [ {called}, %{slow} ]"
+        )
+        .unwrap();
+        if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
+            let dest_ty = render_ty(self.tcx, self.body.local_ty(destination.local));
+            let dslot = local_slot(destination.local);
+            self.store_i64_as(&disc, &dest_ty, &dslot);
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Emits the guard reaching a slot container's element store, branching to
+    /// `slow` where there is none, and answers its length, data pointer, and
+    /// the store itself. Leaves the emitter in the `check` block.
+    fn emit_deque_store_probe(
+        &mut self,
+        deque_ptr: &str,
+        check: &str,
+        slow: &str,
+    ) -> (String, String, String) {
+        let isnull = self.fresh();
+        writeln!(self.out, "  {isnull} = icmp eq ptr {deque_ptr}, null").unwrap();
+        let vec_check = format!("{check}_store");
+        writeln!(
+            self.out,
+            "  br i1 {isnull}, label %{slow}, label %{vec_check}"
+        )
+        .unwrap();
+        writeln!(self.out, "{vec_check}:").unwrap();
+        let vecp = self.fresh();
+        writeln!(
+            self.out,
+            "  {vecp} = load ptr, ptr {deque_ptr}{TBAA_HEADER}"
+        )
+        .unwrap();
+        let novec = self.fresh();
+        writeln!(self.out, "  {novec} = icmp eq ptr {vecp}, null").unwrap();
+        writeln!(self.out, "  br i1 {novec}, label %{slow}, label %{check}").unwrap();
+        writeln!(self.out, "{check}:").unwrap();
+        let (len, data) = self.vec_header_len_data(&vecp);
+        let nodata = self.fresh();
+        writeln!(self.out, "  {nodata} = icmp eq ptr {data}, null").unwrap();
+        let data_ok = format!("{check}_data");
+        writeln!(
+            self.out,
+            "  br i1 {nodata}, label %{slow}, label %{data_ok}"
+        )
+        .unwrap();
+        writeln!(self.out, "{data_ok}:").unwrap();
+        (len, data, vecp)
+    }
+
+    /// The multiple-of-eight element width an inline word-wise exchange
+    /// handles, for a `Vec` whose element type settles its stride.
+    pub(crate) fn vec_operand_word_multiple_stride(&self, op: &Operand) -> Option<i64> {
+        let bytes = self.vec_operand_elem_bytes(op)?;
+        (bytes > 0 && bytes % 8 == 0 && bytes <= 32).then_some(bytes)
+    }
+
+    /// Inline `gos_rt_vec_pop_into(vec, out)`: the last element's bytes move
+    /// into the caller's storage and the length drops by one.
+    ///
+    /// The shim copies the element whatever its kind - a pop moves the
+    /// vector's share out rather than duplicating it - so the only thing the
+    /// inline form needs from the type is a settled stride.
+    pub(crate) fn lower_vec_pop_into_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+        bytes: i64,
+    ) -> Result<(), BuildError> {
+        declare_rt(&mut self.runtime_refs, "gos_rt_vec_pop_into");
+        let vec_ptr = self.vec_operand_ptr(&args[0])?;
+        let out = self.vec_operand_ptr(&args[1])?;
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (check, pop, slow, cont) = (
+            format!("vpi_check_{s}"),
+            format!("vpi_pop_{s}"),
+            format!("vpi_slow_{s}"),
+            format!("vpi_cont_{s}"),
+        );
+        let isnull = self.fresh();
+        writeln!(self.out, "  {isnull} = icmp eq ptr {vec_ptr}, null").unwrap();
+        writeln!(self.out, "  br i1 {isnull}, label %{slow}, label %{check}").unwrap();
+        writeln!(self.out, "{check}:").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
+        let empty = self.fresh();
+        writeln!(self.out, "  {empty} = icmp sle i64 {len}, 0").unwrap();
+        let nodata = self.fresh();
+        writeln!(self.out, "  {nodata} = icmp eq ptr {data}, null").unwrap();
+        let bad = self.fresh();
+        writeln!(self.out, "  {bad} = or i1 {empty}, {nodata}").unwrap();
+        writeln!(self.out, "  br i1 {bad}, label %{slow}, label %{pop}").unwrap();
+        writeln!(self.out, "{pop}:").unwrap();
+        let newlen = self.fresh();
+        writeln!(self.out, "  {newlen} = sub i64 {len}, 1").unwrap();
+        writeln!(self.out, "  store i64 {newlen}, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        self.emit_vec_mutation_bump(&vec_ptr);
+        let off = self.fresh();
+        writeln!(self.out, "  {off} = mul i64 {newlen}, {bytes}").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        writeln!(
+            self.out,
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {out}, ptr {ea}, i64 {bytes}, i1 false)"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow}:").unwrap();
+        let called = self.fresh();
+        writeln!(
+            self.out,
+            "  {called} = call i64 @gos_rt_vec_pop_into(ptr {vec_ptr}, ptr {out})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{cont}:").unwrap();
+        let disc = self.fresh();
+        writeln!(
+            self.out,
+            "  {disc} = phi i64 [ 0, %{pop} ], [ {called}, %{slow} ]"
+        )
+        .unwrap();
+        if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
+            let dest_ty = render_ty(self.tcx, self.body.local_ty(destination.local));
+            let dslot = local_slot(destination.local);
+            self.store_i64_as(&disc, &dest_ty, &dslot);
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Exchanges two elements of a settled multiple-of-eight width in place,
+    /// word by word, where the scalar swap would have called the runtime.
+    pub(crate) fn lower_vec_swap_words_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+        bytes: i64,
+        panics: bool,
+    ) -> Result<(), BuildError> {
+        let shim = if panics {
+            "gos_rt_vec_swap_safe"
+        } else {
+            "gos_rt_vec_swap_i64"
+        };
+        declare_rt(&mut self.runtime_refs, shim);
+        let vec_ptr = self.vec_operand_ptr(&args[0])?;
+        let i_raw = self.lower_operand(&args[1])?;
+        let i = self.widen_to_i64(&args[1], &i_raw);
+        let j_raw = self.lower_operand(&args[2])?;
+        let j = self.widen_to_i64(&args[2], &j_raw);
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (check, swap, slow, cont) = (
+            format!("vsw_check_{s}"),
+            format!("vsw_do_{s}"),
+            format!("vsw_slow_{s}"),
+            format!("vsw_cont_{s}"),
+        );
+        let isnull = self.fresh();
+        writeln!(self.out, "  {isnull} = icmp eq ptr {vec_ptr}, null").unwrap();
+        writeln!(self.out, "  br i1 {isnull}, label %{slow}, label %{check}").unwrap();
+        writeln!(self.out, "{check}:").unwrap();
+        let (len, data) = self.vec_header_len_data(&vec_ptr);
+        let i_bad = self.fresh();
+        writeln!(self.out, "  {i_bad} = icmp uge i64 {i}, {len}").unwrap();
+        let j_bad = self.fresh();
+        writeln!(self.out, "  {j_bad} = icmp uge i64 {j}, {len}").unwrap();
+        let bad = self.fresh();
+        writeln!(self.out, "  {bad} = or i1 {i_bad}, {j_bad}").unwrap();
+        writeln!(self.out, "  br i1 {bad}, label %{slow}, label %{swap}").unwrap();
+        writeln!(self.out, "{swap}:").unwrap();
+        let i_off = self.fresh();
+        writeln!(self.out, "  {i_off} = mul i64 {i}, {bytes}").unwrap();
+        let j_off = self.fresh();
+        writeln!(self.out, "  {j_off} = mul i64 {j}, {bytes}").unwrap();
+        let i_addr = self.elem_addr(&data, &i_off);
+        let j_addr = self.elem_addr(&data, &j_off);
+        let words = bytes / 8;
+        let mut held = Vec::with_capacity(words as usize * 2);
+        for w in 0..words {
+            let (ia, ja) = (self.fresh(), self.fresh());
+            writeln!(
+                self.out,
+                "  {ia} = getelementptr i8, ptr {i_addr}, i64 {}",
+                w * 8
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "  {ja} = getelementptr i8, ptr {j_addr}, i64 {}",
+                w * 8
+            )
+            .unwrap();
+            let (x, y) = (self.fresh(), self.fresh());
+            writeln!(self.out, "  {x} = load i64, ptr {ia}{TBAA_DATA}").unwrap();
+            writeln!(self.out, "  {y} = load i64, ptr {ja}{TBAA_DATA}").unwrap();
+            held.push((ia, ja, x, y));
+        }
+        for (ia, ja, x, y) in held {
+            writeln!(self.out, "  store i64 {y}, ptr {ia}{TBAA_DATA}").unwrap();
+            writeln!(self.out, "  store i64 {x}, ptr {ja}{TBAA_DATA}").unwrap();
+        }
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow}:").unwrap();
+        writeln!(
+            self.out,
+            "  call void @{shim}(ptr {vec_ptr}, i64 {i}, i64 {j})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{cont}:").unwrap();
+        if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
+            let dest_ty = render_ty(self.tcx, self.body.local_ty(destination.local));
+            let dslot = local_slot(destination.local);
+            let zero = match dest_ty.as_str() {
+                "ptr" => "null",
+                "double" | "float" => "0.0",
+                _ => "0",
+            };
+            writeln!(self.out, "  store {dest_ty} {zero}, ptr {dslot}").unwrap();
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Records a structural mutation, which a lazy borrowed iterator reads to
+    /// notice that the sequence it walks has changed under it.
+    fn emit_vec_mutation_bump(&mut self, vec_ptr: &str) {
+        let addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {addr} = getelementptr i8, ptr {vec_ptr}, i64 56"
+        )
+        .unwrap();
+        let cur = self.fresh();
+        writeln!(self.out, "  {cur} = load i64, ptr {addr}{TBAA_HEADER}").unwrap();
+        let next = self.fresh();
+        writeln!(self.out, "  {next} = add i64 {cur}, 1").unwrap();
+        writeln!(self.out, "  store i64 {next}, ptr {addr}{TBAA_HEADER}").unwrap();
+    }
+
+    /// Emits the spare-capacity path of an aggregate-element push: the
+    /// element's bytes move into the slot past the end and the length grows
+    /// by one. Growth, and a null receiver, stay with the runtime shim.
+    fn emit_vec_push_aggregate_inline(&mut self, vec_ptr: &str, val_addr: &str, bytes: i64) {
+        declare_rt(&mut self.runtime_refs, "gos_rt_vec_push");
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (check, fast, slow, cont) = (
+            format!("vpa_check_{s}"),
+            format!("vpa_fast_{s}"),
+            format!("vpa_slow_{s}"),
+            format!("vpa_cont_{s}"),
+        );
+        let isnull = self.fresh();
+        writeln!(self.out, "  {isnull} = icmp eq ptr {vec_ptr}, null").unwrap();
+        writeln!(self.out, "  br i1 {isnull}, label %{slow}, label %{check}").unwrap();
+        writeln!(self.out, "{check}:").unwrap();
+        let (len, data) = self.vec_header_len_data(vec_ptr);
+        let cap_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {cap_addr} = getelementptr i8, ptr {vec_ptr}, i64 8"
+        )
+        .unwrap();
+        let cap = self.fresh();
+        writeln!(self.out, "  {cap} = load i64, ptr {cap_addr}{TBAA_HEADER}").unwrap();
+        let full = self.fresh();
+        writeln!(self.out, "  {full} = icmp sge i64 {len}, {cap}").unwrap();
+        writeln!(self.out, "  br i1 {full}, label %{slow}, label %{fast}").unwrap();
+        writeln!(self.out, "{fast}:").unwrap();
+        let off = self.fresh();
+        writeln!(self.out, "  {off} = mul i64 {len}, {bytes}").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        writeln!(
+            self.out,
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {ea}, ptr {val_addr}, i64 {bytes}, i1 false)"
+        )
+        .unwrap();
+        let len1 = self.fresh();
+        writeln!(self.out, "  {len1} = add i64 {len}, 1").unwrap();
+        writeln!(self.out, "  store i64 {len1}, ptr {vec_ptr}{TBAA_HEADER}").unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow}:").unwrap();
+        writeln!(
+            self.out,
+            "  call void @gos_rt_vec_push(ptr {vec_ptr}, ptr {val_addr})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{cont}:").unwrap();
+    }
+
     /// Inline `v.push(x)` for arbitrary element widths.
     /// `gos_rt_vec_push(*mut GosVec, *const u8)` reads the
     /// element through the second pointer; the i64 / ptr value
@@ -2202,12 +2882,26 @@ impl<'a> Lowerer<'a> {
             } else {
                 self.lower_place_address(p)
             };
-            declare_rt(&mut self.runtime_refs, "gos_rt_vec_push");
-            writeln!(
-                self.out,
-                "  call void @gos_rt_vec_push(ptr {vec_ptr}, ptr {val_addr})"
-            )
-            .unwrap();
+            let elem_ty = self.place_leaf_ty(p);
+            // An element owning no reference-counted child is moved by its
+            // bytes alone, so a push with capacity in hand is one copy and a
+            // length increment. An element whose slots carry heap children
+            // needs the retains the runtime performs, and keeps the call.
+            let inline_bytes = self
+                .tcx
+                .scalar_leaves_only(elem_ty)
+                .then(|| crate::lower::settled_elem_bytes(self.tcx, elem_ty))
+                .flatten();
+            if let Some(bytes) = inline_bytes {
+                self.emit_vec_push_aggregate_inline(&vec_ptr, &val_addr, bytes);
+            } else {
+                declare_rt(&mut self.runtime_refs, "gos_rt_vec_push");
+                writeln!(
+                    self.out,
+                    "  call void @gos_rt_vec_push(ptr {vec_ptr}, ptr {val_addr})"
+                )
+                .unwrap();
+            }
             if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
                 let dest_ty = render_ty(self.tcx, self.body.local_ty(destination.local));
                 let dslot = local_slot(destination.local);
@@ -2525,6 +3219,182 @@ impl<'a> Lowerer<'a> {
     /// shared, capacity-exhausted) branches to the runtime shim, which
     /// owns those paths. Header layout matches `c_abi::string`:
     /// `rc@acc-13`, `cap@acc-9`, `len@acc-5`, `tag@acc-1`.
+    /// Inline `s.push_char(c)` for the one case a text builder spends its
+    /// time in: an ASCII character appended to an exclusively held builder
+    /// with room for it.
+    ///
+    /// The character index a `String` carries is what makes an append more
+    /// than a byte store, and its first word is the sentinel saying every
+    /// byte is one character. Appending an ASCII byte to a string already
+    /// carrying that sentinel leaves it saying the same thing, so the index
+    /// needs no work and the append is the store the program wrote. Every
+    /// other shape - a wider character, a shared or full builder, a string
+    /// whose index holds real offsets - keeps the shim.
+    pub(crate) fn lower_str_push_char_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        use gossamer_abi::string_layout as sl;
+        declare_rt(&mut self.runtime_refs, "gos_rt_str_push_char");
+        let acc = self.vec_operand_ptr(&args[0])?;
+        let ch_raw = self.lower_operand(&args[1])?;
+        let ch_ty = self.operand_llvm_ty(&args[1]);
+        let ch = self.coerce_llvm_value(&ch_raw, &ch_ty, "i32");
+        let id = self.next_ssa;
+        self.next_ssa += 1;
+        let (typed, room, ascii, fast, slow, done) = (
+            format!("pc_typed_{id}"),
+            format!("pc_room_{id}"),
+            format!("pc_ascii_{id}"),
+            format!("pc_fast_{id}"),
+            format!("pc_slow_{id}"),
+            format!("pc_done_{id}"),
+        );
+        // An ASCII character is the only one that occupies one byte and keeps
+        // the index sentinel true, and it is tested first because it is the
+        // cheapest of the guards and decides most of the misses.
+        let is_ascii = self.fresh();
+        writeln!(self.out, "  {is_ascii} = icmp ult i32 {ch}, 128").unwrap();
+        let guard = format!("pc_guard_{id}");
+        writeln!(
+            self.out,
+            "  br i1 {is_ascii}, label %{guard}, label %{slow}"
+        )
+        .unwrap();
+        writeln!(self.out, "{guard}:").unwrap();
+        self.emit_typed_string_guard(&acc, &typed, &slow);
+        writeln!(self.out, "{typed}:").unwrap();
+        // A builder is the only tag whose bytes may be written in place; a
+        // literal's live in read-only data and a region string's are swept
+        // wholesale.
+        let tag_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {tag_ptr} = getelementptr i8, ptr {acc}, i64 {}",
+            sl::TAG_OFFSET
+        )
+        .unwrap();
+        let tag = self.fresh();
+        writeln!(self.out, "  {tag} = load i8, ptr {tag_ptr}{TBAA_HEADER}").unwrap();
+        let tag_z = self.fresh();
+        writeln!(self.out, "  {tag_z} = zext i8 {tag} to i32").unwrap();
+        let is_builder = self.fresh();
+        writeln!(
+            self.out,
+            "  {is_builder} = icmp eq i32 {tag_z}, {}",
+            sl::TAG_BUILDER
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {is_builder}, label %{room}, label %{slow}"
+        )
+        .unwrap();
+        writeln!(self.out, "{room}:").unwrap();
+        let rc_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {rc_ptr} = getelementptr i8, ptr {acc}, i64 -13"
+        )
+        .unwrap();
+        let rc = self.fresh();
+        writeln!(self.out, "  {rc} = load i32, ptr {rc_ptr}{TBAA_HEADER}").unwrap();
+        let cap_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {cap_ptr} = getelementptr i8, ptr {acc}, i64 {}",
+            sl::CAP_OFFSET
+        )
+        .unwrap();
+        let cap = self.fresh();
+        writeln!(self.out, "  {cap} = load i32, ptr {cap_ptr}{TBAA_HEADER}").unwrap();
+        let len_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {len_ptr} = getelementptr i8, ptr {acc}, i64 {}",
+            sl::LEN_OFFSET
+        )
+        .unwrap();
+        let len = self.fresh();
+        writeln!(self.out, "  {len} = load i32, ptr {len_ptr}{TBAA_HEADER}").unwrap();
+        let newlen = self.fresh();
+        writeln!(self.out, "  {newlen} = add i32 {len}, 1").unwrap();
+        let fits = self.fresh();
+        writeln!(self.out, "  {fits} = icmp ule i32 {newlen}, {cap}").unwrap();
+        let sole = self.fresh();
+        writeln!(self.out, "  {sole} = icmp eq i32 {rc}, 1").unwrap();
+        let ok = self.fresh();
+        writeln!(self.out, "  {ok} = and i1 {fits}, {sole}").unwrap();
+        writeln!(self.out, "  br i1 {ok}, label %{ascii}, label %{slow}").unwrap();
+        writeln!(self.out, "{ascii}:").unwrap();
+        let cap64 = self.fresh();
+        writeln!(self.out, "  {cap64} = zext i32 {cap} to i64").unwrap();
+        let footer_off = self.fresh();
+        writeln!(self.out, "  {footer_off} = add i64 {cap64}, 1").unwrap();
+        let footer = self.fresh();
+        writeln!(
+            self.out,
+            "  {footer} = getelementptr i8, ptr {acc}, i64 {footer_off}"
+        )
+        .unwrap();
+        let chars = self.fresh();
+        writeln!(self.out, "  {chars} = load i32, ptr {footer}{TBAA_HEADER}").unwrap();
+        let all_ascii = self.fresh();
+        writeln!(
+            self.out,
+            "  {all_ascii} = icmp eq i32 {chars}, {}",
+            sl::INDEX_ASCII
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {all_ascii}, label %{fast}, label %{slow}"
+        )
+        .unwrap();
+        writeln!(self.out, "{fast}:").unwrap();
+        let len64 = self.fresh();
+        writeln!(self.out, "  {len64} = zext i32 {len} to i64").unwrap();
+        let dst = self.fresh();
+        writeln!(
+            self.out,
+            "  {dst} = getelementptr i8, ptr {acc}, i64 {len64}"
+        )
+        .unwrap();
+        let byte = self.fresh();
+        writeln!(self.out, "  {byte} = trunc i32 {ch} to i8").unwrap();
+        writeln!(self.out, "  store i8 {byte}, ptr {dst}{TBAA_DATA}").unwrap();
+        let nul = self.fresh();
+        writeln!(self.out, "  {nul} = getelementptr i8, ptr {dst}, i64 1").unwrap();
+        writeln!(self.out, "  store i8 0, ptr {nul}{TBAA_DATA}").unwrap();
+        writeln!(self.out, "  store i32 {newlen}, ptr {len_ptr}{TBAA_HEADER}").unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow}:").unwrap();
+        let called = self.fresh();
+        writeln!(
+            self.out,
+            "  {called} = call ptr @gos_rt_str_push_char(ptr {acc}, i32 {ch})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{done}:").unwrap();
+        let res = self.fresh();
+        writeln!(
+            self.out,
+            "  {res} = phi ptr [ {acc}, %{fast} ], [ {called}, %{slow} ]"
+        )
+        .unwrap();
+        if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
+            let slot = local_slot(destination.local);
+            writeln!(self.out, "  store ptr {res}, ptr {slot}").unwrap();
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
     pub(crate) fn lower_str_append_bytes_inline(
         &mut self,
         args: &[Operand],

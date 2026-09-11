@@ -1,0 +1,29 @@
+// A `&self` method reached through an aggregate field. The receiver copy
+// names the caller's own storage for the length of the call, so its share of
+// the field is redundant and every tier reads the same cells.
+
+struct Tape { cells: Vec<u8>, pos: i64 }
+
+impl Tape {
+    fn get(&self) -> i64 { self.cells[self.pos] as i64 }
+    fn add(&mut self, delta: i64) { self.cells[self.pos] = ((self.cells[self.pos] as i64 + delta) & 255) as u8 }
+}
+
+struct Machine { tape: Tape, result: i64 }
+
+impl Machine {
+    fn step(&mut self, n: i64) -> i64 {
+        let mut acc = 0
+        for _ in 0..n {
+            self.tape.add(1)
+            while self.tape.get() > 200 { self.tape.add(-100) }
+            acc += self.tape.get()
+        }
+        acc
+    }
+}
+
+fn main() {
+    let mut m = Machine { tape: Tape { cells: #[0; 4], pos: 1 }, result: 0 }
+    println("{}", m.step(1000))
+}

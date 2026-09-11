@@ -1535,6 +1535,28 @@ pub unsafe extern "C" fn gos_rt_vec_pop_opt(v: *mut GosVec) -> i128 {
     })
 }
 
+/// `xs.pop()` whose element the caller already owns storage for: the last
+/// element's slots move into `out` and the answer is the `Option`
+/// discriminant (0 written, 1 empty). The element leaves the vec with its
+/// bytes, so no share is taken and nothing is left behind to release.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_pop_into(v: *mut GosVec, out: *mut u8) -> i64 {
+    ffi_entry!(1, {
+        if v.is_null() || out.is_null() {
+            return 1;
+        }
+        let vec = unsafe { &mut *v };
+        if vec.len <= 0 || vec.ptr.is_null() {
+            return 1;
+        }
+        crate::c_abi::vec::bump_vec_mutation_generation(vec);
+        vec.len -= 1;
+        let src = unsafe { vec.ptr.add((vec.len as usize) * (vec.elem_bytes as usize)) };
+        unsafe { std::ptr::copy_nonoverlapping(src, out, vec.elem_bytes as usize) };
+        0
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_pop(v: *mut GosVec, out: *mut u8) -> i32 {
     ffi_entry!(-1, {

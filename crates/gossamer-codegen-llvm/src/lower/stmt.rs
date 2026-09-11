@@ -564,7 +564,19 @@ impl<'a> Lowerer<'a> {
                     self.emit_heap_spill_frees();
                     writeln!(self.out, "  ret void").unwrap();
                 } else if is_aggregate(self.tcx, ret_ty) {
-                    if let Some(slots) = slot_count(self.tcx, ret_ty) {
+                    if let Some(bytes) = self.body_uses_sret() {
+                        // The caller named storage for this value, so the
+                        // slots go there and the pointer it already holds is
+                        // the answer.
+                        writeln!(
+                            self.out,
+                            "  call void @llvm.memcpy.p0.p0.i64(ptr %sret, ptr {slot}, i64 {bytes}, i1 false)",
+                            slot = local_slot(Local::RETURN)
+                        )
+                        .unwrap();
+                        self.emit_heap_spill_frees();
+                        writeln!(self.out, "  ret ptr %sret").unwrap();
+                    } else if let Some(slots) = slot_count(self.tcx, ret_ty) {
                         // Inline aggregate (struct / tuple / array): the
                         // callee's `%l0` is a stack alloca whose storage
                         // dies when the frame pops. Heap-allocate so the

@@ -126,6 +126,47 @@ pub(crate) unsafe fn skip_cmp_desc(tags: *const u8, cursor: &mut usize) {
     }
 }
 
+/// `true` when a descriptor is one byte long and covers one slot, so a walk
+/// over it is a read of that byte and nothing more.
+const fn desc_tag_is_flat(tag: u8) -> bool {
+    !matches!(
+        tag,
+        gossamer_abi::TUPLE_TAG_NESTED
+            | gossamer_abi::DESC_ARRAY
+            | gossamer_abi::DESC_OPTION
+            | gossamer_abi::DESC_RESULT
+            | gossamer_abi::DESC_ENUM
+            | gossamer_abi::DESC_VEC
+            | gossamer_abi::DESC_SELF
+    )
+}
+
+/// Orders the one-slot values at `a` and `b` under a flat descriptor tag.
+/// Orders two one-slot values under their descriptor tag.
+///
+/// # Safety
+/// `a` and `b` address one slot each, holding a value of the tag's kind.
+pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
+    let wa = unsafe { (a as *const i64).read_unaligned() };
+    let wb = unsafe { (b as *const i64).read_unaligned() };
+    match tag {
+        1 => ord_code((wa as u64).cmp(&(wb as u64))),
+        2 => ord_code(
+            f64::from_bits(wa as u64)
+                .partial_cmp(&f64::from_bits(wb as u64))
+                .unwrap_or(Ordering::Equal),
+        ),
+        3 => ord_code((wa & 1).cmp(&(wb & 1))),
+        4 => ord_code((wa as u32).cmp(&(wb as u32))),
+        5 => {
+            let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
+            let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);
+            ord_code(unsafe { crate::c_abi::gos_rt_str_compare(sa, sb) }.cmp(&0))
+        }
+        _ => ord_code(wa.cmp(&wb)),
+    }
+}
+
 fn ord_code(ordering: Ordering) -> i64 {
     match ordering {
         Ordering::Less => -1,
@@ -165,6 +206,24 @@ pub(crate) unsafe fn compare_desc(
             *cursor += 1;
             let arity = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
+            // Where every field is one byte of descriptor over one slot, the
+            // field's descriptor is at a known offset and its span is one, so
+            // the ordering is read straight off the slots. The general walk
+            // below re-derives both per field, per comparison, which is what
+            // an ordered container spends its time on.
+            let flat = (0..arity).all(|i| desc_tag_is_flat(unsafe { *tags.add(*cursor + i) }));
+            if flat {
+                let mut result = 0i64;
+                for i in 0..arity {
+                    let tag = unsafe { *tags.add(*cursor + i) };
+                    let ord = unsafe { compare_flat(tag, a.add(i * 8), b.add(i * 8)) };
+                    if result == 0 {
+                        result = ord;
+                    }
+                }
+                *cursor += arity;
+                return result;
+            }
             let mut result = 0i64;
             let mut slot = 0usize;
             for _ in 0..arity {
@@ -330,24 +389,7 @@ pub(crate) unsafe fn compare_desc(
         }
         _ => {
             *cursor += 1;
-            let wa = unsafe { (a as *const i64).read_unaligned() };
-            let wb = unsafe { (b as *const i64).read_unaligned() };
-            match tag {
-                1 => ord_code((wa as u64).cmp(&(wb as u64))),
-                2 => ord_code(
-                    f64::from_bits(wa as u64)
-                        .partial_cmp(&f64::from_bits(wb as u64))
-                        .unwrap_or(Ordering::Equal),
-                ),
-                3 => ord_code((wa & 1).cmp(&(wb & 1))),
-                4 => ord_code((wa as u32).cmp(&(wb as u32))),
-                5 => {
-                    let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
-                    let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);
-                    ord_code(unsafe { crate::c_abi::gos_rt_str_compare(sa, sb) }.cmp(&0))
-                }
-                _ => ord_code(wa.cmp(&wb)),
-            }
+            unsafe { compare_flat(tag, a, b) }
         }
     }
 }
@@ -439,6 +481,108 @@ unsafe fn compare_vec(
 unsafe fn elem_addr(v: *const GosVec, idx: i64) -> *const u8 {
     let vec = unsafe { &*v };
     unsafe { vec.ptr.add((idx as usize) * (vec.elem_bytes as usize)) }
+}
+
+/// A decoded ordering descriptor.
+///
+/// A container that orders its elements reads the same descriptor for every
+/// comparison it makes. Deciding its shape once per operation leaves the
+/// comparison itself a read of the slots.
+pub(crate) enum CmpPlan<'a> {
+    /// One slot holding a signed machine word.
+    IntWord,
+    /// That many slots, each a signed machine word, compared in order.
+    IntTuple(usize),
+    /// One slot under one tag.
+    Flat(u8),
+    /// One tag per slot, compared in order until one decides.
+    FlatTuple(&'a [u8]),
+    /// Any other shape, read from the descriptor at each comparison.
+    Walk,
+}
+
+/// The descriptor tag of a signed machine word - the tag
+/// [`compare_flat`] reaches through its default arm, and the one the
+/// overwhelming majority of ordered elements carry.
+const DESC_TAG_INT: u8 = 0;
+
+/// Orders two signed machine words.
+///
+/// # Safety
+/// `a` and `b` address one slot each.
+#[inline]
+pub(crate) unsafe fn compare_int_word(a: *const u8, b: *const u8) -> i64 {
+    let wa = unsafe { (a as *const i64).read_unaligned() };
+    let wb = unsafe { (b as *const i64).read_unaligned() };
+    ord_code(wa.cmp(&wb))
+}
+
+/// Orders two runs of `slots` signed machine words, lexicographically.
+///
+/// # Safety
+/// `a` and `b` each address `slots` slots.
+#[inline]
+pub(crate) unsafe fn compare_int_slots(slots: usize, a: *const u8, b: *const u8) -> i64 {
+    for i in 0..slots {
+        let ord = unsafe { compare_int_word(a.add(i * 8), b.add(i * 8)) };
+        if ord != 0 {
+            return ord;
+        }
+    }
+    0
+}
+
+/// Orders two values by walking their whole descriptor.
+///
+/// # Safety
+/// `a` and `b` address values `tags` describes.
+#[inline]
+pub(crate) unsafe fn compare_whole(a: *const u8, b: *const u8, tags: *const u8) -> i64 {
+    let mut cursor = 0usize;
+    unsafe { compare_desc(a, b, tags, &mut cursor, CmpStorage::Inline, None) }
+}
+
+/// Decodes `tags` into the plan its comparisons follow.
+///
+/// # Safety
+/// `tags` is null or a whole ordering descriptor.
+pub(crate) unsafe fn plan_cmp<'a>(tags: *const u8) -> CmpPlan<'a> {
+    if tags.is_null() {
+        return CmpPlan::Walk;
+    }
+    let tag = unsafe { *tags };
+    if tag == DESC_TAG_INT {
+        return CmpPlan::IntWord;
+    }
+    if desc_tag_is_flat(tag) {
+        return CmpPlan::Flat(tag);
+    }
+    if tag == gossamer_abi::TUPLE_TAG_NESTED {
+        let arity = unsafe { *tags.add(1) } as usize;
+        let fields = unsafe { std::slice::from_raw_parts(tags.add(2), arity) };
+        if fields.iter().all(|&t| t == DESC_TAG_INT) {
+            return CmpPlan::IntTuple(arity);
+        }
+        if fields.iter().all(|&t| desc_tag_is_flat(t)) {
+            return CmpPlan::FlatTuple(fields);
+        }
+    }
+    CmpPlan::Walk
+}
+
+/// Orders two runs of one-slot values, one tag per slot, lexicographically.
+///
+/// # Safety
+/// `a` and `b` each address `fields.len()` slots.
+#[inline]
+pub(crate) unsafe fn compare_flat_slots(fields: &[u8], a: *const u8, b: *const u8) -> i64 {
+    for (i, &tag) in fields.iter().enumerate() {
+        let ord = unsafe { compare_flat(tag, a.add(i * 8), b.add(i * 8)) };
+        if ord != 0 {
+            return ord;
+        }
+    }
+    0
 }
 
 /// Compares two values of one type through their ordering descriptor,

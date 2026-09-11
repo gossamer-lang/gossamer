@@ -1,0 +1,60 @@
+// A queue drained front to back, over every element shape the store holds.
+// Each element leaves the queue once, so the answer is the same whether the
+// live range starts where it was built or where the last pop left it.
+
+struct Cell { id: i64, tag: String }
+
+fn drain_scalars(n: i64) -> i64 {
+    let mut q: Queue<i64> = Queue::new()
+    for i in 0..n { q.push(i) }
+    let mut total = 0
+    while let Some(v) = q.pop() { total += v }
+    total
+}
+
+fn drain_tuples(n: i64) -> i64 {
+    let mut q: Deque<(i64, i64)> = Deque::new()
+    for i in 0..n { q.push_back((i, i * 2)) }
+    let mut total = 0
+    while let Some(p) = q.pop_front() { let a, b = p; total += a + b }
+    total
+}
+
+fn drain_strings(n: i64) -> i64 {
+    let mut q: Deque<String> = Deque::new()
+    for i in 0..n { q.push_back(format("k{}", i)) }
+    let mut total = 0
+    while let Some(s) = q.pop_front() { total += s.len() }
+    total
+}
+
+fn drain_structs(n: i64) -> i64 {
+    let mut q: Deque<Cell> = Deque::new()
+    for i in 0..n { q.push_back(Cell { id: i, tag: format("t{}", i) }) }
+    let mut total = 0
+    while let Some(c) = q.pop_front() { total += c.id + c.tag.len() }
+    total
+}
+
+fn interleaved(n: i64) -> i64 {
+    let mut q: Deque<i64> = Deque::new()
+    let mut total = 0
+    let mut i = 0
+    while i < n {
+        q.push_back(i)
+        q.push_front(i * 3)
+        if let Some(v) = q.pop_front() { total += v }
+        if let Some(v) = q.pop_back() { total += v }
+        i += 1
+    }
+    while let Some(v) = q.pop_front() { total += v }
+    total
+}
+
+fn main() {
+    println("{}", drain_scalars(400))
+    println("{}", drain_tuples(400))
+    println("{}", drain_strings(400))
+    println("{}", drain_structs(400))
+    println("{}", interleaved(400))
+}

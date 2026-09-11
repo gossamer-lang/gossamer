@@ -312,9 +312,10 @@ jobs:
           # Linux-only because it self-skips elsewhere.
           non_native_cli="
             client_error_display dispatch_consistency doc_emit_stdlib docs_assets
-            ecosystem_bindings feature_status fmt_faithful goroutine_worker_reuse
-            http_h2_alpn http_h2_conformance mcp stdlib_compiled_coverage
-            stdlib_export_drift
+            deque_drain_is_linear ecosystem_bindings feature_status fmt_faithful
+            goroutine_worker_reuse
+            http_h2_alpn http_h2_conformance mcp runtime_archive_parity
+            stdlib_compiled_coverage stdlib_export_drift
           "
           non_native_cranelift="
             coff_pic_reloc dispatch_parity emit macho_dead_strip
@@ -450,9 +451,11 @@ jobs:
           - suite: tooling-registry
             command: >-
               "$CARGO_BIN" test -p gossamer-cli
-              --test client_error_display --test dispatch_consistency
+              --test client_error_display --test deque_drain_is_linear
+              --test dispatch_consistency
               --test doc_emit_stdlib --test docs_assets --test feature_status
-              --test fmt_faithful --test mcp --test stdlib_compiled_coverage
+              --test fmt_faithful --test mcp --test runtime_archive_parity
+              --test stdlib_compiled_coverage
               --test stdlib_export_drift -- --nocapture
           - suite: bindings-integration
             command: >-

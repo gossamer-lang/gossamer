@@ -1,7 +1,88 @@
 # Changelog
 
-## 0.60.0 - A name reaches the values they mean across all tiers
+## 0.60.0 - Hot paths drop the runtime call, and ownership reaches every share it is owed
 
+- `strings::split_whitespace` and `strings::splitn` hand back a vector that
+  owns the pieces in it, so a split's words are reclaimed with the vector
+  rather than held for the life of the process. A loop splitting a
+  sixteen-thousand-word text two thousand times held 1.5 GB and now holds
+  3.3 MB. Each piece is also built once, where the result was assembled as
+  one string and then copied into another.
+- `encoding::yaml::parse_all` hands back a vector that owns its documents, so
+  a parsed document is reclaimed with the vector rather than kept alive for
+  the life of the process.
+- `encoding::csv::read` builds each field once, straight from the run of the
+  line holding it. A field carrying no quote is not copied at all before the
+  one allocation that answers it.
+- A `MinHeap`, `MaxHeap`, or `BTreeMap` decides how to order its elements
+  once per operation, rather than walking a per-type descriptor at every
+  comparison, and a sift moves one element per level where it exchanged a
+  pair. A scalar element, and a tuple or struct of machine words, compare
+  through a direct comparison rather than the descriptor at all.
+- `encoding::base64::decode` reads four characters at a time straight into
+  the vector it answers, where it read one character at a time into an
+  intermediate buffer and then copied that whole buffer out.
+- `.len()` on a `Vec` whose element is not a machine word - a `Vec<u8>`, a
+  `Vec<bool>`, a vector of structs - is the one header read it already was
+  for the others, rather than a runtime call. A loop bounded by one paid that
+  call per iteration.
+- `.unwrap()` on an `Option` or a `Result` is the discriminant test and the
+  payload word it names, rather than a runtime call.
+- `s.push_char(c)` appends an ASCII character to a text builder in place. A
+  loop rendering a document one character at a time paid a runtime call per
+  character.
+- A `push`, `pop`, or `swap` of a `Vec` element that owns no reference-counted
+  child moves the element's bytes where it stands, rather than calling the
+  runtime to do it, and a `Deque`, `Queue`, or `Stack` back push and front pop
+  do the same.
+- Two byte strings longer than thirty-two bytes are compared a word at a time.
+  A map keyed by growing strings confirmed each key through the platform's
+  byte-at-a-time routine, which the static-musl link resolves to a scalar
+  loop.
+- A bounds check on an indexed aggregate is one unsigned compare rather than
+  the pair of signed ones no back end can fold, neither being able to prove
+  the loaded length non-negative.
+- An allocation no longer takes a process-wide atomic read-modify-write to
+  stamp its identity: each goroutine claims a block of identities at a time.
+- The process allocator keeps its own page-purge delay. Overriding it to ten
+  milliseconds made a loop that builds and drops a container pay a kernel
+  round trip per iteration, for no resident memory: what a program holds is
+  its live set and the segments the allocator keeps whole, and neither moves
+  with the delay. `GOS_ALLOC_PURGE_DELAY` still sets it, `0` included.
+- The scheduler asks a worker to reach a safepoint once per overstay window
+  rather than once per watchdog pass. A goroutine in a loop that reaches no
+  safepoint was signalled about two thousand times a second, and neither side
+  learned anything from the repeats.
+- The live-object counters behind `GOS_LEAK_LEDGER` record only while the
+  ledger is armed. A program that asked for no instrumentation no longer pays
+  an atomic read-modify-write on every string, vector, aggregate, map, and
+  reference-counted allocation and free.
+- The JSON encoder finds the next byte needing an escape in one pass over the
+  written run, rather than classifying every byte on its own.
+- `json::encode` and `json::encode_pretty` of a struct write the document
+  token by token as they walk the value, rather than building a `json::Value`
+  tree and serialising it. The bytes and member order are the tree renderer's.
+- An `Option`, a `Result`, or a user enum reached by `json::encode` renders the
+  value it carries: `None` is `null`, a variant carrying one value is that
+  value, a variant carrying several is the array of them, and a variant
+  carrying none is its own name. The compiled tiers rendered every one of them
+  as `null`, and the bytecode VM spelled `None` as a string.
+- `json::encode_pretty` of a struct answers the document on the bytecode VM.
+  Both spellings of the encoder now walk one conversion rather than two, only
+  one of which knew how to read a struct.
+- A JSON number renders the way the language renders the same value, on every
+  tier: a float keeps the spelling `{}` gives it, and an integer too large for
+  `i64` resolves to the float every accessor already reported for it.
+- A function that answers a multi-slot aggregate writes it into storage the
+  caller names, rather than allocating a block, copying its slots in, and
+  handing back a pointer the caller copies out of and frees. `GOS_NO_SRET`
+  restores the old convention.
+- An index into a vector multiplies by the element stride its type settles,
+  rather than loading the stride out of the vector's header at every access.
+- A `while let Some(x) = c.pop()` over a `Vec`, `Deque`, `MinHeap`, or
+  `MaxHeap` of a multi-word all-scalar element (a `(i64, i64)`, a struct of
+  scalars) moves the element into `x` in place. The pop no longer heap-copies
+  the element for the `Option` carrier and frees the copy at the binding.
 - A `match` arm's byte-literal pattern dispatches on the byte. The compiled
   tiers' `SwitchInt` path decodes a fixed set of pattern shapes and hands
   every other one to the if-chain, so a shape it does not decode can no
@@ -146,7 +227,40 @@
   the share the frame still held.
 - A source install places the static-musl runtime archive beside the host one,
   so `gos build --release` on Linux links the archive the installed toolchain
-  owns.
+  owns, and removes an installed one the current build did not produce rather
+  than leaving the pair from two different builds. Each file is staged beside
+  its destination and renamed, which a running `gos` no longer refuses and
+  which needs no GNU-only copy flag.
+- A typed decode reads a nested value out of the node it is standing on. Each
+  type gains a decoder that takes a `json::Value`, and the text-taking one is
+  a `json::parse` in front of it, where a member used to be rendered back to
+  JSON text and parsed again. A `bool` field asks the node what it holds
+  rather than comparing its rendering with `"true"`.
+- A local that only ever names a value another local owns gives up its own
+  share, for three shapes it kept one for: a struct copy whose share lives on
+  its `Vec` and reference-counted fields, a guarded aggregate or `Option` slot
+  reached through a copy-blob walk, and a whole set of locals that feed one
+  another - the cursor of a walk that steps down a tree and back to its root.
+  A payload read out of a carrier is a view of it for the same purpose.
+- An element store and a push leave their receiver's own count alone, so a
+  receiver read for one keeps no share of its own.
+- The share a whole-aggregate move mints for its destination and gives back
+  from its source is not booked at all, and a walk over words a guarded zero
+  has already emptied, or a zero no walk reads, is not emitted.
+- A `json::Value` handed to a named function is a borrow, so the frame that
+  parsed it gives the document back. A typed decode reads its fields through
+  such a call, and every one of them used to keep the whole document alive.
+- Base64 encoding writes four bytes at a time into a buffer sized up front,
+  where it pushed four characters and re-encoded each as UTF-8, and decoding
+  reads a table where it ran a range test per character.
+- Draining a queue front to back costs its own length. The live range moves
+  down only once the dead prefix reaches half the store, where it moved on
+  every pop; a wide element's payload is a copy of its slots, so the range no
+  longer has to start at zero for one to be read.
+- A sequence a program builds only to ask how long it is answers the count
+  without building any of it, where a counting sibling exists.
+- The playground's Ctrl / Cmd + Enter runs the program. The chord it advertises
+  now outranks the editor's own binding for it.
 
 ## 0.59.2 - Debug binary build vs execution speed balance
 

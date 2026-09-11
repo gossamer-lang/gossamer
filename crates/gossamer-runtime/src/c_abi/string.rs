@@ -15,7 +15,9 @@
 #![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
-use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
+use std::alloc::{Layout, handle_alloc_error};
+#[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+use std::alloc::{alloc, dealloc};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -643,18 +645,40 @@ pub(crate) unsafe fn copy_small_bytes(src: *const u8, dst: *mut u8, n: usize) {
 /// map of short keys pays that loop per lookup (glibc hides the same cost
 /// behind a SIMD ifunc; musl does not). Short slices are compared here as a
 /// few overlapping fixed-width loads, the same shape [`copy_small_bytes`]
-/// uses for the copy side; longer ones take the standard comparison, where
-/// throughput dominates and the call is amortised.
+/// uses for the copy side, and longer ones walk 32-byte blocks of the same.
+/// The standard comparison is what a growing dictionary key reached, at about
+/// six hundred instructions per compare.
 #[inline]
 pub(crate) fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     let n = a.len();
     if n != b.len() {
         return false;
     }
-    if n >= 32 {
-        return a == b;
-    }
     let (pa, pb) = (a.as_ptr(), b.as_ptr());
+    if n >= 32 {
+        // SAFETY: every read is inside `0..n`, which both slices hold: the
+        // loop stops with 32 bytes still ahead of `i`, and the final block
+        // starts at `n - 32`, overlapping the one before it where the length
+        // is not a whole number of blocks.
+        unsafe {
+            let mut i = 0usize;
+            while i + 32 <= n {
+                if load64(pa.add(i)) != load64(pb.add(i))
+                    || load64(pa.add(i + 8)) != load64(pb.add(i + 8))
+                    || load64(pa.add(i + 16)) != load64(pb.add(i + 16))
+                    || load64(pa.add(i + 24)) != load64(pb.add(i + 24))
+                {
+                    return false;
+                }
+                i += 32;
+            }
+            let tail = n - 32;
+            return load64(pa.add(tail)) == load64(pb.add(tail))
+                && load64(pa.add(tail + 8)) == load64(pb.add(tail + 8))
+                && load64(pa.add(tail + 16)) == load64(pb.add(tail + 16))
+                && load64(pa.add(tail + 24)) == load64(pb.add(tail + 24));
+        }
+    }
     // SAFETY: every read below is bounded by `n`, which both slices hold, and
     // the trailing reads start at `n - width` so they stay inside the same
     // range. Unaligned reads are explicit.
@@ -737,6 +761,40 @@ fn alloc_growable(parts: &[&[u8]], cap: usize) -> *mut c_char {
     alloc_growable_forced(parts, cap, false)
 }
 
+/// Storage for a string body.
+///
+/// The Rust global-allocator facade routes a request through mimalloc's
+/// aligned entry, which pads it by 8 to 16 bytes and takes the aligned free
+/// path on the way back. Plain `mi_malloc` returns the bin the size asks for
+/// and guarantees 16-byte alignment, which covers the 8 this layout wants.
+/// The sanitizer and wasm builds keep the facade, where the global allocator
+/// is the system one and mixing would free across allocators.
+#[inline]
+fn string_body_alloc(layout: Layout) -> *mut u8 {
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    {
+        unsafe { libmimalloc_sys::mi_malloc(layout.size()).cast() }
+    }
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    {
+        unsafe { alloc(layout) }
+    }
+}
+
+/// Companion to [`string_body_alloc`].
+#[inline]
+unsafe fn string_body_free(base: *mut u8, layout: Layout) {
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    {
+        let _ = layout;
+        unsafe { libmimalloc_sys::mi_free(base.cast()) };
+    }
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    {
+        unsafe { dealloc(base, layout) };
+    }
+}
+
 /// Allocates a growable string, promoting it to the heap when `force_heap` is
 /// set or any non-empty input slice points into region storage.
 fn alloc_growable_forced(parts: &[&[u8]], cap: usize, force_heap: bool) -> *mut c_char {
@@ -812,7 +870,7 @@ where
         let layout = Layout::from_size_align(total, 8).expect("string layout is valid");
         // SAFETY: `layout` has non-zero size and a power-of-two alignment. The
         // matching `dealloc` below reconstructs the exact same layout.
-        let base = unsafe { alloc(layout) };
+        let base = string_body_alloc(layout);
         if base.is_null() {
             handle_alloc_error(layout);
         }
@@ -845,9 +903,13 @@ where
         *hdr.add(12) = tag;
         fill(content);
         if zero_tail {
-            // Region allocations arrive zeroed. Heap allocations need their
-            // spare capacity and trailing NUL initialized explicitly.
-            std::ptr::write_bytes(content.add(content_len), 0, cap - content_len + 1);
+            // Region allocations arrive zeroed. A heap allocation needs only
+            // its terminator: the header's length is what says how much of
+            // the content is text, the index footer is written in full below,
+            // and spare capacity is written by the append that claims it. A
+            // builder reserved for a large document would otherwise be
+            // cleared once at its full size and again as it fills.
+            *content.add(content_len) = 0;
         }
         rebuild_str_index(content.cast::<c_char>(), content_len, cap);
         if tag != STR_REGION_TAG {
@@ -880,7 +942,7 @@ pub(crate) unsafe fn free_promoted_string(body: *mut c_char) {
     unregister_heap_string_body(body);
     // SAFETY: the allocation base is `STRING_BODY_OFFSET` below the body, and
     // `layout` reconstructs the one `alloc_growable_with_fill` used.
-    unsafe { dealloc(body.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
+    unsafe { string_body_free(body.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
     crate::c_abi::ledger::str_dec();
 }
 
@@ -938,7 +1000,7 @@ unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
         // last strong reference after the count logic above. The carrier owns
         // the allocation base; `hdr` is only its legacy suffix.
         unregister_heap_string_body(s);
-        unsafe { dealloc(s.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
+        unsafe { string_body_free(s.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
         crate::c_abi::ledger::str_dec();
     });
 }
@@ -3443,10 +3505,22 @@ unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
 }
 
 /// Builds a `*mut GosVec` of c-string pointers from owned strings.
-fn alloc_str_vec(parts: &[String]) -> *mut GosVec {
-    let vec = unsafe { gos_rt_vec_with_capacity(8, parts.len() as i64) };
+/// Builds the `[String]` a split answers, one allocation per piece, taken
+/// straight from the run of the input each piece names.
+///
+/// STRING-typed: the vec owns the pieces, so `gos_rt_vec_free` reclaims them
+/// even when a consumer loop breaks early.
+fn alloc_str_vec<'a>(parts: impl Iterator<Item = &'a str>) -> *mut GosVec {
+    let parts: Vec<*mut c_char> = parts.map(|p| alloc_cstring(p.as_bytes())).collect();
+    let vec = unsafe {
+        crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
+            8,
+            parts.len() as i64,
+            crate::c_abi::vec::vec_elem_kind::STRING,
+        )
+    };
     for p in parts {
-        let pv = alloc_cstring(p.as_bytes()) as i64;
+        let pv = p as i64;
         unsafe { gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>()) };
     }
     vec
@@ -3464,11 +3538,7 @@ pub unsafe extern "C" fn gos_rt_str_splitn(
             crate::c_abi::panic::panic_text("strings::splitn: count must be non-negative");
         }
         let n = usize::try_from(n).unwrap_or(0);
-        let parts: Vec<String> = unsafe { cstr(s) }
-            .splitn(n, unsafe { cstr(sep) })
-            .map(str::to_string)
-            .collect();
-        alloc_str_vec(&parts)
+        alloc_str_vec(unsafe { cstr(s) }.splitn(n, unsafe { cstr(sep) }))
     })
 }
 
@@ -3476,11 +3546,7 @@ pub unsafe extern "C" fn gos_rt_str_splitn(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let parts: Vec<String> = unsafe { cstr(s) }
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        alloc_str_vec(&parts)
+        alloc_str_vec(unsafe { cstr(s) }.split_whitespace())
     })
 }
 
@@ -3489,11 +3555,7 @@ pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_fields(s: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let parts: Vec<String> = unsafe { cstr(s) }
-            .split_whitespace()
-            .map(str::to_string)
-            .collect();
-        alloc_str_vec(&parts)
+        alloc_str_vec(unsafe { cstr(s) }.split_whitespace())
     })
 }
 
@@ -3952,7 +4014,7 @@ mod byte_compare_tests {
     /// at every length either path can take and at every byte position.
     #[test]
     fn bytes_eq_agrees_with_slice_equality_at_every_length() {
-        for len in 0..=40usize {
+        for len in 0..=200usize {
             let a: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
             assert!(bytes_eq(&a, &a.clone()), "equal at len {len}");
             assert_eq!(bytes_eq(&a, &a.clone()), a == a.clone());

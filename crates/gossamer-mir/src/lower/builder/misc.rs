@@ -59,10 +59,11 @@ impl<'a> Builder<'a> {
             HirExprKind::MethodCall { receiver, name, .. } if name.name == "iter" => receiver,
             _ => iter_expr,
         };
-        // Direct `<x>.as_bytes()`: rewrite the iteration to walk
-        // the bytes of `<x>` directly.
+        // Direct `<x>.as_bytes()` / `<x>.bytes()`: both name the same byte
+        // sequence, so the iteration walks the bytes of `<x>` directly rather
+        // than a copy of them.
         if let HirExprKind::MethodCall { receiver, name, .. } = &cur.kind
-            && name.name == "as_bytes"
+            && matches!(name.name.as_str(), "as_bytes" | "bytes")
             && self.is_string_receiver(receiver)
         {
             return Some(receiver);

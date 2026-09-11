@@ -264,7 +264,22 @@ impl<'a> Lowerer<'a> {
     /// `Ok(Bag { ... })` doesn't return a pointer to a struct
     /// that lives only on the producer's stack.
     pub(crate) fn maybe_heap_copy_aggregate(&mut self, arg: &Operand) -> Option<String> {
-        self.maybe_heap_copy_aggregate_with(arg, /* leak */ false, /* map_owned */ false)
+        self.maybe_heap_copy_aggregate_with(
+            arg, /* leak */ false, /* map_owned */ false, false,
+        )
+    }
+
+    /// Same shape as [`Self::maybe_heap_copy_aggregate`]; when `moved`, the
+    /// blob takes the share the source's words already carried rather than
+    /// minting one of its own.
+    pub(crate) fn maybe_heap_copy_aggregate_moved(
+        &mut self,
+        arg: &Operand,
+        moved: bool,
+    ) -> Option<String> {
+        self.maybe_heap_copy_aggregate_with(
+            arg, /* leak */ false, /* map_owned */ false, moved,
+        )
     }
 
     /// Heap-copies a 2-word by-value enum payload (sentinel
@@ -316,7 +331,9 @@ impl<'a> Lowerer<'a> {
     /// HashMap inserts use [`Self::maybe_heap_copy_aggregate_for_map`], whose
     /// reference-counted structural copy is reclaimed with the map entry.
     pub(crate) fn maybe_heap_copy_aggregate_leak(&mut self, arg: &Operand) -> Option<String> {
-        self.maybe_heap_copy_aggregate_with(arg, /* leak */ true, /* map_owned */ false)
+        self.maybe_heap_copy_aggregate_with(
+            arg, /* leak */ true, /* map_owned */ false, false,
+        )
     }
 
     /// Gives back the share a call-site copy was minted with.
@@ -339,7 +356,9 @@ impl<'a> Lowerer<'a> {
     /// metadata is preferred over the guarded copy-blob metadata because the
     /// map owns direct `String` / `Vec` fields as well as the outer blob.
     pub(crate) fn maybe_heap_copy_aggregate_for_map(&mut self, arg: &Operand) -> Option<String> {
-        self.maybe_heap_copy_aggregate_with(arg, /* leak */ false, /* map_owned */ true)
+        self.maybe_heap_copy_aggregate_with(
+            arg, /* leak */ false, /* map_owned */ true, false,
+        )
     }
 
     /// Copies a by-value aggregate into a reference-counted block and answers
@@ -539,11 +558,16 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    #[allow(
+        clippy::fn_params_excessive_bools,
+        reason = "three independent one-bit choices the call sites name at each site"
+    )]
     fn maybe_heap_copy_aggregate_with(
         &mut self,
         arg: &Operand,
         leak: bool,
         map_owned: bool,
+        moved: bool,
     ) -> Option<String> {
         let Operand::Copy(place) = arg else {
             return None;
@@ -589,14 +613,19 @@ impl<'a> Lowerer<'a> {
             } else {
                 format!("@\"{sym}\"")
             };
-            declare_rt(&mut self.runtime_refs, "gos_rt_rc_alloc_copy");
+            let allocator = if moved {
+                "gos_rt_rc_alloc_move"
+            } else {
+                "gos_rt_rc_alloc_copy"
+            };
+            declare_rt(&mut self.runtime_refs, allocator);
             let src = local_slot(place.local);
             // `noalias`: the RC block is freshly allocated, so nothing else
             // live at this point addresses it.
             let heap = self.fresh();
             writeln!(
                 self.out,
-                "  {heap} = call noalias ptr @gos_rt_rc_alloc_copy(i64 {bytes}, ptr {meta}, ptr {src})"
+                "  {heap} = call noalias ptr @{allocator}(i64 {bytes}, ptr {meta}, ptr {src})"
             )
             .unwrap();
             let heap_i64 = self.fresh();

@@ -459,17 +459,23 @@ impl<'a> Lowerer<'a> {
             self.lower_str_byte_len_inline(&args[0], destination, target)?;
             return Ok(());
         }
+        // A text builder's inner loop is one character at a time, so the
+        // append is worth having without a call.
+        if name == "gos_rt_str_push_char" && args.len() == 2 {
+            self.lower_str_push_char_inline(args, destination, target)?;
+            return Ok(());
+        }
         if name == "gos_rt_str_len" && args.len() == 1 {
             self.lower_str_len_inline(&args[0], destination, target)?;
             return Ok(());
         }
         // `.len()` on a Vec/Slice that routed through the generic
-        // `gos_rt_len` dispatcher: same null-guarded header load, but
-        // only when the static element type pins the receiver as a
-        // real word-stride GosVec - never `Vec<String>`, whose
-        // `env::args()` sentinel pointer keeps its length in
-        // `ARGS_LEN` rather than at `*p`.
-        if name == "gos_rt_len" && args.len() == 1 && self.vec_operand_has_word_elem(&args[0]) {
+        // `gos_rt_len` dispatcher: the same null-guarded header load. A
+        // length sits at offset zero of the header whatever the element
+        // type, so every receiver the type pins as a GosVec takes it -
+        // never `Vec<String>`, whose `env::args()` sentinel pointer keeps
+        // its length in `ARGS_LEN` rather than at `*p`.
+        if name == "gos_rt_len" && args.len() == 1 && self.vec_operand_len_is_header(&args[0]) {
             self.lower_vec_len_inline(&args[0], destination, target)?;
             return Ok(());
         }
@@ -567,6 +573,20 @@ impl<'a> Lowerer<'a> {
         // A slot container's wide push takes the address of the element's
         // slots, exactly as the Vec push does: the runtime copies the
         // element store's own stride from it.
+        if name == "gos_rt_deque_push_back_wide"
+            && args.len() == 2
+            && let Some(bytes) = self.container_operand_scalar_stride(&args[0])
+        {
+            self.lower_deque_push_back_inline(args, destination, target, bytes)?;
+            return Ok(());
+        }
+        if name == "gos_rt_deque_pop_front_into"
+            && args.len() == 2
+            && let Some(bytes) = self.container_operand_scalar_stride(&args[0])
+        {
+            self.lower_deque_pop_front_inline(args, destination, target, bytes)?;
+            return Ok(());
+        }
         if matches!(
             name.as_str(),
             "gos_rt_deque_push_back_wide" | "gos_rt_deque_push_front_wide"
@@ -660,6 +680,33 @@ impl<'a> Lowerer<'a> {
             self.lower_vec_swap_i64_inline(args, destination, target)?;
             return Ok(());
         }
+        // An exchange of two elements wider than a word - a tuple or struct
+        // of them - is that many word exchanges, where the scalar forms above
+        // would have left it to the runtime and its byte-wise copies.
+        if matches!(
+            name.as_str(),
+            "gos_rt_vec_swap_i64" | "gos_rt_vec_swap_safe"
+        ) && args.len() == 3
+            && let Some(bytes) = self.vec_operand_word_multiple_stride(&args[0])
+        {
+            self.lower_vec_swap_words_inline(
+                args,
+                destination,
+                target,
+                bytes,
+                name == "gos_rt_vec_swap_safe",
+            )?;
+            return Ok(());
+        }
+        // The last element's bytes move into the binding that names it: a
+        // length decrement and one copy of a width the element type settles.
+        if name == "gos_rt_vec_pop_into"
+            && args.len() == 2
+            && let Some(bytes) = self.vec_operand_elem_bytes_settled(&args[0])
+        {
+            self.lower_vec_pop_into_inline(args, destination, target, bytes)?;
+            return Ok(());
+        }
         // `buf.set_byte(i, x)` on the Terminator::Call route (fasta's inner
         // loop). The branchless inline also fires on the Rvalue::CallIntrinsic
         // route (`lower_call_intrinsic`); route both to the same body so the
@@ -681,6 +728,38 @@ impl<'a> Lowerer<'a> {
             && !is_aggregate(self.tcx, self.body.local_ty(destination.local))
         {
             self.lower_vec_get_ptr_inline(args, destination, target)?;
+            return Ok(());
+        }
+        // A walk over a sequence of aggregates binds the element's address as
+        // an integer word and copies the element out of it. The address is
+        // the same header read and multiply; only the slot it lands in
+        // differs, and an inline-aggregate element rules out the two element
+        // kinds whose address is not that.
+        if name == "gos_rt_vec_get_ptr"
+            && args.len() == 2
+            && render_ty(self.tcx, self.body.local_ty(destination.local)) == "i64"
+            && self.vec_operand_elem_is_inline_aggregate(&args[0])
+        {
+            self.lower_vec_get_ptr_inline_as(args, destination, target, true)?;
+            return Ok(());
+        }
+        // The element itself as the destination: a nested index copies the
+        // aggregate out of the address, which is the same address math behind
+        // one memcpy.
+        if name == "gos_rt_vec_get_ptr"
+            && args.len() == 2
+            && destination.projection.is_empty()
+            && self.vec_operand_elem_is_inline_aggregate(&args[0])
+            && is_aggregate(self.tcx, self.body.local_ty(destination.local))
+            && let Some(slots) =
+                slot_count(self.tcx, self.body.local_ty(destination.local)).filter(|&n| n > 0)
+        {
+            self.lower_vec_get_ptr_aggregate_inline(
+                args,
+                destination,
+                target,
+                u64::from(slots) * 8,
+            )?;
             return Ok(());
         }
         // Variant constructor stubs: `Ok(v)`, `Some(v)`, `Err(e)`

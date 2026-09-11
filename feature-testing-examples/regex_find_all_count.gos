@@ -1,0 +1,24 @@
+// A match list asked only for its length answers the same number as one that
+// is bound and read, on every tier.
+
+use std::regex
+
+fn main() {
+    let text = "aXbXXcXdXXXe"
+    let p = regex::compile("X+").unwrap()
+
+    let mut counted = 0
+    let mut i = 0
+    while i < 3 {
+        counted += p.find_all(text).len()
+        i += 1
+    }
+    println("counted: {}", counted)
+
+    let all = p.find_all(text)
+    println("bound: {}", all.len())
+    for m in all { println("match at {}", m.0) }
+
+    let empty = regex::compile("Z").unwrap()
+    println("none: {}", empty.find_all(text).len())
+}

@@ -217,6 +217,8 @@ mod expr_array;
 
 mod stdlib_json;
 
+mod stdlib_json_stream;
+
 mod stdlib_free;
 
 mod stdlib_binding;

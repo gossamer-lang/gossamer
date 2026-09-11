@@ -1,0 +1,33 @@
+// A walk over a tree of guarded aggregates. Every hop names a node the root
+// already owns, so the walk's own accounting is redundant and the tiers must
+// agree on the answer with or without it.
+
+struct Node { sym: i64, left: Option<Node>, right: Option<Node> }
+
+fn build(depth: i64) -> Node {
+    if depth == 0 {
+        Node { sym: 1, left: None, right: None }
+    } else {
+        Node { sym: -1, left: Some(build(depth - 1)), right: Some(build(depth - 1)) }
+    }
+}
+
+fn decode(root: Node, bits: Vec<i64>) -> i64 {
+    let mut node = root
+    let mut out = 0
+    for b in bits {
+        node = if b == 0 { node.left.unwrap() } else { node.right.unwrap() }
+        if node.sym >= 0 {
+            out += node.sym
+            node = root
+        }
+    }
+    out
+}
+
+fn main() {
+    let root = build(4)
+    let mut bits = #[]
+    for i in 0..200000 { bits.push((i * 7 + i / 3) % 2) }
+    println("{}", decode(root, bits))
+}

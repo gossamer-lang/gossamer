@@ -41,6 +41,16 @@ use gossamer_runtime::c_abi::vec::{
 
 static LEDGER_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
+/// Takes the ledger lock and arms the recording hooks. A process that asked
+/// for no instrumentation leaves the live counters off, and a counter only
+/// reflects events recorded while it is armed, so every ledger test reads its
+/// baseline inside this scope rather than before it.
+fn ledger_scope() -> parking_lot::MutexGuard<'static, ()> {
+    let guard = LEDGER_LOCK.lock();
+    gossamer_runtime::c_abi::ledger::arm_instrumentation();
+    guard
+}
+
 fn str_live() -> i64 {
     STR_LIVE.load(Ordering::SeqCst)
 }
@@ -51,7 +61,7 @@ fn vec_live() -> i64 {
 
 #[test]
 fn with_capacity_uses_the_active_region() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     gos_rt_arena_push();
     if !region_is_active() {
         // Targets without virtual-memory reservations intentionally fall back
@@ -82,7 +92,7 @@ fn with_capacity_uses_the_active_region() {
 
 #[test]
 fn vec_valued_map_releases_replaced_and_removed_entries() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let base = vec_live();
     unsafe {
         let map = gos_rt_map_new(8, 8);
@@ -131,7 +141,7 @@ fn vec_valued_map_releases_replaced_and_removed_entries() {
 
 #[test]
 fn compact_i64_byte_vec_map_leaves_the_caller_its_own_share() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let base = vec_live();
     unsafe {
         let map = gos_rt_map_new_with_capacity_typed(0, 2, 4);
@@ -177,7 +187,7 @@ fn compact_i64_byte_vec_map_leaves_the_caller_its_own_share() {
 
 #[test]
 fn compact_str_byte_vec_map_preserves_loop_carried_source_share() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let base = vec_live();
     unsafe {
         let map = gos_rt_map_new_with_capacity_typed(1, 2, 4);
@@ -213,7 +223,7 @@ fn compact_str_byte_vec_map_preserves_loop_carried_source_share() {
 
 #[test]
 fn vec_valued_map_or_insert_transfers_only_the_map_share() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let base = vec_live();
     unsafe {
         let map = gos_rt_map_new(8, 8);
@@ -260,7 +270,7 @@ fn vec_valued_map_or_insert_transfers_only_the_map_share() {
 
 #[test]
 fn structural_copy_blob_retains_and_releases_string_and_vec_children() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let str_base = str_live();
     let vec_base = vec_live();
     let meta = [
@@ -317,7 +327,7 @@ fn first_slot_cstr(v: *const GosVec) -> *const std::ffi::c_char {
 
 #[test]
 fn regex_split_vec_is_string_typed_and_free_reclaims_pieces() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let pat = cstr(",");
     let re = unsafe { gos_rt_regex_compile(pat.as_ptr()) };
     let text = cstr("a,b,c,d");
@@ -335,7 +345,7 @@ fn regex_split_vec_is_string_typed_and_free_reclaims_pieces() {
 
 #[test]
 fn regex_find_all_free_without_iteration_reclaims_match_strings() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let pat = cstr("ab+");
     let re = unsafe { gos_rt_regex_compile(pat.as_ptr()) };
     let text = cstr("xabby_ab_abbb");
@@ -359,7 +369,7 @@ fn regex_find_all_free_without_iteration_reclaims_match_strings() {
 
 #[test]
 fn regex_captures_free_without_iteration_reclaims_some_groups() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let pat = cstr("(a)(b)?");
     let re = unsafe { gos_rt_regex_compile(pat.as_ptr()) };
     let text = cstr("a");
@@ -386,7 +396,7 @@ fn regex_captures_free_without_iteration_reclaims_some_groups() {
 
 #[test]
 fn regex_captures_all_outer_free_recursively_reclaims_rows_and_strings() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let pat = cstr("(a)(b)?");
     let re = unsafe { gos_rt_regex_compile(pat.as_ptr()) };
     let text = cstr("a ab a");
@@ -406,7 +416,7 @@ fn regex_captures_all_outer_free_recursively_reclaims_rows_and_strings() {
 
 #[test]
 fn str_split_and_lines_vecs_are_string_typed_and_leak_free() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let s = cstr("a:b:c");
     let sep = cstr(":");
     let str_base = str_live();
@@ -426,7 +436,7 @@ fn str_split_and_lines_vecs_are_string_typed_and_leak_free() {
 
 #[test]
 fn map_keys_str_snapshot_is_string_typed_and_leak_free() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let m = unsafe { gos_rt_map_new(8, 8) };
     let k1 = cstr("alpha");
     let k2 = cstr("beta");
@@ -446,7 +456,7 @@ fn map_keys_str_snapshot_is_string_typed_and_leak_free() {
 
 #[test]
 fn pem_decode_all_free_reclaims_labels_and_body_vecs() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let pem = cstr(concat!(
         "-----BEGIN FIRST-----\nAAAA\n-----END FIRST-----\n",
         "-----BEGIN SECOND-----\nAAAA\n-----END SECOND-----\n",
@@ -499,7 +509,7 @@ fn build_pair_vec(pairs: &[(&str, &str)]) -> *mut GosVec {
 
 #[test]
 fn two_string_slot_vec_partial_read_then_free_reclaims_all_slots() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let str_base = str_live();
     let v = build_pair_vec(&[("content-type", "text/plain"), ("x-id", "abc")]);
     assert_eq!(str_live(), str_base + 4);
@@ -514,7 +524,7 @@ fn two_string_slot_vec_partial_read_then_free_reclaims_all_slots() {
 
 #[test]
 fn push_onto_tagged_vec_retains_children_for_balanced_frees() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let str_base = str_live();
     let v = build_pair_vec(&[("a", "b")]);
     // Push a slot whose strings the CALLER keeps holding - the tagged
@@ -535,7 +545,7 @@ fn push_onto_tagged_vec_retains_children_for_balanced_frees() {
 
 #[test]
 fn clone_of_string_typed_vec_shares_then_frees_balanced() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let s = cstr("x,y,z");
     let sep = cstr(",");
     let str_base = str_live();
@@ -555,7 +565,7 @@ fn clone_of_string_typed_vec_shares_then_frees_balanced() {
 
 #[test]
 fn clone_of_aggr_owned_vec_shares_then_frees_balanced() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let str_base = str_live();
     let v = build_pair_vec(&[("k1", "v1"), ("k2", "v2")]);
     let c = unsafe { gos_rt_vec_clone(v) };
@@ -576,7 +586,7 @@ fn clone_of_aggr_owned_vec_shares_then_frees_balanced() {
 
 #[test]
 fn slice_of_string_typed_vec_shares_then_frees_balanced() {
-    let _guard = LEDGER_LOCK.lock();
+    let _guard = ledger_scope();
     let s = cstr("a,b,c,d");
     let sep = cstr(",");
     let str_base = str_live();
