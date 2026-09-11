@@ -1048,9 +1048,18 @@ fn blocks_reachable_from(body: &Body, start: usize) -> Vec<bool> {
 
 /// Whether any statement or terminator in `block` reads `local` other than
 /// through the reference-count helpers that bracket an ownership transfer.
-fn block_reads_vec_local(block: &BasicBlock, local: Local, from_stmt: usize) -> bool {
+fn block_reads_vec_local(
+    block: &BasicBlock,
+    block_index: usize,
+    local: Local,
+    from_stmt: usize,
+    skip: &[(usize, usize)],
+) -> bool {
     let mentions = |op: &Operand| matches!(op, Operand::Copy(p) if p.local == local);
-    for stmt in block.stmts.iter().skip(from_stmt) {
+    for (stmt_index, stmt) in block.stmts.iter().enumerate().skip(from_stmt) {
+        if skip.contains(&(block_index, stmt_index)) {
+            continue;
+        }
         let StatementKind::Assign { place, rvalue } = &stmt.kind else {
             continue;
         };
@@ -1116,8 +1125,8 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
     if n_blocks == 0 {
         return;
     }
-    // (clone block, target block) pairs to rewrite.
-    let mut rewrites: Vec<(usize, usize, Local)> = Vec::new();
+    // (clone block, target block, clone destination, cloned field) to rewrite.
+    let mut rewrites: Vec<(usize, usize, Local, Place)> = Vec::new();
 
     for bi in 0..n_blocks {
         let Terminator::Call {
@@ -1135,10 +1144,21 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
         let [Operand::Copy(field)] = args.as_slice() else {
             continue;
         };
-        let [Projection::Field(index)] = field.projection.as_slice() else {
+        // A field of a field is the same shape one level deeper: a struct
+        // holding a struct that holds the vector, which is how a benchmark
+        // harness keeps the world it built.
+        let path: Option<Vec<u32>> = field
+            .projection
+            .iter()
+            .map(|step| match step {
+                Projection::Field(index) => Some(*index),
+                _ => None,
+            })
+            .collect();
+        let Some(path) = path.filter(|path| !path.is_empty()) else {
             continue;
         };
-        let (index, base, cloned, ti) = (*index, field.local, destination.local, target.as_u32() as usize);
+        let (base, cloned, ti) = (field.local, destination.local, target.as_u32() as usize);
         if ti >= n_blocks {
             continue;
         }
@@ -1158,7 +1178,7 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
             continue;
         }
 
-        match aggregate_field_origin(body, base, index, user_fns) {
+        match aggregate_field_origin(body, base, &path, user_fns) {
             // A value a function answered is the caller's own; the callee's
             // own binding rules gave it storage nothing else names.
             Some(AggregateOrigin::CallResult) => {}
@@ -1169,28 +1189,16 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
             }) => {
                 // A vector nothing names after the aggregate cannot be told
                 // apart from the field that now holds it.
-                let reachable = blocks_reachable_from(body, origin_block);
-                let mut live =
-                    block_reads_vec_local(&body.blocks[origin_block], source, origin_stmt + 1);
-                for (idx, block) in body.blocks.iter().enumerate() {
-                    if idx != origin_block
-                        && reachable[idx]
-                        && block_reads_vec_local(block, source, 0)
-                    {
-                        live = true;
-                        break;
-                    }
-                }
-                if live {
+                if !local_dead_after(body, source, origin_block, origin_stmt) {
                     continue;
                 }
             }
             None => continue,
         }
-        rewrites.push((bi, ti, cloned));
+        rewrites.push((bi, ti, cloned, field.clone()));
     }
 
-    for (bi, ti, cloned) in rewrites {
+    for (bi, ti, cloned, field) in rewrites {
         let span = body.blocks[bi].span;
         let Terminator::Call { target, .. } = body.blocks[bi].terminator.clone() else {
             continue;
@@ -1207,6 +1215,31 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
         });
         body.blocks[bi].terminator = Terminator::Goto { target };
         body.blocks[ti].stmts.drain(0..3);
+        // The copy also handed the field's element storage back in index
+        // order, which a walk of it reads as locality. Rebuilding the
+        // elements where they stand keeps that without a second copy of the
+        // whole structure. A sink local so the statement is an assignment
+        // like every other intrinsic call.
+        let sink = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+        body.locals.push(crate::ir::LocalDecl {
+            ty: body.locals[cloned.0 as usize].ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        body.blocks[ti].stmts.insert(
+            0,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(sink),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_vec_compact_elems",
+                        args: vec![Operand::Copy(field)],
+                    },
+                },
+                span,
+            },
+        );
     }
 }
 
@@ -1222,57 +1255,99 @@ enum AggregateOrigin {
     },
 }
 
-/// The origin of the aggregate whose field `index` a binding local names.
-fn aggregate_field_origin(
+/// Whether nothing reads `local` on any path from just past the statement at
+/// `stmt` in `block`, ignoring the reference-count helpers that bracket an
+/// ownership transfer.
+fn local_dead_after(body: &Body, local: Local, block: usize, stmt: usize) -> bool {
+    local_dead_after_except(body, local, block, stmt, &[])
+}
+
+/// [`local_dead_after`], ignoring the statements at `skip` - the copies that
+/// carry one value along a chain of bindings, which name it without being
+/// another reader of it.
+fn local_dead_after_except(
     body: &Body,
-    base: Local,
-    index: u32,
-    user_fns: &HashSet<String>,
-) -> Option<AggregateOrigin> {
-    let mut binding_init: Option<Local> = None;
+    local: Local,
+    block: usize,
+    stmt: usize,
+    skip: &[(usize, usize)],
+) -> bool {
+    if block_reads_vec_local(&body.blocks[block], block, local, stmt + 1, skip) {
+        return false;
+    }
+    let reachable = blocks_reachable_from(body, block);
+    !body.blocks.iter().enumerate().any(|(idx, b)| {
+        idx != block && reachable[idx] && block_reads_vec_local(b, idx, local, 0, skip)
+    })
+}
+
+/// The one value a local is ever given.
+enum SingleWrite<'a> {
+    /// Copied whole out of another local, at this statement.
+    Copy {
+        /// Where the copy is written, so the chain walk can tell its own
+        /// hand-off from another reader of the same value.
+        site: (usize, usize),
+        /// The local the value was copied from.
+        source: Local,
+    },
+    /// Built here: the statement's position and the operands it was built from.
+    Built {
+        block: usize,
+        index: usize,
+        operands: &'a [Operand],
+    },
+    /// Answered by a user function, so its storage is this frame's own.
+    Answered {
+        /// The block whose terminator made the call, so the walk can ask what
+        /// still reads the bindings the answer passed through.
+        block: usize,
+    },
+}
+
+/// The single value `local` is given across the whole body, or `None` when it
+/// is written more than once, written through a projection this walk cannot
+/// follow, or answered by something other than a user function.
+fn single_write_of<'a>(body: &'a Body, local: Local, user_fns: &HashSet<String>) -> Option<SingleWrite<'a>> {
+    let mut found: Option<SingleWrite<'a>> = None;
     let mut writes = 0u32;
-    for block in &body.blocks {
-        for stmt in &block.stmts {
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (si, stmt) in block.stmts.iter().enumerate() {
             let StatementKind::Assign { place, rvalue } = &stmt.kind else {
                 continue;
             };
-            if place.local != base || !place.projection.is_empty() {
-                // A store into a field replaces what the field names; it
-                // cannot make the dead source observable again.
+            // A store into a field replaces what the field names; it cannot
+            // make the dead source observable again.
+            if place.local != local || !place.projection.is_empty() {
                 continue;
             }
             // The pre-init sentinel every aggregate slot starts at is not a
-            // value the binding ever holds.
+            // value the local ever holds.
             if matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0)))) {
                 continue;
             }
             writes += 1;
-            if let Rvalue::Use(Operand::Copy(src)) = rvalue
-                && src.projection.is_empty()
-            {
-                binding_init = Some(src.local);
-            }
+            found = match rvalue {
+                Rvalue::Use(Operand::Copy(src)) if src.projection.is_empty() => {
+                    Some(SingleWrite::Copy {
+                        site: (bi, si),
+                        source: src.local,
+                    })
+                }
+                Rvalue::Aggregate { operands, .. } => Some(SingleWrite::Built {
+                    block: bi,
+                    index: si,
+                    operands,
+                }),
+                _ => None,
+            };
         }
-        if let Terminator::Call { destination, .. } = &block.terminator
-            && destination.local == base
-            && destination.projection.is_empty()
-        {
-            return None;
-        }
-    }
-    if writes != 1 {
-        return None;
-    }
-    let temp = binding_init?;
-    // The binding may copy a temporary a user function answered directly.
-    let mut answered_by_call = false;
-    for block in &body.blocks {
         if let Terminator::Call {
             callee,
             destination,
             ..
         } = &block.terminator
-            && destination.local == temp
+            && destination.local == local
             && destination.projection.is_empty()
         {
             let user = match callee {
@@ -1283,37 +1358,83 @@ fn aggregate_field_origin(
             if !user {
                 return None;
             }
-            answered_by_call = true;
+            writes += 1;
+            found = Some(SingleWrite::Answered { block: bi });
         }
     }
-    if answered_by_call {
-        return Some(AggregateOrigin::CallResult);
-    }
-    let mut found: Option<AggregateOrigin> = None;
-    let mut temp_writes = 0u32;
-    for (bi, block) in body.blocks.iter().enumerate() {
-        for (si, stmt) in block.stmts.iter().enumerate() {
-            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
-                continue;
-            };
-            if place.local != temp || !place.projection.is_empty() {
-                continue;
+    if writes == 1 { found } else { None }
+}
+
+/// The origin of the aggregate whose field path a binding local names.
+///
+/// The path steps through nested aggregates, and each step follows the chain
+/// of whole-value copies back to where the value was built. An intermediate
+/// aggregate has to be dead itself: a name still reading it would tell the
+/// copy from the original.
+fn aggregate_field_origin(
+    body: &Body,
+    base: Local,
+    path: &[u32],
+    user_fns: &HashSet<String>,
+) -> Option<AggregateOrigin> {
+    let index = *path.first()?;
+    let mut local = base;
+    // The bindings the value passes through on its way to `base`, and the
+    // copies that hand it along. A binding read anywhere else is another name
+    // for the same storage, and the copy is what keeps the two apart.
+    let mut chain: Vec<Local> = Vec::new();
+    let mut hand_offs: Vec<(usize, usize)> = Vec::new();
+    for _ in 0..=body.locals.len() {
+        match single_write_of(body, local, user_fns)? {
+            SingleWrite::Copy { site, source } => {
+                hand_offs.push(site);
+                chain.push(source);
+                local = source;
             }
-            if matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0)))) {
-                continue;
+            // A value a function answered is the caller's own, at every depth
+            // of it: the callee's own binding rules gave the whole answer
+            // storage nothing outside it names - as long as no binding the
+            // answer passed through is still read, which would be a second
+            // name for the storage the copy is keeping apart.
+            SingleWrite::Answered { block } => {
+                let stmts = body.blocks[block].stmts.len();
+                if chain.iter().any(|l| {
+                    !local_dead_after_except(body, *l, block, stmts, &hand_offs)
+                }) {
+                    return None;
+                }
+                return Some(AggregateOrigin::CallResult);
             }
-            temp_writes += 1;
-            if let Rvalue::Aggregate { operands, .. } = rvalue
-                && let Some(Operand::Copy(src)) = operands.get(index as usize)
-                && src.projection.is_empty()
-            {
-                found = Some(AggregateOrigin::Field {
-                    block: bi,
-                    index: si,
-                    source: src.local,
-                });
+            SingleWrite::Built {
+                block,
+                index: stmt,
+                operands,
+            } => {
+                let Some(Operand::Copy(src)) = operands.get(index as usize) else {
+                    return None;
+                };
+                if !src.projection.is_empty() {
+                    return None;
+                }
+                if chain
+                    .iter()
+                    .any(|l| !local_dead_after_except(body, *l, block, stmt, &hand_offs))
+                {
+                    return None;
+                }
+                if path.len() == 1 {
+                    return Some(AggregateOrigin::Field {
+                        block,
+                        index: stmt,
+                        source: src.local,
+                    });
+                }
+                if !local_dead_after(body, src.local, block, stmt) {
+                    return None;
+                }
+                return aggregate_field_origin(body, src.local, &path[1..], user_fns);
             }
         }
     }
-    if temp_writes == 1 { found } else { None }
+    None
 }

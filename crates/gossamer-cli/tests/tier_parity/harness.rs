@@ -169,6 +169,11 @@ const SPECS: &[Spec] = &[
     // A trait implemented for every kind of receiver a program can name. A
     // scalar carries its own type to the call, so several scalar impls of one
     // trait pick by receiver; every other type reaches a method as a handle.
+    // What a copy of a container-holding value is for: a callee that only
+    // reads a by-value container reads the caller's storage, a struct literal
+    // copies its field only while the value it was built from is still named,
+    // and a goroutine answers a float through a float register.
+    spec("feature-testing-examples/aggregate_copy_elision_semantics.gos"),
     spec("feature-testing-examples/trait_impl_receiver_types.gos"),
     // A built-in type's own surface answers a name it carries, and an `impl`
     // block answers one it does not, so which body a call reaches follows from

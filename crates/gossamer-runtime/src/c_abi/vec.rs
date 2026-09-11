@@ -1312,6 +1312,49 @@ pub unsafe extern "C" fn gos_rt_vec_mark_vec_elems(v: *mut GosVec) {
     vec.elem_kind = vec_elem_kind::VEC;
 }
 
+/// Rebuilds every nested-vector element of `v` in index order, in place.
+///
+/// A `Vec<Vec<T>>` grown element by element has its element storage scattered
+/// across the heap in the order the pushes happened to allocate, and a walk of
+/// it pays that order in cache misses. Rebuilding each element hands the
+/// allocator the elements in the order a reader visits them, at a peak cost of
+/// one element rather than a second copy of the whole structure.
+///
+/// Each element is replaced by a copy of itself and the original is released,
+/// which is what a whole-container copy does to each element - so the value is
+/// the one the program already had, and any other name for an element keeps
+/// the element it named. A vector whose elements are not nested vectors is
+/// left alone: their storage is the one contiguous buffer it already is.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_compact_elems(v: *mut GosVec) {
+    if v.is_null() {
+        return;
+    }
+    let vec = unsafe { &mut *v };
+    if vec_is_region(vec)
+        || vec.elem_kind != vec_elem_kind::VEC
+        || vec.elem_bytes != 8
+        || vec.ptr.is_null()
+    {
+        return;
+    }
+    for i in 0..vec.len.max(0) as usize {
+        // Exposed-integer slot (flat-slot ABI); recover provenance.
+        let slot = unsafe { vec.ptr.add(i * 8).cast::<usize>() };
+        let raw = unsafe { slot.read_unaligned() };
+        if raw == 0 {
+            continue;
+        }
+        let child: *mut GosVec = std::ptr::with_exposed_provenance_mut(raw);
+        let fresh = unsafe { crate::c_abi::string::gos_rt_vec_clone(child) };
+        if fresh.is_null() {
+            continue;
+        }
+        unsafe { slot.write_unaligned(fresh.cast::<u8>().expose_provenance()) };
+        unsafe { crate::c_abi::map::gos_rt_vec_free(child) };
+    }
+}
+
 /// Tags `v` as holding guarded aggregate elements and records the
 /// per-type meta used to retain/release their copy-blob children.
 /// Emitted by the MIR lowering right after constructing a vec whose

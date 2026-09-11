@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.60.1 - A program holds the data it is using, and no second copy of it
+
+- A goroutine that reads a collection its closure captured reads the one the
+  spawning frame holds. A helper that answers a collection of its own no longer
+  disqualifies the ones it only reads, so a sixteen-way parallel matrix product
+  stopped taking sixteen copies of both operands: 296 MB to 53 MB, and the
+  product itself runs in 0.44 s where it took 0.73 s.
+- A `Map` lookup asked only which arm it answered - `.is_some()`, `.is_none()`,
+  `.is_ok()`, `.is_err()` - gives its `String` or `Vec` payload back. A
+  lookup-in-a-loop kept one answer per call for the life of the process; an
+  LRU-cache simulation held 157 MB and now holds 3 MB.
+- A struct literal whose field is built from a value nothing names afterwards
+  takes that value's storage rather than a copy of it, however many bindings
+  and nested aggregates the value passed through on the way. A benchmark
+  harness holding the world it built kept two of everything: a 1400-square maze
+  fell from 636 MB to 342 MB and a half-million-vertex graph from 331 MB to
+  211 MB.
+- The element storage of a nested sequence is rebuilt in index order where the
+  copy that used to do it stood, so a walk of a `Vec<Vec<T>>` grown element by
+  element still reads its elements in the order it visits them.
+- A goroutine answering an `f64` hands back the value it computed. `join()` on
+  a float-returning spawn read an integer register on the compiled tiers and
+  answered an unrelated bit pattern, where the bytecode VM answered correctly.
+- A range pattern over bytes or characters - `matches(b, b'0'..=b'9')`,
+  `'a'..='z'` as a match arm - compiles. Each bound compares as the scalar it
+  is, where only an integer bound was read before and anything else ended the
+  compile.
+
 ## 0.60.0 - Hot paths drop the runtime call, and ownership reaches every share it is owed
 
 - `strings::split_whitespace` and `strings::splitn` hand back a vector that

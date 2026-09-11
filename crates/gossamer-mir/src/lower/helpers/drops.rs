@@ -6216,6 +6216,299 @@ pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &gossamer_types::Ty
     }
 }
 
+/// Releases the payload of a carrier nothing ever takes the payload out of.
+///
+/// A `String` / `Vec` payload has no holder of its own: the share the call
+/// minted is handed on by whatever extracts it - an `if let`, an `unwrap`, a
+/// `?`. A carrier that is only ever asked which arm it is (`is_some`,
+/// `is_none`, `is_ok`, `is_err`) has no extraction to hand it to, so the
+/// payload's last share leaves with the local: one string per call, which is
+/// the whole live set of a lookup-in-a-loop.
+///
+/// The release is emitted where the carrier is minted, and only when every
+/// local the value reaches is used for nothing but those queries and copies
+/// between themselves - so no other site can be holding the share. A query
+/// reads the discriminant word alone, which the release leaves as it is.
+pub(crate) fn release_unqueried_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    use gossamer_types::TyKind;
+
+    // Entry points that read a carrier's discriminant and nothing else.
+    fn queries_arm(name: &str) -> bool {
+        matches!(
+            name,
+            "gos_rt_result_is_ok" | "gos_rt_result_is_err" | "gos_rt_result_disc"
+        )
+    }
+
+    // The `gos_rt_result_ok_payload_release` kind of a carrier's payload:
+    // `1` for a `String`, `2` for a `Vec` / slice, `None` for a payload the
+    // helper does not own.
+    let payload_kind = |ty: gossamer_types::Ty| -> Option<i64> {
+        match tcx.kind_of(ty) {
+            TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
+                substs
+                    .types()
+                    .first()
+                    .and_then(|payload| match tcx.kind_of(*payload) {
+                        TyKind::String => Some(1),
+                        TyKind::Vec(_) | TyKind::Slice(_) => Some(2),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }
+    };
+
+    let n_locals = body.locals.len();
+    let arity = body.arity as usize;
+    let kinds: Vec<Option<i64>> = (0..n_locals)
+        .map(|i| {
+            if i <= arity || body.locals[i].region {
+                None
+            } else {
+                payload_kind(body.locals[i].ty)
+            }
+        })
+        .collect();
+    if kinds.iter().all(Option::is_none) {
+        return;
+    }
+
+    // Any mention that is not a query of the arm, or a copy into another
+    // carrier of the same payload, withdraws the local: the mention could take
+    // the share, store it, or read it after the release.
+    let mut withdrawn = vec![false; n_locals];
+    // `dest <- src` copies between carriers, so a withdrawn destination
+    // withdraws its source too.
+    let mut copies: Vec<(u32, u32)> = Vec::new();
+    // Each carrier-destined call and the block its release belongs in.
+    let mut mints: Vec<(u32, usize)> = Vec::new();
+    let mut predecessors = vec![0u32; body.blocks.len()];
+
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                for_each_stmt_place(&stmt.kind, &mut |p| withdrawn[p.local.0 as usize] = true);
+                continue;
+            };
+            let dest = place.local.0 as usize;
+            let dest_carrier =
+                place.projection.is_empty() && dest < n_locals && kinds[dest].is_some();
+            if !dest_carrier {
+                withdrawn[dest.min(n_locals - 1)] = true;
+            }
+            match rvalue {
+                // A copy between two carriers of the same payload keeps the
+                // value inside the class.
+                Rvalue::Use(Operand::Copy(src))
+                    if dest_carrier
+                        && src.projection.is_empty()
+                        && (src.local.0 as usize) < n_locals
+                        && kinds[src.local.0 as usize] == kinds[dest] =>
+                {
+                    copies.push((place.local.0, src.local.0));
+                }
+                Rvalue::CallIntrinsic { name, args } => {
+                    if dest_carrier {
+                        withdrawn[dest] = true;
+                    }
+                    let skip_first = queries_arm(name);
+                    for (idx, arg) in args.iter().enumerate() {
+                        if skip_first && idx == 0 {
+                            continue;
+                        }
+                        if let Operand::Copy(p) = arg {
+                            withdrawn[p.local.0 as usize] = true;
+                        }
+                    }
+                }
+                _ => {
+                    if dest_carrier {
+                        withdrawn[dest] = true;
+                    }
+                    for_each_rvalue_place(rvalue, &mut |p| withdrawn[p.local.0 as usize] = true);
+                }
+            }
+        }
+        match &block.terminator {
+            Terminator::Call {
+                callee,
+                args,
+                destination,
+                target,
+            } => {
+                let skip_first = matches!(
+                    callee,
+                    Operand::Const(ConstValue::Str(name)) if queries_arm(name)
+                );
+                if let Operand::Copy(p) = callee {
+                    withdrawn[p.local.0 as usize] = true;
+                }
+                for (idx, arg) in args.iter().enumerate() {
+                    if skip_first && idx == 0 {
+                        continue;
+                    }
+                    if let Operand::Copy(p) = arg {
+                        withdrawn[p.local.0 as usize] = true;
+                    }
+                }
+                let dest = destination.local.0 as usize;
+                if destination.projection.is_empty() && dest < n_locals && kinds[dest].is_some() {
+                    match target {
+                        Some(next) => mints.push((destination.local.0, next.0 as usize)),
+                        // With no successor the release has nowhere to sit.
+                        None => withdrawn[dest] = true,
+                    }
+                } else {
+                    withdrawn[dest] = true;
+                }
+            }
+            Terminator::SwitchInt { discriminant, .. } => {
+                if let Operand::Copy(p) = discriminant {
+                    withdrawn[p.local.0 as usize] = true;
+                }
+            }
+            Terminator::Assert { cond, .. } => {
+                if let Operand::Copy(p) = cond {
+                    withdrawn[p.local.0 as usize] = true;
+                }
+            }
+            Terminator::Drop { place, .. } => withdrawn[place.local.0 as usize] = true,
+            Terminator::Goto { .. }
+            | Terminator::Return
+            | Terminator::Unreachable
+            | Terminator::Panic { .. } => {}
+        }
+        let mut note_successor = |id: &crate::ir::BlockId| {
+            if let Some(count) = predecessors.get_mut(id.0 as usize) {
+                *count += 1;
+            }
+        };
+        match &block.terminator {
+            Terminator::Goto { target } => note_successor(target),
+            Terminator::Call { target, .. } => {
+                if let Some(target) = target {
+                    note_successor(target);
+                }
+            }
+            Terminator::Drop { target, .. } => note_successor(target),
+            Terminator::SwitchInt { arms, default, .. } => {
+                for (_, target) in arms {
+                    note_successor(target);
+                }
+                note_successor(default);
+            }
+            Terminator::Assert { target, .. } => note_successor(target),
+            Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => {}
+        }
+    }
+    // The return slot leaves with the caller's share.
+    withdrawn[0] = true;
+
+    loop {
+        let mut changed = false;
+        for (dest, src) in &copies {
+            if withdrawn[*dest as usize] && !withdrawn[*src as usize] {
+                withdrawn[*src as usize] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    for (local, target) in mints {
+        if withdrawn[local as usize] {
+            continue;
+        }
+        let Some(kind) = kinds[local as usize] else {
+            continue;
+        };
+        // A block another edge also reaches would run the release on a path
+        // that never minted the value.
+        if predecessors.get(target).copied().unwrap_or(0) != 1 {
+            continue;
+        }
+        let sink = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+        body.locals.push(crate::ir::LocalDecl {
+            ty: unit_ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        let Some(block) = body.blocks.get_mut(target) else {
+            continue;
+        };
+        let span = block.span;
+        block.stmts.insert(
+            0,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(sink),
+                    rvalue: Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_ok_payload_release",
+                        args: vec![
+                            Operand::Copy(Place::local(Local(local))),
+                            Operand::Const(ConstValue::Int(i128::from(kind))),
+                        ],
+                    },
+                },
+                span,
+            },
+        );
+    }
+}
+
+/// Every place an rvalue reads.
+fn for_each_rvalue_place(rvalue: &Rvalue, f: &mut impl FnMut(&Place)) {
+    let mut operand = |op: &Operand| {
+        if let Operand::Copy(p) = op {
+            f(p);
+        }
+    };
+    match rvalue {
+        Rvalue::Use(op)
+        | Rvalue::UnaryOp { operand: op, .. }
+        | Rvalue::Cast { operand: op, .. }
+        | Rvalue::Repeat { value: op, .. } => operand(op),
+        Rvalue::BinaryOp { lhs, rhs, .. } => {
+            operand(lhs);
+            operand(rhs);
+        }
+        Rvalue::Aggregate { operands, .. } | Rvalue::CallIntrinsic { args: operands, .. } => {
+            for op in operands {
+                operand(op);
+            }
+        }
+        Rvalue::Len(place) | Rvalue::Ref { place, .. } => f(place),
+        Rvalue::StaticLoad(_) => {}
+    }
+}
+
+/// Every place a non-assignment statement reads or writes.
+fn for_each_stmt_place(kind: &StatementKind, f: &mut impl FnMut(&Place)) {
+    let mut operand = |op: &Operand| {
+        if let Operand::Copy(p) = op {
+            f(p);
+        }
+    };
+    match kind {
+        StatementKind::Assign { place, rvalue } => {
+            f(place);
+            for_each_rvalue_place(rvalue, f);
+        }
+        StatementKind::StaticStore { value, .. } => operand(value),
+        StatementKind::IterSource { source, .. } => operand(source),
+        StatementKind::IterAdapter {
+            closure_or_arg: Some(op),
+            ..
+        } => operand(op),
+        _ => {}
+    }
+}
+
 /// Emits the give-back for `carrier.map(f)`.
 ///
 /// `map` hands the payload to the closure, which answers a value of its own (a

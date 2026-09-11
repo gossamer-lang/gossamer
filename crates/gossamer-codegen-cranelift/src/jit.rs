@@ -3055,6 +3055,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_vec_clone"           => rt::gos_rt_vec_clone,
         "gos_rt_vec_set_slot_children" => rt::gos_rt_vec_set_slot_children,
         "gos_rt_vec_mark_rc_elems"   => rt::gos_rt_vec_mark_rc_elems,
+        "gos_rt_vec_compact_elems"   => rt::gos_rt_vec_compact_elems,
         "gos_rt_vec_mark_vec_elems"  => rt::gos_rt_vec_mark_vec_elems,
         "gos_rt_map_inc_str_i64"        => rt::gos_rt_map_inc_str_i64,
         "gos_rt_map_inc_typed_str_i64"  => rt::gos_rt_map_inc_typed_str_i64,

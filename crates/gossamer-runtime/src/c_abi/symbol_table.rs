@@ -4179,6 +4179,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::vec::gos_rt_vec_mark_rc_elems as *const u8,
         ),
         (
+            "gos_rt_vec_compact_elems",
+            crate::c_abi::vec::gos_rt_vec_compact_elems as *const u8,
+        ),
+        (
             "gos_rt_vec_mark_vec_elems",
             crate::c_abi::vec::gos_rt_vec_mark_vec_elems as *const u8,
         ),

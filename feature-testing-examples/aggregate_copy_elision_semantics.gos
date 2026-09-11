@@ -1,0 +1,126 @@
+// What a copy of a container-holding value is for, and where it is not needed.
+//
+// A callee that only reads a by-value container reads the caller's own
+// storage, whatever the callee answers; one that could hand the storage back
+// takes a copy. A struct literal gives its field storage of its own only while
+// something else still names the value the field was built from. A goroutine
+// answers a float through a float register. Bit-identical on the VM,
+// Cranelift, and LLVM tiers.
+
+struct Inner {
+    cells: Vec<i64>
+    width: i64
+}
+
+struct Holder {
+    inner: Inner
+    tag: i64
+}
+
+struct Rows {
+    rows: Vec<Vec<i64>>
+}
+
+/// Reads the sequence and answers one of its own, so the caller's storage
+/// stays the caller's and crosses the call as the handle it is.
+fn doubled(xs: Vec<i64>) -> Vec<i64> {
+    let mut out: Vec<i64> = #[]
+    for v in xs { out.push(v * 2) }
+    out
+}
+
+/// Answers a row of what it was handed, so the caller's storage could leave
+/// the call and the argument is copied.
+fn first_row(grid: Vec<Vec<i64>>) -> Vec<i64> { grid[0] }
+
+/// Keeps a row of what it was handed, for the same reason.
+fn kept_rows(grid: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
+    let mut out: Vec<Vec<i64>> = #[]
+    out.push(grid[0])
+    out
+}
+
+/// A field taken out of a by-value struct is the same case.
+fn kept_field(source: Rows) -> Vec<Vec<i64>> {
+    let mut out: Vec<Vec<i64>> = #[]
+    out.push(source.rows[0])
+    out
+}
+
+fn build(n: i64) -> Inner {
+    let mut cells: Vec<i64> = #[]
+    for i in 0..n { cells.push(i) }
+    Inner { cells: cells, width: n }
+}
+
+fn wrap(cells: Vec<i64>) -> Inner { Inner { cells: cells, width: 0 } }
+
+fn scaled(x: i64) -> f64 { (x as f64) * 2.5 }
+
+/// A byte and a character range each compare as the scalar they are.
+fn is_digit(b: u8) -> bool { matches(b, b'0'..=b'9') }
+
+fn letter_case(c: char) -> i64 {
+    match c {
+        'a'..='z' => 1
+        'A'..='Z' => 2
+        _ => 0
+    }
+}
+
+fn main() {
+    let numbers: Vec<i64> = #[1, 2, 3]
+    println("read-only {:?} {:?}", numbers, doubled(numbers))
+
+    let mut grid: Vec<Vec<i64>> = #[#[1, 2], #[3, 4]]
+    let mut row = first_row(grid)
+    row.push(99)
+    println("answered row {:?} {:?}", grid, row)
+
+    let mut kept = kept_rows(grid)
+    kept[0].push(77)
+    println("kept row {:?} {:?}", grid, kept)
+
+    let mut source = Rows { rows: #[#[7, 8]] }
+    let mut taken = kept_field(source)
+    taken[0].push(33)
+    println("kept field {:?} {:?}", source.rows, taken)
+
+    // The value the field was built from has no reader left, so the two
+    // cannot be told apart.
+    let mut dead = Holder { inner: build(3), tag: 1 }
+    dead.inner.cells.push(9)
+    println("dead source {:?}", dead.inner.cells)
+
+    // The value is still named, so the field takes storage of its own.
+    let mut live = build(3)
+    let mut holder = Holder { inner: live, tag: 2 }
+    holder.inner.cells.push(8)
+    live.cells.push(7)
+    println("live source {:?} {:?}", live.cells, holder.inner.cells)
+
+    let mut passed: Vec<i64> = #[5]
+    let mut wrapped = Holder { inner: wrap(passed), tag: 3 }
+    wrapped.inner.cells.push(6)
+    println("passed through {:?} {:?}", passed, wrapped.inner.cells)
+
+    // A map lookup asked only which arm it is still hands its answer back.
+    let mut table: Map<String, String> = Map::new()
+    let _ = table.insert("k", "value")
+    let mut hits = 0
+    for _ in 0..3 {
+        if table.get("k").is_some() { hits += 1 }
+    }
+    println("queried {} {}", hits, table.len())
+
+    let mut total = 0.0
+    let _ = cohort {
+        let mut handles = #[]
+        for t in 0..3 { handles.push(spawn(|| scaled(t))) }
+        for handle in handles { total += handle.join().unwrap_or(0.0) }
+    }
+    println("float answer {}", total)
+
+    println("byte range {} {}", is_digit(b'7'), is_digit(b'x'))
+    println("char range {} {} {}", letter_case('k'), letter_case('K'), letter_case('7'))
+}

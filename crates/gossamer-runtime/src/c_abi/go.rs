@@ -29,6 +29,10 @@ fn spawn_task(task: Box<dyn FnOnce() + Send + 'static>) {
 
 /// Heap-boxed result of a spawned goroutine, carried over the
 /// one-shot handle channel as a single 8-byte pointer.
+/// `ret_words` code for a callable answering a float: one slot, delivered in a
+/// floating-point register rather than an integer one.
+const RET_WORDS_F64: i64 = 3;
+
 /// `disc` 0 = Ok (`payload` is the returned i64); `disc` 1 = Err
 /// (`payload` is a c-string pointer to the panic message).
 #[repr(C)]
@@ -336,7 +340,15 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
             // reports T's register shape. The `C-unwind` ABI lets a
             // goroutine panic propagate across this call into the
             // Drop-guards above.
-            let value = if ret_words >= 2 {
+            let value = if ret_words == RET_WORDS_F64 {
+                // A float answer arrives in a floating-point register, so the
+                // call has to be made through a float-returning signature; the
+                // bits are what the joiner's carrier holds, symmetric with
+                // `gos_rt_result_new_f64`.
+                type Fn1F64 = unsafe extern "C-unwind" fn(usize) -> f64;
+                let f: Fn1F64 = unsafe { std::mem::transmute(code) };
+                unsafe { f(env) }.to_bits() as i64
+            } else if ret_words >= 2 {
                 type Fn1Wide = unsafe extern "C-unwind" fn(usize) -> i128;
                 let f: Fn1Wide = unsafe { std::mem::transmute(code) };
                 let wide = unsafe { f(env) };

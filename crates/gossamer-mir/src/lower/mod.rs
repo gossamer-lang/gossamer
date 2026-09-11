@@ -227,6 +227,7 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
         // retain/release.
         fuse_substring_map_inc(body);
         release_mapped_payloads(body, tcx);
+        release_unqueried_carrier_payloads(body, tcx);
         record_channel_elem_kind(body, tcx);
         drop_confined_channels(body);
         clear_region_on_call_results(body);

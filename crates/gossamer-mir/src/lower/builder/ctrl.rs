@@ -928,17 +928,13 @@ impl<'a> Builder<'a> {
                 // `lo..hi` and `lo..=hi` arms reduce to
                 // `(scrut >= lo) && (scrut <op> hi)` where the
                 // upper comparison is `<` for exclusive and `<=`
-                // for inclusive. Only integer literal bounds are
-                // accepted today; float / char ranges fall
-                // through to the unsupported placeholder.
-                let HirLiteral::Int(lo_text) = lo else {
-                    return None;
-                };
-                let HirLiteral::Int(hi_text) = hi else {
-                    return None;
-                };
-                let lo_v = parse_int(lo_text)?;
-                let hi_v = parse_int(hi_text)?;
+                // for inclusive. A byte and a character compare as
+                // the scalar each one is, which is the same
+                // comparison their equality arms already lower to;
+                // a float bound has no ordering the discriminant
+                // path reads and falls through.
+                let lo_v = pattern_range_bound(lo)?;
+                let hi_v = pattern_range_bound(hi)?;
                 let scrut_ty = self.locals[scrutinee.0 as usize].ty;
                 let lo_local = self.fresh(scrut_ty);
                 self.emit_assign(
@@ -4026,5 +4022,17 @@ impl<'a> Builder<'a> {
                 )
             }
         }
+    }
+}
+
+/// The scalar value of a range-pattern bound: an integer, a byte, or a
+/// character, each of which compares as the number it is. `None` for a bound
+/// this lowering has no ordering for.
+fn pattern_range_bound(literal: &HirLiteral) -> Option<i128> {
+    match literal {
+        HirLiteral::Int(text) => parse_int(text),
+        HirLiteral::Byte(b) => Some(i128::from(*b)),
+        HirLiteral::Char(c) => Some(i128::from(u32::from(*c))),
+        _ => None,
     }
 }

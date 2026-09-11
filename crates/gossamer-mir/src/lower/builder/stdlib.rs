@@ -1013,6 +1013,14 @@ impl<'a> Builder<'a> {
         const ERR_KIND_ERROR: i64 = 1;
         const ERR_KIND_STRING: i64 = 2;
         const ERR_KIND_OTHER: i64 = 3;
+        // A float answer comes back in a floating-point register, so the
+        // runtime has to call the callable through a float-returning signature
+        // and keep the bits; reading the integer register hands the joiner
+        // whatever happened to be in it.
+        const RET_F64: i64 = 3;
+        if matches!(self.tcx.kind_of(elem), TyKind::Float(_)) {
+            return (RET_F64, ERR_KIND_NONE);
+        }
         let TyKind::Adt { def, substs } = self.tcx.kind_of(elem).clone() else {
             return (1, ERR_KIND_NONE);
         };

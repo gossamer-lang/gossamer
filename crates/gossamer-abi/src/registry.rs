@@ -1894,6 +1894,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_vec_capacity", (Ptr) -> I64, Both, "Return the total element capacity of a GosVec."),
     rt!("gos_rt_vec_clear", (Ptr) -> Void, Cranelift, "Clear a GosVec in place, dropping live elements."),
     rt!("gos_rt_vec_clone", (Ptr) -> Ptr, Cranelift, "Clone a GosVec, sharing a reference to its element data."),
+    rt!("gos_rt_vec_compact_elems", (Ptr) -> Void, Both, "Rebuild each nested-vector element of a vec in index order, in place, so a walk of it reads its element storage in the order it visits."),
     rt!("gos_rt_vec_contains_i64", (Ptr, I64) -> I8, Cranelift, "Return 1 if a Vec<i64> contains the needle."),
     rt!("gos_rt_vec_contains_str", (Ptr, Ptr) -> I8, Cranelift, "Return 1 if a Vec<String> contains the needle."),
     rt!("gos_rt_vec_copy_from_slice", (Ptr, Ptr) -> Void, Both, "Vec::copy_from_slice: overwrite every element of dst with src's; the lengths must match."),
