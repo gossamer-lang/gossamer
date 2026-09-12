@@ -406,6 +406,71 @@ fn consecutive_assignment_ignores_same_length_different_values() {
     assert!(!has_code(&diags, "GL0039"), "got {:?}", diags_codes(&diags));
 }
 
+#[test]
+fn nested_ternary_if_fires_on_one_discriminant() {
+    let diags = lint(
+        "fn f(n: i64) -> String {\n    if n == 0 { \"zero\" }\n    else if n == 1 { \"one\" }\n    else if n == 2 { \"two\" }\n    else { \"many\" }\n}\n",
+    );
+    assert!(has_code(&diags, "GL0030"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn nested_ternary_if_fires_on_or_patterns_of_one_discriminant() {
+    let diags = lint(
+        "fn f(n: i64) -> String {\n    if n == 0 || n == 1 { \"low\" }\n    else if n == 2 { \"two\" }\n    else if n == 3 { \"three\" }\n    else { \"many\" }\n}\n",
+    );
+    assert!(has_code(&diags, "GL0030"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn nested_ternary_if_reports_a_long_chain_once() {
+    let diags = lint(
+        "fn f(n: i64) -> String {\n    if n == 0 { \"zero\" }\n    else if n == 1 { \"one\" }\n    else if n == 2 { \"two\" }\n    else if n == 3 { \"three\" }\n    else { \"many\" }\n}\n",
+    );
+    let hits = diags.iter().filter(|d| d.code.as_str() == "GL0030").count();
+    assert_eq!(hits, 1, "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn nested_ternary_if_silent_on_relational_chain() {
+    let diags = lint(
+        "fn f(n: i64) -> String {\n    if n < 0 { \"negative\" }\n    else if n == 0 { \"zero\" }\n    else if n < 10 { \"small\" }\n    else { \"large\" }\n}\n",
+    );
+    assert!(!has_code(&diags, "GL0030"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn nested_ternary_if_silent_on_unrelated_conditions() {
+    let diags = lint(
+        "fn f(i: i64) -> String {\n    if i % 3 == 0 { \"three\" }\n    else if i % 5 == 0 { \"five\" }\n    else if i % 7 == 0 { \"seven\" }\n    else { \"other\" }\n}\n",
+    );
+    assert!(!has_code(&diags, "GL0030"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn nested_ternary_if_fires_on_a_computed_discriminant() {
+    let diags = lint(
+        "fn f(i: i64) -> String {\n    if i % 3 == 0 { \"zero\" }\n    else if i % 3 == 1 { \"one\" }\n    else if i % 3 == 2 { \"two\" }\n    else { \"other\" }\n}\n",
+    );
+    assert!(has_code(&diags, "GL0030"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn nested_ternary_if_silent_when_the_scrutinee_is_a_call() {
+    let diags = lint(
+        "fn g() -> i64 { 1 }\nfn f() -> String {\n    if g() == 0 { \"zero\" }\n    else if g() == 1 { \"one\" }\n    else if g() == 2 { \"two\" }\n    else { \"many\" }\n}\n",
+    );
+    assert!(!has_code(&diags, "GL0030"), "got {:?}", diags_codes(&diags));
+}
+
+#[test]
+fn nested_ternary_if_silent_without_a_closing_else() {
+    let diags = lint(
+        "fn f(n: i64) -> i64 {\n    let mut out = 0\n    if n == 0 { out = 1 }\n    else if n == 1 { out = 2 }\n    else if n == 2 { out = 3 }\n    out\n}\n",
+    );
+    assert!(!has_code(&diags, "GL0030"), "got {:?}", diags_codes(&diags));
+}
+
 fn diags_codes(diags: &[Diagnostic]) -> Vec<&str> {
     diags.iter().map(|d| d.code.as_str()).collect()
 }

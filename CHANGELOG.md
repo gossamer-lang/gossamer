@@ -1,22 +1,43 @@
 # Changelog
 
+## 0.60.2 - Parsed JSON documents are reclaimed, and aggregates cost less to hold
+
+- A parsed JSON document is reclaimed once nothing views it any more. The
+  handle `json::get` answers sits inside an `Option`, and that arm is now what
+  gives the handle back, so a program that parses in a loop no longer keeps
+  every document it has ever parsed alive for the rest of the run. A handle
+  bound to a name of its own keeps that binding as its owner, so nothing is
+  given back twice.
+- A struct or tuple that escapes into a `Some` or `Ok` payload carries one
+  word of bookkeeping rather than three, so a program built from many small
+  heap aggregates holds less memory.
+- A function that reads a sequence parameter and binds one of its elements to
+  a name - `let byte = buf[i]` - still reads the caller's storage rather than a
+  copy of the whole sequence. Binding a scalar element used to withdraw the
+  parameter, so a helper reading a few bytes of a large buffer copied the
+  buffer once per call. An embedded database answering a row out of a resident
+  file went from thousands of requests a second to hundreds of thousands, and
+  stopped growing under load.
+- A diagnostic whose span covers several lines underlines the part of the line
+  it prints rather than running past the end of it.
+- The `nested_ternary_if` lint names an `if / else if` chain only when every
+  arm tests one value against a pattern, which is the chain `match` replaces
+  arm for arm. A chain of relational or unrelated conditions keeps its shape,
+  since `match` would only move those conditions into guards.
+
 ## 0.60.1 - A program holds the data it is using, and no second copy of it
 
 - A goroutine that reads a collection its closure captured reads the one the
   spawning frame holds. A helper that answers a collection of its own no longer
-  disqualifies the ones it only reads, so a sixteen-way parallel matrix product
-  stopped taking sixteen copies of both operands: 296 MB to 53 MB, and the
-  product itself runs in 0.44 s where it took 0.73 s.
+  disqualifies the ones it only reads, so a parallel matrix product stopped
+  taking one copy of both operands per goroutine, and runs faster for it.
 - A `Map` lookup asked only which arm it answered - `.is_some()`, `.is_none()`,
   `.is_ok()`, `.is_err()` - gives its `String` or `Vec` payload back. A
-  lookup-in-a-loop kept one answer per call for the life of the process; an
-  LRU-cache simulation held 157 MB and now holds 3 MB.
+  lookup-in-a-loop kept one answer per call for the life of the process.
 - A struct literal whose field is built from a value nothing names afterwards
   takes that value's storage rather than a copy of it, however many bindings
-  and nested aggregates the value passed through on the way. A benchmark
-  harness holding the world it built kept two of everything: a 1400-square maze
-  fell from 636 MB to 342 MB and a half-million-vertex graph from 331 MB to
-  211 MB.
+  and nested aggregates the value passed through on the way. A harness holding
+  the world it built kept two of everything.
 - The element storage of a nested sequence is rebuilt in index order where the
   copy that used to do it stood, so a walk of a `Vec<Vec<T>>` grown element by
   element still reads its elements in the order it visits them.

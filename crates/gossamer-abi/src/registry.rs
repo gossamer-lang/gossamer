@@ -1388,7 +1388,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_result_ok", (I128) -> I64, Cranelift, "Unwrap the Ok payload of a Result; panics if Err."),
     rt!("gos_rt_result_ok_or", (I128, I64) -> I128, Cranelift, "Unwrap the Ok payload, or return a default i64 if Err."),
     rt!("gos_rt_result_ok_or_else", (I128, Ptr) -> I128, Both, "opt.ok_or_else(f): Some payload becomes Ok, None becomes Err(f())."),
-    rt!("gos_rt_result_ok_payload_release", (I128, I64) -> Void, Both, "Release a carrier's Ok/Some heap payload (kind 1 String, 2 Vec); a no-op on the other arm."),
+    rt!("gos_rt_result_ok_payload_release", (I128, I64) -> Void, Both, "Release a carrier's Ok/Some heap payload (kind 1 String, 2 Vec, 3 json::Value); a no-op on the other arm."),
     rt!("gos_rt_result_or_else", (I128, Ptr) -> I128, Both, "result::or_else(res, f): apply f to the Err payload, Ok passthrough; f returns a packed Result."),
     rt!("gos_rt_result_payload", (I128) -> I64, Cranelift, "Return the raw i64 payload of a Result without discriminant check."),
     rt!("gos_rt_result_payload_f64", (I128) -> F64, Cranelift, "Return the f64 payload of a Result<f64,_> by bitcast - symmetric with `gos_rt_result_new(0, x.to_bits())`."),

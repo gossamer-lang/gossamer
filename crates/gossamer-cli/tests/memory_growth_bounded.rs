@@ -1386,3 +1386,76 @@ fn main() {
          at 100000): every parsed document is still held"
     );
 }
+
+/// A `json::get` answers a handle onto the parsed document inside an
+/// `Option`, and that arm is the only name the handle has. If the arm does
+/// not give it back, every document the loop parses stays alive, so peak RSS
+/// tracks the parse count.
+#[test]
+fn json_get_releases_the_document_it_views() {
+    if !gnu_time_available() {
+        return;
+    }
+    let dir = env::temp_dir().join(format!("gos-json-own-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("json_own.gos");
+    std::fs::write(
+        &source,
+        "
+use std::{env, encoding::json}
+
+fn field(value: json::Value, name: String) -> i64 {
+    json::get(value, name).and_then(json::as_i64).unwrap_or(0)
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"1\").to_i64().unwrap_or(1)
+    let text = \"{\\\"a\\\": 1, \\\"b\\\": [1, 2, 3], \\\"c\\\": {\\\"d\\\": 4}}\"
+    let mut total = 0
+    for _ in 0..n {
+        let doc = json::parse(text).unwrap()
+        total += field(doc, \"a\")
+        if json::get(doc, \"c\").is_some() { total += 1 }
+        total += json::get(doc, \"b\").and_then(json::as_array).unwrap_or(#[]).len()
+    }
+    println(\"{}\", total)
+}
+",
+    )
+    .unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("json_own");
+    let rss = |iterations: &str| -> u64 {
+        let out = Command::new("/usr/bin/time")
+            .arg("-v")
+            .arg(&binary)
+            .arg(iterations)
+            .output()
+            .expect("run under /usr/bin/time");
+        assert!(
+            out.status.success(),
+            "binary failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        parse_max_rss_kb(&String::from_utf8_lossy(&out.stderr))
+            .expect("GNU time reports a maximum resident set size")
+    };
+    let small = rss("100");
+    let large = rss("100000");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        large < small + 4096,
+        "peak RSS tracks the parse count ({small} KB at 100 parses, {large} KB \
+         at 100000): every parsed document is still held"
+    );
+}

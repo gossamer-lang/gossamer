@@ -9502,6 +9502,94 @@ pub(crate) fn hoist_loop_carried_releases(body: &mut Body, tcx: &gossamer_types:
     }
 }
 
+/// Names of bodies that borrow every `json::Value` parameter they take.
+///
+/// A `gos_rt_json_*` entry reads the tree its handle views and mints a fresh
+/// handle for anything it answers, so a parameter that reaches nothing else
+/// cannot leave the call inside the result. `gos_rt_json_identity` is the one
+/// entry that answers its own argument, so it is not one of those reads.
+///
+/// The callers of `option::and_then` / `result::map` and their siblings pass
+/// the payload to one of these bodies, which is what lets the carrier holding
+/// it be reclaimed after the call.
+pub(crate) fn collect_json_borrowing_fns(
+    bodies: &[Body],
+    tcx: &gossamer_types::TyCtxt,
+) -> std::collections::HashSet<String> {
+    use gossamer_types::TyKind;
+    let mut out = std::collections::HashSet::new();
+    for body in bodies {
+        let arity = body.arity as usize;
+        let json_params: Vec<usize> = (1..=arity)
+            .filter(|&i| {
+                body.locals
+                    .get(i)
+                    .is_some_and(|l| matches!(tcx.kind_of(l.ty), TyKind::JsonValue))
+            })
+            .collect();
+        if json_params.is_empty() {
+            continue;
+        }
+        let escaped = std::cell::Cell::new(false);
+        let mut escapes = |p: &Place| {
+            if json_params.contains(&(p.local.0 as usize)) {
+                escaped.set(true);
+            }
+        };
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                    for_each_stmt_place(&stmt.kind, &mut escapes);
+                    continue;
+                };
+                if json_params.contains(&(place.local.0 as usize)) {
+                    escaped.set(true);
+                }
+                match rvalue {
+                    Rvalue::CallIntrinsic { name, args } if json_entry_borrows(name) => {
+                        let _ = args;
+                    }
+                    _ => for_each_rvalue_place(rvalue, &mut escapes),
+                }
+            }
+            match &block.terminator {
+                Terminator::Call { callee, args, .. } => {
+                    let borrows = matches!(
+                        callee,
+                        Operand::Const(ConstValue::Str(n)) if json_entry_borrows(n)
+                    );
+                    if !borrows {
+                        for a in args {
+                            if let Operand::Copy(p) = a {
+                                escapes(p);
+                            }
+                        }
+                    }
+                }
+                Terminator::SwitchInt {
+                    discriminant: Operand::Copy(p),
+                    ..
+                } => escapes(p),
+                _ => {}
+            }
+        }
+        if !escaped.get() {
+            out.insert(body.name.clone());
+        }
+    }
+    out
+}
+
+/// `true` when `name` is a json runtime entry that reads its handle argument
+/// and answers something that never aliases it.
+fn json_entry_borrows(name: &str) -> bool {
+    name.starts_with("gos_rt_json_")
+        && !matches!(
+            name,
+            "gos_rt_json_identity" | "gos_rt_json_free" | "gos_rt_json_free_slots"
+        )
+}
+
 /// `true` when a value of `ty` can carry a `json::Value` handle.
 ///
 /// A callee that answers one may be handing back the very handle it was
@@ -9556,22 +9644,146 @@ fn ty_reaches_json_value(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -
 /// each re-initialising call and at every return. Aliased, stored,
 /// returned, or user-call-passed handles keep today's (leaking)
 /// behaviour - a leak is recoverable, a dangling handle is not.
-pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+pub(crate) fn insert_json_frees(
+    body: &mut Body,
+    tcx: &gossamer_types::TyCtxt,
+    json_borrowing_fns: &std::collections::HashSet<String>,
+) {
     use gossamer_types::TyKind;
     let n_locals = body.locals.len();
     let arity = body.arity as usize;
     let mut candidate = vec![false; n_locals];
+    // A carrier local whose `Some` / `Ok` payload is a handle owns that
+    // handle: `json::get(v, k)` mints one per call and the arm is the only
+    // thing naming it, so the give-back is the carrier's rather than a
+    // separate local's.
+    let mut is_carrier = vec![false; n_locals];
     let mut any = false;
     for i in (arity + 1)..n_locals {
-        if matches!(tcx.kind_of(body.locals[i].ty), TyKind::JsonValue) && !body.locals[i].region {
-            candidate[i] = true;
-            any = true;
+        if body.locals[i].region {
+            continue;
+        }
+        match tcx.kind_of(body.locals[i].ty) {
+            TyKind::JsonValue => {
+                candidate[i] = true;
+                any = true;
+            }
+            TyKind::Adt { def, substs }
+                if (def.local == u32::MAX || def.local == u32::MAX - 1)
+                    && substs
+                        .types()
+                        .first()
+                        .is_some_and(|p| matches!(tcx.kind_of(*p), TyKind::JsonValue)) =>
+            {
+                candidate[i] = true;
+                is_carrier[i] = true;
+                any = true;
+            }
+            _ => {}
         }
     }
     if !any {
         return;
     }
     let is_json_rt = |name: &str| name.starts_with("gos_rt_json_");
+    // Entries that read a carrier's arm and hand nothing of its payload out.
+    let carrier_query = |name: &str| {
+        matches!(
+            name,
+            "gos_rt_result_is_ok" | "gos_rt_result_is_err" | "gos_rt_result_disc"
+        )
+    };
+    // Combinators that hand the payload to a closure, as (carrier, env)
+    // argument positions. `filter` is deliberately absent: it answers the very
+    // payload it was given.
+    let combinator_slots = |name: &str| -> Option<(usize, usize)> {
+        match name {
+            "gos_rt_option_and_then" | "gos_rt_result_and_then" | "gos_rt_result_map" => {
+                Some((0, 1))
+            }
+            "gos_rt_option_map_i64" => Some((1, 0)),
+            _ => None,
+        }
+    };
+    // The closure each env local carries, from the `gos_fn_addr` the lowering
+    // stores at offset 8. An env written with more than one closure answers
+    // `None`, so a reused env is judged as unknown rather than as the last
+    // name written into it.
+    let closure_of_env = {
+        let mut fn_addr: std::collections::HashMap<u32, &str> = std::collections::HashMap::new();
+        let mut const_int: std::collections::HashMap<u32, i128> = std::collections::HashMap::new();
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                    continue;
+                };
+                match rvalue {
+                    Rvalue::CallIntrinsic { name, args } if *name == "gos_fn_addr" => {
+                        if let Some(Operand::Const(ConstValue::Str(n))) = args.first() {
+                            fn_addr.insert(place.local.0, n.as_str());
+                        }
+                    }
+                    Rvalue::Use(Operand::Const(ConstValue::Int(n))) => {
+                        const_int.insert(place.local.0, *n);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // The callable slot the closure lowering writes: offset 8 of the env
+        // block, spelled either as a literal or as a local holding it.
+        let is_callable_slot = |op: &Operand| match op {
+            Operand::Const(ConstValue::Int(n)) => *n == 8,
+            Operand::Copy(p) => const_int.get(&p.local.0) == Some(&8),
+            _ => false,
+        };
+        let mut env: std::collections::HashMap<u32, Option<&str>> =
+            std::collections::HashMap::new();
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let StatementKind::Assign { rvalue, .. } = &stmt.kind else {
+                    continue;
+                };
+                let Rvalue::CallIntrinsic { name, args } = rvalue else {
+                    continue;
+                };
+                if *name != "gos_store" {
+                    continue;
+                }
+                let [Operand::Copy(target), offset, Operand::Copy(value)] = args.as_slice() else {
+                    continue;
+                };
+                if !is_callable_slot(offset) {
+                    continue;
+                }
+                let stored = fn_addr.get(&value.local.0).copied();
+                env.entry(target.local.0)
+                    .and_modify(|slot| {
+                        if *slot != stored {
+                            *slot = None;
+                        }
+                    })
+                    .or_insert(stored);
+            }
+        }
+        env
+    };
+    let combinator_borrows = |name: &str, args: &[Operand], local: u32| -> bool {
+        let Some((carrier_idx, env_idx)) = combinator_slots(name) else {
+            return false;
+        };
+        if !matches!(args.get(carrier_idx), Some(Operand::Copy(p)) if p.local.0 == local) {
+            return false;
+        }
+        let Some(Operand::Copy(env)) = args.get(env_idx) else {
+            return false;
+        };
+        closure_of_env
+            .get(&env.local.0)
+            .copied()
+            .flatten()
+            .is_some_and(|n| json_borrowing_fns.contains(n))
+    };
     // A handle read out of a container is the container's, not the frame's:
     // the container hands back the slot's word and reclaims it at its own
     // death, so freeing it here would give the same handle back twice.
@@ -9586,8 +9798,11 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     // ONLY value read and its only such move - the destination owns
     // the handle, the source is never freed. Pre-scan to identify
     // them so the escape check below can treat the move as allowed.
+    // Locals that own a handle, directly or through a carrier's arm. A move
+    // hands ownership on within one class; the two are never interchangeable,
+    // since one names the handle and the other names the arm holding it.
     let jv: Vec<bool> = (0..n_locals)
-        .map(|i| matches!(tcx.kind_of(body.locals[i].ty), TyKind::JsonValue))
+        .map(|i| matches!(tcx.kind_of(body.locals[i].ty), TyKind::JsonValue) || is_carrier[i])
         .collect();
     let mut value_reads = vec![0usize; n_locals];
     let mut move_edges: Vec<(usize, usize, usize, usize)> = Vec::new(); // (src, dest, bi, si)
@@ -9612,6 +9827,7 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
                         && (src.local.0 as usize) < n_locals
                         && jv[place.local.0 as usize]
                         && jv[src.local.0 as usize]
+                        && is_carrier[place.local.0 as usize] == is_carrier[src.local.0 as usize]
                     {
                         move_edges.push((src.local.0 as usize, place.local.0 as usize, bi, si));
                     } else {
@@ -9668,13 +9884,27 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
             }
         }
     }
-    fn check_op(op: &Operand, allowed: bool, c: &mut [bool]) {
+    // A read withdraws the local unless the site allows its class: a handle
+    // and a carrier reach different entry points, so each has its own verdict.
+    fn check_op(
+        op: &Operand,
+        allowed: bool,
+        allowed_carrier: bool,
+        carrier: &[bool],
+        c: &mut [bool],
+    ) {
         if let Operand::Copy(p) = op
             && (p.local.0 as usize) < c.len()
             && c[p.local.0 as usize]
-            && !allowed
         {
-            c[p.local.0 as usize] = false;
+            let ok = if carrier[p.local.0 as usize] {
+                allowed_carrier
+            } else {
+                allowed
+            };
+            if !ok {
+                c[p.local.0 as usize] = false;
+            }
         }
     }
     // Init sites per local: (block, stmt-or-terminator marker).
@@ -9689,8 +9919,11 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
             match rvalue {
                 Rvalue::CallIntrinsic { name, args } => {
                     let allowed = is_json_rt(name);
+                    let queries = carrier_query(name);
                     for a in args {
-                        check_op(a, allowed, &mut candidate);
+                        let carrier_ok = queries
+                            || matches!(a, Operand::Copy(p) if combinator_borrows(name, args, p.local.0));
+                        check_op(a, allowed, carrier_ok, &is_carrier, &mut candidate);
                     }
                 }
                 Rvalue::Use(op) => {
@@ -9704,21 +9937,23 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
                                 && (place.local.0 as usize) < n_locals
                                 && jv[place.local.0 as usize]
                     );
-                    check_op(op, clean_move, &mut candidate);
+                    check_op(op, clean_move, clean_move, &is_carrier, &mut candidate);
                 }
                 Rvalue::BinaryOp { lhs, rhs, .. } => {
-                    check_op(lhs, false, &mut candidate);
-                    check_op(rhs, false, &mut candidate);
+                    check_op(lhs, false, false, &is_carrier, &mut candidate);
+                    check_op(rhs, false, false, &is_carrier, &mut candidate);
                 }
                 Rvalue::UnaryOp { operand, .. } | Rvalue::Cast { operand, .. } => {
-                    check_op(operand, false, &mut candidate);
+                    check_op(operand, false, false, &is_carrier, &mut candidate);
                 }
                 Rvalue::Aggregate { operands, .. } => {
                     for a in operands {
-                        check_op(a, false, &mut candidate);
+                        check_op(a, false, false, &is_carrier, &mut candidate);
                     }
                 }
-                Rvalue::Repeat { value, .. } => check_op(value, false, &mut candidate),
+                Rvalue::Repeat { value, .. } => {
+                    check_op(value, false, false, &is_carrier, &mut candidate);
+                }
                 Rvalue::Ref { place: rp, .. } => {
                     if candidate.get(rp.local.0 as usize).copied().unwrap_or(false) {
                         candidate[rp.local.0 as usize] = false;
@@ -9781,13 +10016,22 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
                     && (destination.local.0 as usize) < n_locals
                     && !ty_reaches_json_value(tcx, body.locals[destination.local.0 as usize].ty);
                 let allowed = callee_name.is_some_and(is_json_rt) || user_call_borrows;
+                let queries = callee_name.is_some_and(carrier_query);
                 for a in args {
                     if let Operand::Copy(p) = a
                         && (p.local.0 as usize) < n_locals
                         && candidate[p.local.0 as usize]
-                        && !allowed
                     {
-                        candidate[p.local.0 as usize] = false;
+                        let ok = if is_carrier[p.local.0 as usize] {
+                            queries
+                                || callee_name
+                                    .is_some_and(|n| combinator_borrows(n, args, p.local.0))
+                        } else {
+                            allowed
+                        };
+                        if !ok {
+                            candidate[p.local.0 as usize] = false;
+                        }
                     }
                 }
                 if destination.projection.is_empty()
@@ -9823,15 +10067,25 @@ pub(crate) fn insert_json_frees(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     let free_stmt = |l: usize, span: gossamer_lex::Span, next: &mut usize| -> Statement {
         let dest = Local(u32::try_from(*next).expect("local overflow"));
         *next += 1;
+        let operand = Operand::Copy(Place::local(Local(u32::try_from(l).unwrap_or(0))));
+        // A carrier gives back the handle its `Some` / `Ok` arm names; the
+        // other arm's payload word belongs to the error value. Kind 3 is the
+        // `json::Value` payload.
+        let rvalue = if is_carrier[l] {
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_ok_payload_release",
+                args: vec![operand, Operand::Const(ConstValue::Int(3))],
+            }
+        } else {
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_json_free",
+                args: vec![operand],
+            }
+        };
         Statement {
             kind: StatementKind::Assign {
                 place: Place::local(dest),
-                rvalue: Rvalue::CallIntrinsic {
-                    name: "gos_rt_json_free",
-                    args: vec![Operand::Copy(Place::local(Local(
-                        u32::try_from(l).unwrap_or(0),
-                    )))],
-                },
+                rvalue,
             },
             span,
         }

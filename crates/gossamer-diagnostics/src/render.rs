@@ -233,8 +233,19 @@ fn render_label(
             .span
             .end
             .saturating_sub(label.location.span.start)
-            .max(1);
-        let caret = "^".repeat(span_len as usize);
+            .max(1) as usize;
+        // A span may run past the line under it - an `if / else if` chain or a
+        // block-bodied match arm covers several lines. The caret marks what
+        // the reader can see, so it stops at the end of the printed line.
+        let visible = source_line_of(map, origin, line)
+            .map_or(span_len, |text| {
+                text.chars()
+                    .count()
+                    .saturating_sub(column.saturating_sub(1) as usize)
+                    .max(1)
+            })
+            .min(span_len);
+        let caret = "^".repeat(visible);
         let caret_colour = if label.primary { red } else { cyan };
         let _ = writeln!(
             out,

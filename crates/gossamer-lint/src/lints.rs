@@ -1514,48 +1514,178 @@ fn lint_manual_not_equal(sf: &SourceFile) -> Vec<Finding> {
 fn lint_nested_ternary_if(sf: &SourceFile) -> Vec<Finding> {
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
+        // A chain is reported once, at the `if` that opens it, so the
+        // `else if` links inside it are not chains of their own.
+        let mut continuations = BTreeSet::new();
         walk_expr(body, &mut |expr| {
-            let ExprKind::If {
+            if let ExprKind::If {
                 else_branch: Some(else_branch),
                 ..
             } = &expr.kind
-            else {
+                && let Some(next) = else_if_of(else_branch)
+            {
+                continuations.insert(next.id.as_u32());
+            }
+        });
+        walk_expr(body, &mut |expr| {
+            if continuations.contains(&expr.id.as_u32()) {
+                return;
+            }
+            let Some(conditions) = if_chain_with_final_else(expr) else {
                 return;
             };
-            let tail = match &else_branch.kind {
-                ExprKind::Block(b) if b.stmts.is_empty() => b.tail.as_deref(),
-                ExprKind::If { .. } => Some(else_branch.as_ref()),
-                _ => None,
-            };
-            let Some(tail) = tail else { return };
-            if let ExprKind::If {
-                else_branch: Some(_),
-                ..
-            } = &tail.kind
-            {
-                if let ExprKind::If {
-                    else_branch: Some(inner_else),
-                    ..
-                } = &tail.kind
-                {
-                    if matches!(
-                        &inner_else.kind,
-                        ExprKind::If {
-                            else_branch: Some(_),
-                            ..
-                        }
-                    ) {
-                        out.push((
-                            expr.span,
-                            "deeply nested `if/else if` chain reads better as `match`".to_string(),
-                            Some("convert to `match` on the discriminant".to_string()),
-                        ));
-                    }
-                }
+            if conditions.len() < 3 || !tests_one_discriminant(&conditions) {
+                return;
             }
+            out.push((
+                expr.span,
+                "deeply nested `if/else if` chain reads better as `match`".to_string(),
+                Some("convert to `match` on the discriminant".to_string()),
+            ));
         });
     });
     out
+}
+
+/// The `if` an else branch continues the chain with. `else { if .. }` is
+/// written as a block holding one tail `if`, and reads as the `else if` it
+/// stands for.
+fn else_if_of(else_branch: &Expr) -> Option<&Expr> {
+    match &else_branch.kind {
+        ExprKind::If { .. } => Some(else_branch),
+        ExprKind::Block(block) if block.stmts.is_empty() => match block.tail.as_deref() {
+            Some(tail) if matches!(tail.kind, ExprKind::If { .. }) => Some(tail),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The conditions of an `if / else if / ... / else` chain in source order,
+/// or `None` when `expr` is not an `if` or the chain has no closing `else`.
+fn if_chain_with_final_else(expr: &Expr) -> Option<Vec<&Expr>> {
+    let mut conditions = Vec::new();
+    let mut current = expr;
+    loop {
+        let ExprKind::If {
+            condition,
+            else_branch: Some(else_branch),
+            ..
+        } = &current.kind
+        else {
+            return None;
+        };
+        conditions.push(condition.as_ref());
+        let Some(next) = else_if_of(else_branch) else {
+            return Some(conditions);
+        };
+        current = next;
+    }
+}
+
+/// Whether every condition in the chain compares one and the same value
+/// against something a `match` arm can spell as a pattern, which is what
+/// makes the rewrite mechanical rather than a reshuffle into guards.
+fn tests_one_discriminant(conditions: &[&Expr]) -> bool {
+    let Some(first) = conditions.first().and_then(|c| equality_discriminant(c)) else {
+        return false;
+    };
+    conditions
+        .iter()
+        .skip(1)
+        .all(|cond| equality_discriminant(cond) == Some(first))
+}
+
+/// The value an equality test compares, when the other side is a pattern and
+/// the value itself is one a `match` may evaluate once. `a == 1 || a == 2`
+/// answers `a`, since or-patterns cover it.
+fn equality_discriminant(cond: &Expr) -> Option<&Expr> {
+    match &cond.kind {
+        ExprKind::Binary {
+            op: BinaryOp::Eq,
+            lhs,
+            rhs,
+        } => {
+            if is_pattern_value(rhs) && is_repeatable_scrutinee(lhs) {
+                Some(lhs)
+            } else if is_pattern_value(lhs) && is_repeatable_scrutinee(rhs) {
+                Some(rhs)
+            } else {
+                None
+            }
+        }
+        ExprKind::Binary {
+            op: BinaryOp::Or,
+            lhs,
+            rhs,
+        } => {
+            let left = equality_discriminant(lhs)?;
+            let right = equality_discriminant(rhs)?;
+            (left == right).then_some(left)
+        }
+        _ => None,
+    }
+}
+
+/// Whether a `match` arm can spell this value as a pattern.
+fn is_pattern_value(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Literal(lit) => !matches!(lit, Literal::Float(_) | Literal::Unit),
+        // A variant or associated constant, the two path forms a pattern
+        // matches by value rather than binding as a fresh name.
+        ExprKind::Path(path) => {
+            path.segments.len() > 1
+                || path.segments.first().is_some_and(|segment| {
+                    segment
+                        .name
+                        .name
+                        .chars()
+                        .next()
+                        .is_some_and(char::is_uppercase)
+                })
+        }
+        ExprKind::Unary {
+            op: UnaryOp::Neg,
+            operand,
+        } => matches!(operand.kind, ExprKind::Literal(Literal::Int(_))),
+        _ => false,
+    }
+}
+
+/// Whether the chain can be rewritten to evaluate this scrutinee once, which
+/// rules out anything that may run code or observe a change between arms.
+fn is_repeatable_scrutinee(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Literal(_) => false,
+        ExprKind::Path(_) => true,
+        ExprKind::FieldAccess { receiver, .. } => is_repeatable_scrutinee(receiver),
+        ExprKind::Index { base, index } => {
+            is_repeatable_scrutinee(base)
+                && (is_repeatable_scrutinee(index) || is_pattern_value(index))
+        }
+        ExprKind::Cast { value, .. } => is_repeatable_scrutinee(value),
+        ExprKind::Unary { op, operand } => {
+            matches!(op, UnaryOp::Neg | UnaryOp::Not | UnaryOp::Deref)
+                && (is_repeatable_scrutinee(operand) || is_pattern_value(operand))
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            matches!(
+                op,
+                BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Rem
+                    | BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Shl
+                    | BinaryOp::Shr
+                    | BinaryOp::BitAnd
+                    | BinaryOp::BitXor
+                    | BinaryOp::BitOr
+            ) && (is_repeatable_scrutinee(lhs) || is_pattern_value(lhs))
+                && (is_repeatable_scrutinee(rhs) || is_pattern_value(rhs))
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------

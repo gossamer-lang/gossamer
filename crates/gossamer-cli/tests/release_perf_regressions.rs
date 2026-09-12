@@ -247,6 +247,47 @@ println("{} {}", rendered.len(), checksum)
     assert_linear_and_fast("json-serde-like", small, large, Duration::from_secs(3));
 }
 
+/// A read-only `Vec<u8>` parameter crosses a call as the handle, so a fixed
+/// number of calls costs the same whatever the buffer holds. A body that binds
+/// a scalar element of the parameter (`let byte = buf[i]`) and hands it on is
+/// the shape that used to withdraw the parameter and clone the whole buffer
+/// once per call, which turns a row read into a pass over the file it sits in.
+#[test]
+fn read_only_buffer_parameter_cost_is_independent_of_its_size() {
+    let binary = build_release(
+        "shared_buffer_param",
+        r#"
+use std::env
+
+fn classify(byte: u8) -> i64 { if byte > 128u8 { 1 } else { 0 } }
+
+fn scan(buf: Vec<u8>, start: i64, end: i64) -> i64 {
+    let mut total = 0
+    let mut i = start
+    while i < end {
+        let byte = buf[i]
+        total += classify(byte) + (byte as i64)
+        i += 1
+    }
+    total
+}
+
+let bytes: i64 = env::args()[0].to_i64().unwrap_or(65536)
+let buf: Vec<u8> = #[7u8; bytes]
+let mut acc = 0
+for i in 0..20_000 { acc += scan(buf, 0, 16) }
+println("{}", acc)
+"#,
+    );
+    let small = timed(&binary, 64 * 1024);
+    let large = timed(&binary, 4 * 1024 * 1024);
+    assert!(
+        large <= small.saturating_mul(3) + Duration::from_millis(250),
+        "a read-only buffer parameter is being copied per call: \
+         64 KiB={small:?}, 4 MiB={large:?}"
+    );
+}
+
 #[test]
 fn radix_sort_like_release_work_stays_linear_and_fast() {
     let binary = build_release(

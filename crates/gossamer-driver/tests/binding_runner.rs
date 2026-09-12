@@ -36,11 +36,18 @@ fn fixture_path() -> PathBuf {
 }
 
 fn fresh_cache() -> PathBuf {
+    // Test threads share this process, and two of them can read the clock in
+    // the same tick, so the counter is what makes each cache path its own.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let p = std::env::temp_dir().join(format!("gos-runner-test-{}-{now}", std::process::id()));
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let p = std::env::temp_dir().join(format!(
+        "gos-runner-test-{}-{now}-{seq}",
+        std::process::id()
+    ));
     fs::create_dir_all(&p).unwrap();
     p
 }

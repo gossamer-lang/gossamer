@@ -1,0 +1,60 @@
+use std::encoding::json
+
+// A `json::get` mints a handle onto the parsed document and hands it back
+// inside an `Option`. The arm is the only name that handle has, so the
+// carrier is what gives it back; every shape below has to answer the same
+// value whether or not the give-back is emitted.
+
+fn field(value: json::Value, name: String) -> f64 {
+    json::get(value, name).and_then(json::as_f64).unwrap_or(0.0)
+}
+
+fn depth(value: json::Value) -> i64 {
+    json::get(value, "inner")
+        .and_then(json::as_array)
+        .unwrap_or(#[])
+        .len()
+}
+
+fn document(n: i64) -> String {
+    let mut rows: Vec<String> = #[]
+    for i in 0..n {
+        rows.push(format("{{\"x\":{}.5,\"y\":{}.25,\"tag\":\"t{}\"}}", i, i, i))
+    }
+    format("{{\"rows\":[{}],\"inner\":[1,2,3],\"info\":\"done\"}}", rows.join(","))
+}
+
+fn main() {
+    let text = document(40)
+    let mut sum = 0.0
+    let mut named = 0
+    let mut inners = 0
+    let mut kept = 0
+
+    for _ in 0..50 {
+        let doc = json::parse(text).unwrap()
+
+        // A carrier read only for its arm.
+        if json::get(doc, "info").is_some() { named += 1 }
+
+        // A carrier whose payload the combinator hands to a borrowing callee.
+        inners += depth(doc)
+
+        // A carrier whose payload is bound to a name of its own: the binding
+        // owns the handle, so the carrier must not give it back as well.
+        if let Some(info) = json::get(doc, "info") {
+            kept += json::as_str(info).unwrap_or("").len()
+        }
+
+        let rows = json::get(doc, "rows").and_then(json::as_array).unwrap_or(#[])
+        for row in rows {
+            sum += field(row, "x") + field(row, "y")
+            if json::get(row, "tag").is_some() { named += 1 }
+        }
+    }
+
+    println("sum {:.2}", sum)
+    println("named {}", named)
+    println("inners {}", inners)
+    println("kept {}", kept)
+}

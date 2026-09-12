@@ -909,12 +909,16 @@ impl ShareScan<'_> {
                         // A binding taken straight out of the parameter names
                         // the same storage, so it joins the tracked set rather
                         // than counting as a use: the walk then judges what the
-                        // body does with it.
+                        // body does with it. A scalar element is the exception
+                        // - `let byte = buf[i]` binds a copy of the byte, which
+                        // reaches none of the parameter's storage - so it is
+                        // walked as the read it is.
                         if let gossamer_hir::HirPatKind::Binding {
                             name,
                             mutable: false,
                         } = &pattern.kind
                             && self.projection_of_tracked(e)
+                            && !is_copy_ty(self.tcx, e.ty)
                         {
                             self.walk_projection_indices(e);
                             self.names.push(name.name.as_str().to_string());

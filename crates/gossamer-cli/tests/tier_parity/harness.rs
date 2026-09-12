@@ -1518,6 +1518,21 @@ const SPECS: &[Spec] = &[
     // back into a `Value::Variant` tree and frees - the json-serde parse shape.
     // Bit-identical across the bytecode VM, Cranelift JIT, and LLVM AOT tiers.
     spec("feature-testing-examples/json_parse_jit.gos"),
+    // A `json::get` hands a handle onto the parsed document back inside an
+    // `Option`, and the arm is the only name that handle has. The fixture
+    // covers the three shapes that decide who gives it back: a carrier read
+    // only for its arm, a carrier whose payload a combinator hands to a
+    // borrowing callee, and a payload bound to a name of its own (which owns
+    // the handle, so the carrier must not release it too). Bit-identical
+    // across the bytecode VM, Cranelift JIT, and LLVM AOT tiers.
+    spec("feature-testing-examples/json_carrier_handle_drops.gos"),
+    // A read-only sequence parameter crosses a call as the caller's storage.
+    // The fixture binds a scalar element of it and hands that copy on, which
+    // says nothing about the buffer, and writes the caller's vector between
+    // calls - so a callee holding a stale view, or one that copied when it
+    // should not have, answers differently. Bit-identical across the bytecode
+    // VM, Cranelift JIT, and LLVM AOT tiers.
+    spec("feature-testing-examples/shared_buffer_scalar_reads.gos"),
     // Recursive heap enum crossing the JIT boundary in BOTH directions: a
     // by-value `transform(Node) -> Node` (enum in, freshly built enum out,
     // with `Vec<Node>` and `Vec<(String, Node)>` variant fields marshalled

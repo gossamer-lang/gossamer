@@ -1,0 +1,49 @@
+// A read-only sequence parameter crosses a call as the caller's own storage.
+// A body that binds a scalar element of it (`let byte = buf[i]`) binds a copy
+// of that byte, so handing the copy on says nothing about the buffer - and the
+// caller keeps writing to the vector between calls, which is what a shared
+// parameter has to answer correctly.
+
+fn classify(byte: u8) -> i64 { if byte > 128u8 { 1 } else { 0 } }
+
+fn weigh(value: i64) -> i64 { value * 2 }
+
+fn scan(buf: Vec<u8>, start: i64, end: i64) -> i64 {
+    let mut total = 0
+    let mut i = start
+    while i < end {
+        let byte = buf[i]
+        total += classify(byte) + weigh(byte as i64)
+        i += 1
+    }
+    total
+}
+
+fn widths(rows: Vec<Vec<i64>>) -> i64 {
+    let mut total = 0
+    for row in rows {
+        let first = row[0]
+        total += weigh(first) + row.len()
+    }
+    total
+}
+
+fn main() {
+    let mut buf: Vec<u8> = #[1u8, 200u8, 3u8, 250u8]
+    let mut seen = 0
+    for round in 0..4 {
+        seen += scan(buf, 0, buf.len())
+        // The caller writes its vector between calls: a callee that had been
+        // handed the storage rather than a copy must not have kept a stale
+        // view of it, and one handed a copy must not see this write.
+        buf.push((round * 40) as u8)
+    }
+    println("scan {}", seen)
+    println("len {}", buf.len())
+
+    let mut rows: Vec<Vec<i64>> = #[]
+    for i in 0..3 { rows.push(#[i, i + 1, i + 2]) }
+    println("widths {}", widths(rows))
+    rows.push(#[9, 9])
+    println("widths {}", widths(rows))
+}

@@ -219,8 +219,10 @@ not `|(t)|`.
 
 ## `nested_ternary_if`
 
-Three or more nested `if / else if` layers are hard to skim.
-Rewrite as `match` on the discriminant.
+Three or more `if / else if` layers that all test one value against a
+pattern are a `match` written the long way. Rewrite them as `match` on
+that value. A chain whose arms test unrelated conditions, or compare with
+`<` and `>`, is left alone: `match` would only move those into guards.
 
 ## `absurd_range`
 

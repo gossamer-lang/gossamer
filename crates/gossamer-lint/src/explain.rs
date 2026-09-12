@@ -125,8 +125,11 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
         }
         "manual_not_equal" => "`!(a == b)` is just `a != b`. Prefer the direct operator.",
         "nested_ternary_if" => {
-            "Three or more nested `if / else if` layers are hard to skim.\n\
-            Rewrite as `match` on the discriminant."
+            "Three or more `if / else if` layers that all test one value\n\
+            against a pattern are a `match` written the long way. Rewrite\n\
+            them as `match` on that value. A chain whose arms test\n\
+            unrelated conditions, or compare with `<` and `>`, is left\n\
+            alone: `match` would only move those into guards."
         }
         "absurd_range" => {
             "A literal range whose lower bound exceeds its upper bound is\n\

@@ -2940,10 +2940,10 @@ pub extern "C" fn gos_rt_result_unwrap_or_str(r: i128, default: i64) -> i64 {
 /// Releases the heap payload of a carrier's `Ok` / `Some` arm, and nothing on
 /// the other arm, whose payload word belongs to the error value.
 ///
-/// `kind` names the payload's storage: 1 a `String`, 2 a `Vec` / slice. This is
-/// the give-back for `map`, which hands the payload to a closure that answers a
-/// value of its own; the carrier itself never releases a payload of either
-/// kind.
+/// `kind` names the payload's storage: 1 a `String`, 2 a `Vec` / slice, 3 a
+/// `json::Value` handle. This is the give-back for `map`, which hands the
+/// payload to a closure that answers a value of its own; the carrier itself
+/// never releases a payload of any of those kinds.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
     if result_disc_of(r) != 0 {
@@ -2962,6 +2962,14 @@ pub extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
         // SAFETY: as above, for a `Vec` header.
         2 => unsafe {
             crate::c_abi::gos_rt_vec_free(payload as usize as *mut GosVec);
+        },
+        // SAFETY: as above, for a `GosJson` handle box. The box holds one
+        // share of the parsed document, so giving it back is what lets the
+        // document die with the last handle onto it.
+        3 => unsafe {
+            crate::c_abi::json::gos_rt_json_free(
+                payload as usize as *mut crate::c_abi::json::GosJson,
+            );
         },
         _ => {}
     }

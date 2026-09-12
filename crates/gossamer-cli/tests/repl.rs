@@ -36,12 +36,16 @@ fn run_repl(input: &str) -> ReplOutput {
 fn run_repl_args(input: &str, args: &[&str]) -> ReplOutput {
     // REPL history is normally persistent. Every test gets a private path so
     // history assertions never read or mutate a developer's real session.
+    // Test threads share this process, and two of them can read the clock in
+    // the same tick, so the counter is what makes each history path its own.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let history_path = env::temp_dir().join(format!(
-        "gos-repl-history-test-{}-{}",
+        "gos-repl-history-test-{}-{}-{}",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |duration| duration.as_nanos()),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     let mut child = Command::new(gos_bin())
         .arg("repl")

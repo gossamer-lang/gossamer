@@ -204,6 +204,9 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
     }
     let user_fn_names: std::collections::HashSet<String> =
         bodies.iter().map(|body| body.name.clone()).collect();
+    // Which callees borrow a `json::Value` they are handed, so the carrier a
+    // combinator reads the handle out of can be reclaimed after the call.
+    let json_borrowing_fns = collect_json_borrowing_fns(&bodies, tcx);
     for body in &mut bodies {
         // Rewrite `s = s + frag` to the in-place `gos_rt_str_concat_drop_a`
         // BEFORE inserting RC retain/release statements. The rewrite matches a
@@ -235,7 +238,7 @@ pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
         insert_drops_at_returns(body, tcx);
         insert_rc_releases(body, tcx);
         insert_aggr_copy_drops(body, tcx);
-        insert_json_frees(body, tcx);
+        insert_json_frees(body, tcx, &json_borrowing_fns);
         insert_vec_elem_metas(body, tcx);
         insert_early_releases(body, tcx);
         insert_copied_key_releases(body, tcx);

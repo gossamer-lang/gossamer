@@ -9,13 +9,17 @@ fn gos_bin() -> PathBuf {
 }
 
 fn run(source: &str) -> std::process::Output {
+    // Test threads share this process, and two of them can read the clock in
+    // the same tick, so the counter is what makes each fixture path its own.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let fixture = env::temp_dir().join(format!(
-        "gossamer-builtin-collection-contracts-{}-{}.gos",
+        "gossamer-builtin-collection-contracts-{}-{}-{}.gos",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system time after epoch")
-            .as_nanos()
+            .as_nanos(),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::write(&fixture, source).expect("write fixture");
     let output = Command::new(gos_bin())

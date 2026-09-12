@@ -40,12 +40,16 @@ fn main() {
 ";
 
 fn write_fixture() -> PathBuf {
+    // Test threads share this process, and two of them can read the clock in
+    // the same tick, so the counter is what makes each fixture path its own.
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let path = std::env::temp_dir().join(format!(
-        "gos-recv-ctx-{}-{}.gos",
+        "gos-recv-ctx-{}-{}-{}.gos",
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos() as u64),
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
     ));
     std::fs::write(&path, RECV_CTX_SRC).expect("write fixture");
     path

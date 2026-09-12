@@ -2851,53 +2851,35 @@ unsafe fn free_block(payload: *mut u8) {
 //
 // A guarded payload may also hold a non-copy pointer (map-get result,
 // construction aggregate, or borrow). Copy blobs therefore carry a real
-// owner immediately before their compact `RcHeader`; the carrier includes the
-// ABI version, destructor identity, allocation generation, and the exact
-// guarded metadata used for the copy. This replaces the former address-keyed
-// fallback.
+// owner immediately before their compact `RcHeader`, which is what a walk
+// over an untyped slot reads to tell one apart. This is the block's own
+// state rather than an address-keyed side table.
+/// The carrier in front of a guarded copy blob's ordinary RC header: one
+/// word naming the ABI version, the carrier kind, and the destructor the
+/// block answers to, under a magic that no ordinary payload word carries.
+///
+/// The word is what says a pointer read out of an untyped `Option` /
+/// `Result` slot is a copy blob rather than some other managed allocation,
+/// so it is a whole word of tag rather than a flag. The child layout is not
+/// repeated here: the RC header interns it as `meta_id`, and `meta_of` reads
+/// the same blob back.
 #[repr(C)]
 struct CopyBlobOwner {
-    abi_version: u16,
-    kind: u16,
-    destructor: u32,
-    generation: u64,
-    meta: *const i64,
+    tag: u64,
 }
 
 const COPY_BLOB_OWNER_VERSION: u16 = 1;
 const COPY_BLOB_OWNER_KIND: u16 = 3;
 const COPY_BLOB_OWNER_DTOR: u32 = 1;
+const COPY_BLOB_OWNER_MAGIC: u16 = 0xC0B5;
 const COPY_BLOB_DISC: u8 = 0xCB;
 const COPY_BLOB_OWNER_BYTES: usize = std::mem::size_of::<CopyBlobOwner>();
-static NEXT_COPY_BLOB_GENERATION: AtomicUsize = AtomicUsize::new(1);
 
-/// Identities a goroutine claims in one go. A blob's identity has to be
-/// unique across the process, which one process-wide counter gives at the
-/// cost of a read-modify-write on every allocation. Claiming a block at a
-/// time keeps the uniqueness and leaves the allocation path a thread-local
-/// increment.
-const COPY_BLOB_GENERATION_BLOCK: usize = 1 << 16;
-
-thread_local! {
-    /// The identities this thread still holds: the next one to hand out and
-    /// the end of its claimed block.
-    static COPY_BLOB_GENERATIONS: std::cell::Cell<(usize, usize)> =
-        const { std::cell::Cell::new((0, 0)) };
-}
-
-fn next_copy_blob_generation() -> u64 {
-    COPY_BLOB_GENERATIONS.with(|held| {
-        let (next, end) = held.get();
-        if next < end {
-            held.set((next + 1, end));
-            return next as u64;
-        }
-        let base =
-            NEXT_COPY_BLOB_GENERATION.fetch_add(COPY_BLOB_GENERATION_BLOCK, Ordering::Relaxed);
-        held.set((base + 1, base + COPY_BLOB_GENERATION_BLOCK));
-        base as u64
-    })
-}
+/// The one value a live carrier's word holds.
+const COPY_BLOB_OWNER_TAG: u64 = ((COPY_BLOB_OWNER_MAGIC as u64) << 48)
+    | ((COPY_BLOB_OWNER_VERSION as u64) << 40)
+    | ((COPY_BLOB_OWNER_KIND as u64) << 32)
+    | (COPY_BLOB_OWNER_DTOR as u64);
 
 /// Whether `payload` could be a managed allocation this module may inspect.
 ///
@@ -2933,11 +2915,7 @@ unsafe fn copy_blob_owner(payload: *mut u8) -> Option<&'static CopyBlobOwner> {
             .sub(COPY_BLOB_OWNER_BYTES)
             .cast::<CopyBlobOwner>())
     };
-    (owner.abi_version == COPY_BLOB_OWNER_VERSION
-        && owner.kind == COPY_BLOB_OWNER_KIND
-        && owner.destructor == COPY_BLOB_OWNER_DTOR
-        && !owner.meta.is_null())
-    .then_some(owner)
+    (owner.tag == COPY_BLOB_OWNER_TAG && !unsafe { meta_of(header) }.is_null()).then_some(owner)
 }
 
 #[inline]
@@ -3044,11 +3022,7 @@ unsafe fn rc_alloc_from(
     let header = unsafe { base.add(COPY_BLOB_OWNER_BYTES).cast::<RcHeader>() };
     unsafe {
         owner.write(CopyBlobOwner {
-            abi_version: COPY_BLOB_OWNER_VERSION,
-            kind: COPY_BLOB_OWNER_KIND,
-            destructor: COPY_BLOB_OWNER_DTOR,
-            generation: next_copy_blob_generation(),
-            meta,
+            tag: COPY_BLOB_OWNER_TAG,
         });
         (*header).strong = 1;
         (*header).weak = AtomicU8::new(0);
@@ -4828,15 +4802,17 @@ mod tests {
         unsafe {
             let first = gos_rt_rc_alloc_copy(8, meta.as_ptr(), source.as_ptr().cast());
             let first_owner = copy_blob_owner(first).expect("copy blob owner");
-            assert_eq!(first_owner.meta, meta.as_ptr());
-            assert_ne!(first_owner.generation, 0);
+            assert_eq!(first_owner.tag, COPY_BLOB_OWNER_TAG);
+            assert_eq!(meta_of(header_ptr(first)), meta.as_ptr(), "child layout");
             assert_eq!(unsafe { first.cast::<u64>().read() }, 17);
-            let first_generation = first_owner.generation;
             gos_rt_rc_release(first);
 
             let second = gos_rt_rc_alloc_copy(8, meta.as_ptr(), source.as_ptr().cast());
-            let second_owner = copy_blob_owner(second).expect("copy blob owner");
-            assert_ne!(second_owner.generation, first_generation);
+            assert_eq!(
+                copy_blob_owner(second).expect("copy blob owner").tag,
+                COPY_BLOB_OWNER_TAG
+            );
+            assert_eq!(meta_of(header_ptr(second)), meta.as_ptr(), "child layout");
             gos_rt_rc_release(second);
         }
         assert_eq!(rc_live_count(), base);

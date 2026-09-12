@@ -31,7 +31,6 @@ fn area(shape: Shape) -> f64 {
     }
 }
 
-#[lint(allow(nested_ternary_if))]
 fn main() {
     // while loop with `+=`
     let mut n = 0
