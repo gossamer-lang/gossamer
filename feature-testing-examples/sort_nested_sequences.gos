@@ -1,0 +1,64 @@
+// Sorting, searching, and min/max over elements that are themselves
+// sequences, or aggregates holding one: Vec<Vec<i64>> with an empty inner Vec,
+// Vec<Vec<String>>, Vec<Vec<f64>> with negatives, tuples and a struct holding a
+// Vec, a fixed array of Vecs, Option<Vec>, and a tuple whose first field is a
+// variant-only enum. Sequences order lexicographically and a prefix orders
+// first.
+use std::{iter, sort}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Level { Low, Mid, High }
+
+struct Row { id: i64, tags: Vec<i64> }
+
+fn main() {
+    let mut ints = #[#[2], #[1, 9], #[], #[1], #[1, 9, 0], #[0, 5]]
+    ints.sort()
+    println("ints {:?}", ints)
+    println("found {:?} missing {:?}", ints.binary_search(#[1, 9]), ints.binary_search(#[1, 5]))
+    println("sort::binary_search {:?}", sort::binary_search(ints, #[2]))
+    println("sort::partition_point {}", sort::partition_point(ints, #[1, 9]))
+
+    let loose = #[#[3, 1], #[2], #[2, 0], #[]]
+    println("stable {:?}", sort::sort_stable(loose))
+    if let Some(low) = iter::min(loose) {
+        println("min {:?}", low)
+    }
+    if let Some(high) = iter::max(loose) {
+        println("max {:?}", high)
+    }
+
+    let mut words = #[#["b"], #["a", "c"], #["a"], #["a", "b"]]
+    words.sort()
+    println("words {:?}", words)
+
+    let mut floats = #[#[1.5, -2.0], #[-3.0], #[1.5, -9.0], #[-3.0, 0.5]]
+    floats.sort()
+    println("floats {:?}", floats)
+
+    let mut pairs = #[(2, #[1]), (1, #[5]), (1, #[4, 4]), (1, #[])]
+    pairs.sort()
+    println("pairs {:?}", pairs)
+
+    let mut rows = #[
+        Row { id: 2, tags: #[1] }
+        Row { id: 1, tags: #[5] }
+        Row { id: 1, tags: #[4, 9] }
+    ]
+    rows.sort()
+    for row in rows {
+        println("row {} {:?}", row.id, row.tags)
+    }
+
+    let mut fixed = [#[3], #[1, 1], #[1]]
+    fixed.sort()
+    println("fixed {:?}", fixed)
+
+    let mut optional = #[Some(#[2]), None, Some(#[1, 0]), Some(#[1])]
+    optional.sort()
+    println("optional {:?}", optional)
+
+    let mut levels = #[(Level::High, 1), (Level::Low, 2), (Level::Mid, 3), (Level::Low, 1)]
+    levels.sort()
+    println("levels {:?}", levels)
+}

@@ -115,6 +115,16 @@ pub unsafe extern "C" fn gos_rt_iter_count(v: *const GosVec) -> i64 {
     })
 }
 
+/// The integer elements of `vec`, each read at the width the vec stores it:
+/// a packed byte vec holds one byte per element, every other a word.
+///
+/// # Safety
+/// `vec` must be a live header whose `ptr` addresses `len` elements.
+unsafe fn vec_words(vec: &GosVec) -> impl Iterator<Item = i64> + '_ {
+    // SAFETY: every index is in `[0, len)` of the caller's live vec.
+    (0..vec.len).map(move |index| unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, index) })
+}
+
 /// Sum all i64 elements of `v`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_iter_sum_i64(v: *const GosVec) -> i64 {
@@ -126,9 +136,69 @@ pub unsafe extern "C" fn gos_rt_iter_sum_i64(v: *const GosVec) -> i64 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 0;
         }
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<i64>(), vec.len as usize) };
-        slice.iter().copied().sum()
+        unsafe { vec_words(vec) }.fold(0i64, i64::wrapping_add)
     })
+}
+
+/// Sum all i64 elements of `v`, raising the language's integer overflow panic
+/// where the sum leaves `i64`. The checked build profiles call this one, so
+/// `sum` overflows exactly where `+` would.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_iter_sum_i64_checked(v: *const GosVec) -> i64 {
+    ffi_entry!(-1, {
+        if v.is_null() {
+            return 0;
+        }
+        let vec = unsafe { &*v };
+        if vec.ptr.is_null() || vec.len <= 0 {
+            return 0;
+        }
+        checked_sum_i64(unsafe { vec_words(vec) })
+    })
+}
+
+/// Product of all i64 elements of `v`, raising the language's integer overflow
+/// panic where the product leaves `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_iter_product_i64_checked(v: *const GosVec) -> i64 {
+    ffi_entry!(-1, {
+        if v.is_null() {
+            return 1;
+        }
+        let vec = unsafe { &*v };
+        if vec.ptr.is_null() || vec.len <= 0 {
+            return 1;
+        }
+        checked_product_i64(unsafe { vec_words(vec) })
+    })
+}
+
+/// The sum of `values`, raising the language's addition overflow panic at the
+/// first element that leaves `i64`.
+fn checked_sum_i64(values: impl Iterator<Item = i64>) -> i64 {
+    let mut total = 0i64;
+    for value in values {
+        let Some(next) = total.checked_add(value) else {
+            crate::c_abi::panic::panic_text("attempt to add with overflow");
+            unreachable!("the raise does not return on the main thread");
+        };
+        total = next;
+    }
+    total
+}
+
+/// The product of `values`, raising the language's multiplication overflow
+/// panic at the first element that leaves `i64`.
+fn checked_product_i64(values: impl Iterator<Item = i64>) -> i64 {
+    let mut total = 1i64;
+    for value in values {
+        let Some(next) = total.checked_mul(value) else {
+            crate::c_abi::panic::panic_text("attempt to multiply with overflow");
+            unreachable!("the raise does not return on the main thread");
+        };
+        total = next;
+    }
+    total
 }
 
 /// Sum all f64 elements of `v`.
@@ -143,7 +213,9 @@ pub unsafe extern "C" fn gos_rt_iter_sum_f64(v: *const GosVec) -> f64 {
             return 0.0;
         }
         let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<f64>(), vec.len as usize) };
-        slice.iter().copied().sum()
+        // A float sum starts from +0.0, the value a written `acc += x` loop
+        // starts from, so negative zeros sum to +0.0 on every tier.
+        slice.iter().fold(0.0, |total, value| total + value)
     })
 }
 
@@ -158,8 +230,7 @@ pub unsafe extern "C" fn gos_rt_iter_product_i64(v: *const GosVec) -> i64 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 1;
         }
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<i64>(), vec.len as usize) };
-        slice.iter().copied().fold(1i64, i64::wrapping_mul)
+        unsafe { vec_words(vec) }.fold(1i64, i64::wrapping_mul)
     })
 }
 
@@ -192,8 +263,7 @@ pub unsafe extern "C" fn gos_rt_iter_min_i64(v: *const GosVec) -> i128 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 1i128;
         }
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<i64>(), vec.len as usize) };
-        match slice.iter().copied().min() {
+        match unsafe { vec_words(vec) }.min() {
             Some(m) => gos_rt_result_new(0, m),
             None => 1i128,
         }
@@ -212,8 +282,7 @@ pub unsafe extern "C" fn gos_rt_iter_max_i64(v: *const GosVec) -> i128 {
         if vec.ptr.is_null() || vec.len <= 0 {
             return 1i128;
         }
-        let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<i64>(), vec.len as usize) };
-        match slice.iter().copied().max() {
+        match unsafe { vec_words(vec) }.max() {
             Some(m) => gos_rt_result_new(0, m),
             None => 1i128,
         }
@@ -325,6 +394,18 @@ pub mod lazy_elem_class {
     /// keeps alive, so a consumer reads it through the address rather than
     /// from the slot.
     pub const AGGR: u8 = 2;
+    /// Integer register holding a managed `String`. Every element a consumer
+    /// pulls is a share of its own, so whatever discards one releases it.
+    pub const STRING: u8 = 3;
+    /// Integer register holding the address of a counted copy blob that holds
+    /// one element wider than a slot. Every element a consumer pulls is a
+    /// share of its own, so whatever discards one releases it.
+    pub const AGGR_COUNTED: u8 = 4;
+
+    /// Whether each pulled element of `class` is a share the puller owns.
+    pub const fn counted(class: u8) -> bool {
+        matches!(class, STRING | AGGR_COUNTED)
+    }
 }
 
 /// What a lazy handle's slots mean: their ABI class, plus - for the aggregate
@@ -363,8 +444,12 @@ pub struct GosLazyIterI64 {
 }
 
 /// Opaque lazy `Iterator<(i64, i64)>` state used by enumerate and zip.
+///
+/// `classes` names the [`lazy_elem_class`] of each half, so a consumer that
+/// discards a pair gives back the shares a counted half carries.
 pub struct GosLazyIterPairI64 {
     inner: Box<dyn Iterator<Item = (i64, i64)>>,
+    classes: [u8; 2],
 }
 
 struct BorrowedGosVecI64 {
@@ -449,10 +534,15 @@ where
 
 struct GosRangeFromI64 {
     current: i64,
+    /// Whether stepping past `i64::MAX` raises the overflow panic, as `+`
+    /// does in the checked build profiles, or wraps, as it does in release.
+    checked: bool,
 }
 
-fn advance_range_from_i64(current: i64) -> Option<(i64, i64)> {
-    if cfg!(debug_assertions) && current == i64::MAX {
+/// The value an open range yields next and the one after it. A checked range
+/// has no value after `i64::MAX`; an unchecked one wraps to `i64::MIN`.
+fn advance_range_from_i64(current: i64, checked: bool) -> Option<(i64, i64)> {
+    if checked && current == i64::MAX {
         None
     } else {
         Some((current, current.wrapping_add(1)))
@@ -463,7 +553,7 @@ impl Iterator for GosRangeFromI64 {
     type Item = i64;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let Some((out, next)) = advance_range_from_i64(self.current) else {
+        let Some((out, next)) = advance_range_from_i64(self.current, self.checked) else {
             crate::c_abi::panic::panic_text("attempt to add with overflow in open integer range");
             unreachable!("the raise does not return on the main thread");
         };
@@ -472,13 +562,145 @@ impl Iterator for GosRangeFromI64 {
     }
 }
 
-fn lazy_pair_i64<I>(iter: I) -> *mut GosLazyIterPairI64
+fn lazy_pair_i64<I>(classes: [u8; 2], iter: I) -> *mut GosLazyIterPairI64
 where
     I: Iterator<Item = (i64, i64)> + 'static,
 {
     Box::into_raw(Box::new(GosLazyIterPairI64 {
         inner: Box::new(iter),
+        classes,
     }))
+}
+
+/// Gives back the share a pulled element carries when its consumer does not
+/// keep it. Only a `STRING` element is counted; every other class owns
+/// nothing beyond its slot.
+unsafe fn release_pulled(class: u8, x: i64) {
+    match class {
+        lazy_elem_class::STRING => {
+            let text: *mut c_char = std::ptr::with_exposed_provenance_mut(x as usize);
+            // SAFETY: a STRING slot holds a compiler-typed string the puller
+            // owns one share of.
+            unsafe { crate::c_abi::string::gos_rt_str_free_typed(text) };
+        }
+        lazy_elem_class::AGGR_COUNTED => {
+            let blob: *mut u8 = std::ptr::with_exposed_provenance_mut(x as usize);
+            // SAFETY: an AGGR_COUNTED slot holds a copy blob the puller owns
+            // one share of.
+            unsafe { crate::c_abi::rc::gos_rt_rc_release(blob) };
+        }
+        _ => {}
+    }
+}
+
+/// Mints the share a puller owns of an element read out of storage that keeps
+/// its own.
+unsafe fn share_pulled(class: u8, x: i64) -> i64 {
+    match class {
+        lazy_elem_class::STRING => {
+            let text: *const c_char = std::ptr::with_exposed_provenance(x as usize);
+            // SAFETY: the storage the element was read from holds a live share.
+            unsafe { crate::c_abi::string::gos_rt_str_retain_typed(text) };
+        }
+        lazy_elem_class::AGGR_COUNTED => {
+            let blob: *mut u8 = std::ptr::with_exposed_provenance_mut(x as usize);
+            // SAFETY: the storage the element was read from holds a live share.
+            unsafe { crate::c_abi::rc::gos_rt_rc_retain(blob) };
+        }
+        _ => {}
+    }
+    x
+}
+
+/// `skip(n)` over a counted stream: each skipped element is released.
+struct SkipReleasing {
+    upstream: Box<dyn Iterator<Item = i64>>,
+    remaining: usize,
+    class: u8,
+}
+
+impl Iterator for SkipReleasing {
+    type Item = i64;
+
+    fn next(&mut self) -> Option<i64> {
+        while self.remaining > 0 {
+            self.remaining -= 1;
+            let skipped = self.upstream.next()?;
+            unsafe { release_pulled(self.class, skipped) };
+        }
+        self.upstream.next()
+    }
+}
+
+/// `step_by(step)` over a counted stream: each element stepped over is
+/// released.
+struct StepByReleasing {
+    upstream: Box<dyn Iterator<Item = i64>>,
+    step: usize,
+    started: bool,
+    class: u8,
+}
+
+impl Iterator for StepByReleasing {
+    type Item = i64;
+
+    fn next(&mut self) -> Option<i64> {
+        if self.started {
+            for _ in 1..self.step {
+                let skipped = self.upstream.next()?;
+                unsafe { release_pulled(self.class, skipped) };
+            }
+        } else {
+            self.started = true;
+        }
+        self.upstream.next()
+    }
+}
+
+/// `zip` whose left half is released when the right side ends first.
+struct ZipReleasing {
+    left: Box<dyn Iterator<Item = i64>>,
+    right: Box<dyn Iterator<Item = i64>>,
+    left_class: u8,
+}
+
+impl Iterator for ZipReleasing {
+    type Item = (i64, i64);
+
+    fn next(&mut self) -> Option<(i64, i64)> {
+        let a = self.left.next()?;
+        if let Some(b) = self.right.next() {
+            Some((a, b))
+        } else {
+            unsafe { release_pulled(self.left_class, a) };
+            None
+        }
+    }
+}
+
+/// Yields `remaining` shares of one `String`, holding a share of its own for
+/// as long as the state lives.
+struct RepeatStr {
+    value: i64,
+    remaining: usize,
+}
+
+impl Iterator for RepeatStr {
+    type Item = i64;
+
+    fn next(&mut self) -> Option<i64> {
+        if self.remaining == 0 {
+            return None;
+        }
+        self.remaining -= 1;
+        Some(unsafe { share_pulled(lazy_elem_class::STRING, self.value) })
+    }
+}
+
+impl Drop for RepeatStr {
+    fn drop(&mut self) {
+        unsafe { release_pulled(lazy_elem_class::STRING, self.value) };
+    }
 }
 
 /// Consume a lazy handle, yielding its element source and ABI-class tag.
@@ -582,9 +804,13 @@ fn mapped_stride(out_bytes: i64) -> u32 {
 /// the element's own storage.
 unsafe fn push_mapped(out: *mut GosVec, y: i64, out_bytes: i64, by_block: bool) {
     if by_block || out_bytes > 8 {
-        let block = std::ptr::with_exposed_provenance::<u8>(y as usize);
+        let block = std::ptr::with_exposed_provenance_mut::<u8>(y as usize);
         if !block.is_null() {
             unsafe { crate::c_abi::vec::gos_rt_vec_push(out, block) };
+            // The callback answered a heap copy of its result, whose words -
+            // and the shares they carry - now live in the vec's element.
+            let bytes = u64::try_from(out_bytes.max(1)).unwrap_or(8).div_ceil(8) * 8;
+            crate::c_abi::gc::gos_rt_aggr_free(block, bytes);
         }
     } else {
         unsafe { gos_rt_vec_push_i64(out, y) };
@@ -648,13 +874,17 @@ type PredPtr = unsafe extern "C" fn(env: *const u8, x: *const u8) -> bool;
 
 unsafe fn take_lazy_pair_i64(
     iter: *mut GosLazyIterPairI64,
-) -> Box<dyn Iterator<Item = (i64, i64)>> {
+) -> (Box<dyn Iterator<Item = (i64, i64)>>, [u8; 2]) {
     if iter.is_null() {
-        Box::new(std::iter::empty())
+        (
+            Box::new(std::iter::empty()),
+            [lazy_elem_class::WORD, lazy_elem_class::WORD],
+        )
     } else {
         // SAFETY: lazy iterator helpers are linear; consuming a helper
         // argument transfers ownership of the opaque state to this function.
-        unsafe { Box::from_raw(iter).inner }
+        let state = unsafe { Box::from_raw(iter) };
+        (state.inner, state.classes)
     }
 }
 
@@ -701,18 +931,117 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_next_i64(iter: *mut GosLazyIterI64) ->
     })
 }
 
+/// Advance a lazy pair iterator without consuming the iterator handle.
+///
+/// Returns `Option<(i64, i64)>` in the packed i128 carrier: discriminant 0
+/// with the address of a two-slot block holding the pair, or discriminant 1
+/// for `None`. The block is the same collector-owned copy an `Option` over a
+/// wide sequence element carries, so the pair stays readable after the next
+/// pull.
+/// Copy-blob layout of a pulled pair: two words and no counted child.
+static PAIR_BLOB_META: [i64; 2] = [gossamer_abi::rc::RC_KIND_STRUCT_GUARDED, 0];
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_next_pair_i64(iter: *mut GosLazyIterPairI64) -> i128 {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        if iter.is_null() {
+            return gos_rt_result_new(1, 0);
+        }
+        // SAFETY: the handle remains owned by the caller; this only advances
+        // the state in place.
+        let Some((first, second)) = unsafe { &mut *iter }.inner.next() else {
+            return gos_rt_result_new(1, 0);
+        };
+        // The pair is a counted leaf blob the `Some` payload owns, so whatever
+        // releases that option slot gives the pair's storage back. Its words
+        // are the elements themselves, whose shares the puller already holds.
+        let words = [first, second];
+        // SAFETY: `words` is 16 readable bytes and the leaf meta names no child.
+        let blob = unsafe {
+            crate::c_abi::rc::gos_rt_rc_alloc_move(
+                16,
+                PAIR_BLOB_META.as_ptr(),
+                words.as_ptr().cast::<u8>(),
+            )
+        };
+        if blob.is_null() {
+            crate::c_abi::panic::panic_text("lazy pair iterator: out of memory for the pair");
+            return gos_rt_result_new(1, 0);
+        }
+        gos_rt_result_new(0, blob.expose_provenance() as i64)
+    })
+}
+
+/// Hands a lazy pair iterator on as a stream of pair addresses.
+///
+/// A word adapter reads an element wider than one slot through its address, so
+/// each pair becomes the counted two-word blob [`gos_rt_lazy_iter_next_pair_i64`]
+/// answers, a share the puller owns and gives back when it discards the pair.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_pair_blobs(
+    iter: *mut GosLazyIterPairI64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        let (pairs, _classes) = unsafe { take_lazy_pair_i64(iter) };
+        let tag = LazyElemTag {
+            class: lazy_elem_class::AGGR_COUNTED,
+            elem_bytes: 16,
+            elem_kind: super::vec::vec_elem_kind::PRIMITIVE,
+            source: 0,
+        };
+        lazy_tagged(
+            tag,
+            pairs.map(|(first, second)| {
+                let words = [first, second];
+                // SAFETY: `words` is 16 readable bytes and the leaf meta names
+                // no child.
+                let blob = unsafe {
+                    crate::c_abi::rc::gos_rt_rc_alloc_move(
+                        16,
+                        PAIR_BLOB_META.as_ptr(),
+                        words.as_ptr().cast::<u8>(),
+                    )
+                };
+                if blob.is_null() {
+                    crate::c_abi::panic::panic_text(
+                        "lazy pair iterator: out of memory for the pair",
+                    );
+                }
+                blob.expose_provenance() as i64
+            }),
+        )
+    })
+}
+
 /// Lazy `[start, end)` i64 range.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_range_i64(start: i64, end: i64) -> *mut GosLazyIterI64 {
     ffi_entry!(std::ptr::null_mut(), { lazy_i64(start..end) })
 }
 
-/// Lazy Rust-compatible `start..` i64 range. Debug builds panic before
-/// yielding `i64::MAX`; release builds yield it, wrap, and continue.
+/// Lazy `start..` i64 range for the release profile: it yields `i64::MAX`,
+/// wraps, and continues, as `+` does there.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_range_from_i64(start: i64) -> *mut GosLazyIterI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        lazy_i64(GosRangeFromI64 { current: start })
+        lazy_i64(GosRangeFromI64 {
+            current: start,
+            checked: false,
+        })
+    })
+}
+
+/// Lazy `start..` i64 range for the checked build profiles: stepping past
+/// `i64::MAX` raises the overflow panic `+` raises there.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_range_from_i64_checked(
+    start: i64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        lazy_i64(GosRangeFromI64 {
+            current: start,
+            checked: true,
+        })
     })
 }
 
@@ -745,17 +1074,23 @@ unsafe fn lazy_from_vec_classed(source: *mut GosVec, class: u8) -> *mut GosLazyI
     // SAFETY: retaining the header gives the iterator state its own share
     // until `BorrowedGosVecI64::drop`.
     unsafe { gos_rt_vec_retain(source) };
-    lazy_classed(
-        class,
-        BorrowedGosVecI64 {
-            source,
-            generation: header.generation,
-            mutation_generation: header.mutation_generation,
-            len: header.len,
-            cap: header.cap,
-            index: 0,
-        },
-    )
+    let borrowed = BorrowedGosVecI64 {
+        source,
+        generation: header.generation,
+        mutation_generation: header.mutation_generation,
+        len: header.len,
+        cap: header.cap,
+        index: 0,
+    };
+    if class == lazy_elem_class::STRING {
+        // The vec keeps its own share of each element, so a pull mints the
+        // puller's.
+        return lazy_classed(
+            class,
+            borrowed.map(|x| unsafe { share_pulled(lazy_elem_class::STRING, x) }),
+        );
+    }
+    lazy_classed(class, borrowed)
 }
 
 /// Lazy borrowed source over a `Vec<i64>`. The source header is retained so
@@ -765,6 +1100,15 @@ unsafe fn lazy_from_vec_classed(source: *mut GosVec, class: u8) -> *mut GosLazyI
 pub unsafe extern "C" fn gos_rt_lazy_iter_from_vec_i64(source: *mut GosVec) -> *mut GosLazyIterI64 {
     ffi_entry!(std::ptr::null_mut(), {
         unsafe { lazy_from_vec_classed(source, lazy_elem_class::WORD) }
+    })
+}
+
+/// Lazy borrowed source over a `Vec<String>`. Each pull hands the puller a
+/// share of the element, so the stream's consumers own what they pull.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_from_vec_str(source: *mut GosVec) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { lazy_from_vec_classed(source, lazy_elem_class::STRING) }
     })
 }
 
@@ -860,10 +1204,13 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_from_vec_aggr(
 pub unsafe extern "C" fn gos_rt_lazy_iter_collect_aggr(iter: *mut GosLazyIterI64) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
-        debug_assert_eq!(
-            tag.class,
-            lazy_elem_class::AGGR,
-            "lazy aggregate collect reads a handle of another class"
+        debug_assert!(
+            matches!(
+                tag.class,
+                lazy_elem_class::AGGR | lazy_elem_class::AGGR_COUNTED
+            ),
+            "lazy aggregate collect reads a handle of class {}",
+            tag.class
         );
         let out = unsafe {
             crate::c_abi::vec::gos_rt_vec_with_capacity_typed(tag.elem_bytes, 0, tag.elem_kind)
@@ -877,6 +1224,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_collect_aggr(iter: *mut GosLazyIterI64
             // SAFETY: every yielded address points at one element of a live
             // source whose width is the one the output vec was built with.
             unsafe { gos_rt_vec_push(out, addr) };
+            if tag.class == lazy_elem_class::AGGR_COUNTED {
+                // The element's words, and the child shares they carry, now
+                // live in the vec, so the blob goes back without its children.
+                unsafe { crate::c_abi::rc::release_blob_moved(addr.cast_mut()) };
+            }
         }
         // The copied slots are raw copies of the source's, so any
         // pointer-bearing field needs the output's own share. Done while the
@@ -982,6 +1334,35 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_once_i64(value: i64) -> *mut GosLazyIt
     ffi_entry!(std::ptr::null_mut(), { lazy_i64(std::iter::once(value)) })
 }
 
+/// Lazy repeat of a `String` `n` times. The state takes a share of `value`,
+/// since the caller's binding may end before the stream is drained.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_repeat_str(value: i64, n: i64) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        if n < 0 {
+            crate::c_abi::panic::panic_text("iter::repeat: count must be non-negative");
+        }
+        let remaining = usize::try_from(n).unwrap_or(0);
+        let value = unsafe { share_pulled(lazy_elem_class::STRING, value) };
+        lazy_classed(lazy_elem_class::STRING, RepeatStr { value, remaining })
+    })
+}
+
+/// Lazy single-item `String` iterator.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_once_str(value: i64) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        let value = unsafe { share_pulled(lazy_elem_class::STRING, value) };
+        lazy_classed(
+            lazy_elem_class::STRING,
+            RepeatStr {
+                value,
+                remaining: 1,
+            },
+        )
+    })
+}
+
 /// Lazy `take(n)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_take_i64(
@@ -1010,6 +1391,17 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_step_by_i64(
         }
         let step = usize::try_from(step).unwrap_or(1);
         let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
+        if lazy_elem_class::counted(tag.class) {
+            return lazy_tagged(
+                tag,
+                StepByReleasing {
+                    upstream,
+                    step,
+                    started: false,
+                    class: tag.class,
+                },
+            );
+        }
         lazy_tagged(tag, upstream.step_by(step))
     })
 }
@@ -1026,6 +1418,16 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_skip_i64(
         }
         let n = usize::try_from(n).unwrap_or(0);
         let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
+        if lazy_elem_class::counted(tag.class) {
+            return lazy_tagged(
+                tag,
+                SkipReleasing {
+                    upstream,
+                    remaining: n,
+                    class: tag.class,
+                },
+            );
+        }
         lazy_tagged(tag, upstream.skip(n))
     })
 }
@@ -1037,14 +1439,22 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_chain_i64(
     second: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        let (first, tag) = unsafe { take_lazy_tagged(first) };
+        let (first, first_tag) = unsafe { take_lazy_tagged(first) };
         let (second, second_tag) = unsafe { take_lazy_tagged(second) };
         let second_class = second_tag.class;
-        let class = tag.class;
+        let class = first_tag.class;
         debug_assert_eq!(
             class, second_class,
             "iter::chain joins two element classes: {class} and {second_class}"
         );
+        // Both sides stream one element type, so either side's source vec
+        // describes the layout a collecting terminal reads child shares from;
+        // the joined stream names whichever side has one.
+        let tag = if first_tag.source == 0 {
+            second_tag
+        } else {
+            first_tag
+        };
         lazy_tagged(tag, first.chain(second))
     })
 }
@@ -1055,8 +1465,9 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_enumerate_i64(
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterPairI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        let upstream = unsafe { take_lazy_i64(iter) };
+        let (upstream, tag) = unsafe { take_lazy_word(iter) };
         lazy_pair_i64(
+            [lazy_elem_class::WORD, tag.class],
             upstream
                 .enumerate()
                 .map(|(idx, value)| (i64::try_from(idx).unwrap_or(i64::MAX), value)),
@@ -1071,9 +1482,20 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_zip_i64(
     right: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterPairI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        let left = unsafe { take_lazy_i64(left) };
-        let right = unsafe { take_lazy_i64(right) };
-        lazy_pair_i64(left.zip(right))
+        let (left, left_tag) = unsafe { take_lazy_word(left) };
+        let (right, right_tag) = unsafe { take_lazy_word(right) };
+        let classes = [left_tag.class, right_tag.class];
+        if lazy_elem_class::counted(left_tag.class) {
+            return lazy_pair_i64(
+                classes,
+                ZipReleasing {
+                    left,
+                    right,
+                    left_class: left_tag.class,
+                },
+            );
+        }
+        lazy_pair_i64(classes, left.zip(right))
     })
 }
 
@@ -1109,6 +1531,34 @@ impl Drop for EnvShare {
 // different worker thread than the one that built it.
 unsafe impl Send for EnvShare {}
 
+/// Lazy `map(f)` over word-register elements whose results are of
+/// `out_class`.
+///
+/// The callback reads its argument without taking it, so the pulled element's
+/// share is released once the callback has answered; the result is the
+/// callback's own value, a fresh share when it is counted.
+unsafe fn lazy_map_word(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+    out_class: u8,
+) -> *mut GosLazyIterI64 {
+    type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+    let (upstream, tag) = unsafe { take_lazy_word(iter) };
+    let Some(f) = (unsafe { lazy_callback::<CallFn>(env) }) else {
+        return lazy_classed(out_class, std::iter::empty());
+    };
+    let share = unsafe { EnvShare::new(env) };
+    let in_class = tag.class;
+    lazy_classed(
+        out_class,
+        upstream.map(move |x| unsafe {
+            let y = f(share.ptr(), x);
+            release_pulled(in_class, x);
+            y
+        }),
+    )
+}
+
 /// Lazy `map(f)`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_map_i64(
@@ -1116,19 +1566,155 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_i64(
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        let (upstream, _tag) = unsafe { take_lazy_word(iter) };
-        if env.is_null() {
-            return lazy_i64(std::iter::empty());
-        }
-        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
-        let fn_addr_raw = unsafe { (env as *const usize).read() };
-        if fn_addr_raw == 0 {
-            return lazy_i64(std::iter::empty());
-        }
-        let f: CallFn = unsafe { std::mem::transmute(fn_addr_raw) };
-        let share = unsafe { EnvShare::new(env) };
-        lazy_i64(upstream.map(move |x| unsafe { f(share.ptr(), x) }))
+        unsafe { lazy_map_word(env, iter, lazy_elem_class::WORD) }
     })
+}
+
+/// Lazy `map(f)` whose callback answers a `String`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_map_str(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { lazy_map_word(env, iter, lazy_elem_class::STRING) }
+    })
+}
+
+/// Lazy `filter_map(f)` over word-register elements whose callback answers an
+/// `Option` carrying a payload of `out_class`.
+///
+/// The callback reads its argument without taking it, so the pulled element's
+/// share is released once it has answered; a `Some` payload is the callback's
+/// own value, a fresh share when it is counted, and a `None` holds nothing.
+unsafe fn lazy_filter_map_word(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+    out_class: u8,
+) -> *mut GosLazyIterI64 {
+    type OptionFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i128;
+    let (upstream, tag) = unsafe { take_lazy_word(iter) };
+    let Some(f) = (unsafe { lazy_callback::<OptionFn>(env) }) else {
+        return lazy_classed(out_class, std::iter::empty());
+    };
+    let share = unsafe { EnvShare::new(env) };
+    let in_class = tag.class;
+    lazy_classed(
+        out_class,
+        upstream.filter_map(move |x| unsafe {
+            let answer = f(share.ptr(), x);
+            release_pulled(in_class, x);
+            (super::vec::gos_rt_result_disc(answer) == 0)
+                .then(|| super::vec::gos_rt_result_payload(answer))
+        }),
+    )
+}
+
+/// Lazy `filter_map(f)` whose callback answers `Option<i64>`, `Option<bool>`,
+/// or `Option<char>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_filter_map_i64(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { lazy_filter_map_word(env, iter, lazy_elem_class::WORD) }
+    })
+}
+
+/// Lazy `filter_map(f)` whose callback answers `Option<String>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_filter_map_str(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { lazy_filter_map_word(env, iter, lazy_elem_class::STRING) }
+    })
+}
+
+/// Lazy `map(f)` whose callback answers a struct, tuple, or array.
+///
+/// Such a callback returns the address of the element's flat slot block, a
+/// collector-owned allocation, so the state yields that address and a consumer
+/// reads the element through it. `out_bytes` is the element's width, which a
+/// terminal that rebuilds storage strides by.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_map_aggr(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+    out_bytes: i64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        let (upstream, in_tag) = unsafe { take_lazy_word(iter) };
+        let tag = LazyElemTag {
+            class: lazy_elem_class::AGGR,
+            elem_bytes: mapped_stride(out_bytes),
+            elem_kind: 0,
+            source: 0,
+        };
+        type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
+        let Some(f) = (unsafe { lazy_callback::<CallFn>(env) }) else {
+            return lazy_tagged(tag, std::iter::empty());
+        };
+        let share = unsafe { EnvShare::new(env) };
+        let in_class = in_tag.class;
+        lazy_tagged(
+            tag,
+            upstream.map(move |x| unsafe {
+                let y = f(share.ptr(), x);
+                release_pulled(in_class, x);
+                y
+            }),
+        )
+    })
+}
+
+/// Makes each element of a lazy `map` over struct, tuple, or array results a
+/// counted share its consumer owns.
+///
+/// The callback answers a block it allocated and no one owns. Each pull moves
+/// that block's words, with the child shares they carry, into a copy blob
+/// `meta` describes, so a consumer that discards an element releases it and
+/// one that keeps an element keeps a counted value. Only a mapped stream is
+/// converted: a stream borrowed from a vec already has an owner.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_set_elem_meta(
+    iter: *mut GosLazyIterI64,
+    meta: *const i64,
+) {
+    ffi_entry!((), {
+        if iter.is_null() || meta.is_null() {
+            return;
+        }
+        // SAFETY: the caller hands over a live lazy handle it still owns.
+        let state = unsafe { &mut *iter };
+        if state.tag.class != lazy_elem_class::AGGR || state.tag.source != 0 {
+            return;
+        }
+        let bytes = u64::from(state.tag.elem_bytes).div_ceil(8) * 8;
+        let meta_addr = meta.expose_provenance();
+        let upstream = std::mem::replace(&mut state.inner, Box::new(std::iter::empty()));
+        state.inner = Box::new(upstream.map(move |word| {
+            let block: *mut u8 = std::ptr::with_exposed_provenance_mut(word as usize);
+            if block.is_null() {
+                return word;
+            }
+            let meta: *const i64 = std::ptr::with_exposed_provenance(meta_addr);
+            // SAFETY: the block holds `bytes` of one element the callback built,
+            // and the blob takes the shares its words carry.
+            let blob = unsafe { crate::c_abi::rc::gos_rt_rc_alloc_move(bytes, meta, block) };
+            if blob.is_null() {
+                eprintln!(
+                    "gossamer runtime: OOM counting a mapped element ({bytes} bytes); aborting"
+                );
+                std::process::abort();
+            }
+            crate::c_abi::gc::gos_rt_aggr_free(block, bytes);
+            blob.expose_provenance() as i64
+        }));
+        state.tag.class = lazy_elem_class::AGGR_COUNTED;
+    });
 }
 
 /// Lazy `filter(p)`.
@@ -1149,7 +1735,17 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_filter_i64(
         }
         let p: PredFn = unsafe { std::mem::transmute(fn_addr_raw) };
         let share = unsafe { EnvShare::new(env) };
-        lazy_tagged(tag, upstream.filter(move |x| unsafe { p(share.ptr(), *x) }))
+        let class = tag.class;
+        lazy_tagged(
+            tag,
+            upstream.filter(move |x| unsafe {
+                let keep = p(share.ptr(), *x);
+                if !keep {
+                    release_pulled(class, *x);
+                }
+                keep
+            }),
+        )
     })
 }
 
@@ -1157,8 +1753,16 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_filter_i64(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_collect_i64(iter: *mut GosLazyIterI64) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { gos_rt_vec_new(8) };
-        let (upstream, _class) = unsafe { take_lazy_tagged(iter) };
+        let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
+        // A counted element's pulled share becomes the vec's, so the vec
+        // declares that it owns its elements.
+        let out = if tag.class == lazy_elem_class::STRING {
+            unsafe {
+                crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
+            }
+        } else {
+            unsafe { gos_rt_vec_new(8) }
+        };
         for x in upstream {
             unsafe { gos_rt_vec_push_i64(out, x) };
         }
@@ -1173,7 +1777,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_collect_pair_i64(
 ) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         let out = unsafe { gos_rt_vec_new(16) };
-        for (a, b) in unsafe { take_lazy_pair_i64(iter) } {
+        let (pairs, _classes) = unsafe { take_lazy_pair_i64(iter) };
+        for (a, b) in pairs {
             let slot: [i64; 2] = [a, b];
             unsafe { gos_rt_vec_push(out, slot.as_ptr().cast::<u8>()) };
         }
@@ -1185,8 +1790,16 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_collect_pair_i64(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_count_i64(iter: *mut GosLazyIterI64) -> i64 {
     ffi_entry!(0, {
-        let (upstream, _class) = unsafe { take_lazy_tagged(iter) };
-        i64::try_from(upstream.count()).unwrap_or(i64::MAX)
+        let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
+        if !lazy_elem_class::counted(tag.class) {
+            return i64::try_from(upstream.count()).unwrap_or(i64::MAX);
+        }
+        let mut count = 0i64;
+        for x in upstream {
+            unsafe { release_pulled(tag.class, x) };
+            count = count.saturating_add(1);
+        }
+        count
     })
 }
 
@@ -1194,7 +1807,16 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_count_i64(iter: *mut GosLazyIterI64) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_count_pair_i64(iter: *mut GosLazyIterPairI64) -> i64 {
     ffi_entry!(0, {
-        i64::try_from(unsafe { take_lazy_pair_i64(iter) }.count()).unwrap_or(i64::MAX)
+        let (pairs, [first, second]) = unsafe { take_lazy_pair_i64(iter) };
+        let mut count = 0i64;
+        for (a, b) in pairs {
+            unsafe {
+                release_pulled(first, a);
+                release_pulled(second, b);
+            }
+            count = count.saturating_add(1);
+        }
+        count
     })
 }
 
@@ -1214,25 +1836,80 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_product_i64(iter: *mut GosLazyIterI64)
     })
 }
 
-/// Minimum of a lazy i64 iterator as `Option<i64>`.
+/// Sum of a lazy i64 iterator, raising the language's integer overflow panic
+/// where the sum leaves `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_sum_i64_checked(iter: *mut GosLazyIterI64) -> i64 {
+    ffi_entry!(0, { checked_sum_i64(unsafe { take_lazy_i64(iter) }) })
+}
+
+/// Product of a lazy i64 iterator, raising the language's integer overflow
+/// panic where the product leaves `i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_product_i64_checked(iter: *mut GosLazyIterI64) -> i64 {
+    ffi_entry!(1, { checked_product_i64(unsafe { take_lazy_i64(iter) }) })
+}
+
+/// The least (or, with `greatest`, the greatest) element of a word-register
+/// stream as `Option<T>` in the packed carrier.
+///
+/// An integer orders by its word. A `String` orders by its text, and every
+/// element that loses is released, leaving the caller the winner's share. Ties
+/// keep the first minimum and the last maximum, as `Iterator::min` and
+/// `Iterator::max` do.
+unsafe fn lazy_word_extreme(iter: *mut GosLazyIterI64, greatest: bool) -> i128 {
+    let (upstream, tag) = unsafe { take_lazy_tagged(iter) };
+    let best = match tag.class {
+        lazy_elem_class::WORD => {
+            if greatest {
+                upstream.max()
+            } else {
+                upstream.min()
+            }
+        }
+        lazy_elem_class::STRING => {
+            let mut best: Option<i64> = None;
+            for x in upstream {
+                let Some(current) = best else {
+                    best = Some(x);
+                    continue;
+                };
+                let text = |word: i64| -> *const c_char {
+                    std::ptr::with_exposed_provenance(word as usize)
+                };
+                let order =
+                    unsafe { crate::c_abi::string::gos_rt_str_compare(text(x), text(current)) };
+                let replaces = if greatest { order >= 0 } else { order < 0 };
+                if replaces {
+                    unsafe { release_pulled(tag.class, current) };
+                    best = Some(x);
+                } else {
+                    unsafe { release_pulled(tag.class, x) };
+                }
+            }
+            best
+        }
+        other => class_mismatch(other, lazy_elem_class::WORD),
+    };
+    match best {
+        Some(value) => gos_rt_result_new(0, value),
+        None => gos_rt_result_new(1, 0),
+    }
+}
+
+/// Minimum of a lazy i64 or `String` iterator as `Option<T>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_min_i64(iter: *mut GosLazyIterI64) -> i128 {
     ffi_entry!(gos_rt_result_new(1, 0), {
-        match unsafe { take_lazy_i64(iter) }.min() {
-            Some(value) => gos_rt_result_new(0, value),
-            None => gos_rt_result_new(1, 0),
-        }
+        unsafe { lazy_word_extreme(iter, false) }
     })
 }
 
-/// Maximum of a lazy i64 iterator as `Option<i64>`.
+/// Maximum of a lazy i64 or `String` iterator as `Option<T>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_max_i64(iter: *mut GosLazyIterI64) -> i128 {
     ffi_entry!(gos_rt_result_new(1, 0), {
-        match unsafe { take_lazy_i64(iter) }.max() {
-            Some(value) => gos_rt_result_new(0, value),
-            None => gos_rt_result_new(1, 0),
-        }
+        unsafe { lazy_word_extreme(iter, true) }
     })
 }
 
@@ -1254,8 +1931,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_fold_i64(
         }
         let f: FoldFn = unsafe { std::mem::transmute(fn_addr_raw) };
         let mut acc = init;
-        for x in unsafe { take_lazy_word(iter) }.0 {
+        let (upstream, tag) = unsafe { take_lazy_word(iter) };
+        for x in upstream {
             acc = unsafe { f(env, acc, x) };
+            unsafe { release_pulled(tag.class, x) };
         }
         acc
     })
@@ -1277,8 +1956,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_any_i64(
             return 0;
         }
         let p: PredFn = unsafe { std::mem::transmute(fn_addr_raw) };
-        for x in unsafe { take_lazy_word(iter) }.0 {
-            if unsafe { p(env, x) } {
+        let (upstream, tag) = unsafe { take_lazy_word(iter) };
+        for x in upstream {
+            let hit = unsafe { p(env, x) };
+            unsafe { release_pulled(tag.class, x) };
+            if hit {
                 return 1;
             }
         }
@@ -1302,8 +1984,11 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_all_i64(
             return 1;
         }
         let p: PredFn = unsafe { std::mem::transmute(fn_addr_raw) };
-        for x in unsafe { take_lazy_word(iter) }.0 {
-            if !unsafe { p(env, x) } {
+        let (upstream, tag) = unsafe { take_lazy_word(iter) };
+        for x in upstream {
+            let hit = unsafe { p(env, x) };
+            unsafe { release_pulled(tag.class, x) };
+            if !hit {
                 return 0;
             }
         }
@@ -1329,10 +2014,12 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_find_i64(
             return gos_rt_result_new(1, 0);
         }
         let p: PredFn = unsafe { std::mem::transmute(fn_addr_raw) };
-        for x in unsafe { take_lazy_word(iter) }.0 {
+        let (upstream, tag) = unsafe { take_lazy_word(iter) };
+        for x in upstream {
             if unsafe { p(env, x) } {
                 return gos_rt_result_new(0, x);
             }
+            unsafe { release_pulled(tag.class, x) };
         }
         gos_rt_result_new(1, 0)
     })
@@ -1397,6 +2084,23 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64(
     })
 }
 
+/// Lazy `map(f)` from `f64` to a word-register result of `out_class`.
+unsafe fn lazy_map_f64_word(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+    out_class: u8,
+) -> *mut GosLazyIterI64 {
+    let upstream = unsafe { take_lazy_f64(iter) };
+    let Some(f) = (unsafe { lazy_callback::<CallF64Word>(env) }) else {
+        return lazy_classed(out_class, std::iter::empty());
+    };
+    let share = unsafe { EnvShare::new(env) };
+    lazy_classed(
+        out_class,
+        upstream.map(move |x| unsafe { f(share.ptr(), x) }),
+    )
+}
+
 /// Lazy `map(f)` for `f64 -> i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64_word(
@@ -1404,12 +2108,18 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64_word(
     iter: *mut GosLazyIterI64,
 ) -> *mut GosLazyIterI64 {
     ffi_entry!(std::ptr::null_mut(), {
-        let upstream = unsafe { take_lazy_f64(iter) };
-        let Some(f) = (unsafe { lazy_callback::<CallF64Word>(env) }) else {
-            return lazy_i64(std::iter::empty());
-        };
-        let share = unsafe { EnvShare::new(env) };
-        lazy_i64(upstream.map(move |x| unsafe { f(share.ptr(), x) }))
+        unsafe { lazy_map_f64_word(env, iter, lazy_elem_class::WORD) }
+    })
+}
+
+/// Lazy `map(f)` for `f64 -> String`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_lazy_iter_map_f64_str(
+    env: *const u8,
+    iter: *mut GosLazyIterI64,
+) -> *mut GosLazyIterI64 {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { lazy_map_f64_word(env, iter, lazy_elem_class::STRING) }
     })
 }
 
@@ -1424,12 +2134,17 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_word_f64(
         // an element's value or an aggregate element's address, so both
         // classes are operands here - only a float slot would be read in the
         // wrong register file.
-        let (upstream, _tag) = unsafe { take_lazy_word(iter) };
+        let (upstream, tag) = unsafe { take_lazy_word(iter) };
         let Some(f) = (unsafe { lazy_callback::<CallWordF64>(env) }) else {
             return lazy_f64(std::iter::empty());
         };
         let share = unsafe { EnvShare::new(env) };
-        lazy_f64(upstream.map(move |x| unsafe { f(share.ptr(), x) }))
+        let in_class = tag.class;
+        lazy_f64(upstream.map(move |x| unsafe {
+            let y = f(share.ptr(), x);
+            release_pulled(in_class, x);
+            y
+        }))
     })
 }
 
@@ -1452,7 +2167,10 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_filter_f64(
 /// Sum a lazy f64 iterator.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_lazy_iter_sum_f64(iter: *mut GosLazyIterI64) -> f64 {
-    ffi_entry!(0.0, { unsafe { take_lazy_f64(iter) }.sum() })
+    // Starts from +0.0 as `gos_rt_iter_sum_f64` does.
+    ffi_entry!(0.0, {
+        unsafe { take_lazy_f64(iter) }.fold(0.0, |total, value| total + value)
+    })
 }
 
 /// Product of a lazy f64 iterator.
@@ -1514,13 +2232,14 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_fold_f64_word(
     ffi_entry!(init, {
         // See `gos_rt_lazy_iter_map_word_f64`: the element reaches the
         // callback as a word either way.
-        let (upstream, _tag) = unsafe { take_lazy_word(iter) };
+        let (upstream, tag) = unsafe { take_lazy_word(iter) };
         let Some(f) = (unsafe { lazy_callback::<FoldF64Word>(env) }) else {
             return init;
         };
         let mut acc = init;
         for x in upstream {
             acc = unsafe { f(env, acc, x) };
+            unsafe { release_pulled(tag.class, x) };
         }
         acc
     })
@@ -2756,16 +3475,18 @@ mod lazy_iterator_tests {
     }
 
     #[test]
-    fn open_range_boundary_matches_rust_overflow_profile() {
-        assert_eq!(
-            advance_range_from_i64(i64::MAX - 1),
-            Some((i64::MAX - 1, i64::MAX))
-        );
-        if cfg!(debug_assertions) {
-            assert_eq!(advance_range_from_i64(i64::MAX), None);
-        } else {
-            assert_eq!(advance_range_from_i64(i64::MAX), Some((i64::MAX, i64::MIN)));
+    fn open_range_boundary_follows_the_program_profile() {
+        for checked in [true, false] {
+            assert_eq!(
+                advance_range_from_i64(i64::MAX - 1, checked),
+                Some((i64::MAX - 1, i64::MAX))
+            );
         }
+        assert_eq!(advance_range_from_i64(i64::MAX, true), None);
+        assert_eq!(
+            advance_range_from_i64(i64::MAX, false),
+            Some((i64::MAX, i64::MIN))
+        );
     }
 
     #[test]

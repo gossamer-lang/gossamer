@@ -1,5 +1,7 @@
 // Comptime parameters (P3) and compile-time validation macros (P4).
 
+use std::regex
+
 // P3: a `comptime` parameter's argument is evaluated at build time and
 // replaced with its result literal. `scale` runs at runtime with a
 // folded constant factor and a runtime input.

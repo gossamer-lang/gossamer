@@ -1,0 +1,83 @@
+// `unwrap_or` over a `Result` or `Option` whose payload is a struct holding
+// strings, a nested struct, and a vector answers the payload or the fallback,
+// and each value frees its own heap children once, on both arms, through the
+// method and the free-function spellings.
+
+use std::{errors, option, result}
+
+struct Inner {
+    a: i64
+    b: String
+}
+
+struct Outer {
+    name: String
+    inner: Inner
+    xs: Vec<Inner>
+}
+
+fn fallback(i: i64) -> Outer {
+    Outer {
+        name: format("fb{i}")
+        inner: Inner { a: i, b: format("ib{i}") }
+        xs: #[Inner { a: i, b: "v" }]
+    }
+}
+
+fn load(i: i64) -> Result<Outer, errors::Error> {
+    if i % 3 == 0 {
+        Err(errors::new(format("missing {i}")))
+    } else {
+        Ok(fallback(i + 50))
+    }
+}
+
+fn pick(i: i64) -> Option<Outer> {
+    if i % 2 == 0 { Some(fallback(i + 100)) } else { None }
+}
+
+fn weigh(o: Outer) -> i64 {
+    o.name.len() + o.inner.a + o.inner.b.len() + o.xs.len() * 10
+}
+
+fn method_forms(i: i64) -> i64 {
+    let ok = load(i * 3 + 1).unwrap_or(fallback(i))
+    let err = load(i * 3).unwrap_or(fallback(i))
+    let some_or_none = pick(i).unwrap_or(fallback(i))
+    let kept = fallback(i + 1)
+    let reused = load(3).unwrap_or(kept)
+    weigh(ok) + weigh(err) + weigh(some_or_none) + weigh(reused) + weigh(kept)
+}
+
+fn free_forms(i: i64) -> i64 {
+    let ok = result::unwrap_or(load(i * 3 + 2), fallback(i))
+    let err = result::unwrap_or(load(i * 3), fallback(i))
+    let opt = option::unwrap_or(pick(i), fallback(i))
+    let lazy = option::unwrap_or_else(pick(i + 1), || fallback(i + 2))
+    weigh(ok) + weigh(err) + weigh(opt) + weigh(lazy)
+}
+
+fn decoded(text: String, i: i64) -> i64 {
+    let back = from_json::<Outer>(text).unwrap_or(fallback(i))
+    let bad = from_json::<Outer>("{").unwrap_or(fallback(i))
+    weigh(back) + weigh(bad)
+}
+
+fn churn() -> i64 {
+    let mut total = 0
+    for i in 0..200 {
+        total += method_forms(i) + free_forms(i)
+    }
+    total
+}
+
+fn main() {
+    let good = to_json::<Outer>(fallback(7)).unwrap_or("ERR")
+    println("{}", good)
+    println("total {}", churn())
+    println("decoded {}", decoded(good, 4))
+    let last = load(1).unwrap_or(fallback(0))
+    println("{} {} {} {:?}", last.name, last.inner.a, last.inner.b, last.xs.len())
+    let missing = pick(1).unwrap_or(fallback(3))
+    println("{} {}", missing.name, missing.xs[0].b)
+}

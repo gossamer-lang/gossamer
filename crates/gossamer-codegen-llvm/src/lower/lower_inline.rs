@@ -81,6 +81,15 @@ enum ElemStride {
     Header(String),
 }
 
+/// How a slot container's back push hands its element over.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DequePushElem {
+    /// The address of the element's slots, which the push copies from.
+    Slots,
+    /// A one-word scalar passed by value.
+    Word,
+}
+
 impl<'a> Lowerer<'a> {
     /// Inline fast path for `gos_rt_stream_write_byte(stream, b)`.
     ///
@@ -2342,6 +2351,30 @@ impl<'a> Lowerer<'a> {
     /// `Deque`, `Queue` and `Stack` all hold their elements in one `GosVec`
     /// at the same stride a `Vec<T>` would, so an element whose leaves are
     /// all scalars is moved in and out by its bytes alone.
+    /// True when a slot container's element is a one-word scalar, the element
+    /// the one-word push and pop entry points carry by value. A one-field
+    /// struct or tuple is also one slot wide, but it crosses as the address of
+    /// its slots, so it keeps the entry points that know that.
+    pub(crate) fn container_operand_word_scalar(&self, op: &Operand) -> bool {
+        if self.container_operand_scalar_stride(op) != Some(8) {
+            return false;
+        }
+        let Operand::Copy(pl) = op else {
+            return false;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let Some(TyKind::Adt { substs, .. }) = self.tcx.kind(ty) else {
+            return false;
+        };
+        substs
+            .types()
+            .first()
+            .is_some_and(|elem| !is_aggregate(self.tcx, *elem))
+    }
+
     pub(crate) fn container_operand_scalar_stride(&self, op: &Operand) -> Option<i64> {
         /// `Deque`, `Queue`, and `Stack`, by the sentinel `DefId` each carries.
         const CONTAINER_DEF_LOCALS: [u32; 3] = [u32::MAX - 19, u32::MAX - 31, u32::MAX - 32];
@@ -2359,10 +2392,11 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         let elem = *substs.types().first()?;
-        self.tcx
-            .scalar_leaves_only(elem)
-            .then(|| crate::lower::settled_elem_bytes(self.tcx, elem))
-            .flatten()
+        // The stride is the one the store's constructor gave it, the element's
+        // slot footprint, which is narrower than a word for `char` and `bool`.
+        (self.tcx.scalar_leaves_only(elem)
+            && crate::lower::settled_elem_bytes(self.tcx, elem).is_some())
+        .then(|| i64::from(self.tcx.slot_bytes(elem)))
     }
 
     /// Inline the spare-capacity path of a slot container's back push.
@@ -2377,10 +2411,21 @@ impl<'a> Lowerer<'a> {
         destination: &Place,
         target: Option<&gossamer_mir::BlockId>,
         bytes: i64,
+        elem_kind: DequePushElem,
     ) -> Result<(), BuildError> {
-        declare_rt(&mut self.runtime_refs, "gos_rt_deque_push_back_wide");
+        let shim = match elem_kind {
+            DequePushElem::Slots => "gos_rt_deque_push_back_wide",
+            DequePushElem::Word => "gos_rt_deque_push_back",
+        };
+        declare_rt(&mut self.runtime_refs, shim);
         let deque_ptr = self.vec_operand_ptr(&args[0])?;
-        let elem_addr = self.elem_slot_address(&args[1])?;
+        let elem = match elem_kind {
+            DequePushElem::Slots => self.elem_slot_address(&args[1])?,
+            DequePushElem::Word => {
+                let value = self.lower_operand(&args[1])?;
+                self.widen_to_i64(&args[1], &value)
+            }
+        };
         let s = self.next_ssa;
         self.next_ssa += 1;
         let (check, fast, slow, cont) = (
@@ -2423,11 +2468,16 @@ impl<'a> Lowerer<'a> {
         let off = self.fresh();
         writeln!(self.out, "  {off} = mul i64 {len}, {bytes}").unwrap();
         let ea = self.elem_addr(&data, &off);
-        writeln!(
-            self.out,
-            "  call void @llvm.memcpy.p0.p0.i64(ptr {ea}, ptr {elem_addr}, i64 {bytes}, i1 false)"
-        )
-        .unwrap();
+        match elem_kind {
+            DequePushElem::Slots => writeln!(
+                self.out,
+                "  call void @llvm.memcpy.p0.p0.i64(ptr {ea}, ptr {elem}, i64 {bytes}, i1 false)"
+            )
+            .unwrap(),
+            DequePushElem::Word => {
+                writeln!(self.out, "  store i64 {elem}, ptr {ea}{TBAA_DATA}").unwrap();
+            }
+        }
         let len1 = self.fresh();
         writeln!(self.out, "  {len1} = add i64 {len}, 1").unwrap();
         writeln!(self.out, "  store i64 {len1}, ptr {vecp}{TBAA_HEADER}").unwrap();
@@ -2435,9 +2485,13 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  br label %{cont}").unwrap();
         let cold_start = self.out.len();
         writeln!(self.out, "{slow}:").unwrap();
+        let elem_ty = match elem_kind {
+            DequePushElem::Slots => "ptr",
+            DequePushElem::Word => "i64",
+        };
         writeln!(
             self.out,
-            "  call void @gos_rt_deque_push_back_wide(ptr {deque_ptr}, ptr {elem_addr})"
+            "  call void @{shim}(ptr {deque_ptr}, {elem_ty} {elem})"
         )
         .unwrap();
         writeln!(self.out, "  br label %{cont}").unwrap();
@@ -2544,6 +2598,84 @@ impl<'a> Lowerer<'a> {
     /// Emits the guard reaching a slot container's element store, branching to
     /// `slow` where there is none, and answers its length, data pointer, and
     /// the store itself. Leaves the emitter in the `check` block.
+    /// Inline the front pop of a slot container of one-word scalars into the
+    /// `Option` carrier the program reads: the front word is the payload and
+    /// the live range starts one element later. An empty or unallocated
+    /// store answers through the shim, which also owns reclaiming the dead
+    /// prefix.
+    pub(crate) fn lower_deque_pop_front_word_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        declare_rt(&mut self.runtime_refs, "gos_rt_deque_pop_front");
+        let deque_ptr = self.vec_operand_ptr(&args[0])?;
+        let s = self.next_ssa;
+        self.next_ssa += 1;
+        let (check, fast, slow, cont) = (
+            format!("dpw_check_{s}"),
+            format!("dpw_fast_{s}"),
+            format!("dpw_slow_{s}"),
+            format!("dpw_cont_{s}"),
+        );
+        let (len, data, _vecp) = self.emit_deque_store_probe(&deque_ptr, &check, &slow);
+        let head_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {head_addr} = getelementptr i8, ptr {deque_ptr}, i64 8"
+        )
+        .unwrap();
+        let head = self.fresh();
+        writeln!(
+            self.out,
+            "  {head} = load i64, ptr {head_addr}{TBAA_HEADER}"
+        )
+        .unwrap();
+        let empty = self.fresh();
+        writeln!(self.out, "  {empty} = icmp sge i64 {head}, {len}").unwrap();
+        writeln!(self.out, "  br i1 {empty}, label %{slow}, label %{fast}").unwrap();
+        writeln!(self.out, "{fast}:").unwrap();
+        let off = self.fresh();
+        writeln!(self.out, "  {off} = mul i64 {head}, 8").unwrap();
+        let ea = self.elem_addr(&data, &off);
+        let word = self.fresh();
+        writeln!(self.out, "  {word} = load i64, ptr {ea}{TBAA_DATA}").unwrap();
+        let head1 = self.fresh();
+        writeln!(self.out, "  {head1} = add i64 {head}, 1").unwrap();
+        writeln!(
+            self.out,
+            "  store i64 {head1}, ptr {head_addr}{TBAA_HEADER}"
+        )
+        .unwrap();
+        let payload128 = self.fresh();
+        writeln!(self.out, "  {payload128} = zext i64 {word} to i128").unwrap();
+        let packed_some = self.fresh();
+        writeln!(self.out, "  {packed_some} = shl i128 {payload128}, 64").unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        let cold_start = self.out.len();
+        writeln!(self.out, "{slow}:").unwrap();
+        let called = self.fresh();
+        writeln!(
+            self.out,
+            "  {called} = call i128 @gos_rt_deque_pop_front(ptr {deque_ptr})"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        self.mark_cold(cold_start);
+        writeln!(self.out, "{cont}:").unwrap();
+        let packed = self.fresh();
+        writeln!(
+            self.out,
+            "  {packed} = phi i128 [ {packed_some}, %{fast} ], [ {called}, %{slow} ]"
+        )
+        .unwrap();
+        let slot = local_slot(destination.local);
+        writeln!(self.out, "  store i128 {packed}, ptr {slot}, align 8").unwrap();
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
     fn emit_deque_store_probe(
         &mut self,
         deque_ptr: &str,

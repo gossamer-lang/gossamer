@@ -1,0 +1,48 @@
+// An iterator method chain over a range or a sequence of scalars runs as one
+// loop with its closures inlined. The observable behaviour is the runtime
+// iterator's: stages run per element in chain order, short-circuiting
+// terminals stop at the deciding element, and every closure runs exactly as
+// many times.
+
+fn main() {
+    let xs: Vec<i64> = #[1, 2, 3, 4, 5, 6]
+    let mut mapped: Vec<i64> = #[]
+    let mut tested: Vec<i64> = #[]
+    let total = xs.iter().map(|x| {
+        mapped.push(x)
+        x * 10
+    }).filter(|x| {
+        tested.push(x)
+        x > 20
+    }).sum()
+    println("chain {} {:?} {:?}", total, mapped, tested)
+
+    let mut probed: Vec<i64> = #[]
+    let found = xs.iter().any(|v| {
+        probed.push(v)
+        v == 3
+    })
+    let every = xs.iter().all(|v| v < 4)
+    println("any {} {:?} all {}", found, probed, every)
+
+    println("range {} {}", (1..7).map(|k| k * k).filter(|k| k % 2 == 0).sum(), (0..=4).count())
+    println("eager {} {}", xs.map(|x| x + 1).sum(), xs.filter(|x| x % 2 == 0).count())
+    println("count {} {}", xs.iter().count(|v| v > 2), xs.iter().count())
+    println("fold {} {}", xs.iter().fold(100, |acc, v| acc - v), (1..5).product())
+    xs.iter().filter(|v| v % 2 == 1).for_each(|v| print("{} ", v))
+    println("")
+
+    let fs: Vec<f64> = #[0.5, 1.25, 2.0]
+    let zeros: Vec<f64> = #[-0.0, -0.0]
+    println("floats {} {} {} {}", fs.iter().map(|v| v * 2.0).sum(), fs.iter().product(), zeros.iter().sum(), fs.iter().fold(0.0, |a, v| a + v))
+
+    let bytes: Vec<u8> = #[104, 105, 33]
+    let letters = ['a', 'b', 'c', 'd']
+    println("narrow {} {}", bytes.iter().filter(|b| b > 100).count(), letters.iter().any(|c| c == 'c'))
+    let arr = [3, 4, 5]
+    println("array {}", arr.iter().map(|v| v * 2).sum())
+
+    // A closure that names the sequence it walks keeps the runtime iterator.
+    let ys: Vec<i64> = #[1, 2, 3]
+    println("self {}", ys.iter().map(|v| v + ys.len()).sum())
+}

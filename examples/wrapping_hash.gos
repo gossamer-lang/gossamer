@@ -1,0 +1,46 @@
+// Wrapping arithmetic in Gossamer.
+//
+// `+%`, `-%`, and `*%` add, subtract, and multiply with two's-complement
+// wrapping at the operands' declared integer width, the same on every tier
+// and in every build profile, and `+%=`, `-%=`, `*%=` are their compound
+// forms. Plain `+`, `-`, and `*` keep their overflow check, so a hash or a
+// checksum says where it wraps.
+//
+// Run with:
+//   gos run examples/wrapping_hash.gos
+//   gos build examples/wrapping_hash.gos
+
+fn djb2(text: String) -> u32 {
+    let mut hash: u32 = 5381
+    for b in text.bytes() {
+        hash = (hash << 5) +% hash +% b as u32
+    }
+    hash
+}
+
+fn fnv1a(text: String) -> u32 {
+    let mut hash: u32 = 2_166_136_261
+    for b in text.bytes() {
+        hash = hash ^ b as u32
+        hash *%= 16_777_619
+    }
+    hash
+}
+
+fn countdown(start: u8, steps: i64) -> u8 {
+    let mut value = start
+    for _ in 0..steps {
+        value -%= 1
+    }
+    value
+}
+
+fn main() {
+    println("djb2(hello) = {}", djb2("hello"))
+    println("fnv1a(hello) = {}", fnv1a("hello"))
+    println("250 +% 10 as u8 = {}", 250 as u8 +% 10)
+    println("countdown(2, 5) = {}", countdown(2, 5))
+    let mut total: i32 = 2_147_483_000
+    total +%= 1_000
+    println("i32 total wraps to {}", total)
+}

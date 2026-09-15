@@ -1835,7 +1835,7 @@ pub struct SelectArmMeta {
 }
 
 /// Source position associated with a bytecode instruction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SourceLocation {
     /// Display name of the source file.
     pub file: &'static str,
@@ -1855,6 +1855,23 @@ pub struct InstructionLocation {
     pub instruction: InstrIdx,
     /// Source position for this run of instructions.
     pub location: Option<SourceLocation>,
+    /// The inlined call these instructions were compiled from, as an index
+    /// into [`FnChunk::inline_sites`].
+    pub inline_site: Option<u32>,
+}
+
+/// A call whose callee body the compiler placed in the caller.
+///
+/// The callee has no frame of its own at run time, so a traceback through
+/// its instructions rebuilds the frame from the site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InlineSite {
+    /// The inlined callee.
+    pub function: &'static str,
+    /// Where the call is written, in the body it was placed in.
+    pub call: Option<SourceLocation>,
+    /// The site of the inlined body this call is itself written in.
+    pub parent: Option<u32>,
 }
 
 /// Compiled function - the unit of bytecode the VM can call.
@@ -1876,6 +1893,9 @@ pub struct FnChunk {
     pub instrs: Vec<Op>,
     /// Run-length encoded source positions for [`Self::instrs`].
     pub instruction_locations: Vec<InstructionLocation>,
+    /// Every call inlined into this chunk, referenced from
+    /// [`InstructionLocation::inline_site`].
+    pub inline_sites: &'static [InlineSite],
     /// Side-table for op payloads that don't fit in the in-line
     /// `Op` variant width without forcing every other op to
     /// pay the worst-case slot. Indexed by `Op::Wide(idx)`. The

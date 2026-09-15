@@ -196,19 +196,21 @@ fn show(p: Point) -> String {
 
 ## Compile-time validation - `regex::compile` / `sql::statement`
 
-`regex::compile("…")` and `sql::statement("…")` validate their argument at
-build time and
-fold to the validated string. A malformed pattern or statement fails the
-build with a diagnostic rather than reaching runtime - the project's
-"if it compiles, it works" goal:
+`regex::compile("…")` and `sql::statement("…")` check a literal argument
+while the program is parsed, so a malformed pattern or statement fails the
+build with a diagnostic at the literal rather than reaching runtime - the
+project's "if it compiles, it works" goal. A pattern is compiled with the
+engine `regex::compile` uses at run time; `sql::statement` answers the
+statement it checked:
 
 ```gossamer
 let pattern = regex::compile("^\\d{4}-\\d{2}-\\d{2}$")   // compiled + checked at build time
 let query   = sql::statement("SELECT id, name FROM users WHERE id = 1")
 ```
 
-`regex::compile("(unclosed")` fails the build with `unclosed group`; an
-unbalanced `sql::statement` fails with a parenthesis error. These are the
+`regex::compile("(unclosed")` fails the build with `GP0057` (`unclosed
+group`); an empty or unbalanced `sql::statement` fails with `GP0058`. Neither
+check runs the compile-time evaluator. These are the
 only compile-time-validated calls, and both stay module paths rather than
 globals - the older `regex!` / `sql!` spellings report `GP0051`.
 

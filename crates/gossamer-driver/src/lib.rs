@@ -38,11 +38,12 @@ pub use link::{
     link,
 };
 pub use pipeline::{
-    CheckedFrontend, ReleaseBuild, ReleaseBuildPaths, compile_at_paths_from_frontend,
-    compile_release_at_paths_from_frontend, compile_source, compile_source_native,
-    compile_source_native_from_frontend, compile_source_native_from_frontend_at_path,
-    compile_source_native_release, compile_source_native_release_with_fallback,
-    compile_source_native_release_with_fallback_from_frontend, register_source_lines,
+    CheckedFrontend, MirPhaseTimes, ReleaseBuild, ReleaseBuildPaths,
+    compile_at_paths_from_frontend, compile_release_at_paths_from_frontend, compile_source,
+    compile_source_native, compile_source_native_from_frontend,
+    compile_source_native_from_frontend_at_path, compile_source_native_release,
+    compile_source_native_release_with_fallback,
+    compile_source_native_release_with_fallback_from_frontend, register_source_positions,
 };
 pub use target::{
     ObjectFormat, PrebuiltRuntime, REGISTERED_TARGETS, TargetInfo, all_targets, lookup_target,

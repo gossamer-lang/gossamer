@@ -1,0 +1,161 @@
+// An aggregate taken out of an `Option` or `Result` with `unwrap` holds its
+// own shares of the children the carrier keeps, whether the carrier came from
+// a container read, a function, or a parameter, and whether the children are
+// nested carriers of the same type or strings.
+
+struct Node {
+    id: i64
+    kid: Option<Node>
+}
+
+struct Named {
+    name: String
+    id: i64
+    kid: Option<Named>
+}
+
+struct Tree {
+    weight: i64
+    symbol: i64
+    leaf: bool
+    left: Option<Tree>
+    right: Option<Tree>
+}
+
+fn pair(i: i64) -> Node {
+    Node { id: i, kid: Some(Node { id: -i, kid: None }) }
+}
+
+fn made(i: i64) -> Option<Node> {
+    Some(pair(i))
+}
+
+fn taken(carrier: Option<Node>) -> Node {
+    carrier.unwrap()
+}
+
+fn nested_ok(wrapped: Node, id: i64) -> bool {
+    let inner = wrapped.kid.unwrap()
+    let leaf = inner.kid.unwrap()
+    inner.id == id && leaf.id == -id && wrapped.id == id
+}
+
+fn removed_rounds(count: i64) -> i64 {
+    let mut pool: Vec<Node> = #[]
+    for i in 0..count { pool.push(pair(i)) }
+    let mut kept: Vec<Node> = #[]
+    while pool.len() > 0 {
+        let item = pool.remove(0).unwrap()
+        let noise = pair(count * 10)
+        kept.push(Node { id: item.id, kid: Some(item) })
+        if noise.id < 0 { return -1 }
+    }
+    let mut good = 0
+    for k in kept {
+        let id = k.id
+        if nested_ok(k, id) { good += 1 }
+    }
+    good
+}
+
+fn returned_rounds(count: i64) -> i64 {
+    let mut kept: Vec<Node> = #[]
+    for i in 0..count {
+        let a = made(i).unwrap()
+        let noise = pair(count * 10)
+        let b = taken(made(i))
+        kept.push(Node { id: a.id, kid: Some(a) })
+        kept.push(Node { id: b.id, kid: Some(b) })
+        if noise.id < 0 { return -1 }
+    }
+    let mut good = 0
+    for k in kept {
+        let id = k.id
+        if nested_ok(k, id) { good += 1 }
+    }
+    good
+}
+
+fn named(i: i64) -> Named {
+    Named { name: format("n{}", i), id: i, kid: Some(Named { name: format("leaf{}", i), id: -i, kid: None }) }
+}
+
+fn named_rounds(count: i64) -> i64 {
+    let mut pool: Vec<Named> = #[]
+    for i in 0..count { pool.push(named(i)) }
+    let mut kept: Vec<Named> = #[]
+    while pool.len() > 0 {
+        let item = pool.remove(0).unwrap()
+        kept.push(Named { name: format("wrap{}", item.id), id: item.id, kid: Some(item) })
+    }
+    let mut good = 0
+    for k in kept {
+        let inner = k.kid.unwrap()
+        let leaf = inner.kid.unwrap()
+        if inner.name == format("n{}", k.id) && leaf.name == format("leaf{}", k.id) { good += 1 }
+    }
+    good
+}
+
+fn leaf(weight: i64, symbol: i64) -> Tree {
+    Tree { weight: weight, symbol: symbol, leaf: true, left: None, right: None }
+}
+
+fn build_tree(weights: Vec<i64>) -> Option<Tree> {
+    let mut nodes: Vec<Tree> = #[]
+    for i in 0..weights.len() {
+        if weights[i] > 0 { nodes.push(leaf(weights[i], i)) }
+    }
+    nodes.sort_by(|a, b| a.weight - b.weight)
+    while nodes.len() > 1 {
+        let left = nodes.remove(0).unwrap()
+        let right = nodes.remove(0).unwrap()
+        let parent = Tree {
+            weight: left.weight + right.weight, symbol: 0, leaf: false
+            left: Some(left), right: Some(right)
+        }
+        let mut lo = 0
+        let mut hi = nodes.len()
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if nodes[mid].weight >= parent.weight { hi = mid } else { lo = mid + 1 }
+        }
+        let _ = nodes.insert(lo, parent)
+    }
+    nodes.pop()
+}
+
+fn depth_sum(tree: Tree, depth: i64, lengths: &mut Vec<i64>) {
+    if tree.leaf {
+        lengths[tree.symbol] = depth
+        return
+    }
+    if let Some(left) = tree.left { depth_sum(left, depth + 1, lengths) }
+    if let Some(right) = tree.right { depth_sum(right, depth + 1, lengths) }
+}
+
+fn tree_rounds(symbols: i64) -> i64 {
+    let mut weights: Vec<i64> = #[0; symbols]
+    for i in 0..4000 { weights[(i * i * 31 + i * 7) % symbols] += 1 }
+    let mut lengths: Vec<i64> = #[0; symbols]
+    if let Some(tree) = build_tree(weights) {
+        depth_sum(tree, 0, &mut lengths)
+    }
+    let mut bits = 0
+    for i in 0..symbols { bits += lengths[i] * weights[i] }
+    bits
+}
+
+fn main() {
+    let mut removed = 0
+    let mut returned = 0
+    let mut names = 0
+    let mut bits = 0
+    for _ in 0..40 {
+        removed += removed_rounds(64)
+        returned += returned_rounds(32)
+        names += named_rounds(24)
+        bits += tree_rounds(128)
+    }
+    println("removed {} returned {} named {} bits {}", removed, returned, names, bits)
+}

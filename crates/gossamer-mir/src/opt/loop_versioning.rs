@@ -1346,7 +1346,7 @@ fn range_check_block(
                         rhs: check.arith_rhs,
                     },
                 },
-                span: ctx.sp,
+                span: ctx.sp, inlined: None,
             },
             Statement {
                 kind: StatementKind::Assign {
@@ -1357,7 +1357,7 @@ fn range_check_block(
                         rhs: Operand::Copy(Place::local(tmp)),
                     },
                 },
-                span: ctx.sp,
+                span: ctx.sp, inlined: None,
             },
         ],
         terminator: Terminator::SwitchInt {
@@ -1366,6 +1366,8 @@ fn range_check_block(
             default: next,
         },
         span: ctx.sp,
+        terminator_span: None,
+        terminator_inlined: None,
     }
 }
 
@@ -1398,7 +1400,7 @@ fn build_inv_expr(
                         rhs: r,
                     },
                 },
-                span: ctx.sp,
+                span: ctx.sp, inlined: None,
             });
             Operand::Copy(Place::local(tmp))
         }
@@ -1424,6 +1426,8 @@ fn invariant_index_operand(
             stmts,
             terminator: Terminator::Goto { target: next },
             span: ctx.sp,
+            terminator_span: None,
+            terminator_inlined: None,
         });
     }
     op
@@ -1501,6 +1505,8 @@ fn emit_version_len_blocks(
                 target: Some(version_next_block(pbase, total, unchecked_header, i)),
             },
             span: ctx.sp,
+            terminator_span: None,
+            terminator_inlined: None,
         });
     }
 

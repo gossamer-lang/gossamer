@@ -203,6 +203,9 @@ pub(super) fn type_slot_count(tcx: &TyCtxt, ty: Ty) -> u32 {
             if def.local == u32::MAX || def.local == u32::MAX - 1 || tcx.is_inline_enum_ty(ty) {
                 return 2;
             }
+            if let Some(layout) = tcx.packed_layout(ty) {
+                return layout.size / 8;
+            }
             tcx.adt_field_tys(def, &substs).map_or(1, |tys| {
                 tys.iter()
                     .map(|t| type_slot_count(tcx, *t))
@@ -319,6 +322,9 @@ pub(super) fn field_byte_offset(tcx: &TyCtxt, ty: Ty, idx: u32) -> u32 {
             if def.local == u32::MAX || def.local == u32::MAX - 1 || tcx.is_inline_enum_ty(ty) {
                 return idx * 8;
             }
+            if let Some(layout) = tcx.packed_layout(ty) {
+                return layout.field_offsets.get(target).copied().unwrap_or(0);
+            }
             tcx.adt_field_tys(def, &substs).map_or(idx * 8, |tys| {
                 tys.iter()
                     .take(target)
@@ -332,6 +338,55 @@ pub(super) fn field_byte_offset(tcx: &TyCtxt, ty: Ty, idx: u32) -> u32 {
             .saturating_mul(8),
         TyKind::Ref { inner, .. } => field_byte_offset(tcx, inner, idx),
         _ => idx * 8,
+    }
+}
+
+/// The type a scalar field of a packed struct is stored at: its own width,
+/// where every other slot holds a whole word. An `f32` is a double on every
+/// tier, so it keeps the word a float is.
+pub(super) fn packed_scalar_storage(tcx: &TyCtxt, ty: Ty) -> ir::Type {
+    match tcx.kind_of(ty) {
+        TyKind::Bool | TyKind::Int(IntTy::I8 | IntTy::U8) => types::I8,
+        TyKind::Int(IntTy::I16 | IntTy::U16) => types::I16,
+        TyKind::Char | TyKind::Int(IntTy::I32 | IntTy::U32) => types::I32,
+        TyKind::Float(_) => types::F64,
+        _ => types::I64,
+    }
+}
+
+/// The narrow storage type and signedness of a place whose leaf is an integer
+/// field of a packed struct narrower than a word, or `None` when the leaf is
+/// stored at the type its value has. The value stays a 64-bit integer, so a
+/// read widens and a store narrows at the field.
+pub(super) fn packed_integer_field(
+    tcx: &TyCtxt,
+    body: &Body,
+    place: &Place,
+) -> Option<(ir::Type, bool)> {
+    let (Projection::Field(idx), prefix) = place.projection.split_last()? else {
+        return None;
+    };
+    let parent = Place {
+        local: place.local,
+        projection: prefix.to_vec().into(),
+    };
+    let mut parent_ty = resolve_place_ty(tcx, body, &parent);
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(parent_ty) {
+        parent_ty = *inner;
+    }
+    tcx.packed_layout(parent_ty)?;
+    match tcx.kind_of(field_ty_at(tcx, parent_ty, *idx)?) {
+        TyKind::Int(
+            int_ty @ (IntTy::I8 | IntTy::U8 | IntTy::I16 | IntTy::U16 | IntTy::I32 | IntTy::U32),
+        ) => {
+            let storage = match int_ty {
+                IntTy::I8 | IntTy::U8 => types::I8,
+                IntTy::I16 | IntTy::U16 => types::I16,
+                _ => types::I32,
+            };
+            Some((storage, !int_ty_is_unsigned(*int_ty)))
+        }
+        _ => None,
     }
 }
 

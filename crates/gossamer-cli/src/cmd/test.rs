@@ -1731,7 +1731,7 @@ pub(crate) mod tier_parity {
     use anyhow::{Result, anyhow};
 
     use super::TestOpts;
-    use crate::cmd::feature_status::{TierStatus, render_sidecar};
+    use crate::cmd::feature_status::{TierStatus, load_tier_status, render_sidecar};
 
     /// Per-tier budget when `--timeout` is not given.
     const DEFAULT_TIER_BUDGET: Duration = Duration::from_mins(1);
@@ -1757,14 +1757,11 @@ pub(crate) mod tier_parity {
                     .join(", "),
             ));
         }
-        let mut records: Vec<(String, TierStatus)> = Vec::with_capacity(files.len());
-        // A fixture's imports name the stdlib modules it exercises, so a
-        // module's row is the aggregate over every fixture that imports it:
-        // a tier passes only when all of them pass on it.
-        let mut by_module: BTreeMap<String, TierStatus> = BTreeMap::new();
+        let root = workspace_root_or_cwd().unwrap_or_else(|| PathBuf::from("."));
+        let mut fixtures: BTreeMap<String, TierStatus> = BTreeMap::new();
         for file in &files {
             let name = file
-                .strip_prefix(workspace_root_or_cwd().unwrap_or_else(|| PathBuf::from(".")))
+                .strip_prefix(&root)
                 .unwrap_or(file)
                 .display()
                 .to_string();
@@ -1775,35 +1772,28 @@ pub(crate) mod tier_parity {
                 cranelift.as_deref().unwrap_or("-"),
                 llvm.as_deref().unwrap_or("-"),
             );
-            let status = TierStatus {
-                vm,
-                cranelift,
-                llvm,
-            };
-            for module in stdlib_modules_used(file) {
-                merge_module_status(&mut by_module, module, &status);
-            }
-            // A language construct earns its tier row the same way a stdlib
-            // module does: from a fixture that ran on every tier and
-            // actually contains the construct.
-            if let Ok(source) = fs::read_to_string(file) {
-                for feature in gossamer_std::manifest::feature_status::lang_features_used(&source) {
-                    merge_module_status(&mut by_module, feature, &status);
-                }
-            }
-            for feature in gossamer_std::manifest::feature_status::lang_features_pinned(file) {
-                merge_module_status(&mut by_module, feature, &status);
-            }
-            records.push((name, status));
+            fixtures.insert(
+                name,
+                TierStatus {
+                    vm,
+                    cranelift,
+                    llvm,
+                },
+            );
         }
-        records.extend(by_module);
-        let json = render_sidecar(&records);
         if opts.report.as_deref() == Some("status") {
             let out_path = sidecar_path();
+            let mut reported = if opts.path.is_some() {
+                carried_fixture_records(&root, load_tier_status(Some(&out_path))?, &fixtures)
+            } else {
+                BTreeMap::new()
+            };
+            reported.extend(fixtures.clone());
+            let records = sidecar_records(&root, reported);
             if let Some(parent) = out_path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            fs::write(&out_path, &json)
+            fs::write(&out_path, render_sidecar(&records))
                 .map_err(|e| anyhow!("writing sidecar {}: {e}", out_path.display()))?;
             println!(
                 "feature-status sidecar written to {} ({} records)",
@@ -1815,17 +1805,17 @@ pub(crate) mod tier_parity {
         }
         // A tier that reached no verdict is absent from the record rather
         // than marked failing, so only an explicit `fail` counts here.
-        let failed = records
-            .iter()
-            .filter(|(_, s)| {
+        let failed = fixtures
+            .values()
+            .filter(|s| {
                 [&s.vm, &s.cranelift, &s.llvm]
                     .iter()
                     .any(|t| t.as_deref() == Some("fail"))
             })
             .count();
-        let undetermined = records
-            .iter()
-            .filter(|(_, s)| [&s.vm, &s.cranelift, &s.llvm].iter().any(|t| t.is_none()))
+        let undetermined = fixtures
+            .values()
+            .filter(|s| [&s.vm, &s.cranelift, &s.llvm].iter().any(|t| t.is_none()))
             .count();
         if undetermined > 0 {
             println!(
@@ -1932,6 +1922,56 @@ pub(crate) mod tier_parity {
             }
         }
         found
+    }
+
+    /// The fixture records of an earlier status report that this run did not
+    /// evaluate again and whose source still exists. A run over one path
+    /// re-evaluates only the fixtures under it, so every other surface keeps
+    /// the evidence it already had.
+    fn carried_fixture_records(
+        root: &Path,
+        recorded: BTreeMap<String, TierStatus>,
+        fresh: &BTreeMap<String, TierStatus>,
+    ) -> BTreeMap<String, TierStatus> {
+        recorded
+            .into_iter()
+            .filter(|(name, _)| {
+                Path::new(name).extension().and_then(|e| e.to_str()) == Some("gos")
+                    && !fresh.contains_key(name)
+                    && root.join(name).is_file()
+            })
+            .collect()
+    }
+
+    /// The status report for a set of fixture records: a row per fixture, then
+    /// a row per stdlib module and language construct those fixtures reach. A
+    /// module's row aggregates every fixture that imports it, and a construct's
+    /// every fixture that contains it, so a tier passes only when all of them
+    /// pass on it.
+    fn sidecar_records(
+        root: &Path,
+        fixtures: BTreeMap<String, TierStatus>,
+    ) -> Vec<(String, TierStatus)> {
+        use gossamer_std::manifest::feature_status::{lang_features_pinned, lang_features_used};
+
+        let mut by_module: BTreeMap<String, TierStatus> = BTreeMap::new();
+        for (name, status) in &fixtures {
+            let file = root.join(name);
+            for module in stdlib_modules_used(&file) {
+                merge_module_status(&mut by_module, module, status);
+            }
+            if let Ok(source) = fs::read_to_string(&file) {
+                for feature in lang_features_used(&source) {
+                    merge_module_status(&mut by_module, feature, status);
+                }
+            }
+            for feature in lang_features_pinned(&file) {
+                merge_module_status(&mut by_module, feature, status);
+            }
+        }
+        let mut records: Vec<(String, TierStatus)> = fixtures.into_iter().collect();
+        records.extend(by_module);
+        records
     }
 
     /// Folds one fixture's outcome into a module's aggregate. `fail` on any
@@ -2384,11 +2424,59 @@ pub(crate) mod tier_parity {
         }
     }
 
-    // BTreeMap type import kept to suppress dead-code lint when the
-    // sidecar shape is consumed only via render_sidecar.
-    #[allow(dead_code)]
-    fn _unused_btreemap() -> BTreeMap<String, TierStatus> {
-        BTreeMap::new()
+    #[cfg(test)]
+    mod sidecar_merge_tests {
+        use std::collections::BTreeMap;
+
+        use super::{carried_fixture_records, sidecar_records};
+        use crate::cmd::feature_status::TierStatus;
+
+        fn every_tier(verdict: &str) -> TierStatus {
+            TierStatus {
+                vm: Some(verdict.to_string()),
+                cranelift: Some(verdict.to_string()),
+                llvm: Some(verdict.to_string()),
+            }
+        }
+
+        #[test]
+        fn a_run_over_one_path_keeps_the_evidence_of_every_other_fixture() {
+            let root =
+                std::env::temp_dir().join(format!("gos-sidecar-merge-{}", std::process::id()));
+            std::fs::create_dir_all(&root).expect("create fixture root");
+            std::fs::write(root.join("strings.gos"), "use std::strings\n").expect("write fixture");
+            std::fs::write(root.join("files.gos"), "use std::fs\n").expect("write fixture");
+            let recorded = BTreeMap::from([
+                ("strings.gos".to_string(), every_tier("pass")),
+                ("deleted.gos".to_string(), every_tier("fail")),
+                ("std::strings".to_string(), every_tier("pass")),
+            ]);
+            let fresh = BTreeMap::from([("files.gos".to_string(), every_tier("pass"))]);
+            let mut reported = carried_fixture_records(&root, recorded.clone(), &fresh);
+            reported.extend(fresh);
+            let names: Vec<String> = sidecar_records(&root, reported)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+
+            let rerun = BTreeMap::from([("strings.gos".to_string(), every_tier("fail"))]);
+            let mut again = carried_fixture_records(&root, recorded, &rerun);
+            again.extend(rerun);
+            let strings_row = sidecar_records(&root, again)
+                .into_iter()
+                .find(|(name, _)| name == "std::strings")
+                .map(|(_, status)| status);
+            let _ = std::fs::remove_dir_all(&root);
+
+            assert_eq!(
+                names,
+                ["files.gos", "strings.gos", "std::fs", "std::strings"]
+            );
+            assert_eq!(
+                strings_row.and_then(|status| status.vm).as_deref(),
+                Some("fail")
+            );
+        }
     }
 
     #[cfg(test)]

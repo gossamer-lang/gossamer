@@ -1,0 +1,24 @@
+// A function item, a generic function, and a closure that captures nothing
+// stored as Map values, through a map literal and through insert, then read
+// back and called.
+
+fn dbl(x: f64) -> f64 {
+    x * 2.0
+}
+
+fn ident<T>(x: T) -> T {
+    x
+}
+
+fn main() {
+    let table: Map<String, Fn(f64) -> f64> = { "double": dbl, "same": ident }
+    let mut ops: Map<String, Fn(f64) -> f64> = Map::new()
+    ops.insert("half", |x| x / 2.0)
+    ops.insert("double", dbl)
+    let d = table.get("double").unwrap()
+    let s = table.get("same").unwrap()
+    let hf = ops.get("half").unwrap()
+    let od = ops.get("double").unwrap()
+    println("map {} {} {} {}", d(3.0), s(3.0), hf(3.0), od(0.5))
+    println("sizes {} {}", table.len(), ops.len())
+}

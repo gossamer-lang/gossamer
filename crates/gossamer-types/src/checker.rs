@@ -93,6 +93,7 @@ impl TypeChecker<'_> {
         self.check_deferred_into_conversions();
         self.check_deferred_literal_type_mismatches();
         self.check_deferred_scalar_method_rejections();
+        self.check_deferred_wrapping_operands();
         self.check_deferred_mutating_receivers();
         self.check_deferred_private_fields();
         self.check_deferred_structural();
@@ -133,11 +134,37 @@ const RECURSION_LIMIT: u32 = 256;
 /// the receiver and arguments it is applied to.
 struct MethodCallSite<'a> {
     call_id: NodeId,
+    /// Source range of the whole call, receiver through closing parenthesis.
+    call_span: Span,
     method: &'a str,
     /// Source range of the method name, so a diagnostic about the method
     /// points at it rather than at the receiver.
     name_span: Span,
     generics: &'a [AstGenericArg],
+}
+
+/// Signature of a trait function as seen through a type parameter bounded by
+/// the trait. `Self` is the placeholder `Param` at index zero, which a use
+/// site substitutes with the bounded parameter.
+#[derive(Clone)]
+struct TraitFnSelfSig {
+    /// The receiver the function declares, if any.
+    receiver: Option<gossamer_ast::Receiver>,
+    /// Non-receiver parameters and return.
+    sig: FnSig,
+}
+
+/// Signature of a method on a concrete user type whose own type parameters
+/// reach its return. Parameter and return types carry those parameters as
+/// rigid `Param` slots, indexed from zero.
+#[derive(Clone)]
+struct OwnGenericMethodSig {
+    /// Number of type parameters the method declares.
+    generics: usize,
+    /// Non-receiver parameter types.
+    params: Vec<Ty>,
+    /// Declared return type.
+    ret: Ty,
 }
 
 const HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
@@ -685,6 +712,13 @@ struct TypeChecker<'a> {
     /// parameter types carry rigid `Param` slots substituted from the
     /// receiver at each call site.
     generic_method_param_types: HashMap<(String, String), Vec<Ty>>,
+    /// Signatures of methods on concrete user types whose own type
+    /// parameters reach the return, keyed like [`Self::method_ret_types`].
+    /// Each call site instantiates those parameters afresh.
+    own_generic_method_sigs: HashMap<(String, String, usize), OwnGenericMethodSig>,
+    /// Signatures of the functions a non-generic trait declares, keyed by
+    /// `(trait, function)`, for calls through a bounded type parameter.
+    trait_fn_self_sigs: HashMap<(String, String), TraitFnSelfSig>,
     /// Declared argument arity (excluding `self`) of each user method,
     /// keyed by `(type_name, method_name)`. Drives the
     /// method-call arity check (GT0018): a call with the wrong count
@@ -723,6 +757,10 @@ struct TypeChecker<'a> {
     /// defaulting after the last item is checked, so whether the receiver
     /// is a scalar - and which scalar to name - is only known then.
     deferred_scalar_method_rejections: Vec<(Ty, String, Span)>,
+    /// Wrapping arithmetic operands still being inferred when checked, with
+    /// the other operand's type, the operator, and its span. Literal defaulting
+    /// settles them, so the integer requirement is checked afterwards.
+    deferred_wrapping_operands: Vec<(Ty, Ty, &'static str, Span)>,
     /// `.into()` / `.try_into()` call sites, recorded as (result, method,
     /// span). The target comes from the use site, so whether one was given
     /// at all is only known once unification has run.
@@ -811,11 +849,8 @@ struct TypeChecker<'a> {
     /// finishes so each argument is checked against the declaration's
     /// bounds at its final resolved type.
     deferred_adt_bounds: Vec<(gossamer_resolve::DefId, Vec<Ty>, Span)>,
-    /// Per-position flags marking which of each generic function's
-    /// parameters are const parameters, keyed by `DefId`. Lets a call
-    /// site record a `GenericArg::Const` (rather than a type argument)
-    /// at each const position when inferring the substitution.
-    fn_generic_const_mask: HashMap<gossamer_resolve::DefId, Vec<bool>>,
+    /// Const generic parameters of generic functions, types, and impl methods.
+    const_generics: ConstGenerics,
     /// Set of concrete type names implementing each trait, keyed by trait
     /// name. Built from every `impl Trait for Type` block so a generic
     /// call can verify a `T: Trait` bound is satisfied by the argument.
@@ -855,7 +890,7 @@ struct TypeChecker<'a> {
     /// Lets a `[T; N]` array-length expression naming a const
     /// parameter type as a symbolic [`crate::ArrayLen::Param`] rather
     /// than collapsing to a concrete `0`.
-    current_const_generic_scope: HashMap<String, crate::ParamIdx>,
+    current_const_generic_scope: HashMap<String, (crate::ParamIdx, Ty)>,
     /// Trait names declared in this source file. Populated upfront
     /// by `collect_signatures` from every `ItemKind::Trait`. Used
     /// by `register_fn_sig` to validate that each `<T: Bound>`
@@ -949,14 +984,94 @@ struct TypeChecker<'a> {
 
 /// Saved generic-parameter scopes restored by
 /// [`TypeChecker::leave_generic_scope`].
+/// The const positions of a struct literal's type and what its fields have
+/// said about each: a value, or the enclosing body's own parameter.
+struct LiteralConsts {
+    mask: Vec<bool>,
+    values: Vec<Option<i128>>,
+    forwarded: Vec<Option<crate::ParamIdx>>,
+}
+
+impl LiteralConsts {
+    fn new(mask: Vec<bool>) -> Self {
+        let n = mask.len();
+        Self {
+            mask,
+            values: vec![None; n],
+            forwarded: vec![None; n],
+        }
+    }
+
+    fn has_const_positions(&self) -> bool {
+        self.mask.iter().any(|is_const| *is_const)
+    }
+
+    /// Whether `field_ty` is an array whose length names a const position.
+    fn is_const_array_field(&self, tcx: &TyCtxt, field_ty: Ty) -> bool {
+        let mut ty = field_ty;
+        while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+            ty = *inner;
+        }
+        matches!(
+            tcx.kind_of(ty),
+            TyKind::Array { len: crate::ArrayLen::Param(idx), .. }
+                if self.mask.get(idx.0 as usize).copied().unwrap_or(false)
+        )
+    }
+
+    fn infer_from_field(&mut self, checker: &TypeChecker<'_>, field_ty: Ty, value_ty: Ty) {
+        let Some((idx, len)) = checker.infer_array_const_len(field_ty, value_ty) else {
+            return;
+        };
+        match len {
+            crate::ArrayLen::Concrete(value) => {
+                if let Some(slot) = self.values.get_mut(idx) {
+                    slot.get_or_insert(value as i128);
+                }
+            }
+            crate::ArrayLen::Param(param) => {
+                if let Some(slot) = self.forwarded.get_mut(idx) {
+                    slot.get_or_insert(param);
+                }
+            }
+        }
+    }
+
+    /// `field_ty` with the const positions known so far substituted.
+    fn apply(&self, checker: &mut TypeChecker<'_>, field_ty: Ty, types: &[Ty]) -> Ty {
+        let substituted = checker.subst_generics_in_ty(field_ty, types, &self.values);
+        checker.forward_const_params(substituted, &self.forwarded)
+    }
+}
+
+/// What the checker knows about const generic parameters, gathered while
+/// signatures are registered and read back at every use site.
+#[derive(Default)]
+struct ConstGenerics {
+    /// Declared type of each const generic parameter of each generic function
+    /// or type, by parameter position (`None` at a type position). Lets a use
+    /// site record a `GenericArg::Const` rather than a type argument at each
+    /// const position.
+    param_tys: HashMap<gossamer_resolve::DefId, Vec<Option<Ty>>>,
+    /// For a method of a generic `impl` block, keyed by owner and method, the
+    /// impl's const parameters in declaration order: each one's position in
+    /// the impl's parameter list, which is the position the self type's
+    /// arguments carry it at, and its declared type.
+    impl_method_params: HashMap<(String, String), Vec<(usize, Ty)>>,
+}
+
 struct GenericScope {
     types: HashMap<String, (crate::ParamIdx, Box<str>)>,
-    consts: HashMap<String, crate::ParamIdx>,
+    consts: HashMap<String, (crate::ParamIdx, Ty)>,
     bounds: Vec<Vec<String>>,
     assoc_bindings: HashMap<(String, String), gossamer_ast::Type>,
 }
 
 impl<'a> TypeChecker<'a> {
+    // One initializer per field and no control flow: the length follows the
+    // number of tables the checker carries, which is not what the lint
+    // measures.
+    #[allow(clippy::too_many_lines)]
     fn new(tcx: &'a mut TyCtxt, resolutions: &'a Resolutions) -> Self {
         let checker_struct_fields = stdlib_struct_fields(tcx);
         Self {
@@ -1000,6 +1115,8 @@ impl<'a> TypeChecker<'a> {
             method_param_types: HashMap::new(),
             generic_method_ret_types: HashMap::new(),
             generic_method_param_types: HashMap::new(),
+            own_generic_method_sigs: HashMap::new(),
+            trait_fn_self_sigs: HashMap::new(),
             method_arities: HashMap::new(),
             inherent_method_requires_mut: HashMap::new(),
             trait_impl_method_requires_mut: HashMap::new(),
@@ -1010,6 +1127,7 @@ impl<'a> TypeChecker<'a> {
             deferred_into_conversions: Vec::new(),
             deferred_literal_type_mismatches: Vec::new(),
             deferred_scalar_method_rejections: Vec::new(),
+            deferred_wrapping_operands: Vec::new(),
             deferred_conversion_targets: Vec::new(),
             enum_variant_payloads: HashMap::new(),
             variant_ctor_substs: HashMap::new(),
@@ -1027,7 +1145,7 @@ impl<'a> TypeChecker<'a> {
             adt_param_bounds: HashMap::new(),
             user_type_defs: HashMap::new(),
             deferred_adt_bounds: Vec::new(),
-            fn_generic_const_mask: HashMap::new(),
+            const_generics: ConstGenerics::default(),
             trait_impl_types: HashMap::new(),
             trait_method_ret: HashMap::new(),
             trait_method_params: HashMap::new(),
@@ -1210,16 +1328,6 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    /// Per-parameter flags marking which generic positions are const
-    /// parameters, indexed by full parameter position.
-    fn const_param_mask(generics: &gossamer_ast::Generics) -> Vec<bool> {
-        generics
-            .params
-            .iter()
-            .map(|p| matches!(p, gossamer_ast::GenericParam::Const { .. }))
-            .collect()
-    }
-
     fn enter_generic_scope(&mut self, generics: &gossamer_ast::Generics) -> GenericScope {
         let prior_types = std::mem::take(&mut self.current_generic_scope);
         let prior_consts = std::mem::take(&mut self.current_const_generic_scope);
@@ -1241,9 +1349,11 @@ impl<'a> TypeChecker<'a> {
                     self.current_generic_scope
                         .insert(name.name.clone(), (crate::ParamIdx(i as u32), owned));
                 }
-                gossamer_ast::GenericParam::Const { name, .. } => {
+                gossamer_ast::GenericParam::Const { name, ty, .. } => {
+                    let const_ty = self.type_from_ast(ty);
+                    self.record(ty.id, const_ty);
                     self.current_const_generic_scope
-                        .insert(name.name.clone(), crate::ParamIdx(i as u32));
+                        .insert(name.name.clone(), (crate::ParamIdx(i as u32), const_ty));
                 }
                 gossamer_ast::GenericParam::Lifetime { .. } => {}
             }
@@ -1293,9 +1403,11 @@ impl<'a> TypeChecker<'a> {
                     self.current_generic_scope
                         .insert(name.name.clone(), (idx, owned));
                 }
-                gossamer_ast::GenericParam::Const { name, .. } => {
+                gossamer_ast::GenericParam::Const { name, ty, .. } => {
+                    let const_ty = self.type_from_ast(ty);
+                    self.record(ty.id, const_ty);
                     self.current_const_generic_scope
-                        .insert(name.name.clone(), idx);
+                        .insert(name.name.clone(), (idx, const_ty));
                 }
                 gossamer_ast::GenericParam::Lifetime { .. } => {}
             }
@@ -1305,6 +1417,19 @@ impl<'a> TypeChecker<'a> {
             consts: prior_consts,
             bounds: prior_bounds,
             assoc_bindings: prior_bindings,
+        }
+    }
+
+    /// Enters a function's generic scope the way its body is checked: inside
+    /// an `impl` with generics of its own, the block's parameters come first,
+    /// so a signature naming the block's `N` or `T` reads the slot the body
+    /// and the struct's fields use.
+    fn enter_fn_generic_scope(&mut self, generics: &gossamer_ast::Generics) -> GenericScope {
+        match self.current_impl_generics.clone() {
+            Some(impl_generics) if !impl_generics.params.is_empty() => {
+                self.enter_generic_scope_combined(&impl_generics, generics)
+            }
+            _ => self.enter_generic_scope(generics),
         }
     }
 
@@ -1773,7 +1898,7 @@ impl<'a> TypeChecker<'a> {
     /// Infers a const generic array length from a call argument: a
     /// parameter typed `[T; N]` (peeling references) matched against an
     /// argument of concrete length yields `(N's param index, length)`.
-    fn infer_array_const_len(&self, param_ty: Ty, arg_ty: Ty) -> Option<(usize, i128)> {
+    fn infer_array_const_len(&self, param_ty: Ty, arg_ty: Ty) -> Option<(usize, crate::ArrayLen)> {
         let mut p = param_ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(p) {
             p = *inner;
@@ -1793,14 +1918,151 @@ impl<'a> TypeChecker<'a> {
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(a) {
             a = *inner;
         }
-        let TyKind::Array {
-            len: crate::ArrayLen::Concrete(n),
-            ..
-        } = self.tcx.kind_of(a)
-        else {
+        let TyKind::Array { len, .. } = self.tcx.kind_of(a) else {
             return None;
         };
-        Some((idx, *n as i128))
+        Some((idx, *len))
+    }
+
+    /// Every const parameter position `param_ty` names that `arg_ty` supplies a
+    /// value for, walking the two types together: an array length, or a const
+    /// argument of a generic type (`Grid<N>` against `Grid<2>`), through
+    /// references, sequences, tuples, and type arguments.
+    fn infer_const_args(&self, param_ty: Ty, arg_ty: Ty, out: &mut Vec<(usize, crate::ArrayLen)>) {
+        let arg_ty = self.infer.resolve(self.tcx, arg_ty);
+        match (self.tcx.kind_of(param_ty), self.tcx.kind_of(arg_ty)) {
+            (TyKind::Ref { inner: p, .. }, TyKind::Ref { inner: a, .. })
+            | (TyKind::Vec(p), TyKind::Vec(a))
+            | (TyKind::Slice(p), TyKind::Slice(a)) => self.infer_const_args(*p, *a, out),
+            (TyKind::Ref { inner: p, .. }, _) => self.infer_const_args(*p, arg_ty, out),
+            (TyKind::Array { elem: pe, len: pl }, TyKind::Array { elem: ae, len: al })
+            | (
+                TyKind::Simd {
+                    elem: pe,
+                    lanes: pl,
+                },
+                TyKind::Simd {
+                    elem: ae,
+                    lanes: al,
+                },
+            ) => {
+                if let crate::ArrayLen::Param(idx) = pl {
+                    out.push((idx.0 as usize, *al));
+                }
+                self.infer_const_args(*pe, *ae, out);
+            }
+            (TyKind::Tuple(ps), TyKind::Tuple(ars)) => {
+                for (p, a) in ps.iter().zip(ars.iter()) {
+                    self.infer_const_args(*p, *a, out);
+                }
+            }
+            (
+                TyKind::Adt {
+                    def: pd,
+                    substs: ps,
+                },
+                TyKind::Adt {
+                    def: ad,
+                    substs: ars,
+                },
+            ) if pd == ad => {
+                for (p, a) in ps.as_slice().iter().zip(ars.as_slice().iter()) {
+                    match (p, a) {
+                        (crate::GenericArg::ConstParam(idx), crate::GenericArg::Const(value)) => {
+                            if let Ok(value) = usize::try_from(*value) {
+                                out.push((idx.0 as usize, crate::ArrayLen::Concrete(value)));
+                            }
+                        }
+                        (
+                            crate::GenericArg::ConstParam(idx),
+                            crate::GenericArg::ConstParam(from),
+                        ) => out.push((idx.0 as usize, crate::ArrayLen::Param(*from))),
+                        (crate::GenericArg::Type(p), crate::GenericArg::Type(a)) => {
+                            self.infer_const_args(*p, *a, out);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// `ty` with each array length still naming a callee const parameter that
+    /// the call forwards from the caller's own parameter renamed to the
+    /// caller's position.
+    fn forward_const_params(&mut self, ty: Ty, forwarded: &[Option<crate::ParamIdx>]) -> Ty {
+        if forwarded.iter().all(Option::is_none) {
+            return ty;
+        }
+        match self.tcx.kind_of(ty).clone() {
+            TyKind::Array { elem, len } => {
+                let elem = self.forward_const_params(elem, forwarded);
+                let len = match len {
+                    crate::ArrayLen::Param(idx) => forwarded
+                        .get(idx.0 as usize)
+                        .copied()
+                        .flatten()
+                        .map_or(len, crate::ArrayLen::Param),
+                    concrete @ crate::ArrayLen::Concrete(_) => concrete,
+                };
+                self.tcx.intern(TyKind::Array { elem, len })
+            }
+            TyKind::Simd { elem, lanes } => {
+                let elem = self.forward_const_params(elem, forwarded);
+                let lanes = match lanes {
+                    crate::ArrayLen::Param(idx) => forwarded
+                        .get(idx.0 as usize)
+                        .copied()
+                        .flatten()
+                        .map_or(lanes, crate::ArrayLen::Param),
+                    concrete @ crate::ArrayLen::Concrete(_) => concrete,
+                };
+                self.tcx.intern(TyKind::Simd { elem, lanes })
+            }
+            TyKind::Ref { mutability, inner } => {
+                let inner = self.forward_const_params(inner, forwarded);
+                self.tcx.intern(TyKind::Ref { mutability, inner })
+            }
+            TyKind::Vec(elem) => {
+                let elem = self.forward_const_params(elem, forwarded);
+                self.tcx.intern(TyKind::Vec(elem))
+            }
+            TyKind::Slice(elem) => {
+                let elem = self.forward_const_params(elem, forwarded);
+                self.tcx.intern(TyKind::Slice(elem))
+            }
+            TyKind::Tuple(elems) => {
+                let elems = elems
+                    .iter()
+                    .map(|elem| self.forward_const_params(*elem, forwarded))
+                    .collect();
+                self.tcx.intern(TyKind::Tuple(elems))
+            }
+            TyKind::Adt { def, substs } => {
+                let args = substs
+                    .as_slice()
+                    .iter()
+                    .map(|arg| match arg {
+                        crate::GenericArg::Type(t) => {
+                            crate::GenericArg::Type(self.forward_const_params(*t, forwarded))
+                        }
+                        crate::GenericArg::ConstParam(idx) => {
+                            forwarded.get(idx.0 as usize).copied().flatten().map_or(
+                                crate::GenericArg::ConstParam(*idx),
+                                crate::GenericArg::ConstParam,
+                            )
+                        }
+                        other @ crate::GenericArg::Const(_) => other.clone(),
+                    })
+                    .collect();
+                self.tcx.intern(TyKind::Adt {
+                    def,
+                    substs: crate::Substs::from_args(args),
+                })
+            }
+            _ => ty,
+        }
     }
 
     /// Like [`Self::subst_params_in_ty`] but also rewrites a const
@@ -1851,6 +2113,18 @@ impl<'a> TypeChecker<'a> {
                     self.tcx.intern(TyKind::Array {
                         elem: new_elem,
                         len: new_len,
+                    })
+                }
+            }
+            TyKind::Simd { elem, lanes } => {
+                let new_elem = self.subst_generics_in_ty(elem, substs, const_substs);
+                let new_lanes = subst_array_len(lanes, const_substs);
+                if new_elem == elem && new_lanes == lanes {
+                    ty
+                } else {
+                    self.tcx.intern(TyKind::Simd {
+                        elem: new_elem,
+                        lanes: new_lanes,
                     })
                 }
             }
@@ -1989,6 +2263,12 @@ impl<'a> TypeChecker<'a> {
                     crate::GenericArg::Type(self.subst_generics_in_ty(*t, substs, const_substs))
                 }
                 crate::GenericArg::Const(c) => crate::GenericArg::Const(*c),
+                crate::GenericArg::ConstParam(idx) => {
+                    match const_substs.get(idx.0 as usize).copied().flatten() {
+                        Some(value) => crate::GenericArg::Const(value),
+                        None => crate::GenericArg::ConstParam(*idx),
+                    }
+                }
             })
             .collect();
         crate::Substs::from_args(new_args)
@@ -2030,7 +2310,9 @@ impl<'a> TypeChecker<'a> {
             .iter()
             .map(|arg| match arg {
                 crate::GenericArg::Type(t) => crate::GenericArg::Type(self.deep_resolve(*t)),
-                crate::GenericArg::Const(c) => crate::GenericArg::Const(*c),
+                other @ (crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_)) => {
+                    other.clone()
+                }
             })
             .collect();
         crate::Substs::from_args(new_args)
@@ -2118,15 +2400,10 @@ impl<'a> TypeChecker<'a> {
             // Without this the recorded node keeps `[?v; 2]` and the
             // format/codegen dispatch can't classify the element.
             TyKind::Array { elem, len } => {
-                let new_elem = self.deep_resolve(elem);
-                if new_elem == elem {
-                    resolved
-                } else {
-                    self.tcx.intern(TyKind::Array {
-                        elem: new_elem,
-                        len,
-                    })
-                }
+                self.deep_resolve_wrap(resolved, elem, |elem| TyKind::Array { elem, len })
+            }
+            TyKind::Simd { elem, lanes } => {
+                self.deep_resolve_wrap(resolved, elem, |elem| TyKind::Simd { elem, lanes })
             }
             TyKind::Slice(elem) => self.deep_resolve_wrap(resolved, elem, TyKind::Slice),
             TyKind::Vec(elem) => self.deep_resolve_wrap(resolved, elem, TyKind::Vec),
@@ -2166,7 +2443,7 @@ impl<'a> TypeChecker<'a> {
     /// Deep-resolves a single-payload composite (`Vec`/`Slice`/channel
     /// endpoints) and re-interns it through `wrap` only when the payload
     /// actually changed.
-    fn deep_resolve_wrap(&mut self, resolved: Ty, elem: Ty, wrap: fn(Ty) -> TyKind) -> Ty {
+    fn deep_resolve_wrap(&mut self, resolved: Ty, elem: Ty, wrap: impl FnOnce(Ty) -> TyKind) -> Ty {
         let new_elem = self.deep_resolve(elem);
         if new_elem == elem {
             resolved
@@ -2528,13 +2805,134 @@ impl<'a> TypeChecker<'a> {
                     self.infer.unify(self.tcx, actual, rhs_resolved)
                 })
             }
-            _ => None,
+            // A function item nested in the value - `Some(dbl)` where an
+            // `Option<Fn(f64) -> f64>` is expected - coerces at its own
+            // position the way a bare one does.
+            _ => self
+                .coerce_nested_fn_items(lhs_resolved, rhs_resolved)
+                .map(|coerced| self.infer.unify(self.tcx, lhs_resolved, coerced)),
         };
         let result = callable_result
             .unwrap_or_else(|| self.infer.unify(self.tcx, lhs_resolved, rhs_resolved));
         match result {
             Ok(()) => {}
             Err(err) => self.report_unify(err, lhs, rhs, span),
+        }
+    }
+
+    /// Records the callable-shaped type on each expression that produces a
+    /// value holding a function item where `expected` names a callable,
+    /// descending through block tails, `if` branches, and `match` arms, so the
+    /// expression that builds the value is lowered with the slot's shape.
+    fn record_fn_item_coercion(&mut self, expr: &Expr, expected: Ty) {
+        match &expr.kind {
+            ExprKind::Block(block) => {
+                if let Some(tail) = &block.tail {
+                    self.record_fn_item_coercion(tail, expected);
+                }
+            }
+            ExprKind::If {
+                then_branch,
+                else_branch,
+                ..
+            } => {
+                self.record_fn_item_coercion(then_branch, expected);
+                if let Some(else_branch) = else_branch {
+                    self.record_fn_item_coercion(else_branch, expected);
+                }
+            }
+            ExprKind::Match { arms, .. } => {
+                for arm in arms {
+                    self.record_fn_item_coercion(&arm.body, expected);
+                }
+            }
+            _ => {}
+        }
+        if let Some(found) = self.table.get(expr.id)
+            && let Some(coerced) = self.coerce_nested_fn_items(expected, found)
+        {
+            self.record(expr.id, coerced);
+        }
+    }
+
+    /// `found` with every function item that stands where `expected` names a
+    /// callable replaced by the item's instantiated signature, looking through
+    /// generic arguments, tuples, `Vec`s, and arrays. `None` when no nested
+    /// position needed the coercion.
+    fn coerce_nested_fn_items(&mut self, expected: Ty, found: Ty) -> Option<Ty> {
+        let expected = self.infer.resolve(self.tcx, expected);
+        let found = self.infer.resolve(self.tcx, found);
+        let expected_kind = self.tcx.kind(expected).cloned()?;
+        let found_kind = self.tcx.kind(found).cloned()?;
+        match (expected_kind, found_kind) {
+            (TyKind::FnPtr(_) | TyKind::FnTrait(_), TyKind::FnDef { def, substs }) => {
+                let sig = self.instantiated_fn_item_sig(def, &substs)?;
+                Some(self.tcx.intern(TyKind::FnPtr(sig)))
+            }
+            (
+                TyKind::Adt {
+                    def: expected_def,
+                    substs: expected_substs,
+                },
+                TyKind::Adt {
+                    def: found_def,
+                    substs: found_substs,
+                },
+            ) if expected_def == found_def
+                && expected_substs.as_slice().len() == found_substs.as_slice().len() =>
+            {
+                let mut changed = false;
+                let mut args = Vec::with_capacity(found_substs.as_slice().len());
+                for (e, f) in expected_substs
+                    .as_slice()
+                    .iter()
+                    .zip(found_substs.as_slice())
+                {
+                    match (e, f) {
+                        (crate::GenericArg::Type(e), crate::GenericArg::Type(f)) => {
+                            match self.coerce_nested_fn_items(*e, *f) {
+                                Some(coerced) => {
+                                    changed = true;
+                                    args.push(crate::GenericArg::Type(coerced));
+                                }
+                                None => args.push(crate::GenericArg::Type(*f)),
+                            }
+                        }
+                        (_, other) => args.push(other.clone()),
+                    }
+                }
+                changed.then(|| {
+                    self.tcx.intern(TyKind::Adt {
+                        def: found_def,
+                        substs: crate::Substs::from_args(args),
+                    })
+                })
+            }
+            (TyKind::Tuple(expected_elems), TyKind::Tuple(found_elems))
+                if expected_elems.len() == found_elems.len() =>
+            {
+                let mut changed = false;
+                let mut elems = Vec::with_capacity(found_elems.len());
+                for (e, f) in expected_elems.iter().zip(&found_elems) {
+                    match self.coerce_nested_fn_items(*e, *f) {
+                        Some(coerced) => {
+                            changed = true;
+                            elems.push(coerced);
+                        }
+                        None => elems.push(*f),
+                    }
+                }
+                changed.then(|| self.tcx.intern(TyKind::Tuple(elems)))
+            }
+            (TyKind::Vec(e), TyKind::Vec(f)) => {
+                let coerced = self.coerce_nested_fn_items(e, f)?;
+                Some(self.tcx.intern(TyKind::Vec(coerced)))
+            }
+            (TyKind::Array { elem: e, .. }, TyKind::Array { elem: f, len }) => {
+                let coerced = self.coerce_nested_fn_items(e, f)?;
+                Some(self.tcx.intern(TyKind::Array { elem: coerced, len }))
+            }
+            _ => None,
         }
     }
 
@@ -2548,11 +2946,7 @@ impl<'a> TypeChecker<'a> {
         if n == 0 {
             return Some(sig);
         }
-        let const_mask = self
-            .fn_generic_const_mask
-            .get(&def)
-            .cloned()
-            .unwrap_or_default();
+        let const_mask = self.fn_generic_const_mask_of(def);
         let vars: Vec<Ty> = (0..n)
             .map(|i| match explicit.as_slice().get(i) {
                 Some(crate::GenericArg::Type(ty))
@@ -2968,14 +3362,34 @@ impl<'a> TypeChecker<'a> {
             // A generic enum instantiates its parameters per constructor call
             // and per match arm, exactly as a generic struct does. The arity
             // says how many fresh variables each of those needs.
+            // Every generic position counts, so a const parameter keeps the
+            // index its `[T; N]` payload names.
             let arity = decl
                 .generics
                 .params
                 .iter()
-                .filter(|p| matches!(p, gossamer_ast::GenericParam::Type { .. }))
+                .filter(|p| {
+                    matches!(
+                        p,
+                        gossamer_ast::GenericParam::Type { .. }
+                            | gossamer_ast::GenericParam::Const { .. }
+                    )
+                })
                 .count();
             if arity > 0 {
                 self.struct_generic_arity.insert(def, arity);
+            }
+            let const_tys: Vec<Option<Ty>> = decl
+                .generics
+                .params
+                .iter()
+                .map(|param| match param {
+                    gossamer_ast::GenericParam::Const { ty, .. } => Some(self.type_from_ast(ty)),
+                    _ => None,
+                })
+                .collect();
+            if const_tys.iter().any(Option::is_some) {
+                self.const_generics.param_tys.insert(def, const_tys);
             }
             self.tcx.register_enum_variant_names(
                 def,
@@ -3064,6 +3478,10 @@ impl<'a> TypeChecker<'a> {
                     }
                     StructBody::Unit => Vec::new(),
                 };
+                let tys = tys
+                    .into_iter()
+                    .map(|t| self.const_length_carrier(t))
+                    .collect();
                 variant_tys.push(tys);
             }
             self.tcx.register_enum_variant_tys(def, variant_tys);
@@ -3188,14 +3606,34 @@ impl<'a> TypeChecker<'a> {
         // Record the struct's generic-parameter arity in source
         // order so struct-literal substitution at use sites knows
         // how many fresh inference variables to allocate.
+        // Every generic position counts, so a const parameter keeps the index
+        // its `[T; N]` field names.
         let arity = decl
             .generics
             .params
             .iter()
-            .filter(|p| matches!(p, gossamer_ast::GenericParam::Type { .. }))
+            .filter(|p| {
+                matches!(
+                    p,
+                    gossamer_ast::GenericParam::Type { .. }
+                        | gossamer_ast::GenericParam::Const { .. }
+                )
+            })
             .count();
         if arity > 0 {
             self.struct_generic_arity.insert(def, arity);
+        }
+        let const_tys: Vec<Option<Ty>> = decl
+            .generics
+            .params
+            .iter()
+            .map(|param| match param {
+                gossamer_ast::GenericParam::Const { ty, .. } => Some(self.type_from_ast(ty)),
+                _ => None,
+            })
+            .collect();
+        if const_tys.iter().any(Option::is_some) {
+            self.const_generics.param_tys.insert(def, const_tys);
         }
         // Tuple-struct fields are modelled as named fields "0".."N-1", so a
         // `Pt(a, b)` constructor (rewritten to a `Pt { 0: a, 1: b }` literal)
@@ -3234,7 +3672,14 @@ impl<'a> TypeChecker<'a> {
         // A unit struct is the zero-field shape `Unit {}` also spells, so it
         // carries the same registered (empty) layout: the tiers read its
         // fields, its slots, and its key content through one description.
-        let tys: Vec<Ty> = list.iter().map(|(_, t)| *t).collect();
+        // A field whose length is a const parameter has no length until an
+        // instantiation supplies one, so its storage is the runtime-length
+        // sequence a const generic body holds. The checker keeps the declared
+        // `[T; N]` for typing; the layout reads the carrier.
+        let tys: Vec<Ty> = list
+            .iter()
+            .map(|(_, t)| self.const_length_carrier(*t))
+            .collect();
         self.tcx.register_struct_fields(def, tys);
         self.struct_fields.insert(def, list);
         if matches!(decl.body, StructBody::Tuple(_)) {
@@ -3296,8 +3741,8 @@ impl<'a> TypeChecker<'a> {
                             // parameter; field reads need to
                             // resolve `Param` back to the
                             // receiver's per-instance argument.
-                            let substs_vec = substs.types();
-                            return Ok(self.subst_params_in_ty(*ty, &substs_vec));
+                            let (types, consts) = self.adt_subst_vectors(&substs);
+                            return Ok(self.subst_generics_in_ty(*ty, &types, &consts));
                         }
                     }
                     return Err(TypeError::UnknownField {
@@ -3507,91 +3952,174 @@ impl<'a> TypeChecker<'a> {
             &mut self.current_self_ty_name,
             gossamer_ast::assoc::type_head_name(&decl.self_ty).map(ToString::to_string),
         );
+        let prev_impl_generics = self.current_impl_generics.replace(decl.generics.clone());
+        let prev_impl_where =
+            std::mem::replace(&mut self.current_impl_where, decl.where_clause.clone());
         for item in &decl.items {
             if let ImplItem::Fn(fn_decl) = item {
-                let id = NodeId::DUMMY;
-                let _ = id;
-                self.register_fn_sig_anonymous(fn_decl);
-                self.register_method_arg_sig(fn_decl);
-                // A method with its own type parameters is registered too,
-                // as long as its RETURN names none of them: `fn arg<T:
-                // Arg>(self, v: T) -> Cmd` answers a `Cmd` at every call
-                // site, so recording it is what keeps a field read through
-                // the result checked. Without this the call typed as a fresh
-                // variable and `c.no_such_field` passed `gos check`.
-                let method_ret_is_concrete = fn_decl.generics.params.is_empty()
-                    || fn_decl.ret.as_ref().is_some_and(|ty| {
-                        let scope = self.enter_generic_scope(&fn_decl.generics);
-                        let resolved = self.type_from_ast(ty);
-                        self.leave_generic_scope(scope);
-                        !self.ty_mentions_generic_param(resolved)
-                    });
-                if let Some(names) = &self_names
-                    && method_ret_is_concrete
-                {
-                    // A method with its own type parameters contributes its
-                    // RETURN only: its parameter types carry rigid `Param`
-                    // slots that each call site instantiates for itself, so
-                    // recording them would check the second `arg("two")`
-                    // against the first `arg(1)`'s instantiation.
-                    let own_generics = !fn_decl.generics.params.is_empty();
-                    let scope = self.enter_generic_scope(&fn_decl.generics);
-                    let params: Vec<Ty> = fn_decl
-                        .params
-                        .iter()
-                        .filter(|p| matches!(p, FnParam::Typed { .. }))
-                        .map(|p| self.param_ty(p))
-                        .collect();
-                    let ret = match fn_decl.ret.as_ref() {
-                        Some(ty) => self.type_from_ast(ty),
-                        None => self.tcx.unit(),
-                    };
-                    self.leave_generic_scope(scope);
-                    let arity = params.len();
-                    for name in names {
-                        if !own_generics {
-                            self.method_param_types
-                                .insert((name.clone(), fn_decl.name.name.clone()), params.clone());
-                        }
-                        self.method_ret_types
-                            .insert((name.clone(), fn_decl.name.name.clone(), arity), ret);
-                        self.method_arities
-                            .insert((name.clone(), fn_decl.name.name.clone()), arity);
-                    }
-                } else if !decl.generics.params.is_empty()
-                    && fn_decl.generics.params.is_empty()
-                    && let Some(names) = &owner_names
-                {
-                    // Generic-impl methods (`impl<T> Add for Wrap<T>`):
-                    // record the return with rigid `Param` slots, resolved
-                    // inside the impl's generic scope. A receiver-typed use
-                    // site substitutes its instantiation's `substs`.
-                    let scope = self.enter_generic_scope(&decl.generics);
-                    let params: Vec<Ty> = fn_decl
-                        .params
-                        .iter()
-                        .filter(|p| matches!(p, FnParam::Typed { .. }))
-                        .map(|p| self.param_ty(p))
-                        .collect();
-                    let arity = params.len();
-                    let ret = match fn_decl.ret.as_ref() {
-                        Some(ty) => self.type_from_ast(ty),
-                        None => self.tcx.unit(),
-                    };
-                    self.leave_generic_scope(scope);
-                    for name in names {
-                        self.generic_method_param_types
-                            .insert((name.clone(), fn_decl.name.name.clone()), params.clone());
-                        self.generic_method_ret_types
-                            .insert((name.clone(), fn_decl.name.name.clone(), arity), ret);
-                        self.method_arities
-                            .insert((name.clone(), fn_decl.name.name.clone()), arity);
-                    }
-                }
+                self.collect_impl_fn_signature(
+                    decl,
+                    fn_decl,
+                    self_names.as_deref(),
+                    owner_names.as_deref(),
+                );
             }
         }
+        self.current_impl_where = prev_impl_where;
+        self.current_impl_generics = prev_impl_generics;
         self.current_self_ty_name = prev_self_name;
         self.current_self_ty = prev_self_ty;
+    }
+
+    /// Records one `impl` method's signature under the owner names it is
+    /// reached by. `self_names` is set for a non-generic block, whose
+    /// signatures are concrete; `owner_names` for every block, so a generic
+    /// block's signatures are kept with their parameter slots.
+    fn collect_impl_fn_signature(
+        &mut self,
+        decl: &ImplDecl,
+        fn_decl: &FnDecl,
+        self_names: Option<&[String]>,
+        owner_names: Option<&[String]>,
+    ) {
+        self.register_fn_sig_anonymous(fn_decl);
+        self.register_method_arg_sig(fn_decl);
+        // A method with its own type parameters is registered too,
+        // as long as its RETURN names none of them: `fn arg<T:
+        // Arg>(self, v: T) -> Cmd` answers a `Cmd` at every call
+        // site, so recording it is what keeps a field read through
+        // the result checked. Without this the call typed as a fresh
+        // variable and `c.no_such_field` passed `gos check`.
+        let method_ret_is_concrete = fn_decl.generics.params.is_empty()
+            || fn_decl.ret.as_ref().is_some_and(|ty| {
+                let scope = self.enter_fn_generic_scope(&fn_decl.generics);
+                let resolved = self.type_from_ast(ty);
+                self.leave_generic_scope(scope);
+                !self.ty_mentions_generic_param(resolved)
+            });
+        if let Some(names) = self_names
+            && method_ret_is_concrete
+        {
+            // A method with its own type parameters contributes its
+            // RETURN only: its parameter types carry rigid `Param`
+            // slots that each call site instantiates for itself, so
+            // recording them would check the second `arg("two")`
+            // against the first `arg(1)`'s instantiation.
+            let own_generics = !fn_decl.generics.params.is_empty();
+            let scope = self.enter_fn_generic_scope(&fn_decl.generics);
+            let params: Vec<Ty> = fn_decl
+                .params
+                .iter()
+                .filter(|p| matches!(p, FnParam::Typed { .. }))
+                .map(|p| self.param_ty(p))
+                .collect();
+            let ret = match fn_decl.ret.as_ref() {
+                Some(ty) => self.type_from_ast(ty),
+                None => self.tcx.unit(),
+            };
+            self.leave_generic_scope(scope);
+            let arity = params.len();
+            for name in names {
+                if !own_generics {
+                    self.method_param_types
+                        .insert((name.clone(), fn_decl.name.name.clone()), params.clone());
+                }
+                self.method_ret_types
+                    .insert((name.clone(), fn_decl.name.name.clone(), arity), ret);
+                self.method_arities
+                    .insert((name.clone(), fn_decl.name.name.clone()), arity);
+            }
+        } else if let Some(names) = self_names
+            && fn_decl
+                .generics
+                .params
+                .iter()
+                .all(|param| matches!(param, gossamer_ast::GenericParam::Type { .. }))
+        {
+            self.record_own_generic_method_sig(fn_decl, names);
+        } else if !decl.generics.params.is_empty()
+            && let Some(names) = owner_names
+        {
+            // Generic-impl methods (`impl<T> Add for Wrap<T>`):
+            // record the return with rigid `Param` slots, resolved
+            // inside the impl's generic scope. A receiver-typed use
+            // site substitutes its instantiation's `substs`, and a
+            // method's own type parameters take the positions after
+            // the impl's, which each call instantiates from its
+            // arguments.
+            let scope = self.enter_generic_scope_combined(&decl.generics, &fn_decl.generics);
+            let params: Vec<Ty> = fn_decl
+                .params
+                .iter()
+                .filter(|p| matches!(p, FnParam::Typed { .. }))
+                .map(|p| self.param_ty(p))
+                .collect();
+            let arity = params.len();
+            let ret = match fn_decl.ret.as_ref() {
+                Some(ty) => self.type_from_ast(ty),
+                None => self.tcx.unit(),
+            };
+            let impl_consts: Vec<(usize, Ty)> = decl
+                .generics
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(position, param)| match param {
+                    gossamer_ast::GenericParam::Const { ty, .. } => {
+                        Some((position, self.type_from_ast(ty)))
+                    }
+                    _ => None,
+                })
+                .collect();
+            self.leave_generic_scope(scope);
+            for name in names {
+                if !impl_consts.is_empty() {
+                    self.const_generics.impl_method_params.insert(
+                        (name.clone(), fn_decl.name.name.clone()),
+                        impl_consts.clone(),
+                    );
+                }
+                self.generic_method_param_types
+                    .insert((name.clone(), fn_decl.name.name.clone()), params.clone());
+                self.generic_method_ret_types
+                    .insert((name.clone(), fn_decl.name.name.clone(), arity), ret);
+                self.method_arities
+                    .insert((name.clone(), fn_decl.name.name.clone()), arity);
+            }
+        }
+    }
+
+    /// Records a method on a concrete user type whose own type parameters
+    /// reach its return. It answers a different type at each call site, so
+    /// the signature keeps those parameters rigid and every call
+    /// instantiates them from its own arguments.
+    fn record_own_generic_method_sig(&mut self, fn_decl: &FnDecl, names: &[String]) {
+        let scope = self.enter_fn_generic_scope(&fn_decl.generics);
+        let params: Vec<Ty> = fn_decl
+            .params
+            .iter()
+            .filter(|p| matches!(p, FnParam::Typed { .. }))
+            .map(|p| self.param_ty(p))
+            .collect();
+        let ret = match fn_decl.ret.as_ref() {
+            Some(ty) => self.type_from_ast(ty),
+            None => self.tcx.unit(),
+        };
+        self.leave_generic_scope(scope);
+        let arity = params.len();
+        let sig = OwnGenericMethodSig {
+            generics: fn_decl.generics.params.len(),
+            params,
+            ret,
+        };
+        for name in names {
+            self.own_generic_method_sigs.insert(
+                (name.clone(), fn_decl.name.name.clone(), arity),
+                sig.clone(),
+            );
+            self.method_arities
+                .insert((name.clone(), fn_decl.name.name.clone()), arity);
+        }
     }
 
     fn collect_impl_method_owners_and_mutability(&mut self, decl: &ImplDecl, owner: &str) {
@@ -3649,6 +4177,48 @@ impl<'a> TypeChecker<'a> {
         // `Self::Item` in a trait method signature resolves through the
         // declaring trait, since no concrete self type is known yet.
         let prev_trait = self.current_trait_name.replace(trait_name.clone());
+        // A function reached through a bounded type parameter (`T::zero()`)
+        // reads the trait's `Self` as that parameter, so its signature is kept
+        // with `Self` as a placeholder the use site substitutes. It is typed
+        // before the declaration's own signature below, whose recorded node
+        // types are the ones that stand.
+        if decl.generics.params.is_empty() {
+            let self_placeholder = self.tcx.intern(TyKind::Param {
+                idx: crate::ParamIdx(0),
+                name: "Self".into(),
+            });
+            for item in &decl.items {
+                let TraitItem::Fn(fn_decl) = item else {
+                    continue;
+                };
+                if !fn_decl.generics.params.is_empty() {
+                    continue;
+                }
+                let prev_self = self.current_self_ty.replace(self_placeholder);
+                let inputs: Vec<Ty> = fn_decl
+                    .params
+                    .iter()
+                    .filter(|p| matches!(p, FnParam::Typed { .. }))
+                    .map(|p| self.param_ty(p))
+                    .collect();
+                let output = match fn_decl.ret.as_ref() {
+                    Some(ty) => self.type_from_ast(ty),
+                    None => self.tcx.unit(),
+                };
+                self.current_self_ty = prev_self;
+                let receiver = fn_decl.params.iter().find_map(|p| match p {
+                    FnParam::Receiver(receiver) => Some(*receiver),
+                    FnParam::Typed { .. } => None,
+                });
+                self.trait_fn_self_sigs.insert(
+                    (trait_name.clone(), fn_decl.name.name.clone()),
+                    TraitFnSelfSig {
+                        receiver,
+                        sig: FnSig { inputs, output },
+                    },
+                );
+            }
+        }
         for item in &decl.items {
             if let TraitItem::Fn(fn_decl) = item {
                 self.register_fn_sig_anonymous(fn_decl);
@@ -3690,12 +4260,14 @@ impl<'a> TypeChecker<'a> {
     /// candidates agree (or exactly one is container-shaped), so a
     /// literal is never shaped by the wrong same-named method.
     fn register_method_arg_sig(&mut self, decl: &FnDecl) {
+        let scope = self.enter_fn_generic_scope(&decl.generics);
         let inputs: Vec<Ty> = decl
             .params
             .iter()
             .filter(|p| matches!(p, FnParam::Typed { .. }))
             .map(|p| self.param_ty(p))
             .collect();
+        self.leave_generic_scope(scope);
         let key = (decl.name.name.clone(), inputs.len());
         let entry = self.method_arg_sigs.entry(key).or_default();
         let duplicate = entry.iter().any(|existing| {
@@ -3736,8 +4308,18 @@ impl<'a> TypeChecker<'a> {
                     def,
                     Self::declared_param_bounds(&decl.generics, &decl.where_clause),
                 );
-                self.fn_generic_const_mask
-                    .insert(def, Self::const_param_mask(&decl.generics));
+                let const_tys = decl
+                    .generics
+                    .params
+                    .iter()
+                    .map(|param| match param {
+                        gossamer_ast::GenericParam::Const { ty, .. } => {
+                            Some(self.type_from_ast(ty))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                self.const_generics.param_tys.insert(def, const_tys);
             }
         }
         self.validate_declared_bounds(&decl.generics, &decl.where_clause, span);
@@ -3798,11 +4380,22 @@ impl<'a> TypeChecker<'a> {
         // that names a type parameter (`&T`) records a rigid `TyKind::Param`
         // slot rather than a fresh inference variable. The `Param` slots are
         // what per-call-site instantiation substitutes with fresh variables.
-        let prior = self.enter_generic_scope(&decl.generics);
+        let prior = self.enter_fn_generic_scope(&decl.generics);
         // A `where` predicate constrains the same parameters the angle
         // brackets introduce, so an associated-type projection written in
         // the signature resolves through either spelling.
-        self.current_param_bounds = Self::declared_param_bounds(&decl.generics, &decl.where_clause);
+        self.current_param_bounds = match self.current_impl_generics.clone() {
+            Some(impl_generics) if !impl_generics.params.is_empty() => {
+                let impl_where = self.current_impl_where.clone();
+                Self::combined_param_bounds(
+                    &impl_generics,
+                    &impl_where,
+                    &decl.generics,
+                    &decl.where_clause,
+                )
+            }
+            _ => Self::declared_param_bounds(&decl.generics, &decl.where_clause),
+        };
         Self::assoc_bindings_of(
             &decl.generics,
             &decl.where_clause,
@@ -3960,11 +4553,19 @@ impl<'a> TypeChecker<'a> {
                 let init = self.check_expr_expecting(&decl.value, Expectation::HasType(annotated));
                 self.unify(annotated, init, decl.value.span);
             }
-            ItemKind::Struct(decl) => self.check_struct_body(&decl.body),
+            // Field types name the declaration's own generic parameters, so
+            // they are read inside its scope, as its registration read them.
+            ItemKind::Struct(decl) => {
+                let scope = self.enter_generic_scope(&decl.generics);
+                self.check_struct_body(&decl.body);
+                self.leave_generic_scope(scope);
+            }
             ItemKind::Enum(decl) => {
+                let scope = self.enter_generic_scope(&decl.generics);
                 for variant in &decl.variants {
                     self.check_struct_body(&variant.body);
                 }
+                self.leave_generic_scope(scope);
             }
             ItemKind::TypeAlias(decl) => {
                 let _ = self.type_from_ast(&decl.ty);
@@ -4134,6 +4735,7 @@ impl<'a> TypeChecker<'a> {
             )
         });
         if declared_ret.is_some() && !discards_tail {
+            self.record_fn_item_coercion(body, ret);
             self.unify(ret, body_ty, body.span);
         }
     }
@@ -4650,7 +5252,7 @@ impl<'a> TypeChecker<'a> {
     fn check_loop(&mut self, body: &Expr) -> Ty {
         let break_ty = self.fresh();
         self.loop_break_tys.push((break_ty, false));
-        self.check_expr(body);
+        self.check_discarded_expr(body);
         self.report_discarded_result(body, None);
         let (break_ty, used) = self.loop_break_tys.pop().expect("loop stack");
         if used {
@@ -4677,6 +5279,7 @@ impl<'a> TypeChecker<'a> {
             // value against the declared return type so a non-literal mismatch
             // is reported the same way a block tail is.
             if let (ExprKind::Return(_), Some(ret)) = (&expr.kind, self.current_fn_ret) {
+                self.record_fn_item_coercion(value, ret);
                 self.unify(ret, got, value.span);
             }
             // `break value` unifies its value with the enclosing loop's
@@ -4707,7 +5310,7 @@ impl<'a> TypeChecker<'a> {
     fn check_expr_kind(&mut self, expr: &Expr, expected: Expectation) -> Ty {
         match &expr.kind {
             ExprKind::Literal(lit) => self.type_of_literal(lit, expr.span),
-            ExprKind::Path(path) => self.check_path_expr(expr.id, path, expr.span),
+            ExprKind::Path(path) => self.check_path_expr(expr.id, path, expr.span, expected),
             ExprKind::Call { callee, args } => {
                 let ty = self.check_call(callee, args, expected);
                 if let ExprKind::Path(path) = &callee.kind
@@ -4774,6 +5377,7 @@ impl<'a> TypeChecker<'a> {
                 let ty = self.check_method_call(
                     MethodCallSite {
                         call_id: expr.id,
+                        call_span: expr.span,
                         method: &name.name,
                         name_span: *name_span,
                         generics,
@@ -4829,7 +5433,7 @@ impl<'a> TypeChecker<'a> {
                 let bool_ty = self.tcx.bool_ty();
                 let cond_ty = self.check_expr(condition);
                 self.unify(bool_ty, cond_ty, condition.span);
-                self.check_expr(body);
+                self.check_discarded_expr(body);
                 self.report_discarded_result(body, None);
                 self.tcx.unit()
             }
@@ -4910,7 +5514,17 @@ impl<'a> TypeChecker<'a> {
                                 gossamer_resolve::DefKind::Struct | gossamer_resolve::DefKind::Enum,
                         } => {
                             let arity = self.struct_generic_arity.get(&def).copied().unwrap_or(0);
-                            let substs: Vec<Ty> = (0..arity).map(|_| self.fresh()).collect();
+                            let const_mask = self.fn_generic_const_mask_of(def);
+                            let placeholder = self.tcx.error_ty();
+                            let substs: Vec<Ty> = (0..arity)
+                                .map(|i| {
+                                    if const_mask.get(i).copied().unwrap_or(false) {
+                                        placeholder
+                                    } else {
+                                        self.fresh()
+                                    }
+                                })
+                                .collect();
                             let substs_obj = crate::Substs::from_types(substs.iter().copied());
                             self.defer_adt_bounds(def, &substs, expr.span);
                             (
@@ -5037,6 +5651,8 @@ impl<'a> TypeChecker<'a> {
                         self.reject_private_field_of(def, &field_name, expr.span);
                     }
                 }
+                let mut literal_consts =
+                    LiteralConsts::new(self.fn_generic_const_mask_of_ty(struct_ty));
                 for (field_idx, field) in fields.iter().enumerate() {
                     if let Some(value) = &field.value {
                         // Substitute `Param { idx }` slots with the
@@ -5058,12 +5674,24 @@ impl<'a> TypeChecker<'a> {
                         });
                         let dty_sub =
                             dty_sub.map(|dty| self.subst_params_in_ty(dty, &substs_table));
+                        // An array field whose length is a const parameter
+                        // takes the length the value has; only the element
+                        // type is expected of the value.
+                        let infers_const = dty_sub
+                            .is_some_and(|dty| literal_consts.is_const_array_field(self.tcx, dty));
                         let field_expected = match dty_sub {
+                            Some(_) if infers_const => Expectation::None,
                             Some(dty) => Expectation::HasType(dty),
                             None => Expectation::None,
                         };
                         let val_ty = self.check_expr_expecting(value, field_expected);
                         if let Some(dty) = dty_sub {
+                            let dty = if infers_const {
+                                literal_consts.infer_from_field(self, dty, val_ty);
+                                literal_consts.apply(self, dty, &substs_table)
+                            } else {
+                                dty
+                            };
                             self.unify(dty, val_ty, value.span);
                         }
                     }
@@ -5071,7 +5699,17 @@ impl<'a> TypeChecker<'a> {
                 if let Some(base) = base {
                     self.check_expr(base);
                 }
-                struct_ty
+                if literal_consts.has_const_positions() {
+                    self.finish_struct_literal_consts(
+                        struct_ty,
+                        &literal_consts,
+                        expected,
+                        path,
+                        expr.span,
+                    )
+                } else {
+                    struct_ty
+                }
             }
             ExprKind::Array(arr) => {
                 let target = self.expectation_target(expected);
@@ -5300,6 +5938,7 @@ impl<'a> TypeChecker<'a> {
         loop {
             match self.tcx.kind_of(cur).clone() {
                 TyKind::Ref { inner, .. } => cur = inner,
+                TyKind::Simd { elem, .. } if !range_index => return elem,
                 TyKind::Array { elem, .. } | TyKind::Slice(elem) | TyKind::Vec(elem) => {
                     if range_index {
                         return self.tcx.intern(TyKind::Vec(elem));
@@ -5359,19 +5998,10 @@ impl<'a> TypeChecker<'a> {
         let arg_expectations = self.call_arg_expectations(callee, callee_ty, args.len(), expected);
         let arg_tys: Vec<Ty> = match self.data_last_combinator_arg_tys(callee, args) {
             Some(tys) => tys,
-            None => args
-                .iter()
-                .enumerate()
-                .map(|(i, a)| {
-                    let exp = arg_expectations
-                        .as_ref()
-                        .and_then(|exps| exps.get(i).copied())
-                        .unwrap_or(Expectation::None);
-                    self.check_expr_expecting(a, exp)
-                })
-                .collect(),
+            None => self.check_call_args(callee, callee_ty, args, arg_expectations.as_deref()),
         };
         self.check_mutating_qualified_call(callee, args);
+        self.record_qualified_method_const_generic_args(callee, &arg_tys);
         self.check_call_inner(callee, args, callee_ty, &arg_tys, expected)
     }
 
@@ -5431,6 +6061,318 @@ impl<'a> TypeChecker<'a> {
     /// shapes its payload as a heap `[u8]`, not a fixed `[i64; 3]`),
     /// the stdlib archive-write parameter, or - for the bare `Some` /
     /// `Ok` / `Err` constructors - the call's own expected type.
+    /// Checks a call's arguments in order, except that a closure handed to a
+    /// generic function is checked after the other arguments.
+    ///
+    /// The other arguments say which types the function's parameters stand
+    /// for at this call, so the closure's unannotated parameters take their
+    /// types from them before its body is checked, the way a closure handed to
+    /// a concrete function takes them from the declared signature.
+    fn check_call_args(
+        &mut self,
+        callee: &Expr,
+        callee_ty: Ty,
+        args: &[Expr],
+        expectations: Option<&[Expectation]>,
+    ) -> Vec<Ty> {
+        let is_closure = |arg: &Expr| matches!(arg.kind, ExprKind::Closure { .. });
+        let generic = if args.iter().any(is_closure) {
+            self.generic_callee_inputs(callee_ty, args.len())
+                .map(|(inputs, arity)| (inputs, arity, None))
+                .or_else(|| self.generic_assoc_callee_inputs(callee, args.len()))
+        } else {
+            None
+        };
+        let error_ty = self.tcx.error_ty();
+        let mut tys = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            if generic.is_some() && is_closure(arg) {
+                tys.push(error_ty);
+                continue;
+            }
+            let exp = expectations
+                .and_then(|exps| exps.get(i).copied())
+                .unwrap_or(Expectation::None);
+            tys.push(self.check_expr_expecting(arg, exp));
+        }
+        if let Some((inputs, slots, receiver_def)) = generic {
+            let mut bound = vec![None; slots];
+            if let (Some(def), Some(receiver)) = (receiver_def, tys.first().copied()) {
+                for (slot, ty) in bound.iter_mut().zip(self.receiver_type_args(def, receiver)) {
+                    *slot = ty;
+                }
+            }
+            self.check_closures_against_params(&inputs, bound, args, &mut tys);
+        }
+        tys
+    }
+
+    /// The type arguments of `ty` by position when it is an instantiation of
+    /// the user type `def` (through references), `None` at a const position.
+    /// Empty for any other type.
+    fn receiver_type_args(&self, def: DefId, ty: Ty) -> Vec<Option<Ty>> {
+        let mut resolved = self.infer.resolve(self.tcx, ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(resolved) {
+            resolved = self.infer.resolve(self.tcx, *inner);
+        }
+        match self.tcx.kind(resolved) {
+            Some(TyKind::Adt { def: found, substs }) if *found == def => substs
+                .as_slice()
+                .iter()
+                .map(|arg| match arg {
+                    crate::GenericArg::Type(ty) => Some(*ty),
+                    crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_) => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Checks each closure in `args` against its parameter type in
+    /// `templates`. `bound` starts with what is already known of each type
+    /// parameter position; the other arguments pin more, and each position
+    /// still open becomes a fresh variable. `tys` holds the other arguments'
+    /// types and receives the closures'.
+    fn check_closures_against_params(
+        &mut self,
+        templates: &[Ty],
+        mut bound: Vec<Option<Ty>>,
+        args: &[Expr],
+        tys: &mut [Ty],
+    ) {
+        let is_closure = |arg: &Expr| matches!(arg.kind, ExprKind::Closure { .. });
+        for ((template, arg), ty) in templates.iter().zip(args).zip(tys.iter()) {
+            if !is_closure(arg) {
+                self.bind_type_params(*template, *ty, &mut bound);
+            }
+        }
+        let substs: Vec<Ty> = bound
+            .into_iter()
+            .map(|ty| ty.unwrap_or_else(|| self.fresh()))
+            .collect();
+        for (i, (template, arg)) in templates.iter().zip(args).enumerate() {
+            if is_closure(arg) {
+                let want = self.subst_params_in_ty(*template, &substs);
+                tys[i] = self.check_expr_expecting(arg, Expectation::HasType(want));
+            }
+        }
+    }
+
+    /// One past the highest type parameter position `ty` names.
+    fn param_slots(&self, ty: Ty) -> usize {
+        match self.tcx.kind_of(ty) {
+            TyKind::Param { idx, .. } => idx.0 as usize + 1,
+            TyKind::Ref { inner, .. }
+            | TyKind::Vec(inner)
+            | TyKind::Slice(inner)
+            | TyKind::Iterator(inner)
+            | TyKind::Range(inner)
+            | TyKind::Sender(inner)
+            | TyKind::Receiver(inner)
+            | TyKind::JoinHandle(inner)
+            | TyKind::Array { elem: inner, .. } => self.param_slots(*inner),
+            TyKind::Tuple(elems) => elems
+                .iter()
+                .map(|t| self.param_slots(*t))
+                .max()
+                .unwrap_or(0),
+            TyKind::HashMap { key, value, .. } => {
+                self.param_slots(*key).max(self.param_slots(*value))
+            }
+            TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => substs
+                .types()
+                .iter()
+                .map(|t| self.param_slots(*t))
+                .max()
+                .unwrap_or(0),
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => sig
+                .inputs
+                .iter()
+                .map(|t| self.param_slots(*t))
+                .max()
+                .unwrap_or(0)
+                .max(self.param_slots(sig.output)),
+            _ => 0,
+        }
+    }
+
+    /// A user method's declared non-receiver parameter types for a call with
+    /// `n_args` arguments on `receiver_ty`: the receiver's type arguments
+    /// substituted, and the method's own type parameters left in place.
+    fn user_method_param_templates(
+        &mut self,
+        receiver_ty: Ty,
+        method: &str,
+        n_args: usize,
+    ) -> Option<Vec<Ty>> {
+        let mut resolved = self.infer.resolve(self.tcx, receiver_ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(resolved) {
+            resolved = self.infer.resolve(self.tcx, *inner);
+        }
+        let params = self.user_method_params_for(resolved, method).or_else(|| {
+            let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
+                return None;
+            };
+            let name = self.tcx.def_name(*def)?;
+            self.own_generic_method_sigs
+                .get(&(name.to_string(), method.to_string(), n_args))
+                .map(|sig| sig.params.clone())
+        })?;
+        (params.len() == n_args).then_some(params)
+    }
+
+    /// The declared parameter types of a generic function callee that takes
+    /// `n_args` arguments, with how many generic parameters it declares.
+    fn generic_callee_inputs(&self, callee_ty: Ty, n_args: usize) -> Option<(Vec<Ty>, usize)> {
+        let resolved = self.infer.resolve(self.tcx, callee_ty);
+        let Some(TyKind::FnDef { def, .. }) = self.tcx.kind(resolved) else {
+            return None;
+        };
+        let arity = self.fn_generic_arity.get(def).copied()?;
+        let sig = self.fn_sigs.get(def)?;
+        (sig.inputs.len() == n_args).then(|| (sig.inputs.clone(), arity))
+    }
+
+    /// The declared parameter types of `Type::function` when `callee` names a
+    /// function of a user type's generic `impl` block that takes `n_args`
+    /// arguments, with how many type parameter positions they name. A method
+    /// called in this form takes its receiver as the first argument, which
+    /// has no declared type here and is named by the type's definition.
+    fn generic_assoc_callee_inputs(
+        &mut self,
+        callee: &Expr,
+        n_args: usize,
+    ) -> Option<(Vec<Ty>, usize, Option<DefId>)> {
+        let ExprKind::Path(path) = &callee.kind else {
+            return None;
+        };
+        let segments: Vec<&str> = path
+            .segments
+            .iter()
+            .map(|seg| seg.name.name.as_str())
+            .collect();
+        let [owner @ .., fn_name] = segments.as_slice() else {
+            return None;
+        };
+        if owner.is_empty() {
+            return None;
+        }
+        let type_name = self
+            .owner_identity_candidates(owner)
+            .into_iter()
+            .find(|candidate| self.user_type_decls.contains(candidate))?;
+        let def = self.user_type_defs.get(&type_name).copied()?;
+        let method = (*fn_name).to_string();
+        let params = match self
+            .generic_method_param_types
+            .get(&(type_name.clone(), method.clone()))
+        {
+            Some(params) => params.clone(),
+            None => [Some(n_args), n_args.checked_sub(1)]
+                .into_iter()
+                .flatten()
+                .find_map(|arity| {
+                    self.own_generic_method_sigs
+                        .get(&(type_name.clone(), method.clone(), arity))
+                })
+                .map(|sig| sig.params.clone())?,
+        };
+        let slots = params
+            .iter()
+            .map(|param| self.param_slots(*param))
+            .max()
+            .unwrap_or(0);
+        if params.len() == n_args {
+            Some((params, slots, None))
+        } else if params.len() + 1 == n_args {
+            let receiver = self.tcx.error_ty();
+            let inputs = std::iter::once(receiver)
+                .chain(params.iter().copied())
+                .collect();
+            Some((inputs, slots, Some(def)))
+        } else {
+            None
+        }
+    }
+
+    /// Records, for each type parameter `template` names, the type `actual`
+    /// holds in its place, walking the two types together.
+    fn bind_type_params(&self, template: Ty, actual: Ty, out: &mut [Option<Ty>]) {
+        let actual = self.infer.resolve(self.tcx, actual);
+        match (self.tcx.kind_of(template), self.tcx.kind_of(actual)) {
+            (TyKind::Param { .. }, TyKind::Var(_) | TyKind::Error) => {}
+            (TyKind::Param { idx, .. }, _) => {
+                if let Some(slot) = out.get_mut(idx.0 as usize) {
+                    slot.get_or_insert(actual);
+                }
+            }
+            (TyKind::Ref { inner: t, .. }, TyKind::Ref { inner: a, .. }) => {
+                self.bind_type_params(*t, *a, out);
+            }
+            (TyKind::Ref { inner: t, .. }, _) => self.bind_type_params(*t, actual, out),
+            (
+                TyKind::Vec(t)
+                | TyKind::Slice(t)
+                | TyKind::Iterator(t)
+                | TyKind::Range(t)
+                | TyKind::Sender(t)
+                | TyKind::Receiver(t)
+                | TyKind::JoinHandle(t),
+                TyKind::Vec(a)
+                | TyKind::Slice(a)
+                | TyKind::Iterator(a)
+                | TyKind::Range(a)
+                | TyKind::Sender(a)
+                | TyKind::Receiver(a)
+                | TyKind::JoinHandle(a)
+                | TyKind::Array { elem: a, .. },
+            )
+            | (TyKind::Array { elem: t, .. }, TyKind::Array { elem: a, .. }) => {
+                self.bind_type_params(*t, *a, out);
+            }
+            (TyKind::Tuple(ts), TyKind::Tuple(actuals)) if ts.len() == actuals.len() => {
+                for (t, a) in ts.iter().zip(actuals) {
+                    self.bind_type_params(*t, *a, out);
+                }
+            }
+            (
+                TyKind::HashMap {
+                    key: tk, value: tv, ..
+                },
+                TyKind::HashMap {
+                    key: ak, value: av, ..
+                },
+            ) => {
+                self.bind_type_params(*tk, *ak, out);
+                self.bind_type_params(*tv, *av, out);
+            }
+            (
+                TyKind::Adt {
+                    def: td,
+                    substs: ts,
+                },
+                TyKind::Adt {
+                    def: ad,
+                    substs: actuals,
+                },
+            ) if td == ad => {
+                for (t, a) in ts.types().iter().zip(actuals.types().iter()) {
+                    self.bind_type_params(*t, *a, out);
+                }
+            }
+            (
+                TyKind::FnPtr(ts) | TyKind::FnTrait(ts),
+                TyKind::FnPtr(actuals) | TyKind::FnTrait(actuals),
+            ) if ts.inputs.len() == actuals.inputs.len() => {
+                for (t, a) in ts.inputs.iter().zip(&actuals.inputs) {
+                    self.bind_type_params(*t, *a, out);
+                }
+                self.bind_type_params(ts.output, actuals.output, out);
+            }
+            _ => {}
+        }
+    }
+
     fn call_arg_expectations(
         &mut self,
         callee: &Expr,
@@ -5586,59 +6528,91 @@ impl<'a> TypeChecker<'a> {
         arg_tys: &[Ty],
     ) -> FnSig {
         let n = vars.len();
-        let const_mask = self
-            .fn_generic_const_mask
-            .get(&def)
-            .cloned()
-            .unwrap_or_default();
+        let const_mask = self.fn_generic_const_mask_of(def);
         // Infer each const generic from the array argument whose length
         // names it (`sum_arr([1, 2, 3])` => N = 3), so the substituted
-        // `[T; N]` carries the concrete count.
+        // `[T; N]` carries the concrete count. Inside another generic body the
+        // argument's length may be that body's own const parameter, which the
+        // call forwards.
         let mut const_substs: Vec<Option<i128>> = (0..n)
             .map(|i| match explicit_substs.as_slice().get(i) {
                 Some(crate::GenericArg::Const(value)) => Some(*value),
                 _ => None,
             })
             .collect();
+        let mut forwarded: Vec<Option<crate::ParamIdx>> = vec![None; n];
         // An explicit `f::<N>(..)` argument is authoritative: inference fills
         // only the positions the call site left open, so an argument of a
         // different length reports a mismatch against the written `N`.
         for (param, arg_ty) in sig.inputs.iter().zip(arg_tys.iter()) {
-            if let Some((idx, value)) = self.infer_array_const_len(*param, *arg_ty)
-                && idx < n
-                && !matches!(
-                    explicit_substs.as_slice().get(idx),
-                    Some(crate::GenericArg::Const(_))
-                )
-            {
-                const_substs[idx] = Some(value);
+            let mut found = Vec::new();
+            self.infer_const_args(*param, *arg_ty, &mut found);
+            for (idx, len) in found {
+                if idx >= n
+                    || matches!(
+                        explicit_substs.as_slice().get(idx),
+                        Some(crate::GenericArg::Const(_))
+                    )
+                {
+                    continue;
+                }
+                match len {
+                    crate::ArrayLen::Concrete(value) => {
+                        const_substs[idx].get_or_insert(value as i128);
+                    }
+                    crate::ArrayLen::Param(forwarded_from) => {
+                        forwarded[idx].get_or_insert(forwarded_from);
+                    }
+                }
             }
         }
-        // A const-generic array return (`-> [T; N]`) is carried as a runtime
-        // GosVec - the same representation as the by-value `[T; N]` parameter
-        // it is derived from. The call-site result type is therefore `Vec<T>`,
-        // not the substituted fixed-length array: binding it as `[T; k]` would
-        // make the caller read the heap Vec inline and treat the buffer pointer
-        // as element 0.
-        let output = match self.tcx.kind_of(sig.output) {
-            TyKind::Array {
-                elem,
-                len: crate::ArrayLen::Param(_),
-            } => {
-                let elem = *elem;
-                let elem = self.subst_generics_in_ty(elem, vars, &const_substs);
-                self.tcx.intern(TyKind::Vec(elem))
+        let output = self.subst_generics_in_ty(sig.output, vars, &const_substs);
+        let output = self.forward_const_params(output, &forwarded);
+        let inputs: Vec<Ty> = sig
+            .inputs
+            .iter()
+            .map(|t| self.subst_generics_in_ty(*t, vars, &const_substs))
+            .collect();
+        let inputs = inputs
+            .into_iter()
+            .map(|t| self.forward_const_params(t, &forwarded))
+            .collect();
+        let new_sig = FnSig { inputs, output };
+        let const_tys = self
+            .const_generics
+            .param_tys
+            .get(&def)
+            .cloned()
+            .unwrap_or_default();
+        let mut const_args = Vec::new();
+        for i in 0..n {
+            if !const_mask.get(i).copied().unwrap_or(false) {
+                continue;
             }
-            _ => self.subst_generics_in_ty(sig.output, vars, &const_substs),
-        };
-        let new_sig = FnSig {
-            inputs: sig
-                .inputs
-                .iter()
-                .map(|t| self.subst_generics_in_ty(*t, vars, &const_substs))
-                .collect(),
-            output,
-        };
+            let ty = const_tys
+                .get(i)
+                .copied()
+                .flatten()
+                .unwrap_or_else(|| self.tcx.int_ty(crate::IntTy::Usize));
+            if let Some(value) = const_substs[i] {
+                const_args.push(crate::ConstGenericArg::Value { value, ty });
+            } else if let Some(name) = forwarded[i].and_then(|at| self.const_generic_param_name(at))
+            {
+                const_args.push(crate::ConstGenericArg::Param { name, ty });
+            } else {
+                self.emit(
+                    TypeError::ConstGenericNotInferred {
+                        callee: callee_display_name(callee),
+                        literal_ty: None,
+                        assoc_owner: None,
+                    },
+                    callee.span,
+                );
+            }
+        }
+        if !const_args.is_empty() {
+            self.table.insert_const_generic_args(callee.id, const_args);
+        }
         // Const positions carry the inferred value; every other position
         // carries its fresh type variable (pinned by argument unification).
         let subst_args: Vec<crate::GenericArg> = (0..n)
@@ -5876,11 +6850,7 @@ impl<'a> TypeChecker<'a> {
                         callee.span,
                     );
                 }
-                let const_mask = self
-                    .fn_generic_const_mask
-                    .get(&def)
-                    .cloned()
-                    .unwrap_or_default();
+                let const_mask = self.fn_generic_const_mask_of(def);
                 let vars = (0..n)
                     .map(|i| {
                         if const_mask.get(i).copied().unwrap_or(false) {
@@ -5941,7 +6911,7 @@ impl<'a> TypeChecker<'a> {
         args: &[Expr],
         arg_tys: &[Ty],
     ) -> Option<Ty> {
-        self.check_user_assoc_fn_call(callee, args)
+        self.check_user_assoc_fn_call(callee, args, arg_tys)
             .or_else(|| self.check_reverse_ctor_call(callee, args, arg_tys))
             .or_else(|| self.check_tuple_struct_ctor_call(callee, args, arg_tys))
             .or_else(|| self.check_named_struct_ctor_call(callee, args))
@@ -5952,7 +6922,12 @@ impl<'a> TypeChecker<'a> {
     /// function. Without it the call's result is a fresh variable, so a
     /// `-> Self` constructor produces an untyped value and every method
     /// call on it - including its argument types - goes unchecked.
-    fn check_user_assoc_fn_call(&mut self, callee: &Expr, args: &[Expr]) -> Option<Ty> {
+    fn check_user_assoc_fn_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
         let ExprKind::Path(path) = &callee.kind else {
             return None;
         };
@@ -5978,9 +6953,238 @@ impl<'a> TypeChecker<'a> {
         // method: `Type::helper()` reached from outside the module the
         // `impl` was written in is private unless it says `pub`.
         self.reject_private_method(&type_name, fn_name, callee.span);
-        self.method_ret_types
-            .get(&(type_name, (*fn_name).to_string(), args.len()))
+        if let Some(ret) = self
+            .method_ret_types
+            .get(&(type_name.clone(), (*fn_name).to_string(), args.len()))
             .copied()
+        {
+            return Some(ret);
+        }
+        if let Some(ret) =
+            self.check_generic_assoc_fn_call(callee, path, &type_name, fn_name, args, arg_tys)
+        {
+            return Some(ret);
+        }
+        // A method with type parameters of its own on a concrete type,
+        // written `Type::method(value, ..)` or as an associated function.
+        let method = (*fn_name).to_string();
+        let (sig, receiver_form) = [(args.len(), false), (args.len().wrapping_sub(1), true)]
+            .into_iter()
+            .find_map(|(arity, receiver_form)| {
+                self.own_generic_method_sigs
+                    .get(&(type_name.clone(), method.clone(), arity))
+                    .cloned()
+                    .map(|sig| (sig, receiver_form))
+            })?;
+        let skip = usize::from(receiver_form);
+        Some(self.instantiate_own_generic_call(&sig, &args[skip..], &arg_tys[skip..]))
+    }
+
+    /// Return type of `Type::assoc(..)` for an associated function of a
+    /// generic `impl<T> Type<T>` block.
+    ///
+    /// The declared signature names the block's parameters, and no receiver
+    /// supplies an instantiation for them. Each call site gives them fresh
+    /// variables of its own, which the arguments pin, so `Bag::of(2.5)`
+    /// answers `Bag<f64>`. A result typed by the declaration alone would
+    /// carry the block's rigid parameters into a caller that has none.
+    fn check_generic_assoc_fn_call(
+        &mut self,
+        callee: &Expr,
+        path: &gossamer_ast::PathExpr,
+        type_name: &str,
+        fn_name: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) -> Option<Ty> {
+        let key = (type_name.to_string(), fn_name.to_string());
+        // A method reached as `Type::method(value, ..)` carries its receiver
+        // as one argument more than the parameters it declares.
+        let ret = [Some(args.len()), args.len().checked_sub(1)]
+            .into_iter()
+            .flatten()
+            .find_map(|arity| {
+                self.generic_method_ret_types
+                    .get(&(key.0.clone(), key.1.clone(), arity))
+                    .copied()
+            })?;
+        let params = self.generic_method_param_types.get(&key).cloned()?;
+        let def = self.user_type_defs.get(type_name).copied()?;
+        let arity = self.struct_generic_arity.get(&def).copied().unwrap_or(0);
+        let const_mask = self.fn_generic_const_mask_of(def);
+        // A const position is filled by its own inference; only a type
+        // position takes a variable here.
+        let placeholder = self.tcx.error_ty();
+        // A method's own type parameters take the positions after the
+        // block's, and each takes a variable of its own as well.
+        let slots = params
+            .iter()
+            .chain(std::iter::once(&ret))
+            .map(|ty| self.param_slots(*ty))
+            .max()
+            .unwrap_or(0)
+            .max(arity);
+        // `Type::method(value, ..)` hands the receiver over first, and its
+        // type arguments fill the block's positions.
+        let receiver_form = params.len() + 1 == arg_tys.len();
+        let receiver_args = match arg_tys.first() {
+            Some(receiver) if receiver_form => self.receiver_type_args(def, *receiver),
+            _ => Vec::new(),
+        };
+        let vars: Vec<Ty> = (0..slots)
+            .map(|i| {
+                if const_mask.get(i).copied().unwrap_or(false) {
+                    placeholder
+                } else {
+                    receiver_args
+                        .get(i)
+                        .copied()
+                        .flatten()
+                        .unwrap_or_else(|| self.fresh())
+                }
+            })
+            .collect();
+        let const_values = self.assoc_call_const_values(path, def, arg_tys.first(), receiver_form);
+        // A call that names no value for a const parameter has been reported,
+        // and its result has no type to check against what it meets.
+        if !receiver_form
+            && !self.record_assoc_const_generic_args(callee, def, type_name, fn_name, &const_values)
+        {
+            return Some(self.tcx.error_ty());
+        }
+        let const_substs: Vec<Option<i128>> = const_values
+            .iter()
+            .map(|value| match value {
+                Some(crate::GenericArg::Const(value)) => Some(*value),
+                _ => None,
+            })
+            .collect();
+        let (args, arg_tys) = if receiver_form {
+            (&args[1..], &arg_tys[1..])
+        } else {
+            (args, arg_tys)
+        };
+        if params.len() == arg_tys.len() {
+            for (param, (arg_ty, arg)) in params.iter().zip(arg_tys.iter().zip(args)) {
+                let param = self.subst_params_in_ty(*param, &vars);
+                let param = self.subst_generics_in_ty(param, &[], &const_substs);
+                self.check_sig_param_arg(param, *arg_ty, arg);
+            }
+        }
+        let ret = self.subst_params_in_ty(ret, &vars);
+        Some(self.subst_generics_in_ty(ret, &[], &const_substs))
+    }
+
+    /// The value each const position of a generic `impl` block takes at an
+    /// associated call: from the turbofish on the type the call names
+    /// (`Ring::<3>::blank()`), or from the receiver's own type when the call
+    /// hands one over (`Ring::snapshot(r)`).
+    fn assoc_call_const_values(
+        &mut self,
+        path: &gossamer_ast::PathExpr,
+        def: gossamer_resolve::DefId,
+        receiver: Option<&Ty>,
+        receiver_form: bool,
+    ) -> Vec<Option<crate::GenericArg>> {
+        let mask = self.fn_generic_const_mask_of(def);
+        if receiver_form {
+            let resolved =
+                receiver.map(|receiver| self.peel_refs(self.infer.resolve(self.tcx, *receiver)));
+            let substs = match resolved.and_then(|ty| self.tcx.kind(ty).cloned()) {
+                Some(TyKind::Adt { substs, .. }) => substs.as_slice().to_vec(),
+                _ => Vec::new(),
+            };
+            return mask
+                .iter()
+                .enumerate()
+                .map(|(position, is_const)| {
+                    substs
+                        .get(position)
+                        .filter(|_| *is_const)
+                        .filter(|arg| {
+                            matches!(
+                                arg,
+                                crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_)
+                            )
+                        })
+                        .cloned()
+                })
+                .collect();
+        }
+        let owner_generics = match path.segments.as_slice() {
+            [.., owner, _] => owner.generics.clone(),
+            _ => Vec::new(),
+        };
+        mask.iter()
+            .enumerate()
+            .map(|(position, is_const)| {
+                if !*is_const {
+                    return None;
+                }
+                match owner_generics.get(position)? {
+                    AstGenericArg::Const(expr) => Some(crate::GenericArg::Const(
+                        self.evaluate_generic_const_arg(expr),
+                    )),
+                    AstGenericArg::Type(ast_ty) => self
+                        .const_generic_type_arg(ast_ty)
+                        .map(crate::GenericArg::ConstParam),
+                }
+            })
+            .collect()
+    }
+
+    /// Records the values an associated call with no receiver hands its
+    /// `impl` block's const parameters, which the function receives as
+    /// trailing parameters. Answers `false` after reporting a parameter
+    /// nothing names.
+    fn record_assoc_const_generic_args(
+        &mut self,
+        callee: &Expr,
+        def: gossamer_resolve::DefId,
+        type_name: &str,
+        fn_name: &str,
+        values: &[Option<crate::GenericArg>],
+    ) -> bool {
+        let Some(owner) = self.tcx.def_name(def).map(ToString::to_string) else {
+            return true;
+        };
+        let Some(params) = self
+            .const_generics
+            .impl_method_params
+            .get(&(owner, fn_name.to_string()))
+            .cloned()
+        else {
+            return true;
+        };
+        let mut args = Vec::with_capacity(params.len());
+        for (position, ty) in params {
+            match values.get(position).cloned().flatten() {
+                Some(crate::GenericArg::Const(value)) => {
+                    args.push(crate::ConstGenericArg::Value { value, ty });
+                }
+                Some(crate::GenericArg::ConstParam(idx)) => {
+                    let Some(name) = self.const_generic_param_name(idx) else {
+                        return true;
+                    };
+                    args.push(crate::ConstGenericArg::Param { name, ty });
+                }
+                _ => {
+                    self.emit(
+                        TypeError::ConstGenericNotInferred {
+                            callee: fn_name.to_string(),
+                            literal_ty: None,
+                            assoc_owner: Some(type_name.to_string()),
+                        },
+                        callee.span,
+                    );
+                    return false;
+                }
+            }
+        }
+        if !args.is_empty() {
+            self.table.insert_const_generic_args(callee.id, args);
+        }
+        true
     }
 
     fn check_call_inner(
@@ -6363,11 +7567,30 @@ impl<'a> TypeChecker<'a> {
         // the payload checks below and the type this call produces read the
         // same variables, so an argument pins the enum's own arguments.
         let instantiation = self.variant_ctor_instantiation(callee.id, &enum_name);
+        let mut ctor_consts = LiteralConsts::new(
+            instantiation
+                .as_ref()
+                .map(|(def, _)| self.fn_generic_const_mask_of(*def))
+                .unwrap_or_default(),
+        );
         let payloads: Vec<Ty> = match &instantiation {
-            Some((_, substs)) => payloads
-                .iter()
-                .map(|t| self.subst_params_in_ty(*t, substs))
-                .collect(),
+            Some((_, substs)) => {
+                let declared: Vec<Ty> = payloads
+                    .iter()
+                    .map(|t| self.subst_params_in_ty(*t, substs))
+                    .collect();
+                // An array payload whose length is a const parameter takes
+                // the length its argument has.
+                for (payload, arg_ty) in declared.iter().zip(arg_tys.iter()) {
+                    if ctor_consts.is_const_array_field(self.tcx, *payload) {
+                        ctor_consts.infer_from_field(self, *payload, *arg_ty);
+                    }
+                }
+                declared
+                    .iter()
+                    .map(|t| ctor_consts.apply(self, *t, substs))
+                    .collect()
+            }
             None => payloads,
         };
         if payloads.len() == arg_tys.len() {
@@ -6385,10 +7608,20 @@ impl<'a> TypeChecker<'a> {
             );
         }
         if let Some((def, substs)) = instantiation {
-            return Some(self.tcx.intern(TyKind::Adt {
+            let ty = self.tcx.intern(TyKind::Adt {
                 def,
                 substs: crate::Substs::from_types(substs.iter().copied()),
-            }));
+            });
+            if !ctor_consts.has_const_positions() {
+                return Some(ty);
+            }
+            return Some(self.finish_struct_literal_consts(
+                ty,
+                &ctor_consts,
+                Expectation::None,
+                path,
+                callee.span,
+            ));
         }
         Some(
             self.enum_tys
@@ -6807,9 +8040,7 @@ impl<'a> TypeChecker<'a> {
     /// Result type of an `fs::` / `os::` free call, or `None` for the
     /// unlisted surface. Typed reads keep the `?`-unwrapped payload
     /// concrete (`fs::read_to_string(p)?.to_lowercase()` stays `String`
-    /// into codegen), and directory walks yield the `fs::DirInfo`
-    /// sentinel whose field layout is pre-registered so `e.path` /
-    /// `e.size` on the entries stay concretely typed.
+    /// into codegen).
     fn fs_call_ret_ty(&mut self, last: &str) -> Option<Ty> {
         match last {
             "file_size" => Some(self.tcx.int_ty(IntTy::I64)),
@@ -6822,19 +8053,6 @@ impl<'a> TypeChecker<'a> {
             "read" | "read_file" => {
                 let u8_ty = self.tcx.int_ty(IntTy::U8);
                 let v = self.tcx.intern(TyKind::Vec(u8_ty));
-                let e = self.tcx.dyn_error_ty();
-                Some(self.result_adt_ty(v, e))
-            }
-            // `walk_dir` is the visiting form and is typed from its declared
-            // signature, so only the listing call is pinned here.
-            "read_dir" => {
-                let def = gossamer_resolve::DefId::local(u32::MAX - 2);
-                self.tcx.register_def_name(def, "DirInfo");
-                let entry = self.tcx.intern(TyKind::Adt {
-                    def,
-                    substs: crate::Substs::new(),
-                });
-                let v = self.tcx.intern(TyKind::Vec(entry));
                 let e = self.tcx.dyn_error_ty();
                 Some(self.result_adt_ty(v, e))
             }
@@ -7005,6 +8223,366 @@ impl<'a> TypeChecker<'a> {
                 }))
             }
             _ => None,
+        }
+    }
+
+    /// `Simd<T, N>` / `Mask<N>` from a written type path.
+    fn simd_type_from_path(&mut self, head: &str, path: &TypePath, span: Span) -> Ty {
+        let substs = self.substs_from_ast(path);
+        let args = substs.as_slice();
+        let (elem, lanes_arg) = if head == "Mask" {
+            (Some(self.tcx.bool_ty()), args.first())
+        } else {
+            let elem = args.first().and_then(|arg| match arg {
+                crate::GenericArg::Type(ty) => Some(*ty),
+                _ => None,
+            });
+            (elem, args.get(1))
+        };
+        let lanes = match lanes_arg {
+            Some(crate::GenericArg::Const(value)) => {
+                usize::try_from(*value).ok().map(crate::ArrayLen::Concrete)
+            }
+            Some(crate::GenericArg::ConstParam(idx)) => Some(crate::ArrayLen::Param(*idx)),
+            _ => None,
+        };
+        let (Some(elem), Some(lanes)) = (elem, lanes) else {
+            self.emit(
+                TypeError::SimdShape {
+                    reason: format!("`{head}` names its lanes, as in `Simd<f64, 4>` or `Mask<4>`"),
+                },
+                span,
+            );
+            return self.tcx.error_ty();
+        };
+        self.checked_simd_ty(elem, lanes, span)
+    }
+
+    /// The vector type of `lanes` lanes of `elem`, reporting an element type or
+    /// lane count outside the supported set.
+    fn checked_simd_ty(&mut self, elem: Ty, lanes: crate::ArrayLen, span: Span) -> Ty {
+        let elem = self.infer.resolve(self.tcx, elem);
+        let takes_sixteen = match self.tcx.kind(elem) {
+            Some(TyKind::Float(_) | TyKind::Int(IntTy::I64)) => false,
+            Some(
+                TyKind::Int(IntTy::U8 | IntTy::I32 | IntTy::U32) | TyKind::Bool | TyKind::Var(_),
+            ) => true,
+            _ => {
+                let ty = self.render_public_ty(elem);
+                self.emit(
+                    TypeError::SimdShape {
+                        reason: format!("`{ty}` is not a lane type"),
+                    },
+                    span,
+                );
+                return self.tcx.error_ty();
+            }
+        };
+        if let crate::ArrayLen::Concrete(count) = lanes
+            && !(matches!(count, 2 | 4 | 8) || (count == 16 && takes_sixteen))
+        {
+            let ty = self.render_public_ty(elem);
+            self.emit(
+                TypeError::SimdShape {
+                    reason: format!("{count} lanes of `{ty}`"),
+                },
+                span,
+            );
+            return self.tcx.error_ty();
+        }
+        self.tcx.intern(TyKind::Simd { elem, lanes })
+    }
+
+    /// The element type of a sequence a lane window reads or writes: a `Vec`,
+    /// a slice, or a fixed array, seen through references.
+    fn simd_window_elem(&mut self, ty: Ty) -> Option<Ty> {
+        let mut ty = self.infer.resolve(self.tcx, ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = self.infer.resolve(self.tcx, *inner);
+        }
+        match self.tcx.kind(ty) {
+            Some(TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. }) => {
+                Some(*elem)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Simd::from_array(a)`, `Simd::splat(v)`, and `Simd::load(xs, offset)`.
+    fn simd_ctor_ret(
+        &mut self,
+        last: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        expected: Expectation,
+        span: Span,
+    ) -> Option<Ty> {
+        match (last, arg_tys) {
+            ("from_array", [array]) => {
+                let array = self.infer.resolve(self.tcx, *array);
+                let (elem, len) = match self.tcx.kind(array).cloned() {
+                    Some(TyKind::Array { elem, len }) => (elem, len),
+                    // A bracket literal names its lanes by its length; it is
+                    // the fixed array the vector is laid out as.
+                    Some(TyKind::Vec(elem)) => {
+                        let Some(ExprKind::Array(gossamer_ast::ArrayExpr::List(items))) =
+                            args.first().map(|arg| &arg.kind)
+                        else {
+                            self.emit(
+                                TypeError::SimdShape {
+                                    reason: "`Simd::from_array` takes a fixed array such as `[1.0, 2.0, 3.0, 4.0]`".to_string(),
+                                },
+                                span,
+                            );
+                            return Some(self.tcx.error_ty());
+                        };
+                        let len = crate::ArrayLen::Concrete(items.len());
+                        let fixed = self.tcx.intern(TyKind::Array { elem, len });
+                        if let Some(arg) = args.first() {
+                            self.record(arg.id, fixed);
+                        }
+                        (elem, len)
+                    }
+                    _ => {
+                        self.emit(
+                            TypeError::SimdShape {
+                                reason: "`Simd::from_array` takes a fixed array such as `[1.0, 2.0, 3.0, 4.0]`".to_string(),
+                            },
+                            span,
+                        );
+                        return Some(self.tcx.error_ty());
+                    }
+                };
+                Some(self.checked_simd_ty(elem, len, span))
+            }
+            ("load", [source, offset]) => {
+                let want = match expected {
+                    Expectation::HasType(ty) => self.infer.resolve(self.tcx, ty),
+                    _ => self.tcx.error_ty(),
+                };
+                let Some(TyKind::Simd { elem, .. }) = self.tcx.kind(want).cloned() else {
+                    self.emit(
+                        TypeError::SimdShape {
+                            reason: "`Simd::load` takes its lane count from the annotated type"
+                                .to_string(),
+                        },
+                        span,
+                    );
+                    return Some(self.tcx.error_ty());
+                };
+                let Some(source_elem) = self.simd_window_elem(*source) else {
+                    self.emit(
+                        TypeError::SimdShape {
+                            reason: "`Simd::load` reads lanes from a `Vec<T>`, `[T]`, or `[T; N]`"
+                                .to_string(),
+                        },
+                        span,
+                    );
+                    return Some(self.tcx.error_ty());
+                };
+                self.unify(elem, source_elem, span);
+                let i64_ty = self.tcx.int_ty(IntTy::I64);
+                self.unify(i64_ty, *offset, span);
+                Some(want)
+            }
+            ("splat", [value]) => {
+                let want = match expected {
+                    Expectation::HasType(ty) => self.infer.resolve(self.tcx, ty),
+                    _ => self.tcx.error_ty(),
+                };
+                if let Some(TyKind::Simd { elem, .. }) = self.tcx.kind(want).cloned() {
+                    self.unify(elem, *value, span);
+                    return Some(want);
+                }
+                self.emit(
+                    TypeError::SimdShape {
+                        reason: "`Simd::splat` takes its lane count from the annotated type"
+                            .to_string(),
+                    },
+                    span,
+                );
+                Some(self.tcx.error_ty())
+            }
+            _ => None,
+        }
+    }
+
+    /// The type of `lhs <op> rhs` when either operand is a lane vector and the
+    /// operator is lane-wise; comparisons, logic, and pipes keep their own
+    /// typing.
+    fn check_simd_binary(
+        &mut self,
+        op: BinaryOp,
+        lhs_ty: Ty,
+        rhs_ty: Ty,
+        span: Span,
+    ) -> Option<Ty> {
+        if matches!(
+            op,
+            BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::PipeGt
+        ) {
+            return None;
+        }
+        let lhs_res = self.infer.resolve(self.tcx, lhs_ty);
+        let rhs_res = self.infer.resolve(self.tcx, rhs_ty);
+        let simd = [lhs_res, rhs_res]
+            .into_iter()
+            .find(|ty| matches!(self.tcx.kind(*ty), Some(TyKind::Simd { .. })))?;
+        let Some(TyKind::Simd { elem, .. }) = self.tcx.kind(simd).cloned() else {
+            return None;
+        };
+        self.unify(simd, lhs_ty, span);
+        self.unify(simd, rhs_ty, span);
+        let elem = self.infer.resolve(self.tcx, elem);
+        // A lane type still spelled by an unsuffixed literal is the integer or
+        // float type that literal defaults to.
+        let float = matches!(self.tcx.kind(elem), Some(TyKind::Float(_)))
+            || self.infer.is_float_literal_var(self.tcx, elem);
+        let int = matches!(self.tcx.kind(elem), Some(TyKind::Int(_)))
+            || self.infer.is_integer_constrained_var(self.tcx, elem);
+        let mask = matches!(self.tcx.kind(elem), Some(TyKind::Bool));
+        let defined = match op {
+            BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul => float || int,
+            BinaryOp::Div => float,
+            BinaryOp::WrappingAdd
+            | BinaryOp::WrappingSub
+            | BinaryOp::WrappingMul
+            | BinaryOp::Shl
+            | BinaryOp::Shr => int,
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => int || mask,
+            _ => false,
+        };
+        if !defined {
+            let ty = self.render_public_ty(simd);
+            self.emit(
+                TypeError::SimdShape {
+                    reason: format!("`{}` is not a lane-wise operation on `{ty}`", op.as_str()),
+                },
+                span,
+            );
+            return Some(self.tcx.error_ty());
+        }
+        Some(simd)
+    }
+
+    /// A method call on a lane vector receiver.
+    fn check_simd_method(
+        &mut self,
+        method: &str,
+        receiver_ty: Ty,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Ty> {
+        let mut recv = self.infer.resolve(self.tcx, receiver_ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(recv) {
+            recv = self.infer.resolve(self.tcx, *inner);
+        }
+        let Some(TyKind::Simd { elem, lanes }) = self.tcx.kind(recv).cloned() else {
+            return None;
+        };
+        let elem_res = self.infer.resolve(self.tcx, elem);
+        let float = matches!(self.tcx.kind(elem_res), Some(TyKind::Float(_)))
+            || self.infer.is_float_literal_var(self.tcx, elem_res);
+        let int = matches!(self.tcx.kind(elem_res), Some(TyKind::Int(_)))
+            || self.infer.is_integer_constrained_var(self.tcx, elem_res);
+        let mask = matches!(self.tcx.kind(elem_res), Some(TyKind::Bool));
+        let ret = match (method, args.len()) {
+            ("to_array", 0) => self.tcx.intern(TyKind::Array { elem, len: lanes }),
+            ("min" | "max", 1) if !mask => {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                recv
+            }
+            ("abs", 0) if !mask => recv,
+            ("sqrt", 0) if float => recv,
+            ("lanes_eq" | "lanes_lt" | "lanes_le", 1) if !mask => {
+                let got = self.check_expr_expecting(&args[0], Expectation::HasType(recv));
+                self.unify(recv, got, args[0].span);
+                let bool_ty = self.tcx.bool_ty();
+                self.tcx.intern(TyKind::Simd {
+                    elem: bool_ty,
+                    lanes,
+                })
+            }
+            ("select", 2) if mask => {
+                let a = self.check_expr(&args[0]);
+                let b = self.check_expr_expecting(&args[1], Expectation::HasType(a));
+                self.unify(a, b, args[1].span);
+                let a_res = self.infer.resolve(self.tcx, a);
+                match self.tcx.kind(a_res) {
+                    Some(TyKind::Simd { lanes: picked, .. }) if *picked == lanes => a_res,
+                    _ => {
+                        self.emit(
+                            TypeError::SimdShape {
+                                reason:
+                                    "`select` picks between two vectors with the mask's lane count"
+                                        .to_string(),
+                            },
+                            span,
+                        );
+                        self.tcx.error_ty()
+                    }
+                }
+            }
+            ("store", 2) if !mask => {
+                let target = self.check_expr(&args[0]);
+                let target = self.infer.resolve(self.tcx, target);
+                let writable = match self.tcx.kind(target).cloned() {
+                    Some(TyKind::Ref {
+                        mutability: crate::Mutbl::Mut,
+                        inner,
+                    }) => self.simd_window_elem(inner),
+                    _ => None,
+                };
+                match writable {
+                    Some(target_elem) => self.unify(elem, target_elem, args[0].span),
+                    None => self.emit(
+                        TypeError::SimdShape {
+                            reason: "`store` writes its lanes through `&mut` a `Vec<T>`, `[T]`, or `[T; N]`"
+                                .to_string(),
+                        },
+                        args[0].span,
+                    ),
+                }
+                let i64_ty = self.tcx.int_ty(IntTy::I64);
+                let offset = self.check_expr_expecting(&args[1], Expectation::HasType(i64_ty));
+                self.unify(i64_ty, offset, args[1].span);
+                self.tcx.unit()
+            }
+            ("reduce_sum" | "reduce_min" | "reduce_max", 0) if !mask => elem,
+            ("reduce_and" | "reduce_or", 0) if int || mask => elem,
+            _ => {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                let ty = self.render_public_ty(recv);
+                self.emit(
+                    TypeError::SimdShape {
+                        reason: format!("`{ty}` has no method `{method}`"),
+                    },
+                    span,
+                );
+                self.tcx.error_ty()
+            }
+        };
+        Some(ret)
+    }
+
+    /// `Simd<T, N>`, or `Mask<N>` for a lane vector of `bool`.
+    fn render_simd_ty(&mut self, elem: Ty, lanes: crate::ArrayLen) -> String {
+        let count = render_array_len(lanes);
+        if matches!(self.tcx.kind(elem), Some(TyKind::Bool)) {
+            format!("Mask<{count}>")
+        } else {
+            format!("Simd<{}, {count}>", self.render_public_ty(elem))
         }
     }
 
@@ -7741,6 +9319,53 @@ impl<'a> TypeChecker<'a> {
         Some(self.tcx.intern(TyKind::Vec(elem)))
     }
 
+    /// Return types of the `process` and `signal` calls that answer a named
+    /// runtime handle.
+    fn process_signal_ret_ty(&mut self, module: &[&str], last: &str) -> Option<Ty> {
+        // `process::spawn_piped(prog, args) -> Result<Child, errors::Error>`.
+        // The Ok payload is the named `Child` sentinel Adt so the
+        // extracted binder carries the `process::Child` runtime kind
+        // and its method calls dispatch to the child shims on every
+        // tier.
+        if matches!(
+            module,
+            ["process" | "exec"] | ["os", "exec"] | ["std", "process"] | ["std", "os", "exec"]
+        ) && last == "spawn_piped"
+        {
+            let child_def = gossamer_resolve::DefId::local(u32::MAX - 8);
+            self.tcx.register_def_name(child_def, "Child");
+            let child_ty = self.tcx.intern(TyKind::Adt {
+                def: child_def,
+                substs: crate::Substs::new(),
+            });
+            let err = self.tcx.dyn_error_ty();
+            return Some(self.result_adt_ty(child_ty, err));
+        }
+        if !matches!(
+            module,
+            ["signal"] | ["os", "signal"] | ["std", "os", "signal"]
+        ) {
+            return None;
+        }
+        match last {
+            // `signal::on(sig) -> signal::Notifier`. The runtime value is
+            // the same opaque i64 handle; the sentinel type keeps
+            // method-form dispatch (`n.wait()`, `n.try_wait()`) uniform
+            // with free-form dispatch across tiers.
+            "on" => {
+                let notifier_def = gossamer_resolve::DefId::local(u32::MAX - 17);
+                self.tcx.register_def_name(notifier_def, "Notifier");
+                Some(self.tcx.intern(TyKind::Adt {
+                    def: notifier_def,
+                    substs: crate::Substs::new(),
+                }))
+            }
+            "wait" => Some(self.tcx.unit()),
+            "try_wait" => Some(self.tcx.bool_ty()),
+            _ => None,
+        }
+    }
+
     fn check_stdlib_module_ret_ty(
         &mut self,
         module: &[&str],
@@ -7767,51 +9392,8 @@ impl<'a> TypeChecker<'a> {
             let s = self.tcx.string_ty();
             return Some(self.option_adt_ty(s));
         }
-        // `process::spawn_piped(prog, args) -> Result<Child, errors::Error>`.
-        // The Ok payload is the named `Child` sentinel Adt so the
-        // extracted binder carries the `process::Child` runtime kind
-        // and its method calls dispatch to the child shims on every
-        // tier.
-        if matches!(
-            module,
-            ["process" | "exec"] | ["os", "exec"] | ["std", "process"] | ["std", "os", "exec"]
-        ) && last == "spawn_piped"
-        {
-            let child_def = gossamer_resolve::DefId::local(u32::MAX - 8);
-            self.tcx.register_def_name(child_def, "Child");
-            let child_ty = self.tcx.intern(TyKind::Adt {
-                def: child_def,
-                substs: crate::Substs::new(),
-            });
-            let err = self.tcx.dyn_error_ty();
-            return Some(self.result_adt_ty(child_ty, err));
-        }
-        // `signal::on(sig) -> signal::Notifier`. The runtime value is
-        // the same opaque i64 handle; the sentinel type keeps
-        // method-form dispatch (`n.wait()`, `n.try_wait()`) uniform
-        // with free-form dispatch across tiers.
-        if matches!(
-            module,
-            ["signal"] | ["os", "signal"] | ["std", "os", "signal"]
-        ) && last == "on"
-        {
-            let notifier_def = gossamer_resolve::DefId::local(u32::MAX - 17);
-            self.tcx.register_def_name(notifier_def, "Notifier");
-            return Some(self.tcx.intern(TyKind::Adt {
-                def: notifier_def,
-                substs: crate::Substs::new(),
-            }));
-        }
-        if matches!(
-            module,
-            ["signal"] | ["os", "signal"] | ["std", "os", "signal"]
-        ) && matches!(last, "wait" | "try_wait")
-        {
-            return Some(if last == "wait" {
-                self.tcx.unit()
-            } else {
-                self.tcx.bool_ty()
-            });
+        if let Some(ty) = self.process_signal_ret_ty(module, last) {
+            return Some(ty);
         }
         // `json::Value::*` constructor calls produce the opaque dynamic
         // JSON value. Without this the call is a fresh var, so a
@@ -7844,6 +9426,11 @@ impl<'a> TypeChecker<'a> {
             };
         }
         if let Some(ty) = self.handle_call_ret_ty(module, last) {
+            return Some(ty);
+        }
+        if matches!(module, ["Simd" | "Mask"])
+            && let Some(ty) = self.simd_ctor_ret(last, args, arg_tys, expected, callee.span)
+        {
             return Some(ty);
         }
         if let Some(ty) = self.collection_call_ret_ty(module, last, args, arg_tys, expected) {
@@ -7897,6 +9484,7 @@ impl<'a> TypeChecker<'a> {
                 | "len"
                 | "is_null"
                 | "as_i64"
+                | "as_u64"
                 | "as_f64"
                 | "as_str"
                 | "as_bool"
@@ -7924,6 +9512,10 @@ impl<'a> TypeChecker<'a> {
             "as_i64" => {
                 let i = self.tcx.int_ty(IntTy::I64);
                 Some(self.option_adt_ty(i))
+            }
+            "as_u64" => {
+                let u = self.tcx.int_ty(IntTy::U64);
+                Some(self.option_adt_ty(u))
             }
             "as_f64" => {
                 let f = self.tcx.float_ty(FloatTy::F64);
@@ -8066,6 +9658,10 @@ impl<'a> TypeChecker<'a> {
                 let i = self.tcx.int_ty(IntTy::I64);
                 self.option_adt_ty(i)
             }
+            ("as_u64", 0) => {
+                let u = self.tcx.int_ty(IntTy::U64);
+                self.option_adt_ty(u)
+            }
             ("as_f64", 0) => {
                 let f = self.tcx.float_ty(FloatTy::F64);
                 self.option_adt_ty(f)
@@ -8204,6 +9800,7 @@ impl<'a> TypeChecker<'a> {
                 };
                 self.tcx.intern(TyKind::JoinHandle(elem))
             }
+            "min" | "max" | "clamp" => self.scalar_bound_intrinsic_ty(name, arg_tys)?,
             "Some" => {
                 let payload = arg_tys.first().copied().unwrap_or_else(|| self.fresh());
                 self.option_adt_ty(payload)
@@ -8225,6 +9822,63 @@ impl<'a> TypeChecker<'a> {
             _ => return None,
         };
         Some(ty)
+    }
+
+    /// The type a prelude `min` / `max` / `clamp` call answers. `min(xs)` /
+    /// `max(xs)` reduce a sequence to `Option<T>`, exactly as `iter::min` /
+    /// `iter::max` do; the scalar forms answer the operands' own type. Typing
+    /// them here is what lets a binding of the result, and a format site
+    /// reading it, know it is a `Vec` or a `u64` rather than an unconstrained
+    /// variable.
+    fn scalar_bound_intrinsic_ty(&mut self, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+        match (name, arg_tys.len()) {
+            ("min" | "max", 1) => {
+                let seq = self.peel_resolved_refs(arg_tys[0]);
+                let elem = match self.tcx.kind(seq) {
+                    Some(TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. }) => {
+                        *elem
+                    }
+                    _ => return None,
+                };
+                Some(self.option_adt_ty(elem))
+            }
+            ("min" | "max", 2) | ("clamp", 3) => self.scalar_bound_call_ty(arg_tys),
+            _ => None,
+        }
+    }
+
+    /// `ty` resolved through inference and with every reference peeled.
+    fn peel_resolved_refs(&mut self, ty: Ty) -> Ty {
+        let mut cur = self.infer.resolve(self.tcx, ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(cur) {
+            cur = self.infer.resolve(self.tcx, *inner);
+        }
+        cur
+    }
+
+    /// The type a scalar `min` / `max` / `clamp` call answers: the operands'
+    /// scalar type, where one of them names it. An unsigned 64-bit operand
+    /// decides, since its values reach past what a signed word orders; an
+    /// integer literal beside it takes that type at run time too.
+    fn scalar_bound_call_ty(&mut self, arg_tys: &[Ty]) -> Option<Ty> {
+        let operands: Vec<Ty> = arg_tys
+            .iter()
+            .map(|ty| self.peel_resolved_refs(*ty))
+            .collect();
+        if let Some(unsigned) = operands.iter().copied().find(|ty| {
+            matches!(
+                self.tcx.kind(*ty),
+                Some(TyKind::Int(IntTy::U64 | IntTy::Usize))
+            )
+        }) {
+            return Some(unsigned);
+        }
+        let first = *operands.first()?;
+        matches!(
+            self.tcx.kind(first),
+            Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Char)
+        )
+        .then_some(first)
     }
 
     fn channel_tuple_ty(&mut self) -> Ty {
@@ -8616,20 +10270,35 @@ impl<'a> TypeChecker<'a> {
     /// on a generic-instantiation receiver, from the generic impl's declared
     /// return with the instantiation's arguments substituted. `None` for
     /// non-generic receivers or unknown methods.
-    fn generic_recv_method_ret(&mut self, resolved: Ty, method: &str, arity: usize) -> Option<Ty> {
+    fn generic_recv_method_ret(
+        &mut self,
+        resolved: Ty,
+        method: &str,
+        arity: usize,
+        method_substs: &[Ty],
+    ) -> Option<Ty> {
         let Some(TyKind::Adt { def, substs }) = self.tcx.kind(resolved) else {
             return None;
         };
         let substs = substs.clone();
-        if substs.types().is_empty() {
+        if substs.is_empty() {
             return None;
         }
         let name = self.tcx.def_name(*def)?.to_string();
         let &ret = self
             .generic_method_ret_types
             .get(&(name, method.to_string(), arity))?;
-        let subst_tys = substs.types();
-        Some(self.subst_params_in_ty(ret, &subst_tys))
+        let (mut subst_tys, subst_consts) = self.adt_subst_vectors(&substs);
+        // The method's own type parameters take the positions after the
+        // impl's, standing for what this call's arguments instantiated them to.
+        for position in subst_tys.len()..self.param_slots(ret) {
+            let ty = method_substs
+                .get(position)
+                .copied()
+                .unwrap_or_else(|| self.fresh());
+            subst_tys.push(ty);
+        }
+        Some(self.subst_generics_in_ty(ret, &subst_tys, &subst_consts))
     }
 
     /// Coerces a byte literal compared against an integer operand to that
@@ -9263,6 +10932,51 @@ impl<'a> TypeChecker<'a> {
         tys
     }
 
+    /// Types a `wrapping_add` / `wrapping_sub` / `wrapping_mul` call on an
+    /// integer and reports it with the operator that replaces it.
+    fn check_retired_wrapping_method(
+        &mut self,
+        resolved: Ty,
+        method: &str,
+        (receiver, args): (&Expr, &[Expr]),
+        all_arg_tys: &[Ty],
+        call_span: Span,
+    ) -> Ty {
+        let arg_count = all_arg_tys.len();
+        if arg_count != 1 {
+            let owner = self.render_public_ty(resolved);
+            self.emit(
+                TypeError::CallArityMismatch {
+                    callee: format!("{owner}::{method}"),
+                    expected: 1,
+                    found: arg_count,
+                },
+                receiver.span,
+            );
+            return self.tcx.error_ty();
+        }
+        let arg_ty = self.peel_refs(all_arg_tys[0]);
+        let arg_span = args.first().map_or(receiver.span, |arg| arg.span);
+        self.unify(resolved, arg_ty, arg_span);
+        // Wrapping arithmetic has one spelling, the operator; the call is
+        // still typed so what follows it checks as it would once fixed.
+        let Some(operator) = wrapping_method_operator(method) else {
+            return resolved;
+        };
+        let replacement = args
+            .first()
+            .and_then(|arg| wrapping_operator_rewrite(receiver, arg, operator));
+        self.emit(
+            TypeError::WrappingMethodRetired {
+                method: method.to_string(),
+                operator: operator.to_string(),
+                replacement,
+            },
+            call_span,
+        );
+        resolved
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "receiver dispatch is intentionally kept in source order"
@@ -9276,6 +10990,7 @@ impl<'a> TypeChecker<'a> {
     ) -> Ty {
         let MethodCallSite {
             call_id,
+            call_span,
             method,
             name_span,
             generics,
@@ -9283,6 +10998,9 @@ impl<'a> TypeChecker<'a> {
         self.check_overlapping_mutable_call_args(args);
         let receiver_expected = self.method_receiver_expectation(method, receiver, expected);
         let receiver_ty = self.check_expr_expecting(receiver, receiver_expected);
+        if let Some(ty) = self.check_simd_method(method, receiver_ty, args, call_span) {
+            return ty;
+        }
         if self.reject_invalid_builtin_receiver_call(receiver_ty, method, args, call_id, name_span)
         {
             return self.tcx.error_ty();
@@ -9300,6 +11018,7 @@ impl<'a> TypeChecker<'a> {
         // type, which is known here and nowhere later: a container and a
         // structural type both reach a method as an untyped handle below.
         self.record_method_owner(call_id, receiver_ty, method);
+        self.record_method_const_generic_args(call_id, receiver_ty, method);
         // A method an `impl` block declared for a built-in type. Its own
         // surface is dispatched below and answers first, so an impl adds
         // names to a type rather than replacing any it already had.
@@ -9367,24 +11086,15 @@ impl<'a> TypeChecker<'a> {
         if matches!(
             self.tcx.kind(resolved),
             Some(TyKind::Int(_) | TyKind::Var(_))
-        ) && matches!(method, "wrapping_add" | "wrapping_mul")
+        ) && matches!(method, "wrapping_add" | "wrapping_sub" | "wrapping_mul")
         {
-            if arg_count != 1 {
-                let owner = self.render_public_ty(resolved);
-                self.emit(
-                    TypeError::CallArityMismatch {
-                        callee: format!("{owner}::{method}"),
-                        expected: 1,
-                        found: arg_count,
-                    },
-                    receiver.span,
-                );
-                return self.tcx.error_ty();
-            }
-            let arg_ty = self.peel_refs(all_arg_tys[0]);
-            let arg_span = args.first().map_or(receiver.span, |arg| arg.span);
-            self.unify(resolved, arg_ty, arg_span);
-            return resolved;
+            return self.check_retired_wrapping_method(
+                resolved,
+                method,
+                (receiver, args),
+                &all_arg_tys,
+                call_span,
+            );
         }
         if self.reject_collection_method_arity(resolved, method, arg_count, receiver.span) {
             return self.tcx.error_ty();
@@ -9397,7 +11107,7 @@ impl<'a> TypeChecker<'a> {
         {
             return ty;
         }
-        self.check_user_method_args(resolved, method, args, &arg_tys);
+        let method_substs = self.check_user_method_args(resolved, method, args, &arg_tys);
         if method == "where_eq"
             && args.len() == 2
             && let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved)
@@ -9418,10 +11128,16 @@ impl<'a> TypeChecker<'a> {
         {
             return ret;
         }
+        if let Some(ret) =
+            self.own_generic_method_ret(resolved, method, (args, &arg_tys), arg_count)
+        {
+            return ret;
+        }
         // A generic-instantiation receiver (`Wrap<f64>`) types the call
         // from the generic impl's return with the instantiation's
         // arguments substituted, so chained uses resolve concretely.
-        if let Some(ret) = self.generic_recv_method_ret(resolved, method, arg_count) {
+        if let Some(ret) = self.generic_recv_method_ret(resolved, method, arg_count, &method_substs)
+        {
             return ret;
         }
         if let Some(ty) = self.vec_method_ret(method, &all_arg_tys, resolved, receiver.span) {
@@ -9602,8 +11318,6 @@ impl<'a> TypeChecker<'a> {
                     | "into"
                     | "to_string"
                     | "try_into"
-                    | "wrapping_add"
-                    | "wrapping_mul"
             );
         if declared {
             return false;
@@ -10216,8 +11930,8 @@ impl<'a> TypeChecker<'a> {
                 match method {
                     "set" => Some(2),
                     "get" | "at" => Some(1),
-                    "keys" | "len" | "is_null" | "as_str" | "as_i64" | "as_f64" | "as_bool"
-                    | "as_array" => Some(0),
+                    "keys" | "len" | "is_null" | "as_str" | "as_i64" | "as_u64" | "as_f64"
+                    | "as_bool" | "as_array" => Some(0),
                     _ => None,
                 },
             ),
@@ -10690,12 +12404,10 @@ impl<'a> TypeChecker<'a> {
                 format!(
                     "[{}; {}]",
                     self.render_public_ty(elem),
-                    match len {
-                        crate::ArrayLen::Concrete(n) => n.to_string(),
-                        crate::ArrayLen::Param(idx) => format!("N{}", idx.as_u32()),
-                    }
+                    render_array_len(len)
                 )
             }
+            Some(TyKind::Simd { elem, lanes }) => self.render_simd_ty(elem, lanes),
             Some(TyKind::Slice(elem)) => {
                 format!("[{}]", self.render_public_ty(elem))
             }
@@ -10805,6 +12517,9 @@ impl<'a> TypeChecker<'a> {
                 .map(|arg| match arg {
                     crate::GenericArg::Type(ty) => self.render_public_ty(*ty),
                     crate::GenericArg::Const(value) => value.to_string(),
+                    crate::GenericArg::ConstParam(idx) => self
+                        .const_generic_param_name(*idx)
+                        .unwrap_or_else(|| format!("N{}", idx.0)),
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -10976,31 +12691,96 @@ impl<'a> TypeChecker<'a> {
             return Some(params.clone());
         }
         let params = self.generic_method_param_types.get(&key)?.clone();
-        let subst_tys = substs.types();
+        let (subst_tys, subst_consts) = self.adt_subst_vectors(&substs);
         Some(
             params
                 .into_iter()
-                .map(|param| self.subst_params_in_ty(param, &subst_tys))
+                .map(|param| self.subst_generics_in_ty(param, &subst_tys, &subst_consts))
                 .collect(),
         )
     }
 
+    /// The return of a call to a method whose own type parameters reach its
+    /// return, with those parameters instantiated from this call's arguments.
+    /// `None` when `resolved` declares no such method.
+    fn own_generic_method_ret(
+        &mut self,
+        resolved: Ty,
+        method: &str,
+        (args, arg_tys): (&[Expr], &[Ty]),
+        arity: usize,
+    ) -> Option<Ty> {
+        let sig = match self.tcx.kind(resolved) {
+            Some(TyKind::Adt { def, substs }) if substs.types().is_empty() => {
+                self.tcx.def_name(*def).and_then(|name| {
+                    self.own_generic_method_sigs
+                        .get(&(name.to_string(), method.to_string(), arity))
+                        .cloned()
+                })
+            }
+            _ => None,
+        }?;
+        Some(self.instantiate_own_generic_call(&sig, args, arg_tys))
+    }
+
+    /// Checks one call to a method whose own type parameters each take a
+    /// fresh variable at the call, and answers its return with them
+    /// substituted. `args` are the declared parameters' arguments, without a
+    /// receiver.
+    fn instantiate_own_generic_call(
+        &mut self,
+        sig: &OwnGenericMethodSig,
+        args: &[Expr],
+        arg_tys: &[Ty],
+    ) -> Ty {
+        let vars: Vec<Ty> = (0..sig.generics).map(|_| self.fresh()).collect();
+        let params: Vec<Ty> = sig
+            .params
+            .iter()
+            .map(|param| self.subst_params_in_ty(*param, &vars))
+            .collect();
+        for (param, (arg_ty, arg)) in params.iter().zip(arg_tys.iter().zip(args)) {
+            self.check_sig_param_arg(*param, *arg_ty, arg);
+        }
+        self.subst_params_in_ty(sig.ret, &vars)
+    }
+
+    /// Checks a user method call's arguments against the method's parameters
+    /// and answers the type each of the method's own type parameters stands
+    /// for at this call, by position (empty when it declares none).
     fn check_user_method_args(
         &mut self,
         receiver_ty: Ty,
         method: &str,
         args: &[Expr],
         arg_tys: &[Ty],
-    ) {
+    ) -> Vec<Ty> {
         let Some(params) = self.user_method_params_for(receiver_ty, method) else {
-            return;
+            return Vec::new();
         };
+        // The receiver's type arguments are already in `params`; what is left
+        // is the method's own, which this call's arguments instantiate.
+        let slots = params
+            .iter()
+            .map(|param| self.param_slots(*param))
+            .max()
+            .unwrap_or(0);
+        let mut bound = vec![None; slots];
+        for (param, arg_ty) in params.iter().zip(arg_tys) {
+            self.bind_type_params(*param, *arg_ty, &mut bound);
+        }
+        let method_substs: Vec<Ty> = bound
+            .into_iter()
+            .map(|ty| ty.unwrap_or_else(|| self.fresh()))
+            .collect();
         // Arity has its own receiver-aware diagnostic below. Validate every
         // explicit leading argument here; a pipeline supplies the final slot
         // later in `pipe_result_ty`.
         for (param, (arg_ty, arg)) in params.iter().zip(arg_tys.iter().zip(args)) {
-            self.check_sig_param_arg(*param, *arg_ty, arg);
+            let param = self.subst_params_in_ty(*param, &method_substs);
+            self.check_sig_param_arg(param, *arg_ty, arg);
         }
+        method_substs
     }
 
     /// Types a method call's explicit arguments, shaping each by the
@@ -11021,9 +12801,41 @@ impl<'a> TypeChecker<'a> {
             .cloned()
             .unwrap_or_default();
         let closure_combinator_inputs = self.vec_combinator_closure_inputs(method, receiver_ty);
+        let is_closure = |arg: &Expr| matches!(arg.kind, ExprKind::Closure { .. });
+        // A closure handed to a user method takes its parameter types from the
+        // method's signature, once the other arguments have said what the
+        // method's own type parameters stand for.
+        let user_params = if closure_combinator_inputs.is_none() && args.iter().any(is_closure) {
+            self.user_method_param_templates(receiver_ty, method, args.len())
+        } else {
+            None
+        };
+        let error_ty = self.tcx.error_ty();
         let mut arg_tys: Vec<Ty> = Vec::with_capacity(args.len());
         for (i, arg) in args.iter().enumerate() {
-            let exp = match (&closure_combinator_inputs, &arg.kind) {
+            if user_params.is_some() && is_closure(arg) {
+                arg_tys.push(error_ty);
+                continue;
+            }
+            // A fold's callback reads the accumulator its seed argument names
+            // and the receiver's element, and a reduce's reads two elements, so
+            // both are its parameter types before its body is checked.
+            let accumulator_inputs = match (method, i, &arg.kind) {
+                ("fold" | "scan", 1, ExprKind::Closure { params, .. }) if params.len() == 2 => self
+                    .vec_combinator_closure_inputs("map", receiver_ty)
+                    .zip(arg_tys.first().copied())
+                    .map(|(elem, seed)| vec![seed, elem[0]]),
+                ("reduce", 0, ExprKind::Closure { params, .. }) if params.len() == 2 => self
+                    .vec_combinator_closure_inputs("map", receiver_ty)
+                    .map(|elem| vec![elem[0], elem[0]]),
+                _ => None,
+            };
+            let exp = match (
+                accumulator_inputs
+                    .as_ref()
+                    .or(closure_combinator_inputs.as_ref()),
+                &arg.kind,
+            ) {
                 (Some(inputs), ExprKind::Closure { params, .. })
                     if params.len() == inputs.len() =>
                 {
@@ -11053,6 +12865,14 @@ impl<'a> TypeChecker<'a> {
                 },
             };
             arg_tys.push(self.check_expr_expecting(arg, exp));
+        }
+        if let Some(templates) = user_params {
+            let slots = templates
+                .iter()
+                .map(|t| self.param_slots(*t))
+                .max()
+                .unwrap_or(0);
+            self.check_closures_against_params(&templates, vec![None; slots], args, &mut arg_tys);
         }
         arg_tys
     }
@@ -11783,7 +13603,7 @@ impl<'a> TypeChecker<'a> {
         }
         match substs.as_slice().first()? {
             crate::GenericArg::Type(ok) => Some(*ok),
-            crate::GenericArg::Const(_) => None,
+            crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_) => None,
         }
     }
 
@@ -11816,7 +13636,7 @@ impl<'a> TypeChecker<'a> {
         }
         match substs.as_slice().first()? {
             crate::GenericArg::Type(payload) => Some(*payload),
-            crate::GenericArg::Const(_) => None,
+            crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_) => None,
         }
     }
 
@@ -12413,6 +14233,11 @@ impl<'a> TypeChecker<'a> {
         let mut found: Option<(Ty, String)> = None;
         for sig in candidates {
             let Some(&ty) = sig.get(i) else { continue };
+            // A parameter typed by the method's own type parameters says
+            // nothing about a literal until the call instantiates them.
+            if self.ty_mentions_generic_param(ty) {
+                continue;
+            }
             let mut peeled = self.infer.resolve(self.tcx, ty);
             while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(peeled) {
                 peeled = self.infer.resolve(self.tcx, *inner);
@@ -12448,6 +14273,14 @@ impl<'a> TypeChecker<'a> {
                 self.tcx.intern(TyKind::Vec(entry))
             }
             "__gos_fs_metadata_raw" => self.tuple_fs_metadata_ty(),
+            "__gos_fs_read_dir_raw" => {
+                let entry = self.tuple_dir_entry_ty();
+                self.tcx.intern(TyKind::Vec(entry))
+            }
+            "__gos_fs_walk_dir_raw" => self.tcx.unit(),
+            "__gos_process_run_raw"
+            | "__gos_process_run_in_raw"
+            | "__gos_process_pipeline_run_raw" => self.tuple_process_output_ty(),
             "__gos_x509_parse_pem_raw" => self.tuple_cert_info_ty(),
             "__gos_tar_read_raw" | "__gos_zip_read_raw" => {
                 let entry = self.tuple_archive_entry_ty();
@@ -12478,6 +14311,22 @@ impl<'a> TypeChecker<'a> {
         let vec_str = self.tcx.intern(TyKind::Vec(s));
         self.tcx
             .intern(TyKind::Tuple(vec![s, s, vec_u8, i, i, vec_str, vec_u8]))
+    }
+
+    /// `(name, path, is_file, is_dir, is_symlink, size, modified_ms)`, one
+    /// `fs::read_dir` entry.
+    fn tuple_dir_entry_ty(&mut self) -> Ty {
+        let s = self.tcx.string_ty();
+        let i = self.tcx.int_ty(IntTy::I64);
+        let b = self.tcx.bool_ty();
+        self.tcx.intern(TyKind::Tuple(vec![s, s, b, b, b, i, i]))
+    }
+
+    /// `(stdout, stderr, code)`, a finished `process::run`.
+    fn tuple_process_output_ty(&mut self) -> Ty {
+        let s = self.tcx.string_ty();
+        let i = self.tcx.int_ty(IntTy::I64);
+        self.tcx.intern(TyKind::Tuple(vec![s, s, i]))
     }
 
     fn tuple_fs_metadata_ty(&mut self) -> Ty {
@@ -12739,13 +14588,18 @@ impl<'a> TypeChecker<'a> {
                 self.check_callable_arity(&sig, inputs, resolved, span);
                 sig.output
             }
-            Some(TyKind::FnDef { def, .. }) => match self.fn_sigs.get(&def).cloned() {
-                Some(sig) => {
-                    self.check_callable_arity(&sig, inputs, resolved, span);
-                    sig.output
+            // A generic function item takes fresh variables for its type
+            // parameters at each use, so its callback slot binds them to the
+            // element types this call supplies.
+            Some(TyKind::FnDef { def, substs }) => {
+                match self.instantiated_fn_item_sig(def, &substs) {
+                    Some(sig) => {
+                        self.check_callable_arity(&sig, inputs, resolved, span);
+                        sig.output
+                    }
+                    None => self.fresh(),
                 }
-                None => self.fresh(),
-            },
+            }
             Some(TyKind::Var(_)) => {
                 let output = self.fresh();
                 let shaped = self.tcx.intern(TyKind::FnPtr(FnSig {
@@ -13554,9 +15408,11 @@ impl<'a> TypeChecker<'a> {
                 // method's return type, and the operand node is anchored
                 // to its resolved nominal type so tier lowering dispatches
                 // the call. An ADT with no `impl Neg` is rejected here
-                // rather than faulting at runtime. Scalars keep the
-                // operand type.
-                if self.reject_operator_off_bound(resolved, "-", "neg", span) {
+                // rather than faulting at runtime. Scalars and lane vectors
+                // keep the operand type.
+                if matches!(self.tcx.kind(resolved), Some(TyKind::Simd { .. })) {
+                    operand_ty
+                } else if self.reject_operator_off_bound(resolved, "-", "neg", span) {
                     self.tcx.error_ty()
                 } else if self.adt_name_of(resolved).is_some() {
                     self.record(operand.id, resolved);
@@ -13676,7 +15532,17 @@ impl<'a> TypeChecker<'a> {
         }
         let def = *self.user_type_defs.get(enum_name)?;
         let arity = self.struct_generic_arity.get(&def).copied()?;
-        let substs: Vec<Ty> = (0..arity).map(|_| self.fresh()).collect();
+        let const_mask = self.fn_generic_const_mask_of(def);
+        let placeholder = self.tcx.error_ty();
+        let substs: Vec<Ty> = (0..arity)
+            .map(|i| {
+                if const_mask.get(i).copied().unwrap_or(false) {
+                    placeholder
+                } else {
+                    self.fresh()
+                }
+            })
+            .collect();
         self.variant_ctor_substs.insert(node, (def, substs.clone()));
         Some((def, substs))
     }
@@ -13743,6 +15609,9 @@ impl<'a> TypeChecker<'a> {
             self.pipe_stage_arg_tys.insert(rhs.id, lhs_ty);
         }
         let rhs_ty = self.check_pipe_rhs(op, lhs_ty, rhs);
+        if let Some(ty) = self.check_simd_binary(op, lhs_ty, rhs_ty, span) {
+            return ty;
+        }
         match op {
             BinaryOp::Eq
             | BinaryOp::Ne
@@ -13783,6 +15652,9 @@ impl<'a> TypeChecker<'a> {
                 bool_ty
             }
             BinaryOp::PipeGt => self.pipe_result_ty(lhs, lhs_ty, rhs, rhs_ty),
+            BinaryOp::WrappingAdd | BinaryOp::WrappingSub | BinaryOp::WrappingMul => {
+                self.check_wrapping_operands(op, lhs, lhs_ty, rhs, rhs_ty, span)
+            }
             _ => {
                 // String concatenation accepts a borrowed RHS:
                 // `"hello, " + &name` (the documented spelling). Peel
@@ -13857,6 +15729,75 @@ impl<'a> TypeChecker<'a> {
                 lhs_ty
             }
         }
+    }
+
+    /// Types a wrapping arithmetic operator (`+%`, `-%`, `*%`). Its operands
+    /// are one integer type, whose declared width the result wraps at; a byte
+    /// literal joins an integer operand as it does for `+`.
+    fn check_wrapping_operands(
+        &mut self,
+        op: BinaryOp,
+        lhs: &Expr,
+        lhs_ty: Ty,
+        rhs: &Expr,
+        rhs_ty: Ty,
+        span: Span,
+    ) -> Ty {
+        let lhs_is_byte = matches!(&lhs.kind, ExprKind::Literal(Literal::Byte(_)));
+        let result = if self.coerce_byte_literal_cmp(lhs, lhs_ty, rhs, rhs_ty) {
+            if lhs_is_byte { rhs_ty } else { lhs_ty }
+        } else {
+            self.unify_operands(op, lhs, lhs_ty, rhs, rhs_ty, span);
+            lhs_ty
+        };
+        self.require_wrapping_integer(op.as_str(), result, rhs_ty, span)
+    }
+
+    /// Reports GT0003 when a wrapping arithmetic operand settles on a type
+    /// other than an integer: wrapping names a width, and only an integer has
+    /// one. An operand still being inferred is left to unification.
+    fn require_wrapping_integer(&mut self, op: &'static str, ty: Ty, other: Ty, span: Span) -> Ty {
+        let resolved = self.infer.resolve(self.tcx, ty);
+        if self.is_integer(resolved) {
+            return ty;
+        }
+        if !self.is_concrete(resolved) {
+            self.deferred_wrapping_operands
+                .push((resolved, other, op, span));
+            return ty;
+        }
+        self.emit_wrapping_operand_error(op, resolved, other, span);
+        self.tcx.error_ty()
+    }
+
+    /// Reports the deferred wrapping arithmetic operands whose type literal
+    /// defaulting settled on something other than an integer.
+    fn check_deferred_wrapping_operands(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_wrapping_operands);
+        for (ty, other, op, span) in deferred {
+            let resolved = self.deep_resolve(ty);
+            if self.is_integer(resolved)
+                || !self.is_concrete(resolved)
+                || matches!(self.tcx.kind(resolved), Some(TyKind::Error))
+            {
+                continue;
+            }
+            self.emit_wrapping_operand_error(op, resolved, other, span);
+        }
+    }
+
+    fn emit_wrapping_operand_error(&mut self, op: &str, ty: Ty, other: Ty, span: Span) {
+        let other = self.deep_resolve(other);
+        let lhs = self.render_public_ty(ty);
+        let rhs = self.render_public_ty(other);
+        self.emit(
+            TypeError::UnresolvedOp {
+                op: op.to_string(),
+                lhs,
+                rhs,
+            },
+            span,
+        );
     }
 
     /// Unifies two operand types, reporting an integer paired with a float
@@ -13992,8 +15933,8 @@ impl<'a> TypeChecker<'a> {
                 self.mark_piped_iterator_consumed(lhs, lhs_ty, rhs);
                 return self.infer.resolve(self.tcx, sig.output);
             }
-            TyKind::FnDef { def, .. } => {
-                if let Some(sig) = self.fn_sigs.get(&def).cloned() {
+            TyKind::FnDef { def, substs } => {
+                if let Some(sig) = self.instantiated_fn_item_sig(def, &substs) {
                     if matches!(rhs.kind, ExprKind::Path(_)) {
                         self.check_direct_pipe_sig(&sig, lhs, lhs_ty, rhs);
                     }
@@ -14071,8 +16012,8 @@ impl<'a> TypeChecker<'a> {
                     }
                     return self.infer.resolve(self.tcx, sig.output);
                 }
-                TyKind::FnDef { def, .. } => {
-                    if let Some(sig) = self.fn_sigs.get(&def).cloned() {
+                TyKind::FnDef { def, substs } => {
+                    if let Some(sig) = self.instantiated_fn_item_sig(def, &substs) {
                         if args.len() + 1 == sig.inputs.len()
                             && let Some(last) = sig.inputs.last().copied()
                         {
@@ -14516,6 +16457,16 @@ impl<'a> TypeChecker<'a> {
                 }
             }
         }
+        if matches!(
+            op,
+            gossamer_ast::AssignOp::WrappingAddAssign
+                | gossamer_ast::AssignOp::WrappingSubAssign
+                | gossamer_ast::AssignOp::WrappingMulAssign
+        ) {
+            self.unify(place_ty, value_ty, value.span);
+            self.require_wrapping_integer(op.as_str(), place_ty, value_ty, place.span);
+            return self.tcx.unit();
+        }
         // Compound assignment on a user struct / enum desugars through the
         // binary operator, so it routes to the same operator impl
         // (`+=` -> `add`). The impl's return re-binds the place, so it
@@ -14591,6 +16542,20 @@ impl<'a> TypeChecker<'a> {
     /// answering an `Option<i64>`, the next an `Option<String>` - a type
     /// error about a value nothing reads.
     fn check_discarded_expr(&mut self, expr: &Expr) -> Ty {
+        // A block whose value is discarded discards its tail as well, so the
+        // tail gets the same per-branch treatment a statement does.
+        if let ExprKind::Block(block) | ExprKind::Unsafe(block) = &expr.kind
+            && let Some(tail) = &block.tail
+        {
+            self.push_scope();
+            for stmt in &block.stmts {
+                self.check_stmt(stmt);
+            }
+            self.check_discarded_expr(tail);
+            self.pop_scope();
+            let unit = self.tcx.unit();
+            return self.record(expr.id, unit);
+        }
         let ExprKind::If {
             condition,
             then_branch,
@@ -14623,6 +16588,12 @@ impl<'a> TypeChecker<'a> {
         let then_ty = self.check_expr_expecting(then_branch, expected);
         if let Some(else_branch) = else_branch {
             let else_ty = self.check_expr_expecting(else_branch, expected);
+            // An `else if` chain with no final `else` answers nothing on the
+            // path where every condition fails. Like an else-less `if`, it is
+            // typed `()` and each branch keeps its own type.
+            if !Self::if_chain_has_final_else(else_branch) {
+                return self.tcx.unit();
+            }
             let joined = self.join_branch_tys(then_ty, else_ty, else_branch.span);
             // When the branches joined to a Vec/slice, re-record each
             // array-literal branch to that shape so an unannotated
@@ -14633,6 +16604,21 @@ impl<'a> TypeChecker<'a> {
             joined
         } else {
             self.tcx.unit()
+        }
+    }
+
+    /// Whether an `if` chain ends in a final `else`, so some branch runs on
+    /// every path. `else_branch` is the node after an `else`.
+    fn if_chain_has_final_else(else_branch: &Expr) -> bool {
+        match &else_branch.kind {
+            ExprKind::If {
+                else_branch: Some(next),
+                ..
+            } => Self::if_chain_has_final_else(next),
+            ExprKind::If {
+                else_branch: None, ..
+            } => false,
+            _ => true,
         }
     }
 
@@ -14974,6 +16960,16 @@ impl<'a> TypeChecker<'a> {
                         break Some(elem);
                     }
                     TyKind::String => break Some(self.tcx.char_ty()),
+                    // A `Set` / `BTreeSet` walked directly yields its elements,
+                    // the same values its `iter()` cursor hands over.
+                    TyKind::Adt { def, substs }
+                        if matches!(def.local, HASH_SET_DEF_LOCAL | BTREE_SET_DEF_LOCAL) =>
+                    {
+                        let Some(elem) = substs.types().first().copied() else {
+                            break None;
+                        };
+                        break Some(self.infer.resolve(self.tcx, elem));
+                    }
                     // A map walked directly yields the same `(key, value)`
                     // pair its `iter()` cursor does, so a bare `for (k, v) in
                     // m` binds the map's own key and value types.
@@ -15007,7 +17003,7 @@ impl<'a> TypeChecker<'a> {
             None => self.type_of_pattern(pattern),
         };
         self.bind_pattern(pattern, pat_ty);
-        self.check_expr(body);
+        self.check_discarded_expr(body);
         self.report_discarded_result(body, None);
         self.pop_scope();
         self.tcx.unit()
@@ -15236,6 +17232,7 @@ impl<'a> TypeChecker<'a> {
             if let Some(error) = self.option_value_mismatch(pattern, binding_ty, init, init_ty) {
                 self.emit(error, init.span);
             } else {
+                self.record_fn_item_coercion(init, binding_ty);
                 self.unify(binding_ty, init_ty, init.span);
             }
             // A target list says how many elements it expects, so its arity is
@@ -15739,7 +17736,9 @@ impl<'a> TypeChecker<'a> {
             Some(TyKind::Tuple(elems)) => elems
                 .iter()
                 .all(|elem| self.is_hashable_ty_rec(*elem, seen)),
-            Some(TyKind::Array { elem, .. }) => self.is_hashable_ty_rec(*elem, seen),
+            Some(TyKind::Array { elem, .. } | TyKind::Simd { elem, .. }) => {
+                self.is_hashable_ty_rec(*elem, seen)
+            }
             // A nominal alias hashes and compares exactly as the value it
             // erases to, so it is a key wherever its representation is.
             Some(TyKind::Nominal { repr, .. }) => self.is_hashable_ty_rec(*repr, seen),
@@ -16057,6 +18056,12 @@ impl<'a> TypeChecker<'a> {
                         elem: elem_ty,
                         len: crate::ArrayLen::Concrete(len),
                     })
+                } else if let Some((idx, _)) = self.const_generic_param(count) {
+                    let elem_ty = self.infer.resolve(self.tcx, elem_ty);
+                    self.tcx.intern(TyKind::Array {
+                        elem: elem_ty,
+                        len: crate::ArrayLen::Param(idx),
+                    })
                 } else {
                     self.emit(TypeError::ArrayLengthNotConstant, count.span);
                     self.tcx.intern(TyKind::Array {
@@ -16068,7 +18073,69 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
-    fn check_path_expr(&mut self, node: NodeId, path: &gossamer_ast::PathExpr, span: Span) -> Ty {
+    /// The type of an enum path in value position: `Enum::Variant` with no
+    /// payload to infer its parameters from.
+    fn enum_path_value_ty(
+        &mut self,
+        node: NodeId,
+        def: DefId,
+        path: &gossamer_ast::PathExpr,
+        span: Span,
+        expected: Expectation,
+    ) -> Ty {
+        // A generic enum named without a payload to infer from -
+        // `L::Nil` - still has to carry parameters, or it will
+        // not unify with the `L<i64>` it is being bound to. A
+        // const parameter has no payload to take its value from
+        // either, so it takes the value the context expects.
+        let arity = self.struct_generic_arity.get(&def).copied().unwrap_or(0);
+        let consts = LiteralConsts::new(self.fn_generic_const_mask_of(def));
+        let placeholder = self.tcx.error_ty();
+        let substs: Vec<Ty> = (0..arity)
+            .map(|i| {
+                if consts.mask.get(i).copied().unwrap_or(false) {
+                    placeholder
+                } else {
+                    self.fresh()
+                }
+            })
+            .collect();
+        let ty = self.tcx.intern(TyKind::Adt {
+            def,
+            substs: crate::Substs::from_types(substs),
+        });
+        let enum_name = self
+            .tcx
+            .def_name(def)
+            .and_then(|name| name.rsplit("::").next())
+            .map(str::to_string);
+        let variant_name = path
+            .segments
+            .last()
+            .map(|segment| segment.name.name.clone());
+        let carries_payload = match (enum_name, variant_name) {
+            (Some(enum_name), Some(variant_name)) => self
+                .enum_variant_payloads
+                .get(&(enum_name, variant_name))
+                .is_some_and(|payloads| !payloads.is_empty()),
+            _ => true,
+        };
+        if !consts.has_const_positions()
+            || carries_payload
+            || self.callee_path_nodes.contains(&node)
+        {
+            return ty;
+        }
+        self.finish_struct_literal_consts(ty, &consts, expected, path, span)
+    }
+
+    fn check_path_expr(
+        &mut self,
+        node: NodeId,
+        path: &gossamer_ast::PathExpr,
+        span: Span,
+        expected: Expectation,
+    ) -> Ty {
         self.check_path_read_conflict(path, span);
         // `Enum::Variant` naming a variant the enum does not declare: the
         // resolver resolves the path to the enum head and leaves the bad
@@ -16137,15 +18204,7 @@ impl<'a> TypeChecker<'a> {
                     })
                 }
                 gossamer_resolve::DefKind::Enum => {
-                    // A generic enum named without a payload to infer from -
-                    // `L::Nil` - still has to carry parameters, or it will
-                    // not unify with the `L<i64>` it is being bound to.
-                    let arity = self.struct_generic_arity.get(&def).copied().unwrap_or(0);
-                    let substs: Vec<Ty> = (0..arity).map(|_| self.fresh()).collect();
-                    self.tcx.intern(TyKind::Adt {
-                        def,
-                        substs: crate::Substs::from_types(substs),
-                    })
+                    self.enum_path_value_ty(node, def, path, span, expected)
                 }
                 gossamer_resolve::DefKind::Fn => {
                     // Pull turbofish args (`ident::<i64, bool>`) off
@@ -16154,14 +18213,18 @@ impl<'a> TypeChecker<'a> {
                     // `TyKind::FnDef { def, substs }` so that the MIR
                     // lowerer reads the real substitution instead of
                     // deriving one heuristically from argument types.
-                    let substs = self.substs_from_path(path);
+                    let substs = self.fn_item_path_substs(node, def, path);
                     self.tcx.intern(TyKind::FnDef { def, substs })
                 }
-                gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => self
-                    .const_tys
-                    .get(&def)
-                    .copied()
-                    .unwrap_or_else(|| self.fresh()),
+                gossamer_resolve::DefKind::Const | gossamer_resolve::DefKind::Static => {
+                    self.const_path_ty(def, path)
+                }
+                gossamer_resolve::DefKind::TypeParam => {
+                    match self.check_param_assoc_fn_path(def, path) {
+                        Some(ty) => ty,
+                        None => self.fresh(),
+                    }
+                }
                 _ => self.fresh(),
             },
             Resolution::Import { .. } | Resolution::Err => {
@@ -16179,6 +18242,78 @@ impl<'a> TypeChecker<'a> {
                 self.check_std_path_value(node, path, span)
             }
         }
+    }
+
+    /// The substitution a path naming the function item `def` carries: its
+    /// turbofish arguments when written. A generic function named as a value,
+    /// not called, is instantiated by the callable type it coerces to, so each
+    /// type position starts as a fresh variable that the coercion binds and the
+    /// value names one instantiation rather than the template. A call records
+    /// its own instantiation in `check_call`.
+    fn fn_item_path_substs(
+        &mut self,
+        node: NodeId,
+        def: gossamer_resolve::DefId,
+        path: &gossamer_ast::PathExpr,
+    ) -> crate::Substs {
+        let substs = self.substs_from_path(path);
+        let arity = self.fn_generic_arity.get(&def).copied().unwrap_or(0);
+        if !substs.is_empty()
+            || arity == 0
+            || self.callee_path_nodes.contains(&node)
+            || self.fn_generic_const_mask_of(def).iter().any(|c| *c)
+        {
+            return substs;
+        }
+        let vars: Vec<Ty> = (0..arity).map(|_| self.fresh()).collect();
+        crate::Substs::from_types(vars)
+    }
+
+    /// Types `T::name`, where `T` is a type parameter in scope and `name` is
+    /// a function one of `T`'s bounds declares, as that function with the
+    /// trait's `Self` read as `T`. Records which parameter the path's head
+    /// resolved to, so lowering can dispatch the call per instantiation.
+    fn check_param_assoc_fn_path(
+        &mut self,
+        def: gossamer_resolve::DefId,
+        path: &gossamer_ast::PathExpr,
+    ) -> Option<Ty> {
+        let [head, function] = path.segments.as_slice() else {
+            return None;
+        };
+        let head_name = head.name.name.clone();
+        let (idx, name) = self.current_generic_scope.get(&head_name).cloned()?;
+        let param_ty = self.tcx.intern(TyKind::Param { idx, name });
+        let bounds = self.with_supertraits(self.bounds_of_param(&head_name));
+        let found = bounds.iter().find_map(|bound| {
+            self.trait_fn_self_sigs
+                .get(&(bound.clone(), function.name.name.clone()))
+                .cloned()
+        })?;
+        let substs = [param_ty];
+        let mut inputs: Vec<Ty> = found
+            .sig
+            .inputs
+            .iter()
+            .map(|input| self.subst_params_in_ty(*input, &substs))
+            .collect();
+        if let Some(receiver) = found.receiver {
+            let receiver_ty = match receiver {
+                gossamer_ast::Receiver::Owned => param_ty,
+                gossamer_ast::Receiver::RefShared => self.tcx.intern(TyKind::Ref {
+                    mutability: Mutbl::Not,
+                    inner: param_ty,
+                }),
+                gossamer_ast::Receiver::RefMut => self.tcx.intern(TyKind::Ref {
+                    mutability: Mutbl::Mut,
+                    inner: param_ty,
+                }),
+            };
+            inputs.insert(0, receiver_ty);
+        }
+        let output = self.subst_params_in_ty(found.sig.output, &substs);
+        self.tcx.register_type_param_def(def, param_ty);
+        Some(self.tcx.intern(TyKind::FnPtr(FnSig { inputs, output })))
     }
 
     fn check_path_read_conflict(&mut self, path: &gossamer_ast::PathExpr, span: Span) {
@@ -16246,6 +18381,21 @@ impl<'a> TypeChecker<'a> {
     /// the historical fresh-var fallback.
     /// Type of a reference to `def`, reached through a `use` of this
     /// unit's own item. Mirrors the `Resolution::Def` arm of
+    /// Type of a path naming a `const` or `static` item, or a const generic
+    /// parameter, which is a value of its declared type inside the body the
+    /// call supplies it to.
+    fn const_path_ty(&mut self, def: DefId, path: &gossamer_ast::PathExpr) -> Ty {
+        if let Some(ty) = self.const_tys.get(&def).copied() {
+            return ty;
+        }
+        if let [seg] = path.segments.as_slice()
+            && let Some((_, ty)) = self.current_const_generic_scope.get(&seg.name.name)
+        {
+            return *ty;
+        }
+        self.fresh()
+    }
+
     /// [`Self::check_path_expr`] for the kinds a value path can name.
     fn ty_of_imported_def(&mut self, def: DefId, path: &gossamer_ast::PathExpr) -> Option<Ty> {
         match self.resolutions.kind_of(def)? {
@@ -16696,6 +18846,7 @@ impl<'a> TypeChecker<'a> {
         // sentinel `DefId`s use `u32::MAX` / `u32::MAX-1` so they
         // never collide with anything the resolver emits.
         match head_name {
+            "Simd" | "Mask" => return self.simd_type_from_path(head_name, path, span),
             "Result" => {
                 let mut substs = self.substs_from_ast(path);
                 // `Result<T>` with a single arg is shorthand for
@@ -16969,10 +19120,10 @@ impl<'a> TypeChecker<'a> {
             _ => {}
         }
         // Recognise stdlib struct types by their last path segment
-        // so parameter annotations like `entry: &fs::DirInfo` resolve
+        // so parameter annotations like `stream: http::ResponseStream` resolve
         // to the sentinel Adt rather than a fresh inference variable.
-        // Without this, the MIR can't recover "DirInfo" from the
-        // parameter's type and field access (`entry.is_symlink`) falls
+        // Without this, the MIR can't recover the struct from the
+        // parameter's type and field access (`stream.status`) falls
         // through to gos_rt_json_get instead of a Field(idx) projection.
         let tail = path.segments.last().map_or("", |s| s.name.name.as_str());
         let stdlib_def_offset: Option<u32> = match tail {
@@ -16983,8 +19134,6 @@ impl<'a> TypeChecker<'a> {
             // name - a spelling the bytecode VM registers and the compiled
             // tiers have no symbol for.
             "Pattern" => Some(26),
-            "DirInfo" => Some(2),
-            "Output" => Some(3),
             "ResponseStream" => Some(4),
             "Response" => Some(5),
             // `context::Context` - an opaque i64 handle with no
@@ -17326,7 +19475,11 @@ impl<'a> TypeChecker<'a> {
             for arg in &segment.generics {
                 match arg {
                     AstGenericArg::Type(ast_ty) => {
-                        args.push(crate::GenericArg::Type(self.type_from_ast(ast_ty)));
+                        if let Some(idx) = self.const_generic_type_arg(ast_ty) {
+                            args.push(crate::GenericArg::ConstParam(idx));
+                        } else {
+                            args.push(crate::GenericArg::Type(self.type_from_ast(ast_ty)));
+                        }
                     }
                     AstGenericArg::Const(expr) => {
                         let value = self.evaluate_generic_const_arg(expr);
@@ -17342,6 +19495,253 @@ impl<'a> TypeChecker<'a> {
         matches!(self.tcx.kind(ty), Some(TyKind::Int(_)))
     }
 
+    /// The in-scope const generic parameter a generic argument names when the
+    /// parser read it as a type: `N` in `Ring<N>` inside `impl<const N: usize>`.
+    fn const_generic_type_arg(&self, ast_ty: &AstType) -> Option<crate::ParamIdx> {
+        let AstTypeKind::Path(path) = &ast_ty.kind else {
+            return None;
+        };
+        let [segment] = path.segments.as_slice() else {
+            return None;
+        };
+        if !segment.generics.is_empty()
+            || !matches!(
+                self.resolutions.get(ast_ty.id),
+                Some(Resolution::Def {
+                    kind: gossamer_resolve::DefKind::Const,
+                    ..
+                })
+            )
+        {
+            return None;
+        }
+        self.current_const_generic_scope
+            .get(&segment.name.name)
+            .map(|(idx, _)| *idx)
+    }
+
+    /// A generic ADT's arguments as position-aligned type and const vectors,
+    /// the shapes [`Self::subst_generics_in_ty`] takes. A const position
+    /// holds a placeholder type, and a type position no const.
+    fn adt_subst_vectors(&mut self, substs: &crate::Substs) -> (Vec<Ty>, Vec<Option<i128>>) {
+        let placeholder = self.tcx.error_ty();
+        substs
+            .as_slice()
+            .iter()
+            .map(|arg| match arg {
+                crate::GenericArg::Type(ty) => (*ty, None),
+                crate::GenericArg::Const(value) => (placeholder, Some(*value)),
+                crate::GenericArg::ConstParam(_) => (placeholder, None),
+            })
+            .unzip()
+    }
+
+    /// The storage type of a field or payload declared as `ty`: an array whose
+    /// length is a const parameter has no length until an instantiation
+    /// supplies one, so it is held as the runtime-length slice a const generic
+    /// body holds. The checker keeps the declared `[T; N]` for typing.
+    fn const_length_carrier(&mut self, ty: Ty) -> Ty {
+        match self.tcx.kind_of(ty).clone() {
+            TyKind::Array {
+                elem,
+                len: crate::ArrayLen::Param(_),
+            }
+            | TyKind::Simd {
+                elem,
+                lanes: crate::ArrayLen::Param(_),
+            } => self.tcx.intern(TyKind::Slice(elem)),
+            _ => ty,
+        }
+    }
+
+    /// The const mask of the generic ADT `ty` names, or an empty one.
+    fn fn_generic_const_mask_of_ty(&self, ty: Ty) -> Vec<bool> {
+        match self.tcx.kind(ty) {
+            Some(TyKind::Adt { def, .. }) => self.fn_generic_const_mask_of(*def),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The struct literal's type with each const position filled from what
+    /// its array fields said, from the type the context expects, or reported
+    /// as uninferred.
+    fn finish_struct_literal_consts(
+        &mut self,
+        struct_ty: Ty,
+        consts: &LiteralConsts,
+        expected: Expectation,
+        path: &gossamer_ast::PathExpr,
+        span: Span,
+    ) -> Ty {
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(struct_ty).clone() else {
+            return struct_ty;
+        };
+        let expected_args: Vec<crate::GenericArg> = self
+            .expectation_target(expected)
+            .map(|target| self.infer.resolve(self.tcx, target))
+            .and_then(|target| match self.tcx.kind(target) {
+                Some(TyKind::Adt {
+                    def: expected_def,
+                    substs,
+                }) if *expected_def == def => Some(substs.as_slice().to_vec()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let mut args = Vec::with_capacity(substs.len());
+        let mut missing = false;
+        for (i, arg) in substs.as_slice().iter().enumerate() {
+            if !consts.mask.get(i).copied().unwrap_or(false) {
+                args.push(arg.clone());
+                continue;
+            }
+            let filled = match (
+                consts.values.get(i).copied().flatten(),
+                consts.forwarded.get(i).copied().flatten(),
+            ) {
+                (Some(value), _) => Some(crate::GenericArg::Const(value)),
+                (None, Some(param)) => Some(crate::GenericArg::ConstParam(param)),
+                (None, None) => expected_args
+                    .get(i)
+                    .filter(|arg| {
+                        matches!(
+                            arg,
+                            crate::GenericArg::Const(_) | crate::GenericArg::ConstParam(_)
+                        )
+                    })
+                    .cloned(),
+            };
+            if let Some(arg) = filled {
+                args.push(arg);
+            } else {
+                missing = true;
+                args.push(crate::GenericArg::Const(0));
+            }
+        }
+        if missing {
+            let callee = path
+                .segments
+                .last()
+                .map_or_else(String::new, |segment| segment.name.name.clone());
+            let literal_ty = self
+                .tcx
+                .def_name(def)
+                .and_then(|name| name.rsplit("::").next())
+                .map(str::to_string);
+            self.emit(
+                TypeError::ConstGenericNotInferred {
+                    callee,
+                    literal_ty,
+                    assoc_owner: None,
+                },
+                span,
+            );
+            // The value has no type to report against, so what it meets does
+            // not report a second mismatch.
+            return self.tcx.error_ty();
+        }
+        self.tcx.intern(TyKind::Adt {
+            def,
+            substs: crate::Substs::from_args(args),
+        })
+    }
+
+    /// `Ring::capacity(r)` spells the method call `r.capacity()`, so it hands
+    /// the method's `impl` block the same const arguments, read from the
+    /// receiver argument when the path names that receiver's own type.
+    fn record_qualified_method_const_generic_args(&mut self, callee: &Expr, arg_tys: &[Ty]) {
+        let ExprKind::Path(path) = &callee.kind else {
+            return;
+        };
+        let [.., owner_segment, method_segment] = path.segments.as_slice() else {
+            return;
+        };
+        let Some(receiver_ty) = arg_tys.first().copied() else {
+            return;
+        };
+        let resolved = self.peel_refs(self.infer.resolve(self.tcx, receiver_ty));
+        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
+            return;
+        };
+        let names_receiver_type = self
+            .tcx
+            .def_name(*def)
+            .is_some_and(|name| name.rsplit("::").next() == Some(owner_segment.name.name.as_str()));
+        if names_receiver_type {
+            let method = method_segment.name.name.clone();
+            self.record_method_const_generic_args(callee.id, receiver_ty, &method);
+        }
+    }
+
+    /// Records the values a method call on a const generic type hands the
+    /// method's `impl` block, read from the receiver's arguments at the
+    /// positions the block's self type carries them at.
+    fn record_method_const_generic_args(&mut self, call_id: NodeId, receiver_ty: Ty, method: &str) {
+        let resolved = self.peel_refs(self.infer.resolve(self.tcx, receiver_ty));
+        let Some(TyKind::Adt { def, substs }) = self.tcx.kind(resolved).cloned() else {
+            return;
+        };
+        let Some(owner) = self.tcx.def_name(def).map(ToString::to_string) else {
+            return;
+        };
+        let Some(params) = self
+            .const_generics
+            .impl_method_params
+            .get(&(owner, method.to_string()))
+            .cloned()
+        else {
+            return;
+        };
+        let mut args = Vec::with_capacity(params.len());
+        for (position, ty) in params {
+            match substs.as_slice().get(position) {
+                Some(crate::GenericArg::Const(value)) => {
+                    args.push(crate::ConstGenericArg::Value { value: *value, ty });
+                }
+                Some(crate::GenericArg::ConstParam(idx)) => {
+                    let Some(name) = self.const_generic_param_name(*idx) else {
+                        return;
+                    };
+                    args.push(crate::ConstGenericArg::Param { name, ty });
+                }
+                _ => return,
+            }
+        }
+        if !args.is_empty() {
+            self.table.insert_const_generic_args(call_id, args);
+        }
+    }
+
+    /// Which positions of generic function `def`'s parameter list are const
+    /// parameters.
+    fn fn_generic_const_mask_of(&self, def: gossamer_resolve::DefId) -> Vec<bool> {
+        self.const_generics
+            .param_tys
+            .get(&def)
+            .map(|tys| tys.iter().map(Option::is_some).collect())
+            .unwrap_or_default()
+    }
+
+    /// The const generic parameter in scope that `expr` names by itself, with
+    /// its position and declared type.
+    fn const_generic_param(&self, expr: &Expr) -> Option<(crate::ParamIdx, Ty)> {
+        let ExprKind::Path(path) = &expr.kind else {
+            return None;
+        };
+        let [seg] = path.segments.as_slice() else {
+            return None;
+        };
+        self.current_const_generic_scope
+            .get(&seg.name.name)
+            .copied()
+    }
+
+    /// The name of the const generic parameter in scope at position `idx`.
+    fn const_generic_param_name(&self, idx: crate::ParamIdx) -> Option<String> {
+        self.current_const_generic_scope
+            .iter()
+            .find_map(|(name, (at, _))| (*at == idx).then(|| name.clone()))
+    }
+
     /// Types an array-length expression. A literal yields a concrete
     /// count; a bare path naming a const generic parameter in scope
     /// yields a symbolic `Param` length linked to that parameter's
@@ -17351,14 +19751,7 @@ impl<'a> TypeChecker<'a> {
         if let Some(len) = self.evaluate_array_len(expr) {
             return crate::ArrayLen::Concrete(len);
         }
-        if let ExprKind::Path(path) = &expr.kind
-            && path.segments.len() == 1
-            && let Some(seg) = path.segments.first()
-            && let Some(idx) = self
-                .current_const_generic_scope
-                .get(&seg.name.name)
-                .copied()
-        {
+        if let Some((idx, _)) = self.const_generic_param(expr) {
             return crate::ArrayLen::Param(idx);
         }
         self.emit(TypeError::ArrayLengthNotConstant, expr.span);
@@ -18032,6 +20425,43 @@ fn expr_display(expr: &Expr) -> Option<String> {
     }
 }
 
+/// `(receiver op arg)` for a wrapping arithmetic method call, or `None` when
+/// an operand has no short spelling. The parentheses keep the rewrite meaning
+/// what the call meant wherever it stood, whatever operator surrounds it.
+fn wrapping_operator_rewrite(receiver: &Expr, arg: &Expr, operator: &str) -> Option<String> {
+    let receiver = wrapping_operand_display(receiver)?;
+    let arg = wrapping_operand_display(arg)?;
+    Some(format!("({receiver} {operator} {arg})"))
+}
+
+/// Spelling of a wrapping rewrite's operand with any wrapping method call at
+/// its head already written as the operator, so the rewrite of the outermost
+/// call in a chain is the whole fix.
+fn wrapping_operand_display(expr: &Expr) -> Option<String> {
+    if let ExprKind::MethodCall {
+        receiver,
+        name,
+        args,
+        ..
+    } = &expr.kind
+        && let [arg] = args.as_slice()
+        && let Some(operator) = wrapping_method_operator(&name.name)
+    {
+        return wrapping_operator_rewrite(receiver, arg, operator);
+    }
+    expr_display(expr)
+}
+
+/// The operator a retired wrapping arithmetic method is spelled as.
+fn wrapping_method_operator(method: &str) -> Option<&'static str> {
+    match method {
+        "wrapping_add" => Some("+%"),
+        "wrapping_sub" => Some("-%"),
+        "wrapping_mul" => Some("*%"),
+        _ => None,
+    }
+}
+
 /// Comma-joined spellings of an argument list, or `None` when any argument
 /// has no short spelling.
 fn expr_display_list(args: &[Expr]) -> Option<String> {
@@ -18281,8 +20711,7 @@ fn is_catalog_type_param(src: &str) -> bool {
 }
 
 /// Pre-registers field types for stdlib structs that user source can
-/// name (e.g. `fs::DirInfo`, `os::Output`, `http::Response`,
-/// `http::ResponseStream`). The MIR-side dispatch pins free-call
+/// name (`http::Response`, `http::ResponseStream`). The MIR-side dispatch pins free-call
 /// destinations to sentinel `DefId`s (`u32::MAX - N`) for these
 /// structs; without their field types registered here, `entry.path`
 /// / `r.status` projections leave the result `Var(_)` and downstream
@@ -18290,17 +20719,6 @@ fn is_catalog_type_param(src: &str) -> bool {
 fn register_stdlib_struct_fields(tcx: &mut TyCtxt) {
     let str_ty = tcx.string_ty();
     let i64_ty = tcx.int_ty(IntTy::I64);
-    let bool_ty = tcx.bool_ty();
-    // DirInfo: [name, path, is_file, is_dir, is_symlink, size, modified_ms]
-    tcx.register_struct_fields(
-        gossamer_resolve::DefId::local(u32::MAX - 2),
-        vec![str_ty, str_ty, bool_ty, bool_ty, bool_ty, i64_ty, i64_ty],
-    );
-    // Output: [stdout, stderr, code]
-    tcx.register_struct_fields(
-        gossamer_resolve::DefId::local(u32::MAX - 3),
-        vec![str_ty, str_ty, i64_ty],
-    );
     // ResponseStream: [__handle, status, content_type]
     tcx.register_struct_fields(
         gossamer_resolve::DefId::local(u32::MAX - 4),
@@ -18321,13 +20739,9 @@ fn register_stdlib_struct_fields(tcx: &mut TyCtxt) {
     );
 }
 
-/// Seeds the checker's own `struct_fields` map with the same stdlib
-/// struct entries that `register_stdlib_struct_fields` puts in `tcx`.
-/// Without this, `lookup_field_ty_diagnosed` returns `UnknownField {
-/// opaque: true }` for `entry: &fs::DirInfo` even though `tcx` knows
-/// the field layout.
 /// The stdlib struct field tables the checker starts with, registered into
-/// `tcx` and returned as the checker's own copy.
+/// `tcx` and returned as the checker's own copy, so a field lookup on one of
+/// those structs finds the layout `tcx` knows.
 fn stdlib_struct_fields(tcx: &mut TyCtxt) -> HashMap<gossamer_resolve::DefId, Vec<(String, Ty)>> {
     register_stdlib_struct_fields(tcx);
     let mut fields = HashMap::new();
@@ -18485,7 +20899,10 @@ enum PlaceMut {
 fn assign_op_method(op: gossamer_ast::AssignOp) -> Option<&'static str> {
     use gossamer_ast::AssignOp;
     match op {
-        AssignOp::Assign => None,
+        AssignOp::Assign
+        | AssignOp::WrappingAddAssign
+        | AssignOp::WrappingSubAssign
+        | AssignOp::WrappingMulAssign => None,
         AssignOp::AddAssign => Some("add"),
         AssignOp::SubAssign => Some("sub"),
         AssignOp::MulAssign => Some("mul"),
@@ -18517,6 +20934,15 @@ fn op_trait_name(method: &str) -> &'static str {
         "not" => "Not",
         "index" => "Index",
         _ => "Add",
+    }
+}
+
+/// The source spelling of an array length or lane count: its number, or the
+/// const parameter it names.
+fn render_array_len(len: crate::ArrayLen) -> String {
+    match len {
+        crate::ArrayLen::Concrete(n) => n.to_string(),
+        crate::ArrayLen::Param(idx) => format!("N{}", idx.as_u32()),
     }
 }
 
@@ -18827,6 +21253,7 @@ fn kind_is_concrete(checker: &TypeChecker<'_>, kind: &TyKind) -> bool {
         | TyKind::Param { .. } => true,
         TyKind::Tuple(parts) => parts.iter().all(|t| checker.is_concrete(*t)),
         TyKind::Array { elem, .. }
+        | TyKind::Simd { elem, .. }
         | TyKind::Slice(elem)
         | TyKind::Vec(elem)
         | TyKind::Iterator(elem)
@@ -18848,10 +21275,12 @@ fn kind_is_concrete(checker: &TypeChecker<'_>, kind: &TyKind) -> bool {
         | TyKind::Closure { substs, .. } => substs.as_slice().iter().all(|arg| match arg {
             crate::GenericArg::Type(ty) => checker.is_concrete(*ty),
             crate::GenericArg::Const(_) => true,
+            crate::GenericArg::ConstParam(_) => false,
         }),
         TyKind::Dyn(trait_ref) => trait_ref.substs.as_slice().iter().all(|arg| match arg {
             crate::GenericArg::Type(ty) => checker.is_concrete(*ty),
             crate::GenericArg::Const(_) => true,
+            crate::GenericArg::ConstParam(_) => false,
         }),
     }
 }
@@ -19745,10 +22174,6 @@ fn builtin_trait_methods(name: &str) -> Option<&'static [&'static str]> {
     crate::builtin_traits::builtin_trait(name).map(|entry| entry.bound_methods)
 }
 
-/// Sentinel-def offset for a stdlib handle named by its last path segment.
-///
-/// Mirrors the annotation path so `fs::DirInfo` means the same type whether
-/// it is written in source or read out of a signature row.
 /// Last segment of a module-qualified type path (`collections::Deque`),
 /// or `None` for a bare name or a path whose leading segments are not
 /// plain module names. Module segments are lowercase and carry no
@@ -19816,11 +22241,11 @@ fn stdlib_handle_by_path(segments: &[&str]) -> Option<(u32, &'static str)> {
 /// Sentinel offsets of the stdlib types that are runtime-owned handles:
 /// a pointer the runtime hands back, with no text form. The pure-handle
 /// band is covered by range; these are the older sentinels that predate
-/// it, including the field-bearing blobs (`fs::DirInfo`,
-/// `process::Output`, `http::Response`) whose fields are read through
-/// accessors rather than rendered.
+/// it, including the field-bearing blobs (`http::ResponseStream`,
+/// `http::Response`) whose fields are read through accessors rather than
+/// rendered.
 const OPAQUE_HANDLE_OFFSETS: &[u32] = &[
-    2, 3, 4, 5, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27,
+    4, 5, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27,
 ];
 
 /// True when `def` names a runtime handle rather than a value with a
@@ -19831,12 +22256,13 @@ fn is_opaque_handle_def(local: u32) -> bool {
         || OPAQUE_HANDLE_OFFSETS.contains(&offset)
 }
 
+/// Sentinel-def offset for a stdlib handle named by its last path segment,
+/// the same type whether it is written in source or read out of a signature
+/// row.
 fn stdlib_handle_def_offset(tail: &str) -> Option<u32> {
     Some(match tail {
         "Pattern" => 26,
         "Policy" => 13,
-        "DirInfo" => 2,
-        "Output" => 3,
         "ResponseStream" => 4,
         "Response" => 5,
         _ => {

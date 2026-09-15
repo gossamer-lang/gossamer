@@ -19,20 +19,7 @@
 
 use std::collections::HashMap;
 
-/// Mirrors `gossamer_codegen_cranelift::ResultScalarKind` so the shared
-/// dispatch code in `jit_call` type-checks on wasm; no instance is ever
-/// constructed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResultScalarKind {
-    /// The word is the integer itself.
-    I64,
-    /// The word is the double's bit pattern.
-    F64,
-    /// The low bit of the word is the boolean.
-    Bool,
-    /// The word is the Unicode scalar's code point.
-    Char,
-}
+use gossamer_abi::jit_carrier::{CarrierBoxMetas, CarrierShape};
 
 /// ABI classification of a JIT slot. Mirrors the cranelift enum so the
 /// VM's trampoline (`jit_call`) type-checks; no instance is ever
@@ -57,14 +44,9 @@ pub enum JitKind {
     /// `Result<Enum, _>` return as the by-value two-word `i128`; payload is
     /// the `Ok` enum's VM shape-table index.
     ResultEnumPtr(u32),
-    /// `Result<String, _>` return as the by-value two-word `i128`.
-    ResultNativeStr,
-    /// `Result<scalar, _>` return on the two-word carrier; payload names the
-    /// scalar the `Ok` word carries.
-    ResultScalar(ResultScalarKind),
-    /// `Option<scalar>` return on the two-word carrier; payload names the
-    /// scalar the `Some` word carries.
-    OptionScalar(ResultScalarKind),
+    /// `Option` / `Result` as its two words through a carrier thunk; payload
+    /// names what each arm's payload word holds.
+    Carrier(CarrierShape),
     /// All-scalar user struct as a pointer to its flat field-slot block;
     /// payload is the VM struct-shape-table index.
     StructPtr(u32),
@@ -135,6 +117,22 @@ pub struct JitFn {
     /// shared dispatch code in `jit_call` compiles against either handle.
     /// The wasm stub never promotes a body, so the value is irrelevant.
     pub returns_fresh: bool,
+    /// Mirrors `gossamer_codegen_cranelift::JitFn::carrier_box_metas`.
+    pub carrier_box_metas: Box<[CarrierBoxMetas]>,
+}
+
+/// A JIT frame on the machine stack. wasm compiles none.
+pub struct JitFrame {
+    /// The body's source name.
+    pub function: std::sync::Arc<str>,
+    /// Where in the source the frame stands.
+    pub span: Option<gossamer_lex::Span>,
+}
+
+/// wasm runs no JIT code, so no JIT frame is ever on the stack.
+#[must_use]
+pub fn active_jit_frames() -> Vec<JitFrame> {
+    Vec::new()
 }
 
 /// A set of compiled functions. Always empty on wasm.

@@ -107,7 +107,7 @@ use chrono::{
 use chrono_tz::Tz;
 use std::os::raw::c_char;
 
-use crate::c_abi::{gos_rt_gc_alloc, gos_rt_result_new};
+use crate::c_abi::gos_rt_result_new;
 
 enum CivilLocation {
     Iana(Tz),
@@ -163,13 +163,7 @@ fn time_ok_string(value: &str) -> i128 {
 }
 
 fn alloc_i64_words(values: &[i64]) -> i64 {
-    let size = u64::try_from(values.len().saturating_mul(8)).unwrap_or(u64::MAX);
-    let ptr = gos_rt_gc_alloc(size).cast::<i64>();
-    if ptr.is_null() {
-        return 0;
-    }
-    unsafe { std::ptr::copy_nonoverlapping(values.as_ptr(), ptr, values.len()) };
-    ptr as i64
+    crate::c_abi::rc::counted_words(values, &crate::c_abi::rc::LEAF_BLOB_META) as i64
 }
 
 fn naive_civil(

@@ -1,0 +1,104 @@
+// Trait functions with no receiver, reached through a bounded type parameter
+// (`T::zero()`), for a struct, a float, and an integer instantiation: from a
+// generic function, from one that forwards its own parameter, from a method of
+// a generic impl, from a method with its own parameter, and passed as a value.
+
+struct Point {
+    x: f64
+    y: f64
+}
+
+trait Zero {
+    fn zero() -> Self
+    fn label() -> String
+}
+
+impl Zero for Point {
+    fn zero() -> Point {
+        Point { x: 0.5, y: -0.5 }
+    }
+
+    fn label() -> String {
+        "point"
+    }
+}
+
+impl Zero for f64 {
+    fn zero() -> f64 {
+        0.125
+    }
+
+    fn label() -> String {
+        "float"
+    }
+}
+
+impl Zero for i64 {
+    fn zero() -> i64 {
+        7
+    }
+
+    fn label() -> String {
+        "int"
+    }
+}
+
+struct Holder<T> {
+    held: T
+}
+
+impl<T: Zero> Holder<T> {
+    fn reset_value(&self) -> T {
+        T::zero()
+    }
+}
+
+struct Factory {
+    count: i64
+}
+
+impl Factory {
+    fn build<T: Zero>(&self) -> T {
+        T::zero()
+    }
+}
+
+fn make<T: Zero>() -> T {
+    T::zero()
+}
+
+fn labelled<T: Zero>() -> (String, T) {
+    (T::label(), make::<T>())
+}
+
+fn call0<T>(f: Fn() -> T) -> T {
+    f()
+}
+
+fn through_value<T: Zero>() -> T {
+    call0(T::zero)
+}
+
+fn main() {
+    let f: f64 = make()
+    let p: Point = make()
+    let n: i64 = make()
+    println("{} {} {} {}", f, p.x, p.y, n)
+    let lf: (String, f64) = labelled()
+    let ln: (String, i64) = labelled()
+    let lp: (String, Point) = labelled()
+    println("{} {} {} {}", lf.0, lf.1, ln.0, ln.1)
+    println("{} {} {}", lp.0, lp.1.x, lp.1.y)
+    let hf = Holder { held: 9.5 }
+    let hp = Holder { held: Point { x: 3.5, y: 4.5 } }
+    let hz = hp.reset_value()
+    println("{} {} {} {}", hf.reset_value(), hz.x, hz.y, hf.held)
+    let factory = Factory { count: 2 }
+    let bf: f64 = factory.build()
+    let bn: i64 = factory.build()
+    let bp: Point = factory.build()
+    println("{} {} {} {} {}", bf, bn, bp.x, bp.y, factory.count)
+    let vf: f64 = through_value()
+    let vp: Point = through_value()
+    println("{} {} {}", vf, vp.x, vp.y)
+}

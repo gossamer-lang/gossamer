@@ -45,10 +45,18 @@ pub const RC_KIND_CLOSURE: i64 = 5;
 /// child at `payload_word` is live only when the word at `disc_word`
 /// reads 0 (the `Some`/`Ok` discriminant) - or unconditionally when
 /// `disc_word` is negative. Every child pointer is additionally checked
-/// for the explicit copy-blob owner carrier before retain/release, so a
+/// for copy-blob provenance before retain/release (the copy-blob arena's
+/// address range, or the owner word a blob outside it carries), so a
 /// payload that came from a non-RC producer (map get, borrow, the
 /// Cranelift tier's construction-allocated aggregates) is left alone.
 pub const RC_KIND_STRUCT_GUARDED: i64 = 6;
+
+/// Layout of an element copied out of a container that owns its elements'
+/// heap children: `[kind, count, (gate, disc_word, word, child)*]`, the
+/// per-slot child list the container itself walks, so the copy gives back
+/// exactly what the element's words own. `child` is a container slot-child
+/// kind: a string, vec, map, set, or reference-counted node.
+pub const RC_KIND_SLOT_CHILDREN: i64 = 7;
 
 // ---------------------------------------------------------------------
 // Child-entry encoding (RC_KIND_ENUM / RC_KIND_STRUCT records).
@@ -75,3 +83,41 @@ pub const RC_CHILD_VEC: i64 = 1;
 /// written back into the copy's word) and the node's release frees it through
 /// `gos_rt_map_free`.
 pub const RC_CHILD_MAP: i64 = 2;
+/// Child kind: a copy blob in a carrier field's payload word, live when the
+/// carrier's discriminant (the word before) is 0, the `Ok` / `Some` arm.
+/// Walked as an RC child.
+pub const RC_CHILD_BLOB_OK: i64 = 3;
+/// Child kind: a copy blob in a carrier field's payload word, live when the
+/// carrier's discriminant is 1, the `Err` arm.
+pub const RC_CHILD_BLOB_ERR: i64 = 4;
+/// Child kind: a copy blob in a carrier field's payload word on both arms.
+pub const RC_CHILD_BLOB_ANY: i64 = 5;
+/// Child kind: a boxed list of an error's structured fields, which the node
+/// owns alone and drops when it is freed.
+pub const RC_CHILD_ERROR_FIELDS: i64 = 6;
+/// Child entry naming a `Set` the blob owns outright: a set carries no
+/// reference count, so a copy takes a table of its own.
+pub const RC_CHILD_SET: i64 = 7;
+
+/// The copy-blob child kind for a carrier field whose payload is a blob under
+/// discriminant `gate` (0, 1, or negative for both arms).
+#[must_use]
+pub const fn rc_child_blob_kind(gate: i64) -> i64 {
+    match gate {
+        0 => RC_CHILD_BLOB_OK,
+        1 => RC_CHILD_BLOB_ERR,
+        _ => RC_CHILD_BLOB_ANY,
+    }
+}
+
+/// The discriminant gate of a copy-blob child kind (negative for both arms),
+/// or `None` for any other kind.
+#[must_use]
+pub const fn rc_child_blob_gate(kind: i64) -> Option<i64> {
+    match kind {
+        RC_CHILD_BLOB_OK => Some(0),
+        RC_CHILD_BLOB_ERR => Some(1),
+        RC_CHILD_BLOB_ANY => Some(-1),
+        _ => None,
+    }
+}

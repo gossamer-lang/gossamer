@@ -78,6 +78,7 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
             stmts: vec![
                 Statement {
                     span,
+                    inlined: None,
                     kind: StatementKind::IterSource {
                         dst: Place::local(Local(1)),
                         source_kind: IteratorSourceKind::Range,
@@ -95,6 +96,7 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
                         closure_or_arg: Some(Operand::Const(ConstValue::Int(2))),
                         item_ty: i64_ty,
                     },
+                    inlined: None,
                 },
                 Statement {
                     span,
@@ -103,6 +105,7 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
                         iter_place: Place::local(Local(2)),
                         item_ty: i64_ty,
                     },
+                    inlined: None,
                 },
                 Statement {
                     span,
@@ -110,10 +113,13 @@ fn typed_iterator_main() -> (Body, TyCtxt) {
                         place: Place::local(Local(0)),
                         rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
                     },
+                    inlined: None,
                 },
             ],
             terminator: Terminator::Return,
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         }],
         span,
     };
@@ -134,7 +140,14 @@ fn gos_bin() -> PathBuf {
         if let Ok(path) = std::env::var("CARGO_BIN_EXE_gos") {
             return PathBuf::from(path);
         }
-        let mut path = workspace_root().join("target").join("debug").join("gos");
+        // The test executable sits at `<target>/<profile>/deps/<name>`, so its
+        // ancestors name the target directory cargo is building into, which
+        // is where the `cargo build` below places the binary too.
+        let target = std::env::current_exe()
+            .ok()
+            .and_then(|exe| Some(exe.parent()?.parent()?.parent()?.to_path_buf()))
+            .unwrap_or_else(|| workspace_root().join("target"));
+        let mut path = target.join("debug").join("gos");
         if !std::env::consts::EXE_EXTENSION.is_empty() {
             path.set_extension(std::env::consts::EXE_EXTENSION);
         }

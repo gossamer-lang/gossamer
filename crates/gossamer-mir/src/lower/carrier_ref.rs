@@ -161,6 +161,7 @@ pub(crate) fn split_carrier_writebacks(body: &mut Body, tcx: &TyCtxt) {
                     rvalue: rvalue.clone(),
                 },
                 span,
+                inlined: None,
             });
             out.push(Statement {
                 kind: StatementKind::Assign {
@@ -168,6 +169,7 @@ pub(crate) fn split_carrier_writebacks(body: &mut Body, tcx: &TyCtxt) {
                     rvalue: Rvalue::Use(Operand::Copy(Place::local(temp))),
                 },
                 span,
+                inlined: None,
             });
         }
         block.stmts = out;

@@ -141,6 +141,7 @@ mod elide_unit_load_tests {
             &HashSet::new(),
             None,
             None,
+            None,
         )
         .expect("compile_fn");
         (chunk, decl)
@@ -598,8 +599,8 @@ fn checksum(s: String) -> i64 {
     let mut sum: i64 = 0
     let mut i: i64 = 0
     while i < s.len() {
-        sum = sum.wrapping_add(s.byte_at(i))
-        i = i.wrapping_add(1)
+        sum = sum +% s.byte_at(i)
+        i = i +% 1
     }
     sum
 }
@@ -633,10 +634,7 @@ fn checksum(s: String) -> i64 {
 
     #[test]
     fn negative_wrapping_immediate_is_one_typed_opcode() {
-        let (chunk, _) = compile_named(
-            "fn dec(value: i64) -> i64 { value.wrapping_add(-1) }\n",
-            "dec",
-        );
+        let (chunk, _) = compile_named("fn dec(value: i64) -> i64 { value +% -1 }\n", "dec");
         assert!(
             chunk.instrs.iter().any(|op| matches!(
                 op,

@@ -1,0 +1,47 @@
+// A lazy stream of two-word elements - the pairs `enumerate` and `zip` build,
+// tuples a `map` answers, or tuples read out of a `Vec` - runs through every
+// adapter and loop the way a stream of words does: stages run per element in
+// chain order, `take` stops pulling, and each closure runs exactly as often.
+
+fn main() {
+    let xs: Vec<i64> = #[1, 2, 3, 4, 5]
+    let ys: Vec<i64> = #[5, 4, 3, 2, 1]
+    let ps: Vec<(i64, i64)> = #[(1, 5), (2, 4), (3, 3)]
+
+    let mut seen: Vec<i64> = #[]
+    let taken = xs.iter().map(|x| {
+        seen.push(x)
+        x
+    }).enumerate().take(2).count()
+    println("take {} {:?}", taken, seen)
+    println("filter {} skip {} step {}", xs.iter().enumerate().filter(|p| p.0 > 1).count(), xs.iter().enumerate().skip(1).count(), xs.iter().enumerate().step_by(2).count())
+    println("zip {} {} {}", xs.iter().zip(ys.iter()).map(|p| p.0 + p.1).sum(), xs.iter().zip(ys.iter()).filter(|p| p.0 < p.1).count(), xs.iter().zip(ys.iter()).fold(0, |a, p| a + p.0 * p.1))
+    println("any {} indexed {}", xs.iter().enumerate().any(|p| p.1 == 3), xs.iter().enumerate().map(|(i, v)| i * v).sum())
+    println("collect {} {}", xs.iter().enumerate().collect().len(), xs.iter().enumerate().map(|p| p.0).collect().len())
+
+    let mut kept: Vec<(i64, i64)> = #[]
+    for p in xs.iter().enumerate().filter(|p| p.1 % 2 == 1) {
+        kept.push(p)
+    }
+    let mut last = (0, 0)
+    for p in xs.iter().zip(ys.iter()).skip(3) {
+        last = p
+    }
+    let mut doubled: Vec<(i64, i64)> = #[]
+    for p in xs.iter().map(|v| (v, v * 2)).filter(|p| p.0 > 3) {
+        doubled.push(p)
+    }
+    let mut picked = 0
+    for p in ps.iter().filter(|p| p.0 > 1) {
+        picked += p.0 * p.1
+    }
+    println("loops {:?} {:?} {:?} {}", kept, last, doubled, picked)
+
+    let mut total = 0
+    let mut round = 0
+    while round < 300 {
+        total += xs.iter().enumerate().map(|p| p.0 * p.1).sum() + xs.iter().zip(ys.iter()).filter(|p| p.0 > 2).count()
+        round += 1
+    }
+    println("rounds {}", total)
+}

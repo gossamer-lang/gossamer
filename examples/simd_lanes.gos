@@ -1,0 +1,44 @@
+// Lane vectors in Gossamer.
+//
+// `Simd<T, N>` holds N lanes of one scalar type (`f32`, `f64`, `i32`, `i64`,
+// `u8`, or `u32`; 2, 4, 8, or 16 lanes) and computes lane-wise with the same
+// bits on every tier. `Mask<N>` is its `bool` form: a lane comparison
+// answers one, and `select` picks each lane from one of two vectors by it.
+// `Simd::load` reads a window of lanes from a sequence and `store` writes one
+// back, with the whole window checked once.
+//
+// Run with:
+//   gos run examples/simd_lanes.gos
+//   gos build examples/simd_lanes.gos
+
+fn dot<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> f64 {
+    (a * b).reduce_sum()
+}
+
+fn halve_in_windows(data: Vec<f64>) -> Vec<f64> {
+    let mut out = data
+    let halves: Simd<f64, 4> = Simd::splat(0.5)
+    let mut offset = 0
+    while offset + 4 <= out.len() {
+        let window: Simd<f64, 4> = Simd::load(out, offset)
+        (window * halves).store(&mut out, offset)
+        offset += 4
+    }
+    out
+}
+
+fn main() {
+    let a = Simd::from_array([1.0, 2.0, 3.0, 4.0])
+    let b: Simd<f64, 4> = Simd::splat(0.5)
+    println("a + b = {:?}", (a + b).to_array())
+    println("dot(a, b) = {}", dot(a, b))
+    let cutoff: Simd<f64, 4> = Simd::splat(2.5)
+    let low = a.lanes_lt(cutoff)
+    println("low lanes keep a, the rest take b: {:?}", low.select(a, b).to_array())
+    let ints = Simd::from_array([7, -3, 12, 0])
+    println("abs {:?} max {}", ints.abs().to_array(), ints.reduce_max())
+    let ones: Simd<i64, 4> = Simd::splat(1)
+    let top = Simd::from_array([9_223_372_036_854_775_807, 1, 2, 3])
+    println("wrapping {:?}", (top +% ones).to_array())
+    println("halved {:?}", halve_in_windows(#[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]))
+}

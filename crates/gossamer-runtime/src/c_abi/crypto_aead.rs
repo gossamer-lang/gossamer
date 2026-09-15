@@ -51,21 +51,16 @@ fn aead_err(msg: &str) -> i128 {
     super::vec::gos_rt_result_new(1, err as i64)
 }
 
-/// GC-tracked 2-slot tuple `(a, b)`; the by-value-aggregate ABI
-/// memcpys 16 contiguous bytes from the returned pointer. Mirrors the
-/// private `alloc_pair` in `combinator.rs` / `math.rs`.
-fn alloc_pair(a: i64, b: i64) -> *mut u8 {
-    let p = super::gos_rt_gc_alloc(16);
-    if !p.is_null() {
-        // SAFETY: `p` is a fresh 16-byte allocation.
-        unsafe {
-            let slots = p.cast::<i64>();
-            *slots = a;
-            *slots.add(1) = b;
-        }
-    }
-    p
-}
+/// Layout of the ed25519 `([u8], [u8])` keypair: both byte vectors are owned by
+/// the blob.
+static KEYPAIR_VECS_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
 
 /// `crypto::aead::aes_256_gcm_seal(key, nonce, plaintext, aad)
 /// -> Result<[u8], errors::Error>` - AES-256-GCM seal (ciphertext
@@ -243,7 +238,8 @@ pub unsafe extern "C" fn gos_rt_crypto_ed25519_keypair() -> i128 {
         let public = signing.verifying_key();
         let secret_vec = bytes_to_gosvec(&signing.to_bytes()) as i64;
         let public_vec = bytes_to_gosvec(&public.to_bytes()) as i64;
-        super::vec::gos_rt_result_new(0, alloc_pair(secret_vec, public_vec) as i64)
+        let pair = crate::c_abi::rc::counted_words(&[secret_vec, public_vec], &KEYPAIR_VECS_META);
+        super::vec::gos_rt_result_new(0, pair as i64)
     })
 }
 

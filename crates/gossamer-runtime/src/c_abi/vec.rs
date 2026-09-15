@@ -86,13 +86,6 @@ pub mod vec_elem_kind {
     /// via [`super::vec::gos_rt_vec_mark_rc_elems`], emitted by the MIR
     /// lowering right after constructing a vec of payload-enum elements.
     pub const RC_ENUM: u8 = 8;
-    /// A runtime-owned, fixed-width primitive `Vec<Vec<i64>>` payload. The
-    /// outer `GosVec` points at a `PackedRows` descriptor instead of an array
-    /// of child pointers; indexed access returns one stable row header from
-    /// that descriptor. This is intentionally distinct from `VEC` so normal
-    /// deep-free and pointer-slot paths can never mistake the descriptor for
-    /// a child Vec pointer.
-    pub const PACKED_ROWS: u8 = 9;
     /// Element is an aggregate - a struct, tuple, or fixed array - held
     /// inline in the storage whose slots own no heap children, and which
     /// occupies a single slot. Its slot address is the value, so a read
@@ -308,44 +301,8 @@ const VEC_REGION_FLAG: u8 = 1;
 /// a split vec; an inline vec's buffer is freed with the header block.
 const VEC_SPLIT_FLAG: u8 = 2;
 
-/// Header flag for a row owned by [`PackedRows`]. Such rows borrow their
-/// header and initial payload from the descriptor; freeing an observed row is
-/// therefore a no-op and the descriptor releases all rows together.
-const VEC_PACKED_ROW_FLAG: u8 = 4;
 /// Header was allocated as `Box<GosVec>` without an unused inline buffer.
 const VEC_COMPACT_HEADER_FLAG: u8 = 8;
-
-/// Minimum row count at which replacing one allocation per row with a packed
-/// descriptor amortises the conversion. The eligibility checks below remain
-/// semantic rather than benchmark-specific: any sufficiently large, uniform,
-/// primitive nested Vec can use it.
-const PACKED_ROWS_MIN_ROWS: i64 = 1024;
-
-/// Runtime storage for a uniform primitive nested Vec. `rows` supplies real
-/// `GosVec` headers so every existing read-only Vec ABI consumer continues to
-/// see an ordinary row pointer; `data` is one contiguous row-major payload.
-/// The descriptor owns both allocations and is reached only through an outer
-/// Vec tagged [`vec_elem_kind::PACKED_ROWS`].
-pub(crate) struct PackedRows {
-    pub(crate) rows: Box<[GosVec]>,
-    // Owns the row-major allocation addressed by `rows[*].ptr`. This stays
-    // raw so moving the descriptor does not retag and invalidate those row
-    // pointers under Miri's Stacked Borrows model.
-    data: SyncRawPtr<u64>,
-    data_len: usize,
-}
-
-impl Drop for PackedRows {
-    fn drop(&mut self) {
-        if self.data_len == 0 {
-            return;
-        }
-        unsafe {
-            let data = std::ptr::slice_from_raw_parts_mut(self.data.as_ptr(), self.data_len);
-            drop(Box::from_raw(data));
-        }
-    }
-}
 
 /// Element words held inline, immediately after the [`GosVec`] header, in a
 /// single [`InlineVec`] allocation. Six words is the selected default from the
@@ -538,156 +495,6 @@ pub(crate) unsafe fn consume_byte_vec_preserving_source<R>(
     // As above: the bytes are what the container keeps, so the source's own
     // holders are the only ones, and this takes none of their shares.
     result
-}
-
-/// Replaces a large uniform `Vec<Vec<i64>>` with contiguous fixed-width row
-/// storage. The conversion is deliberately conservative and is performed at
-/// the first indexed read, after construction is complete: every row must be
-/// uniquely owned, primitive, eight-byte wide, and have the same length.
-/// Anything that does not meet those conditions remains an ordinary Vec.
-///
-/// The returned descriptor keeps stable `GosVec` row headers, so read-only
-/// indexing and iteration need no new source-level type or ABI. A later row
-/// growth detaches that row through the existing split-buffer path and is
-/// released when the descriptor dies.
-pub(crate) unsafe fn try_pack_primitive_rows(outer: *mut GosVec) -> bool {
-    if outer.is_null() {
-        return false;
-    }
-    let outer_ref = unsafe { &mut *outer };
-    if outer_ref.elem_kind != vec_elem_kind::VEC
-        || outer_ref.len < PACKED_ROWS_MIN_ROWS
-        || vec_is_region(outer_ref)
-    {
-        return false;
-    }
-    let row_count = outer_ref.len as usize;
-    let mut width: Option<usize> = None;
-    for i in 0..row_count {
-        let slot = unsafe {
-            outer_ref
-                .ptr
-                .as_ptr()
-                .add(i * 8)
-                .cast::<usize>()
-                .read_unaligned()
-        };
-        if slot == 0 {
-            return false;
-        }
-        let row = unsafe { &*(std::ptr::with_exposed_provenance::<GosVec>(slot)) };
-        if row.elem_kind != vec_elem_kind::PRIMITIVE
-            || row.elem_bytes != 8
-            || row.len < 0
-            || row.rc.load(std::sync::atomic::Ordering::Acquire) != 1
-        {
-            return false;
-        }
-        match width {
-            Some(expected) if expected != row.len as usize => return false,
-            None => width = Some(row.len as usize),
-            _ => {}
-        }
-    }
-    let width = width.unwrap_or(0);
-    let Some(words) = row_count.checked_mul(width) else {
-        return false;
-    };
-    let mut data = std::mem::ManuallyDrop::new(vec![0u64; words].into_boxed_slice());
-    let data_len = data.len();
-    let data_base = data.as_mut_ptr();
-    let mut rows = Vec::with_capacity(row_count);
-    for i in 0..row_count {
-        let slot = unsafe {
-            outer_ref
-                .ptr
-                .as_ptr()
-                .add(i * 8)
-                .cast::<usize>()
-                .read_unaligned()
-        };
-        let row_ptr = std::ptr::with_exposed_provenance_mut::<GosVec>(slot);
-        let row = unsafe { &*row_ptr };
-        if width != 0 {
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    row.ptr.as_ptr(),
-                    data_base.add(i * width).cast::<u8>(),
-                    width * std::mem::size_of::<u64>(),
-                );
-            }
-        }
-        let data_ptr = if width == 0 {
-            std::ptr::NonNull::<u64>::dangling().as_ptr().cast::<u8>()
-        } else {
-            unsafe { data_base.add(i * width).cast::<u8>() }
-        };
-        rows.push(GosVec {
-            len: width as i64,
-            cap: width as i64,
-            elem_bytes: 8,
-            elem_kind: vec_elem_kind::PRIMITIVE,
-            region_flag: VEC_PACKED_ROW_FLAG,
-            rc: std::sync::atomic::AtomicU16::new(1),
-            ptr: SyncRawPtr::new(data_ptr),
-            generation: 0,
-            mutation_generation: 0,
-            elem_meta: SyncRawPtr::NULL,
-            owner: SyncRawPtr::NULL,
-        });
-        // The outer Vec owns the sole share of every eligible row. Release
-        // it only after copying the primitive payload into the descriptor.
-        unsafe { crate::c_abi::map::gos_rt_vec_free(row_ptr) };
-    }
-    if vec_is_split(outer_ref) {
-        let bytes = checked_buffer_bytes(outer_ref.cap as usize, outer_ref.elem_bytes as usize);
-        unsafe { free_vec_buffer(outer_ref.ptr.as_ptr(), bytes) };
-    }
-    let packed = Box::new(PackedRows {
-        rows: rows.into_boxed_slice(),
-        data: SyncRawPtr::new(data_base),
-        data_len,
-    });
-    outer_ref.ptr = SyncRawPtr::new(Box::into_raw(packed).cast::<u8>());
-    outer_ref.cap = outer_ref.len;
-    outer_ref.elem_kind = vec_elem_kind::PACKED_ROWS;
-    outer_ref.region_flag &= !VEC_SPLIT_FLAG;
-    crate::c_abi::ledger::vec_packed_conversion(row_count, words * std::mem::size_of::<u64>());
-    true
-}
-
-/// Returns the stable row header for a packed outer Vec.
-pub(crate) unsafe fn packed_row_at(outer: *const GosVec, idx: i64) -> *mut u8 {
-    if outer.is_null() || idx < 0 {
-        return std::ptr::null_mut();
-    }
-    let outer = unsafe { &*outer };
-    if outer.elem_kind != vec_elem_kind::PACKED_ROWS || idx >= outer.len || outer.ptr.is_null() {
-        return std::ptr::null_mut();
-    }
-    let packed = unsafe { &*outer.ptr.as_ptr().cast::<PackedRows>() };
-    packed
-        .rows
-        .get(idx as usize)
-        .map_or(std::ptr::null_mut(), |row| {
-            std::ptr::from_ref(row).cast_mut().cast::<u8>()
-        })
-}
-
-/// Releases a packed descriptor and any row which detached to a normal split
-/// buffer after a mutation. Initial row data is owned by `PackedRows::data`.
-pub(crate) unsafe fn free_packed_rows(outer: &GosVec) {
-    if outer.ptr.is_null() {
-        return;
-    }
-    let packed = unsafe { Box::from_raw(outer.ptr.as_ptr().cast::<PackedRows>()) };
-    for row in &packed.rows {
-        if vec_is_split(row) {
-            let bytes = checked_buffer_bytes(row.cap as usize, row.elem_bytes as usize);
-            unsafe { free_vec_buffer(row.ptr.as_ptr(), bytes) };
-        }
-    }
-    drop(packed);
 }
 
 /// Allocate a GosVec header from the active region if one is open (so it is
@@ -1312,6 +1119,23 @@ pub unsafe extern "C" fn gos_rt_vec_mark_vec_elems(v: *mut GosVec) {
     vec.elem_kind = vec_elem_kind::VEC;
 }
 
+/// Tags `v` as owning `String` elements ([`vec_elem_kind::STRING`]):
+/// `gos_rt_vec_free` releases each element and storage duplication retains
+/// each copy. Emitted by the MIR lowering after a runtime shim whose callback
+/// answered each element as a fresh share. Only a `PRIMITIVE` vec is
+/// re-tagged; no-op for null / region vecs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_mark_str_elems(v: *mut GosVec) {
+    if v.is_null() {
+        return;
+    }
+    let vec = unsafe { &mut *v };
+    if vec_is_region(vec) || vec.elem_kind != vec_elem_kind::PRIMITIVE || vec.elem_bytes != 8 {
+        return;
+    }
+    vec.elem_kind = vec_elem_kind::STRING;
+}
+
 /// Rebuilds every nested-vector element of `v` in index order, in place.
 ///
 /// A `Vec<Vec<T>>` grown element by element has its element storage scattered
@@ -1404,6 +1228,22 @@ pub unsafe extern "C" fn gos_rt_vec_set_slot_children(v: *mut GosVec, meta: *con
     }
 }
 
+/// Declares that `v`'s elements own the counted words `children` names, so
+/// each push takes a share of them and the vec's free gives those back. No-op
+/// for a null or region vec, or when no word is counted.
+pub(crate) fn vec_own_slot_children(v: *mut GosVec, children: Box<[VecSlotChild]>) {
+    if v.is_null() || children.is_empty() {
+        return;
+    }
+    // SAFETY: callers hand a live header they just allocated.
+    let vec = unsafe { &mut *v };
+    if vec_is_region(vec) {
+        return;
+    }
+    vec.elem_kind = vec_elem_kind::AGGR_OWNED;
+    ensure_vec_owner(vec).slot_children = Some(children);
+}
+
 /// Release the guarded children of every element of an
 /// `AGGR_GUARDED` vec. Called by `gos_rt_vec_free` before the buffer
 /// is reclaimed.
@@ -1466,54 +1306,103 @@ pub(crate) fn vec_elem_is_inline_aggregate(v: &GosVec) -> bool {
 /// The payload word for an element handed back as an owned value.
 ///
 /// A word-wide element is the value itself. A wider one is a flat slot block
-/// the caller addresses in place, so it is copied out of the container: the
-/// value the caller holds has to stay readable across the next mutation of
-/// the storage it came from.
+/// the caller addresses in place, so its words move into a counted blob: the
+/// value has to stay readable across the next mutation of the storage it came
+/// from, and the carrier holding it gives back the children those words own.
 pub(crate) unsafe fn vec_elem_owned_payload_word(v: &GosVec, idx: i64) -> i64 {
-    let stride = v.elem_bytes as usize;
-    if stride == 0 || v.ptr.is_null() || !vec_elem_is_inline_aggregate(v) {
-        return unsafe { vec_elem_load_i64(v, idx) };
-    }
-    let copy = crate::c_abi::gc::gos_rt_gc_alloc(stride as u64);
-    if copy.is_null() {
-        return 0;
-    }
-    let src = unsafe { v.ptr.add((idx as usize) * stride) };
-    unsafe { crate::c_abi::string::copy_small_bytes(src, copy, stride) };
-    copy as i64
+    unsafe { vec_elem_payload_blob(v, idx, false) }
 }
 
 /// The payload word for an element handed to the program while the vec keeps
 /// its own.
 ///
-/// An inline aggregate is copied out of the storage: the value has to stay
-/// readable after the vec grows, is mutated, or dies, none of which the slot
-/// address survives. Both holders are then live, so each of the copy's
-/// reference-counted children gains its own share.
+/// An inline aggregate is copied into a counted blob as for an owned read.
+/// Both holders are then live, so each of the copy's children gains a share.
 pub(crate) unsafe fn vec_elem_shared_payload_word(v: &GosVec, idx: i64) -> i64 {
+    unsafe { vec_elem_payload_blob(v, idx, true) }
+}
+
+/// Copies element `idx` into the counted blob an `Option` carrier answers,
+/// laid out by what the element's words own: the vec's guarded meta, its slot
+/// children, or nothing for an element of scalars.
+unsafe fn vec_elem_payload_blob(v: &GosVec, idx: i64, shared: bool) -> i64 {
     let stride = v.elem_bytes as usize;
     if stride == 0 || v.ptr.is_null() || !vec_elem_is_inline_aggregate(v) {
         return unsafe { vec_elem_load_i64(v, idx) };
     }
-    let copy = crate::c_abi::gc::gos_rt_gc_alloc(stride as u64);
+    let guarded = vec_elem_meta(std::ptr::from_ref(v));
+    let meta = match v.elem_kind {
+        vec_elem_kind::AGGR_GUARDED if !guarded.is_null() => guarded,
+        vec_elem_kind::AGGR_OWNED => vec_slot_children(v)
+            .map_or(crate::c_abi::rc::LEAF_BLOB_META.as_ptr(), |children| {
+                slot_children_blob_meta(children).as_ptr()
+            }),
+        _ => crate::c_abi::rc::LEAF_BLOB_META.as_ptr(),
+    };
+    let src = unsafe { v.ptr.add((idx as usize) * stride) };
+    let (copy, counted) =
+        unsafe { crate::c_abi::rc::counted_element_copy(stride as u64, meta, src) };
     if copy.is_null() {
         return 0;
     }
-    let src = unsafe { v.ptr.add((idx as usize) * stride) };
-    unsafe { crate::c_abi::string::copy_small_bytes(src, copy, stride) };
-    match v.elem_kind {
-        vec_elem_kind::AGGR_GUARDED => {
-            let meta = vec_elem_meta(std::ptr::from_ref(v));
-            if !meta.is_null() {
-                unsafe { crate::c_abi::rc::gos_rt_aggr_retain_children(copy, meta) };
-            }
+    if shared && counted {
+        match v.elem_kind {
+            vec_elem_kind::AGGR_GUARDED if !guarded.is_null() => unsafe {
+                crate::c_abi::rc::gos_rt_aggr_retain_children(copy, guarded);
+            },
+            vec_elem_kind::AGGR_OWNED => unsafe {
+                vec_retain_slot_children(std::ptr::from_ref(v), copy);
+            },
+            _ => {}
         }
-        vec_elem_kind::AGGR_OWNED => unsafe {
-            vec_retain_slot_children(std::ptr::from_ref(v), copy);
-        },
-        _ => {}
     }
     copy as i64
+}
+
+/// A slot-children list with the counted-blob meta that names it.
+type InternedSlotChildren = (Box<[VecSlotChild]>, &'static [i64]);
+
+/// The counted-blob meta naming `children`. It is interned for the life of
+/// the process because a copy taken out of a vec can outlive that vec.
+fn slot_children_blob_meta(children: &[VecSlotChild]) -> &'static [i64] {
+    thread_local! {
+        static SEEN: std::cell::RefCell<Vec<InternedSlotChildren>> =
+            const { std::cell::RefCell::new(Vec::new()) };
+    }
+    static INTERNED: parking_lot::Mutex<Vec<InternedSlotChildren>> =
+        parking_lot::Mutex::new(Vec::new());
+    let find = |table: &[InternedSlotChildren]| {
+        table
+            .iter()
+            .find(|(layout, _)| **layout == *children)
+            .map(|(_, meta)| *meta)
+    };
+    if let Some(meta) = SEEN.with(|seen| find(&seen.borrow())) {
+        return meta;
+    }
+    let meta = {
+        let mut interned = INTERNED.lock();
+        if let Some(meta) = find(&interned) {
+            meta
+        } else {
+            let mut blob = Vec::with_capacity(2 + children.len() * 4);
+            blob.push(gossamer_abi::rc::RC_KIND_SLOT_CHILDREN);
+            blob.push(i64::try_from(children.len()).unwrap_or(i64::MAX));
+            for child in children {
+                blob.extend([
+                    child.gate,
+                    i64::try_from(child.disc_word).unwrap_or(i64::MAX),
+                    i64::try_from(child.word).unwrap_or(i64::MAX),
+                    i64::from(child.kind),
+                ]);
+            }
+            let meta: &'static [i64] = Box::leak(blob.into_boxed_slice());
+            interned.push((children.into(), meta));
+            meta
+        }
+    };
+    SEEN.with(|seen| seen.borrow_mut().push((children.into(), meta)));
+    meta
 }
 
 /// Writes `value` to element `idx` of `v`, truncating to the
@@ -1537,7 +1426,9 @@ pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64)
     }
     let old: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
     match v.elem_kind {
-        vec_elem_kind::STRING => unsafe { crate::c_abi::string::gos_rt_str_free(old.cast()) },
+        vec_elem_kind::STRING => unsafe {
+            crate::c_abi::string::gos_rt_str_free_typed(old.cast());
+        },
         vec_elem_kind::VEC => unsafe { crate::c_abi::map::gos_rt_vec_free(old.cast()) },
         vec_elem_kind::MAP => unsafe { crate::c_abi::map::gos_rt_map_free(old.cast()) },
         vec_elem_kind::SET => unsafe { crate::c_abi::map::gos_rt_set_free(old.cast()) },
@@ -1610,8 +1501,7 @@ pub unsafe extern "C" fn gos_rt_vec_new(elem_bytes: u32) -> *mut GosVec {
 /// An inline-aggregate kind describes elements whose heap children are
 /// described by the vec's metadata carrier rather than by the tag, and the
 /// carrier is attached after the elements are in place (see
-/// [`vec_set_slot_children`]); a packed-rows vec likewise gets its tag when
-/// the descriptor is installed. Such a request builds the storage untagged
+/// [`vec_set_slot_children`]). Such a request builds the storage untagged
 /// and is not a mistake; a tag outside the set is.
 ///
 /// Every one-word owning kind - including [`vec_elem_kind::RC_ENUM`], whose
@@ -1620,9 +1510,7 @@ pub unsafe extern "C" fn gos_rt_vec_new(elem_bytes: u32) -> *mut GosVec {
 /// free from the moment it exists.
 fn header_elem_kind(requested: u8, site: &str) -> u8 {
     match requested {
-        vec_elem_kind::AGGR_GUARDED | vec_elem_kind::AGGR_OWNED | vec_elem_kind::PACKED_ROWS => {
-            vec_elem_kind::PRIMITIVE
-        }
+        vec_elem_kind::AGGR_GUARDED | vec_elem_kind::AGGR_OWNED => vec_elem_kind::PRIMITIVE,
         kind if kind <= vec_elem_kind::ERROR
             || kind == vec_elem_kind::RC_ENUM
             || kind == vec_elem_kind::AGGR_FLAT
@@ -1980,15 +1868,17 @@ pub unsafe extern "C" fn gos_rt_vec_set_i128(v: *mut GosVec, idx: i64, value: i1
     });
 }
 
+/// Capacity a growing vec moves to: at least double the old one, and a power
+/// of two. A vec that outgrows its inline buffer (a few elements wide) then
+/// continues on the 4, 8, 16 sequence a vec with no inline buffer follows,
+/// rather than on one offset by the inline capacity.
 fn next_geometric_cap(old_cap: i64, min_cap: i64) -> i64 {
-    let mut cap = if old_cap <= 0 { 4 } else { old_cap };
-    while cap < min_cap {
-        cap = cap
-            .checked_mul(2)
-            .filter(|next| *next > cap)
-            .unwrap_or(min_cap);
-    }
-    cap
+    let wanted = old_cap.saturating_mul(2).max(4).max(min_cap);
+    u64::try_from(wanted)
+        .ok()
+        .and_then(u64::checked_next_power_of_two)
+        .and_then(|cap| i64::try_from(cap).ok())
+        .unwrap_or(wanted)
 }
 
 unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
@@ -2369,7 +2259,9 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
         match vec.elem_kind {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_retain(ptr.cast()),
             vec_elem_kind::VEC => vec_retain_header(ptr.cast()),
-            vec_elem_kind::RC_ENUM => crate::c_abi::rc::gos_rt_rc_retain(ptr),
+            vec_elem_kind::RC_ENUM | vec_elem_kind::ERROR => {
+                crate::c_abi::rc::gos_rt_rc_retain(ptr);
+            }
             // A JSON handle carries no count, so the copy takes a box of its
             // own onto the same document and the slot names that one.
             vec_elem_kind::JSON => {
@@ -2377,8 +2269,8 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
                 slot.cast::<usize>()
                     .write_unaligned((cloned.cast::<u8>()).expose_provenance());
             }
-            // GosMap and GosError do not currently have a retain protocol.
-            vec_elem_kind::MAP | vec_elem_kind::ERROR => return false,
+            // A GosMap carries no count, so a shared element has no protocol.
+            vec_elem_kind::MAP => return false,
             _ => {}
         }
     }
@@ -2493,7 +2385,7 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
         if src_ref.elem_bytes != dst_ref.elem_bytes || src_ref.elem_kind != dst_ref.elem_kind {
             return;
         }
-        if matches!(src_ref.elem_kind, vec_elem_kind::MAP | vec_elem_kind::ERROR) {
+        if src_ref.elem_kind == vec_elem_kind::MAP {
             return;
         }
         let len = src_ref.len.max(0);
@@ -2885,6 +2777,46 @@ pub unsafe extern "C" fn gos_rt_option_unwrap(r: i128) -> i64 {
     })
 }
 
+/// The carrier a two-word payload was boxed as, read back by value. A null box
+/// reads as `None`.
+fn boxed_carrier_of(r: i128) -> i128 {
+    let boxed: *const u8 = std::ptr::with_exposed_provenance(result_payload_of(r) as usize);
+    if boxed.is_null() {
+        return gos_rt_result_new(1, 0);
+    }
+    // SAFETY: the payload word of a carrier whose payload is itself a carrier
+    // is the address of the 16-byte box the constructor copied it into, alive
+    // for as long as the outer carrier is.
+    unsafe { boxed.cast::<i128>().read_unaligned() }
+}
+
+/// `option.unwrap()` / `option.expect(msg)` where the payload is itself an
+/// `Option` / `Result`. The answer is the boxed carrier as it stands; the box
+/// keeps its own share of that carrier's payload.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
+    ffi_entry!(0, {
+        if result_disc_of(r) != 0 {
+            crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
+            return 0;
+        }
+        boxed_carrier_of(r)
+    })
+}
+
+/// `result.unwrap()` / `result.expect(msg)` where the `Ok` payload is itself an
+/// `Option` / `Result`, answered as [`gos_rt_option_unwrap_carrier`] does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_result_unwrap_carrier(r: i128) -> i128 {
+    ffi_entry!(0, {
+        if result_disc_of(r) != 0 {
+            crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
+            return 0;
+        }
+        boxed_carrier_of(r)
+    })
+}
+
 /// `result.unwrap_or(default)` / `option.unwrap_or(default)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_result_unwrap_or(r: i128, default: i64) -> i64 {
@@ -2937,11 +2869,66 @@ pub extern "C" fn gos_rt_result_unwrap_or_str(r: i128, default: i64) -> i64 {
     default
 }
 
+/// Reads the two-word carrier a map keeps boxed, answering `None` for a null
+/// box: a map reader answers the box's address rather than the carrier.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_carrier_from_box(word: i64) -> i128 {
+    let boxed: *const u8 = std::ptr::with_exposed_provenance(word as usize);
+    if boxed.is_null() {
+        return gos_rt_result_new(1, 0);
+    }
+    // SAFETY: a non-null word a map reader answers for a two-word value is the
+    // address of the entry's 16-byte carrier.
+    unsafe { boxed.cast::<i128>().read_unaligned() }
+}
+
+/// Takes a share of a carrier's `Ok` / `Some` `String` payload, for a field
+/// copy that holds the carrier alongside its source. A no-op on the other arm.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_option_str_payload_retain(r: i128) {
+    if result_disc_of(r) != 0 || result_payload_of(r) == 0 {
+        return;
+    }
+    // SAFETY: the payload word of an `Ok`/`Some` arm whose static type is a
+    // `String` is a runtime string body.
+    unsafe {
+        crate::c_abi::string::gos_rt_str_retain_typed(
+            result_payload_of(r) as usize as *const std::ffi::c_char
+        );
+    }
+}
+
+/// Gives back a carrier field's `Ok` / `Some` `String` payload at the field's
+/// death. A no-op on the other arm.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_option_str_payload_release(r: i128) {
+    gos_rt_result_ok_payload_release(r, 1);
+}
+
+/// Takes a share of a carrier's `Ok` / `Some` `Vec` payload, for a field copy
+/// that holds the carrier alongside its source. A no-op on the other arm.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_option_vec_payload_retain(r: i128) {
+    if result_disc_of(r) != 0 || result_payload_of(r) == 0 {
+        return;
+    }
+    // SAFETY: the payload word of an `Ok`/`Some` arm whose static type is a
+    // `Vec` is a live `GosVec` header.
+    unsafe { crate::c_abi::gos_rt_vec_retain(result_payload_of(r) as usize as *mut GosVec) };
+}
+
+/// Gives back a carrier field's `Ok` / `Some` `Vec` payload at the field's
+/// death. A no-op on the other arm.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_option_vec_payload_release(r: i128) {
+    gos_rt_result_ok_payload_release(r, 2);
+}
+
 /// Releases the heap payload of a carrier's `Ok` / `Some` arm, and nothing on
 /// the other arm, whose payload word belongs to the error value.
 ///
 /// `kind` names the payload's storage: 1 a `String`, 2 a `Vec` / slice, 3 a
-/// `json::Value` handle. This is the give-back for `map`, which hands the
+/// `json::Value` handle, 4 an `errors::Error` cell. This is the give-back for `map`, which hands the
 /// payload to a closure that answers a value of its own; the carrier itself
 /// never releases a payload of any of those kinds.
 #[unsafe(no_mangle)]
@@ -2971,6 +2958,53 @@ pub extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
                 payload as usize as *mut crate::c_abi::json::GosJson,
             );
         },
+        // SAFETY: as above, for an error cell.
+        4 => unsafe { crate::c_abi::rc::gos_rt_rc_release(payload as usize as *mut u8) },
+        _ => {}
+    }
+}
+
+/// Releases the heap payload of whichever arm a carrier holds: `ok_kind` names
+/// the `Ok` / `Some` payload's storage and `err_kind` the `Err` payload's, in
+/// the kinds [`gos_rt_result_ok_payload_release`] takes, with 0 for an arm
+/// whose payload is not heap storage the carrier owns.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_result_payload_release(r: i128, ok_kind: i64, err_kind: i64) {
+    match result_disc_of(r) {
+        0 => gos_rt_result_ok_payload_release(r, ok_kind),
+        // The error arm's payload word is laid out as the ok arm's is, so the
+        // same release reads it once the discriminant has chosen the kind.
+        1 => gos_rt_result_ok_payload_release(gos_rt_result_new(0, result_payload_of(r)), err_kind),
+        _ => {}
+    }
+}
+
+/// Takes a share of the heap payload of whichever arm a carrier holds, by the
+/// kinds [`gos_rt_result_payload_release`] takes: 1 a `String`, 2 a `Vec`, 4 an
+/// `errors::Error` cell, 0 an arm with nothing to share.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_result_payload_retain(r: i128, ok_kind: i64, err_kind: i64) {
+    let kind = match result_disc_of(r) {
+        0 => ok_kind,
+        1 => err_kind,
+        _ => 0,
+    };
+    let payload = result_payload_of(r);
+    if payload == 0 {
+        return;
+    }
+    match kind {
+        // SAFETY: the payload word of an arm whose static type is a `String`
+        // is a runtime string body.
+        1 => unsafe {
+            crate::c_abi::string::gos_rt_str_retain_typed(
+                payload as usize as *const std::ffi::c_char,
+            );
+        },
+        // SAFETY: as above, for a live `GosVec` header.
+        2 => unsafe { crate::c_abi::gos_rt_vec_retain(payload as usize as *mut GosVec) },
+        // SAFETY: as above, for a live error cell.
+        4 => unsafe { crate::c_abi::rc::gos_rt_rc_retain(payload as usize as *mut u8) },
         _ => {}
     }
 }
@@ -3248,28 +3282,8 @@ pub(crate) fn decode_header_tuple_vec(headers: *const GosVec) -> Vec<(String, St
 }
 
 #[cfg(test)]
-mod packed_row_tests {
+mod repeat_primitive_tests {
     use super::*;
-
-    #[test]
-    fn uniform_primitive_rows_pack_with_bulk_copy() {
-        unsafe {
-            let outer = gos_rt_vec_with_capacity_typed(8, PACKED_ROWS_MIN_ROWS, vec_elem_kind::VEC);
-            for row_index in 0..PACKED_ROWS_MIN_ROWS {
-                let row = gos_rt_vec_with_capacity(8, 3);
-                gos_rt_vec_push_i64(row, row_index);
-                gos_rt_vec_push_i64(row, row_index + 1);
-                gos_rt_vec_push_i64(row, row_index + 2);
-                let slot = row as usize;
-                gos_rt_vec_push(outer, std::ptr::addr_of!(slot).cast());
-            }
-            assert!(try_pack_primitive_rows(outer));
-            let row = packed_row_at(outer, 777).cast::<GosVec>();
-            assert_eq!(gos_rt_vec_get_i64(row, 0), 777);
-            assert_eq!(gos_rt_vec_get_i64(row, 2), 779);
-            crate::c_abi::map::gos_rt_vec_free(outer);
-        }
-    }
 
     #[test]
     fn primitive_repeat_constructs_final_length_and_values() {

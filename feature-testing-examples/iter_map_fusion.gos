@@ -1,0 +1,67 @@
+// Method chains over a Map's entries, keys, and values walk the entries in the
+// order the map's own `for` loop does, and call each closure as often as the
+// unfused chain.
+
+fn main() {
+    let mut counts: Map<char, i64> = Map::new()
+    for c in "mississippi banana".chars() {
+        counts.inc(c)
+    }
+    let mut scores: Map<i64, f64> = Map::new()
+    for i in 0..12 {
+        scores.insert(i * 37 % 101, i as f64 * 1.5)
+    }
+    scores.remove(37)
+    scores.insert(500, -2.25)
+
+    let mut calls = #[]
+    let letters = counts.iter().filter(|p| p.1 > 1).map(|p| p.0).collect()
+    println("letters {:?}", letters)
+    let weight = counts.iter().map(|(c, n)| (c as i64) * n).sum()
+    println("weight {}", weight)
+    let first_big = counts.iter().find(|p| {
+        calls.push(p.0 as i64)
+        p.1 >= 4
+    })
+    println("first_big {:?} after {} calls", first_big, calls.len())
+    let position = counts.keys().position(|c| c == 'n')
+    println("position {:?}", position)
+    let total = counts.values().sum()
+    println("total {}", total)
+    let most = counts.values().max()
+    let least = counts.values().min()
+    println("most {:?} least {:?}", most, least)
+    let pairs = counts.iter().enumerate().take(3).map(|(i, p)| i * 100 + p.1).collect()
+    println("pairs {:?}", pairs)
+    let any_odd = counts.values().any(|n| n % 2 == 1)
+    let all_small = scores.keys().all(|k| k < 1000)
+    println("any_odd {} all_small {}", any_odd, all_small)
+
+    let sum_scores = scores.values().sum()
+    println("sum_scores {}", sum_scores)
+    let key_order = scores.keys()
+    let mut walked = #[]
+    for (k, _) in scores {
+        walked.push(k)
+    }
+    println("same order {}", key_order == walked)
+    let folded = scores.iter().skip(2).step_by(3).fold(0.0, |acc, (k, v)| acc + k as f64 * v)
+    println("folded {}", folded)
+    let zipped = scores.keys().zip(0..4).map(|(k, i)| k * i).sum()
+    println("zipped {}", zipped)
+    let while_small = scores.iter().take_while(|p| p.0 < 90).count()
+    let past_small = scores.iter().skip_while(|p| p.0 < 90).count()
+    println("take_while {} skip_while {}", while_small, past_small)
+    let halves = scores.values().filter_map(|v| if v > 5.0 { Some(v / 2.0) } else { None })
+    println("halves {:?}", halves)
+
+    let mut seen = #[]
+    let lazy_hits = counts.iter().map(|p| {
+        seen.push(p.1)
+        p.1
+    }).filter(|n| n > 1).take(2).count()
+    println("lazy_hits {} seen {}", lazy_hits, seen.len())
+
+    let empty: Map<i64, i64> = Map::new()
+    println("empty {} {:?} {}", empty.values().sum(), empty.keys().max(), empty.iter().count())
+}

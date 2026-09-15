@@ -163,11 +163,12 @@ pub(super) struct IntrinsicContext {
     /// up the target function without threading the parent map
     /// through every call.
     pub(super) functions: HashMap<String, FuncId>,
-    /// Win64 vector-return wrappers (`<name>$cabi`) for bodies the Rust
-    /// runtime enters as `extern "C" fn(..) -> i128`, keyed by the body's
-    /// name. `gos_fn_addr` hands the wrapper's address over in place of the
-    /// body's own so the carrier comes back in the register the runtime
-    /// reads. Empty on every other target.
+    /// Entry wrappers for address-taken bodies whose compiled convention is
+    /// not the one a callable is entered with, keyed by the body's name:
+    /// Win64 vector-return wrappers (`<name>$cabi`) for a two-word carrier
+    /// return, and result-slot wrappers (`<name>$addr`) for an aggregate
+    /// return. `gos_fn_addr` hands the wrapper's address over in place of the
+    /// body's own.
     pub(super) cabi_callbacks: HashMap<String, FuncId>,
     /// Mirror of `function_ids_by_def` so `Operand::FnRef { def }`
     /// operands in non-call position (`let f = fib; f(5)`) can be
@@ -379,13 +380,7 @@ impl IntrinsicContext {
             ConstValue::Int(n) => i64_truncate(*n) as u64,
             ConstValue::Bool(b) => u64::from(*b),
             ConstValue::Char(c) => u64::from(u32::from(*c)),
-            ConstValue::Float(bits) => {
-                if cl_ty == types::F32 {
-                    u64::from((f64::from_bits(*bits) as f32).to_bits())
-                } else {
-                    *bits
-                }
-            }
+            ConstValue::Float(bits) => *bits,
             ConstValue::Unit => 0,
             ConstValue::Str(_) => {
                 bail!("native codegen: static mut string init unsupported; running on VM")

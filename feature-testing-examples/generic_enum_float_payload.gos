@@ -1,0 +1,55 @@
+// A generic enum's payload is bound at the type the value's own instantiation
+// gives it, whether the match sits in a non-generic body or in a generic one
+// whose parameters sit at different positions from the enum's.
+
+struct Point { x: f64, y: f64 }
+
+enum Maybe<T> {
+    Just(T)
+    Nothing
+}
+
+enum Tagged<T> {
+    Val { v: T, tag: i64 }
+    Empty
+}
+
+fn or_else<T>(m: Maybe<T>, d: T) -> T {
+    match m {
+        Maybe::Just(v) => v
+        Maybe::Nothing => d
+    }
+}
+
+fn pick<A, B>(m: Maybe<B>, a: A, d: B) -> B {
+    println("{}", a)
+    if let Maybe::Just(v) = m { v } else { d }
+}
+
+fn tag_val<T>(t: Tagged<T>, d: T) -> T {
+    match t {
+        Tagged::Val { v, tag } => {
+            println("tag {}", tag)
+            v
+        }
+        Tagged::Empty => d
+    }
+}
+
+fn main() {
+    let direct: Maybe<f64> = Maybe::Just(0.75)
+    match direct {
+        Maybe::Just(v) => println("{}", v)
+        Maybe::Nothing => println("none")
+    }
+    let named: Tagged<f64> = Tagged::Val { v: 5.25, tag: 2 }
+    if let Tagged::Val { v, tag } = named {
+        println("{} {}", v, tag)
+    }
+    println("{}", or_else(Maybe::Just(2.5), 0.0))
+    println("{}", or_else(Maybe::Nothing, 9.25))
+    println("{}", pick(Maybe::Just(1.5), 7, 0.0))
+    println("{}", tag_val(Tagged::Val { v: 6.5, tag: 3 }, 0.0))
+    let p = or_else(Maybe::Just(Point { x: 1.5, y: 2.5 }), Point { x: 0.0, y: 0.0 })
+    println("{} {}", p.x, p.y)
+}

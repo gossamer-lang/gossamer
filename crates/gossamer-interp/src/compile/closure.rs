@@ -112,6 +112,10 @@ impl<'tcx> FnBuilder<'tcx> {
         // inline stack into it so a callee mid-inline in the enclosing
         // function is never re-inlined across the closure boundary.
         b.inlining.clone_from(&self.inlining);
+        // A closure body belongs to the instantiation of the function it is
+        // written in, so it reads the same dispatch targets.
+        b.dispatch = self.dispatch;
+        b.dispatch_key = self.dispatch_key;
         // Captured upvalues occupy the leading registers; the names bind
         // to them below, once the declared parameters have claimed the
         // rest of the arity prefix.

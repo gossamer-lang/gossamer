@@ -39,14 +39,15 @@ use std::mem;
 use std::sync::Arc;
 
 #[cfg(target_arch = "wasm32")]
-use crate::jit_stub::{ArrayElem, JitFn, JitKind, ResultScalarKind, TupleElem};
+use crate::jit_stub::{ArrayElem, JitFn, JitKind, TupleElem};
+use gossamer_abi::jit_carrier::{CarrierNode, CarrierShape};
 #[cfg(not(target_arch = "wasm32"))]
-use gossamer_codegen_cranelift::{ArrayElem, JitFn, JitKind, ResultScalarKind, TupleElem};
+use gossamer_codegen_cranelift::{ArrayElem, JitFn, JitKind, TupleElem};
 use gossamer_runtime::c_abi as rt;
 
 use crate::value::{
-    NativeEnumShape, NativeFieldKind, NativeStructShape, SmolStr, StructInner, ThreadConfinedCell,
-    Value, VariantInner, native_struct_shape,
+    NativeEnumShape, NativeFieldKind, NativeFieldPlacement, NativeStructShape, SmolStr,
+    StructInner, ThreadConfinedCell, Value, VariantInner, native_struct_shape,
 };
 
 /// One trampoline-owned native object built for an aggregate parameter,
@@ -873,12 +874,13 @@ impl NativeStructBacking {
 
 impl Drop for NativeStructBacking {
     fn drop(&mut self) {
-        for (slot, (_, kind)) in self.slots.iter().zip(self.shape.fields.iter()) {
-            if matches!(kind, NativeFieldKind::Str) && *slot != 0 {
+        for (place, (_, kind)) in self.shape.placements.iter().zip(self.shape.fields.iter()) {
+            let slot = read_struct_field(&self.slots, *place);
+            if matches!(kind, NativeFieldKind::Str) && slot != 0 {
                 // SAFETY: string slots are owned native strings built by
                 // `build_native_struct` or written by a native body into this
                 // trampoline-owned struct block.
-                unsafe { free_native(JitKind::NativeStr, *slot) };
+                unsafe { free_native(JitKind::NativeStr, slot) };
             }
         }
     }
@@ -931,9 +933,47 @@ fn build_native_array_block(value: &Value, len: u32, class: ArrayElem) -> Option
     Some(slots)
 }
 
+/// The word a struct field holds, widened from its placement's bytes.
+fn read_struct_field(slots: &[i64], place: NativeFieldPlacement) -> i64 {
+    let start = place.offset as usize;
+    let end = start + usize::from(place.bytes);
+    let mut bytes = [0u8; 8];
+    for (i, byte) in bytes.iter_mut().enumerate().take(end - start) {
+        let at = start + i;
+        *byte = slots
+            .get(at / 8)
+            .map_or(0, |word| word.to_le_bytes()[at % 8]);
+    }
+    let raw = u64::from_le_bytes(bytes);
+    match (place.bytes, place.signed) {
+        (1, true) => i64::from(raw as u8 as i8),
+        (2, true) => i64::from(raw as u16 as i16),
+        (4, true) => i64::from(raw as u32 as i32),
+        _ => raw as i64,
+    }
+}
+
+/// Writes the low bytes of `word` a struct field's placement spans.
+fn write_struct_field(slots: &mut [i64], place: NativeFieldPlacement, word: i64) {
+    let start = place.offset as usize;
+    for (i, byte) in word
+        .to_le_bytes()
+        .iter()
+        .take(usize::from(place.bytes))
+        .enumerate()
+    {
+        let at = start + i;
+        if let Some(slot) = slots.get_mut(at / 8) {
+            let mut le = slot.to_le_bytes();
+            le[at % 8] = *byte;
+            *slot = i64::from_le_bytes(le);
+        }
+    }
+}
+
 /// Marshals a supported `Value::Struct` into a freshly allocated flat
-/// field-slot block (the compiled-tier struct layout: one 8-byte slot per
-/// field, field `i` at byte offset `i * 8`, NO RC header). String fields are
+/// block laid out as the compiled tiers lay the struct out, with NO RC
+/// header. String fields are
 /// copied into owned native strings held by the backing block. The caller
 /// passes the block pointer to the JIT body and keeps it alive across the
 /// call; a `&mut self` body mutates its slots in place and those slots are
@@ -949,7 +989,7 @@ fn build_native_struct(
     if inner.fields.len() != shape.fields.len() {
         return None;
     }
-    let mut slots = vec![0i64; shape.fields.len()].into_boxed_slice();
+    let mut slots = vec![0i64; shape.words].into_boxed_slice();
     for (i, (_, kind)) in shape.fields.iter().enumerate() {
         let word = match (kind, &inner.fields[i]) {
             (NativeFieldKind::I64, Value::Int(n)) => *n,
@@ -968,17 +1008,18 @@ fn build_native_struct(
                 return None;
             }
         };
-        slots[i] = word;
+        write_struct_field(&mut slots, shape.placements[i], word);
     }
     Some(NativeStructBacking { slots, shape })
 }
 
 fn free_native_struct_slots(slots: &[i64], shape: &NativeStructShape) {
-    for (slot, (_, kind)) in slots.iter().zip(shape.fields.iter()) {
-        if matches!(kind, NativeFieldKind::Str) && *slot != 0 {
+    for (place, (_, kind)) in shape.placements.iter().zip(shape.fields.iter()) {
+        let slot = read_struct_field(slots, *place);
+        if matches!(kind, NativeFieldKind::Str) && slot != 0 {
             // SAFETY: only slots already written by `build_native_struct` are
             // non-zero here, and each is an owned native string.
-            unsafe { free_native(JitKind::NativeStr, *slot) };
+            unsafe { free_native(JitKind::NativeStr, slot) };
         }
     }
 }
@@ -990,15 +1031,15 @@ fn read_native_struct(ptr: i64, shape: &NativeStructShape) -> Value {
     if ptr == 0 {
         return Value::Unit;
     }
-    let base = ptr as *const i64;
+    // SAFETY: `ptr` is the trampoline-owned backing buffer of `shape.words`
+    // initialised i64 slots.
+    let slots = unsafe { std::slice::from_raw_parts(ptr as *const i64, shape.words) };
     let fields: Box<[(&'static str, Value)]> = shape
         .fields
         .iter()
-        .enumerate()
-        .map(|(i, (name, kind))| {
-            // SAFETY: `base` is the trampoline-owned backing buffer of
-            // `shape.fields.len()` initialised i64 slots; slot `i` is in bounds.
-            let word = unsafe { *base.add(i) };
+        .zip(&shape.placements)
+        .map(|((name, kind), place)| {
+            let word = read_struct_field(slots, *place);
             let v = match kind {
                 NativeFieldKind::I64 => Value::Int(word),
                 NativeFieldKind::F64 => Value::Float(f64::from_bits(word as u64)),
@@ -1081,14 +1122,132 @@ fn free_native_enum(ptr: i64, shape: &crate::value::NativeEnumShape) {
     }
 }
 
-/// The VM value a two-word carrier's payload word stands for.
-fn decode_carrier_scalar(kind: ResultScalarKind, payload: i64) -> Value {
-    use ResultScalarKind as K;
-    match kind {
-        K::I64 => Value::Int(payload),
-        K::F64 => Value::Float(f64::from_bits(payload as u64)),
-        K::Bool => Value::Bool(payload & 1 != 0),
-        K::Char => Value::Char(char::from_u32(payload as u32).unwrap_or('\u{fffd}')),
+/// Carriers built for a call's parameters, each word pair at a stable address
+/// the body reads through. Each holds one share of its payload and the body
+/// only borrows it, so the shares are given back when the dispatch ends, by
+/// whichever path it ends.
+struct BuiltCarriers(Vec<(CarrierShape, Box<[i64; 2]>)>);
+
+impl Drop for BuiltCarriers {
+    fn drop(&mut self) {
+        for (shape, words) in &self.0 {
+            release_carrier_words(*shape, 0, words[0], words[1]);
+        }
+    }
+}
+
+/// The VM value of the carrier at node `at` of `shape` whose words are `disc`
+/// and `payload`. Reads only: every share stays with the words.
+fn carrier_to_value(shape: CarrierShape, at: usize, disc: i64, payload: i64) -> Value {
+    let (present, absent) = if shape.node(at) == CarrierNode::Option {
+        ("Some", "None")
+    } else {
+        ("Ok", "Err")
+    };
+    match shape.arm(at, disc) {
+        Some(arm) => Value::variant(
+            if disc == 0 { present } else { absent },
+            vec![carrier_payload_to_value(shape, arm, payload)],
+        ),
+        None => Value::variant(absent, vec![]),
+    }
+}
+
+/// The VM value of the payload word `word` whose node is `at`.
+fn carrier_payload_to_value(shape: CarrierShape, at: usize, word: i64) -> Value {
+    match shape.node(at) {
+        CarrierNode::Unit => Value::Unit,
+        CarrierNode::I64 => Value::Int(word),
+        CarrierNode::F64 => Value::Float(f64::from_bits(word as u64)),
+        CarrierNode::Bool => Value::Bool(word & 1 != 0),
+        CarrierNode::Char => Value::Char(char::from_u32(word as u32).unwrap_or('\u{fffd}')),
+        CarrierNode::Str => native_ptr_to_value(JitKind::NativeStr, word),
+        CarrierNode::Error => read_native_error(word),
+        CarrierNode::Option | CarrierNode::Result => {
+            let inner = rt::gos_rt_carrier_from_box(word);
+            carrier_to_value(shape, at, inner as i64, (inner >> 64) as i64)
+        }
+    }
+}
+
+/// Gives back the share the words of the carrier at node `at` hold on their
+/// arm's payload: a string body, or the box of a nested carrier. A scalar
+/// owns nothing, and the runtime keeps every error node for the process.
+fn release_carrier_words(shape: CarrierShape, at: usize, disc: i64, payload: i64) {
+    let Some(arm) = shape.arm(at, disc) else {
+        return;
+    };
+    if payload == 0 {
+        return;
+    }
+    match shape.node(arm) {
+        // SAFETY: an arm whose node is a `String` holds a string body the
+        // words own one share of.
+        CarrierNode::Str => unsafe { free_native(JitKind::NativeStr, payload) },
+        CarrierNode::Option | CarrierNode::Result => {
+            let slot = [disc, payload];
+            // SAFETY: `slot` is a live two-word carrier whose payload word is a
+            // box; the release confirms the box is a counted blob first.
+            unsafe { rt::gos_rt_option_slot_release(slot.as_ptr()) };
+        }
+        _ => {}
+    }
+}
+
+/// Builds the two words of the carrier at node `at` of `shape` from a VM
+/// value, each heap payload holding one fresh share. `metas` names the
+/// counted-box layout of every nested carrier node. `None`, with nothing left
+/// allocated, when the value is not of this shape.
+fn build_native_carrier(
+    shape: CarrierShape,
+    metas: &[Option<&'static [i64]>],
+    at: usize,
+    value: &Value,
+) -> Option<[i64; 2]> {
+    let Value::Variant(variant) = value else {
+        return None;
+    };
+    let is_option = shape.node(at) == CarrierNode::Option;
+    let disc = match (is_option, variant.name.as_str()) {
+        (true, "Some") | (false, "Ok") => 0,
+        (true, "None") => return Some([1, 0]),
+        (false, "Err") => 1,
+        _ => return None,
+    };
+    let arm = shape.arm(at, disc)?;
+    let payload = build_carrier_payload(shape, metas, arm, variant.fields.first()?)?;
+    Some([disc, payload])
+}
+
+/// The payload word for node `at` built from `value`, holding a fresh share
+/// when it is heap storage.
+fn build_carrier_payload(
+    shape: CarrierShape,
+    metas: &[Option<&'static [i64]>],
+    at: usize,
+    value: &Value,
+) -> Option<i64> {
+    match (shape.node(at), value) {
+        (CarrierNode::Unit, Value::Unit) => Some(0),
+        (CarrierNode::I64, Value::Int(n)) => Some(*n),
+        (CarrierNode::F64, Value::Float(x)) => Some(x.to_bits() as i64),
+        (CarrierNode::Bool, Value::Bool(b)) => Some(i64::from(*b)),
+        (CarrierNode::Char, Value::Char(c)) => Some(i64::from(u32::from(*c))),
+        (CarrierNode::Str, Value::String(_)) => build_native_str(value),
+        (CarrierNode::Option | CarrierNode::Result, _) => {
+            let meta = metas.get(at).copied().flatten()?;
+            let words = build_native_carrier(shape, metas, at, value)?;
+            // SAFETY: `words` are two initialised words laid out as `meta`
+            // describes; the box takes the shares they hold.
+            let boxed =
+                unsafe { rt::gos_rt_rc_alloc_move(16, meta.as_ptr(), words.as_ptr().cast()) };
+            if boxed.is_null() {
+                release_carrier_words(shape, at, words[0], words[1]);
+                return None;
+            }
+            Some(boxed as i64)
+        }
+        _ => None,
     }
 }
 
@@ -1379,12 +1538,14 @@ fn writeback_natives(natives: &[NativeArg]) {
 }
 
 /// Frees every trampoline-owned native object exactly once, deduped by
-/// pointer. `ret` is the native aggregate return (if any); a body that
-/// returns one of its own params yields `ret == param ptr`, so the dedup
-/// frees that single allocation once - never a double free, never a leak.
+/// pointer among the params. `ret` is the native aggregate return (if any).
+/// A compiled body that returns one of its own counted params (a `Vec` or a
+/// `String`) takes a share of it for the caller, so that return is freed as
+/// well as the param; a return of any other kind that names a param is the
+/// same single allocation and is freed once.
 fn free_natives(natives: &[NativeArg], ret: Option<(JitKind, i64)>) {
     let mut freed: Vec<i64> = Vec::with_capacity(natives.len() + 1);
-    let mut free_once = |kind: JitKind, ptr: i64| {
+    let free_once = |kind: JitKind, ptr: i64, freed: &mut Vec<i64>| {
         if ptr == 0 || freed.contains(&ptr) {
             return;
         }
@@ -1394,10 +1555,24 @@ fn free_natives(natives: &[NativeArg], ret: Option<(JitKind, i64)>) {
         unsafe { free_native(kind, ptr) };
     };
     for (kind, ptr, _) in natives {
-        free_once(*kind, *ptr);
+        free_once(*kind, *ptr, &mut freed);
     }
     if let Some((kind, ptr)) = ret {
-        free_once(kind, ptr);
+        let counted_return = matches!(
+            kind,
+            JitKind::NativeVecI64
+                | JitKind::NativeVecF64
+                | JitKind::NativeVecStr
+                | JitKind::NativeVecTupleIF
+                | JitKind::NativeStr
+        );
+        if counted_return && ptr != 0 {
+            // SAFETY: the body's return holds a share of its own, distinct
+            // from the one the param build took.
+            unsafe { free_native(kind, ptr) };
+        } else {
+            free_once(kind, ptr, &mut freed);
+        }
     }
 }
 
@@ -1710,16 +1885,13 @@ macro_rules! call_through {
             // Canonicalized to I64 before dispatch; never reaches a stub.
             JitKind::EnumPtr(_) => unreachable!("EnumPtr returns are canonicalized to I64"),
             // `Result<Enum, _>`: the body's two-word `[disc, payload]` carrier
-            // crosses through an out-pointer thunk (`emit_carrier_outptr_thunk`),
+            // crosses through an out-pointer thunk (`emit_carrier_entry_thunk`),
             // so `$ptr` here is the thunk - it takes a buffer pointer first,
             // calls the real body, and stores the carrier there. A pointer
             // argument has an identical ABI on every target, unlike an `i128`
             // return (which Windows x64 places in a register Rust reads
             // differently). `invoke_prepared_native` decodes the carrier tuple.
-            JitKind::ResultEnumPtr(_)
-            | JitKind::ResultNativeStr
-            | JitKind::ResultScalar(_)
-            | JitKind::OptionScalar(_) => {
+            JitKind::ResultEnumPtr(_) | JitKind::Carrier(_) => {
                 // A `u128` slot is 16-byte aligned, matching the thunk's
                 // aligned `i128` store; `disc` is the low word, `payload`
                 // the high word.
@@ -3072,10 +3244,6 @@ pub(crate) struct Prepared {
     /// stub yields the `[disc, payload]` carrier tuple and the native path
     /// decodes the `Ok` enum (this shape) / `Err` error and frees it.
     result_enum: Option<u32>,
-    /// `true` when the real return was `Result<String, errors::Error>`.
-    /// The stub yields the same `[disc, payload]` carrier tuple; the native
-    /// path copies and frees the `Ok` string payload or decodes the `Err`.
-    result_native_str: bool,
     /// `Some(kind)` when the real return was a native aggregate
     /// (`NativeStr` / native `Vec` / `StructPtr`); the raw pointer is read
     /// back and freed after the call when it owns a runtime allocation.
@@ -3170,17 +3338,14 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
         );
         return None;
     };
-    let (ret_kind, enum_return, native_return, result_enum, result_native_str) = match jit.returns {
-        JitKind::EnumPtr(idx) => (JitKind::I64, Some(idx), None, None, false),
-        JitKind::ResultEnumPtr(idx) => (JitKind::ResultEnumPtr(idx), None, None, Some(idx), false),
-        JitKind::ResultNativeStr => (JitKind::ResultNativeStr, None, None, None, true),
-        JitKind::ResultScalar(kind) => (JitKind::ResultScalar(kind), None, None, None, false),
-        JitKind::OptionScalar(kind) => (JitKind::OptionScalar(kind), None, None, None, false),
+    let (ret_kind, enum_return, native_return, result_enum) = match jit.returns {
+        JitKind::EnumPtr(idx) => (JitKind::I64, Some(idx), None, None),
+        JitKind::ResultEnumPtr(idx) => (JitKind::ResultEnumPtr(idx), None, None, Some(idx)),
         k @ (JitKind::NativeStr
         | JitKind::NativeVecI64
         | JitKind::NativeVecF64
         | JitKind::NativeVecStr
-        | JitKind::NativeVecTupleIF) => (JitKind::I64, None, Some(k), None, false),
+        | JitKind::NativeVecTupleIF) => (JitKind::I64, None, Some(k), None),
         // A `U8Vec` return would need re-registering the native buffer into
         // the VM registry; not supported, so keep such bodies on bytecode.
         JitKind::U8VecHandle => {
@@ -3188,22 +3353,16 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
             return None;
         }
         // `Vec<Vec<i64>>` returns re-wrap through `invoke_prepared_native`.
-        JitKind::NativeVecVecI64 => (
-            JitKind::I64,
-            None,
-            Some(JitKind::NativeVecVecI64),
-            None,
-            false,
-        ),
+        JitKind::NativeVecVecI64 => (JitKind::I64, None, Some(JitKind::NativeVecVecI64), None),
         // Struct returns use the same structural-return ABI as tuples: the
         // caller supplies a flat field-slot block and the body returns that
         // stable pointer after filling it.
-        k @ JitKind::StructPtr(_) => (JitKind::I64, None, Some(k), None, false),
+        k @ JitKind::StructPtr(_) => (JitKind::I64, None, Some(k), None),
         // A 2-tuple return is a pointer to a heap (`gos_rt_aggr_alloc`)
         // block; the stub reads it as `I64` and the native path decodes the
         // slots into a `Value::Tuple`.
-        JitKind::TupleReturn(_) => (JitKind::I64, None, None, None, false),
-        other => (other, None, None, None, false),
+        JitKind::TupleReturn(_) => (JitKind::I64, None, None, None),
+        other => (other, None, None, None),
     };
     let tuple_return = match jit.returns {
         JitKind::TupleReturn(elems) => Some(elems),
@@ -3230,13 +3389,9 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
     // `Some` / `None`) arm on the native path; the scalar fast path has
     // no decode step and would hand the caller the raw `[disc, payload]`
     // pair as a tuple.
-    let carrier_return = matches!(
-        jit.returns,
-        JitKind::ResultScalar(_) | JitKind::OptionScalar(_)
-    );
+    let carrier_return = matches!(jit.returns, JitKind::Carrier(_));
     let has_native = native_return.is_some()
         || result_enum.is_some()
-        || result_native_str
         || carrier_return
         || tuple_return.is_some()
         || enum_param_deep
@@ -3253,6 +3408,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
                     | JitKind::U8VecHandle
                     | JitKind::StructPtr(_)
                     | JitKind::ArrayBlockPtr(..)
+                    | JitKind::Carrier(_)
             )
         });
     Some(Prepared {
@@ -3261,7 +3417,6 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
         ret_kind,
         enum_return,
         result_enum,
-        result_native_str,
         native_return,
         struct_return,
         tuple_return,
@@ -3383,9 +3538,7 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
                 | JitKind::StructPtr(_)
                 | JitKind::ArrayBlockPtr(..)
                 | JitKind::ResultEnumPtr(_)
-                | JitKind::ResultNativeStr
-                | JitKind::ResultScalar(_)
-                | JitKind::OptionScalar(_)
+                | JitKind::Carrier(_)
                 | JitKind::TupleReturn(_),
                 _,
             ) => return Dispatch::Fallback,
@@ -3489,6 +3642,7 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
     // string pointer, passed as `*mut *mut c_char` so the body's append /
     // realloc updates the slot, read back into the caller's binding after.
     let mut str_cells: Vec<StrCell> = Vec::new();
+    let mut built_carriers = BuiltCarriers(Vec::new());
     for (i, (kind, value)) in jit.params.iter().zip(args.iter()).enumerate() {
         let slot = match kind {
             JitKind::NativeStr => match value {
@@ -3651,13 +3805,22 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
                     return Dispatch::Fallback;
                 }
             },
-            // Result carriers and `TupleReturn` are return-only kinds
-            // (rejected as params by `body_kinds`); never in the param list.
-            JitKind::ResultEnumPtr(_)
-            | JitKind::ResultNativeStr
-            | JitKind::ResultScalar(_)
-            | JitKind::OptionScalar(_)
-            | JitKind::TupleReturn(_) => {
+            // A carrier is lent to the body as a pointer to its two words,
+            // which stay at a stable address for the whole call.
+            JitKind::Carrier(shape) => {
+                let metas = jit.carrier_box_metas.get(i).map_or(&[][..], |m| &m[..]);
+                let Some(words) = build_native_carrier(*shape, metas, 0, value) else {
+                    free_in_flight(&natives, &built_enums, &str_cells);
+                    return Dispatch::Fallback;
+                };
+                let words = Box::new(words);
+                let addr = words.as_ptr() as i64;
+                built_carriers.0.push((*shape, words));
+                Slot::I(addr)
+            }
+            // `Result<Enum, errors::Error>` and `TupleReturn` are return-only
+            // kinds (rejected as params by `body_kinds`).
+            JitKind::ResultEnumPtr(_) | JitKind::TupleReturn(_) => {
                 free_in_flight(&natives, &built_enums, &str_cells);
                 return Dispatch::Fallback;
             }
@@ -3678,7 +3841,7 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
             };
             Some(NativeStructBacking {
                 // Empty structs still cross through a one-word ABI slot.
-                slots: vec![0; shape.fields.len().max(1)].into_boxed_slice(),
+                slots: vec![0; shape.words.max(1)].into_boxed_slice(),
                 shape,
             })
         }
@@ -3777,9 +3940,9 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
             Value::variant("Err", vec![read_native_error(payload)])
         };
         (v, None)
-    } else if let JitKind::OptionScalar(scalar) = p.jit.returns {
-        // `Option<scalar>`: the same carrier, with `Some` in the zero
-        // discriminant and the scalar in the payload word.
+    } else if let JitKind::Carrier(shape) = p.jit.returns {
+        // The caller owns the answered words: read them into a VM value, then
+        // give back the shares they hold.
         let Value::Tuple(t) = &raw else {
             free_in_flight(&natives, &built_enums, &str_cells);
             return Dispatch::Fallback;
@@ -3788,51 +3951,8 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
             free_in_flight(&natives, &built_enums, &str_cells);
             return Dispatch::Fallback;
         };
-        let v = if *disc == 0 {
-            Value::variant("Some", vec![decode_carrier_scalar(scalar, *payload)])
-        } else {
-            Value::variant("None", vec![])
-        };
-        (v, None)
-    } else if let JitKind::ResultScalar(scalar) = p.jit.returns {
-        // `Result<scalar, errors::Error>`: the `Ok` payload word IS the
-        // scalar, so nothing is owned on that side and nothing is freed.
-        let Value::Tuple(t) = &raw else {
-            free_in_flight(&natives, &built_enums, &str_cells);
-            return Dispatch::Fallback;
-        };
-        let (Some(Value::Int(disc)), Some(Value::Int(payload))) = (t.first(), t.get(1)) else {
-            free_in_flight(&natives, &built_enums, &str_cells);
-            return Dispatch::Fallback;
-        };
-        let (disc, payload) = (*disc, *payload);
-        let v = if disc == 0 {
-            Value::variant("Ok", vec![decode_carrier_scalar(scalar, payload)])
-        } else {
-            Value::variant("Err", vec![read_native_error(payload)])
-        };
-        (v, None)
-    } else if p.result_native_str {
-        let Value::Tuple(t) = &raw else {
-            free_in_flight(&natives, &built_enums, &str_cells);
-            return Dispatch::Fallback;
-        };
-        let (Some(Value::Int(disc)), Some(Value::Int(payload))) = (t.first(), t.get(1)) else {
-            free_in_flight(&natives, &built_enums, &str_cells);
-            return Dispatch::Fallback;
-        };
-        let (disc, payload) = (*disc, *payload);
-        let v = if disc == 0 {
-            let s = native_ptr_to_value(JitKind::NativeStr, payload);
-            if payload != 0 {
-                // SAFETY: an owned native string returned in the `Ok` payload,
-                // copied out above and freed exactly once here.
-                unsafe { free_native(JitKind::NativeStr, payload) };
-            }
-            Value::variant("Ok", vec![s])
-        } else {
-            Value::variant("Err", vec![read_native_error(payload)])
-        };
+        let v = carrier_to_value(shape, 0, *disc, *payload);
+        release_carrier_words(shape, 0, *disc, *payload);
         (v, None)
     } else if let Some(nret) = p.native_return {
         let Value::Int(ret_ptr) = raw else {

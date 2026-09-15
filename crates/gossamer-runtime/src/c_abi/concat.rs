@@ -158,6 +158,8 @@ pub unsafe extern "C" fn gos_rt_error_cause(err: *const GosError) -> i128 {
         } else {
             unsafe { (*err).cause.as_ptr() }
         };
+        // The `Some` arm borrows the cause the error holds a share of, so a
+        // binding that keeps it takes a share of its own.
         let (disc, payload) = if cause.is_null() {
             (1, 0)
         } else {
@@ -228,12 +230,11 @@ pub unsafe extern "C" fn gos_rt_errors_join(ptr: *const *mut GosError, len: i64)
             return none();
         }
         let combined = parts.join("; ");
-        let leaked = alloc_cstring(combined.as_bytes());
-        let err = Box::into_raw(Box::new(GosError {
-            message: SyncRawPtr::new(leaked),
-            cause: SyncRawPtr::NULL,
-            fields: Vec::new(),
-        }));
+        let err = super::errors::error_alloc(
+            alloc_cstring(combined.as_bytes()),
+            std::ptr::null_mut(),
+            Vec::new(),
+        );
         crate::c_abi::vec::pack_result(0, err as i64)
     })
 }
@@ -269,12 +270,11 @@ pub unsafe extern "C" fn gos_rt_errors_join_vec(vec: *mut GosVec) -> i128 {
             return none();
         }
         let combined = parts.join("; ");
-        let leaked = alloc_cstring(combined.as_bytes());
-        let err = Box::into_raw(Box::new(GosError {
-            message: SyncRawPtr::new(leaked),
-            cause: SyncRawPtr::NULL,
-            fields: Vec::new(),
-        }));
+        let err = super::errors::error_alloc(
+            alloc_cstring(combined.as_bytes()),
+            std::ptr::null_mut(),
+            Vec::new(),
+        );
         crate::c_abi::vec::pack_result(0, err as i64)
     })
 }

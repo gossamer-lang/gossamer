@@ -1,0 +1,5 @@
+djb2(hello) = 261238937
+fnv1a(hello) = 1335831723
+250 +% 10 as u8 = 4
+countdown(2, 5) = 253
+i32 total wraps to -2147483296

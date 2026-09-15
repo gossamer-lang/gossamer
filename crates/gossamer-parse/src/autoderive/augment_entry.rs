@@ -4,7 +4,7 @@
 /// source into the source map before invoking `parse_source_file`.
 #[must_use]
 pub fn augment_source(source: &str) -> String {
-    // Compile-time validation macro backers (`regex!` / `sql!`).
+    // The `codegen(..)` splice's `comptime fn` backer.
     let validators = synthesize_validators(source);
     // Stdlib structs (pem::Block, …) are real Gossamer structs +
     // wrapper functions injected here; the wrappers call leaf

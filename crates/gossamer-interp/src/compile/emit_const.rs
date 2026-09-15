@@ -28,7 +28,10 @@ impl<'tcx> FnBuilder<'tcx> {
     pub(crate) fn push_instr(&mut self, op: Op) -> InstrIdx {
         let idx = u32::try_from(self.instrs.len()).expect("instruction overflow");
         self.instrs.push(op);
-        self.instruction_locations.push(None);
+        self.instruction_locations.push(super::InstrSource {
+            location: None,
+            inline_site: self.current_inline_site,
+        });
         idx
     }
 
@@ -81,20 +84,22 @@ impl<'tcx> FnBuilder<'tcx> {
     }
 
     pub(crate) fn annotate_instructions(&mut self, start: usize, span: gossamer_lex::Span) {
-        let Some(map) = self.source_map else {
+        let Some(location) = self.source_location(span) else {
             return;
         };
-        let line_col = map.line_col(span.file, span.start);
-        let location = crate::bytecode::SourceLocation {
-            file: crate::value::intern_type_name(map.file_name(span.file)),
-            line: line_col.line,
-            column: line_col.column,
-        };
         for slot in &mut self.instruction_locations[start..] {
-            if slot.is_none() {
-                *slot = Some(location);
+            if slot.location.is_none() {
+                slot.location = Some(location);
             }
         }
+    }
+
+    /// Where `span` starts in the source a traceback names.
+    pub(crate) fn source_location(
+        &self,
+        span: gossamer_lex::Span,
+    ) -> Option<crate::bytecode::SourceLocation> {
+        Some(super::resolve_source_location(self.source_map?, span))
     }
 
     pub(crate) fn cur_idx(&self) -> InstrIdx {

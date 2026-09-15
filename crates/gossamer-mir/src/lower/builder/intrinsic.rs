@@ -70,6 +70,38 @@ fn iter_combinator_helper(
     })
 }
 
+/// Where a fold's accumulator starts.
+enum FoldSeed {
+    /// A seed value the caller supplied (`fold`).
+    Init(Local),
+    /// The source's first element (`reduce`), answered as an `Option` of the
+    /// named carrier type that is `None` for an empty source.
+    FirstElement(Ty),
+}
+
+/// How a fold pulls its elements.
+enum FoldPull {
+    /// By index from a sequence.
+    Vec {
+        vec: Local,
+        len: Local,
+        counter: Local,
+    },
+    /// One pull per turn from lazy iterator state.
+    Lazy {
+        state: Local,
+        next_symbol: &'static str,
+    },
+}
+
+/// What an aggregate `unwrap_or` family answers when the carrier holds no
+/// payload: a value already evaluated, or a closure called for it.
+#[derive(Clone, Copy)]
+pub(crate) enum CarrierFallback {
+    Value(Local),
+    Call(Local),
+}
+
 impl<'a> Builder<'a> {
     /// True when a value of `ty` is stored inline in its container slot
     /// (the flat struct / tuple / array layout the compiled tiers use), so
@@ -311,11 +343,23 @@ impl<'a> Builder<'a> {
             ("binary_search", 1) => {
                 let i64_ty = self.tcx.int_ty(IntTy::I64);
                 let ret = self.result_adt_of(i64_ty, i64_ty);
-                let symbol = match self.tcx.kind_of(self.peel_ref_ty(elem)) {
+                let elem = self.peel_ref_ty(elem);
+                let symbol = match self.tcx.kind_of(elem) {
+                    // A `u64` / `usize` word does not order as the signed word
+                    // the i64 search compares, so it searches through its tag.
+                    TyKind::Int(IntTy::U64 | IntTy::Usize) => {
+                        return self.lower_vec_binary_search_ordered(
+                            recv_place, elem, &args[0], ret, span,
+                        );
+                    }
                     TyKind::Int(_) | TyKind::Char => "gos_rt_vec_binary_search_i64",
                     TyKind::Float(_) => "gos_rt_vec_binary_search_f64",
                     TyKind::String => "gos_rt_vec_binary_search_str",
-                    _ => return None,
+                    _ => {
+                        return self.lower_vec_binary_search_ordered(
+                            recv_place, elem, &args[0], ret, span,
+                        );
+                    }
                 };
                 (symbol, ret)
             }
@@ -336,6 +380,85 @@ impl<'a> Builder<'a> {
         });
         self.set_current(next);
         Some(dest)
+    }
+
+    /// `xs.binary_search(needle)` over elements whose slot word is not their
+    /// order: the search compares through the element's tag stream, the same
+    /// one `xs.sort()` put the sequence in order with.
+    fn lower_vec_binary_search_ordered(
+        &mut self,
+        recv_place: Place,
+        elem: Ty,
+        needle: &HirExpr,
+        ret_ty: Ty,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::IntTy;
+
+        let (count, tags) = self.tuple_element_stream(elem)?;
+        let needle_local = self.lower_expr(needle)?;
+        let slots = self.ordered_value_slots(needle_local, elem, span);
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let count_local = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(count_local),
+            Rvalue::Use(Operand::Const(ConstValue::Int(
+                i128::try_from(count).unwrap_or(0),
+            ))),
+            span,
+        );
+        let string_ty = self.tcx.string_ty();
+        let tags_local = self.fresh(string_ty);
+        self.emit_assign(
+            Place::local(tags_local),
+            Rvalue::Use(Operand::Const(ConstValue::Str(
+                tags.iter().map(|&b| b as char).collect(),
+            ))),
+            span,
+        );
+        let dest = self.fresh(ret_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_vec_binary_search_aggr".to_string())),
+            args: vec![
+                Operand::Copy(recv_place),
+                Operand::Copy(Place::local(slots)),
+                Operand::Copy(Place::local(count_local)),
+                Operand::Copy(Place::local(tags_local)),
+            ],
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        Some(dest)
+    }
+
+    /// A local whose storage is `value` laid out as one element of a sequence
+    /// of `elem`, so a runtime comparison can address its slots.
+    ///
+    /// A tuple or struct local is already that run of slots. Any other value
+    /// is a word or a carrier held by value, so it is placed in a one-field
+    /// tuple, whose storage is exactly the element's slots.
+    pub(crate) fn ordered_value_slots(&mut self, value: Local, elem: Ty, span: Span) -> Local {
+        use gossamer_types::TyKind;
+
+        if self
+            .inline_field_tys(elem)
+            .is_some_and(|fields| !fields.is_empty())
+        {
+            return value;
+        }
+        let tuple_ty = self.tcx.intern(TyKind::Tuple(vec![elem]));
+        let slots = self.fresh(tuple_ty);
+        self.emit_assign(
+            Place::local(slots),
+            Rvalue::Aggregate {
+                kind: crate::ir::AggregateKind::Tuple,
+                operands: vec![Operand::Copy(Place::local(value))],
+            },
+            span,
+        );
+        slots
     }
 
     /// `xs.resize(new_len, value)` - shrink by truncation, or grow by
@@ -622,8 +745,8 @@ impl<'a> Builder<'a> {
         // element. Arrays-of-T as elements aren't sortable -
         // their content fan-out makes the comparator ABI
         // ambiguous; bail out.
-        // `fs::DirInfo` and the other opaque heap-blob / handle stdlib
-        // structs (`def.local` in the `u32::MAX - 16 ..= u32::MAX - 2`
+        // The opaque heap-blob / handle stdlib structs (`def.local` in the
+        // `u32::MAX - 16 ..= u32::MAX - 2`
         // sentinel range) are single pointer-valued slots, so the
         // comparator receives the value directly like any scalar - the
         // aggregate helper would hand it a pointer to the slot (a pointer
@@ -754,10 +877,10 @@ impl<'a> Builder<'a> {
         };
         let root_local = self.lower_expr(root_arg)?;
         let raw_visit_local = self.lower_expr(visit_arg)?;
-        let dir_info_ty = self.dir_info_adt_ty();
+        let entry_ty = self.tuple_dir_entry_ty();
         let visit_ret_ty = self.result_unit_error_adt_ty();
         let visit_sig = gossamer_types::FnSig {
-            inputs: vec![dir_info_ty],
+            inputs: vec![entry_ty],
             output: visit_ret_ty,
         };
         let visit_trait_ty = self.tcx.intern(TyKind::FnTrait(visit_sig));
@@ -766,7 +889,7 @@ impl<'a> Builder<'a> {
         let dest = self.fresh(result_ty);
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_fs_walk_dir".to_string())),
+            callee: Operand::Const(ConstValue::Str("gos_rt_fs_walk_dir_raw".to_string())),
             args: vec![
                 Operand::Copy(Place::local(root_local)),
                 Operand::Copy(Place::local(visit_local)),
@@ -1256,12 +1379,16 @@ impl<'a> Builder<'a> {
                         LazyElemFamily::Aggr => "gos_rt_lazy_iter_collect_aggr",
                         _ => "gos_rt_lazy_iter_collect_i64",
                     };
-                    return Some(self.emit_combinator_call(
+                    let collected = self.emit_combinator_call(
                         helper,
                         vec![Operand::Copy(Place::local(v))],
                         dest_ty,
                         span,
-                    ));
+                    );
+                    if family == LazyElemFamily::Aggr {
+                        self.tag_owned_elements(collected, elem, span);
+                    }
+                    return Some(collected);
                 }
                 let dest_ty = if matches!(self.tcx.kind_of(ty), TyKind::Vec(_) | TyKind::Slice(_)) {
                     ty
@@ -1336,7 +1463,7 @@ impl<'a> Builder<'a> {
             ("iter::once", 1) => {
                 let v = self.lower_expr(&args[0])?;
                 if let Some(family) = self.lazy_iter_ty_family(ty) {
-                    let helper = format!("gos_rt_lazy_iter_once_{}", family.word_or_float_suffix());
+                    let helper = format!("gos_rt_lazy_iter_once_{}", family.value_suffix());
                     let dest = self.fresh(ty);
                     let next = self.new_block(span);
                     self.terminate(Terminator::Call {
@@ -1581,8 +1708,7 @@ impl<'a> Builder<'a> {
                 let v = self.lower_expr(&args[0])?;
                 let n = self.lower_expr(&args[1])?;
                 if let Some(family) = self.lazy_iter_ty_family(ty) {
-                    let helper =
-                        format!("gos_rt_lazy_iter_repeat_{}", family.word_or_float_suffix());
+                    let helper = format!("gos_rt_lazy_iter_repeat_{}", family.value_suffix());
                     let dest = self.fresh(ty);
                     let next = self.new_block(span);
                     self.terminate(Terminator::Call {
@@ -1614,7 +1740,7 @@ impl<'a> Builder<'a> {
             }
             ("iter::take", 2) => {
                 let n = self.lower_expr(&args[0])?;
-                if self.lazy_iter_ty_family(ty).is_some()
+                if self.lazy_iter_result_ty(ty)
                     && let Some(iter) = self.lower_lazy_iter_source_aggr(&args[1])
                 {
                     let dest = self.fresh(ty);
@@ -1650,7 +1776,7 @@ impl<'a> Builder<'a> {
             }
             ("iter::step_by", 2) => {
                 let step = self.lower_expr(&args[0])?;
-                if self.lazy_iter_ty_family(ty).is_some()
+                if self.lazy_iter_result_ty(ty)
                     && let Some(iter) = self.lower_lazy_iter_source_aggr(&args[1])
                 {
                     let dest = self.fresh(ty);
@@ -1688,7 +1814,7 @@ impl<'a> Builder<'a> {
             }
             ("iter::skip", 2) => {
                 let n = self.lower_expr(&args[0])?;
-                if self.lazy_iter_ty_family(ty).is_some()
+                if self.lazy_iter_result_ty(ty)
                     && let Some(iter) = self.lower_lazy_iter_source_aggr(&args[1])
                 {
                     let dest = self.fresh(ty);
@@ -1751,8 +1877,12 @@ impl<'a> Builder<'a> {
                         vec_ty,
                         span,
                     );
-                    return Some(self.emit_combinator_call(
+                    let from_vec = self.lazy_iter_elem_family(elem).map_or(
                         "gos_rt_lazy_iter_from_vec_i64",
+                        LazyElemFamily::vec_source_symbol,
+                    );
+                    return Some(self.emit_combinator_call(
+                        from_vec,
                         vec![Operand::Copy(Place::local(reversed))],
                         ty,
                         span,
@@ -2098,15 +2228,76 @@ impl<'a> Builder<'a> {
                 // wider than a slot is answered as the address of storage the
                 // callback owns, and the lazy state holds one word per element
                 // with nowhere to copy that block to, so it stays eager.
+                // A struct, tuple, or array result is answered as the address of
+                // the block the callback built, so the lazy state carries that
+                // address and the stream is marked as address-carrying. A float
+                // source hands the callback its element in another register
+                // file, which the address form's callback shape does not.
+                if self.elem_is_slot_addressed(out_ty)
+                    && self.lazy_addressed_elem(out_ty)
+                    && matches!(self.tcx.kind_of(ty), TyKind::Iterator(_))
+                    && self
+                        .lazy_iter_source_family(args[1].ty)
+                        .is_some_and(|family| family != LazyElemFamily::Float)
+                {
+                    let closure_local =
+                        self.lower_iter_closure(&args[0], &[in_ty], out_ty, span)?;
+                    let iter_local = self.lower_lazy_iter_source_aggr(&args[1])?;
+                    let width = i128::from(self.elem_bytes_of(out_ty));
+                    let dest = self.fresh(ty);
+                    let next = self.new_block(span);
+                    self.terminate(Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str(
+                            "gos_rt_lazy_iter_map_aggr".to_string(),
+                        )),
+                        args: vec![
+                            Operand::Copy(Place::local(closure_local)),
+                            Operand::Copy(Place::local(iter_local)),
+                            Operand::Const(ConstValue::Int(width)),
+                        ],
+                        destination: Place::local(dest),
+                        target: Some(next),
+                    });
+                    self.set_current(next);
+                    // Each result is a block only the stream holds, so the
+                    // stream hands it out as a counted blob this meta describes:
+                    // the element's owning fields when it has any, the leaf
+                    // copy meta when it does not.
+                    if let Some(meta) = self
+                        .ensure_aggr_struct_meta(out_ty)
+                        .or_else(|| self.ensure_aggr_copy_meta(out_ty))
+                    {
+                        let unit = self.tcx.unit();
+                        let sink = self.fresh(unit);
+                        self.emit_assign(
+                            Place::local(sink),
+                            Rvalue::CallIntrinsic {
+                                name: "gos_rt_lazy_iter_set_elem_meta",
+                                args: vec![
+                                    Operand::Copy(Place::local(dest)),
+                                    Operand::Const(ConstValue::Str(meta)),
+                                ],
+                            },
+                            span,
+                        );
+                    }
+                    self.local_aggr_iter.insert(dest);
+                    return Some(dest);
+                }
                 if let Some(source) = self.lazy_iter_source_family(args[1].ty)
                     && self.lazy_iter_ty_family(ty).is_some()
                     && !self.elem_is_slot_addressed(out_ty)
                     && self.elem_bytes_of(out_ty) <= 8
                 {
+                    // A `String` result is a fresh share the stream's consumers
+                    // own, so it is produced by the helper that counts it.
+                    let counted = self.lazy_iter_elem_family(out_ty) == Some(LazyElemFamily::Ptr);
                     let helper = match (source, out_abi) {
                         (LazyElemFamily::Float, ElemAbi::Float) => "gos_rt_lazy_iter_map_f64",
+                        (LazyElemFamily::Float, _) if counted => "gos_rt_lazy_iter_map_f64_str",
                         (LazyElemFamily::Float, _) => "gos_rt_lazy_iter_map_f64_word",
                         (_, ElemAbi::Float) => "gos_rt_lazy_iter_map_word_f64",
+                        _ if counted => "gos_rt_lazy_iter_map_str",
                         _ => "gos_rt_lazy_iter_map_i64",
                     };
                     let closure_local =
@@ -2166,20 +2357,24 @@ impl<'a> Builder<'a> {
                     let by_block = i128::from(self.elem_is_slot_addressed(out_ty));
                     call_args.push(Operand::Const(ConstValue::Int(by_block)));
                 }
-                Some(self.emit_iter_combinator_call(
+                let mapped = self.emit_iter_combinator_call(
                     "map",
                     in_abi,
                     Some(out_class),
                     call_args,
                     dest_ty,
                     span,
-                ))
+                );
+                // Each element the callback answered carries the shares its
+                // fields own, which the result now holds.
+                self.tag_owned_elements(mapped, out_ty, span);
+                Some(mapped)
             }
             ("iter::filter", 2) => {
                 let bool_ty = self.tcx.bool_ty();
                 let (in_ty, in_abi) = self.iter_elem_abi(args[1].ty);
                 if let Some(source) = self.lazy_iter_source_family(args[1].ty)
-                    && self.lazy_iter_ty_family(ty).is_some()
+                    && self.lazy_iter_result_ty(ty)
                 {
                     let helper =
                         format!("gos_rt_lazy_iter_filter_{}", source.word_or_float_suffix());
@@ -2218,58 +2413,20 @@ impl<'a> Builder<'a> {
             }
             ("iter::fold", 3) => {
                 // The accumulator's type is the fold's result and the
-                // callback's first parameter; the element's ABI fills its
-                // second. Both classes pick the helper together, so the
-                // closure the runtime calls always matches the signature it
-                // transmutes to.
+                // callback's first parameter; the element fills its second.
                 let init_local = self.lower_expr(&args[0])?;
                 let acc_ty = self.locals[init_local.0 as usize].ty;
-                let acc_abi = self.scalar_abi_of(acc_ty);
-                let (elem_ty, elem_abi) = self.iter_elem_abi(args[2].ty);
+                let (elem_ty, _) = self.iter_elem_abi(args[2].ty);
                 let closure_local =
                     self.lower_iter_closure(&args[1], &[acc_ty, elem_ty], acc_ty, span)?;
-                if let Some(source) = self.lazy_iter_source_family(args[2].ty) {
-                    let helper = match (acc_abi, source) {
-                        (ElemAbi::Float, LazyElemFamily::Float) => "gos_rt_lazy_iter_fold_f64",
-                        (ElemAbi::Float, _) => "gos_rt_lazy_iter_fold_f64_word",
-                        (_, LazyElemFamily::Float) => "gos_rt_lazy_iter_fold_word_f64",
-                        _ => "gos_rt_lazy_iter_fold_i64",
-                    };
-                    let iter_local = self.lower_lazy_iter_source_aggr(&args[2])?;
-                    let dest = self.fresh(acc_ty);
-                    let next = self.new_block(span);
-                    self.terminate(Terminator::Call {
-                        callee: Operand::Const(ConstValue::Str(helper.to_string())),
-                        args: vec![
-                            Operand::Copy(Place::local(init_local)),
-                            Operand::Copy(Place::local(closure_local)),
-                            Operand::Copy(Place::local(iter_local)),
-                        ],
-                        destination: Place::local(dest),
-                        target: Some(next),
-                    });
-                    self.set_current(next);
-                    return Some(dest);
-                }
-                // The accumulator rides an integer register unless it is an
-                // `f64`; the element keeps its own class independently.
-                let acc_class = match acc_abi {
-                    ElemAbi::Float => ElemAbi::Float,
-                    _ => ElemAbi::Word,
-                };
-                let vec_local = self.lower_iter_vec_arg(&args[2])?;
-                Some(self.emit_iter_combinator_call(
-                    "fold",
-                    elem_abi,
-                    Some(acc_class),
-                    vec![
-                        Operand::Copy(Place::local(init_local)),
-                        Operand::Copy(Place::local(closure_local)),
-                        Operand::Copy(Place::local(vec_local)),
-                    ],
+                self.lower_fold_loop(
+                    FoldSeed::Init(init_local),
+                    closure_local,
+                    &args[2],
                     acc_ty,
+                    elem_ty,
                     span,
-                ))
+                )
             }
             ("iter::sum_by", 2) => {
                 let (elem_ty, elem_abi) = self.iter_elem_abi(args[1].ty);
@@ -2496,6 +2653,16 @@ impl<'a> Builder<'a> {
         self.tcx.int_ty(gossamer_types::IntTy::I64)
     }
 
+    /// The `option::unwrap` / `option::expect` helper for a payload of type
+    /// `payload`: a carrier is boxed and loads back as two words.
+    fn option_unwrap_helper(&self, payload: Ty) -> &'static str {
+        if self.is_result_or_option_adt(payload) {
+            "gos_rt_option_unwrap_carrier"
+        } else {
+            "gos_rt_option_unwrap"
+        }
+    }
+
     pub(crate) fn try_lower_option_call(
         &mut self,
         joined: &str,
@@ -2515,10 +2682,11 @@ impl<'a> Builder<'a> {
             ("option::unwrap", 1) => {
                 let opt = self.lower_expr(&args[0])?;
                 let dest_ty = self.unwrap_default_dest_ty(ty, args[0].ty, opt);
+                let helper = self.option_unwrap_helper(dest_ty);
                 let dest = self.fresh(dest_ty);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str("gos_rt_option_unwrap".to_string())),
+                    callee: Operand::Const(ConstValue::Str(helper.to_string())),
                     args: vec![Operand::Copy(Place::local(opt))],
                     destination: Place::local(dest),
                     target: Some(next),
@@ -2530,10 +2698,11 @@ impl<'a> Builder<'a> {
                 let _message = self.lower_expr(&args[0])?;
                 let opt = self.lower_expr(&args[1])?;
                 let dest_ty = self.unwrap_default_dest_ty(ty, args[1].ty, opt);
+                let helper = self.option_unwrap_helper(dest_ty);
                 let dest = self.fresh(dest_ty);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str("gos_rt_option_unwrap".to_string())),
+                    callee: Operand::Const(ConstValue::Str(helper.to_string())),
                     args: vec![Operand::Copy(Place::local(opt))],
                     destination: Place::local(dest),
                     target: Some(next),
@@ -2544,21 +2713,46 @@ impl<'a> Builder<'a> {
             ("option::unwrap_or", 2) => {
                 let fallback = self.lower_expr(&args[0])?;
                 let opt = self.lower_expr(&args[1])?;
+                let payload_ty = self.enum_payload_ty(args[1].ty, 0).unwrap_or(i64_ty);
+                if self.tcx.elem_is_addressed_aggregate(payload_ty)
+                    && !self.carrier_payload_is_carrier(args[1].ty)
+                {
+                    return Some(self.lower_unwrap_or_inline(
+                        opt,
+                        CarrierFallback::Value(fallback),
+                        args[1].ty,
+                        true,
+                        payload_ty,
+                        span,
+                    ));
+                }
                 let dest_ty = self.unwrap_default_dest_ty(ty, args[1].ty, opt);
-                let helper =
-                    if matches!(self.tcx.kind_of(dest_ty), gossamer_types::TyKind::Float(_)) {
-                        "gos_rt_option_default_f64"
-                    } else {
-                        "gos_rt_option_default_i64"
-                    };
+                // A carrier payload is boxed, so its helper loads the two words
+                // back and takes the option first.
+                let nested = self.is_result_or_option_adt(dest_ty);
+                let helper = if nested {
+                    "gos_rt_result_unwrap_or_carrier"
+                } else if matches!(self.tcx.kind_of(dest_ty), gossamer_types::TyKind::Float(_)) {
+                    "gos_rt_option_default_f64"
+                } else {
+                    "gos_rt_option_default_i64"
+                };
+                let call_args = if nested {
+                    vec![
+                        Operand::Copy(Place::local(opt)),
+                        Operand::Copy(Place::local(fallback)),
+                    ]
+                } else {
+                    vec![
+                        Operand::Copy(Place::local(fallback)),
+                        Operand::Copy(Place::local(opt)),
+                    ]
+                };
                 let dest = self.fresh(dest_ty);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
                     callee: Operand::Const(ConstValue::Str(helper.to_string())),
-                    args: vec![
-                        Operand::Copy(Place::local(fallback)),
-                        Operand::Copy(Place::local(opt)),
-                    ],
+                    args: call_args,
                     destination: Place::local(dest),
                     target: Some(next),
                 });
@@ -2626,6 +2820,19 @@ impl<'a> Builder<'a> {
             ("result::unwrap_or", 2) => {
                 let fallback = self.lower_expr(&args[0])?;
                 let res_local = self.lower_expr(&args[1])?;
+                let payload_ty = self.enum_payload_ty(args[1].ty, 0).unwrap_or(i64_ty);
+                if self.tcx.elem_is_addressed_aggregate(payload_ty)
+                    && !self.carrier_payload_is_carrier(args[1].ty)
+                {
+                    return Some(self.lower_unwrap_or_inline(
+                        res_local,
+                        CarrierFallback::Value(fallback),
+                        args[1].ty,
+                        false,
+                        payload_ty,
+                        span,
+                    ));
+                }
                 let dest_ty = self.unwrap_default_dest_ty(ty, args[1].ty, res_local);
                 let helper =
                     if matches!(self.tcx.kind_of(dest_ty), gossamer_types::TyKind::Float(_)) {
@@ -2651,6 +2858,22 @@ impl<'a> Builder<'a> {
             // closure is arg 0, the Result arg 1. Returns the `Ok`
             // value, or the closure applied to the `Err` payload.
             ("result::unwrap_or_else", 2) => {
+                let payload_ty = self.enum_payload_ty(args[1].ty, 0).unwrap_or(i64_ty);
+                if self.tcx.elem_is_addressed_aggregate(payload_ty)
+                    || self.carrier_payload_is_carrier(args[1].ty)
+                {
+                    let err_ty = self.enum_payload_ty(args[1].ty, 1).unwrap_or(i64_ty);
+                    let closure = self.lower_iter_closure(&args[0], &[err_ty], payload_ty, span)?;
+                    let res_local = self.lower_expr(&args[1])?;
+                    return Some(self.lower_unwrap_or_inline(
+                        res_local,
+                        CarrierFallback::Call(closure),
+                        args[1].ty,
+                        false,
+                        payload_ty,
+                        span,
+                    ));
+                }
                 let closure_local = self.lower_iter_closure(&args[0], &[i64_ty], i64_ty, span)?;
                 let res_local = self.lower_expr(&args[1])?;
                 let dest_ty = if matches!(
@@ -2782,6 +3005,21 @@ impl<'a> Builder<'a> {
                 ty
             };
             let recv = self.lower_expr(receiver)?;
+            if self.tcx.elem_is_addressed_aggregate(payload_ty)
+                || self.carrier_payload_is_carrier(receiver_ty)
+            {
+                let err_ty = self.enum_payload_ty(receiver_ty, 1).unwrap_or(i64_ty);
+                let inputs: Vec<Ty> = if is_option { Vec::new() } else { vec![err_ty] };
+                let closure = self.lower_iter_closure(closure_arg, &inputs, payload_ty, span)?;
+                return Some(self.lower_unwrap_or_inline(
+                    recv,
+                    CarrierFallback::Call(closure),
+                    receiver_ty,
+                    is_option,
+                    dest_ty,
+                    span,
+                ));
+            }
             let closure = self.lower_iter_closure(closure_arg, inputs, payload_ty, span)?;
             return Some(self.emit_combinator_call(
                 helper,
@@ -3093,6 +3331,21 @@ impl<'a> Builder<'a> {
                 ))
             }
             ("option::unwrap_or_else", 2) => {
+                let payload_ty = self.enum_payload_ty(args[1].ty, 0).unwrap_or(i64_ty);
+                if self.tcx.elem_is_addressed_aggregate(payload_ty)
+                    || self.carrier_payload_is_carrier(args[1].ty)
+                {
+                    let closure = self.lower_iter_closure(&args[0], &[], payload_ty, span)?;
+                    let opt = self.lower_expr(&args[1])?;
+                    return Some(self.lower_unwrap_or_inline(
+                        opt,
+                        CarrierFallback::Call(closure),
+                        args[1].ty,
+                        true,
+                        payload_ty,
+                        span,
+                    ));
+                }
                 let closure = self.lower_iter_closure(&args[0], &[], i64_ty, span)?;
                 let opt = self.lower_expr(&args[1])?;
                 let dest_ty = self.unwrap_default_dest_ty(ty, args[1].ty, opt);
@@ -3107,21 +3360,97 @@ impl<'a> Builder<'a> {
                 ))
             }
             ("option::zip", 2) => {
+                // The pair is built here and wrapped the way any `Some((a, b))`
+                // is, so the carrier holds a copy its own release reclaims.
                 let first = self.lower_expr(&args[0])?;
                 let second = self.lower_expr(&args[1])?;
                 let a = self.enum_payload_ty(args[0].ty, 0).unwrap_or(i64_ty);
                 let b = self.enum_payload_ty(args[1].ty, 0).unwrap_or(i64_ty);
                 let pair = self.tcx.intern(TyKind::Tuple(vec![a, b]));
                 let dest_ty = self.option_payload_adt_ty(pair);
-                Some(self.emit_combinator_call(
-                    "gos_rt_option_zip",
-                    vec![
-                        Operand::Copy(Place::local(first)),
-                        Operand::Copy(Place::local(second)),
-                    ],
-                    dest_ty,
+                let dest_ty = self.result_repr_ty(dest_ty);
+                let result = self.fresh(dest_ty);
+                let both = self.new_block(span);
+                let none = self.new_block(span);
+                let join = self.new_block(span);
+                let check = |this: &mut Self, carrier: Local, next: BlockId| {
+                    let disc = this.fresh(i64_ty);
+                    this.emit_assign(
+                        Place::local(disc),
+                        Rvalue::CallIntrinsic {
+                            name: "gos_rt_result_disc",
+                            args: vec![Operand::Copy(Place::local(carrier))],
+                        },
+                        span,
+                    );
+                    this.terminate(Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(disc)),
+                        arms: vec![(0, next)],
+                        default: none,
+                    });
+                };
+                let second_check = self.new_block(span);
+                check(self, first, second_check);
+                self.set_current(second_check);
+                check(self, second, both);
+                self.set_current(both);
+                let payload_of = |this: &mut Self, carrier: Local, payload_ty: Ty| {
+                    let extractor = if matches!(this.tcx.kind_of(payload_ty), TyKind::Float(_)) {
+                        "gos_rt_result_payload_f64"
+                    } else if this.is_by_value_enum_ty(payload_ty) {
+                        "gos_rt_result_payload_i128"
+                    } else {
+                        "gos_rt_result_payload"
+                    };
+                    let payload = this.fresh(payload_ty);
+                    this.emit_assign(
+                        Place::local(payload),
+                        Rvalue::CallIntrinsic {
+                            name: extractor,
+                            args: vec![Operand::Copy(Place::local(carrier))],
+                        },
+                        span,
+                    );
+                    payload
+                };
+                let left = payload_of(self, first, a);
+                let right = payload_of(self, second, b);
+                let tuple = self.fresh(pair);
+                self.emit_assign(
+                    Place::local(tuple),
+                    Rvalue::Aggregate {
+                        kind: crate::ir::AggregateKind::Tuple,
+                        operands: vec![
+                            Operand::Copy(Place::local(left)),
+                            Operand::Copy(Place::local(right)),
+                        ],
+                    },
                     span,
-                ))
+                );
+                let _ = self.ensure_aggr_copy_meta(pair);
+                let some_disc = self.fresh(i64_ty);
+                self.emit_assign(
+                    Place::local(some_disc),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    span,
+                );
+                self.lower_result_ctor_into(result, some_disc, tuple, span);
+                self.terminate(Terminator::Goto { target: join });
+                self.set_current(none);
+                self.emit_assign(
+                    Place::local(result),
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_new",
+                        args: vec![
+                            Operand::Const(ConstValue::Int(1)),
+                            Operand::Const(ConstValue::Int(0)),
+                        ],
+                    },
+                    span,
+                );
+                self.terminate(Terminator::Goto { target: join });
+                self.set_current(join);
+                Some(result)
             }
             ("option::flatten", 1) => {
                 let opt = self.lower_expr(&args[0])?;
@@ -3146,6 +3475,40 @@ impl<'a> Builder<'a> {
                 ))
             }
             ("iter::filter_map" | "iter::find_map", 2) => {
+                // Over a lazy stream the callback runs one element per pull, so
+                // a consumer that stops early stops the calls with it.
+                if joined == "iter::filter_map"
+                    && matches!(self.tcx.kind_of(ty), TyKind::Iterator(_))
+                    && let Some(source) = self.lazy_iter_source_family_word(args[1].ty)
+                    && source != LazyElemFamily::Float
+                    && let Some(payload_ty) = self
+                        .callable_output_of(&args[0])
+                        .and_then(|out| self.option_payload_of(out))
+                    && let Some(helper) = match self.lazy_iter_elem_family(payload_ty) {
+                        Some(LazyElemFamily::Word) => Some("gos_rt_lazy_iter_filter_map_i64"),
+                        Some(LazyElemFamily::Ptr) => Some("gos_rt_lazy_iter_filter_map_str"),
+                        _ => None,
+                    }
+                {
+                    let (in_ty, _) = self.iter_elem_abi(args[1].ty);
+                    let opt_payload = self.option_payload_adt_ty(payload_ty);
+                    let closure_local =
+                        self.lower_iter_closure(&args[0], &[in_ty], opt_payload, span)?;
+                    let iter_local = self.lower_lazy_iter_source(&args[1])?;
+                    let dest = self.fresh(ty);
+                    let next = self.new_block(span);
+                    self.terminate(Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str(helper.to_string())),
+                        args: vec![
+                            Operand::Copy(Place::local(closure_local)),
+                            Operand::Copy(Place::local(iter_local)),
+                        ],
+                        destination: Place::local(dest),
+                        target: Some(next),
+                    });
+                    self.set_current(next);
+                    return Some(dest);
+                }
                 let vec_local = self.lower_iter_vec_arg(&args[1])?;
                 let (in_ty, elem_abi) = self.iter_callback_shape(vec_local);
                 // The kept payloads are the callback's results, so the result
@@ -3167,7 +3530,7 @@ impl<'a> Builder<'a> {
                     // rather than storing the word.
                     let width = i128::from(self.elem_bytes_of(payload_ty));
                     let by_block = i128::from(self.elem_is_slot_addressed(payload_ty));
-                    return Some(self.emit_iter_combinator_call(
+                    let kept = self.emit_iter_combinator_call(
                         "filter_map",
                         elem_abi,
                         None,
@@ -3179,7 +3542,11 @@ impl<'a> Builder<'a> {
                         ],
                         dest_ty,
                         span,
-                    ));
+                    );
+                    // Each kept payload is the share its `Some` carried, which
+                    // the result now holds.
+                    self.tag_owned_elements(kept, payload_ty, span);
+                    return Some(kept);
                 }
                 Some(self.emit_iter_combinator_call(
                     "find_map",
@@ -3255,56 +3622,30 @@ impl<'a> Builder<'a> {
                 ))
             }
             ("iter::reduce", 2) => {
-                let vec_local = self.lower_iter_vec_arg(&args[1])?;
-                let (in_ty, elem_abi) = self.iter_callback_shape(vec_local);
                 // The accumulator is an element, so the callback takes two of
                 // them and answers one, and the Option carries that element.
-                let closure = self.lower_iter_closure(&args[0], &[in_ty, in_ty], in_ty, span)?;
-                let unit_ty = self.tcx.unit();
-                let elem = self.iter_result_elem_ty(unit_ty, vec_local);
-                let dest_ty = self.option_payload_adt_ty(elem);
-                Some(self.emit_iter_combinator_call(
-                    "reduce",
-                    elem_abi,
-                    None,
-                    vec![
-                        Operand::Copy(Place::local(closure)),
-                        Operand::Copy(Place::local(vec_local)),
-                    ],
-                    dest_ty,
+                let (elem_ty, _) = self.iter_elem_abi(args[1].ty);
+                let closure =
+                    self.lower_iter_closure(&args[0], &[elem_ty, elem_ty], elem_ty, span)?;
+                let result_ty = self.option_payload_adt_ty(elem_ty);
+                self.lower_fold_loop(
+                    FoldSeed::FirstElement(result_ty),
+                    closure,
+                    &args[1],
+                    elem_ty,
+                    elem_ty,
                     span,
-                ))
+                )
             }
             ("iter::scan", 3) => {
+                // Each accumulator the callback answers is kept in the result,
+                // so the loop pushes it there and replaces its own copy.
                 let init = self.lower_expr(&args[0])?;
-                let vec_local = self.lower_iter_vec_arg(&args[2])?;
-                let (in_ty, elem_abi) = self.iter_callback_shape(vec_local);
-                // The accumulator's own type is the callback's, which the
-                // element's class does not decide.
                 let acc_ty = self.locals[init.0 as usize].ty;
-                let acc_class = self.scalar_abi_of(acc_ty);
-                let acc_class = match acc_class {
-                    ElemAbi::Float => ElemAbi::Float,
-                    _ => ElemAbi::Word,
-                };
-                let closure = self.lower_iter_closure(&args[1], &[acc_ty, in_ty], acc_ty, span)?;
-                let dest_ty = if matches!(self.tcx.kind_of(ty), TyKind::Vec(_)) {
-                    ty
-                } else {
-                    self.tcx.intern(TyKind::Vec(acc_ty))
-                };
-                Some(self.emit_iter_combinator_call(
-                    "scan",
-                    elem_abi,
-                    Some(acc_class),
-                    vec![
-                        Operand::Copy(Place::local(init)),
-                        Operand::Copy(Place::local(closure)),
-                        Operand::Copy(Place::local(vec_local)),
-                    ],
-                    dest_ty,
-                    span,
-                ))
+                let (elem_ty, _) = self.iter_elem_abi(args[2].ty);
+                let closure =
+                    self.lower_iter_closure(&args[1], &[acc_ty, elem_ty], acc_ty, span)?;
+                self.lower_scan_loop(init, closure, &args[2], acc_ty, elem_ty, span)
             }
             ("iter::product_by", 2) => {
                 let vec_local = self.lower_iter_vec_arg(&args[1])?;
@@ -3414,6 +3755,31 @@ impl<'a> Builder<'a> {
                 ))
             }
             ("iter::sort_by_key" | "iter::min_by_key" | "iter::max_by_key", 2) => {
+                if joined != "iter::sort_by_key"
+                    && let Some(dest) = self.try_lower_map_select_by_key(
+                        joined == "iter::max_by_key",
+                        &args[0],
+                        &args[1],
+                        span,
+                    )
+                {
+                    return Some(dest);
+                }
+                if joined != "iter::sort_by_key"
+                    && let Some(key_ty) = self.callable_output_of(&args[0])
+                    && !self.key_orders_as_word(key_ty)
+                {
+                    let (elem_ty, _) = self.iter_elem_abi(args[1].ty);
+                    let closure = self.lower_iter_closure(&args[0], &[elem_ty], key_ty, span)?;
+                    return self.lower_select_by_key_loop(
+                        closure,
+                        &args[1],
+                        elem_ty,
+                        key_ty,
+                        joined == "iter::max_by_key",
+                        span,
+                    );
+                }
                 let vec_local = self.lower_iter_vec_arg(&args[1])?;
                 // The element and the key each pick their own register class,
                 // so the callback must be built with, and called through, the
@@ -3452,6 +3818,26 @@ impl<'a> Builder<'a> {
                 ))
             }
             ("iter::chunk_by" | "iter::count_by", 2) => {
+                // The runtime shims group by the key's word, which is the key
+                // for every scalar; a `String`, an aggregate, and a payload enum
+                // group by value.
+                if let Some(key_ty) = self.callable_output_of(&args[0])
+                    && (self.is_aggregate_key(key_ty)
+                        || (self.struct_name_of(key_ty).is_none()
+                            && self.ensure_enum_eq_desc(key_ty).is_some())
+                        || matches!(self.tcx.kind_of(key_ty), TyKind::String))
+                {
+                    let (elem_ty, _) = self.iter_elem_abi(args[1].ty);
+                    let closure = self.lower_iter_closure(&args[0], &[elem_ty], key_ty, span)?;
+                    return self.lower_group_by_key_loop(
+                        closure,
+                        &args[1],
+                        elem_ty,
+                        key_ty,
+                        joined == "iter::count_by",
+                        span,
+                    );
+                }
                 let vec_local = self.lower_iter_vec_arg(&args[1])?;
                 let (in_ty, elem_abi) = self.iter_callback_shape(vec_local);
                 let closure = self.lower_iter_closure(&args[0], &[in_ty], i64_ty, span)?;
@@ -3512,7 +3898,7 @@ impl<'a> Builder<'a> {
     /// `substs[idx]` of a Result/Option-shaped `ty`, ref-transparent;
     /// `None` when the type is not a resolved enum Adt or the payload
     /// slot is still an inference Var.
-    fn enum_payload_ty(&self, ty: Ty, idx: usize) -> Option<Ty> {
+    pub(crate) fn enum_payload_ty(&self, ty: Ty, idx: usize) -> Option<Ty> {
         use gossamer_types::TyKind;
         let mut resolved = ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(resolved) {
@@ -3561,6 +3947,123 @@ impl<'a> Builder<'a> {
     /// of the element produced, for the combinators whose symbol distinguishes
     /// one. A crossing the registry declares no shim for is a gap in the shim
     /// family, and it is named here rather than reaching the linker.
+    /// `m.iter().min_by_key(f)` / `max_by_key(f)` over a map of scalar values,
+    /// with `f` a lifted closure whose body has no observable effect: the
+    /// runtime finds the entry in one pass over the table, ties going to the
+    /// smallest map key, which is the entry a walk in key order keeps. The
+    /// winner lands in a one-pair vec that the ordinary combinator turns into
+    /// the `Option`, so the result is built exactly as the general path builds
+    /// it. `None`, having emitted nothing, leaves the call to that path.
+    fn try_lower_map_select_by_key(
+        &mut self,
+        want_max: bool,
+        callback: &HirExpr,
+        source: &HirExpr,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let HirExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &source.kind
+        else {
+            return None;
+        };
+        if name.name != "iter" || !args.is_empty() {
+            return None;
+        }
+        // A closure that captures nothing reaches here as the path to its
+        // lifted body; one lowered before lifting settled still names it.
+        let body_name = match &callback.kind {
+            HirExprKind::Path { segments, .. } if segments.len() == 1 => &segments[0].name,
+            HirExprKind::LiftedClosure { name, captures } if captures.is_empty() => &name.name,
+            _ => return None,
+        };
+        let reads_key = *self.effect_free_pair_keys.get(body_name)?;
+        let mut recv_ty = self
+            .receiver_local_from_path(receiver)
+            .map_or(receiver.ty, |l| self.locals[l.0 as usize].ty);
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(recv_ty) {
+            recv_ty = *inner;
+        }
+        if !matches!(self.tcx.kind_of(recv_ty), TyKind::HashMap { .. }) {
+            return None;
+        }
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let (declared_key, declared_val) = self.hash_map_kv_tys(recv_ty)?;
+        // A string key the callback never reads is handed over as a null word,
+        // which is only sound when the body is known not to touch it.
+        let key_ty = match self.hash_map_key_kind(recv_ty) {
+            Some(MapKeyKind::String) if !reads_key => self.tcx.string_ty(),
+            Some(MapKeyKind::I64) => declared_key,
+            _ => return None,
+        };
+        if !matches!(self.hash_map_value_kind(recv_ty), Some(MapValueKind::I64)) {
+            return None;
+        }
+        let tuple_ty = self.tcx.intern(TyKind::Tuple(vec![key_ty, declared_val]));
+        if self.elem_bytes_of(tuple_ty) != 16 {
+            return None;
+        }
+        let vec_ty = self.tcx.intern(TyKind::Vec(tuple_ty));
+        let (_, elem_abi) = self.iter_elem_abi(vec_ty);
+        if !matches!(elem_abi, ElemAbi::Ptr) {
+            return None;
+        }
+        let key_out = self.callable_output_of(callback).unwrap_or(i64_ty);
+        let key_is_f64 = matches!(self.tcx.kind_of(key_out), TyKind::Float(_));
+        let closure_ret = if key_is_f64 {
+            self.tcx.float_ty(gossamer_types::FloatTy::F64)
+        } else {
+            i64_ty
+        };
+
+        let recv_local = self.lower_expr(receiver)?;
+        let elem_bytes = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(elem_bytes),
+            Rvalue::Use(Operand::Const(ConstValue::Int(16))),
+            span,
+        );
+        let winner = self.emit_combinator_call_raw(
+            "Vec::new",
+            vec![Operand::Copy(Place::local(elem_bytes))],
+            vec_ty,
+            span,
+        );
+        let (in_ty, _) = self.iter_callback_shape(winner);
+        let closure = self.lower_iter_closure(callback, &[in_ty], closure_ret, span)?;
+        let unit_ty = self.tcx.unit();
+        let _ = self.emit_combinator_call_raw(
+            "gos_rt_map_select_by_key_into",
+            vec![
+                Operand::Copy(Place::local(recv_local)),
+                Operand::Copy(Place::local(winner)),
+                Operand::Copy(Place::local(closure)),
+                Operand::Const(ConstValue::Int(i128::from(key_is_f64))),
+                Operand::Const(ConstValue::Int(i128::from(want_max))),
+            ],
+            unit_ty,
+            span,
+        );
+        let elem = self.iter_result_elem_ty(unit_ty, winner);
+        let dest_ty = self.option_payload_adt_ty(elem);
+        Some(self.emit_iter_combinator_call(
+            if want_max { "max_by_key" } else { "min_by_key" },
+            elem_abi,
+            None,
+            vec![
+                Operand::Copy(Place::local(closure)),
+                Operand::Copy(Place::local(winner)),
+                Operand::Const(ConstValue::Int(i128::from(key_is_f64))),
+            ],
+            dest_ty,
+            span,
+        ))
+    }
+
     pub(crate) fn emit_iter_combinator_call(
         &mut self,
         combinator: &str,
@@ -3708,6 +4211,612 @@ impl<'a> Builder<'a> {
             }
             _ => None,
         }
+    }
+
+    /// `fold` and `reduce` as a loop in this body: each element is pulled from
+    /// the source, handed to the callback with the accumulator, and the
+    /// callback's answer replaces the accumulator.
+    ///
+    /// The accumulator is an ordinary local, so every value it holds is owned
+    /// the way any local's is: the seed is copied in, each replaced
+    /// accumulator is released when the next one is assigned, and the result
+    /// leaves the loop as the local's value. A lazy source is pulled one
+    /// element per turn, so its adapters run interleaved with the callback.
+    fn lower_fold_loop(
+        &mut self,
+        seed: FoldSeed,
+        closure: Local,
+        source: &HirExpr,
+        acc_ty: Ty,
+        elem_ty: Ty,
+        span: Span,
+    ) -> Option<Local> {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let pull = self.fold_source_pull(source, elem_ty, span)?;
+        let acc = self.push_local(acc_ty, None, true);
+        let exit = self.new_block(span);
+        let (result, empty) = match seed {
+            FoldSeed::Init(init) => {
+                self.seed_accumulator(acc, init, span);
+                (None, exit)
+            }
+            FoldSeed::FirstElement(result_ty) => {
+                let result_ty = self.result_repr_ty(result_ty);
+                let result = self.fresh(result_ty);
+                let empty = self.new_block(span);
+                // A pulled element is a share of its own, so it becomes the
+                // accumulator where it lands; a container keeps the copy
+                // `seed_accumulator` gives it.
+                let into = self
+                    .accumulator_clone_symbol(acc_ty)
+                    .is_none()
+                    .then_some(acc);
+                let first = self.emit_fold_pull(&pull, elem_ty, empty, into, span);
+                if first != acc {
+                    self.seed_accumulator(acc, first, span);
+                }
+                (Some(result), empty)
+            }
+        };
+        let header = self.new_block(span);
+        self.terminate(Terminator::Goto { target: header });
+        self.set_current(header);
+        let elem = self.emit_fold_pull(&pull, elem_ty, exit, None, span);
+        let acc_arg = self.fold_callback_arg(acc, span);
+        let elem_arg = self.fold_callback_arg(elem, span);
+        let replaced = self.fresh(acc_ty);
+        let after_call = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Copy(Place::local(closure)),
+            args: vec![
+                Operand::Copy(Place::local(acc_arg)),
+                Operand::Copy(Place::local(elem_arg)),
+            ],
+            destination: Place::local(replaced),
+            target: Some(after_call),
+        });
+        self.set_current(after_call);
+        self.emit_assign(
+            Place::local(acc),
+            Rvalue::Use(Operand::Copy(Place::local(replaced))),
+            span,
+        );
+        self.terminate(Terminator::Goto { target: header });
+
+        self.set_current(exit);
+        let Some(result) = result else {
+            self.fresh_loop_results.insert(acc);
+            return Some(acc);
+        };
+        // Both arms build the carrier straight into the result, so the
+        // payload it carries is the result's own to hand over.
+        let join = self.new_block(span);
+        let some_disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(some_disc),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+        self.lower_result_ctor_into(result, some_disc, acc, span);
+        self.terminate(Terminator::Goto { target: join });
+
+        self.set_current(empty);
+        self.emit_assign(
+            Place::local(result),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_new",
+                args: vec![
+                    Operand::Const(ConstValue::Int(1)),
+                    Operand::Const(ConstValue::Int(0)),
+                ],
+            },
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(join);
+        Some(result)
+    }
+
+    /// Lowers a loop's element source: lazy state pulled one element per turn,
+    /// or a sequence read by index.
+    fn fold_source_pull(&mut self, source: &HirExpr, elem_ty: Ty, span: Span) -> Option<FoldPull> {
+        use gossamer_types::TyKind;
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        if self.lazy_iter_source_family(source.ty).is_some()
+            && matches!(self.tcx.kind_of(source.ty), TyKind::Iterator(_))
+        {
+            let state = self.lower_lazy_iter_source_aggr(source)?;
+            let next_symbol = if self.local_aggr_iter.contains(&state) {
+                "gos_rt_lazy_iter_next_i64"
+            } else {
+                self.lazy_iter_next_symbol(elem_ty)?
+            };
+            return Some(FoldPull::Lazy { state, next_symbol });
+        }
+        let vec = self.lower_iter_vec_arg(source)?;
+        let len = self.emit_combinator_call(
+            "gos_rt_vec_len",
+            vec![Operand::Copy(Place::local(vec))],
+            i64_ty,
+            span,
+        );
+        let counter = self.push_local(i64_ty, None, true);
+        self.emit_assign(
+            Place::local(counter),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+        Some(FoldPull::Vec { vec, len, counter })
+    }
+
+    /// Whether a key's slot word is its own order, which is what the word-key
+    /// combinator shims compare. A `String`, an aggregate, a sequence, a
+    /// payload enum, and an unsigned word order by value instead.
+    fn key_orders_as_word(&self, key_ty: Ty) -> bool {
+        use gossamer_types::{IntTy, TyKind};
+        match self.tcx.kind_of(key_ty) {
+            TyKind::Int(IntTy::U64 | IntTy::Usize) => false,
+            TyKind::Int(_) | TyKind::Bool | TyKind::Char | TyKind::Float(_) => true,
+            TyKind::Adt { def, .. } => {
+                self.tcx.is_inline_enum_ty(key_ty)
+                    && self
+                        .tcx
+                        .enum_variant_tys(*def)
+                        .is_some_and(|variants| variants.iter().all(Vec::is_empty))
+            }
+            _ => false,
+        }
+    }
+
+    /// Calls a key callback on `elem`, answering the key.
+    fn emit_key_call(&mut self, closure: Local, elem: Local, key_ty: Ty, span: Span) -> Local {
+        let arg = self.fold_callback_arg(elem, span);
+        let key = self.fresh(key_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Copy(Place::local(closure)),
+            args: vec![Operand::Copy(Place::local(arg))],
+            destination: Place::local(key),
+            target: Some(next),
+        });
+        self.set_current(next);
+        key
+    }
+
+    /// `min_by_key` / `max_by_key` over a key that orders by value: each
+    /// element's key is compared with the best one so far through the key
+    /// type's ordering descriptor, and the first element holding the least (or
+    /// greatest) key is answered.
+    fn lower_select_by_key_loop(
+        &mut self,
+        closure: Local,
+        source: &HirExpr,
+        elem_ty: Ty,
+        key_ty: Ty,
+        greatest: bool,
+        span: Span,
+    ) -> Option<Local> {
+        let desc: String = self
+            .ordering_stream(key_ty)?
+            .iter()
+            .map(|&b| b as char)
+            .collect();
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let bool_ty = self.tcx.bool_ty();
+        let pull = self.fold_source_pull(source, elem_ty, span)?;
+        let result_ty = self.option_payload_adt_ty(elem_ty);
+        let result_ty = self.result_repr_ty(result_ty);
+        let result = self.fresh(result_ty);
+        let best = self.push_local(elem_ty, None, true);
+        let best_key = self.push_local(key_ty, None, true);
+        let empty = self.new_block(span);
+        let exit = self.new_block(span);
+        let first = self.emit_fold_pull(&pull, elem_ty, empty, None, span);
+        self.emit_assign(
+            Place::local(best),
+            Rvalue::Use(Operand::Copy(Place::local(first))),
+            span,
+        );
+        let first_key = self.emit_key_call(closure, best, key_ty, span);
+        self.emit_assign(
+            Place::local(best_key),
+            Rvalue::Use(Operand::Copy(Place::local(first_key))),
+            span,
+        );
+        let header = self.new_block(span);
+        self.terminate(Terminator::Goto { target: header });
+        self.set_current(header);
+        let elem = self.emit_fold_pull(&pull, elem_ty, exit, None, span);
+        let key = self.emit_key_call(closure, elem, key_ty, span);
+        let key_slots = self.ordered_value_slots(key, key_ty, span);
+        let best_slots = self.ordered_value_slots(best_key, key_ty, span);
+        let order = self.emit_combinator_call(
+            "gos_rt_desc_cmp",
+            vec![
+                Operand::Copy(Place::local(key_slots)),
+                Operand::Copy(Place::local(best_slots)),
+                Operand::Const(ConstValue::Str(desc)),
+            ],
+            i64_ty,
+            span,
+        );
+        let replaces = self.fresh(bool_ty);
+        self.emit_assign(
+            Place::local(replaces),
+            Rvalue::BinaryOp {
+                op: if greatest { BinOp::Gt } else { BinOp::Lt },
+                lhs: Operand::Copy(Place::local(order)),
+                rhs: Operand::Const(ConstValue::Int(0)),
+            },
+            span,
+        );
+        let replace = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(replaces)),
+            arms: vec![(0, header)],
+            default: replace,
+        });
+        self.set_current(replace);
+        self.emit_assign(
+            Place::local(best),
+            Rvalue::Use(Operand::Copy(Place::local(elem))),
+            span,
+        );
+        match self.accumulator_clone_symbol(key_ty) {
+            // The comparison read this turn's container key, which stays this
+            // turn's to reclaim, so the best key takes storage of its own.
+            Some(symbol) => {
+                let next = self.new_block(span);
+                self.terminate(Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+                    args: vec![Operand::Copy(Place::local(key))],
+                    destination: Place::local(best_key),
+                    target: Some(next),
+                });
+                self.set_current(next);
+            }
+            None => self.emit_assign(
+                Place::local(best_key),
+                Rvalue::Use(Operand::Copy(Place::local(key))),
+                span,
+            ),
+        }
+        self.terminate(Terminator::Goto { target: header });
+
+        let join = self.new_block(span);
+        self.set_current(exit);
+        let some_disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(some_disc),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+        self.lower_result_ctor_into(result, some_disc, best, span);
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(empty);
+        self.emit_assign(
+            Place::local(result),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_new",
+                args: vec![
+                    Operand::Const(ConstValue::Int(1)),
+                    Operand::Const(ConstValue::Int(0)),
+                ],
+            },
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(join);
+        Some(result)
+    }
+
+    /// `count_by` / `chunk_by` over a key that is hashed by value: each
+    /// element's key reaches the map through the key type's descriptor, so
+    /// equal keys built at different allocations name one entry.
+    fn lower_group_by_key_loop(
+        &mut self,
+        closure: Local,
+        source: &HirExpr,
+        elem_ty: Ty,
+        key_ty: Ty,
+        counting: bool,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        // A `String` key is its text, which the typed string-keyed entries hash
+        // directly; an aggregate or enum key reaches the map through its
+        // descriptor.
+        let (suffix, desc) = if matches!(self.tcx.kind_of(key_ty), TyKind::String) {
+            ("typed_str_i64", None)
+        } else {
+            match self.ensure_enum_eq_desc(key_ty) {
+                Some(desc) if self.struct_name_of(key_ty).is_none() => ("ekey", Some(desc)),
+                _ => ("skey", Some(self.key_descriptor(key_ty)?)),
+            }
+        };
+        let group_ty = self.tcx.intern(TyKind::Vec(elem_ty));
+        let value_ty = if counting { i64_ty } else { group_ty };
+        let map_ty = self.tcx.intern(TyKind::HashMap {
+            key: key_ty,
+            value: value_ty,
+            ordered: false,
+        });
+        let map = self.emit_combinator_call("Map::new", Vec::new(), map_ty, span);
+        if !counting {
+            let unit = self.tcx.unit();
+            let sink = self.fresh(unit);
+            self.emit_assign(
+                Place::local(sink),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_map_set_vec_values",
+                    args: vec![Operand::Copy(Place::local(map))],
+                },
+                span,
+            );
+        }
+        let pull = self.fold_source_pull(source, elem_ty, span)?;
+        let exit = self.new_block(span);
+        let header = self.new_block(span);
+        self.terminate(Terminator::Goto { target: header });
+        self.set_current(header);
+        let elem = self.emit_fold_pull(&pull, elem_ty, exit, None, span);
+        let key = self.emit_key_call(closure, elem, key_ty, span);
+        let desc_op = desc.map(|desc| Operand::Const(ConstValue::Str(desc)));
+        if counting {
+            let mut inc_args = vec![
+                Operand::Copy(Place::local(map)),
+                Operand::Copy(Place::local(key)),
+            ];
+            inc_args.extend(desc_op);
+            inc_args.push(Operand::Const(ConstValue::Int(1)));
+            self.emit_combinator_call(&format!("gos_rt_map_inc_{suffix}"), inc_args, i64_ty, span);
+        } else {
+            let bytes = i128::from(self.elem_bytes_of(elem_ty).max(1));
+            let fresh_group = self.emit_combinator_call(
+                "Vec::new",
+                vec![Operand::Const(ConstValue::Int(bytes))],
+                group_ty,
+                span,
+            );
+            let mut insert_args = vec![
+                Operand::Copy(Place::local(map)),
+                Operand::Copy(Place::local(key)),
+            ];
+            insert_args.extend(desc_op);
+            insert_args.push(Operand::Copy(Place::local(fresh_group)));
+            let group = self.emit_combinator_call(
+                &format!("gos_rt_map_or_insert_{suffix}"),
+                insert_args,
+                group_ty,
+                span,
+            );
+            let unit = self.tcx.unit();
+            self.emit_combinator_call(
+                "gos_rt_vec_push",
+                vec![
+                    Operand::Copy(Place::local(group)),
+                    Operand::Copy(Place::local(elem)),
+                ],
+                unit,
+                span,
+            );
+        }
+        self.terminate(Terminator::Goto { target: header });
+        self.set_current(exit);
+        Some(map)
+    }
+
+    /// Gives a fold's accumulator `acc` its starting value `seed`. A container
+    /// is copied into storage of its own, so replacing the accumulator frees
+    /// only what the fold itself holds.
+    fn seed_accumulator(&mut self, acc: Local, seed: Local, span: Span) {
+        let ty = self.locals[acc.0 as usize].ty;
+        match self.accumulator_clone_symbol(ty) {
+            Some(symbol) => {
+                let next = self.new_block(span);
+                self.terminate(Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+                    args: vec![Operand::Copy(Place::local(seed))],
+                    destination: Place::local(acc),
+                    target: Some(next),
+                });
+                self.set_current(next);
+            }
+            None => self.emit_assign(
+                Place::local(acc),
+                Rvalue::Use(Operand::Copy(Place::local(seed))),
+                span,
+            ),
+        }
+    }
+
+    /// The runtime copy a container accumulator of type `ty` starts from.
+    fn accumulator_clone_symbol(&self, ty: Ty) -> Option<&'static str> {
+        if matches!(
+            self.tcx.kind_of(ty),
+            gossamer_types::TyKind::Vec(_) | gossamer_types::TyKind::Slice(_)
+        ) {
+            return Some("gos_rt_vec_clone");
+        }
+        self.map_or_set_clone_symbol(ty)
+    }
+
+    /// `scan`: a fold whose every accumulator is also pushed onto the result,
+    /// in order.
+    fn lower_scan_loop(
+        &mut self,
+        init: Local,
+        closure: Local,
+        source: &HirExpr,
+        acc_ty: Ty,
+        elem_ty: Ty,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let pull = self.fold_source_pull(source, elem_ty, span)?;
+        let out_ty = self.tcx.intern(TyKind::Vec(acc_ty));
+        let bytes = i128::from(self.elem_bytes_of(acc_ty).max(1));
+        let out = self.emit_combinator_call(
+            "Vec::new",
+            vec![Operand::Const(ConstValue::Int(bytes))],
+            out_ty,
+            span,
+        );
+        let acc = self.push_local(acc_ty, None, true);
+        self.seed_accumulator(acc, init, span);
+        let exit = self.new_block(span);
+        let header = self.new_block(span);
+        self.terminate(Terminator::Goto { target: header });
+        self.set_current(header);
+        let elem = self.emit_fold_pull(&pull, elem_ty, exit, None, span);
+        let acc_arg = self.fold_callback_arg(acc, span);
+        let elem_arg = self.fold_callback_arg(elem, span);
+        let replaced = self.fresh(acc_ty);
+        let after_call = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Copy(Place::local(closure)),
+            args: vec![
+                Operand::Copy(Place::local(acc_arg)),
+                Operand::Copy(Place::local(elem_arg)),
+            ],
+            destination: Place::local(replaced),
+            target: Some(after_call),
+        });
+        self.set_current(after_call);
+        self.emit_assign(
+            Place::local(acc),
+            Rvalue::Use(Operand::Copy(Place::local(replaced))),
+            span,
+        );
+        let unit = self.tcx.unit();
+        self.emit_combinator_call(
+            "gos_rt_vec_push",
+            vec![
+                Operand::Copy(Place::local(out)),
+                Operand::Copy(Place::local(acc)),
+            ],
+            unit,
+            span,
+        );
+        self.terminate(Terminator::Goto { target: header });
+        self.set_current(exit);
+        Some(out)
+    }
+
+    /// Pulls the next element of a fold's source, branching to `done` when
+    /// there is none, and answers the element in the shape a callback reads.
+    /// A lazily pulled element lands in `into` when one is given.
+    fn emit_fold_pull(
+        &mut self,
+        pull: &FoldPull,
+        elem_ty: Ty,
+        done: BlockId,
+        into: Option<Local>,
+        span: Span,
+    ) -> Local {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let bool_ty = self.tcx.bool_ty();
+        let body = self.new_block(span);
+        match *pull {
+            FoldPull::Vec { vec, len, counter } => {
+                let more = self.fresh(bool_ty);
+                self.emit_assign(
+                    Place::local(more),
+                    Rvalue::BinaryOp {
+                        op: BinOp::Lt,
+                        lhs: Operand::Copy(Place::local(counter)),
+                        rhs: Operand::Copy(Place::local(len)),
+                    },
+                    span,
+                );
+                self.terminate(Terminator::SwitchInt {
+                    discriminant: Operand::Copy(Place::local(more)),
+                    arms: vec![(0, done)],
+                    default: body,
+                });
+                self.set_current(body);
+                let (elem, _) = self.load_vec_element(vec, counter, elem_ty, false, span);
+                self.emit_assign(
+                    Place::local(counter),
+                    Rvalue::BinaryOp {
+                        op: BinOp::Add,
+                        lhs: Operand::Copy(Place::local(counter)),
+                        rhs: Operand::Const(ConstValue::Int(1)),
+                    },
+                    span,
+                );
+                elem
+            }
+            FoldPull::Lazy { state, next_symbol } => {
+                let carrier_ty = self.option_payload_adt_ty(elem_ty);
+                let carrier = self.emit_combinator_call(
+                    next_symbol,
+                    vec![Operand::Copy(Place::local(state))],
+                    carrier_ty,
+                    span,
+                );
+                let disc = self.fresh(i64_ty);
+                self.emit_assign(
+                    Place::local(disc),
+                    Rvalue::CallIntrinsic {
+                        name: "gos_rt_result_disc",
+                        args: vec![Operand::Copy(Place::local(carrier))],
+                    },
+                    span,
+                );
+                self.terminate(Terminator::SwitchInt {
+                    discriminant: Operand::Copy(Place::local(disc)),
+                    arms: vec![(0, body)],
+                    default: done,
+                });
+                self.set_current(body);
+                let extractor =
+                    if matches!(self.tcx.kind_of(elem_ty), gossamer_types::TyKind::Float(_)) {
+                        "gos_rt_result_payload_f64"
+                    } else if self.is_by_value_enum_ty(elem_ty) {
+                        "gos_rt_result_payload_i128"
+                    } else {
+                        "gos_rt_result_payload"
+                    };
+                let elem = into.unwrap_or_else(|| self.fresh(elem_ty));
+                self.emit_assign(
+                    Place::local(elem),
+                    Rvalue::CallIntrinsic {
+                        name: extractor,
+                        args: vec![Operand::Copy(Place::local(carrier))],
+                    },
+                    span,
+                );
+                elem
+            }
+        }
+    }
+
+    /// The operand a combinator callback takes for `value`: the value itself,
+    /// or its address for a two-word carrier the callback reads by reference
+    /// (see [`Self::lower_iter_closure`]).
+    fn fold_callback_arg(&mut self, value: Local, span: Span) -> Local {
+        let ty = self.locals[value.0 as usize].ty;
+        if !(crate::lower::carrier_ref::is_two_word_carrier(self.tcx, ty)
+            && self.elem_bytes_of(ty) > 8)
+        {
+            return value;
+        }
+        let ref_ty = self.tcx.intern(gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Not,
+            inner: ty,
+        });
+        let reference = self.fresh(ref_ty);
+        self.emit_assign(
+            Place::local(reference),
+            Rvalue::Ref {
+                mutable: false,
+                place: Place::local(value),
+            },
+            span,
+        );
+        reference
     }
 
     /// `xs.map(f)` over a word-slot element and a word-slot result, with `f`
@@ -3915,6 +5024,33 @@ impl<'a> Builder<'a> {
         self.iter_elem_abi(ty).1
     }
 
+    /// Whether a map of type `ty` declares its keys `u64` / `usize`, whose
+    /// stored words walk in unsigned order.
+    pub(crate) fn map_keys_unsigned(&self, ty: Ty) -> bool {
+        self.hash_map_kv_tys(ty).is_some_and(|(key, _)| {
+            matches!(
+                self.tcx.kind_of(self.peel_ref_ty(key)),
+                gossamer_types::TyKind::Int(
+                    gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize
+                )
+            )
+        })
+    }
+
+    /// Whether a set of type `ty` declares its elements `u64` / `usize`,
+    /// whose stored words walk in unsigned order.
+    pub(crate) fn set_elems_unsigned(&self, ty: Ty) -> bool {
+        self.first_generic_of(self.peel_ref_ty(ty))
+            .is_some_and(|elem| {
+                matches!(
+                    self.tcx.kind_of(self.peel_ref_ty(elem)),
+                    gossamer_types::TyKind::Int(
+                        gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize
+                    )
+                )
+            })
+    }
+
     pub(crate) fn iter_elem_abi(&mut self, seq_ty: Ty) -> (Ty, ElemAbi) {
         use gossamer_types::TyKind;
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
@@ -3988,6 +5124,116 @@ impl<'a> Builder<'a> {
         )
     }
 
+    /// `carrier.unwrap_or(v)` / `carrier.unwrap_or_else(f)` for an aggregate
+    /// payload, as the branch it stands for: the `Ok` / `Some` payload copied
+    /// out of the carrier, or else the fallback. Both arms are copies the frame
+    /// owns, so the answer takes its own shares of the value's children the
+    /// way a `match` binding does, where a runtime helper would hand back the
+    /// payload's address with no share behind it.
+    pub(crate) fn lower_unwrap_or_inline(
+        &mut self,
+        recv: Local,
+        fallback: CarrierFallback,
+        receiver_ty: Ty,
+        is_option: bool,
+        dest_ty: Ty,
+        span: Span,
+    ) -> Local {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let payload_ty = self.enum_payload_ty(receiver_ty, 0).unwrap_or(dest_ty);
+        let dest = self.fresh(dest_ty);
+        let disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(disc),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_disc",
+                args: vec![Operand::Copy(Place::local(recv))],
+            },
+            span,
+        );
+        let present = self.new_block(span);
+        let otherwise = self.new_block(span);
+        let join = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(disc)),
+            arms: vec![(0, present)],
+            default: otherwise,
+        });
+        self.set_current(present);
+        if self.carrier_payload_is_carrier(receiver_ty) {
+            // A payload that is itself a carrier is boxed, so the reader
+            // answers the two words the box holds. The destination takes its
+            // own share of them where that call answers, which is a block only
+            // this arm reaches.
+            let reader = if is_option {
+                "gos_rt_option_unwrap_carrier"
+            } else {
+                "gos_rt_result_unwrap_carrier"
+            };
+            let answered = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(reader.to_string())),
+                args: vec![Operand::Copy(Place::local(recv))],
+                destination: Place::local(dest),
+                target: Some(answered),
+            });
+            self.set_current(answered);
+        } else {
+            let payload = self.fresh(payload_ty);
+            self.emit_assign(
+                Place::local(payload),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_payload",
+                    args: vec![Operand::Copy(Place::local(recv))],
+                },
+                span,
+            );
+            self.emit_assign(
+                Place::local(dest),
+                Rvalue::Use(Operand::Copy(Place::local(payload))),
+                span,
+            );
+        }
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(otherwise);
+        let closure = match fallback {
+            CarrierFallback::Value(value) => {
+                self.emit_assign(
+                    Place::local(dest),
+                    Rvalue::Use(Operand::Copy(Place::local(value))),
+                    span,
+                );
+                self.terminate(Terminator::Goto { target: join });
+                self.set_current(join);
+                return dest;
+            }
+            CarrierFallback::Call(closure) => closure,
+        };
+        let args = if is_option {
+            Vec::new()
+        } else {
+            let err_ty = self.enum_payload_ty(receiver_ty, 1).unwrap_or(i64_ty);
+            let err = self.fresh(err_ty);
+            self.emit_assign(
+                Place::local(err),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_payload",
+                    args: vec![Operand::Copy(Place::local(recv))],
+                },
+                span,
+            );
+            vec![Operand::Copy(Place::local(err))]
+        };
+        self.terminate(Terminator::Call {
+            callee: Operand::Copy(Place::local(closure)),
+            args,
+            destination: Place::local(dest),
+            target: Some(join),
+        });
+        self.set_current(join);
+        dest
+    }
+
     pub(crate) fn lower_iter_closure(
         &mut self,
         closure_arg: &HirExpr,
@@ -3995,6 +5241,30 @@ impl<'a> Builder<'a> {
         output: Ty,
         span: Span,
     ) -> Option<Local> {
+        // A shim that reads the callback's result as a word still calls a body
+        // that answers its own narrower scalar, so the callable keeps that
+        // result type and its thunk widens it to the word the shim reads.
+        let output = match self.callable_output_of(closure_arg) {
+            Some(real)
+                if output == self.tcx.int_ty(gossamer_types::IntTy::I64)
+                    && matches!(
+                        self.tcx.kind_of(real),
+                        gossamer_types::TyKind::Bool
+                            | gossamer_types::TyKind::Char
+                            | gossamer_types::TyKind::Int(
+                                gossamer_types::IntTy::I8
+                                    | gossamer_types::IntTy::U8
+                                    | gossamer_types::IntTy::I16
+                                    | gossamer_types::IntTy::U16
+                                    | gossamer_types::IntTy::I32
+                                    | gossamer_types::IntTy::U32
+                            )
+                    ) =>
+            {
+                real
+            }
+            _ => output,
+        };
         let raw = self.lower_expr(closure_arg)?;
         // A combinator hands a wide element to its callback by the address of
         // the element's storage. A struct, tuple, or array parameter IS that
@@ -4029,6 +5299,28 @@ impl<'a> Builder<'a> {
     /// a distinct runtime object, so it is drained into a snapshot Vec first.
     pub(crate) fn lower_iter_vec_arg(&mut self, arg: &HirExpr) -> Option<Local> {
         use gossamer_types::TyKind;
+        // An eager traversal of `m.iter()` reads the materialised pairs
+        // directly: a cursor over them would only be drained back into a
+        // second copy of the same sequence.
+        if let HirExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &arg.kind
+            && name.name == "iter"
+            && args.is_empty()
+        {
+            let mut recv_ty = self
+                .receiver_local_from_path(receiver)
+                .map_or(receiver.ty, |l| self.locals[l.0 as usize].ty);
+            while let TyKind::Ref { inner, .. } = self.tcx.kind_of(recv_ty) {
+                recv_ty = *inner;
+            }
+            if matches!(self.tcx.kind_of(recv_ty), TyKind::HashMap { .. }) {
+                return self.materialize_hashmap_entries(receiver, recv_ty, arg.span);
+            }
+        }
         let raw = self.lower_expr(arg)?;
         let raw_ty = self.locals[raw.0 as usize].ty;
         match self.tcx.kind_of(raw_ty).clone() {
@@ -4042,12 +5334,16 @@ impl<'a> Builder<'a> {
             {
                 let vec_ty = self.tcx.intern(TyKind::Vec(elem));
                 let collect_symbol = self.lazy_collect_symbol_for(raw, elem);
-                Some(self.emit_combinator_call(
+                let drained = self.emit_combinator_call(
                     collect_symbol,
                     vec![Operand::Copy(Place::local(raw))],
                     vec_ty,
                     arg.span,
-                ))
+                );
+                if collect_symbol == "gos_rt_lazy_iter_collect_aggr" {
+                    self.tag_owned_elements(drained, elem, arg.span);
+                }
+                Some(drained)
             }
             _ => Some(raw),
         }
@@ -4103,9 +5399,9 @@ impl<'a> Builder<'a> {
             // The pair state is built by `zip` / `enumerate`, never borrowed
             // from a sequence, so a pair-shaped element borrows through the
             // address form like any other multi-slot element.
-            Some(LazyElemFamily::PairWord) | None => {
-                self.aggr_lazy_elem(elem).then_some(LazyElemFamily::Aggr)
-            }
+            Some(LazyElemFamily::PairWord) | None => self
+                .lazy_addressed_elem(elem)
+                .then_some(LazyElemFamily::Aggr),
             family => family,
         }
     }
@@ -4128,6 +5424,20 @@ impl<'a> Builder<'a> {
             self.tcx.kind_of(elem),
             TyKind::Tuple(_) | TyKind::Adt { .. }
         ) && self.elem_bytes_of(elem) > 8
+    }
+
+    /// Whether a lazy stream of `elem` carries each element as the address of
+    /// its storage: an element wider than one slot, or a struct, whose storage
+    /// is reached through its address whatever its width.
+    pub(crate) fn lazy_addressed_elem(&self, elem: Ty) -> bool {
+        use gossamer_types::TyKind;
+        self.aggr_lazy_elem(elem)
+            || matches!(
+                self.tcx.kind_of(elem),
+                TyKind::Adt { def, .. }
+                    if self.tcx.enum_variant_tys(*def).is_none()
+                        && self.tcx.struct_field_tys(*def).is_some()
+            )
     }
 
     /// Result type for an adapter that answered eagerly. A surface type of
@@ -4742,9 +6052,11 @@ impl<'a> Builder<'a> {
             Rvalue::Use(Operand::Copy(slot_place)),
             span,
         );
-        // The payload outlives the vec it was read from, so the backend's
-        // heap copy needs this element's guarded layout to reclaim it.
-        let _ = self.ensure_aggr_copy_meta(elem_ty);
+        // An aggregate payload outlives the vec it was read from, so the
+        // backend's heap copy needs this element's guarded layout to reclaim it.
+        if self.is_inline_aggregate_ty(elem_ty) {
+            let _ = self.ensure_aggr_copy_meta(elem_ty);
+        }
         let some_disc = self.fresh(i64_ty);
         self.emit_assign(
             Place::local(some_disc),
@@ -4805,12 +6117,46 @@ impl<'a> Builder<'a> {
             .sequence_elem_ty_of(self.locals[state.0 as usize].ty)
             .unwrap_or_else(|| self.tcx.int_ty(gossamer_types::IntTy::I64));
         let vec_ty = self.tcx.intern(TyKind::Vec(elem));
-        self.emit_combinator_call(
+        let drained = self.emit_combinator_call(
             "gos_rt_lazy_iter_collect_aggr",
             vec![Operand::Copy(Place::local(state))],
             vec_ty,
             span,
-        )
+        );
+        self.tag_owned_elements(drained, elem, span);
+        drained
+    }
+
+    /// Declares that the vec in `vec`, filled by a runtime shim with elements
+    /// whose shares the shim handed over, owns what each `elem` element holds:
+    /// a `String`, a nested container, a payload enum node, or the heap fields
+    /// of an inline struct or tuple. A vec already tagged from its source keeps
+    /// its layout; the tag records ownership and takes no shares itself.
+    pub(crate) fn tag_owned_elements(&mut self, vec: Local, elem: Ty, span: Span) {
+        use crate::lower::helpers::ElemOwnership;
+        let (symbol, meta) = if matches!(self.tcx.kind_of(elem), gossamer_types::TyKind::String) {
+            ("gos_rt_vec_mark_str_elems", None)
+        } else {
+            match crate::lower::helpers::elem_ownership(self.tcx, elem) {
+                Some(
+                    ownership @ (ElemOwnership::Owned(_)
+                    | ElemOwnership::VecElems
+                    | ElemOwnership::RcElems),
+                ) => (ownership.symbol(), ownership.meta().map(str::to_string)),
+                _ => return,
+            }
+        };
+        let mut args = vec![Operand::Copy(Place::local(vec))];
+        if let Some(meta) = meta {
+            args.push(Operand::Const(ConstValue::Str(meta)));
+        }
+        let unit = self.tcx.unit();
+        let sink = self.fresh(unit);
+        self.emit_assign(
+            Place::local(sink),
+            Rvalue::CallIntrinsic { name: symbol, args },
+            span,
+        );
     }
 
     /// Lowers a combinator's sequence argument once, reporting whether the
@@ -4848,6 +6194,20 @@ impl<'a> Builder<'a> {
             _ => raw,
         };
         let family = self.lowered_lazy_family(local);
+        // The pair state `zip` and `enumerate` build advances through a helper
+        // of its own that no word adapter reads, so its pairs ride on as the
+        // counted blobs an address-carrying stream hands out.
+        if family == Some(LazyElemFamily::PairWord) {
+            let ty = self.locals[local.0 as usize].ty;
+            let handle = self.emit_combinator_call(
+                "gos_rt_lazy_iter_pair_blobs",
+                vec![Operand::Copy(Place::local(local))],
+                ty,
+                arg.span,
+            );
+            self.local_aggr_iter.insert(handle);
+            return Some((handle, Some(LazyElemFamily::Aggr)));
+        }
         Some((local, family))
     }
 
@@ -4873,14 +6233,13 @@ impl<'a> Builder<'a> {
             // The address rides the slot, but what the consumer reads through
             // it is the element, so the state names the element type.
             LazyElemFamily::Aggr => source_elem?,
+            // A counted element keeps its type, so every consumer downstream
+            // picks the helpers that account for the share each pull carries.
+            LazyElemFamily::Ptr => self.tcx.string_ty(),
             _ => self.tcx.int_ty(gossamer_types::IntTy::I64),
         };
         let iter_ty = self.tcx.intern(TyKind::Iterator(elem_ty));
-        let helper = match family {
-            LazyElemFamily::Float => "gos_rt_lazy_iter_from_vec_f64",
-            LazyElemFamily::Aggr => "gos_rt_lazy_iter_from_vec_aggr",
-            _ => "gos_rt_lazy_iter_from_vec_i64",
-        };
+        let helper = family.vec_source_symbol();
         let handle = self.emit_combinator_call(
             helper,
             vec![Operand::Copy(Place::local(source))],
@@ -5014,7 +6373,25 @@ impl<'a> Builder<'a> {
                 receiver,
                 recv_ty,
                 key_struct_ty,
-                descriptor,
+                KeyedPairs::Aggregate(descriptor),
+                key_binding,
+                val_binding,
+                for_loop,
+                span,
+            );
+        }
+        // A payload enum key is stored under its canonical bytes beside the
+        // node itself, so the snapshot hands back the nodes and each value is
+        // looked up through the enum's equality descriptor.
+        if let Some((key_ty, _)) = self.hash_map_kv_tys(recv_ty)
+            && self.struct_name_of(key_ty).is_none()
+            && let Some(descriptor) = self.ensure_enum_eq_desc(key_ty)
+        {
+            return self.lower_for_skey_pairs(
+                receiver,
+                recv_ty,
+                key_ty,
+                KeyedPairs::Enum(descriptor),
                 key_binding,
                 val_binding,
                 for_loop,
@@ -5066,6 +6443,7 @@ impl<'a> Builder<'a> {
             };
             let keys_helper = match key_kind {
                 Some(MapKeyKind::String) => "gos_rt_map_keys_str",
+                _ if self.map_keys_unsigned(recv_ty) => "gos_rt_map_keys_u64",
                 _ => "gos_rt_map_keys_i64",
             };
             let get_or_helper = match (key_kind, value_kind) {
@@ -5079,17 +6457,80 @@ impl<'a> Builder<'a> {
             (key_ty, val_ty, keys_helper, get_or_helper)
         };
 
+        // A key and a value that each fit one word are read out of pairs the
+        // runtime sorts once, with no lookup per entry, and each is bound as the
+        // type the map declares: a scalar's slot holds its own bits.
+        let pairs = match (
+            self.hash_map_key_kind(recv_ty),
+            self.hash_map_value_kind(recv_ty),
+            self.hash_map_kv_tys(recv_ty),
+        ) {
+            (
+                Some(MapKeyKind::String | MapKeyKind::I64),
+                Some(MapValueKind::String | MapValueKind::I64),
+                Some((declared_key, declared_val)),
+            ) => {
+                let pair_key = if key_ty == str_ty {
+                    str_ty
+                } else {
+                    declared_key
+                };
+                let pair_val = if val_ty == str_ty {
+                    str_ty
+                } else {
+                    declared_val
+                };
+                let pair = self.tcx.intern(TyKind::Tuple(vec![pair_key, pair_val]));
+                (self.elem_bytes_of(pair) == 16).then_some((pair, pair_key, pair_val))
+            }
+            _ => None,
+        };
+        let (key_ty, val_ty) = pairs.map_or((key_ty, val_ty), |(_, k, v)| (k, v));
+
         let recv_local = self.lower_expr(receiver)?;
-        let keys_vec_ty = self.tcx.intern(TyKind::Vec(key_ty));
-        let keys_vec = self.fresh(keys_vec_ty);
-        let after_keys = self.new_block(span);
-        self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str(keys_helper.to_string())),
-            args: vec![Operand::Copy(Place::local(recv_local))],
-            destination: Place::local(keys_vec),
-            target: Some(after_keys),
-        });
-        self.set_current(after_keys);
+        let keys_vec = if let Some((pair, _, _)) = pairs {
+            let elem_bytes = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(elem_bytes),
+                Rvalue::Use(Operand::Const(ConstValue::Int(16))),
+                span,
+            );
+            let pairs_ty = self.tcx.intern(TyKind::Vec(pair));
+            let entries = self.emit_combinator_call_raw(
+                "Vec::new",
+                vec![Operand::Copy(Place::local(elem_bytes))],
+                pairs_ty,
+                span,
+            );
+            let unit_ty = self.tcx.unit();
+            let entries_helper = if self.map_keys_unsigned(recv_ty) {
+                "gos_rt_map_entries_into_u64"
+            } else {
+                "gos_rt_map_entries_into"
+            };
+            let _ = self.emit_combinator_call_raw(
+                entries_helper,
+                vec![
+                    Operand::Copy(Place::local(recv_local)),
+                    Operand::Copy(Place::local(entries)),
+                ],
+                unit_ty,
+                span,
+            );
+            entries
+        } else {
+            let keys_vec_ty = self.tcx.intern(TyKind::Vec(key_ty));
+            let keys_vec = self.fresh(keys_vec_ty);
+            let after_keys = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(keys_helper.to_string())),
+                args: vec![Operand::Copy(Place::local(recv_local))],
+                destination: Place::local(keys_vec),
+                target: Some(after_keys),
+            });
+            self.set_current(after_keys);
+            keys_vec
+        };
 
         let len_local = self.fresh(i64_ty);
         let after_len = self.new_block(span);
@@ -5172,25 +6613,6 @@ impl<'a> Builder<'a> {
         });
         self.set_current(after_load);
 
-        // v = m.get_or(k, default). Default-by-value-type: 0 for
-        // i64-valued maps, an empty string for string-valued maps.
-        let default_local = if val_ty == str_ty {
-            let l = self.fresh(str_ty);
-            self.emit_assign(
-                Place::local(l),
-                Rvalue::Use(Operand::Const(ConstValue::Str(String::new()))),
-                span,
-            );
-            l
-        } else {
-            let l = self.fresh(i64_ty);
-            self.emit_assign(
-                Place::local(l),
-                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
-                span,
-            );
-            l
-        };
         let val_local = self.push_local(
             val_ty,
             val_binding.as_ref().map(|(n, _)| n.clone()),
@@ -5200,16 +6622,54 @@ impl<'a> Builder<'a> {
             self.bind_local(&name.name, val_local);
         }
         let after_val = self.new_block(span);
-        self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str(get_or_helper.to_string())),
-            args: vec![
-                Operand::Copy(Place::local(recv_local)),
-                Operand::Copy(Place::local(key_local)),
-                Operand::Copy(Place::local(default_local)),
-            ],
-            destination: Place::local(val_local),
-            target: Some(after_val),
-        });
+        if pairs.is_some() {
+            // v = the pair's second word, read the way the key was.
+            let value_off = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(value_off),
+                Rvalue::Use(Operand::Const(ConstValue::Int(8))),
+                span,
+            );
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_load".to_string())),
+                args: vec![
+                    Operand::Copy(Place::local(ptr_local)),
+                    Operand::Copy(Place::local(value_off)),
+                ],
+                destination: Place::local(val_local),
+                target: Some(after_val),
+            });
+        } else {
+            // v = m.get_or(k, default). Default-by-value-type: 0 for
+            // i64-valued maps, an empty string for string-valued maps.
+            let default_local = if val_ty == str_ty {
+                let l = self.fresh(str_ty);
+                self.emit_assign(
+                    Place::local(l),
+                    Rvalue::Use(Operand::Const(ConstValue::Str(String::new()))),
+                    span,
+                );
+                l
+            } else {
+                let l = self.fresh(i64_ty);
+                self.emit_assign(
+                    Place::local(l),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    span,
+                );
+                l
+            };
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(get_or_helper.to_string())),
+                args: vec![
+                    Operand::Copy(Place::local(recv_local)),
+                    Operand::Copy(Place::local(key_local)),
+                    Operand::Copy(Place::local(default_local)),
+                ],
+                destination: Place::local(val_local),
+                target: Some(after_val),
+            });
+        }
         self.set_current(after_val);
 
         // Auto-region the body, exactly as the `for x in vec` path does: the
@@ -5270,18 +6730,19 @@ impl<'a> Builder<'a> {
         Some(unit)
     }
 
-    /// Lowers `for (k, v) in m.iter()` over an aggregate-keyed map.
+    /// Lowers `for (k, v) in m.iter()` over an aggregate- or enum-keyed map.
     ///
-    /// The key snapshot hands back the rebuilt aggregates as flat element
-    /// slots, so the key binding observes each slot's address and the value
-    /// comes from the same content-keyed lookup an explicit `m.get(k)` uses.
+    /// An aggregate key snapshot hands back the rebuilt aggregates as flat
+    /// element slots, so the key binding observes each slot's address; an enum
+    /// key snapshot hands back the nodes themselves. Either way the value comes
+    /// from the same keyed lookup an explicit `m.get(k)` uses.
     #[allow(clippy::too_many_arguments)]
     fn lower_for_skey_pairs(
         &mut self,
         receiver: &HirExpr,
         recv_ty: Ty,
         key_struct_ty: Ty,
-        descriptor: String,
+        keyed: KeyedPairs,
         key_binding: Option<(Ident, bool)>,
         val_binding: Option<(Ident, bool)>,
         for_loop: &ForLoopShape<'_>,
@@ -5293,14 +6754,29 @@ impl<'a> Builder<'a> {
         // The key binding names the element's storage, not a copy: an
         // aggregate slot is addressed in place, exactly as a struct-valued
         // binding is, so field reads deref the snapshot's own memory.
-        let key_ref_ty = self.tcx.intern(TyKind::Ref {
-            mutability: gossamer_types::Mutbl::Not,
-            inner: key_struct_ty,
-        });
+        let (key_ref_ty, keys_helper, key_reader, lookup_helper, descriptor) = match keyed {
+            KeyedPairs::Aggregate(descriptor) => (
+                self.tcx.intern(TyKind::Ref {
+                    mutability: gossamer_types::Mutbl::Not,
+                    inner: key_struct_ty,
+                }),
+                "gos_rt_map_keys_skey",
+                "gos_rt_vec_get_ptr",
+                "gos_rt_map_get_skey_opt",
+                descriptor,
+            ),
+            KeyedPairs::Enum(descriptor) => (
+                key_struct_ty,
+                "gos_rt_map_keys_ekey",
+                "gos_rt_vec_get_i64",
+                "gos_rt_map_get_ekey_opt",
+                descriptor,
+            ),
+        };
         let recv_local = self.lower_expr(receiver)?;
         let keys_vec_ty = self.tcx.intern(TyKind::Vec(key_struct_ty));
         let keys_vec = self.emit_combinator_call(
-            "gos_rt_map_keys_skey",
+            keys_helper,
             vec![Operand::Copy(Place::local(recv_local))],
             keys_vec_ty,
             span,
@@ -5354,7 +6830,7 @@ impl<'a> Builder<'a> {
         }
         let after_ptr = self.new_block(span);
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_ptr".to_string())),
+            callee: Operand::Const(ConstValue::Str(key_reader.to_string())),
             args: vec![
                 Operand::Copy(Place::local(keys_vec)),
                 Operand::Copy(Place::local(counter)),
@@ -5368,7 +6844,7 @@ impl<'a> Builder<'a> {
         // word is the stored value, so the binding takes the payload directly.
         let opt_ty = self.option_payload_adt_ty(val_ty);
         let entry = self.emit_combinator_call(
-            "gos_rt_map_get_skey_opt",
+            lookup_helper,
             vec![
                 Operand::Copy(Place::local(recv_local)),
                 Operand::Copy(Place::local(key_local)),
@@ -5482,7 +6958,11 @@ impl<'a> Builder<'a> {
             }
             _ => (
                 i64_ty,
-                "gos_rt_map_values_i64",
+                if self.map_keys_unsigned(recv_ty) {
+                    "gos_rt_map_values_u64"
+                } else {
+                    "gos_rt_map_values_i64"
+                },
                 "gos_rt_vec_get_i64_unchecked",
             ),
         };
@@ -5637,6 +7117,8 @@ impl<'a> Builder<'a> {
         let str_ty = self.tcx.string_ty();
         let key_kind = self.hash_map_key_kind(recv_ty);
         let value_kind = self.hash_map_value_kind(recv_ty);
+        let pairs_fill_in_runtime = matches!(key_kind, Some(MapKeyKind::String | MapKeyKind::I64))
+            && matches!(value_kind, Some(MapValueKind::String | MapValueKind::I64));
         let key_ty = match key_kind {
             Some(MapKeyKind::String) => str_ty,
             _ => i64_ty,
@@ -5671,6 +7153,7 @@ impl<'a> Builder<'a> {
         });
         let keys_helper = match key_kind {
             Some(MapKeyKind::String) => "gos_rt_map_keys_str",
+            _ if self.map_keys_unsigned(recv_ty) => "gos_rt_map_keys_u64",
             _ => "gos_rt_map_keys_i64",
         };
         let get_or_helper = {
@@ -5688,7 +7171,68 @@ impl<'a> Builder<'a> {
         let tuple_ty = self.tcx.intern(TyKind::Tuple(vec![key_ty, val_ty]));
         let result_vec_ty = self.tcx.intern(TyKind::Vec(tuple_ty));
 
+        // The runtime copies a scalar's stored word into the pair as it is, so
+        // the pair takes the key and value types the map declares: an `f64`,
+        // `char`, or `bool` slot is read as itself, never as the integer its
+        // bits spell.
+        let (tuple_ty, result_vec_ty) = match self.hash_map_kv_tys(recv_ty) {
+            Some((declared_key, declared_val)) if pairs_fill_in_runtime => {
+                let pair_key = if key_ty == str_ty {
+                    str_ty
+                } else {
+                    declared_key
+                };
+                let pair_val = if val_ty == str_ty {
+                    str_ty
+                } else {
+                    declared_val
+                };
+                let pair = self.tcx.intern(TyKind::Tuple(vec![pair_key, pair_val]));
+                (pair, self.tcx.intern(TyKind::Vec(pair)))
+            }
+            _ => (tuple_ty, result_vec_ty),
+        };
+
         let recv_local = self.lower_expr(receiver)?;
+
+        // A pair of two words - each a `String` or a scalar - is written by the
+        // runtime in one pass under the map's lock, sorted once, rather than
+        // snapshotting the keys and looking every one of them up again.
+        if pairs_fill_in_runtime && self.elem_bytes_of(tuple_ty) == 16 {
+            let elem_bytes = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(elem_bytes),
+                Rvalue::Use(Operand::Const(ConstValue::Int(16))),
+                span,
+            );
+            let result_vec = self.fresh(result_vec_ty);
+            let after_new = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("Vec::new".to_string())),
+                args: vec![Operand::Copy(Place::local(elem_bytes))],
+                destination: Place::local(result_vec),
+                target: Some(after_new),
+            });
+            self.set_current(after_new);
+            let filled = self.fresh(unit_ty);
+            let after_fill = self.new_block(span);
+            let entries_helper = if self.map_keys_unsigned(recv_ty) {
+                "gos_rt_map_entries_into_u64"
+            } else {
+                "gos_rt_map_entries_into"
+            };
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(entries_helper.to_string())),
+                args: vec![
+                    Operand::Copy(Place::local(recv_local)),
+                    Operand::Copy(Place::local(result_vec)),
+                ],
+                destination: Place::local(filled),
+                target: Some(after_fill),
+            });
+            self.set_current(after_fill);
+            return Some(result_vec);
+        }
 
         // keys = m.keys() - a fresh real Vec<K> snapshot.
         let keys_vec_ty = self.tcx.intern(TyKind::Vec(key_ty));
@@ -5896,4 +7440,12 @@ impl<'a> Builder<'a> {
         self.set_current(exit);
         Some(result_vec)
     }
+}
+
+/// How a keyed-pairs loop reaches a map whose keys hash by value.
+enum KeyedPairs {
+    /// A struct or tuple key, keyed through its slot descriptor.
+    Aggregate(String),
+    /// A payload enum key, keyed through its equality descriptor.
+    Enum(String),
 }

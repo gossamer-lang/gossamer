@@ -117,8 +117,8 @@ macro_rules! rt_iter {
 
 /// Like [`rt!`] but declares that the symbol's `Ptr` return is a freshly
 /// allocated `String` the caller owns. The runtime spells the same fact as
-/// `-> *mut c_char`; `registry_string_returns_are_declared_owned` in
-/// `gossamer-cli`'s dispatch-consistency suite holds the two together, so a
+/// `-> *mut c_char`; `every_string_return_declares_its_ownership` in
+/// `gossamer-abi`'s `registry_matches_runtime` suite holds the two together, so a
 /// new string-minting shim cannot reach the compiler undeclared.
 ///
 /// The drop pass schedules a release for a local that takes such a result.
@@ -318,6 +318,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_callback_invoke", (I64, Ptr, I32, Ptr) -> I32, Both, "Invokes a callback registered via `gos_rt_callback_register`. Returns the callback's status code (0 = ok), or -1 when the handle is unknown. Result slot is zero-filled before invocation"),
     rt!("gos_rt_callback_register", (Ptr, Ptr) -> I64, Both, "Registers a `(ctx, invoke)` callback; returns the non-zero handle. Caller must `gos_rt_callback_unregister` when the closure lifetime ends"),
     rt!("gos_rt_callback_unregister", (I64) -> Void, Both, "Removes a callback from the handle table. Idempotent on unknown handles"),
+    rt!("gos_rt_carrier_from_box", (I64) -> I128, Both, "Read the two-word carrier a map keeps boxed, answering None for a null box."),
     rt_unwind!("gos_rt_chan_close", (Ptr) -> I32, Cranelift, "Mark a channel as closed; returns 1 on success, 0 for null. Closing an already-closed channel raises a goroutine-scoped panic, which unwinds out of the shim."),
     rt!("gos_rt_chan_drop", (Ptr) -> Void, Cranelift, "Drop a channel reference and release its memory."),
     rt!("gos_rt_chan_new", (I32, I64) -> Ptr, Cranelift, "Allocate a new typed channel with an optional buffer capacity."),
@@ -342,12 +343,13 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt_str!("gos_rt_chunked_encode", (Ptr) -> Ptr, Cranelift, "Wrap one buffer in HTTP/1.1 chunked transfer-encoding."),
     rt!("gos_rt_clamp_f64", (F64, F64, F64) -> F64, Both, "Scalar clamp of x into [lo, hi] for f64."),
     rt!("gos_rt_clamp_i64", (I64, I64, I64) -> I64, Both, "Scalar clamp of x into [lo, hi] for i64."),
+    rt!("gos_rt_clamp_u64", (I64, I64, I64) -> I64, Both, "Scalar clamp of x into [lo, hi] for u64, ordered unsigned."),
     rt!("gos_rt_cohort_cancel", () -> Void, Both, "Cancel the running goroutine's cohort from inside it, winding its siblings down without failing the cohort."),
     rt!("gos_rt_cohort_cancelled", () -> I64, Both, "Whether the running goroutine's cohort has been cancelled; a CPU-bound child polls this to cooperate at a point of its own choosing."),
     rt!("gos_rt_cohort_join", () -> I128, Both, "Wait for every child of the running goroutine's cohort and answer Result<(), errors::Error>: the lowest-index failure, or Ok."),
     rt!("gos_rt_cohort_pop", () -> Void, Both, "Close the running goroutine's cohort, cancelling and joining anything still running, and restore the enclosing one."),
     rt!("gos_rt_cohort_push", (I64, I64, I64, I64, I64, I64) -> I64, Both, "Open a cohort on the running goroutine: completion policy, optional millisecond deadline, isolation, error disposition, cancellation exemption, and optional millisecond drain bound."),
-    rt!("gos_rt_cohort_root", () -> Ptr, Both, "Return the root cohort's descriptor line as a String, or an empty String when no cohort is open."),
+    rt_str!("gos_rt_cohort_root", () -> Ptr, Both, "Return the root cohort's descriptor line as a String, or an empty String when no cohort is open."),
     rt!("gos_rt_cohorts", () -> Ptr, Both, "Return one descriptor line per live cohort as a GosVec<String>: id, parent, policy, error disposition, outstanding count, and the spawn indices still running."),
     rt!("gos_rt_collect_cycles", () -> Void, Both, "Run the trial-deletion cycle collector, reclaiming unreachable cyclic RC garbage. Backs `runtime::collect_cycles()`."),
     rt!("gos_rt_compress_bzip2_compress", (Ptr, I64) -> I128, Cranelift, "bzip2-compress a byte vector into Result<[u8], errors::Error>."),
@@ -413,10 +415,10 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_ctx_is_cancelled", (Ptr) -> I64, Cranelift, "context::Context::is_cancelled(ctx) -> 1 if the context has been cancelled."),
     rt!("gos_rt_ctx_with_cancel", (Ptr) -> Ptr, Cranelift, "context::Context::with_cancel(parent) -> a cancellable child Context."),
     rt!("gos_rt_ctx_with_timeout", (Ptr, I64) -> Ptr, Cranelift, "context::Context::with_timeout(parent, millis) -> a Context that cancels after a deadline."),
-    rt!("gos_rt_debug_option", (I128, I64) -> Ptr, Both, "Render {:?} of an Option<T> (by-value i128 enum) as 'Some(<payload>)' / 'None'; payload_kind selects the scalar/String payload formatter."),
-    rt!("gos_rt_debug_option_fmt", (I128, I64, Ptr) -> Ptr, Llvm, "Render {:?} of an Option<T> whose payload may be an aggregate; payload_kind DEBUG_PAYLOAD_ADT selects the derived fmt passed alongside."),
-    rt!("gos_rt_debug_result", (I128, I64, I64) -> Ptr, Both, "Render {:?} of a Result<T, E> (by-value i128 enum) as 'Ok(<payload>)' / 'Err(<payload>)'; ok_kind/err_kind select per-arm payload formatters."),
-    rt!("gos_rt_debug_result_fmt", (I128, I64, I64, Ptr, Ptr) -> Ptr, Llvm, "Render {:?} of a Result<T, E> whose arms may be aggregates; payload_kind DEBUG_PAYLOAD_ADT selects the derived fmt passed alongside for that arm."),
+    rt_str!("gos_rt_debug_option", (I128, I64) -> Ptr, Both, "Render {:?} of an Option<T> (by-value i128 enum) as 'Some(<payload>)' / 'None'; payload_kind selects the scalar/String payload formatter."),
+    rt_str!("gos_rt_debug_option_fmt", (I128, I64, Ptr) -> Ptr, Llvm, "Render {:?} of an Option<T> whose payload may be an aggregate; payload_kind DEBUG_PAYLOAD_ADT selects the derived fmt passed alongside."),
+    rt_str!("gos_rt_debug_result", (I128, I64, I64) -> Ptr, Both, "Render {:?} of a Result<T, E> (by-value i128 enum) as 'Ok(<payload>)' / 'Err(<payload>)'; ok_kind/err_kind select per-arm payload formatters."),
+    rt_str!("gos_rt_debug_result_fmt", (I128, I64, I64, Ptr, Ptr) -> Ptr, Llvm, "Render {:?} of a Result<T, E> whose arms may be aggregates; payload_kind DEBUG_PAYLOAD_ADT selects the derived fmt passed alongside for that arm."),
     rt!("gos_rt_deque_assign", (Ptr, Ptr) -> Void, Both, "`*dst = src` through a `&mut Deque` / `Queue` / `Stack`: replace the header's live range with a copy of the source's."),
     rt!("gos_rt_deque_clear", (Ptr) -> Void, Both, "Remove every element from a VecDeque<i64>."),
     rt!("gos_rt_deque_clone", (Ptr) -> Ptr, Both, "Copy a VecDeque into a fresh, independent element store."),
@@ -501,7 +503,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_enum_unit", (I64) -> Ptr, Both, "Shared pinned singleton for a payload-less enum variant (tag-only); avoids per-construction allocation."),
     rt!("gos_rt_env_home_dir", () -> I128, Both, "Return the user's home directory as a Result<String, errors::Error>."),
     rt!("gos_rt_env_set_current_dir", (Ptr) -> I128, Both, "Set the process working directory; returns Result<(), errors::Error>."),
-    rt!("gos_rt_env_temp_dir", () -> Ptr, Both, "Return the OS temporary directory as a cstring."),
+    rt_str!("gos_rt_env_temp_dir", () -> Ptr, Both, "Return the OS temporary directory as a cstring."),
     rt!("gos_rt_env_vars", () -> Ptr, Both, "Every environment variable this process has, as a Map<String, String>."),
     rt!("gos_rt_eprint_str", (Ptr) -> Void, Both, "Write a string to stderr without a trailing newline."),
     rt!("gos_rt_eprintln", () -> Void, Both, "Write a newline to stderr."),
@@ -521,9 +523,9 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_errors_join_vec", (Ptr) -> I128, Cranelift, "Combine a GosVec of errors into one joined error."),
     rt!("gos_rt_exec_kill", (I64) -> I64, Cranelift, "Send SIGKILL to a spawned child process by its handle ID."),
     rt!("gos_rt_exec_kill_group", (I64) -> I64, Cranelift, "Send SIGTERM to an entire process group (Unix); terminates the leader pid on Windows."),
-    rt!("gos_rt_exec_pipeline_run", (Ptr) -> I128, Cranelift, "Run a multi-stage subprocess pipeline; returns Result<Output, errors::Error> with the tail stage's stdout/stderr/code."),
-    rt!("gos_rt_exec_run", (Ptr, Ptr) -> I128, Cranelift, "Run a process synchronously and return its combined output."),
-    rt!("gos_rt_exec_run_in", (Ptr, Ptr, Ptr, Ptr) -> I128, Cranelift, "process::run_in(prog, args, dir, env): run a process in a directory with environment overrides and return its combined output."),
+    rt!("gos_rt_exec_pipeline_run_raw", (Ptr) -> I128, Cranelift, "Run a multi-stage subprocess pipeline; returns Result<Output, errors::Error> with the tail stage's stdout/stderr/code."),
+    rt!("gos_rt_exec_run_in_raw", (Ptr, Ptr, Ptr, Ptr) -> I128, Cranelift, "process::run_in(prog, args, dir, env): run a process in a directory with environment overrides and return its combined output."),
+    rt!("gos_rt_exec_run_raw", (Ptr, Ptr) -> I128, Cranelift, "Run a process synchronously and return its combined output."),
     rt!("gos_rt_exec_signal", (I64, I64) -> I64, Cranelift, "Send an arbitrary signal number to a pid; returns 1 on success."),
     rt!("gos_rt_exec_spawn", (Ptr, Ptr) -> I128, Cranelift, "Spawn a child process and return a handle for later use."),
     rt!("gos_rt_exec_spawn_piped", (Ptr, Ptr) -> I128, Both, "Spawn a child with piped stdin/stdout; Ok payload is the opaque Child handle."),
@@ -590,7 +592,6 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_fs_file_write", (I64, Ptr) -> I128, Cranelift, "fs::File::write(h, data) -> Result<i64, Error>."),
     rt!("gos_rt_fs_file_write_at", (I64, Ptr, I64) -> I128, Both, "fs::File::write_at(h, data, offset) -> Result<i64, Error>: one positional write, short writes reported."),
     rt!("gos_rt_fs_file_write_bytes", (I64, Ptr) -> I128, Both, "fs::File::write_bytes(h, data) -> Result<i64, Error>."),
-    rt!("gos_rt_fs_list_dir", (Ptr) -> I128, Cranelift, "List the entries in a directory as a GosVec<String>."),
     rt!("gos_rt_fs_metadata", (Ptr) -> I128, Cranelift, "fs::metadata(path) -> Result<i64, errors::Error>; Ok payload is file size in bytes."),
     rt!("gos_rt_fs_metadata_raw", (Ptr) -> I128, Cranelift, "fs::metadata(path) leaf -> Result<(size, is_file, is_dir, is_symlink, readonly, modified_unix_ms), Error>; the injected wrapper folds it into a Metadata struct."),
     rt!("gos_rt_fs_open_options_append", (I64, I32) -> I64, Cranelift, "fs::OpenOptions::append(enabled) -> OpenOptions."),
@@ -603,6 +604,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_fs_open_options_write", (I64, I32) -> I64, Cranelift, "fs::OpenOptions::write(enabled) -> OpenOptions."),
     rt!("gos_rt_fs_permissions", (Ptr) -> I128, Cranelift, "fs::permissions(path) -> Result<i64, Error>; the chmod(2) bits, or the read-only attribute widened into them on Windows."),
     rt!("gos_rt_fs_read_bytes_result", (Ptr) -> I128, Cranelift, "Read a file's raw bytes, returning Result<Vec<u8>, errors::Error>."),
+    rt!("gos_rt_fs_read_dir_raw", (Ptr) -> I128, Both, "fs::read_dir leaf -> Result<Vec<(name, path, is_file, is_dir, is_symlink, size, modified_ms)>, errors::Error>; the vec owns each entry's strings."),
     rt_str!("gos_rt_fs_read_to_string", (Ptr) -> Ptr, Cranelift, "Read an entire file into a String."),
     rt!("gos_rt_fs_read_to_string_result", (Ptr) -> I128, Cranelift, "Read an entire file into a String, returning Result<String, errors::Error> so a missing/unreadable path propagates Err."),
     rt!("gos_rt_fs_remove_dir", (Ptr) -> I128, Cranelift, "fs::remove_dir / os::remove_dir(p) -> Result<(), Error>; removes a single empty directory (non-recursive)."),
@@ -611,7 +613,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_fs_sync_dir", (Ptr) -> I128, Both, "fs::sync_dir(path) -> Result<(), Error>: make a directory's own entries durable."),
     rt!("gos_rt_fs_temp_dir", (Ptr) -> I128, Cranelift, "fs::temp_dir(prefix) -> Result<String, Error>."),
     rt!("gos_rt_fs_temp_file", (Ptr) -> I128, Cranelift, "fs::temp_file(prefix) -> Result<(File, String), Error>."),
-    rt!("gos_rt_fs_walk_dir", (Ptr, Ptr) -> I128, Both, "fs::walk_dir(root, visit) -> Result<(), errors::Error>; recursively visits every descendant, calling back into visit's env-pointer closure per entry."),
+    rt!("gos_rt_fs_walk_dir_raw", (Ptr, Ptr) -> I128, Both, "fs::walk_dir leaf: visits every descendant, handing the visitor each entry as a counted (name, path, is_file, is_dir, is_symlink, size, modified_ms) tuple it borrows."),
     rt!("gos_rt_fs_write", (Ptr, Ptr) -> I64, Cranelift, "Write bytes to a file, creating or truncating it; returns 0 on success."),
     rt!("gos_rt_fs_write_mode", (Ptr, Ptr, I64) -> I128, Cranelift, "fs::write_mode(path, contents, mode) -> Result<(), Error>; writes the file and leaves it at exactly mode."),
     rt!("gos_rt_gc_alloc", (I64) -> Ptr, Both, "Allocate `size` zeroed bytes for an aggregate (plain malloc; freed by the MIR drop pass via gos_rt_aggr_free)."),
@@ -861,6 +863,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt_iter!("gos_rt_iter_product_by_ptr", (Ptr, Ptr) -> I64, Both, "product_by", PtrElem, None, "iter::product_by(f, xs) - the product of f(x) over the sequence."),
     rt_iter!("gos_rt_iter_product_f64", (Ptr) -> F64, Both, "product", Float, None, "iter::product over Vec<f64>."),
     rt_iter!("gos_rt_iter_product_i64", (Ptr) -> I64, Both, "product", Word, None, "iter::product over Vec<i64> with wrapping multiplication."),
+    rt!("gos_rt_iter_product_i64_checked", (Ptr) -> I64, Both, "iter::product over Vec<i64> that panics on overflow, for the checked build profiles."),
     rt!("gos_rt_iter_range", (I64, I64) -> Ptr, Both, "iter::range(start, end) -> Vec<i64> over [start, end)."),
     rt!("gos_rt_iter_range_inclusive", (I64, I64) -> Ptr, Both, "iter::range_inclusive(start, end) -> Vec<i64> over [start, end]."),
     rt_iter!("gos_rt_iter_reduce_f64", (Ptr, Ptr) -> I128, Both, "reduce", Float, None, "iter::reduce(f, xs) -> Option<T> - a fold seeded by the first element."),
@@ -892,6 +895,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt_iter!("gos_rt_iter_sum_by_word_f64", (Ptr, Ptr) -> F64, Both, "sum_by", Word, Some(Float), "iter::sum_by over Vec<i64> summing f64 projections."),
     rt_iter!("gos_rt_iter_sum_f64", (Ptr) -> F64, Both, "sum", Float, None, "iter::sum over Vec<f64>."),
     rt_iter!("gos_rt_iter_sum_i64", (Ptr) -> I64, Both, "sum", Word, None, "iter::sum over Vec<i64>."),
+    rt!("gos_rt_iter_sum_i64_checked", (Ptr) -> I64, Both, "iter::sum over Vec<i64> that panics on overflow, for the checked build profiles."),
     rt_iter!("gos_rt_iter_take_i64", (I64, Ptr) -> Ptr, Both, "take", Word, None, "iter::take(xs, n) -> Vec<i64> with the first n elements."),
     rt_iter!("gos_rt_iter_take_while_f64", (Ptr, Ptr) -> Ptr, Both, "take_while", Float, None, "iter::take_while(p, xs) - the longest prefix of elements satisfying p."),
     rt_iter!("gos_rt_iter_take_while_i64", (Ptr, Ptr) -> Ptr, Both, "take_while", Word, None, "iter::take_while(p, xs) - the longest prefix of elements satisfying p."),
@@ -910,6 +914,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_json_as_i64_opt", (Ptr) -> I128, Cranelift, "Return a JSON integer as Option<i64> (None if not an integer)."),
     rt_str!("gos_rt_json_as_str", (Ptr) -> Ptr, Cranelift, "Return the JSON string value; panics if not a string."),
     rt!("gos_rt_json_as_str_opt", (Ptr) -> I128, Cranelift, "Return a JSON string as Option<String> (None if not a string)."),
+    rt!("gos_rt_json_as_u64_opt", (Ptr) -> I128, Cranelift, "Return a non-negative JSON integer as Option<u64> (None otherwise)."),
     rt!("gos_rt_json_at", (Ptr, I64) -> Ptr, Cranelift, "Index into a JSON array by position."),
     rt_str!("gos_rt_json_display", (Ptr) -> Ptr, Cranelift, "Render a JSON value to a compact display string."),
     rt!("gos_rt_json_free", (Ptr) -> Void, Cranelift, "Free a GosJson handle (drop its tree share)."),
@@ -932,9 +937,12 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_json_value_int", (I64) -> Ptr, Cranelift, "Construct a JSON integer value."),
     rt!("gos_rt_json_value_null", () -> Ptr, Cranelift, "Construct a JSON null value."),
     rt!("gos_rt_json_value_object", (Ptr) -> Ptr, Cranelift, "Construct a JSON object from a flat key-value GosVec."),
+    rt!("gos_rt_json_value_object_keyed", (Ptr, I64) -> Ptr, Cranelift, "Construct a JSON object from a flat key-value GosVec whose key words are of the named kind."),
     rt!("gos_rt_json_value_object_n", (I64, Ptr) -> Ptr, Cranelift, "Construct a JSON object from N key-value pairs in a raw pointer."),
     rt!("gos_rt_json_value_object_owned", (Ptr) -> Ptr, Cranelift, "Construct a JSON object from a flat key-value GosVec, consuming its value handles and the vector."),
+    rt!("gos_rt_json_value_object_owned_keyed", (Ptr, I64) -> Ptr, Cranelift, "Construct a JSON object from a flat key-value GosVec whose key words are of the named kind, consuming its value handles and the vector."),
     rt!("gos_rt_json_value_string", (Ptr) -> Ptr, Cranelift, "Construct a JSON string value."),
+    rt!("gos_rt_json_value_uint", (I64) -> Ptr, Cranelift, "Construct a JSON integer value from a word declared u64 / usize."),
     rt!("gos_rt_json_writer_begin_array", (Ptr) -> Void, Both, "Token writer: open an array as the next value."),
     rt!("gos_rt_json_writer_begin_object", (Ptr) -> Void, Both, "Token writer: open an object as the next value."),
     rt!("gos_rt_json_writer_bool", (Ptr, I32) -> Void, Both, "Token writer: write a boolean value."),
@@ -948,6 +956,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_json_writer_new_pretty", () -> Ptr, Both, "Token writer: open an indented JSON document, in the form json::encode_pretty answers."),
     rt!("gos_rt_json_writer_null", (Ptr) -> Void, Both, "Token writer: write null."),
     rt!("gos_rt_json_writer_str", (Ptr, Ptr) -> Void, Both, "Token writer: write a string value."),
+    rt!("gos_rt_json_writer_u64", (Ptr, I64) -> Void, Both, "Token writer: write an integer declared u64 / usize."),
     rt!("gos_rt_json_writer_value", (Ptr, Ptr) -> Void, Both, "Token writer: write a json::Value the caller keeps."),
     rt!("gos_rt_jwt_header", (Ptr) -> I128, Cranelift, "jwt::header(token) -> Result<String, errors::Error> - the JOSE header, unverified."),
     rt!("gos_rt_jwt_sign_eddsa", (Ptr, Ptr) -> I128, Cranelift, "jwt::sign_eddsa(claims_json, signing_key_pem) -> Result<String, errors::Error>."),
@@ -972,6 +981,8 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_lazy_iter_enumerate_i64", (Ptr) -> Ptr, Both, "Lazy enumerate over Iterator<i64>."),
     rt!("gos_rt_lazy_iter_filter_f64", (Ptr, Ptr) -> Ptr, Both, "Lazy filter over Iterator<f64>."),
     rt!("gos_rt_lazy_iter_filter_i64", (Ptr, Ptr) -> Ptr, Both, "Lazy filter over Iterator<i64>."),
+    rt!("gos_rt_lazy_iter_filter_map_i64", (Ptr, Ptr) -> Ptr, Both, "Lazy filter_map over an Iterator whose callback answers an Option of a word."),
+    rt!("gos_rt_lazy_iter_filter_map_str", (Ptr, Ptr) -> Ptr, Both, "Lazy filter_map over an Iterator whose callback answers an Option<String>, each kept payload a share the puller owns."),
     rt!("gos_rt_lazy_iter_find_f64", (Ptr, Ptr) -> I128, Both, "Short-circuiting find over lazy Iterator<f64>, returned as Option<f64>."),
     rt!("gos_rt_lazy_iter_find_i64", (Ptr, Ptr) -> I128, Both, "Short-circuiting find over lazy Iterator<i64>, returned as Option<i64>."),
     rt!("gos_rt_lazy_iter_fold_f64", (F64, Ptr, Ptr) -> F64, Both, "Consume and fold a lazy Iterator<f64> with an f64 accumulator."),
@@ -981,9 +992,13 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_lazy_iter_from_vec_aggr", (Ptr) -> Ptr, Both, "Create a retained borrowed lazy iterator over a GosVec whose elements are wider than one slot, yielding each element's address."),
     rt!("gos_rt_lazy_iter_from_vec_f64", (Ptr) -> Ptr, Both, "Create a retained borrowed lazy Iterator<f64> source from a GosVec."),
     rt!("gos_rt_lazy_iter_from_vec_i64", (Ptr) -> Ptr, Both, "Create a retained borrowed lazy Iterator<i64> source from a GosVec."),
+    rt!("gos_rt_lazy_iter_from_vec_str", (Ptr) -> Ptr, Both, "Create a retained borrowed lazy Iterator<String> source from a GosVec; each pull hands the puller a share of the element."),
+    rt!("gos_rt_lazy_iter_map_aggr", (Ptr, Ptr, I64) -> Ptr, Both, "Lazy map whose callback answers an element wider than one slot, yielding each element's address."),
     rt!("gos_rt_lazy_iter_map_f64", (Ptr, Ptr) -> Ptr, Both, "Lazy map over Iterator<f64> producing f64."),
+    rt!("gos_rt_lazy_iter_map_f64_str", (Ptr, Ptr) -> Ptr, Both, "Lazy map over Iterator<f64> producing String."),
     rt!("gos_rt_lazy_iter_map_f64_word", (Ptr, Ptr) -> Ptr, Both, "Lazy map over Iterator<f64> producing i64."),
     rt!("gos_rt_lazy_iter_map_i64", (Ptr, Ptr) -> Ptr, Both, "Lazy map over Iterator<i64>."),
+    rt!("gos_rt_lazy_iter_map_str", (Ptr, Ptr) -> Ptr, Both, "Lazy map over a word-register Iterator producing String."),
     rt!("gos_rt_lazy_iter_map_word_f64", (Ptr, Ptr) -> Ptr, Both, "Lazy map over Iterator<i64> producing f64."),
     rt!("gos_rt_lazy_iter_max_f64", (Ptr) -> I128, Both, "Consume a lazy Iterator<f64> and return its maximum as Option<f64>."),
     rt!("gos_rt_lazy_iter_max_i64", (Ptr) -> I128, Both, "Consume a lazy Iterator<i64> and return its maximum as Option<i64>."),
@@ -991,21 +1006,29 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_lazy_iter_min_i64", (Ptr) -> I128, Both, "Consume a lazy Iterator<i64> and return its minimum as Option<i64>."),
     rt!("gos_rt_lazy_iter_next_f64", (Ptr) -> I128, Both, "Advance a lazy Iterator<f64> in place and return Option<f64>."),
     rt!("gos_rt_lazy_iter_next_i64", (Ptr) -> I128, Both, "Advance a lazy Iterator<i64> in place and return Option<i64>."),
+    rt!("gos_rt_lazy_iter_next_pair_i64", (Ptr) -> I128, Both, "Advance a lazy Iterator<(i64, i64)> in place and return Option<(i64, i64)> carrying the pair's address."),
     rt!("gos_rt_lazy_iter_once_f64", (F64) -> Ptr, Both, "Lazy single-item Iterator<f64>."),
     rt!("gos_rt_lazy_iter_once_i64", (I64) -> Ptr, Both, "Lazy single-item Iterator<i64>."),
+    rt!("gos_rt_lazy_iter_once_str", (I64) -> Ptr, Both, "Lazy single-item Iterator<String>."),
+    rt!("gos_rt_lazy_iter_pair_blobs", (Ptr) -> Ptr, Both, "Lazy Iterator<(i64, i64)> handed on as a stream of counted two-word pair blobs, which the puller owns."),
     rt!("gos_rt_lazy_iter_product_f64", (Ptr) -> F64, Both, "Consume and multiply a lazy Iterator<f64>."),
     rt!("gos_rt_lazy_iter_product_i64", (Ptr) -> I64, Both, "Consume and multiply a lazy Iterator<i64>."),
-    rt!("gos_rt_lazy_iter_range_from_i64", (I64) -> Ptr, Both, "Lazy Rust-compatible unbounded Iterator<i64> starting at start."),
+    rt!("gos_rt_lazy_iter_product_i64_checked", (Ptr) -> I64, Both, "Consume and multiply a lazy Iterator<i64>, panicking on overflow."),
+    rt!("gos_rt_lazy_iter_range_from_i64", (I64) -> Ptr, Both, "Lazy unbounded Iterator<i64> starting at start that wraps past i64::MAX, for the release profile."),
+    rt!("gos_rt_lazy_iter_range_from_i64_checked", (I64) -> Ptr, Both, "Lazy unbounded Iterator<i64> starting at start that panics past i64::MAX, for the checked build profiles."),
     rt!("gos_rt_lazy_iter_range_i64", (I64, I64) -> Ptr, Both, "Lazy Iterator<i64> range over [start, end)."),
     rt!("gos_rt_lazy_iter_range_inclusive_i64", (I64, I64) -> Ptr, Both, "Lazy Iterator<i64> inclusive range over [start, end]."),
     rt!("gos_rt_lazy_iter_repeat_f64", (F64, I64) -> Ptr, Both, "Lazy Iterator<f64> repeating a value n times."),
     rt!("gos_rt_lazy_iter_repeat_i64", (I64, I64) -> Ptr, Both, "Lazy Iterator<i64> repeating a value n times."),
+    rt!("gos_rt_lazy_iter_repeat_str", (I64, I64) -> Ptr, Both, "Lazy Iterator<String> repeating a value n times."),
+    rt!("gos_rt_lazy_iter_set_elem_meta", (Ptr, Ptr) -> Void, Both, "Make each element of a lazy map over aggregate results a counted copy blob described by the given meta."),
     rt!("gos_rt_lazy_iter_skip_i64", (I64, Ptr) -> Ptr, Both, "Lazy skip over Iterator<i64>."),
     rt!("gos_rt_lazy_iter_step_by_i64", (I64, Ptr) -> Ptr, Both, "Lazy step_by over Iterator<i64>."),
     rt!("gos_rt_lazy_iter_str_bytes", (Ptr) -> Ptr, Both, "Create a lazy Iterator<u8> cursor over a String's UTF-8 bytes."),
     rt!("gos_rt_lazy_iter_str_chars", (Ptr) -> Ptr, Both, "Create a lazy Iterator<char> cursor over a String's Unicode scalars."),
     rt!("gos_rt_lazy_iter_sum_f64", (Ptr) -> F64, Both, "Consume and sum a lazy Iterator<f64>."),
     rt!("gos_rt_lazy_iter_sum_i64", (Ptr) -> I64, Both, "Consume and sum a lazy Iterator<i64>."),
+    rt!("gos_rt_lazy_iter_sum_i64_checked", (Ptr) -> I64, Both, "Consume and sum a lazy Iterator<i64>, panicking on overflow."),
     rt!("gos_rt_lazy_iter_take_i64", (I64, Ptr) -> Ptr, Both, "Lazy take over Iterator<i64>."),
     rt!("gos_rt_lazy_iter_zip_i64", (Ptr, Ptr) -> Ptr, Both, "Lazy zip over two Iterator<i64> states."),
     rt!("gos_rt_lcg_jump", (I64, I64, I64, I64, I64) -> I64, Both, "Advance an LCG state by N steps; returns the new state."),
@@ -1028,6 +1051,8 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_map_contains_key_str", (Ptr, Ptr) -> I8, Cranelift, "Return 1 if the map contains the given string key."),
     rt!("gos_rt_map_contains_key_typed_str", (Ptr, Ptr) -> I8, Cranelift, "Return 1 if the map contains the given compiler-typed string key."),
     rt!("gos_rt_map_contains_skey", (Ptr, Ptr, Ptr) -> I8, Cranelift, "Return 1 if the map contains the given struct key (content-hashed per a layout descriptor)."),
+    rt!("gos_rt_map_entries_into", (Ptr, Ptr) -> Void, Both, "Append a map's (key, value) pairs, each a String or a scalar word, to a fresh two-word-slot Vec in ascending key order."),
+    rt!("gos_rt_map_entries_into_u64", (Ptr, Ptr) -> Void, Both, "gos_rt_map_entries_into for a map whose keys were declared u64: the pairs in unsigned key order."),
     rt!("gos_rt_map_eq", (Ptr, Ptr, I64, Ptr) -> I64, Both, "Structural equality of two GosMaps: same entries, whatever order or storage shape. The third argument names how a value word is read (0 word, 1 f64, 2 String, 3 a slot the descriptor describes, 4 a block of slots it addresses) and the fourth is that descriptor, or null."),
     rt!("gos_rt_map_field_clone", (Ptr) -> Void, Both, "Replace the map an aggregate field holds with its own clone; the address of the field is passed. A GosMap has no reference count, so a copied field takes a value of its own."),
     rt!("gos_rt_map_field_release", (Ptr) -> Void, Both, "Free the map an aggregate field owns and null the slot; the address of the field is passed, so a second booking of the same release is a no-op."),
@@ -1077,7 +1102,9 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_map_keys_i64", (Ptr) -> Ptr, Cranelift, "Return all i64 keys of a GosMap as a GosVec."),
     rt!("gos_rt_map_keys_skey", (Ptr) -> Ptr, Both, "Snapshot the aggregate keys of a struct- or tuple-keyed HashMap as a Vec of flat element slots, in key-byte order."),
     rt!("gos_rt_map_keys_str", (Ptr) -> Ptr, Cranelift, "Return all string keys of a GosMap as a GosVec."),
+    rt!("gos_rt_map_keys_u64", (Ptr) -> Ptr, Both, "Return all keys of a map whose keys were declared u64 as a GosVec, in unsigned order."),
     rt!("gos_rt_map_keys_vec", (Ptr) -> Ptr, Cranelift, "Auto-dispatch m.keys() based on the live storage shape."),
+    rt!("gos_rt_map_keys_vec_u64", (Ptr) -> Ptr, Both, "gos_rt_map_keys_vec for a map whose keys were declared u64: keys in unsigned order."),
     rt!("gos_rt_map_len", (Ptr) -> I64, Cranelift, "Return the number of entries in a GosMap."),
     rt!("gos_rt_map_mark_shared", (Ptr) -> Void, Both, "Mark a GosMap (and its aggregate values) as escaped to another goroutine, so every subsequent operation synchronizes instead of taking the goroutine-local lock-free fast path. Emitted at channel-send / goroutine-spawn escape points for HashMap-typed values. Null-safe."),
     rt!("gos_rt_map_new", (I32, I32) -> Ptr, Cranelift, "Allocate an empty GosMap with given key and value type tags."),
@@ -1097,11 +1124,16 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_map_remove_i64", (Ptr, I64) -> I8, Cranelift, "Remove an i64 key from the map; returns 1 if it was present."),
     rt!("gos_rt_map_remove_str", (Ptr, Ptr) -> I8, Cranelift, "Remove a string key from the map; returns 1 if it was present."),
     rt!("gos_rt_map_remove_typed_str", (Ptr, Ptr) -> I8, Cranelift, "Remove a compiler-typed string key from the map; returns 1 if it was present."),
+    rt!("gos_rt_map_select_by_key_into", (Ptr, Ptr, Ptr, I64, I64) -> Void, Both, "Append the one (key, value) pair of a scalar-valued map whose effect-free callback key is the extreme, ties going to the smallest map key, to a fresh two-word-slot Vec."),
     rt!("gos_rt_map_set_blob_values", (Ptr) -> Void, Both, "Mark a map as holding RC copy-blob values: inserts release the overwritten value, removals and free release stored ones, and the _opt getters retain before handing the pointer out."),
     rt!("gos_rt_map_set_vec_values", (Ptr) -> Void, Both, "Mark a map as holding Vec/slice values: inserts transfer or retain one Vec share, and overwrite, removal, and free release exactly that share."),
+    rt!("gos_rt_map_values_carrier", (Ptr) -> Ptr, Both, "Snapshot the boxed Option/Result values of a map into a vec of two-word carriers that owns each heap payload."),
+    rt!("gos_rt_map_values_carrier_u64", (Ptr) -> Ptr, Both, "gos_rt_map_values_carrier in unsigned key order."),
     rt!("gos_rt_map_values_i64", (Ptr) -> Ptr, Cranelift, "Return all i64 values of a GosMap as a GosVec."),
     rt!("gos_rt_map_values_str", (Ptr) -> Ptr, Cranelift, "Return all string values of a GosMap as a GosVec."),
+    rt!("gos_rt_map_values_u64", (Ptr) -> Ptr, Both, "Return all i64 values of a map whose keys were declared u64 as a GosVec, in unsigned key order."),
     rt!("gos_rt_map_values_vec", (Ptr) -> Ptr, Cranelift, "Auto-dispatch m.values() based on the live storage shape."),
+    rt!("gos_rt_map_values_vec_u64", (Ptr) -> Ptr, Both, "gos_rt_map_values_vec for a map whose keys were declared u64: values in unsigned key order."),
     rt!("gos_rt_math_abs", (F64) -> F64, Both, "Compute the absolute value of an f64."),
     rt!("gos_rt_math_abs_i64", (I64) -> I64, Both, "Magnitude of an i64, saturating at i64::MAX for i64::MIN."),
     rt!("gos_rt_math_acos", (F64) -> F64, Both, "Compute the arccosine of an f64 in radians."),
@@ -1172,6 +1204,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_math_trunc", (F64) -> F64, Both, "Integer part of an f64 with the fractional part discarded."),
     rt!("gos_rt_max_f64", (F64, F64) -> F64, Both, "Scalar max of two f64s."),
     rt!("gos_rt_max_i64", (I64, I64) -> I64, Both, "Scalar max of two i64s."),
+    rt!("gos_rt_max_u64", (I64, I64) -> I64, Both, "Scalar max of two u64s, ordered unsigned."),
     rt!("gos_rt_metrics_counter_inc", (Ptr) -> Void, Cranelift, "metrics::Counter::inc(c): increment a counter by one."),
     rt!("gos_rt_metrics_counter_new", (Ptr, Ptr) -> Ptr, Cranelift, "metrics::Counter::new(name, help) -> a Counter handle."),
     rt!("gos_rt_metrics_counter_value", (Ptr) -> I64, Cranelift, "metrics::Counter::value(c) -> current counter value."),
@@ -1202,23 +1235,24 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt_str!("gos_rt_mime_type_by_extension", (Ptr) -> Ptr, Cranelift, "Return the canonical media type for a filename extension, or empty."),
     rt!("gos_rt_min_f64", (F64, F64) -> F64, Both, "Scalar min of two f64s."),
     rt!("gos_rt_min_i64", (I64, I64) -> I64, Both, "Scalar min of two i64s."),
+    rt!("gos_rt_min_u64", (I64, I64) -> I64, Both, "Scalar min of two u64s, ordered unsigned."),
     rt!("gos_rt_monotonic_ms", () -> I64, Both, "Monotonic milliseconds since a process-wide base instant."),
     rt!("gos_rt_monotonic_nanos", () -> I64, Both, "Monotonic nanoseconds since a process-wide base instant."),
     rt!("gos_rt_mutex_lock", (Ptr) -> Void, Cranelift, "Acquire a Mutex; blocks until the lock is available."),
     rt!("gos_rt_mutex_new", () -> Ptr, Both, "Allocate and initialise a new Mutex."),
     rt!("gos_rt_mutex_unlock", (Ptr) -> Void, Cranelift, "Release a previously acquired Mutex."),
     rt!("gos_rt_mw_accepts_gzip", (Ptr) -> I32, Cranelift, "Return 1 if the Accept-Encoding header advertises gzip support."),
-    rt!("gos_rt_mw_cache_immutable_for", (I64) -> Ptr, Both, "middleware::CacheControl::immutable_for(seconds) -> String."),
-    rt!("gos_rt_mw_cache_no_store", () -> Ptr, Both, "middleware::CacheControl::no_store() -> String."),
-    rt!("gos_rt_mw_cors_new", (Ptr, Ptr, Ptr, I64) -> Ptr, Both, "middleware::CorsConfig::new(origin, methods, headers, max_age) -> String."),
-    rt!("gos_rt_mw_cors_permissive", () -> Ptr, Both, "middleware::CorsConfig::permissive() -> String."),
+    rt_str!("gos_rt_mw_cache_immutable_for", (I64) -> Ptr, Both, "middleware::CacheControl::immutable_for(seconds) -> String."),
+    rt_str!("gos_rt_mw_cache_no_store", () -> Ptr, Both, "middleware::CacheControl::no_store() -> String."),
+    rt_str!("gos_rt_mw_cors_new", (Ptr, Ptr, Ptr, I64) -> Ptr, Both, "middleware::CorsConfig::new(origin, methods, headers, max_age) -> String."),
+    rt_str!("gos_rt_mw_cors_permissive", () -> Ptr, Both, "middleware::CorsConfig::permissive() -> String."),
     rt!("gos_rt_mw_decode_basic_auth", (Ptr) -> I128, Cranelift, "http::middleware::decode_basic_auth(header) -> Option<(String, String)> (decoded user/password)."),
-    rt!("gos_rt_mw_hsts_safe_default", () -> Ptr, Both, "middleware::HstsConfig::safe_default() -> String."),
-    rt!("gos_rt_mw_hsts_strict", () -> Ptr, Both, "middleware::HstsConfig::strict() -> String."),
+    rt_str!("gos_rt_mw_hsts_safe_default", () -> Ptr, Both, "middleware::HstsConfig::safe_default() -> String."),
+    rt_str!("gos_rt_mw_hsts_strict", () -> Ptr, Both, "middleware::HstsConfig::strict() -> String."),
     rt_str!("gos_rt_mw_new_request_id", () -> Ptr, Cranelift, "Generate a process-monotonic request-id string."),
-    rt!("gos_rt_mw_rate_limit_per_ip", (I64, I64) -> Ptr, Both, "middleware::RateLimit::per_ip(capacity, refill_per_sec) -> String."),
-    rt!("gos_rt_mw_security_off", () -> Ptr, Both, "middleware::SecurityHeaders::off() -> String."),
-    rt!("gos_rt_mw_security_strict", () -> Ptr, Both, "middleware::SecurityHeaders::strict() -> String."),
+    rt_str!("gos_rt_mw_rate_limit_per_ip", (I64, I64) -> Ptr, Both, "middleware::RateLimit::per_ip(capacity, refill_per_sec) -> String."),
+    rt_str!("gos_rt_mw_security_off", () -> Ptr, Both, "middleware::SecurityHeaders::off() -> String."),
+    rt_str!("gos_rt_mw_security_strict", () -> Ptr, Both, "middleware::SecurityHeaders::strict() -> String."),
     rt!("gos_rt_native_client_get", (Ptr, Ptr) -> I128, Cranelift, "Issue a one-shot GET via a NativeClient handle."),
     rt!("gos_rt_native_client_new", () -> Ptr, Cranelift, "Allocate a NativeClient handle."),
     rt!("gos_rt_nc_delete", (Ptr) -> I128, Cranelift, "native_client::delete(url) -> Result<Response, errors::Error> (one-shot DELETE, no body/headers)."),
@@ -1257,14 +1291,19 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_option_or_else", (I128, Ptr) -> I128, Both, "option::or_else(opt, f): opt when Some, otherwise f() -> Option."),
     rt!("gos_rt_option_slot_release", (Ptr) -> Void, Both, "Release the by-value Option/Result payload at `slot` when it carries a validated copy-blob owner."),
     rt!("gos_rt_option_slot_retain", (Ptr) -> Void, Both, "Retain the by-value Option/Result payload at `slot` when it carries a validated copy-blob owner."),
+    rt!("gos_rt_option_str_payload_release", (I128) -> Void, Both, "Release the Ok/Some String payload of a carrier held in an aggregate field; a no-op on the other arm."),
+    rt!("gos_rt_option_str_payload_retain", (I128) -> Void, Both, "Retain the Ok/Some String payload of a carrier held in an aggregate field; a no-op on the other arm."),
     rt!("gos_rt_option_unwrap", (I128) -> I64, Both, "option.unwrap() / option.expect(): the payload, or a panic naming the `None` value."),
+    rt!("gos_rt_option_unwrap_carrier", (I128) -> I128, Both, "option.unwrap() / option.expect() over a payload that is itself a carrier: the boxed carrier, or a panic naming the `None` value."),
+    rt!("gos_rt_option_vec_payload_release", (I128) -> Void, Both, "Release the Ok/Some Vec payload of a carrier held in an aggregate field; a no-op on the other arm."),
+    rt!("gos_rt_option_vec_payload_retain", (I128) -> Void, Both, "Retain the Ok/Some Vec payload of a carrier held in an aggregate field; a no-op on the other arm."),
     rt!("gos_rt_option_zip", (I128, I128) -> I128, Both, "option::zip: Some((a, b)) when both options are Some."),
-    rt!("gos_rt_os_arch", () -> Ptr, Both, "Return the target CPU architecture as a String (e.g. \"x86_64\")."),
+    rt_str!("gos_rt_os_arch", () -> Ptr, Both, "Return the target CPU architecture as a String (e.g. \"x86_64\")."),
     rt!("gos_rt_os_args", () -> Ptr, Both, "Return the process argument list as a GosVec<String>."),
     rt!("gos_rt_os_cwd", () -> I128, Cranelift, "Return the current working directory as a String."),
     rt!("gos_rt_os_env", (Ptr) -> I128, Cranelift, "Return the value of an environment variable, or null if not set."),
     rt!("gos_rt_os_exists", (Ptr) -> I64, Cranelift, "Return 1 if the path exists on the filesystem, 0 otherwise."),
-    rt!("gos_rt_os_family", () -> Ptr, Both, "Return the target OS family as a String (e.g. \"unix\")."),
+    rt_str!("gos_rt_os_family", () -> Ptr, Both, "Return the target OS family as a String (e.g. \"unix\")."),
     rt!("gos_rt_os_file_size", (Ptr) -> I64, Cranelift, "Return the file size in bytes, or 0 if the path cannot be stat'd."),
     rt!("gos_rt_os_is_dir", (Ptr) -> I64, Cranelift, "Return 1 if the path is a directory, 0 otherwise."),
     rt!("gos_rt_os_is_file", (Ptr) -> I64, Cranelift, "Return 1 if the path is a regular file, 0 otherwise."),
@@ -1341,7 +1380,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_queue_new", () -> Ptr, Both, "Create a new empty Queue<i64>, returning an opaque heap pointer."),
     rt!("gos_rt_race_access", (I64, I32) -> Void, Llvm, "Record a heap access (addr, write) for the data-race detector."),
     rt!("gos_rt_rc_alloc", (I64, Ptr) -> Ptr, Both, "Allocate an RC-managed heap object with `size` payload bytes and a child-layout meta pointer (null for leaves). Returns the zeroed payload at strong count 1."),
-    rt!("gos_rt_rc_alloc_copy", (I64, Ptr, Ptr) -> Ptr, Both, "Allocate an RC copy-blob (strong count 1), copy `src`, retain guarded children, and attach a versioned owner carrier."),
+    rt!("gos_rt_rc_alloc_copy", (I64, Ptr, Ptr) -> Ptr, Both, "Allocate an RC copy-blob (strong count 1) in the copy-blob arena, copy `src`, and retain guarded children."),
     rt!("gos_rt_rc_alloc_move", (I64, Ptr, Ptr) -> Ptr, Both, "Allocate an RC copy-blob (strong count 1), copy `src`, and take the share its guarded children already carried."),
     rt!("gos_rt_rc_alloc_reuse", (Ptr, I64, Ptr) -> Ptr, Both, "Perceus reuse (alloc half): re-home a block from gos_rt_rc_drop_reuse into a fresh strong-1 object with the given meta (payload zeroed), or allocate fresh when the token is null / unsuitable / a region is active."),
     rt!("gos_rt_rc_alloc_tagged", (I64, Ptr) -> Ptr, Both, "Allocate a tagged-repr enum node: headerless bump allocation inside an active region, headered RC allocation otherwise."),
@@ -1393,9 +1432,12 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_result_payload", (I128) -> I64, Cranelift, "Return the raw i64 payload of a Result without discriminant check."),
     rt!("gos_rt_result_payload_f64", (I128) -> F64, Cranelift, "Return the f64 payload of a Result<f64,_> by bitcast - symmetric with `gos_rt_result_new(0, x.to_bits())`."),
     rt!("gos_rt_result_payload_i128", (I128) -> I128, Cranelift, "Return the 2-word by-value enum payload of a Result/Option (dereferences the heap-copied aggregate payload)."),
+    rt!("gos_rt_result_payload_release", (I128, I64, I64) -> Void, Both, "Releases the heap payload of whichever arm a carrier holds, by the kind named for each arm."),
+    rt!("gos_rt_result_payload_retain", (I128, I64, I64) -> Void, Both, "Takes a share of the heap payload of whichever arm a carrier holds, by the kind named for each arm."),
     rt!("gos_rt_result_to_opt_err", (I128) -> I128, Both, "result::err(res) -> Option<E>: Err payload as Some, Ok as None."),
     rt!("gos_rt_result_to_opt_ok", (I128) -> I128, Both, "result::ok(res) -> Option<T>: Ok payload as Some, Err as None."),
     rt!("gos_rt_result_unwrap", (I128) -> I64, Cranelift, "Unwrap a Result's Ok payload; panics with a message if Err."),
+    rt!("gos_rt_result_unwrap_carrier", (I128) -> I128, Both, "result.unwrap() / result.expect() over an Ok payload that is itself a carrier: the boxed carrier, or a panic naming the `Err` value."),
     rt!("gos_rt_result_unwrap_or", (I128, I64) -> I64, Cranelift, "Unwrap a Result's Ok payload, or return the default if Err."),
     rt!("gos_rt_result_unwrap_or_carrier", (I128, I128) -> I128, Both, "unwrap_or where the payload is itself a Result / Option carrier, which is boxed rather than packed into the payload half."),
     rt!("gos_rt_result_unwrap_or_str", (I128, I64) -> I64, Both, "unwrap_or over a String: answers the payload, or answers the fallback with a share of its own."),
@@ -1421,7 +1463,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_router_put_fn", (Ptr, Ptr, I64) -> Ptr, Cranelift, "Register a bare-fn PUT route on a Router (no env); returns the router pointer for pipe-chaining."),
     rt_unwind!("gos_rt_router_serve", (Ptr, Ptr) -> I128, Cranelift, "Dispatch a request through a Router's route table."),
     rt!("gos_rt_runtime_cycle_collection_supported", () -> I8, Cranelift, "Report whether this tier collects unreachable reference cycles."),
-    rt!("gos_rt_runtime_scheduler_stats_json", () -> Ptr, Cranelift, "Return a compact JSON snapshot of goroutine scheduler counters."),
+    rt_str!("gos_rt_runtime_scheduler_stats_json", () -> Ptr, Cranelift, "Return a compact JSON snapshot of goroutine scheduler counters."),
     rt!("gos_rt_rwlock_get", (Ptr) -> I64, Cranelift, "sync::RwLock::read(lock) -> the guarded i64 value."),
     rt!("gos_rt_rwlock_new", (I64) -> Ptr, Cranelift, "sync::RwLock::new(value) -> a reader-writer lock guarding an i64."),
     rt!("gos_rt_rwlock_set", (Ptr, I64) -> Void, Cranelift, "sync::RwLock::write(lock, value): replace the guarded i64 under a write lock."),
@@ -1480,6 +1522,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_set_to_vec_ekey", (Ptr) -> Ptr, Both, "The set's enum elements as a Vec of nodes, in the set's own order."),
     rt!("gos_rt_set_to_vec_i64", (Ptr) -> Ptr, Cranelift, "Snapshot an i64 HashSet's elements into a numerically sorted Vec<i64>."),
     rt!("gos_rt_set_to_vec_skey", (Ptr, Ptr) -> Ptr, Cranelift, "Snapshot aggregate HashSet elements into a Vec of inline slots."),
+    rt!("gos_rt_set_to_vec_u64", (Ptr) -> Ptr, Both, "Snapshot a set whose elements were declared u64 into a Vec, in unsigned order for a BTreeSet."),
     rt!("gos_rt_set_union", (Ptr, Ptr) -> Ptr, Cranelift, "Return a new HashSet with every element in either operand."),
     rt_str!("gos_rt_sha256_hex", (Ptr) -> Ptr, Cranelift, "Hex-encoded SHA-256 digest of the input c-string."),
     rt_str!("gos_rt_sha512_hex", (Ptr) -> Ptr, Cranelift, "Hex-encoded SHA-512 digest of the input c-string."),
@@ -1886,6 +1929,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_validate_errors_len", (Ptr) -> I64, Cranelift, "validate::Errors::len(errs) -> total number of recorded errors."),
     rt!("gos_rt_validate_errors_new", () -> Ptr, Cranelift, "validate::Errors::new() -> an empty error accumulator."),
     rt!("gos_rt_vec_assign", (Ptr, Ptr) -> Void, Both, "`*dst = src` through a `&mut Vec`: replace the header's elements with shared copies of the source's, releasing the old ones."),
+    rt!("gos_rt_vec_binary_search_aggr", (Ptr, Ptr, I64, Ptr) -> I128, Both, "Vec::binary_search over a sorted Vec whose elements a tag stream orders: Ok(index) when found, Err(insertion index) otherwise."),
     rt!("gos_rt_vec_binary_search_f64", (Ptr, F64) -> I128, Both, "Vec::binary_search over a sorted Vec<f64>: Ok(index) when found, Err(insertion index) otherwise."),
     rt!("gos_rt_vec_binary_search_i64", (Ptr, I64) -> I128, Both, "Vec::binary_search over a sorted Vec<i64>: Ok(index) when found, Err(insertion index) otherwise."),
     rt!("gos_rt_vec_binary_search_str", (Ptr, Ptr) -> I128, Both, "Vec::binary_search over a sorted Vec<String>: Ok(index) when found, Err(insertion index) otherwise."),
@@ -1901,6 +1945,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_vec_copy_within", (Ptr, I64, I64, I64) -> Void, Both, "Vec::copy_within: move len elements from src to dest inside one Vec, correct for overlapping ranges."),
     rt!("gos_rt_vec_count_of_i64", (Ptr, I64) -> I64, Cranelift, "Return the count of matching elements in a Vec<i64>."),
     rt!("gos_rt_vec_count_of_str", (Ptr, Ptr) -> I64, Cranelift, "Return the count of matching elements in a Vec<String>."),
+    rt!("gos_rt_vec_desc_cmp", (Ptr, Ptr, Ptr) -> I64, Both, "Lexicographically compare two sequences, each element through its ordering descriptor: -1, 0, or 1."),
     rt!("gos_rt_vec_eq", (Ptr, Ptr, I8) -> I8, Cranelift, "Structural equality of two Vec/array values, per an element-kind tag; returns 1 if equal."),
     rt!("gos_rt_vec_extend", (Ptr, Ptr) -> Void, Cranelift, "Extend one GosVec from another GosVec with matching element layout."),
     rt!("gos_rt_vec_first", (Ptr) -> I128, Cranelift, "Return Option<T> of the first element of a Vec."),
@@ -1938,6 +1983,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_vec_len", (Ptr) -> I64, Cranelift, "Return the number of elements in a GosVec."),
     rt!("gos_rt_vec_mark_rc_elems", (Ptr) -> Void, Both, "Tag a vec as owning reference-counted enum-node elements: push moves the frame's share in, free releases each element, and storage duplication (clone/slice) retains each copy."),
     rt!("gos_rt_vec_mark_shared", (Ptr) -> Void, Both, "Mark every String, RC node, nested Vec, and aggregate-owned child reachable from a Vec as shared before concurrency publication."),
+    rt!("gos_rt_vec_mark_str_elems", (Ptr) -> Void, Both, "Tag a vec as owning String elements: free releases each element and storage duplication retains each copy."),
     rt!("gos_rt_vec_mark_vec_elems", (Ptr) -> Void, Both, "Tag a vec as owning nested-vec elements: the push minted the container's share, free releases each element vec, and storage duplication (clone/slice) retains each copy."),
     rt!("gos_rt_vec_new", (I32) -> Ptr, Cranelift, "Allocate an empty GosVec with a given element type tag."),
     rt!("gos_rt_vec_new_typed", (I32, I8) -> Ptr, Cranelift, "Allocate an empty GosVec with a given element type tag and elem_kind discriminator (PRIMITIVE/STRING/VEC/MAP/ERROR) for deep-free."),
@@ -2023,6 +2069,72 @@ pub fn lookup(name: &str) -> Option<&'static RuntimeEntry> {
 #[must_use]
 pub fn mints_owned_string(name: &str) -> bool {
     lookup(name).is_some_and(|entry| entry.mints_string)
+}
+
+/// Whether `name` answers a by-value aggregate as the address of a block it
+/// allocated for the call, which the caller copies out of and then frees.
+#[must_use]
+pub fn returns_fresh_aggregate(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_iter_partition_i64"
+            | "gos_rt_iter_partition_f64"
+            | "gos_rt_iter_partition_ptr"
+            | "gos_rt_iter_unzip_i64"
+            | "gos_rt_bits_add"
+            | "gos_rt_bits_sub"
+            | "gos_rt_bits_mul"
+            | "gos_rt_bits_div"
+            | "gos_rt_utf8_decode_rune"
+            | "gos_rt_utf8_decode_rune_in_string"
+            | "gos_rt_utf8_decode_last_rune"
+            | "gos_rt_utf8_decode_last_rune_in_string"
+    )
+}
+
+/// Whether `name` answers a `Result` / `Option` whose aggregate payload is a
+/// counted blob holding the only share of its children, so the frame the call
+/// answers into releases the carrier like one it built.
+#[must_use]
+pub fn answers_counted_payload(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_pem_decode_raw"
+            | "gos_rt_bin_uvarint"
+            | "gos_rt_bin_varint"
+            | "gos_rt_crypto_ed25519_keypair"
+            | "gos_rt_crypto_ecdsa_keypair_pem"
+            | "gos_rt_fs_temp_file"
+            | "gos_rt_fs_metadata_raw"
+            | "gos_rt_exec_run_raw"
+            | "gos_rt_exec_run_in_raw"
+            | "gos_rt_exec_pipeline_run_raw"
+            | "gos_rt_x509_parse_pem_raw"
+            | "gos_rt_time_civil_raw"
+            | "gos_rt_time_resolve_raw"
+    )
+}
+
+/// Whether `name` answers a container's element through an `Option` /
+/// `Result` carrier whose payload, for an element laid out as a slot block, is
+/// a counted blob of the element's words that the answering frame owns.
+#[must_use]
+pub fn answers_counted_element(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_vec_pop_opt"
+            | "gos_rt_vec_remove_safe"
+            | "gos_rt_vec_first"
+            | "gos_rt_vec_last"
+            | "gos_rt_vec_get_opt"
+            | "gos_rt_deque_pop_front"
+            | "gos_rt_deque_pop_back"
+            | "gos_rt_deque_peek_front"
+            | "gos_rt_deque_peek_back"
+            | "gos_rt_bheap_max_pop_desc"
+            | "gos_rt_bheap_min_pop_desc"
+            | "gos_rt_bheap_peek_elem"
+    )
 }
 
 /// The shim implementing `combinator` for the given element crossing, or

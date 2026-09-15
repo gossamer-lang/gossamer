@@ -19,6 +19,7 @@ use std::collections::HashMap;
 
 use anyhow::{Result, anyhow};
 use cranelift_jit::{JITBuilder, JITModule};
+use gossamer_abi::jit_carrier::{CarrierBoxMetas, CarrierNode, CarrierShape};
 use gossamer_mir::Body;
 use gossamer_types::{ArrayLen, Ty, TyCtxt, TyKind};
 
@@ -35,20 +36,6 @@ pub enum ArrayElem {
     /// An IEEE-754 double, written as its bit pattern.
     F64,
     /// A Unicode scalar, written as its `u32` code point.
-    Char,
-}
-
-/// The scalar an `Ok` payload word carries in a [`JitKind::ResultScalar`]
-/// return, which is what the trampoline re-wraps it as.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ResultScalarKind {
-    /// The word is the integer itself.
-    I64,
-    /// The word is the double's bit pattern.
-    F64,
-    /// The low bit of the word is the boolean.
-    Bool,
-    /// The word is the Unicode scalar's code point.
     Char,
 }
 
@@ -89,20 +76,13 @@ pub enum JitKind {
     /// `*mut GosError`. The trampoline decodes the `i128` and marshals each
     /// side back to a VM `Value`. Return-only.
     ResultEnumPtr(u32),
-    /// A `Result<String, errors::Error>` RETURN using the same two-word
-    /// carrier shape as [`Self::ResultEnumPtr`]. On `Ok`, the payload is an
-    /// owned native string pointer; on `Err`, a native `*mut GosError`.
-    /// Return-only.
-    ResultNativeStr,
-    /// A `Result<i64 | f64 | bool | char, errors::Error>` RETURN on the same
-    /// two-word carrier. On `Ok` the payload word is the scalar itself (an
-    /// `f64` as its bit pattern); on `Err` a native `*mut GosError`. This is
-    /// the shape every `?`-using arithmetic helper returns. Return-only.
-    ResultScalar(ResultScalarKind),
-    /// An `Option<i64 | f64 | bool | char>` RETURN on the same two-word
-    /// carrier: `disc` 0 is `Some` and the payload word is the scalar, any
-    /// other disc is `None`. Return-only.
-    OptionScalar(ResultScalarKind),
+    /// An `Option` / `Result` crossing the boundary as its two words
+    /// `[disc, payload]` through the body's carrier entry thunk, which reads a
+    /// parameter's words from memory and writes an answered carrier through an
+    /// out-pointer. The shape names what each arm's payload word holds, down
+    /// through nested carriers kept in counted boxes. A parameter is lent to
+    /// the body; an answer is owned by the caller. Integer register class.
+    Carrier(CarrierShape),
     /// An all-scalar user struct (`&self` / `&mut self` / by-value)
     /// crossing the boundary as a pointer to a flat field-slot block
     /// (one 8-byte slot per field, field `i` at byte offset `i * 8`, NO
@@ -216,6 +196,11 @@ pub struct JitFn {
     /// call: safe only when the native result can't alias the freed input.
     /// See `compute_returns_fresh`.
     pub returns_fresh: bool,
+    /// For each parameter, the counted-box meta of every nested carrier node
+    /// of its [`JitKind::Carrier`] shape, indexed by node; empty for any other
+    /// parameter. The trampoline builds a nested carrier's box with the layout
+    /// the compiled program declared for it, so the body may keep the box.
+    pub carrier_box_metas: Box<[CarrierBoxMetas]>,
 }
 
 // SAFETY: `ptr` is read-only from any thread, but the VM is
@@ -237,6 +222,10 @@ fn report_jit_stats(compiled: usize) {
 /// pointers it has handed out, so the VM must hold the artifact
 /// for as long as any compiled fn is reachable.
 pub struct JitArtifact {
+    /// The artifact's frames as the unwinder and the frame registry know
+    /// them. Declared ahead of `heap` so they are forgotten before the code
+    /// they describe is unmapped.
+    _frames: Option<crate::jit_frames::FrameRegistration>,
     /// Shared allocation owner retained after the compiler module is dropped.
     /// Empty artifacts do not construct a native heap.
     heap: Option<std::sync::Arc<NativeCodeHeap>>,
@@ -1133,6 +1122,7 @@ pub fn compile_to_jit(
     if bodies.is_empty() {
         report_jit_stats(0);
         return Ok(JitArtifact {
+            _frames: None,
             heap: None,
             functions: HashMap::new(),
             code_bytes: 0,
@@ -1184,6 +1174,7 @@ pub fn compile_to_jit_for_promotion_owned(
     if compile_set.is_empty() {
         report_jit_stats(0);
         return Ok(JitArtifact {
+            _frames: None,
             heap: None,
             functions: HashMap::new(),
             code_bytes: 0,
@@ -1251,6 +1242,7 @@ fn compile_bodies_dropping_failures(
         bodies.retain(|body| retry_names.contains(body.name.as_str()));
         if bodies.is_empty() {
             return Ok(JitArtifact {
+                _frames: None,
                 heap: None,
                 functions: HashMap::new(),
                 code_bytes: 0,
@@ -1274,7 +1266,7 @@ fn compile_bodies(
     enum_shapes: &HashMap<u32, u32>,
     struct_shapes: &HashMap<u32, u32>,
 ) -> Result<JitArtifact> {
-    let isa = build_native_isa(false)?;
+    let isa = build_native_isa(false, true)?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     let heap = NativeCodeHeap::new();
     builder.memory_provider(Box::new(NativeCodeHeap::provider(&heap)));
@@ -1297,36 +1289,22 @@ fn compile_bodies(
     // the key, so dispatch is unaffected.
     let lowered = lower_program_serial(&mut module, filtered, tcx, Some("gos_main"))?;
 
-    // A `Result<T, _>`-returning body hands its `[disc, payload]` carrier
-    // back as an `i128` by value. The Rust trampoline reads that return from
-    // a register the Windows x64 ABI disagrees with, so wrap each such body
-    // in an out-pointer thunk (Cranelift-to-Cranelift call, then a pointer
-    // store) and dispatch through the thunk instead. `carrier_thunks` maps
-    // the body name to its thunk's `FuncId`.
-    let mut carrier_thunks: HashMap<String, cranelift_module::FuncId> = HashMap::new();
-    for body in filtered {
-        if !matches!(
-            body_kinds(body, tcx, enum_shapes, struct_shapes),
-            Some((
-                _,
-                JitKind::ResultEnumPtr(_)
-                    | JitKind::ResultNativeStr
-                    | JitKind::ResultScalar(_)
-                    | JitKind::OptionScalar(_)
-            ))
-        ) {
-            continue;
-        }
-        let Some(&body_id) = lowered.function_ids_by_name.get(&body.name) else {
-            continue;
-        };
-        let thunk_id = crate::native::emit_carrier_outptr_thunk(&mut module, body_id, &body.name)?;
-        carrier_thunks.insert(body.name.clone(), thunk_id);
-    }
+    let carrier_thunks = emit_carrier_thunks(
+        &mut module,
+        filtered,
+        &lowered.function_ids_by_name,
+        (tcx, enum_shapes, struct_shapes),
+    )?;
 
     module
         .finalize_definitions()
         .map_err(|e| anyhow!("jit finalize: {e}"))?;
+    let placed: Vec<(usize, crate::jit_frames::FunctionFrames)> = lowered
+        .frames
+        .into_iter()
+        .map(|frames| (module.get_finalized_function(frames.id) as usize, frames))
+        .collect();
+    let frames = crate::jit_frames::register(cranelift_module::Module::isa(&module), placed);
 
     let body_name_set: std::collections::HashSet<&str> =
         filtered.iter().map(|b| b.name.as_str()).collect();
@@ -1344,6 +1322,12 @@ fn compile_bodies(
             // Some param/return type isn't a primitive scalar - the
             // dispatch trampoline can't marshal it, so the VM will
             // fall back to bytecode for this fn.
+            if trace {
+                eprintln!("jit: entry-skip {} (unsupported boundary)", body.name);
+            }
+            continue;
+        };
+        let Some(carrier_box_metas) = param_carrier_box_metas(body, tcx, &params) else {
             if trace {
                 eprintln!("jit: entry-skip {} (unsupported boundary)", body.name);
             }
@@ -1375,9 +1359,8 @@ fn compile_bodies(
             }
             continue;
         }
-        // A `ResultEnumPtr` body dispatches through its out-pointer carrier
-        // thunk (the trampoline passes a stack buffer and reads the carrier
-        // back from memory); every other body is called directly.
+        // A body that takes or answers a carrier dispatches through its entry
+        // thunk; every other body is called directly.
         let ptr = match carrier_thunks.get(&body.name) {
             Some(&thunk_id) => module.get_finalized_function(thunk_id),
             None => module.get_finalized_function(id),
@@ -1397,6 +1380,7 @@ fn compile_bodies(
             params: params.into_boxed_slice(),
             returns,
             returns_fresh: returns_fresh.get(&body.name).copied().unwrap_or(false),
+            carrier_box_metas,
         });
         functions.insert(name, handle);
     }
@@ -1409,6 +1393,7 @@ fn compile_bodies(
 
     report_jit_stats(functions.len());
     Ok(JitArtifact {
+        _frames: Some(frames),
         heap: Some(heap),
         functions,
         code_bytes: lowered.emitted_code_bytes,
@@ -1416,6 +1401,40 @@ fn compile_bodies(
             .iter()
             .any(|body| !body_static_symbols(body).is_empty()),
     })
+}
+
+/// Wraps each body that takes or answers a two-word carrier in an entry thunk,
+/// keyed by the body's name.
+///
+/// A carrier crosses a Cranelift body as an `i128` by value, which the Rust
+/// trampoline passes and reads in registers the Windows x64 ABI disagrees
+/// with, so each such body is dispatched through a thunk that moves its
+/// carriers through pointers (see `emit_carrier_entry_thunk`).
+fn emit_carrier_thunks(
+    module: &mut JITModule,
+    filtered: &[Body],
+    function_ids_by_name: &HashMap<String, cranelift_module::FuncId>,
+    (tcx, enum_shapes, struct_shapes): (&TyCtxt, &HashMap<u32, u32>, &HashMap<u32, u32>),
+) -> Result<HashMap<String, cranelift_module::FuncId>> {
+    let mut carrier_thunks = HashMap::new();
+    for body in filtered {
+        let Some((params, returns)) = body_kinds(body, tcx, enum_shapes, struct_shapes) else {
+            continue;
+        };
+        let crosses_carrier = matches!(returns, JitKind::ResultEnumPtr(_) | JitKind::Carrier(_))
+            || params
+                .iter()
+                .any(|kind| matches!(kind, JitKind::Carrier(_)));
+        if !crosses_carrier {
+            continue;
+        }
+        let Some(&body_id) = function_ids_by_name.get(&body.name) else {
+            continue;
+        };
+        let thunk_id = crate::native::emit_carrier_entry_thunk(module, body_id, &body.name)?;
+        carrier_thunks.insert(body.name.clone(), thunk_id);
+    }
+    Ok(carrier_thunks)
 }
 
 /// Option uses the same two-word discriminant/payload carrier already handled
@@ -1760,6 +1779,9 @@ fn fixed_aggregate_slots(
             if !visiting.insert(ty) {
                 return Some(1);
             }
+            if let Some(layout) = tcx.packed_layout(ty) {
+                return Some(u64::from(layout.size / 8));
+            }
             let fields = tcx.adt_field_tys(*def, substs)?;
             let mut total = 0u64;
             for field in fields {
@@ -1885,9 +1907,10 @@ fn jit_local_ty_needs_bytecode_inner(
         // every operation on it lowers to the `gos_rt_dyn_*` call the AOT
         // backend emits.
         | TyKind::DynValue => false,
-        TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => {
-            jit_local_ty_needs_bytecode_inner(tcx, *elem, visiting)
-        }
+        TyKind::Vec(elem)
+        | TyKind::Slice(elem)
+        | TyKind::Array { elem, .. }
+        | TyKind::Simd { elem, .. } => jit_local_ty_needs_bytecode_inner(tcx, *elem, visiting),
         // Erased before lowering; a leak takes its representation's answer.
         TyKind::Nominal { repr, .. } => jit_local_ty_needs_bytecode_inner(tcx, *repr, visiting),
         TyKind::Tuple(elems) => elems
@@ -2219,21 +2242,14 @@ fn body_kinds(
         if matches!(kind, JitKind::NativeVecStr) && !matches!(tcx.kind_of(ty), TyKind::Ref { .. }) {
             return None;
         }
-        // Result carriers / `TupleReturn` are return-only marshalling shapes;
-        // the trampoline has no inbound parameter path for them, so a body
-        // taking one as a parameter stays on bytecode.
-        if matches!(
-            kind,
-            JitKind::ResultEnumPtr(_)
-                | JitKind::ResultNativeStr
-                | JitKind::ResultScalar(_)
-                | JitKind::OptionScalar(_)
-                | JitKind::TupleReturn(_)
-        ) {
+        // `Result<Enum, errors::Error>` and `TupleReturn` are return-only
+        // marshalling shapes; the trampoline has no inbound path for them.
+        if matches!(kind, JitKind::ResultEnumPtr(_) | JitKind::TupleReturn(_)) {
             return None;
         }
         params.push(kind);
     }
+    param_carrier_box_metas(body, tcx, &params)?;
     if matches!(
         tcx.kind_of(body.local_ty(gossamer_mir::Local(0))),
         TyKind::Iterator(_)
@@ -2319,20 +2335,166 @@ fn trace_ty_to_kind(tcx: &TyCtxt, ty: Ty) {
     );
 }
 
-/// The scalar shape a two-word carrier's payload word holds for `ty`, or
-/// `None` when the payload is not a scalar the word can stand for.
-fn carrier_scalar_kind(tcx: &TyCtxt, ty: Ty) -> Option<ResultScalarKind> {
-    let mut ty = ty;
-    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
-        ty = *inner;
+/// The payload tree of the `Option` / `Result` `ty`, or `None` when an arm
+/// holds a payload with no one-word encoding the trampoline reads.
+fn carrier_shape(tcx: &TyCtxt, ty: Ty) -> Option<CarrierShape> {
+    let mut nodes = Vec::new();
+    push_carrier_nodes(tcx, ty, &mut nodes)?;
+    CarrierShape::from_nodes(&nodes)
+}
+
+fn push_carrier_nodes(tcx: &TyCtxt, ty: Ty, nodes: &mut Vec<CarrierNode>) -> Option<()> {
+    if nodes.len() >= CarrierShape::MAX_NODES {
+        return None;
     }
-    match tcx.kind_of(ty) {
-        TyKind::Int(_) => Some(ResultScalarKind::I64),
-        TyKind::Float(gossamer_types::FloatTy::F64) => Some(ResultScalarKind::F64),
-        TyKind::Bool => Some(ResultScalarKind::Bool),
-        TyKind::Char => Some(ResultScalarKind::Char),
-        _ => None,
+    let node = match tcx.kind_of(ty) {
+        TyKind::Adt { def, substs } if def.local == u32::MAX - 1 => {
+            nodes.push(CarrierNode::Option);
+            return push_carrier_nodes(tcx, *substs.types().first()?, nodes);
+        }
+        TyKind::Adt { def, substs } if def.local == u32::MAX => {
+            let arms = substs.types();
+            nodes.push(CarrierNode::Result);
+            push_carrier_nodes(tcx, *arms.first()?, nodes)?;
+            return push_carrier_nodes(tcx, *arms.get(1)?, nodes);
+        }
+        TyKind::Unit => CarrierNode::Unit,
+        TyKind::Int(gossamer_types::IntTy::I128 | gossamer_types::IntTy::U128) => return None,
+        TyKind::Int(_) => CarrierNode::I64,
+        TyKind::Float(gossamer_types::FloatTy::F64) => CarrierNode::F64,
+        TyKind::Bool => CarrierNode::Bool,
+        TyKind::Char => CarrierNode::Char,
+        TyKind::String => CarrierNode::Str,
+        TyKind::DynError => CarrierNode::Error,
+        _ => return None,
+    };
+    nodes.push(node);
+    Some(())
+}
+
+/// Leaked copies of the box metas handed to the trampoline, one per distinct
+/// layout. The runtime interns a meta by address into a bounded table, so
+/// every artifact naming the same layout shares one address.
+static TRAMPOLINE_BOX_METAS: std::sync::LazyLock<
+    parking_lot::Mutex<HashMap<Vec<i64>, &'static [i64]>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+fn trampoline_box_meta(blob: &[i64]) -> &'static [i64] {
+    let mut metas = TRAMPOLINE_BOX_METAS.lock();
+    if let Some(meta) = metas.get(blob) {
+        return meta;
     }
+    let leaked: &'static [i64] = Box::leak(blob.to_vec().into_boxed_slice());
+    metas.insert(blob.to_vec(), leaked);
+    leaked
+}
+
+/// The meta a carrier of type `ty` is boxed with when it is another carrier's
+/// payload: the structural box meta when one is registered, the guarded copy
+/// meta otherwise - the same choice the `gos_rt_result_new` lowering makes.
+fn carrier_box_meta(tcx: &TyCtxt, ty: Ty) -> Option<&[i64]> {
+    tcx.rc_meta(&format!("gos_rc_meta_boxaggr_{}", ty.as_u32()))
+        .or_else(|| {
+            tcx.aggr_copy_meta(ty)
+                .filter(|sym| !sym.is_empty())
+                .and_then(|sym| tcx.rc_meta(sym))
+        })
+}
+
+/// Whether a box laid out by `blob` owns the heap payload of each arm of the
+/// carrier at node `at`: a structural meta names a `String` payload word as
+/// its child, a guarded meta names a nested box under that arm's
+/// discriminant.
+fn box_meta_owns_payloads(shape: CarrierShape, at: usize, blob: &[i64]) -> bool {
+    use gossamer_abi::rc::{
+        RC_CHILD_KIND_SHIFT, RC_CHILD_RC, RC_KIND_STRUCT, RC_KIND_STRUCT_GUARDED,
+    };
+    const PAYLOAD_WORD: i64 = 1;
+    (0..2).all(|disc| {
+        let Some(arm) = shape.arm(at, disc) else {
+            return true;
+        };
+        match shape.node(arm) {
+            CarrierNode::Str => {
+                blob.first() == Some(&RC_KIND_STRUCT)
+                    && blob.get(4..).is_some_and(|entries| {
+                        entries.contains(&((RC_CHILD_RC << RC_CHILD_KIND_SHIFT) | PAYLOAD_WORD))
+                    })
+            }
+            node if node.is_carrier() => {
+                blob.first() == Some(&RC_KIND_STRUCT_GUARDED)
+                    && blob.get(2..).is_some_and(|entries| {
+                        entries.chunks_exact(3).any(|entry| {
+                            entry[2] == PAYLOAD_WORD && (entry[0] == -1 || entry[0] == disc)
+                        })
+                    })
+            }
+            _ => true,
+        }
+    })
+}
+
+/// The box meta of every nested carrier node of the parameter carrier `ty`,
+/// indexed by node, or `None` when the trampoline cannot build the value: an
+/// arm holds an `errors::Error` (the VM's error value has no native
+/// constructor), or a nested carrier has no registered box meta owning the
+/// payloads its arms hold.
+fn carrier_box_metas(tcx: &TyCtxt, ty: Ty, shape: CarrierShape) -> Option<CarrierBoxMetas> {
+    let mut metas = vec![None; shape.len()];
+    collect_carrier_box_metas(tcx, ty, shape, 0, &mut metas)?;
+    Some(metas.into_boxed_slice())
+}
+
+fn collect_carrier_box_metas(
+    tcx: &TyCtxt,
+    ty: Ty,
+    shape: CarrierShape,
+    at: usize,
+    metas: &mut [Option<&'static [i64]>],
+) -> Option<()> {
+    let TyKind::Adt { substs, .. } = tcx.kind_of(ty) else {
+        return None;
+    };
+    let arm_tys = substs.types();
+    for disc in 0..2 {
+        let Some(arm) = shape.arm(at, disc) else {
+            continue;
+        };
+        let arm_ty = *arm_tys.get(usize::try_from(disc).ok()?)?;
+        match shape.node(arm) {
+            CarrierNode::Error => return None,
+            node if node.is_carrier() => {
+                let blob = carrier_box_meta(tcx, arm_ty)?;
+                if !box_meta_owns_payloads(shape, arm, blob) {
+                    return None;
+                }
+                metas[arm] = Some(trampoline_box_meta(blob));
+                collect_carrier_box_metas(tcx, arm_ty, shape, arm, metas)?;
+            }
+            _ => {}
+        }
+    }
+    Some(())
+}
+
+/// [`carrier_box_metas`] for each parameter of `body` whose kind is a
+/// carrier, empty for every other parameter; `None` when any carrier
+/// parameter cannot be built.
+fn param_carrier_box_metas(
+    body: &Body,
+    tcx: &TyCtxt,
+    params: &[JitKind],
+) -> Option<Box<[CarrierBoxMetas]>> {
+    params
+        .iter()
+        .zip(1..=body.arity)
+        .map(|(kind, pidx)| match kind {
+            JitKind::Carrier(shape) => {
+                carrier_box_metas(tcx, body.local_ty(gossamer_mir::Local(pidx)), *shape)
+            }
+            _ => Some(Box::default()),
+        })
+        .collect()
 }
 
 fn ty_to_kind(
@@ -2365,30 +2527,37 @@ fn ty_to_kind(
         TyKind::Adt { def, .. } if tcx.is_rc_managed(ty) => enum_shapes
             .get(&def.local)
             .map(|idx| JitKind::EnumPtr(*idx)),
-        // `Result<Enum, errors::Error>`: the by-value two-word `i128` return
-        // whose `Ok` payload is a registered heap enum. Only the `Ok`-enum
-        // shape needs marshalling (the `Err` side is read back generically),
-        // so classify by the `Ok` type's shape. Return-only; a `Result`
-        // parameter keeps a body on bytecode (no `ty_to_kind` for it as a
-        // param is wired in the trampoline).
-        // `Option<scalar>`: the same `[disc, payload]` carrier a `Result`
-        // rides, with `Some` in the zero discriminant.
-        TyKind::Adt { def, substs } if def.local == u32::MAX - 1 => {
-            carrier_scalar_kind(tcx, *substs.types().first()?).map(JitKind::OptionScalar)
+        // A carrier crosses by value; a reference to one is a pointer to a
+        // caller slot the trampoline has no write-back path for.
+        TyKind::Adt { def, .. }
+            if (def.local == u32::MAX || def.local == u32::MAX - 1) && was_borrowed =>
+        {
+            None
         }
-        TyKind::Adt { def, substs } if def.local == u32::MAX => {
-            let ok_ty = *substs.types().first()?;
-            let mut ok_ty = ok_ty;
-            while let TyKind::Ref { inner, .. } = tcx.kind_of(ok_ty) {
-                ok_ty = *inner;
-            }
-            match tcx.kind_of(ok_ty) {
-                TyKind::Adt { def: ok_def, .. } if tcx.is_rc_managed(ok_ty) => enum_shapes
-                    .get(&ok_def.local)
-                    .map(|idx| JitKind::ResultEnumPtr(*idx)),
-                TyKind::String => Some(JitKind::ResultNativeStr),
-                _ => carrier_scalar_kind(tcx, ok_ty).map(JitKind::ResultScalar),
-            }
+        // `Result<Enum, errors::Error>`: a return whose `Ok` payload is a
+        // registered heap enum, kept native as a handle on the VM side.
+        TyKind::Adt { def, substs }
+            if def.local == u32::MAX
+                && substs
+                    .types()
+                    .get(1)
+                    .is_some_and(|err| matches!(tcx.kind_of(*err), TyKind::DynError))
+                && substs.types().first().is_some_and(|ok| {
+                    matches!(tcx.kind_of(*ok), TyKind::Adt { def, .. }
+                        if tcx.is_rc_managed(*ok) && enum_shapes.contains_key(&def.local))
+                }) =>
+        {
+            let TyKind::Adt { def: ok_def, .. } = tcx.kind_of(*substs.types().first()?) else {
+                return None;
+            };
+            enum_shapes
+                .get(&ok_def.local)
+                .map(|idx| JitKind::ResultEnumPtr(*idx))
+        }
+        // Every other `Option` / `Result`: the two words, classified arm by
+        // arm so each payload word is read as what its own type stores.
+        TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
+            carrier_shape(tcx, ty).map(JitKind::Carrier)
         }
         // An all-scalar user struct with a registered VM-side shape
         // crosses as a pointer to its flat field-slot block (the
@@ -2747,10 +2916,9 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_flag_map_get"        => rt::gos_rt_flag_map_get,
         "gos_rt_os_env"              => rt::gos_rt_os_env,
         "gos_rt_os_cwd"              => rt::gos_rt_os_cwd,
-        "gos_rt_fs_list_dir"         => rt::gos_rt_fs_list_dir,
-        "gos_rt_fs_walk_dir"         => rt::gos_rt_fs_walk_dir,
-        "gos_rt_exec_run"            => rt::gos_rt_exec_run,
-        "gos_rt_exec_run_in"         => rt::gos_rt_exec_run_in,
+        "gos_rt_fs_walk_dir_raw"     => rt::gos_rt_fs_walk_dir_raw,
+        "gos_rt_exec_run_raw"            => rt::gos_rt_exec_run_raw,
+        "gos_rt_exec_run_in_raw"         => rt::gos_rt_exec_run_in_raw,
         "gos_rt_exec_spawn"          => rt::gos_rt_exec_spawn,
         "gos_rt_exec_spawn_piped"    => rt::gos_rt_exec_spawn_piped,
         "gos_rt_child_write_stdin"   => rt::gos_rt_child_write_stdin,
@@ -2763,7 +2931,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_exec_signal"         => rt::gos_rt_exec_signal,
         "gos_rt_exec_kill_group"     => rt::gos_rt_exec_kill_group,
         "gos_rt_exec_wait_timeout"   => rt::gos_rt_exec_wait_timeout,
-        "gos_rt_exec_pipeline_run"   => rt::gos_rt_exec_pipeline_run,
+        "gos_rt_exec_pipeline_run_raw"   => rt::gos_rt_exec_pipeline_run_raw,
         "gos_rt_signal_on"           => rt::gos_rt_signal_on,
         "gos_rt_signal_wait"         => rt::gos_rt_signal_wait,
         "gos_rt_signal_try_wait"     => rt::gos_rt_signal_try_wait,
@@ -3021,7 +3189,19 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_result_unwrap_or_vec" => rt::vec::gos_rt_result_unwrap_or_vec,
         "gos_rt_result_unwrap_or_str" => rt::vec::gos_rt_result_unwrap_or_str,
         "gos_rt_result_ok_payload_release" => rt::vec::gos_rt_result_ok_payload_release,
+        "gos_rt_result_payload_release" => rt::vec::gos_rt_result_payload_release,
+        "gos_rt_result_payload_retain" => rt::vec::gos_rt_result_payload_retain,
         "gos_rt_result_unwrap_or_carrier" => rt::vec::gos_rt_result_unwrap_or_carrier,
+        "gos_rt_option_unwrap_carrier" => rt::vec::gos_rt_option_unwrap_carrier,
+        "gos_rt_result_unwrap_carrier" => rt::vec::gos_rt_result_unwrap_carrier,
+        "gos_rt_carrier_from_box" => rt::vec::gos_rt_carrier_from_box,
+        "gos_rt_option_str_payload_retain" => rt::vec::gos_rt_option_str_payload_retain,
+        "gos_rt_option_str_payload_release" => rt::vec::gos_rt_option_str_payload_release,
+        "gos_rt_option_vec_payload_retain" => rt::vec::gos_rt_option_vec_payload_retain,
+        "gos_rt_option_vec_payload_release" => rt::vec::gos_rt_option_vec_payload_release,
+        "gos_rt_map_values_carrier" => rt::gos_rt_map_values_carrier,
+        "gos_rt_map_values_carrier_u64" => rt::gos_rt_map_values_carrier_u64,
+        "gos_rt_lazy_iter_set_elem_meta" => rt::gos_rt_lazy_iter_set_elem_meta,
         "gos_rt_result_payload_i128" => rt::gos_rt_result_payload_i128,
         "gos_rt_result_ok"           => rt::gos_rt_result_ok,
         "gos_rt_result_err"          => rt::gos_rt_result_err,
@@ -3148,6 +3328,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_callback_invoke"     => rt::gos_rt_callback_invoke,
         "gos_rt_lazy_iter_range_i64" => rt::gos_rt_lazy_iter_range_i64,
         "gos_rt_lazy_iter_range_from_i64" => rt::gos_rt_lazy_iter_range_from_i64,
+        "gos_rt_lazy_iter_range_from_i64_checked" => rt::gos_rt_lazy_iter_range_from_i64_checked,
         "gos_rt_lazy_iter_range_inclusive_i64" => rt::gos_rt_lazy_iter_range_inclusive_i64,
         "gos_rt_lazy_iter_from_vec_i64" => rt::gos_rt_lazy_iter_from_vec_i64,
         "gos_rt_lazy_iter_str_chars" => rt::gos_rt_lazy_iter_str_chars,
@@ -3158,6 +3339,12 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_lazy_iter_skip_i64" => rt::gos_rt_lazy_iter_skip_i64,
         "gos_rt_lazy_iter_chain_i64" => rt::gos_rt_lazy_iter_chain_i64,
         "gos_rt_lazy_iter_enumerate_i64" => rt::gos_rt_lazy_iter_enumerate_i64,
+        "gos_rt_lazy_iter_pair_blobs" => rt::gos_rt_lazy_iter_pair_blobs,
+        "gos_rt_fs_read_dir_raw" => rt::gos_rt_fs_read_dir_raw,
+        "gos_rt_exec_run_raw" => rt::gos_rt_exec_run_raw,
+        "gos_rt_exec_run_in_raw" => rt::gos_rt_exec_run_in_raw,
+        "gos_rt_lazy_iter_filter_map_i64" => rt::gos_rt_lazy_iter_filter_map_i64,
+        "gos_rt_lazy_iter_filter_map_str" => rt::gos_rt_lazy_iter_filter_map_str,
         "gos_rt_lazy_iter_zip_i64" => rt::gos_rt_lazy_iter_zip_i64,
         "gos_rt_lazy_iter_map_i64" => rt::gos_rt_lazy_iter_map_i64,
         "gos_rt_lazy_iter_filter_i64" => rt::gos_rt_lazy_iter_filter_i64,
@@ -3171,6 +3358,10 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_lazy_iter_drop_pair_i64" => rt::gos_rt_lazy_iter_drop_pair_i64,
         "gos_rt_lazy_iter_sum_i64" => rt::gos_rt_lazy_iter_sum_i64,
         "gos_rt_lazy_iter_product_i64" => rt::gos_rt_lazy_iter_product_i64,
+        "gos_rt_lazy_iter_sum_i64_checked" => rt::gos_rt_lazy_iter_sum_i64_checked,
+        "gos_rt_lazy_iter_product_i64_checked" => rt::gos_rt_lazy_iter_product_i64_checked,
+        "gos_rt_iter_sum_i64_checked" => rt::gos_rt_iter_sum_i64_checked,
+        "gos_rt_iter_product_i64_checked" => rt::gos_rt_iter_product_i64_checked,
         "gos_rt_lazy_iter_min_i64" => rt::gos_rt_lazy_iter_min_i64,
         "gos_rt_lazy_iter_max_i64" => rt::gos_rt_lazy_iter_max_i64,
         "gos_rt_lazy_iter_fold_i64" => rt::gos_rt_lazy_iter_fold_i64,
@@ -3233,6 +3424,8 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_json_value_array"    => rt::gos_rt_json_value_array,
         "gos_rt_json_value_array_owned" => rt::gos_rt_json_value_array_owned,
         "gos_rt_json_value_object_owned" => rt::gos_rt_json_value_object_owned,
+        "gos_rt_json_value_object_owned_keyed" => rt::gos_rt_json_value_object_owned_keyed,
+        "gos_rt_json_value_object_keyed" => rt::gos_rt_json_value_object_keyed,
         "gos_rt_json_value_object"   => rt::gos_rt_json_value_object,
         "gos_rt_parse_f64"           => rt::gos_rt_parse_f64,
         "gos_rt_i64_chars"           => rt::gos_rt_i64_chars,
@@ -3353,6 +3546,8 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_map_keys_i64"        => rt::gos_rt_map_keys_i64,
         "gos_rt_map_values_i64"      => rt::gos_rt_map_values_i64,
         "gos_rt_map_keys_str"        => rt::gos_rt_map_keys_str,
+        "gos_rt_map_entries_into"    => rt::gos_rt_map_entries_into,
+        "gos_rt_map_select_by_key_into" => rt::gos_rt_map_select_by_key_into,
         "gos_rt_map_values_str"      => rt::gos_rt_map_values_str,
         "gos_rt_map_get_or_str_i64"  => rt::gos_rt_map_get_or_str_i64,
         "gos_rt_map_get_or_typed_str_i64" => rt::gos_rt_map_get_or_typed_str_i64,
@@ -3381,6 +3576,8 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_json_writer_f64" => rt::gos_rt_json_writer_f64,
         "gos_rt_json_writer_finish" => rt::gos_rt_json_writer_finish,
         "gos_rt_json_writer_i64" => rt::gos_rt_json_writer_i64,
+        "gos_rt_json_writer_u64" => rt::gos_rt_json_writer_u64,
+        "gos_rt_json_value_uint" => rt::gos_rt_json_value_uint,
         "gos_rt_json_writer_key" => rt::gos_rt_json_writer_key,
         "gos_rt_json_writer_new" => rt::gos_rt_json_writer_new,
         "gos_rt_json_writer_new_pretty" => rt::gos_rt_json_writer_new_pretty,
@@ -3396,6 +3593,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_json_len"            => rt::gos_rt_json_len,
         "gos_rt_json_is_null"        => rt::gos_rt_json_is_null,
         "gos_rt_json_as_i64"         => rt::gos_rt_json_as_i64,
+        "gos_rt_json_as_u64_opt" => rt::gos_rt_json_as_u64_opt,
         "gos_rt_json_as_f64"         => rt::gos_rt_json_as_f64,
         "gos_rt_json_as_str"         => rt::gos_rt_json_as_str,
         "gos_rt_json_as_bool"        => rt::gos_rt_json_as_bool,
@@ -3808,6 +4006,8 @@ mod promotion_report_tests {
                     Terminator::Return
                 },
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             }],
             span,
         }
@@ -3859,6 +4059,8 @@ mod promotion_report_tests {
             stmts: Vec::new(),
             terminator: Terminator::Goto { target: BlockId(1) },
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         });
         let bodies = vec![caller, body("unsupported", i128_ty, false)];
         let admitted = jit_compile_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
@@ -3891,6 +4093,8 @@ mod promotion_report_tests {
             stmts: Vec::new(),
             terminator: Terminator::Goto { target: BlockId(1) },
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         });
         let bodies = vec![caller, body("Counter::next", i128_ty, false)];
         let admitted = jit_compile_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
@@ -3922,6 +4126,8 @@ mod promotion_report_tests {
             stmts: Vec::new(),
             terminator: Terminator::Goto { target: BlockId(1) },
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         });
 
         let bodies = vec![caller, body("build", map_ty, false)];
@@ -3972,6 +4178,8 @@ mod promotion_report_tests {
             stmts: Vec::new(),
             terminator: Terminator::Goto { target: BlockId(1) },
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         });
         let mut energy = body("energy", i64_ty, false);
         energy.arity = 1;
@@ -4012,6 +4220,8 @@ mod promotion_report_tests {
             stmts: Vec::new(),
             terminator: Terminator::Goto { target: BlockId(1) },
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         });
         let bodies = vec![main, body("rand", i64_ty, false)];
         let admitted = jit_compile_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
@@ -4063,6 +4273,8 @@ mod promotion_report_tests {
             stmts: Vec::new(),
             terminator: Terminator::Goto { target: BlockId(1) },
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         });
         builder
     }
@@ -4178,6 +4390,7 @@ mod failure_isolation_tests {
                 id: BlockId(0),
                 stmts: vec![Statement {
                     span,
+                    inlined: None,
                     kind: StatementKind::Assign {
                         place: Place::local(Local(0)),
                         rvalue,
@@ -4185,6 +4398,8 @@ mod failure_isolation_tests {
                 }],
                 terminator: Terminator::Return,
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             }],
             span,
         }

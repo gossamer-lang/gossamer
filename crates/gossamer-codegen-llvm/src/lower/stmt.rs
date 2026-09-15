@@ -214,6 +214,9 @@ impl<'a> Lowerer<'a> {
             self.emit_cleanup_call(entry);
         }
         self.current_block = Some(block.id.as_u32());
+        if let Some(span) = block.terminator_span {
+            self.emit_stack_frame_line(span.start);
+        }
         self.with_frame_line(|lowerer| lowerer.lower_terminator(&block.terminator))?;
         self.current_block = None;
         Ok(())
@@ -337,6 +340,7 @@ impl<'a> Lowerer<'a> {
                         | "gos_rt_option_slot_retain"
                         | "gos_rt_option_slot_release"
                         | "gos_rt_vec_set_elem_meta"
+                        | "gos_rt_lazy_iter_set_elem_meta"
                         | "gos_rt_vec_set_slot_children"
                         | "gos_rt_map_set_blob_values"
                         | "gos_rt_map_set_vec_values"
@@ -524,18 +528,9 @@ impl<'a> Lowerer<'a> {
                 "  call void @llvm.memcpy.p0.p0.i64(ptr {addr}, ptr {src_ptr}, i64 {bytes}, i1 false)"
             )
             .unwrap();
-            // The words are in the destination's own storage now, so the copy
-            // the container allocated for this read has no reader left.
-            if matches!(rvalue, Rvalue::CallIntrinsic { name, .. } if *name == "gos_result_payload_owned")
-            {
-                declare_rt(&mut self.runtime_refs, "gos_rt_aggr_free");
-                writeln!(
-                    self.out,
-                    "  call void @\"gos_rt_aggr_free\"(ptr {src_ptr}, i64 {bytes})"
-                )
-                .unwrap();
-            }
-        } else if self.place_is_packed_byte_element(place) {
+        } else if self.place_is_packed_byte_element(place)
+            || self.packed_integer_field(place).is_some()
+        {
             self.store_value_to_place(place, &leaf_llvm, &value);
         } else {
             let tbaa = self.place_payload_tbaa(place);

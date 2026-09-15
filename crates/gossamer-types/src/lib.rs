@@ -47,7 +47,7 @@ pub use checker::{
     iterator_receiver_accepts_method, typecheck_source_file,
     typecheck_source_file_for_repl_inspection,
 };
-pub use context::TyCtxt;
+pub use context::{PackedLayout, PlainLayout, TyCtxt};
 pub use error::{NotDisplayableClass, TypeDiagnostic, TypeError};
 pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_exhaustiveness};
 pub use infer::{InferCtxt, UnifyError};
@@ -58,7 +58,7 @@ pub use stdlib_signatures::{
     function_signature as stdlib_function_signature,
 };
 pub use subst::{GenericArg, Substs};
-pub use table::TypeTable;
+pub use table::{ConstGenericArg, TypeTable};
 pub use trait_index::{
     ImplEntry, ImplFnId, ImplId, ImplIndex, ImplMethod, MethodResolution, TraitDiagnostic,
     TraitEntry, TraitError,
@@ -165,6 +165,14 @@ pub fn erase_nominal(tcx: &mut TyCtxt, ty: Ty) -> Ty {
                 tcx.intern(TyKind::Array { elem: mapped, len })
             }
         }
+        // A vector is laid out as the fixed array of its lanes.
+        TyKind::Simd { elem, lanes } => {
+            let mapped = erase_nominal(tcx, elem);
+            tcx.intern(TyKind::Array {
+                elem: mapped,
+                len: lanes,
+            })
+        }
         TyKind::HashMap { key, value, .. } => {
             let k = erase_nominal(tcx, key);
             let v = erase_nominal(tcx, value);
@@ -247,7 +255,7 @@ fn erase_nominal_substs(tcx: &mut TyCtxt, substs: &Substs) -> Option<Substs> {
                 changed |= mapped != *t;
                 GenericArg::Type(mapped)
             }
-            other @ GenericArg::Const(_) => other.clone(),
+            other @ (GenericArg::Const(_) | GenericArg::ConstParam(_)) => other.clone(),
         })
         .collect();
     changed.then(|| Substs::from_args(args))

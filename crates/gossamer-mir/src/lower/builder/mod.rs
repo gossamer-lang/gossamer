@@ -61,6 +61,9 @@ pub(crate) struct Builder<'a> {
     /// second physical dereference to that source place.
     pub(crate) reference_aliases: Vec<HashMap<String, Local>>,
     pub(crate) fn_span: Span,
+    /// Span of the expression being lowered, which a block terminated while
+    /// lowering it records as its terminator's span.
+    pub(crate) expr_span: Span,
     pub(crate) structs: &'a HashMap<String, Vec<String>>,
     pub(crate) struct_defs: &'a HashMap<gossamer_resolve::DefId, String>,
     pub(crate) enums: &'a EnumIndex,
@@ -75,7 +78,8 @@ pub(crate) struct Builder<'a> {
     pub(crate) fn_returns: &'a HashMap<gossamer_resolve::DefId, Ty>,
     pub(crate) fn_inputs: &'a HashMap<gossamer_resolve::DefId, Vec<Ty>>,
     /// Per-parameter read-only summary by callee; see `collect_shareable_params`.
-    pub(crate) fn_param_shareable: &'a HashMap<gossamer_resolve::DefId, Vec<bool>>,
+    pub(crate) fn_param_shareable:
+        &'a HashMap<gossamer_resolve::DefId, Vec<crate::lower::helpers::escape::ParamShare>>,
     pub(crate) consts: &'a HashMap<gossamer_resolve::DefId, ConstValue>,
     /// Scalar `static mut` items promoted to real mutable module globals,
     /// keyed by `DefId`. A path reading one lowers to a [`Rvalue::StaticLoad`]
@@ -91,6 +95,10 @@ pub(crate) struct Builder<'a> {
     /// write / param-stash). A loop calling any of these is never
     /// auto-regioned. See `collect_region_unsafe_fns`.
     pub(crate) region_unsafe: &'a std::collections::HashSet<gossamer_resolve::DefId>,
+    /// Lifted one-parameter closures whose body has no observable effect,
+    /// valued by whether the body reads the parameter's first tuple field.
+    /// See `collect_effect_free_pair_keys`.
+    pub(crate) effect_free_pair_keys: &'a HashMap<String, bool>,
     pub(crate) local_struct: HashMap<Local, String>,
     /// Scalar receivers borrowed mutably for a `&mut self` method, keyed by
     /// the reference local and valued by the place it borrowed. A scalar has
@@ -129,6 +137,9 @@ pub(crate) struct Builder<'a> {
     /// an element wider than one slot can be either this or the dedicated pair
     /// state, so which one a local holds is recorded where it is built.
     pub(crate) local_aggr_iter: std::collections::HashSet<Local>,
+    /// Locals that hold a value a loop in this body built and nothing else
+    /// names, so a binding initialised from one takes the value as it is.
+    pub(crate) fresh_loop_results: std::collections::HashSet<Local>,
     /// Per-local field layout for synthesised aggregates produced by
     /// the declarative `flag::define(...)` lowering. Maps the result
     /// local to a `Vec<(long_name, cell_kind)>` indexed by field

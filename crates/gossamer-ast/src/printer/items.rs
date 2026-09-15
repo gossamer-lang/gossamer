@@ -159,7 +159,8 @@ impl Printer {
         }
     }
 
-    pub(super) fn print_generics(&mut self, generics: &Generics) {
+    /// Prints a generic parameter list, or nothing when there is none.
+    pub fn print_generics(&mut self, generics: &Generics) {
         if generics.is_empty() {
             return;
         }

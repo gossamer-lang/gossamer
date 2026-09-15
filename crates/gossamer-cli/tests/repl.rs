@@ -4097,3 +4097,166 @@ fn repl_info_calls_an_implemented_trait_a_trait_not_a_type() {
         out.stdout
     );
 }
+
+#[test]
+fn repl_info_describes_lane_vectors_and_their_methods() {
+    let out = run_repl("%i Simd\n%i Mask\n%i Simd::load -d\n");
+    assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
+    assert!(out.stdout.contains("Simd [type]"), "{}", out.stdout);
+    assert!(
+        out.stdout
+            .contains("Simd::load(source: [T], offset: i64) -> Simd<T, N> [associated function]"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("Simd::lanes_lt(self: Simd<T, N>, other: Simd<T, N>) -> Mask<N> [method]"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("Mask [type]"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains(
+            "Mask::select(self: Mask<N>, if_true: Simd<T, N>, if_false: Simd<T, N>) -> Simd<T, N> [method]"
+        ),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("Example: Simd::load("),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn repl_explain_names_a_lane_vector_bindings_own_lane_type() {
+    let out = run_repl("let v: Simd<f64, 4> = Simd::splat(1.5)\n%e v\n");
+    assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("v: Simd<f64, 4> [binding]"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("v.reduce_sum(self: Simd<f64, 4>) -> f64 [method]"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains(
+            "v.store(self: Simd<f64, 4>, target: &mut [f64], offset: i64) -> () [method]"
+        ),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn repl_info_describes_wrapping_operators_by_their_spelling() {
+    let out = run_repl("%i *% -d\n");
+    assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
+    assert!(
+        out.stdout.contains("a *% b -> T [operator]"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("Wrapping multiply"), "{}", out.stdout);
+    assert!(
+        out.stdout
+            .contains("Example: let mixed: u32 = hash *% 16_777_619"),
+        "{}",
+        out.stdout
+    );
+}
+
+/// Each spelling answers for its own operator and no other: `+%` is not a
+/// prefix of `+%=`, and `*%` is not a `*` wildcard over `%`.
+#[test]
+fn repl_info_answers_only_the_exact_operator_named() {
+    for spelling in ["+%", "-%", "*%", "+%=", "-%=", "*%="] {
+        let out = run_repl(&format!("%i {spelling}\n"));
+        assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
+        let answered: Vec<&str> = out
+            .stdout
+            .lines()
+            .filter(|line| line.ends_with("[operator]"))
+            .collect();
+        assert_eq!(answered.len(), 1, "`%i {spelling}` answered {answered:?}");
+        let form = answered[0].trim_end_matches(" [operator]");
+        assert!(
+            form.split_whitespace().any(|token| token == spelling),
+            "`%i {spelling}` answered `{form}`"
+        );
+    }
+    let out = run_repl("%i +*\n%i *%*\n");
+    assert!(
+        !out.stdout.lines().any(|line| line.ends_with("[operator]")),
+        "a wildcard query must not answer an operator: {}",
+        out.stdout
+    );
+}
+
+#[test]
+fn repl_session_generic_items_show_parameters_variants_and_instances() {
+    let input = "struct Ring<const N: usize> {\n    items: [i64; N]\n}\n\
+                 impl<const N: usize> Ring<N> {\n    fn snapshot(&self) -> [i64; N] {\n        self.items\n    }\n}\n\
+                 enum Grid<const N: usize> {\n    Filled([i64; N])\n    Empty\n}\n\
+                 fn zeros<const N: usize>() -> [i64; N] {\n    [0; N]\n}\n\
+                 let r = Ring { items: [0; 3] }\n\
+                 let g: Grid<2> = Grid::Filled([4, 5])\n\
+                 %i Ring\n%i Grid\n%e zeros\n%e r\n%e g\n";
+    let out = run_repl(input);
+    assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
+    assert!(!out.stderr.contains("GX0007"), "{}", out.stderr);
+    assert!(
+        out.stdout.contains("Ring<const N: usize> [struct]"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("Grid<const N: usize> [enum]"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("    Filled([i64; N])"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout
+            .contains("zeros [declaration]\n  fn zeros<const N: usize>() -> [i64; N]"),
+        "{}",
+        out.stdout
+    );
+    assert!(out.stdout.contains("    items: [i64; 3]"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("r.snapshot() -> [i64; 3] [inherent]"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("    Filled([i64; 2])"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn repl_accepts_a_generic_impl_block_as_a_declaration() {
+    let input = "struct W<T> {\n    v: T\n}\n\
+                 impl<T> W<T> {\n    fn get(&self) -> T {\n        self.v\n    }\n}\n\
+                 let w = W { v: 41 }\n\
+                 w.get() + 1\n";
+    let out = run_repl(input);
+    assert!(out.success, "repl should exit zero; stderr: {}", out.stderr);
+    assert!(!out.stderr.contains("GX0007"), "{}", out.stderr);
+    assert!(
+        out.stdout.lines().any(|line| line.trim() == "42"),
+        "{}",
+        out.stdout
+    );
+}

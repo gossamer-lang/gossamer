@@ -627,7 +627,7 @@ impl<'a> Builder<'a> {
         // `insert` method dispatch does.
         if let Some(value_ty) = self.hash_map_value_ty(map_ty) {
             let _ = self.ensure_aggr_struct_meta(value_ty);
-            if self.is_inline_aggregate_ty(value_ty) {
+            if self.is_inline_aggregate_ty(value_ty) || self.map_value_is_carrier(map_ty) {
                 let _ = self.ensure_aggr_copy_meta(value_ty);
             }
         }
@@ -890,19 +890,16 @@ impl<'a> Builder<'a> {
         let sequence = args.first()?;
         let elem = self.vec_receiver_elem_ty(sequence.ty);
         let elem = self.peel_ref_ty(elem);
-        if !matches!(
-            self.tcx.kind_of(elem),
-            TyKind::Tuple(_) | TyKind::Adt { .. }
-        ) {
-            return None;
-        }
+        // Scalars and Strings order by their slot word and keep the word
+        // entry points; the stream is for every element that does not.
         let (count, tags) = self.tuple_element_stream(elem)?;
         let sequence_local = self.lower_expr(sequence)?;
         let mut call_args = vec![Operand::Copy(Place::local(sequence_local))];
         if joined != "sort::sort_stable" {
             let target = args.get(1)?;
             let target_local = self.lower_expr(target)?;
-            call_args.push(Operand::Copy(Place::local(target_local)));
+            let slots = self.ordered_value_slots(target_local, elem, span);
+            call_args.push(Operand::Copy(Place::local(slots)));
         }
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         let count_local = self.fresh(i64_ty);
@@ -956,7 +953,6 @@ impl<'a> Builder<'a> {
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         let mut resolved = self.lower_errors_regex_free(joined, args);
         resolved = resolved.or_else(|| self.lower_fs_free(joined, args));
-        resolved = resolved.or_else(|| self.lower_fs_2_free(joined, args));
         resolved = resolved.or_else(|| self.lower_os_free(joined, args));
         resolved = resolved.or_else(|| self.lower_os_2_free(joined, args));
         resolved = resolved.or_else(|| self.lower_path_free(joined, args));
@@ -1068,7 +1064,7 @@ impl<'a> Builder<'a> {
         // handed to the runtime walker, which calls back into it per
         // descendant - the generic stdlib-call path only forwards plain
         // operands, so this needs its own lowering ahead of that fallback.
-        if !callee_def_some && args.len() == 2 && matches!(joined, "fs::walk_dir" | "path::walk") {
+        if !callee_def_some && args.len() == 2 && joined == "__gos_fs_walk_dir_raw" {
             return ControlFlow::Break(self.try_lower_walk_dir(args, span));
         }
         // A resolver-bound type-qualified call (`UserStruct::method`, so
@@ -1371,36 +1367,6 @@ impl<'a> Builder<'a> {
                     .tcx
                     .intern(gossamer_types::TyKind::Tuple(vec![file, path]));
                 ("gos_rt_fs_temp_file", self.result_of(pair))
-            }
-            _ => return None,
-        })
-    }
-
-    fn lower_fs_2_free(
-        &mut self,
-        joined: &str,
-        _args: &[HirExpr],
-    ) -> Option<(&'static str, gossamer_types::Ty)> {
-        Some(match joined {
-            "fs::read_dir" => {
-                // Return type is `Result<Vec<DirInfo>, errors::Error>`.
-                // Pin the dest as a Result Adt whose first generic
-                // is `Vec<DirInfo>` so `.map_err(...)?` unwraps to a
-                // properly-typed Vec (driving `entries[i]` through
-                // the Vec dispatch with `DirInfo` element-struct
-                // tag) instead of a bare i64 pointer.
-                let dir_info_ty = self.dir_info_adt_ty();
-                let vec_ty = self.tcx.intern(gossamer_types::TyKind::Vec(dir_info_ty));
-                // The Err payload is a `*mut GosError` from
-                // `gos_rt_error_new`; pinning it as a bare I64 made
-                // `println!("{e}")` render the raw pointer value.
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([vec_ty, err_ty]);
-                let result_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                });
-                ("gos_rt_fs_list_dir", result_ty)
             }
             _ => return None,
         })
@@ -2192,6 +2158,9 @@ impl<'a> Builder<'a> {
             // bare-name dispatch later (single-arg shape is *not*
             // matched here).
             "min" | "math::min" if args.len() == 2 => {
+                if let Some(unsigned) = args.iter().find(|a| arg_is_unsigned64(self.tcx, a)) {
+                    return Some(("gos_rt_min_u64", unsigned.ty));
+                }
                 let is_f = arg_is_float(self.tcx, &args[0]);
                 let sym = if is_f {
                     "gos_rt_min_f64"
@@ -2210,6 +2179,9 @@ impl<'a> Builder<'a> {
                 (sym, ret)
             }
             "max" | "math::max" if args.len() == 2 => {
+                if let Some(unsigned) = args.iter().find(|a| arg_is_unsigned64(self.tcx, a)) {
+                    return Some(("gos_rt_max_u64", unsigned.ty));
+                }
                 let is_f = arg_is_float(self.tcx, &args[0]);
                 let sym = if is_f {
                     "gos_rt_max_f64"
@@ -2238,6 +2210,9 @@ impl<'a> Builder<'a> {
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
             "clamp" | "math::clamp" if args.len() == 3 => {
+                if let Some(unsigned) = args.iter().find(|a| arg_is_unsigned64(self.tcx, a)) {
+                    return Some(("gos_rt_clamp_u64", unsigned.ty));
+                }
                 let is_f = arg_is_float(self.tcx, &args[0]);
                 let sym = if is_f {
                     "gos_rt_clamp_f64"
@@ -2855,6 +2830,23 @@ impl<'a> Builder<'a> {
             "__gos_fs_metadata_raw" => {
                 let tup = self.tuple_fs_metadata_ty();
                 ("gos_rt_fs_metadata_raw", self.result_of(tup))
+            }
+            "__gos_fs_read_dir_raw" => {
+                let tup = self.tuple_dir_entry_ty();
+                let vec = self.tcx.intern(gossamer_types::TyKind::Vec(tup));
+                ("gos_rt_fs_read_dir_raw", self.result_of(vec))
+            }
+            "__gos_process_run_raw" => {
+                let tup = self.tuple_process_output_ty();
+                ("gos_rt_exec_run_raw", self.result_of(tup))
+            }
+            "__gos_process_run_in_raw" => {
+                let tup = self.tuple_process_output_ty();
+                ("gos_rt_exec_run_in_raw", self.result_of(tup))
+            }
+            "__gos_process_pipeline_run_raw" => {
+                let tup = self.tuple_process_output_ty();
+                ("gos_rt_exec_pipeline_run_raw", self.result_of(tup))
             }
             "__gos_tar_read_raw" | "__gos_zip_read_raw" => {
                 let tup = self.tuple_entry_ty();
@@ -4281,46 +4273,6 @@ impl<'a> Builder<'a> {
         _args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
-            // `exec::run(prog, args) -> Result<Output, errors::Error>`.
-            // Pin the Ok payload to the sentinel-DefId Output Adt so
-            // `o.stdout` / `o.stderr` / `o.code` projections find the
-            // right field index via `stdlib_struct_shapes`. Without
-            // this binding, the call lowered to a non-existent
-            // user-fn symbol and the destination held an undefined
-            // pointer the caller then dereferenced as the Result
-            // aggregate (the askq segfault).
-            "exec::run" | "os::exec::run" | "process::run" => {
-                let output_def = gossamer_resolve::DefId::local(u32::MAX - 3);
-                let output_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: output_def,
-                    substs: gossamer_types::Substs::new(),
-                });
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([output_ty, err_ty]);
-                let result_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                });
-                ("gos_rt_exec_run", result_ty)
-            }
-            // `process::run_in(prog, args, dir, env)` - the same
-            // `Result<Output, errors::Error>` shape as `process::run`,
-            // with the child's working directory and environment
-            // overrides supplied by the caller.
-            "process::run_in" => {
-                let output_def = gossamer_resolve::DefId::local(u32::MAX - 3);
-                let output_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: output_def,
-                    substs: gossamer_types::Substs::new(),
-                });
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([output_ty, err_ty]);
-                let result_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                });
-                ("gos_rt_exec_run_in", result_ty)
-            }
             // `exec::spawn(prog, args) -> Result<i64, errors::Error>`.
             // Non-blocking process launch - returns the child PID
             // so callers (daemon launchers, long-running tools)
@@ -4378,24 +4330,6 @@ impl<'a> Builder<'a> {
                 "gos_rt_exec_wait_timeout",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
-            // `exec::pipeline_run(cmds: Vec<String>) -> Result<Output, errors::Error>`.
-            // Same Ok-shape sentinel-DefId as `exec::run` so the
-            // existing `Output { stdout, stderr, code }` field
-            // projection lowers identically.
-            "exec::pipeline_run" | "os::exec::pipeline_run" | "process::pipeline_run" => {
-                let output_def = gossamer_resolve::DefId::local(u32::MAX - 3);
-                let output_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: output_def,
-                    substs: gossamer_types::Substs::new(),
-                });
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([output_ty, err_ty]);
-                let result_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                });
-                ("gos_rt_exec_pipeline_run", result_ty)
-            }
             _ => return None,
         })
     }
@@ -4547,9 +4481,6 @@ impl<'a> Builder<'a> {
         let dest = self.fresh(ret_ty);
         if let Some(rk) = Self::stdlib_runtime_kind(rt_name) {
             self.local_runtime_kind.insert(dest, rk);
-        }
-        if rt_name == "gos_rt_fs_list_dir" {
-            self.local_elem_struct.insert(dest, "DirInfo".to_string());
         }
         let next = self.new_block(span);
         self.terminate(Terminator::Call {

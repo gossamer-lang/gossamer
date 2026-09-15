@@ -201,6 +201,7 @@ impl<'a> Builder<'a> {
                 // is declared as a growable `[T]` / slice.
                 if let Some(field_ty) = field_tys.as_ref().and_then(|t| t.get(idx)).copied() {
                     use gossamer_types::TyKind;
+                    value_local = self.coerce_to_fn_trait_if_needed(value_local, field_ty, span);
                     let val_ty = self.locals[value_local.0 as usize].ty;
                     if let TyKind::Array { elem, len } = self.tcx.kind_of(val_ty).clone()
                         && matches!(
@@ -266,6 +267,9 @@ impl<'a> Builder<'a> {
                                 crate::lower::FieldRcKind::Vec => "gos_rt_vec_retain",
                                 crate::lower::FieldRcKind::Weak => "gos_rt_rc_weak_retain",
                                 crate::lower::FieldRcKind::Rc => "gos_rt_rc_retain",
+                                crate::lower::FieldRcKind::Carrier { .. } => {
+                                    "gos_rt_result_payload_retain"
+                                }
                                 // Takes the field's address and swaps in a
                                 // clone: a container with no reference count
                                 // cannot be co-owned.
@@ -274,13 +278,15 @@ impl<'a> Builder<'a> {
                                     None => continue,
                                 },
                             };
+                            let mut args = vec![Operand::Copy(nested)];
+                            if let crate::lower::FieldRcKind::Carrier { ok, err } = kind {
+                                args.push(Operand::Const(ConstValue::Int(i128::from(ok))));
+                                args.push(Operand::Const(ConstValue::Int(i128::from(err))));
+                            }
                             let retain_dest = self.fresh(i64_ty);
                             self.emit_assign(
                                 Place::local(retain_dest),
-                                Rvalue::CallIntrinsic {
-                                    name: retain,
-                                    args: vec![Operand::Copy(nested)],
-                                },
+                                Rvalue::CallIntrinsic { name: retain, args },
                                 span,
                             );
                         }
@@ -311,6 +317,22 @@ impl<'a> Builder<'a> {
             span,
         );
         Some(dest)
+    }
+
+    /// The type of field `index` of the struct `def` instantiated with
+    /// `substs`: the declared type with the instantiation's type arguments
+    /// substituted wherever it names them.
+    pub(crate) fn instantiated_field_ty(
+        &mut self,
+        def: gossamer_resolve::DefId,
+        substs: &gossamer_types::Substs,
+        index: usize,
+    ) -> Option<Ty> {
+        let declared = self.tcx.struct_field_tys(def)?.get(index).copied()?;
+        let subst_tys = crate::monomorph::subst_type_arguments(substs);
+        Some(crate::monomorph::subst_param_ty(
+            self.tcx, declared, &subst_tys,
+        ))
     }
 
     pub(crate) fn lower_field_access(
@@ -544,10 +566,8 @@ impl<'a> Builder<'a> {
                                     w = *inner;
                                 }
                                 recv_local_ty = match self.tcx.kind_of(w).clone() {
-                                    gossamer_types::TyKind::Adt { def, .. } => self
-                                        .tcx
-                                        .struct_field_tys(def)
-                                        .and_then(|t| t.get(*fidx as usize).copied())
+                                    gossamer_types::TyKind::Adt { def, substs } => self
+                                        .instantiated_field_ty(def, &substs, *fidx as usize)
                                         .unwrap_or(recv_local_ty),
                                     gossamer_types::TyKind::Tuple(elems) => {
                                         elems.get(*fidx as usize).copied().unwrap_or(recv_local_ty)
@@ -562,73 +582,28 @@ impl<'a> Builder<'a> {
                             walk = *inner;
                         }
                         let pinned_ty = match self.tcx.kind_of(walk).clone() {
+                            // The declared field type with the receiver's type
+                            // arguments substituted wherever it names them, at
+                            // any depth (`items: Vec<T>` on `Wrap<i64>`).
                             gossamer_types::TyKind::Adt { def, substs } => {
-                                match self
-                                    .tcx
-                                    .struct_field_tys(def)
-                                    .and_then(|tys| tys.get(pos).copied())
-                                {
-                                    Some(field_ty) => match self.tcx.kind_of(field_ty) {
-                                        gossamer_types::TyKind::Param { idx, .. } => substs
-                                            .types()
-                                            .get(idx.0 as usize)
-                                            .copied()
-                                            .unwrap_or(field_ty),
-                                        _ => field_ty,
-                                    },
-                                    None => ty,
-                                }
+                                self.instantiated_field_ty(def, &substs, pos).unwrap_or(ty)
                             }
                             gossamer_types::TyKind::Tuple(elems) => {
                                 elems.get(pos).copied().unwrap_or(ty)
                             }
                             _ => ty,
                         };
-                        // A user struct is address-is-value: its slot holds the
-                        // field words inline, so a `Field(idx)` projection walks
-                        // them. This holds even when the receiver type is an
-                        // unresolved inference var (the positional path's whole
-                        // reason to exist), so it stays the default. An opaque
-                        // stdlib blob handle (`fs::DirInfo` from `walk_dir` /
-                        // `list_dir`) is the exception: its local is a scalar
-                        // holding the blob's heap address, so project it with
-                        // `gos_load(handle, idx * 8)` (load word `idx` through the
-                        // pointer) instead of GEPing off the slot. Gated on the
-                        // blob's own name and confirmed non-inline receiver so a
-                        // user struct - even a shadowing `struct DirInfo` or one
-                        // whose type only crystallised at pinning - keeps `Field`.
-                        let receiver_is_inline_struct =
-                            matches!(
-                                self.tcx.kind_of(walk),
-                                gossamer_types::TyKind::Adt { def, .. }
-                                    if self.tcx.struct_field_tys(*def).is_some()
-                            ) || matches!(self.tcx.kind_of(walk), gossamer_types::TyKind::Tuple(_));
-                        let is_stdlib_blob = matches!(sname.as_str(), "DirInfo" | "DirEntry");
+                        // A struct is address-is-value: its slot holds the field
+                        // words inline, so a `Field(idx)` projection walks them,
+                        // even when the receiver type is an unresolved inference
+                        // var - the positional path's whole reason to exist.
                         let dest = self.fresh(pinned_ty);
-                        if !is_stdlib_blob || receiver_is_inline_struct {
-                            place.projection.push(crate::ir::Projection::Field(idx));
-                            self.emit_assign(
-                                Place::local(dest),
-                                Rvalue::Use(Operand::Copy(place)),
-                                span,
-                            );
-                        } else {
-                            let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                            let off = self.fresh(i64_ty);
-                            self.emit_assign(
-                                Place::local(off),
-                                Rvalue::Use(Operand::Const(ConstValue::Int(i128::from(idx) * 8))),
-                                span,
-                            );
-                            let next = self.new_block(span);
-                            self.terminate(Terminator::Call {
-                                callee: Operand::Const(ConstValue::Str("gos_load".to_string())),
-                                args: vec![Operand::Copy(place), Operand::Copy(Place::local(off))],
-                                destination: Place::local(dest),
-                                target: Some(next),
-                            });
-                            self.set_current(next);
-                        }
+                        place.projection.push(crate::ir::Projection::Field(idx));
+                        self.emit_assign(
+                            Place::local(dest),
+                            Rvalue::Use(Operand::Copy(place)),
+                            span,
+                        );
                         return Some(dest);
                     }
                 }
@@ -650,63 +625,24 @@ impl<'a> Builder<'a> {
             return Some(field_local);
         }
 
-        // Stdlib struct via `local_struct` tag (e.g. `fs::DirInfo`
-        // returned from `fs::read_dir`). The receiver was tagged
-        // when its element-struct propagated through the
-        // `entries[i]` index. Resolve the field name to a
-        // positional `Field(idx)` against the registered shape
-        // BEFORE the JsonValue fallback fires - otherwise a
-        // typechecker-opaque ADT routes through `gos_rt_json_get`
-        // and crashes inside serde_json.
+        // A struct recorded through a `local_struct` tag: resolve the field
+        // name to a positional `Field(idx)` against the registered shape BEFORE
+        // the JsonValue fallback fires - otherwise a typechecker-opaque ADT
+        // routes through `gos_rt_json_get`.
         if let Some(struct_name) = self.local_struct.get(&receiver_local).cloned() {
             if let Some(order) = self.structs.get(&struct_name).cloned() {
                 if let Some(idx) = order.iter().position(|f| f == name.name.as_str()) {
-                    let recv_ty = self.locals[receiver_local.0 as usize].ty;
-                    // A user struct is address-is-value: `Field(idx)` walks its
-                    // inline field words. An opaque stdlib blob handle
-                    // (`fs::DirInfo` from `walk_dir` / `list_dir`) instead holds
-                    // the blob's heap address in a scalar slot, so project it
-                    // with `gos_load(handle, idx * 8)` (load word `idx` through
-                    // the pointer). Gated on the blob's name plus a confirmed
-                    // non-inline receiver so any user struct keeps `Field`.
-                    let receiver_is_inline_struct = matches!(
-                        self.tcx.kind_of(recv_ty),
-                        gossamer_types::TyKind::Adt { def, .. }
-                            if self.tcx.struct_field_tys(*def).is_some()
-                    );
-                    let is_stdlib_blob = matches!(struct_name.as_str(), "DirInfo" | "DirEntry");
                     let dest = self.fresh(ty);
-                    if !is_stdlib_blob || receiver_is_inline_struct {
-                        self.emit_assign(
-                            Place::local(dest),
-                            Rvalue::Use(Operand::Copy(Place {
-                                local: receiver_local,
-                                projection: vec![crate::ir::Projection::Field(
-                                    u32::try_from(idx).unwrap_or(0),
-                                )],
-                            })),
-                            span,
-                        );
-                    } else {
-                        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                        let off = self.fresh(i64_ty);
-                        self.emit_assign(
-                            Place::local(off),
-                            Rvalue::Use(Operand::Const(ConstValue::Int(idx as i128 * 8))),
-                            span,
-                        );
-                        let next = self.new_block(span);
-                        self.terminate(Terminator::Call {
-                            callee: Operand::Const(ConstValue::Str("gos_load".to_string())),
-                            args: vec![
-                                Operand::Copy(Place::local(receiver_local)),
-                                Operand::Copy(Place::local(off)),
-                            ],
-                            destination: Place::local(dest),
-                            target: Some(next),
-                        });
-                        self.set_current(next);
-                    }
+                    self.emit_assign(
+                        Place::local(dest),
+                        Rvalue::Use(Operand::Copy(Place {
+                            local: receiver_local,
+                            projection: vec![crate::ir::Projection::Field(
+                                u32::try_from(idx).unwrap_or(0),
+                            )],
+                        })),
+                        span,
+                    );
                     return Some(dest);
                 }
             }

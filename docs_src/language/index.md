@@ -25,7 +25,9 @@ One page per language feature. Source is `crates/gossamer-std/src/manifest/featu
 | [`lang::enum`](enum.md) | Sum type declaration with payload-carrying variants. |
 | [`lang::trait`](trait.md) | Behaviour interface declaration. |
 | [`lang::impl`](impl.md) | Inherent and trait implementation blocks. |
-| [`lang::generics`](generics.md) | Type parameters on functions / impls / structs. |
+| [`lang::generics`](generics.md) | Type and const parameters on functions, impls, structs, and enums. A const parameter is a value inside the item that declares it (`N as i64`, `[0; N]`), taken from an array argument's length, a turbofish, an array field or payload, or the type the context expects. |
+| [`lang::wrapping_arithmetic`](wrapping_arithmetic.md) | Wrapping arithmetic operators `+%`, `-%`, `*%` and their compound forms `+%=`, `-%=`, `*%=`: two's-complement wrapping at the operands' declared integer width, on every tier and in every build profile. Plain `+`, `-`, and `*` keep their overflow check, and `wrapping_add` / `wrapping_mul` are not methods (GT0087). |
+| [`lang::simd`](simd.md) | Fixed-width lane vectors: `Simd<T, N>` over `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` and its `bool` form `Mask<N>`. Lane-wise arithmetic and bitwise operators, lane comparisons, `select`, reductions, and `Simd::load` / `store` over a window checked once, with the same bits on every tier (GT0089). |
 | [`lang::cohort`](cohort.md) | Structured concurrency: `cohort { }` owns the goroutines `spawn`ed inside it, joins them on every exit path, and reports the first failure as its `Result`. |
 | [`lang::triple_quoted_string`](triple_quoted_string.md) | `"""` string literal whose body is dedented by the indentation it shares with its closing delimiter; `gos fmt` moves the block with the line that opens it. |
 | [`lang::select`](select.md) | Channel multiplex select expression. |

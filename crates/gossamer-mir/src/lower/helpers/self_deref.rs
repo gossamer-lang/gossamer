@@ -26,9 +26,12 @@ use crate::ir::{
 
 /// Rewrites every body whose receiver is a reference to a scalar so each read
 /// of that receiver loads the value it names.
-pub(crate) fn load_reference_receiver_reads(bodies: &mut [Body], tcx: &mut TyCtxt) {
+///
+/// Only `bodies[start..]` are rewritten; every body counts toward which
+/// methods take a reference receiver.
+pub(crate) fn load_reference_receiver_reads(bodies: &mut [Body], start: usize, tcx: &mut TyCtxt) {
     let takes_reference_receiver = reference_receiver_methods(bodies, tcx);
-    for index in 0..bodies.len() {
+    for index in start..bodies.len() {
         let Some(pointee) = scalar_reference_receiver(&bodies[index], tcx) else {
             continue;
         };
@@ -160,6 +163,7 @@ fn emit_receiver_load(
             rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
         },
         span,
+        inlined: None,
     });
     let value = push_local(body, pointee);
     statements.push(Statement {
@@ -174,6 +178,7 @@ fn emit_receiver_load(
             },
         },
         span,
+        inlined: None,
     });
     value
 }

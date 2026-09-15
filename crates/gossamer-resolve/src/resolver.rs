@@ -406,6 +406,23 @@ impl Resolver {
         }
     }
 
+    /// Records `name` as an alias of the stdlib module `target` names, when the
+    /// import binds it under a name other than the module's own. Paths the
+    /// name heads are respelled to the module before any name-keyed dispatch,
+    /// which keys stdlib items by the module path without its `std` root.
+    fn record_std_module_alias(&mut self, name: &str, target: &str) {
+        let Some(module) = target.strip_prefix("std::") else {
+            return;
+        };
+        if !crate::stdlib_exports::is_stdlib_module_path_or_namespace(module) {
+            return;
+        }
+        if module.rsplit("::").next() != Some(name) {
+            self.resolutions
+                .insert_module_alias(name.to_string(), module.to_string());
+        }
+    }
+
     fn register_use_simple(&mut self, use_decl: &UseDecl) {
         self.reject_invalid_use_path(use_decl);
         let name = use_decl.alias.as_ref().map_or_else(
@@ -446,6 +463,7 @@ impl Resolver {
             self.resolutions
                 .insert_module_alias(name.clone(), named.clone());
         }
+        self.record_std_module_alias(&name, &target);
         self.define_import(&name, use_decl.id, use_decl.span, &target);
     }
 
@@ -579,6 +597,7 @@ impl Resolver {
                 self.resolutions
                     .insert_module_alias(imported.clone(), named.clone());
             }
+            self.record_std_module_alias(&imported, &target);
             self.define_import(&imported, use_decl.id, use_decl.span, &target);
         }
     }
@@ -1575,6 +1594,13 @@ impl Resolver {
 
     fn resolve_trait(&mut self, decl: &TraitDecl) {
         self.scopes.push();
+        // Inside a trait body `Self` names the implementing type: a parameter
+        // the trait is written against, reached as `Self::item` the way a
+        // generic parameter's items are.
+        let self_def = self.defs.next();
+        self.scopes
+            .top_mut()
+            .insert_type("Self", Binding::def(self_def, DefKind::TypeParam));
         self.bind_generics(&decl.generics);
         for bound in &decl.supertraits {
             self.resolve_trait_bound(bound);
@@ -1851,6 +1877,7 @@ impl Resolver {
                 .lookup_type(name)
                 .map(|binding| binding.resolution)
                 .or_else(|| self.synthesized_lookup(name))
+                .or_else(|| self.const_generic_in_type_position(name, path))
                 .unwrap_or(Resolution::Err)
         };
         if let Some(span) = span {
@@ -1865,6 +1892,29 @@ impl Resolver {
         for segment in &path.segments {
             self.resolve_generic_args(&segment.generics);
         }
+    }
+
+    /// A single-segment path written where a type goes that names a const
+    /// binding in scope. A generic argument list cannot tell a type from a
+    /// const by its spelling, so `Ring<N>` inside `impl<const N: usize>`
+    /// reaches the const generic parameter here, and the checker decides
+    /// whether a const is allowed where it stands.
+    fn const_generic_in_type_position(&self, name: &str, path: &TypePath) -> Option<Resolution> {
+        if path.segments.len() != 1 {
+            return None;
+        }
+        self.scopes
+            .lookup_value(name)
+            .map(|binding| binding.resolution)
+            .filter(|resolution| {
+                matches!(
+                    resolution,
+                    Resolution::Def {
+                        kind: DefKind::Const,
+                        ..
+                    }
+                )
+            })
     }
 
     /// Resolves the generic arguments on every segment of `path`.

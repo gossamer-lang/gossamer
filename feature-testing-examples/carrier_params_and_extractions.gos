@@ -1,0 +1,120 @@
+// A carrier handed to a Gossamer function is lent for the call: the caller
+// keeps its share of the payload and gives it back itself. The callee takes a
+// share only for a payload it hands on - returned directly, through a local,
+// relayed through another call, or reached by `unwrap` - and a reassigned
+// parameter owns what it is given. An extraction out of a carrier that was
+// copied from another binding reads the payload the carrier still owns, on
+// the `Ok` arm and on the `Err` arm alike. Every value lands in a sequence
+// that later allocations run over, so a payload released too early reads
+// back as some other text.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+fn maybe(i: i64) -> Option<String> {
+    if i % 3 == 0 { None } else { Some("m" + i.to_string()) }
+}
+
+fn risky(i: i64) -> Result<i64, String> {
+    if i % 4 == 0 { Err("e" + i.to_string()) } else { Ok(i) }
+}
+
+fn words(i: i64) -> Result<String, String> {
+    if i % 3 == 0 { Err("w" + i.to_string()) } else { Ok("ok" + i.to_string()) }
+}
+
+fn nums(i: i64) -> Result<Vec<i64>, String> {
+    if i % 5 == 0 { Err("n" + i.to_string()) } else { Ok(#[i, i + 1]) }
+}
+
+fn width(r: Result<i64, String>) -> i64 {
+    match r {
+        Ok(n) => n
+        Err(e) => e.len() * 100
+    }
+}
+
+fn direct(r: Result<i64, String>) -> Result<i64, String> {
+    r
+}
+
+fn through(r: Result<i64, String>) -> Result<i64, String> {
+    let x = r
+    x
+}
+
+fn direct_opt(o: Option<String>) -> Option<String> {
+    o
+}
+
+fn relay(o: Option<String>) -> Option<String> {
+    direct_opt(o)
+}
+
+fn take(o: Option<String>) -> String {
+    if o.is_some() { o.unwrap() } else { "none" }
+}
+
+fn swap_in(mut o: Option<String>, i: i64) -> Option<String> {
+    if i % 2 == 0 {
+        o = maybe(i + 7)
+    }
+    o
+}
+
+fn qmark(r: Result<String, String>) -> Result<i64, String> {
+    let s = r?
+    Ok(s.len())
+}
+
+fn render(o: Option<String>) -> String {
+    match o {
+        Some(s) => s
+        None => "-"
+    }
+}
+
+fn main() {
+    let mut texts: Vec<String> = #[]
+    let mut opts: Vec<Option<String>> = #[]
+    let mut results: Vec<Result<i64, String>> = #[]
+    let mut total = 0
+    for i in 0..40 {
+        total += width(risky(i))
+        total += width(direct(risky(i + 1)))
+        results.push(through(risky(i + 2)))
+        opts.push(relay(maybe(i)))
+        opts.push(swap_in(maybe(i + 1), i))
+        texts.push(take(maybe(i + 2)))
+        match qmark(words(i)) {
+            Ok(n) => total += n
+            Err(e) => texts.push(e)
+        }
+        let a = maybe(i + 3)
+        let b = a
+        if let Some(s) = b {
+            texts.push(s)
+        }
+        let r = words(i + 1)
+        match r {
+            Ok(s) => texts.push(s)
+            Err(e) => texts.push(e)
+        }
+        let v = nums(i)
+        let c = v
+        match c {
+            Ok(xs) => total += xs.len()
+            Err(e) => texts.push(e)
+        }
+        texts.push("churn" + i.to_string())
+    }
+    let mut out = ""
+    for t in texts {
+        out = out + t + ","
+    }
+    for o in opts {
+        out = out + render(o) + ";"
+    }
+    for r in results {
+        total += width(r)
+    }
+    println("{} {}", total, out)
+}

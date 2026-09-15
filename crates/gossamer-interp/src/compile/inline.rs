@@ -199,6 +199,16 @@ impl<'tcx> FnBuilder<'tcx> {
         }
         self.inlining.push(name);
         self.inlined_nodes += info.cost;
+        // The callee's instructions carry the call they came from, so a
+        // traceback through them names the callee's frame and the caller's
+        // call site.
+        let site = u32::try_from(self.inline_sites.len()).unwrap_or(u32::MAX);
+        self.inline_sites.push(crate::bytecode::InlineSite {
+            function: name,
+            call: self.source_location(callee.span),
+            parent: self.current_inline_site,
+        });
+        let caller_site = self.current_inline_site.replace(site);
         // Swap in a fresh scope stack holding only the parameters; the
         // caller's locals are invisible to the callee body.
         let saved_scopes = std::mem::replace(&mut self.scopes, vec![Scope::default()]);
@@ -270,6 +280,7 @@ impl<'tcx> FnBuilder<'tcx> {
         self.consumable = saved_consumable;
         self.capture_cell_names = saved_cell_names;
         self.capture_cells.truncate(capture_cell_mark);
+        self.current_inline_site = caller_site;
         self.inlining.pop();
         Ok(Some(result?))
     }

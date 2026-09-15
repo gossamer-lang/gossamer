@@ -224,8 +224,8 @@ impl Parser<'_> {
 
     fn peek_binary_op(&self) -> Option<BinaryOp> {
         use Punct::{
-            Amp, AmpAmp, Caret, EqEq, Gt, GtEq, Lt, LtEq, Minus, NotEq, Percent, Pipe, PipeGt,
-            PipePipe, Plus, ShiftL, ShiftR, Slash, Star,
+            Amp, AmpAmp, Caret, EqEq, Gt, GtEq, Lt, LtEq, Minus, MinusPercent, NotEq, Percent,
+            Pipe, PipeGt, PipePipe, Plus, PlusPercent, ShiftL, ShiftR, Slash, Star, StarPercent,
         };
         let TokenKind::Punct(punct) = self.peek().kind else {
             return None;
@@ -234,6 +234,9 @@ impl Parser<'_> {
             Star => BinaryOp::Mul,
             Slash => BinaryOp::Div,
             Percent => BinaryOp::Rem,
+            StarPercent => BinaryOp::WrappingMul,
+            PlusPercent => BinaryOp::WrappingAdd,
+            MinusPercent => BinaryOp::WrappingSub,
             Plus => BinaryOp::Add,
             Minus => BinaryOp::Sub,
             ShiftL => BinaryOp::Shl,
@@ -354,6 +357,9 @@ impl Parser<'_> {
             Punct::CaretEq => AssignOp::BitXorAssign,
             Punct::ShiftLEq => AssignOp::ShlAssign,
             Punct::ShiftREq => AssignOp::ShrAssign,
+            Punct::PlusPercentEq => AssignOp::WrappingAddAssign,
+            Punct::MinusPercentEq => AssignOp::WrappingSubAssign,
+            Punct::StarPercentEq => AssignOp::WrappingMulAssign,
             _ => return None,
         })
     }
@@ -2135,6 +2141,7 @@ impl Parser<'_> {
     }
 
     fn parse_path_expr_or_struct(&mut self) -> ExprKind {
+        let path_start = self.peek_span();
         let path = self.parse_path_expr();
         // A compiler-known name is recognised by the name and the `(`, the
         // way any other call is. The set is closed and known at parse time,
@@ -2146,47 +2153,45 @@ impl Parser<'_> {
             let name = name.to_string();
             return self.parse_builtin_call(&name);
         }
-        // `regex::compile("…")` and `sql::statement("…")` validate a literal
-        // argument while the program is compiled, so a malformed pattern or
-        // statement fails the build rather than reaching a run. The call is
-        // an ordinary one; only the literal form is checked.
+        // `regex::compile("…")` and `sql::statement("…")` check a literal
+        // argument while the program is parsed, so a malformed pattern or
+        // statement is reported at the literal rather than reaching a run.
         if self.at_punct(Punct::LParen)
-            && let Some(validator) = validating_module_call(&path)
+            && let Some(validated) = validated_module_call(&path)
         {
+            let callee_span = Span::new(path_start.file, path_start.start, self.last_span().end);
             self.bump();
             let call_span = self.peek_span();
-            let mut args = self.parse_call_args();
-            let literal = args.first().and_then(literal_string).is_some();
-            if validator == "__gos_sql_validate" {
-                // A statement is checked while the program is compiled, so
-                // the call folds to the literal it validated. There is no
-                // run-time function behind it: a statement built at run time
-                // is an ordinary `String`.
-                if !literal {
-                    self.record(ParseError::ValidatedCallNeedsLiteral, call_span);
-                    return ExprKind::Error;
+            let args = self.parse_call_args();
+            let literal = args.first().and_then(literal_string);
+            match validated {
+                ValidatedCall::SqlStatement => {
+                    // There is no run-time function behind the call: it is
+                    // the statement it checked, and a statement built at run
+                    // time is an ordinary `String`.
+                    let Some(statement) = literal else {
+                        self.record(ParseError::ValidatedCallNeedsLiteral, call_span);
+                        return ExprKind::Error;
+                    };
+                    if let Some(reason) = sql_statement_error(&statement) {
+                        self.record(ParseError::InvalidSqlStatement { reason }, args[0].span);
+                    }
+                    return ExprKind::Literal(Literal::String(statement));
                 }
-                return self.alloc_function_call(validator, args);
+                ValidatedCall::RegexCompile => {
+                    if let Some(pattern) = literal
+                        && let Err(err) = regex::Regex::new(&pattern)
+                    {
+                        let reason = regex_error_reason(&err);
+                        self.record(ParseError::InvalidRegexLiteral { reason }, args[0].span);
+                    }
+                    let id = self.alloc_id();
+                    return ExprKind::Call {
+                        callee: Box::new(Expr::new(id, callee_span, ExprKind::Path(path))),
+                        args,
+                    };
+                }
             }
-            // The validator folds to the literal it was handed, so the call
-            // keeps the callee it was written with and the type that callee
-            // answers; only the argument travels through the check.
-            if literal {
-                let argument = args.remove(0);
-                // The comptime fold rewrites source over the call's own
-                // span, so the synthesized call must cover exactly the
-                // literal it replaces.
-                let span = argument.span;
-                let id = self.alloc_id();
-                let kind = self.alloc_function_call(validator, vec![argument]);
-                args.insert(0, Expr::new(id, span, kind));
-            }
-            let span = self.last_span();
-            let id = self.alloc_id();
-            return ExprKind::Call {
-                callee: Box::new(Expr::new(id, span, ExprKind::Path(path))),
-                args,
-            };
         }
         if self.at_punct(Punct::Bang) {
             return self.parse_macro_tail(path);
@@ -3639,19 +3644,52 @@ fn is_builtin_call_name(name: &str) -> bool {
     is_format_macro(name) || is_desugar_macro(name) || name == "codegen"
 }
 
-/// The build-time validator a module call routes through, if any.
-fn validating_module_call(path: &PathExpr) -> Option<&'static str> {
+/// A module call whose literal argument is checked while the program is parsed.
+#[derive(Clone, Copy)]
+enum ValidatedCall {
+    RegexCompile,
+    SqlStatement,
+}
+
+/// The parse-time check a module call carries, if any.
+fn validated_module_call(path: &PathExpr) -> Option<ValidatedCall> {
     let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
     match names.as_slice() {
-        // `regex::compile` keeps the call it was written as: its literal
-        // is validated by a synthesized `const` whose initialiser folds
-        // while the program is compiled, so nothing of the check reaches
-        // the running program. `sql::statement` has no run-time function
-        // behind it at all - the call IS the validator, and it folds to
-        // the statement it checked.
-        [.., "sql", "statement"] => Some("__gos_sql_validate"),
+        [.., "regex", "compile"] => Some(ValidatedCall::RegexCompile),
+        [.., "sql", "statement"] => Some(ValidatedCall::SqlStatement),
         _ => None,
     }
+}
+
+/// The last line of the regex engine's report, which names the fault; the
+/// lines above it repeat the pattern with a caret the diagnostic's own
+/// underline already draws.
+fn regex_error_reason(err: &regex::Error) -> String {
+    let text = err.to_string();
+    text.lines()
+        .rev()
+        .find_map(|line| line.strip_prefix("error: "))
+        .map_or_else(|| text.clone(), str::to_string)
+}
+
+/// What makes `statement` malformed, if anything: it is empty, or its
+/// parentheses do not balance.
+fn sql_statement_error(statement: &str) -> Option<String> {
+    if statement.is_empty() {
+        return Some("the statement is empty".to_string());
+    }
+    let mut depth = 0i64;
+    for byte in statement.bytes() {
+        match byte {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            _ => {}
+        }
+        if depth < 0 {
+            return Some("a `)` closes nothing".to_string());
+        }
+    }
+    (depth != 0).then(|| "a `(` is never closed".to_string())
 }
 
 #[cfg(test)]

@@ -52,9 +52,14 @@ fn normalize_wrapping_int(value: u64, bits: u32, signed: bool) -> i64 {
 }
 
 macro_rules! wrapping_int_builtins {
-    ($add:ident, $mul:ident, $bits:expr, $signed:expr) => {
+    ($add:ident, $sub:ident, $mul:ident, $bits:expr, $signed:expr) => {
         fn $add(args: &[Value]) -> RuntimeResult<Value> {
             let value = wrapping_int_arg(args, 0).wrapping_add(wrapping_int_arg(args, 1));
+            Ok(Value::Int(normalize_wrapping_int(value, $bits, $signed)))
+        }
+
+        fn $sub(args: &[Value]) -> RuntimeResult<Value> {
+            let value = wrapping_int_arg(args, 0).wrapping_sub(wrapping_int_arg(args, 1));
             Ok(Value::Int(normalize_wrapping_int(value, $bits, $signed)))
         }
 
@@ -65,14 +70,62 @@ macro_rules! wrapping_int_builtins {
     };
 }
 
-wrapping_int_builtins!(builtin_i8_wrapping_add, builtin_i8_wrapping_mul, 8, true);
-wrapping_int_builtins!(builtin_i16_wrapping_add, builtin_i16_wrapping_mul, 16, true);
-wrapping_int_builtins!(builtin_i32_wrapping_add, builtin_i32_wrapping_mul, 32, true);
-wrapping_int_builtins!(builtin_i64_wrapping_add, builtin_i64_wrapping_mul, 64, true);
-wrapping_int_builtins!(builtin_u8_wrapping_add, builtin_u8_wrapping_mul, 8, false);
-wrapping_int_builtins!(builtin_u16_wrapping_add, builtin_u16_wrapping_mul, 16, false);
-wrapping_int_builtins!(builtin_u32_wrapping_add, builtin_u32_wrapping_mul, 32, false);
-wrapping_int_builtins!(builtin_u64_wrapping_add, builtin_u64_wrapping_mul, 64, false);
+wrapping_int_builtins!(
+    builtin_i8_wrapping_add,
+    builtin_i8_wrapping_sub,
+    builtin_i8_wrapping_mul,
+    8,
+    true
+);
+wrapping_int_builtins!(
+    builtin_i16_wrapping_add,
+    builtin_i16_wrapping_sub,
+    builtin_i16_wrapping_mul,
+    16,
+    true
+);
+wrapping_int_builtins!(
+    builtin_i32_wrapping_add,
+    builtin_i32_wrapping_sub,
+    builtin_i32_wrapping_mul,
+    32,
+    true
+);
+wrapping_int_builtins!(
+    builtin_i64_wrapping_add,
+    builtin_i64_wrapping_sub,
+    builtin_i64_wrapping_mul,
+    64,
+    true
+);
+wrapping_int_builtins!(
+    builtin_u8_wrapping_add,
+    builtin_u8_wrapping_sub,
+    builtin_u8_wrapping_mul,
+    8,
+    false
+);
+wrapping_int_builtins!(
+    builtin_u16_wrapping_add,
+    builtin_u16_wrapping_sub,
+    builtin_u16_wrapping_mul,
+    16,
+    false
+);
+wrapping_int_builtins!(
+    builtin_u32_wrapping_add,
+    builtin_u32_wrapping_sub,
+    builtin_u32_wrapping_mul,
+    32,
+    false
+);
+wrapping_int_builtins!(
+    builtin_u64_wrapping_add,
+    builtin_u64_wrapping_sub,
+    builtin_u64_wrapping_mul,
+    64,
+    false
+);
 
 /// `f64::to_bits(x) -> u64`: the value's IEEE-754 binary64 encoding.
 fn builtin_f64_to_bits(args: &[Value]) -> RuntimeResult<Value> {

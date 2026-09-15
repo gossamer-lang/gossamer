@@ -625,6 +625,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::encoding::json",
+        name: "as_u64",
+        signature: "fn as_u64(value: json::Value) -> Option<u64>",
+    },
+    StdFunctionSignature {
+        module_path: "std::encoding::json",
         name: "as_str",
         signature: "fn as_str(value: json::Value) -> Option<String>",
     },
@@ -3835,7 +3840,9 @@ const DATA_FIRST_ITER: [&str; 31] = [
     "windows",
 ];
 
-const DATA_FIRST_OPTION: [&str; 11] = [
+// `zip` is absent: both of its arguments are the data, and the pair it builds
+// takes them in the order they are written, as the method form does.
+const DATA_FIRST_OPTION: [&str; 10] = [
     "and_then",
     "expect",
     "filter",
@@ -3846,7 +3853,6 @@ const DATA_FIRST_OPTION: [&str; 11] = [
     "or_else",
     "unwrap_or",
     "unwrap_or_else",
-    "zip",
 ];
 
 const DATA_FIRST_RESULT: [&str; 6] = [

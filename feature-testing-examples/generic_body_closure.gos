@@ -1,0 +1,50 @@
+// Closures written inside generic bodies: each instantiation of the
+// enclosing function or method runs a closure laid out for its own type,
+// whether the closure captures a value of that type, takes one, or nests a
+// second closure.
+
+struct Point {
+    x: f64
+    y: f64
+}
+
+struct Pair<T> {
+    a: T
+    b: T
+}
+
+impl<T> Pair<T> {
+    fn pick(&self, first: bool) -> T {
+        let choose = || if first { self.a } else { self.b }
+        choose()
+    }
+}
+
+fn combine<T>(v: T, f: Fn(T, T) -> T) -> T {
+    let with_v = |x: T| f(x, v)
+    with_v(with_v(v))
+}
+
+fn keep_second<T>(xs: Vec<T>) -> T {
+    let mut out: Vec<T> = #[]
+    let push_at = |i: i64| {
+        let inner = || xs[i]
+        out.push(inner())
+    }
+    push_at(1)
+    out[0]
+}
+
+fn main() {
+    let f = combine(1.5, |a, b| a + b)
+    let n = combine(3, |a, b| a * b)
+    let p = combine(Point { x: 1.0, y: 2.0 }, |a, b| Point { x: a.x + b.x, y: a.y * b.y })
+    println("{} {} {} {}", f, n, p.x, p.y)
+    let s = keep_second(#["a", "b", "c"])
+    let q = keep_second(#[Point { x: 0.5, y: 0.25 }, Point { x: 4.5, y: 8.25 }])
+    let g = keep_second(#[0.5, 6.75])
+    println("{} {} {} {}", s, q.x, q.y, g)
+    let pf = Pair { a: 2.5, b: 9.5 }
+    let pp = Pair { a: Point { x: 7.5, y: 1.5 }, b: Point { x: 0.0, y: 0.0 } }
+    println("{} {} {}", pf.pick(false), pp.pick(true).x, pp.pick(true).y)
+}

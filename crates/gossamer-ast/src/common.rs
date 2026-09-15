@@ -68,10 +68,19 @@ pub enum BinaryOp {
     Div,
     /// Remainder `%` (level 5).
     Rem,
+    /// Wrapping multiplication `*%`, wrapping at the operands' declared width
+    /// (level 5).
+    WrappingMul,
     /// Addition `+` (level 6).
     Add,
     /// Subtraction `-` (level 6).
     Sub,
+    /// Wrapping addition `+%`, wrapping at the operands' declared width
+    /// (level 6).
+    WrappingAdd,
+    /// Wrapping subtraction `-%`, wrapping at the operands' declared width
+    /// (level 6).
+    WrappingSub,
     /// Left shift `<<` (level 7).
     Shl,
     /// Right shift `>>` (level 7).
@@ -110,8 +119,11 @@ impl BinaryOp {
             Self::Mul => "*",
             Self::Div => "/",
             Self::Rem => "%",
+            Self::WrappingMul => "*%",
             Self::Add => "+",
             Self::Sub => "-",
+            Self::WrappingAdd => "+%",
+            Self::WrappingSub => "-%",
             Self::Shl => "<<",
             Self::Shr => ">>",
             Self::BitAnd => "&",
@@ -133,8 +145,8 @@ impl BinaryOp {
     #[must_use]
     pub const fn precedence(self) -> u8 {
         match self {
-            Self::Mul | Self::Div | Self::Rem => 5,
-            Self::Add | Self::Sub => 6,
+            Self::Mul | Self::Div | Self::Rem | Self::WrappingMul => 5,
+            Self::Add | Self::Sub | Self::WrappingAdd | Self::WrappingSub => 6,
             Self::Shl | Self::Shr => 7,
             Self::BitAnd => 8,
             Self::BitXor => 9,
@@ -204,6 +216,12 @@ pub enum AssignOp {
     ShlAssign,
     /// Compound `>>=`.
     ShrAssign,
+    /// Compound wrapping addition `+%=`.
+    WrappingAddAssign,
+    /// Compound wrapping subtraction `-%=`.
+    WrappingSubAssign,
+    /// Compound wrapping multiplication `*%=`.
+    WrappingMulAssign,
 }
 
 impl AssignOp {
@@ -222,6 +240,9 @@ impl AssignOp {
             Self::BitXorAssign => "^=",
             Self::ShlAssign => "<<=",
             Self::ShrAssign => ">>=",
+            Self::WrappingAddAssign => "+%=",
+            Self::WrappingSubAssign => "-%=",
+            Self::WrappingMulAssign => "*%=",
         }
     }
 }

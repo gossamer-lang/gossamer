@@ -39,6 +39,9 @@ fn classify_three(first: char, second: char, third: char) -> Option<(Punct, usiz
         ('>', '>', '=') => Punct::ShiftREq,
         ('.', '.', '=') => Punct::DotDotEq,
         ('.', '.', '.') => Punct::DotDotDot,
+        ('+', '%', '=') => Punct::PlusPercentEq,
+        ('-', '%', '=') => Punct::MinusPercentEq,
+        ('*', '%', '=') => Punct::StarPercentEq,
         _ => return None,
     };
     Some((hit, 3))
@@ -48,6 +51,9 @@ fn classify_three(first: char, second: char, third: char) -> Option<(Punct, usiz
 fn classify_two(first: char, second: char) -> Option<(Punct, usize)> {
     let hit = match (first, second) {
         ('+', '=') => Punct::PlusEq,
+        ('+', '%') => Punct::PlusPercent,
+        ('-', '%') => Punct::MinusPercent,
+        ('*', '%') => Punct::StarPercent,
         ('-', '=') => Punct::MinusEq,
         ('-', '>') => Punct::Arrow,
         ('*', '=') => Punct::StarEq,

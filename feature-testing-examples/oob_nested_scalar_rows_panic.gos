@@ -1,0 +1,18 @@
+// An out-of-range outer index on a `Vec<Vec<i64>>` field panics with the Vec
+// index diagnostic on every tier, after the in-range reads have printed.
+
+struct Matrix {
+    rows: Vec<Vec<i64>>
+}
+
+impl Matrix {
+    fn at(&self, i: i64, j: i64) -> i64 { self.rows[i][j] }
+}
+
+fn main() {
+    let mut rows: Vec<Vec<i64>> = #[]
+    for i in 0..1100 { rows.push(#[i, i * 2, i * 3]) }
+    let m = Matrix { rows: rows }
+    println("in-range {} {}", m.at(0, 2), m.at(1099, 1))
+    println("unreachable {}", m.at(-1, 0))
+}

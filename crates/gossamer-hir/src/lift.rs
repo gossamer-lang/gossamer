@@ -22,6 +22,10 @@ use crate::tree::{
     HirParam, HirPat, HirPatKind, HirProgram, HirStmt, HirStmtKind,
 };
 
+/// Name prefix of every top-level function a closure lifts to. Later passes
+/// recognise a lifted body by it.
+pub const LIFTED_CLOSURE_PREFIX: &str = "__closure_";
+
 /// Parameter name of the environment pointer a capturing closure's lifted
 /// function receives.
 const ENV_PARAM: &str = "__env";
@@ -115,12 +119,10 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
         }
     }
     // Post-lift: pin every lifted closure param whose type is still
-    // unresolved (`Var/Error/Param`) to i64. Without this the LLVM
-    // tier emits the closure body as `(ptr) -> ptr` while the
-    // unified Fn trampoline calls it with `(i64) -> i64`, and the
-    // signature mismatch segfaults inside the body when a numeric
-    // arg is read as a pointer. Mirrors MIR's `lower_iter_closure`
-    // input pinning at the trait coercion site.
+    // unresolved (`Var` / `Error`) to i64. The unified Fn trampoline calls a
+    // lifted body with integer-register arguments, so a parameter the checker
+    // never typed has to be declared in that register class too. Mirrors
+    // MIR's `lower_iter_closure` input pinning at the trait coercion site.
     let i64_ty = lifter.env_ty;
     for item in &mut lifter.lifted {
         if let HirItemKind::Fn(decl) = &mut item.kind {
@@ -137,12 +139,14 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
             if let Some(body) = &decl.body {
                 collect_aggregate_param_uses(&body.block, &mut aggregate_params);
             }
+            // A type parameter of the enclosing generic body is not
+            // unresolved: monomorphisation gives each instantiation its own
+            // copy of the lifted body with the parameter substituted, so it
+            // keeps its `Param` type here for that copy to read.
             for param in &mut decl.params {
                 let needs_pin = matches!(
                     tcx.kind_of(param.ty),
-                    gossamer_types::TyKind::Var(_)
-                        | gossamer_types::TyKind::Error
-                        | gossamer_types::TyKind::Param { .. }
+                    gossamer_types::TyKind::Var(_) | gossamer_types::TyKind::Error
                 );
                 if !needs_pin {
                     continue;
@@ -165,9 +169,7 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
             if let Some(ret) = decl.ret {
                 if matches!(
                     tcx.kind_of(ret),
-                    gossamer_types::TyKind::Var(_)
-                        | gossamer_types::TyKind::Error
-                        | gossamer_types::TyKind::Param { .. }
+                    gossamer_types::TyKind::Var(_) | gossamer_types::TyKind::Error
                 ) {
                     decl.ret = Some(i64_ty);
                 }
@@ -306,7 +308,7 @@ fn is_synthetic_global<H: std::hash::BuildHasher>(
     if shadowed.contains(name) {
         return false;
     }
-    SYNTHETIC_GLOBAL_NAMES.contains(&name) || name.starts_with("__closure_")
+    SYNTHETIC_GLOBAL_NAMES.contains(&name) || name.starts_with(LIFTED_CLOSURE_PREFIX)
 }
 
 struct Lifter {
@@ -367,7 +369,7 @@ impl Lifter {
     fn fresh_name(&mut self) -> Ident {
         let idx = self.next_id;
         self.next_id += 1;
-        Ident::new(format!("__closure_{idx}"))
+        Ident::new(format!("{LIFTED_CLOSURE_PREFIX}{idx}"))
     }
 
     fn visit_block(&mut self, block: &mut HirBlock) {

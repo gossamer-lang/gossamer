@@ -824,6 +824,9 @@ fn json_to_dyn(value: &gossamer_std::json::Value) -> DynValue {
         gossamer_std::json::Value::Null => DynValue::Nil,
         gossamer_std::json::Value::Bool(b) => DynValue::Bool(*b),
         gossamer_std::json::Value::Int(i) => DynValue::Int(*i),
+        // `DynValue` carries integers as `i64`, the way `value_to_dyn` hands
+        // over an interpreter `Uint`.
+        gossamer_std::json::Value::Uint(u) => DynValue::Int(i64::try_from(*u).unwrap_or(i64::MAX)),
         gossamer_std::json::Value::Number(f) => DynValue::Float(*f),
         gossamer_std::json::Value::String(s) => DynValue::String(s.clone()),
         gossamer_std::json::Value::Array(items) => {

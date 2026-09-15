@@ -328,6 +328,16 @@ impl<'a> Lowerer<'a> {
             )));
         };
         let name = resolve_external_binding_symbol(&name, args.len()).unwrap_or(name);
+        // The debug profile checks integer overflow, so an integer shim calls
+        // the entry that panics where its `+` or `*` would.
+        let name = match gossamer_abi::checked_integer_entry(&name) {
+            Some(checked)
+                if matches!(crate::emit::opt_profile(), crate::emit::OptProfile::Debug) =>
+            {
+                checked.to_string()
+            }
+            _ => name,
+        };
         let name = if name == "gos_rt_bytearr_slice_result" {
             "gos_rt_packed_bytearr_slice_result".to_string()
         } else {
@@ -577,7 +587,36 @@ impl<'a> Lowerer<'a> {
             && args.len() == 2
             && let Some(bytes) = self.container_operand_scalar_stride(&args[0])
         {
-            self.lower_deque_push_back_inline(args, destination, target, bytes)?;
+            self.lower_deque_push_back_inline(
+                args,
+                destination,
+                target,
+                bytes,
+                crate::lower::lower_inline::DequePushElem::Slots,
+            )?;
+            return Ok(());
+        }
+        // A one-word scalar crosses by value, so the same spare-capacity push
+        // stores the word itself.
+        if name == "gos_rt_deque_push_back"
+            && args.len() == 2
+            && self.container_operand_word_scalar(&args[0])
+        {
+            self.lower_deque_push_back_inline(
+                args,
+                destination,
+                target,
+                8,
+                crate::lower::lower_inline::DequePushElem::Word,
+            )?;
+            return Ok(());
+        }
+        if name == "gos_rt_deque_pop_front"
+            && args.len() == 1
+            && self.container_operand_word_scalar(&args[0])
+            && render_ty(self.tcx, self.body.local_ty(destination.local)) == "i128"
+        {
+            self.lower_deque_pop_front_word_inline(args, destination, target)?;
             return Ok(());
         }
         if name == "gos_rt_deque_pop_front_into"
@@ -623,10 +662,9 @@ impl<'a> Lowerer<'a> {
         // Inline when the element is a single-word scalar with no read-time
         // ownership: integer/bool and `f64` (the numeric-kernel case - a
         // `Vec<f64>` matvec read is bit-identical to the i64 path through the
-        // bitcast in `store_i64_as`). A heap-pointer Adt element (e.g.
-        // `Vec<DirInfo>`, where `&entries[i]` has reference-through-handle
-        // semantics the generic call-result path handles) keeps the runtime
-        // call.
+        // bitcast in `store_i64_as`). A heap-pointer Adt element, whose
+        // `&xs[i]` has reference-through-handle semantics the generic
+        // call-result path handles, keeps the runtime call.
         if name == "gos_rt_vec_get_i64"
             && args.len() == 2
             && (is_inline_vec_scalar_llvm(&render_ty(

@@ -99,6 +99,18 @@ impl<'a> Builder<'a> {
         crate::monomorph::subst_param_ty(self.tcx, param, &subst_tys)
     }
 
+    /// [`Self::instantiate_param_ty`] for a callee named without a `FnDef`, a
+    /// method among them: the instantiation is read off the argument's own
+    /// type, matched position by position against the parameter's.
+    pub(crate) fn instantiate_param_ty_from_arg(&mut self, param: Ty, arg: Ty) -> Ty {
+        let mut resolved = Vec::new();
+        crate::monomorph::bind_template_params(self.tcx, param, arg, &mut resolved);
+        if resolved.is_empty() {
+            return param;
+        }
+        crate::monomorph::subst_param_ty(self.tcx, param, &resolved)
+    }
+
     pub(crate) fn coerce_to_fn_trait_if_needed(
         &mut self,
         source_local: Local,
@@ -116,6 +128,7 @@ impl<'a> Builder<'a> {
         };
         let source_ty = self.locals[source_local.0 as usize].ty;
         let source_kind = self.tcx.kind_of(source_ty);
+        let source_kind_owned = source_kind.clone();
         // Wrap when the source is a genuine fn item (`FnDef`)
         // OR a local that the MIR builder marked as holding a
         // function-name string constant (the lift-closures pass
@@ -205,7 +218,16 @@ impl<'a> Builder<'a> {
         // `gos_fn_addr` so the trampoline forwards to the actual
         // code. Direct fn references (FnDef/FnPtr-typed locals)
         // already hold the right value.
-        let real_fn_operand = if let Some(name) = self.local_fn_name.get(&source_local).cloned() {
+        // A generic function item named as a value carries its instantiation
+        // in its own type, and monomorphisation points that value at the
+        // specialised copy. Its name alone would take the template's address.
+        let instantiated_item = matches!(
+            source_kind_owned,
+            TyKind::FnDef { ref substs, .. } if !substs.is_empty()
+        );
+        let real_fn_operand = if instantiated_item {
+            Operand::Copy(Place::local(source_local))
+        } else if let Some(name) = self.local_fn_name.get(&source_local).cloned() {
             let name = self.callable_fn_value_symbol(&name, &sig);
             let addr_local = self.fresh(i64_ty);
             self.emit_assign(
@@ -967,24 +989,20 @@ impl<'a> Builder<'a> {
     /// (`Option` / `Result`, `u32::MAX` / `- 1`), opaque handles, and
     /// inline-able enums are by-value or single-pointer values handled
     /// elsewhere and are never boxed here.
-    /// Materializes a fixed-array payload argument into a heap GosVec when
-    /// the variant's declared field type is `Vec<T>` / `[T]`. An
+    /// Shapes a payload argument for the variant field it fills. A callable
+    /// field holds the env-shaped callable every callable slot holds, so a
+    /// bare fn item or capture-free closure is wrapped. A fixed-array
+    /// argument becomes a heap GosVec when the field is `Vec<T>` / `[T]`: an
     /// unannotated array-literal local (`let inner = [1, 2, 3]`) infers as
-    /// `[T; N]`; passed to an enum constructor it would otherwise be boxed
-    /// as a raw aggregate blob whose bytes are then misread as a GosVec
-    /// header when the variant is iterated - garbage length, then a fault.
-    /// A direct array-literal argument already lowers as a GosVec because
-    /// its type is inferred in the field's `Vec`/`Slice` context.
-    fn coerce_enum_payload_array(
-        &mut self,
-        payload: Local,
-        expected: Option<Ty>,
-        span: Span,
-    ) -> Local {
+    /// `[T; N]`, and its inline bytes are not a GosVec header. A direct
+    /// array-literal argument already lowers as a GosVec because its type is
+    /// inferred in the field's `Vec`/`Slice` context.
+    fn coerce_enum_payload(&mut self, payload: Local, expected: Option<Ty>, span: Span) -> Local {
         use gossamer_types::TyKind;
         let Some(expected) = expected else {
             return payload;
         };
+        let payload = self.coerce_to_fn_trait_if_needed(payload, expected, span);
         let peel = |b: &Self, t: Ty| match b.tcx.kind_of(t) {
             TyKind::Ref { inner, .. } => *inner,
             _ => t,
@@ -1143,7 +1161,7 @@ impl<'a> Builder<'a> {
                 span,
             );
             let (payload_local, is_f64) = if let Some(first) = payload.first().copied() {
-                let p = self.coerce_enum_payload_array(first, field_tys.first().copied(), span);
+                let p = self.coerce_enum_payload(first, field_tys.first().copied(), span);
                 let pty = self.locals[p.0 as usize].ty;
                 let is_f64 = matches!(self.tcx.kind_of(pty), gossamer_types::TyKind::Float(_));
                 (p, is_f64)
@@ -1235,8 +1253,7 @@ impl<'a> Builder<'a> {
         let mut vec_payloads = vec![false; n_args];
         let mut child_offsets: Vec<i64> = Vec::new();
         for (i, value) in payload.iter().copied().enumerate() {
-            let payload_local =
-                self.coerce_enum_payload_array(value, field_tys.get(i).copied(), span);
+            let payload_local = self.coerce_enum_payload(value, field_tys.get(i).copied(), span);
             let payload_ty = self.locals[payload_local.0 as usize].ty;
             // A child entry names the field's WORD within the slot slab, so
             // it follows the field's placement rather than its position.
@@ -1452,6 +1469,51 @@ impl<'a> Builder<'a> {
             span,
         );
         let payload_local = self.lower_expr(payload_expr)?;
+        // A callable payload slot holds the env-shaped callable every callable
+        // slot holds, so a bare fn item is wrapped for the arm it fills.
+        let payload_local = match self.carrier_arm_payload_ty(ty, disc) {
+            Some(expected) => self.coerce_to_fn_trait_if_needed(payload_local, expected, span),
+            None => payload_local,
+        };
+        Some(self.lower_result_ctor_local(disc_local, payload_local, ty, span))
+    }
+
+    /// The payload type of the `Ok` / `Some` (`disc` 0) or `Err` (`disc` 1)
+    /// arm of carrier type `ty`.
+    fn carrier_arm_payload_ty(&self, ty: Ty, disc: i64) -> Option<Ty> {
+        let gossamer_types::TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
+            return None;
+        };
+        if def.local != u32::MAX && def.local != u32::MAX - 1 {
+            return None;
+        }
+        substs.types().get(usize::try_from(disc).ok()?).copied()
+    }
+
+    /// Wraps the already-lowered `payload_local` in the `Result`/`Option`
+    /// carrier `ty` with discriminant `disc_local`.
+    pub(crate) fn lower_result_ctor_local(
+        &mut self,
+        disc_local: Local,
+        payload_local: Local,
+        ty: Ty,
+        span: Span,
+    ) -> Local {
+        let rty = self.result_repr_ty(ty);
+        let dest = self.fresh(rty);
+        self.lower_result_ctor_into(dest, disc_local, payload_local, span);
+        dest
+    }
+
+    /// Builds the `Result`/`Option` carrier `dest` from `disc_local` and the
+    /// already-lowered `payload_local`, writing it into `dest` itself.
+    pub(crate) fn lower_result_ctor_into(
+        &mut self,
+        dest: Local,
+        disc_local: Local,
+        payload_local: Local,
+        span: Span,
+    ) {
         // Route f64 payloads through `gos_rt_result_new_f64` so the
         // bit pattern is preserved via `to_bits` (matching the
         // symmetric `gos_rt_result_payload_f64` extractor). Without
@@ -1461,23 +1523,34 @@ impl<'a> Builder<'a> {
         // A multi-slot aggregate payload is heap-copied by the backend;
         // registering its guarded meta here turns that copy into a
         // reference-counted blob the drop pass can reclaim.
-        if self.type_slot_bytes(payload_ty) > 8
-            && matches!(
-                self.tcx.kind_of(payload_ty),
-                gossamer_types::TyKind::Adt { .. } | gossamer_types::TyKind::Tuple(_)
-            )
+        let aggregate_payload = matches!(
+            self.tcx.kind_of(payload_ty),
+            gossamer_types::TyKind::Adt { .. } | gossamer_types::TyKind::Tuple(_)
+        );
+        // A one-slot struct is boxed like any other aggregate, so its box owns
+        // its heap field the same way.
+        if aggregate_payload
+            && self.type_slot_bytes(payload_ty) == 8
+            && !self.is_result_or_option_adt(payload_ty)
+            && !self.tcx.is_inline_enum_ty(payload_ty)
         {
+            let _ = self.ensure_aggr_struct_meta(payload_ty);
+        }
+        if self.type_slot_bytes(payload_ty) > 8 && aggregate_payload {
             let _ = self.ensure_aggr_copy_meta(payload_ty);
+            // The box owns every heap child of its payload through the
+            // structural meta, the layout a map-boxed value uses too: a carrier
+            // dropped unread gives them back with the box, and each extraction
+            // takes shares of its own.
+            let _ = self.ensure_aggr_struct_meta(payload_ty);
+            if self.is_result_or_option_adt(payload_ty) {
+                let _ = self.ensure_carrier_box_meta(payload_ty);
+            }
         }
         let payload_is_f64 = matches!(
             self.tcx.kind_of(payload_ty),
             gossamer_types::TyKind::Float(_)
         );
-        // Pin the dest to the i128 Result/Option representation even when
-        // inference left `ty` an unresolved `Var` (else the i128 truncates
-        // through a `ptr` slot).
-        let rty = self.result_repr_ty(ty);
-        let dest = self.fresh(rty);
         let intrinsic_name = if payload_is_f64 {
             "gos_rt_result_new_f64"
         } else {
@@ -1494,6 +1567,5 @@ impl<'a> Builder<'a> {
             },
             span,
         );
-        Some(dest)
     }
 }

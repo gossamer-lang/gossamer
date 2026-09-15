@@ -80,21 +80,16 @@ unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
     unsafe { crate::c_abi::gos_str_arg_text(p) }
 }
 
-/// GC-tracked 2-slot tuple `(a, b)`; the by-value-aggregate ABI
-/// memcpys 16 contiguous bytes from the returned pointer. Mirrors
-/// `alloc_pair` in `crypto_aead.rs`.
-fn alloc_pair(a: i64, b: i64) -> *mut u8 {
-    let p = super::gos_rt_gc_alloc(16);
-    if !p.is_null() {
-        // SAFETY: `p` is a fresh 16-byte allocation.
-        unsafe {
-            let slots = p.cast::<i64>();
-            *slots = a;
-            *slots.add(1) = b;
-        }
-    }
-    p
-}
+/// Layout of the `(String, String)` pem keypair: both strings are owned by the
+/// blob.
+static KEYPAIR_STRINGS_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
 
 /// `crypto::ecdsa::keypair_pem()
 /// -> Result<(String, String), errors::Error>` - fresh P-256 keypair
@@ -122,7 +117,9 @@ pub unsafe extern "C" fn gos_rt_crypto_ecdsa_keypair_pem() -> i128 {
         };
         let secret_ptr = super::string::alloc_cstring(secret_pem.as_bytes()) as i64;
         let public_ptr = super::string::alloc_cstring(public_pem.as_bytes()) as i64;
-        gos_rt_result_new(0, alloc_pair(secret_ptr, public_ptr) as i64)
+        let pair =
+            crate::c_abi::rc::counted_words(&[secret_ptr, public_ptr], &KEYPAIR_STRINGS_META);
+        gos_rt_result_new(0, pair as i64)
     })
 }
 

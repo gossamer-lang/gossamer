@@ -81,6 +81,26 @@ impl LazyElemFamily {
             Self::Word | Self::Ptr | Self::PairWord | Self::Aggr => "i64",
         }
     }
+
+    /// Suffix of the producer symbol that hands out one value of this family:
+    /// a `String` stream counts the share each pull carries, so it has
+    /// producers of its own.
+    pub(crate) fn value_suffix(self) -> &'static str {
+        match self {
+            Self::Ptr => "str",
+            other => other.word_or_float_suffix(),
+        }
+    }
+
+    /// Runtime symbol that borrows a sequence of this family as lazy state.
+    pub(crate) fn vec_source_symbol(self) -> &'static str {
+        match self {
+            Self::Float => "gos_rt_lazy_iter_from_vec_f64",
+            Self::Ptr => "gos_rt_lazy_iter_from_vec_str",
+            Self::Aggr => "gos_rt_lazy_iter_from_vec_aggr",
+            Self::Word | Self::PairWord => "gos_rt_lazy_iter_from_vec_i64",
+        }
+    }
 }
 
 /// Register class a combinator's callback sees for one element or scalar.
@@ -268,15 +288,12 @@ impl<'a> Builder<'a> {
                 self.tcx.kind_of(receiver_ty),
                 TyKind::Vec(_) | TyKind::Slice(_)
             ) {
-                let helper = format!(
-                    "gos_rt_lazy_iter_from_vec_{}",
-                    family.word_or_float_suffix()
-                );
+                let helper = family.vec_source_symbol();
                 let source = self.lower_expr(receiver)?;
                 let dest = self.fresh(ty);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str(helper)),
+                    callee: Operand::Const(ConstValue::Str(helper.to_string())),
                     args: vec![Operand::Copy(Place::local(source))],
                     destination: Place::local(dest),
                     target: Some(next),
@@ -286,7 +303,11 @@ impl<'a> Builder<'a> {
             }
         }
 
-        if matches!(method.name.as_str(), "wrapping_add" | "wrapping_mul") && args.len() == 1 {
+        if matches!(
+            method.name.as_str(),
+            "__gos_wrapping_add" | "__gos_wrapping_sub" | "__gos_wrapping_mul"
+        ) && args.len() == 1
+        {
             let mut receiver_ty = receiver.ty;
             while let TyKind::Ref { inner, .. } = self.tcx.kind_of(receiver_ty) {
                 receiver_ty = *inner;
@@ -297,10 +318,10 @@ impl<'a> Builder<'a> {
             ) {
                 let lhs = self.lower_expr(receiver)?;
                 let rhs = self.lower_expr(&args[0])?;
-                let op = if method.name == "wrapping_add" {
-                    BinOp::WrappingAdd
-                } else {
-                    BinOp::WrappingMul
+                let op = match method.name.as_str() {
+                    "__gos_wrapping_add" => BinOp::WrappingAdd,
+                    "__gos_wrapping_sub" => BinOp::WrappingSub,
+                    _ => BinOp::WrappingMul,
                 };
                 // The op runs at i64 width. A type narrower than that wraps
                 // at its own width, so the wide result is narrowed back.
@@ -936,6 +957,18 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Runtime symbol that advances lazy state yielding `elem` by one pull.
+    /// The pair state is a distinct runtime object with its own advance.
+    pub(crate) fn lazy_iter_next_symbol(&self, elem: Ty) -> Option<&'static str> {
+        match self.lazy_iter_elem_family(elem)? {
+            LazyElemFamily::PairWord => Some("gos_rt_lazy_iter_next_pair_i64"),
+            LazyElemFamily::Word
+            | LazyElemFamily::Ptr
+            | LazyElemFamily::Float
+            | LazyElemFamily::Aggr => Some("gos_rt_lazy_iter_next_i64"),
+        }
+    }
+
     /// Whether the lazy iterator runtime can carry `elem` in its 8-byte slot.
     pub(crate) fn lazy_iter_carries_elem(&self, elem: Ty) -> bool {
         self.lazy_iter_elem_family(elem).is_some()
@@ -958,6 +991,18 @@ impl<'a> Builder<'a> {
                 | TyKind::String
                 | TyKind::Float(gossamer_types::FloatTy::F64)
         )
+    }
+
+    /// Whether an element-preserving adapter answering `ty` can answer lazy
+    /// state: an element the slot carries, or one wider than a slot whose
+    /// address the slot carries instead.
+    pub(crate) fn lazy_iter_result_ty(&self, ty: Ty) -> bool {
+        match self.tcx.kind_of(ty) {
+            TyKind::Iterator(elem) => {
+                self.lazy_iter_elem_family(*elem).is_some() || self.lazy_addressed_elem(*elem)
+            }
+            _ => false,
+        }
     }
 
     /// Family of an `Iterator<T>`-typed value, or `None` when `ty` is not
@@ -1275,6 +1320,7 @@ impl<'a> Builder<'a> {
                     | "is_null"
                     | "as_str"
                     | "as_i64"
+                    | "as_u64"
                     | "as_f64"
                     | "as_bool"
                     | "as_array"
@@ -2554,10 +2600,14 @@ impl<'a> Builder<'a> {
                 if matches!(&receiver_kind_flat, TyKind::Adt { .. })
                     && self.is_result_or_option_adt(receiver_ty)
                 {
-                    if self.is_option_adt(receiver_ty) {
-                        Some("gos_rt_option_unwrap")
-                    } else {
-                        Some("gos_rt_result_unwrap")
+                    // A payload that is itself a carrier was boxed at
+                    // construction, so it is loaded back as two words.
+                    let nested = self.carrier_payload_is_carrier(receiver_ty);
+                    match (self.is_option_adt(receiver_ty), nested) {
+                        (true, true) => Some("gos_rt_option_unwrap_carrier"),
+                        (true, false) => Some("gos_rt_option_unwrap"),
+                        (false, true) => Some("gos_rt_result_unwrap_carrier"),
+                        (false, false) => Some("gos_rt_result_unwrap"),
                     }
                 } else {
                     Some("")
@@ -2607,9 +2657,7 @@ impl<'a> Builder<'a> {
                 }
             }
             "next" if args.is_empty() => match &receiver_kind_flat {
-                TyKind::Iterator(elem) if self.lazy_iter_carries_elem(*elem) => {
-                    Some("gos_rt_lazy_iter_next_i64")
-                }
+                TyKind::Iterator(elem) => self.lazy_iter_next_symbol(*elem),
                 _ => None,
             },
             // `option.ok_or(new_err)` converts None into Err and
@@ -2876,10 +2924,29 @@ impl<'a> Builder<'a> {
             // 0.7.0 HashMap method surface - keys / values yield
             // Vec<K> / Vec<V>; pop returns Option<V>.
             "keys" if matches!(&receiver_kind_flat, TyKind::HashMap { .. }) => {
-                Some("gos_rt_map_keys_vec")
+                Some(if self.map_keys_unsigned(receiver_ty) {
+                    "gos_rt_map_keys_vec_u64"
+                } else {
+                    "gos_rt_map_keys_vec"
+                })
+            }
+            // A boxed two-word value is read back out of each box.
+            "values"
+                if matches!(&receiver_kind_flat, TyKind::HashMap { .. })
+                    && self.map_value_is_carrier(receiver_ty) =>
+            {
+                Some(if self.map_keys_unsigned(receiver_ty) {
+                    "gos_rt_map_values_carrier_u64"
+                } else {
+                    "gos_rt_map_values_carrier"
+                })
             }
             "values" if matches!(&receiver_kind_flat, TyKind::HashMap { .. }) => {
-                Some("gos_rt_map_values_vec")
+                Some(if self.map_keys_unsigned(receiver_ty) {
+                    "gos_rt_map_values_vec_u64"
+                } else {
+                    "gos_rt_map_values_vec"
+                })
             }
             "pop" if matches!(&receiver_kind_flat, TyKind::HashMap { .. }) => {
                 let key = hashmap_key_kind(self.tcx, receiver_ty);
@@ -3070,6 +3137,10 @@ impl<'a> Builder<'a> {
             // and return either a fresh `*mut GosJson` (for
             // chained queries) or a primitive scalar.
             "as_i64" => Some("gos_rt_json_as_i64_opt"),
+            "as_u64" => match &receiver_kind_flat {
+                TyKind::JsonValue => Some("gos_rt_json_as_u64_opt"),
+                _ => None,
+            },
             "as_f64" => Some("gos_rt_json_as_f64_opt"),
             "as_bool" => Some("gos_rt_json_as_bool_opt"),
             "is_null" => Some("gos_rt_json_is_null"),
@@ -3261,14 +3332,23 @@ impl<'a> Builder<'a> {
             "keys" => match &receiver_kind_flat {
                 TyKind::HashMap { .. } => match self.hash_map_key_kind(receiver_ty) {
                     Some(MapKeyKind::String) => Some("gos_rt_map_keys_str"),
+                    _ if self.map_keys_unsigned(receiver_ty) => Some("gos_rt_map_keys_u64"),
                     _ => Some("gos_rt_map_keys_i64"),
                 },
                 _ => None,
             },
             "values" => match &receiver_kind_flat {
+                TyKind::HashMap { .. } if self.map_value_is_carrier(receiver_ty) => {
+                    Some(if self.map_keys_unsigned(receiver_ty) {
+                        "gos_rt_map_values_carrier_u64"
+                    } else {
+                        "gos_rt_map_values_carrier"
+                    })
+                }
                 TyKind::HashMap { .. } => match self.hash_map_value_kind(receiver_ty) {
                     Some(MapValueKind::String) => Some("gos_rt_map_values_str"),
                     Some(MapValueKind::Bytes) => Some("gos_rt_map_values_vec"),
+                    _ if self.map_keys_unsigned(receiver_ty) => Some("gos_rt_map_values_u64"),
                     _ => Some("gos_rt_map_values_i64"),
                 },
                 _ => None,
@@ -4021,7 +4101,11 @@ impl<'a> Builder<'a> {
         // set's element kind from the receiver's HIR type to read an
         // i64 set's keys back as integers (sorted numerically).
         if rt == "gos_rt_set_to_vec" && matches!(self.set_elem_kind_of(receiver), MapKeyKind::I64) {
-            rt = "gos_rt_set_to_vec_i64";
+            rt = if self.set_elems_unsigned(receiver.ty) {
+                "gos_rt_set_to_vec_u64"
+            } else {
+                "gos_rt_set_to_vec_i64"
+            };
         }
         if enum_set_desc.is_some() {
             rt = match rt {
@@ -4250,7 +4334,7 @@ impl<'a> Builder<'a> {
                     .unwrap_or_else(|| self.tcx.int_ty(gossamer_types::IntTy::I64));
                 self.tcx.intern(gossamer_types::TyKind::Vec(elem))
             }
-            "gos_rt_set_to_vec_i64" => {
+            "gos_rt_set_to_vec_i64" | "gos_rt_set_to_vec_u64" => {
                 // The snapshot's slots are the set's own words, so the vec
                 // takes the element type they hold: a float set answers a
                 // `Vec<f64>` whose slots are those same bits.
@@ -4433,7 +4517,7 @@ impl<'a> Builder<'a> {
                     self.option_adt_ty()
                 }
             }
-            "gos_rt_lazy_iter_next_i64" => {
+            "gos_rt_lazy_iter_next_i64" | "gos_rt_lazy_iter_next_pair_i64" => {
                 // The slot the shim returns carries whatever the state yields,
                 // so the payload takes the iterator's element type and `Some(s)`
                 // binds `s` as that type rather than as the raw slot.
@@ -5320,10 +5404,12 @@ impl<'a> Builder<'a> {
         if lowered_is_result {
             match method.name.as_str() {
                 "unwrap" | "expect" => {
-                    runtime_symbol = Some(if self.is_option_adt(lowered_recv_ty) {
-                        "gos_rt_option_unwrap"
-                    } else {
-                        "gos_rt_result_unwrap"
+                    let nested = self.carrier_payload_is_carrier(lowered_recv_ty);
+                    runtime_symbol = Some(match (self.is_option_adt(lowered_recv_ty), nested) {
+                        (true, true) => "gos_rt_option_unwrap_carrier",
+                        (true, false) => "gos_rt_option_unwrap",
+                        (false, true) => "gos_rt_result_unwrap_carrier",
+                        (false, false) => "gos_rt_result_unwrap",
                     });
                 }
                 "unwrap_or" => {
@@ -5346,15 +5432,21 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
         }
-        if runtime_symbol.is_none()
+        // The dispatch table above names an advance from the element type,
+        // which cannot tell an address-carrying stream of pairs from the pair
+        // state `zip` and `enumerate` build, so the lowered state decides.
+        if (runtime_symbol.is_none() || self.local_aggr_iter.contains(&receiver_local))
             && method.name.as_str() == "next"
             && args.is_empty()
-            && matches!(
-                self.tcx.kind_of(lowered_recv_ty),
-                TyKind::Iterator(elem) if self.lazy_iter_carries_elem(*elem)
-            )
+            && let TyKind::Iterator(elem) = self.tcx.kind_of(lowered_recv_ty).clone()
         {
-            runtime_symbol = Some("gos_rt_lazy_iter_next_i64");
+            // An address-carrying stream advances through the word shim: its
+            // slot is the element's address, which the `Some` payload is.
+            runtime_symbol = if self.local_aggr_iter.contains(&receiver_local) {
+                Some("gos_rt_lazy_iter_next_i64")
+            } else {
+                self.lazy_iter_next_symbol(elem)
+            };
         }
         // `.clone()` / `.collect()` on a Vec/Slice receiver: dispatch to
         // `gos_rt_vec_clone` so the result is a fresh independent
@@ -5433,12 +5525,42 @@ impl<'a> Builder<'a> {
                 // An aggregate value with no owning children still needs a
                 // copy meta: it is what tags the map as holding blob values,
                 // so the entry takes the share the inserting frame gives back.
-                if self.is_inline_aggregate_ty(value) {
+                // A two-word carrier is boxed the same way.
+                if self.is_inline_aggregate_ty(value) || self.map_value_is_carrier(recv) {
                     let _ = self.ensure_aggr_copy_meta(value);
                 }
             }
         }
 
+        // An aggregate payload is copied out of the carrier in place, so the
+        // answer takes its own shares of the value's children the way a
+        // `match` binding does; the word helper would hand back the payload's
+        // address with no share behind it. The lowered receiver decides, since
+        // a chained call leaves the HIR receiver type a variable.
+        if runtime_symbol == Some("gos_rt_result_unwrap_or")
+            && let Some(payload_ty) = self.enum_payload_ty(lowered_recv_ty, 0)
+            && self.tcx.elem_is_addressed_aggregate(payload_ty)
+            && let [_, Operand::Copy(fallback)] = arg_operands.as_slice()
+            && fallback.projection.is_empty()
+        {
+            let dest_ty = if matches!(
+                self.tcx.kind_of(ty),
+                TyKind::Var(_) | TyKind::Error | TyKind::Never
+            ) {
+                payload_ty
+            } else {
+                ty
+            };
+            let is_option = self.is_option_adt(lowered_recv_ty);
+            return Some(self.lower_unwrap_or_inline(
+                receiver_local,
+                super::intrinsic::CarrierFallback::Value(fallback.local),
+                lowered_recv_ty,
+                is_option,
+                dest_ty,
+                span,
+            ));
+        }
         if let Some(sym) = runtime_symbol {
             return self.dispatch_via_runtime_symbol(
                 sym,
@@ -5585,6 +5707,34 @@ impl<'a> Builder<'a> {
                 )
             );
         let coerce_vec_extend_arg = matches!(runtime_symbol, Some("gos_rt_vec_extend"));
+        // The value a push or insert stores fills one element slot, so it
+        // takes the element's shape: a callable element holds the env-shaped
+        // callable every callable slot holds.
+        let stored_elem_slot = match runtime_symbol {
+            Some("gos_rt_vec_push" | "gos_rt_vec_insert_safe" | "gos_rt_vec_insert_slots_safe") => {
+                match self
+                    .tcx
+                    .kind_of(self.locals[receiver_local.0 as usize].ty)
+                    .clone()
+                {
+                    TyKind::Vec(elem) | TyKind::Slice(elem) => Some(elem),
+                    TyKind::Ref { inner, .. } => match self.tcx.kind_of(inner) {
+                        TyKind::Vec(elem) | TyKind::Slice(elem) => Some(*elem),
+                        _ => None,
+                    },
+                    _ => None,
+                }
+            }
+            Some(sym)
+                if sym.starts_with("gos_rt_map_insert")
+                    || sym.starts_with("gos_rt_map_or_insert") =>
+            {
+                self.hash_map_kv_tys(self.locals[receiver_local.0 as usize].ty)
+                    .or_else(|| self.hash_map_kv_tys(receiver.ty))
+                    .map(|(_, value)| value)
+            }
+            _ => None,
+        };
         // String methods whose needle / pattern argument is a `&str`
         // the runtime helper reads as a `*const c_char`. A `char`
         // literal (`s.contains('e')`, `s.replace('l', "L")`) lowers to
@@ -5633,6 +5783,31 @@ impl<'a> Builder<'a> {
                 self.coerce_char_arg_to_str(a, span)
             } else {
                 a
+            };
+            let a = match stored_elem_slot {
+                Some(slot_ty) if index + 1 == args.len() => {
+                    self.coerce_to_fn_trait_if_needed(a, slot_ty, span)
+                }
+                _ => a,
+            };
+            // A callable parameter is called through an environment on every
+            // tier, so a bare function item or lifted closure handed to one
+            // is wrapped exactly as a free function's argument is. The thunk
+            // is named for the instantiated signature: a method's own `Fn() ->
+            // T` names the register classes of the `T` this call passes.
+            let a = match expected_args.and_then(|tys| tys.get(index)).copied() {
+                Some(expected)
+                    if !self.local_closure.contains_key(&a)
+                        && matches!(
+                            self.tcx.kind_of(expected),
+                            TyKind::FnPtr(_) | TyKind::FnTrait(_)
+                        ) =>
+                {
+                    let source_ty = self.locals[a.0 as usize].ty;
+                    let expected = self.instantiate_param_ty_from_arg(expected, source_ty);
+                    self.coerce_to_fn_trait_if_needed(a, expected, span)
+                }
+                _ => a,
             };
             // User impl arguments obey the same array-to-slice coercions as
             // free-function calls. In particular, `method(&[a, b])` passes a
@@ -5764,6 +5939,32 @@ impl<'a> Builder<'a> {
         runtime_symbol
     }
 
+    /// The fixed `[elem; len]` a call typed `ty` answers when it reaches impl
+    /// function `mangled`, whose declared const generic array result the body
+    /// hands back as a runtime-length sequence.
+    pub(crate) fn const_array_method_result(&self, mangled: &str, ty: Ty) -> Option<(Ty, usize)> {
+        let mut ret = self.impl_methods.get(mangled).copied().flatten()?;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(ret) {
+            ret = *inner;
+        }
+        if !matches!(
+            self.tcx.kind_of(ret),
+            TyKind::Array {
+                len: gossamer_types::ArrayLen::Param(_),
+                ..
+            }
+        ) {
+            return None;
+        }
+        match self.tcx.kind_of(ty) {
+            TyKind::Array {
+                elem,
+                len: gossamer_types::ArrayLen::Concrete(len),
+            } => Some((*elem, *len)),
+            _ => None,
+        }
+    }
+
     /// Emit the user-impl method call or the generic by-name fallback call.
     fn emit_fallback_call(
         &mut self,
@@ -5852,8 +6053,17 @@ impl<'a> Builder<'a> {
             } else {
                 dest_ty
             };
-            let dest = self.fresh(dest_ty);
-            if let Some(out_struct) = self.struct_name_of(dest_ty) {
+            let carrier = self.const_array_method_result(&mangled, dest_ty);
+            let dest = match carrier {
+                Some((elem, _)) => {
+                    let sequence = self.tcx.intern(TyKind::Slice(elem));
+                    self.fresh(sequence)
+                }
+                None => self.fresh(dest_ty),
+            };
+            if carrier.is_none()
+                && let Some(out_struct) = self.struct_name_of(dest_ty)
+            {
                 self.local_struct.insert(dest, out_struct);
             }
             let next = self.new_block(span);
@@ -5880,6 +6090,9 @@ impl<'a> Builder<'a> {
                     })),
                     span,
                 );
+            }
+            if let Some((elem, len)) = carrier {
+                return self.array_from_const_generic_carrier(dest, elem, len, dest_ty, receiver);
             }
             return Some(dest);
         }
@@ -5952,8 +6165,17 @@ impl<'a> Builder<'a> {
                     .unwrap_or_else(|| self.tcx.int_ty(gossamer_types::IntTy::I64)),
                 _ => ty,
             };
-            let dest = self.fresh(dest_ty);
-            if let Some(out_struct) = self.struct_name_of(dest_ty) {
+            let carrier = self.const_array_method_result(mangled, dest_ty);
+            let dest = match carrier {
+                Some((elem, _)) => {
+                    let sequence = self.tcx.intern(TyKind::Slice(elem));
+                    self.fresh(sequence)
+                }
+                None => self.fresh(dest_ty),
+            };
+            if carrier.is_none()
+                && let Some(out_struct) = self.struct_name_of(dest_ty)
+            {
                 self.local_struct.insert(dest, out_struct);
             }
             let next = self.new_block(span);
@@ -5964,6 +6186,9 @@ impl<'a> Builder<'a> {
                 target: Some(next),
             });
             self.set_current(next);
+            if let Some((elem, len)) = carrier {
+                return self.array_from_const_generic_carrier(dest, elem, len, dest_ty, receiver);
+            }
             return Some(dest);
         }
 
@@ -7042,8 +7267,27 @@ impl<'a> Builder<'a> {
                 "gos_rt_vec_count_of_i64"
             }),
             // HashMap receiver surface.
-            "keys" if matches!(kind, TyKind::HashMap { .. }) => Some("gos_rt_map_keys_vec"),
-            "values" if matches!(kind, TyKind::HashMap { .. }) => Some("gos_rt_map_values_vec"),
+            "keys" if matches!(kind, TyKind::HashMap { .. }) => {
+                Some(if self.map_keys_unsigned(ty) {
+                    "gos_rt_map_keys_vec_u64"
+                } else {
+                    "gos_rt_map_keys_vec"
+                })
+            }
+            "values" if matches!(kind, TyKind::HashMap { .. }) && self.map_value_is_carrier(ty) => {
+                Some(if self.map_keys_unsigned(ty) {
+                    "gos_rt_map_values_carrier_u64"
+                } else {
+                    "gos_rt_map_values_carrier"
+                })
+            }
+            "values" if matches!(kind, TyKind::HashMap { .. }) => {
+                Some(if self.map_keys_unsigned(ty) {
+                    "gos_rt_map_values_vec_u64"
+                } else {
+                    "gos_rt_map_values_vec"
+                })
+            }
             "pop" if matches!(kind, TyKind::HashMap { .. }) => {
                 Some(if hashmap_key_kind(self.tcx, ty) == VecElemKind::Str {
                     "gos_rt_map_pop_typed_str"

@@ -14,10 +14,14 @@
 //! before closure lifting and before every backend lowers, all three
 //! tiers (bytecode VM, Cranelift JIT, LLVM AOT) get the fused loop.
 //!
-//! Recognition is conservative: only integer-range sources, `filter` /
-//! `map` stages, and a fixed set of terminals, with inline single-shape
-//! closures throughout. Anything else is left untouched and lowered by
-//! the existing combinator path - correct, just unfused.
+//! Method chains get the same treatment: `xs.iter().map(f).filter(g).sum()`,
+//! `(1..n).map(f).sum()`, and an eager `xs.map(f).sum()` over a sequence of
+//! scalars become one index or counter loop.
+//!
+//! Recognition is conservative: integer-range and scalar-sequence sources,
+//! `filter` / `map` stages, and a fixed set of terminals, with inline
+//! single-shape closures throughout. Anything else is left untouched and
+//! lowered by the existing combinator path - correct, just unfused.
 
 use std::collections::HashSet;
 
@@ -29,7 +33,8 @@ use crate::ids::HirIdGenerator;
 use crate::lift::collect_free_vars;
 use crate::tree::{
     HirArrayExpr, HirBinaryOp, HirBlock, HirExpr, HirExprKind, HirFn, HirItem, HirItemKind,
-    HirLiteral, HirParam, HirPat, HirPatKind, HirProgram, HirStmt, HirStmtKind, HirUnaryOp,
+    HirLiteral, HirMatchArm, HirParam, HirPat, HirPatKind, HirProgram, HirStmt, HirStmtKind,
+    HirUnaryOp,
 };
 
 /// Rewrites every recognised `iter::` range pipeline in `program` into a
@@ -47,12 +52,94 @@ struct Fuser<'a> {
     temp: u32,
 }
 
-/// A `filter` / `map` stage between the range source and the terminal.
+/// A stage between the source and the terminal.
 enum Stage {
-    /// `iter::filter(pred)` - keep the element when the predicate holds.
+    /// `filter(pred)` - keep the element when the predicate holds.
     Filter(HirExpr),
-    /// `iter::map(f)` - replace the element with `f(element)`.
+    /// `map(f)` - replace the element with `f(element)`.
     Map(HirExpr),
+    /// `enumerate()` - pair the element with the number of elements that
+    /// reached this stage before it.
+    Enumerate,
+    /// `take(n)` - end the loop before the next pull once `n` elements have
+    /// passed.
+    Take(i64),
+    /// `skip(n)` - drop the first `n` elements that reach it.
+    Skip(i64),
+    /// `step_by(k)` - keep the first element that reaches it and every `k`-th
+    /// one after.
+    StepBy(i64),
+    /// `zip(other)` - pair the element with the next element of `other`,
+    /// ending the loop when `other` has none.
+    Zip(Source),
+    /// `take_while(pred)` - end the loop at the first element the predicate
+    /// fails for.
+    TakeWhile(HirExpr),
+    /// `skip_while(pred)` - drop elements until the predicate first fails,
+    /// then pass every element on without asking it again.
+    SkipWhile(HirExpr),
+    /// `filter_map(f)` - pass on the payload of each `Some` that `f` answers.
+    FilterMap(HirExpr),
+}
+
+/// A stage with the bindings it keeps across turns of the fused loop.
+enum Step<'p> {
+    Filter(&'p HirExpr),
+    Map(&'p HirExpr),
+    Enumerate {
+        counter: String,
+    },
+    Take {
+        counter: String,
+        limit: i64,
+    },
+    Skip {
+        counter: String,
+        count: i64,
+    },
+    Stride {
+        counter: String,
+        step: i64,
+    },
+    Zip {
+        position: String,
+        end: String,
+        inclusive: bool,
+        read: ElemRead,
+    },
+    TakeWhile(&'p HirExpr),
+    SkipWhile {
+        pred: &'p HirExpr,
+        skipping: String,
+    },
+    FilterMap(&'p HirExpr),
+}
+
+/// How the fused loop reads the element at its counter.
+enum ElemRead {
+    /// A range: the counter is the element.
+    Counter,
+    /// `base[counter]` over a sequence.
+    Index(HirExpr, Ty),
+    /// `base.byte_at(counter) as u8` over a `String`.
+    Byte(HirExpr),
+}
+
+/// The parts of a `Map` walk the loop builder consumes.
+struct MapEntries {
+    base: HirExpr,
+    key_ty: Ty,
+    value_ty: Ty,
+    part: MapPart,
+}
+
+/// How the fused loop's counter walks its source.
+struct LoopShape<'s> {
+    counter: &'s str,
+    bound: &'s str,
+    inclusive: bool,
+    /// Down from one past the last element, stepping before each read.
+    reversed: bool,
 }
 
 /// The reducing operation that ends a pipeline.
@@ -66,14 +153,69 @@ enum Terminal {
     ForEach(HirExpr),
     Any(HirExpr),
     All(HirExpr),
+    /// `count(pred)` - the number of elements the predicate holds for.
+    CountBy(HirExpr),
+    /// `find(pred)` - the first element the predicate holds for.
+    Find(HirExpr),
+    /// `position(pred)` - how many elements came before the first one the
+    /// predicate holds for.
+    Position(HirExpr),
+    /// `min()` - the first smallest element.
+    Min,
+    /// `max()` - the last largest element.
+    Max,
+    /// `collect()` - a `Vec` of every element, in order.
+    Collect,
+}
+
+/// Where a fused loop's elements come from.
+enum Source {
+    /// An `i64` range `start..end` / `start..=end`.
+    Range {
+        start: HirExpr,
+        end: HirExpr,
+        inclusive: bool,
+        reversed: bool,
+    },
+    /// The elements of a sequence binding, read by index in order.
+    Indexed {
+        base: HirExpr,
+        elem_ty: Ty,
+        reversed: bool,
+    },
+    /// The UTF-8 bytes of a `String` binding.
+    Bytes { base: HirExpr, reversed: bool },
+}
+
+/// Which part of each `Map` entry a walk hands on.
+#[derive(Clone, Copy)]
+enum MapPart {
+    /// `m.iter()` - the `(key, value)` pair.
+    Pairs,
+    /// `m.keys()`.
+    Keys,
+    /// `m.values()`.
+    Values,
+}
+
+/// What drives a fused loop.
+enum Walk {
+    /// A counter over a range, a sequence, or a `String`'s bytes.
+    Counted(Source),
+    /// The entries of a `Map` binding, in the order its own `for` loop and
+    /// `iter` / `keys` / `values` answer them.
+    Map {
+        base: HirExpr,
+        key_ty: Ty,
+        value_ty: Ty,
+        part: MapPart,
+    },
 }
 
 /// A recognised, fusable pipeline. Every `HirExpr` is a clone owned by
 /// the plan so the builder can move it into the loop.
 struct Plan {
-    start: HirExpr,
-    end: HirExpr,
-    inclusive: bool,
+    walk: Walk,
     stages: Vec<Stage>,
     terminal: Terminal,
     /// Accumulator / result type of the whole pipeline.
@@ -250,7 +392,12 @@ impl Fuser<'_> {
     // ----- recognition -----
 
     fn plan(&mut self, expr: &HirExpr) -> Option<Plan> {
-        let (name, args) = as_iter_call(expr)?;
+        if let Some(plan) = self.plan_sequence_call(expr) {
+            return Some(plan);
+        }
+        let Some((name, args)) = as_iter_call(expr) else {
+            return self.plan_method_chain(expr);
+        };
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         let bool_ty = self.tcx.bool_ty();
         let unit_ty = self.tcx.unit_interned()?;
@@ -318,12 +465,377 @@ impl Fuser<'_> {
 
         stages_rev.reverse();
         Some(Plan {
-            start,
-            end,
-            inclusive,
+            walk: Walk::Counted(Source::Range {
+                start,
+                end,
+                inclusive,
+                reversed: false,
+            }),
             stages: stages_rev,
             terminal,
             result_ty,
+        })
+    }
+
+    /// `iter::sum(xs)` and the other one-argument terminals over a sequence
+    /// binding, which walk it the way `xs.sum()` does.
+    fn plan_sequence_call(&mut self, expr: &HirExpr) -> Option<Plan> {
+        let (name, [seq]) = as_iter_call(expr)? else {
+            return None;
+        };
+        if !matches!(name, "sum" | "product" | "count" | "min" | "max") {
+            return None;
+        }
+        let terminal = chain_terminal(name, &[])?;
+        let source = self.indexed_source(seq)?;
+        let elem_ty = self.source_elem_ty(&source);
+        let result_ty = self.chain_result_ty(&terminal, expr.ty, elem_ty)?;
+        Some(Plan {
+            walk: Walk::Counted(source),
+            stages: Vec::new(),
+            terminal,
+            result_ty,
+        })
+    }
+
+    /// The source a method chain walks, its stages innermost first, and
+    /// whether the source is a sequence that eager stages walk.
+    fn chain_source<'a>(&mut self, receiver: &'a HirExpr) -> Option<(Walk, Vec<Stage>, bool)> {
+        let mut stages_rev = Vec::new();
+        let mut reversed = false;
+        let mut cur: &'a HirExpr = receiver;
+        let (source, eager) = loop {
+            match &cur.kind {
+                HirExprKind::MethodCall {
+                    receiver: inner,
+                    name,
+                    args,
+                    ..
+                } => {
+                    let call = (name.name.as_str(), args.len());
+                    // `rev` walks the source backwards, so it sits right on it.
+                    if reversed && call != ("iter", 0) && call != ("bytes", 0) {
+                        return None;
+                    }
+                    if let Some(walk) = self.map_walk(inner, call) {
+                        // A `Map` has no reverse walk; `keys` and `values`
+                        // answer a `Vec` its eager stages walk.
+                        if reversed {
+                            return None;
+                        }
+                        let eager = !matches!(
+                            walk,
+                            Walk::Map {
+                                part: MapPart::Pairs,
+                                ..
+                            }
+                        );
+                        stages_rev.reverse();
+                        return Some((walk, stages_rev, eager));
+                    }
+                    match call {
+                        ("map", 1) => stages_rev.push(Stage::Map(one_closure(&args[0])?.clone())),
+                        ("filter", 1) => {
+                            stages_rev.push(Stage::Filter(one_closure(&args[0])?.clone()));
+                        }
+                        ("enumerate", 0) => stages_rev.push(Stage::Enumerate),
+                        ("take", 1) => stages_rev.push(Stage::Take(count_literal(&args[0], 0)?)),
+                        ("skip", 1) => stages_rev.push(Stage::Skip(count_literal(&args[0], 0)?)),
+                        ("step_by", 1) => {
+                            stages_rev.push(Stage::StepBy(count_literal(&args[0], 1)?));
+                        }
+                        ("zip", 1) => stages_rev.push(Stage::Zip(self.zip_source(&args[0])?)),
+                        ("take_while", 1) => {
+                            stages_rev.push(Stage::TakeWhile(one_closure(&args[0])?.clone()));
+                        }
+                        ("skip_while", 1) => {
+                            stages_rev.push(Stage::SkipWhile(one_closure(&args[0])?.clone()));
+                        }
+                        ("filter_map", 1) => {
+                            stages_rev.push(Stage::FilterMap(one_closure(&args[0])?.clone()));
+                        }
+                        ("rev", 0) => reversed = true,
+                        ("iter", 0) => break (self.indexed_source(inner)?, false),
+                        // `bytes` builds its `Vec<u8>` with no closure, so
+                        // reading the text in place walks the same bytes.
+                        ("bytes", 0) => break (self.bytes_source(inner)?, false),
+                        _ => return None,
+                    }
+                    cur = inner;
+                }
+                HirExprKind::Range { .. } => break (range_source(self.tcx, cur)?, false),
+                // A terminal or an eager stage on a sequence walks the same
+                // elements in the same order.
+                _ => break (self.indexed_source(cur)?, true),
+            }
+        };
+        let source = match source {
+            // A reversed inclusive range would step below its start.
+            Source::Range {
+                inclusive: true, ..
+            } if reversed => return None,
+            Source::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => Source::Range {
+                start,
+                end,
+                inclusive,
+                reversed,
+            },
+            Source::Indexed { base, elem_ty, .. } => Source::Indexed {
+                base,
+                elem_ty,
+                reversed,
+            },
+            Source::Bytes { base, .. } => Source::Bytes { base, reversed },
+        };
+        stages_rev.reverse();
+        Some((Walk::Counted(source), stages_rev, eager))
+    }
+
+    /// `m.iter()`, `m.keys()`, or `m.values()` over a `Map` binding of scalar
+    /// keys and values.
+    fn map_walk(&self, base: &HirExpr, call: (&str, usize)) -> Option<Walk> {
+        let part = match call {
+            ("iter", 0) => MapPart::Pairs,
+            ("keys", 0) => MapPart::Keys,
+            ("values", 0) => MapPart::Values,
+            _ => return None,
+        };
+        let HirExprKind::Path { segments, .. } = &base.kind else {
+            return None;
+        };
+        if segments.len() != 1 {
+            return None;
+        }
+        let TyKind::HashMap { key, value, .. } = self.tcx.kind_of(base.ty) else {
+            return None;
+        };
+        if !is_walked_elem(self.tcx, *key) || !is_walked_elem(self.tcx, *value) {
+            return None;
+        }
+        Some(Walk::Map {
+            base: base.clone(),
+            key_ty: *key,
+            value_ty: *value,
+            part,
+        })
+    }
+
+    fn walk_elem_ty(&mut self, walk: &Walk) -> Ty {
+        match walk {
+            Walk::Counted(source) => self.source_elem_ty(source),
+            Walk::Map {
+                key_ty,
+                value_ty,
+                part,
+                ..
+            } => match part {
+                MapPart::Pairs => self.tcx.intern(TyKind::Tuple(vec![*key_ty, *value_ty])),
+                MapPart::Keys => *key_ty,
+                MapPart::Values => *value_ty,
+            },
+        }
+    }
+
+    /// The second source of a `zip`: a range or `other.iter()` over a binding.
+    fn zip_source(&self, arg: &HirExpr) -> Option<Source> {
+        match &arg.kind {
+            HirExprKind::Range { .. } => range_source(self.tcx, arg),
+            HirExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                ..
+            } if args.is_empty() => match name.name.as_str() {
+                "iter" => self.indexed_source(receiver),
+                "bytes" => self.bytes_source(receiver),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn source_elem_ty(&mut self, source: &Source) -> Ty {
+        match source {
+            Source::Range { .. } => self.tcx.int_ty(IntTy::I64),
+            Source::Indexed { elem_ty, .. } => *elem_ty,
+            Source::Bytes { .. } => self.tcx.int_ty(IntTy::U8),
+        }
+    }
+
+    /// The bytes of a `String` binding.
+    fn bytes_source(&self, base: &HirExpr) -> Option<Source> {
+        let HirExprKind::Path { segments, .. } = &base.kind else {
+            return None;
+        };
+        if segments.len() != 1 || !matches!(self.tcx.kind_of(base.ty), TyKind::String) {
+            return None;
+        }
+        Some(Source::Bytes {
+            base: base.clone(),
+            reversed: false,
+        })
+    }
+
+    /// The type a fused chain answers, or `None` when the terminal's result
+    /// is not the one a plain loop computes.
+    fn chain_result_ty(&mut self, terminal: &Terminal, expr_ty: Ty, elem_ty: Ty) -> Option<Ty> {
+        Some(match terminal {
+            Terminal::Any(_) | Terminal::All(_) => self.tcx.bool_ty(),
+            Terminal::ForEach(_) => self.tcx.unit_interned()?,
+            Terminal::Count | Terminal::CountBy(_) => {
+                if !is_i64(self.tcx, expr_ty) {
+                    return None;
+                }
+                expr_ty
+            }
+            // The accumulator is the element type itself, so a sum answers
+            // exactly what adding the elements with `+` from zero answers.
+            Terminal::Sum | Terminal::Product => {
+                if !is_number(self.tcx, expr_ty) || expr_ty != elem_ty {
+                    return None;
+                }
+                expr_ty
+            }
+            Terminal::Fold(init, _) => {
+                if !is_scalar(self.tcx, expr_ty) || init.ty != expr_ty {
+                    return None;
+                }
+                expr_ty
+            }
+            Terminal::Find(_) => {
+                if option_payload(self.tcx, expr_ty)? != elem_ty {
+                    return None;
+                }
+                expr_ty
+            }
+            Terminal::Position(_) => {
+                if !is_i64(self.tcx, option_payload(self.tcx, expr_ty)?) {
+                    return None;
+                }
+                expr_ty
+            }
+            // Only an integer's order is its `<`; a float's `min` / `max`
+            // follows the runtime's IEEE rule.
+            Terminal::Min | Terminal::Max => {
+                if option_payload(self.tcx, expr_ty)? != elem_ty
+                    || !matches!(self.tcx.kind_of(elem_ty), TyKind::Int(_))
+                {
+                    return None;
+                }
+                expr_ty
+            }
+            Terminal::Collect => {
+                if !matches!(self.tcx.kind_of(expr_ty), TyKind::Vec(elem) if *elem == elem_ty) {
+                    return None;
+                }
+                expr_ty
+            }
+            Terminal::SumBy(_) | Terminal::ProductBy(_) => return None,
+        })
+    }
+
+    /// Recognises a method chain ending in a terminal whose receiver root is an
+    /// `i64` range, `xs.iter()`, or a sequence binding an eager stage walks.
+    fn plan_method_chain(&mut self, expr: &HirExpr) -> Option<Plan> {
+        let HirExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let terminal = chain_terminal(name.name.as_str(), args)?;
+        let (walk, stages_rev, eager) = self.chain_source(receiver)?;
+        if eager && !eager_order_kept(&stages_rev, &terminal) {
+            return None;
+        }
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let mut elem_ty = self.walk_elem_ty(&walk);
+        for stage in &stages_rev {
+            elem_ty = match stage {
+                Stage::Map(f) => {
+                    let HirExprKind::Closure { body, .. } = &f.kind else {
+                        return None;
+                    };
+                    body.ty
+                }
+                Stage::Enumerate => self.tcx.intern(TyKind::Tuple(vec![i64_ty, elem_ty])),
+                Stage::Zip(other) => {
+                    let other_ty = self.source_elem_ty(other);
+                    self.tcx.intern(TyKind::Tuple(vec![elem_ty, other_ty]))
+                }
+                Stage::FilterMap(f) => {
+                    let HirExprKind::Closure { body, .. } = &f.kind else {
+                        return None;
+                    };
+                    option_payload(self.tcx, body.ty)?
+                }
+                Stage::Filter(_)
+                | Stage::Take(_)
+                | Stage::Skip(_)
+                | Stage::StepBy(_)
+                | Stage::TakeWhile(_)
+                | Stage::SkipWhile(_) => elem_ty,
+            };
+            if !is_walked_elem(self.tcx, elem_ty) {
+                return None;
+            }
+        }
+        if !is_walked_elem(self.tcx, elem_ty) {
+            return None;
+        }
+        let result_ty = self.chain_result_ty(&terminal, expr.ty, elem_ty)?;
+        // A closure that names a walked binding could change it mid-walk.
+        let walked_bases = stages_rev
+            .iter()
+            .filter_map(|stage| match stage {
+                Stage::Zip(Source::Indexed { base, .. }) => Some(base),
+                _ => None,
+            })
+            .chain(match &walk {
+                Walk::Counted(Source::Indexed { base, .. }) | Walk::Map { base, .. } => Some(base),
+                Walk::Counted(_) => None,
+            });
+        for base in walked_bases {
+            if closures_name_base(base, &stages_rev, &terminal)? {
+                return None;
+            }
+        }
+        Some(Plan {
+            walk,
+            stages: stages_rev,
+            terminal,
+            result_ty,
+        })
+    }
+
+    /// A sequence binding of scalar elements, the only shape an index loop
+    /// reads with no share taken per element.
+    fn indexed_source(&self, base: &HirExpr) -> Option<Source> {
+        let HirExprKind::Path { segments, .. } = &base.kind else {
+            return None;
+        };
+        if segments.len() != 1 {
+            return None;
+        }
+        let elem_ty = match self.tcx.kind_of(base.ty) {
+            TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => *elem,
+            _ => return None,
+        };
+        if !is_walked_elem(self.tcx, elem_ty) {
+            return None;
+        }
+        Some(Source::Indexed {
+            base: base.clone(),
+            elem_ty,
+            reversed: false,
         })
     }
 
@@ -331,16 +843,13 @@ impl Fuser<'_> {
 
     fn build(&mut self, plan: Plan, span: Span) -> HirExpr {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
-        let unit_ty = self.tcx.unit();
         let counter = self.temp_name("i");
         let end_name = self.temp_name("end");
         let acc = self.temp_name("acc");
         let has_acc = !matches!(plan.terminal, Terminal::ForEach(_));
 
         let Plan {
-            start,
-            end,
-            inclusive,
+            walk,
             stages,
             terminal,
             result_ty,
@@ -352,58 +861,445 @@ impl Fuser<'_> {
             let s = self.let_stmt(&acc, true, result_ty, init, span);
             stmts.push(s);
         }
-        let s = self.let_stmt(&counter, true, i64_ty, start, span);
-        stmts.push(s);
-        let s = self.let_stmt(&end_name, false, i64_ty, end, span);
-        stmts.push(s);
-
-        let while_expr = self.build_while(
-            &counter, &end_name, inclusive, &stages, &terminal, &acc, span,
-        );
+        let source = match walk {
+            Walk::Counted(source) => source,
+            Walk::Map {
+                base,
+                key_ty,
+                value_ty,
+                part,
+            } => {
+                self.terminal_bindings(&terminal, &acc, result_ty, &mut stmts, span);
+                let steps = self.stage_steps(&stages, &mut stmts, span);
+                let entries = MapEntries {
+                    base,
+                    key_ty,
+                    value_ty,
+                    part,
+                };
+                let loop_expr =
+                    self.build_map_loop(entries, &steps, &terminal, &acc, result_ty, span);
+                let s = self.expr_stmt(loop_expr, span);
+                stmts.push(s);
+                return self.finish(stmts, has_acc, &acc, result_ty, span);
+            }
+        };
+        let (start, end, inclusive, reversed, read) = match source {
+            Source::Range {
+                start,
+                end,
+                inclusive,
+                reversed,
+            } => (start, end, inclusive, reversed, ElemRead::Counter),
+            Source::Indexed {
+                base,
+                elem_ty,
+                reversed,
+            } => {
+                let zero = self.int_lit(0, i64_ty, span);
+                let len = self.len_call(&base, span);
+                (zero, len, false, reversed, ElemRead::Index(base, elem_ty))
+            }
+            Source::Bytes { base, reversed } => {
+                let zero = self.int_lit(0, i64_ty, span);
+                let len = self.method0(&base, "byte_len", i64_ty, span);
+                (zero, len, false, reversed, ElemRead::Byte(base))
+            }
+        };
+        // Both walks evaluate the start before the end.
+        if reversed {
+            let s = self.let_stmt(&end_name, false, i64_ty, start, span);
+            stmts.push(s);
+            let s = self.let_stmt(&counter, true, i64_ty, end, span);
+            stmts.push(s);
+        } else {
+            let s = self.let_stmt(&counter, true, i64_ty, start, span);
+            stmts.push(s);
+            let s = self.let_stmt(&end_name, false, i64_ty, end, span);
+            stmts.push(s);
+        }
+        self.terminal_bindings(&terminal, &acc, result_ty, &mut stmts, span);
+        let steps = self.stage_steps(&stages, &mut stmts, span);
+        let shape = LoopShape {
+            counter: &counter,
+            bound: &end_name,
+            inclusive,
+            reversed,
+        };
+        let while_expr = self.build_while(&shape, read, &steps, &terminal, &acc, result_ty, span);
         let s = self.expr_stmt(while_expr, span);
         stmts.push(s);
-
-        let (tail, block_ty) = if has_acc {
-            (Some(self.path(&acc, result_ty, span)), result_ty)
-        } else {
-            (None, unit_ty)
-        };
-        self.block(stmts, tail, block_ty, span)
+        self.finish(stmts, has_acc, &acc, result_ty, span)
     }
 
-    /// Builds `while <counter> <=/< <end> { <stages/terminal>; counter += 1 }`.
+    /// The pipeline's block: its statements, then the accumulator when the
+    /// terminal answers one.
+    fn finish(
+        &mut self,
+        stmts: Vec<HirStmt>,
+        has_acc: bool,
+        acc: &str,
+        result_ty: Ty,
+        span: Span,
+    ) -> HirExpr {
+        if has_acc {
+            let tail = self.path(acc, result_ty, span);
+            self.block(stmts, Some(tail), result_ty, span)
+        } else {
+            let unit_ty = self.tcx.unit();
+            self.block(stmts, None, unit_ty, span)
+        }
+    }
+
+    /// `for (key, value) in base { .. }`, spelled as the `loop` / `match` on
+    /// `next()` a `for` lowers to, so the walk is the one the map's own `for`
+    /// loop takes. Only the parts the pipeline reads are bound.
+    fn build_map_loop(
+        &mut self,
+        entries: MapEntries,
+        steps: &[Step<'_>],
+        terminal: &Terminal,
+        acc: &str,
+        result_ty: Ty,
+        span: Span,
+    ) -> HirExpr {
+        let MapEntries {
+            base,
+            key_ty,
+            value_ty,
+            part,
+        } = entries;
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let unit_ty = self.tcx.unit();
+        let bool_ty = self.tcx.bool_ty();
+
+        let mut body_stmts = Vec::new();
+        for step in steps {
+            if let Step::Take { counter, limit } = step {
+                let taken = self.path(counter, i64_ty, span);
+                let limit = self.int_lit(*limit, i64_ty, span);
+                let done = self.binary(HirBinaryOp::Ge, taken, limit, bool_ty, span);
+                let stop = self.break_if(done, span);
+                body_stmts.push(stop);
+            }
+        }
+        let key_name = self.temp_name("k");
+        let value_name = self.temp_name("mv");
+        let reads_key = !matches!(part, MapPart::Values);
+        let reads_value = !matches!(part, MapPart::Keys);
+        let key_pat = self.entry_pat(reads_key.then_some(key_name.as_str()), key_ty, span);
+        let value_pat = self.entry_pat(reads_value.then_some(value_name.as_str()), value_ty, span);
+        let pair_ty = self.tcx.intern(TyKind::Tuple(vec![key_ty, value_ty]));
+        let elem = match part {
+            MapPart::Pairs => {
+                let key = self.path(&key_name, key_ty, span);
+                let value = self.path(&value_name, value_ty, span);
+                self.expr(pair_ty, span, HirExprKind::Tuple(vec![key, value]))
+            }
+            MapPart::Keys => self.path(&key_name, key_ty, span),
+            MapPart::Values => self.path(&value_name, value_ty, span),
+        };
+        let elem = if matches!(part, MapPart::Pairs) {
+            let elem_name = self.temp_name("e");
+            let bind = self.let_stmt(&elem_name, false, pair_ty, elem, span);
+            body_stmts.push(bind);
+            self.path(&elem_name, pair_ty, span)
+        } else {
+            elem
+        };
+        body_stmts.extend(self.build_body(steps, 0, elem, terminal, acc, result_ty, span));
+        let body = self.block(body_stmts, None, unit_ty, span);
+
+        let entry_pat = HirPat {
+            id: self.ids.next(),
+            span,
+            ty: pair_ty,
+            kind: HirPatKind::Tuple(vec![key_pat, value_pat]),
+        };
+        let (some_pat, none_pat) = self.some_none_pats(entry_pat, pair_ty, span);
+        let never = self.tcx.never();
+        let brk = self.expr(
+            never,
+            span,
+            HirExprKind::Break {
+                value: None,
+                label: None,
+            },
+        );
+        let next_call = self.expr(
+            pair_ty,
+            span,
+            HirExprKind::MethodCall {
+                receiver: Box::new(base),
+                name: Ident::new("next"),
+                args: Vec::new(),
+                owner: None,
+            },
+        );
+        let match_expr = self.match_some(next_call, (some_pat, body), (none_pat, brk), span);
+        let loop_body = self.block(Vec::new(), Some(match_expr), unit_ty, span);
+        self.expr(
+            unit_ty,
+            span,
+            HirExprKind::Loop {
+                body: Box::new(loop_body),
+                label: None,
+            },
+        )
+    }
+
+    /// A binding for an entry part the pipeline reads, `_` for one it does not.
+    fn entry_pat(&mut self, name: Option<&str>, ty: Ty, span: Span) -> HirPat {
+        let kind = match name {
+            Some(name) => HirPatKind::Binding {
+                name: Ident::new(name),
+                mutable: false,
+            },
+            None => HirPatKind::Wildcard,
+        };
+        HirPat {
+            id: self.ids.next(),
+            span,
+            ty,
+            kind,
+        }
+    }
+
+    /// The `Some(<payload>)` and `None` patterns of a match whose scrutinee
+    /// has type `ty`.
+    fn some_none_pats(&mut self, payload: HirPat, ty: Ty, span: Span) -> (HirPat, HirPat) {
+        let some_pat = HirPat {
+            id: self.ids.next(),
+            span,
+            ty,
+            kind: HirPatKind::Variant {
+                name: Ident::new("Some"),
+                fields: vec![payload],
+            },
+        };
+        let none_pat = HirPat {
+            id: self.ids.next(),
+            span,
+            ty,
+            kind: HirPatKind::Variant {
+                name: Ident::new("None"),
+                fields: Vec::new(),
+            },
+        };
+        (some_pat, none_pat)
+    }
+
+    /// `match scrutinee { Some(..) => <body>, None => <body> }` as a unit.
+    fn match_some(
+        &mut self,
+        scrutinee: HirExpr,
+        some: (HirPat, HirExpr),
+        none: (HirPat, HirExpr),
+        span: Span,
+    ) -> HirExpr {
+        let unit_ty = self.tcx.unit();
+        let arm = |(pattern, body)| HirMatchArm {
+            pattern,
+            guard: None,
+            body,
+        };
+        self.expr(
+            unit_ty,
+            span,
+            HirExprKind::Match {
+                scrutinee: Box::new(scrutinee),
+                arms: vec![arm(some), arm(none)],
+            },
+        )
+    }
+
+    /// `if cond { then } else { otherwise }` as an expression of type `ty`.
+    fn if_expr(
+        &mut self,
+        cond: HirExpr,
+        then: HirExpr,
+        otherwise: Option<HirExpr>,
+        ty: Ty,
+        span: Span,
+    ) -> HirExpr {
+        self.expr(
+            ty,
+            span,
+            HirExprKind::If {
+                condition: Box::new(cond),
+                then_branch: Box::new(then),
+                else_branch: otherwise.map(Box::new),
+            },
+        )
+    }
+
+    /// `if cond { then } else { otherwise }` as a statement.
+    fn if_stmt(
+        &mut self,
+        cond: HirExpr,
+        then: Vec<HirStmt>,
+        otherwise: Option<Vec<HirStmt>>,
+        span: Span,
+    ) -> HirStmt {
+        let unit_ty = self.tcx.unit();
+        let then = self.block(then, None, unit_ty, span);
+        let otherwise = otherwise.map(|stmts| self.block(stmts, None, unit_ty, span));
+        let if_expr = self.if_expr(cond, then, otherwise, unit_ty, span);
+        self.expr_stmt(if_expr, span)
+    }
+
+    /// Binds, ahead of the loop, the state each stage keeps across turns.
+    fn stage_steps<'p>(
+        &mut self,
+        stages: &'p [Stage],
+        stmts: &mut Vec<HirStmt>,
+        span: Span,
+    ) -> Vec<Step<'p>> {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let mut steps = Vec::with_capacity(stages.len());
+        for stage in stages {
+            let step = match stage {
+                Stage::Filter(pred) => Step::Filter(pred),
+                Stage::Map(f) => Step::Map(f),
+                Stage::TakeWhile(pred) => Step::TakeWhile(pred),
+                Stage::FilterMap(f) => Step::FilterMap(f),
+                Stage::SkipWhile(pred) => {
+                    let skipping = self.temp_name("skipping");
+                    let yes = self.bool_lit(true, span);
+                    let bool_ty = self.tcx.bool_ty();
+                    let s = self.let_stmt(&skipping, true, bool_ty, yes, span);
+                    stmts.push(s);
+                    Step::SkipWhile { pred, skipping }
+                }
+                Stage::Enumerate | Stage::Take(_) | Stage::Skip(_) | Stage::StepBy(_) => {
+                    let counter = self.temp_name("n");
+                    let zero = self.int_lit(0, i64_ty, span);
+                    let s = self.let_stmt(&counter, true, i64_ty, zero, span);
+                    stmts.push(s);
+                    match stage {
+                        Stage::Take(limit) => Step::Take {
+                            counter,
+                            limit: *limit,
+                        },
+                        Stage::Skip(count) => Step::Skip {
+                            counter,
+                            count: *count,
+                        },
+                        Stage::StepBy(step) => Step::Stride {
+                            counter,
+                            step: *step,
+                        },
+                        _ => Step::Enumerate { counter },
+                    }
+                }
+                Stage::Zip(other) => {
+                    let position = self.temp_name("z");
+                    let end = self.temp_name("zend");
+                    let (start, end_expr, inclusive, read) = match other {
+                        Source::Range {
+                            start,
+                            end,
+                            inclusive,
+                            ..
+                        } => (
+                            self.reclone(start),
+                            self.reclone(end),
+                            *inclusive,
+                            ElemRead::Counter,
+                        ),
+                        Source::Indexed { base, elem_ty, .. } => {
+                            let zero = self.int_lit(0, i64_ty, span);
+                            let len = self.len_call(base, span);
+                            (
+                                zero,
+                                len,
+                                false,
+                                ElemRead::Index(self.reclone(base), *elem_ty),
+                            )
+                        }
+                        Source::Bytes { base, .. } => {
+                            let zero = self.int_lit(0, i64_ty, span);
+                            let len = self.method0(base, "byte_len", i64_ty, span);
+                            (zero, len, false, ElemRead::Byte(self.reclone(base)))
+                        }
+                    };
+                    let s = self.let_stmt(&position, true, i64_ty, start, span);
+                    stmts.push(s);
+                    let s = self.let_stmt(&end, false, i64_ty, end_expr, span);
+                    stmts.push(s);
+                    Step::Zip {
+                        position,
+                        end,
+                        inclusive,
+                        read,
+                    }
+                }
+            };
+            steps.push(step);
+        }
+        steps
+    }
+
+    /// Builds the loop over the source: `take` checks, the element read, the
+    /// stages and terminal, and the counter step.
+    /// With an indexed source the element is `base[counter]`, bound once
+    /// per turn before the stages read it.
+    // The loop's shape is the product of every part a plan names; grouping
+    // them into a struct would only restate the plan.
     #[allow(clippy::too_many_arguments)]
     fn build_while(
         &mut self,
-        counter: &str,
-        end_name: &str,
-        inclusive: bool,
-        stages: &[Stage],
+        shape: &LoopShape<'_>,
+        read: ElemRead,
+        steps: &[Step<'_>],
         terminal: &Terminal,
         acc: &str,
+        result_ty: Ty,
         span: Span,
     ) -> HirExpr {
         let i64_ty = self.tcx.int_ty(IntTy::I64);
         let unit_ty = self.tcx.unit();
         let bool_ty = self.tcx.bool_ty();
 
-        let elem = self.path(counter, i64_ty, span);
-        let mut body_stmts = self.build_body(stages, 0, elem, terminal, acc, span);
-        let ctr_path = self.path(counter, i64_ty, span);
-        let one = self.int_lit(1, i64_ty, span);
-        let inc = self.binary(HirBinaryOp::Add, ctr_path, one, i64_ty, span);
-        let ctr_place = self.path(counter, i64_ty, span);
-        let bump = self.assign_stmt(ctr_place, inc, span);
-        body_stmts.push(bump);
+        let mut body_stmts = Vec::new();
+        // A `take` whose count has passed ends the loop before the next pull.
+        for step in steps {
+            if let Step::Take { counter, limit } = step {
+                let taken = self.path(counter, i64_ty, span);
+                let limit = self.int_lit(*limit, i64_ty, span);
+                let done = self.binary(HirBinaryOp::Ge, taken, limit, bool_ty, span);
+                let stop = self.break_if(done, span);
+                body_stmts.push(stop);
+            }
+        }
+        if shape.reversed {
+            let down = self.step_stmt(shape.counter, HirBinaryOp::Sub, span);
+            body_stmts.push(down);
+        }
+        let value = self.elem_value(&read, shape.counter, span);
+        let elem_ty = value.ty;
+        let elem = if matches!(read, ElemRead::Counter) {
+            value
+        } else {
+            let elem_name = self.temp_name("e");
+            let bind = self.let_stmt(&elem_name, false, elem_ty, value, span);
+            body_stmts.push(bind);
+            self.path(&elem_name, elem_ty, span)
+        };
+        body_stmts.extend(self.build_body(steps, 0, elem, terminal, acc, result_ty, span));
+        if !shape.reversed {
+            let up = self.step_stmt(shape.counter, HirBinaryOp::Add, span);
+            body_stmts.push(up);
+        }
         let body_block = self.block(body_stmts, None, unit_ty, span);
 
-        let cmp_op = if inclusive {
-            HirBinaryOp::Le
-        } else {
-            HirBinaryOp::Lt
+        let cmp_op = match (shape.reversed, shape.inclusive) {
+            (true, _) => HirBinaryOp::Gt,
+            (false, true) => HirBinaryOp::Le,
+            (false, false) => HirBinaryOp::Lt,
         };
-        let lhs = self.path(counter, i64_ty, span);
-        let rhs = self.path(end_name, i64_ty, span);
+        let lhs = self.path(shape.counter, i64_ty, span);
+        let rhs = self.path(shape.bound, i64_ty, span);
         let cond = self.binary(cmp_op, lhs, rhs, bool_ty, span);
         self.expr(
             unit_ty,
@@ -416,48 +1312,361 @@ impl Fuser<'_> {
         )
     }
 
+    // Each argument threads one piece of the recursion's state.
+    #[allow(clippy::too_many_arguments)]
     fn build_body(
         &mut self,
-        stages: &[Stage],
+        steps: &[Step<'_>],
         i: usize,
         elem: HirExpr,
         terminal: &Terminal,
         acc: &str,
+        result_ty: Ty,
         span: Span,
     ) -> Vec<HirStmt> {
-        if i == stages.len() {
-            return self.terminal_stmts(terminal, elem, acc, span);
+        if i == steps.len() {
+            return self.terminal_stmts(terminal, elem, acc, result_ty, span);
         }
-        match &stages[i] {
-            Stage::Filter(pred) => {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let unit_ty = self.tcx.unit();
+        let bool_ty = self.tcx.bool_ty();
+        match &steps[i] {
+            Step::Filter(pred) => {
                 let elem_for_pred = self.reclone(&elem);
                 let cond = self.inline1(pred, elem_for_pred, span);
-                let rest = self.build_body(stages, i + 1, elem, terminal, acc, span);
-                let unit_ty = self.tcx.unit();
-                let rest_block = self.block(rest, None, unit_ty, span);
-                let if_expr = self.expr(
-                    unit_ty,
-                    span,
-                    HirExprKind::If {
-                        condition: Box::new(cond),
-                        then_branch: Box::new(rest_block),
-                        else_branch: None,
-                    },
-                );
-                let stmt = self.expr_stmt(if_expr, span);
-                vec![stmt]
+                let rest = self.build_body(steps, i + 1, elem, terminal, acc, result_ty, span);
+                vec![self.if_stmt(cond, rest, None, span)]
             }
-            Stage::Map(f) => {
-                let i64_ty = self.tcx.int_ty(IntTy::I64);
+            Step::Map(f) => {
                 let vname = self.temp_name("v");
                 let mapped = self.inline1(f, elem, span);
-                let let_v = self.let_stmt(&vname, false, i64_ty, mapped, span);
-                let next_elem = self.path(&vname, i64_ty, span);
-                let mut out = vec![let_v];
-                out.extend(self.build_body(stages, i + 1, next_elem, terminal, acc, span));
+                let mapped_ty = mapped.ty;
+                let mut out = vec![self.let_stmt(&vname, false, mapped_ty, mapped, span)];
+                let next = self.path(&vname, mapped_ty, span);
+                out.extend(self.build_body(steps, i + 1, next, terminal, acc, result_ty, span));
                 out
             }
+            Step::Enumerate { counter } => {
+                let index = self.path(counter, i64_ty, span);
+                let (bind, pair) = self.bind_pair(index, elem, span);
+                let up = self.step_stmt(counter, HirBinaryOp::Add, span);
+                let mut out = vec![bind, up];
+                out.extend(self.build_body(steps, i + 1, pair, terminal, acc, result_ty, span));
+                out
+            }
+            Step::Take { counter, .. } => {
+                let up = self.step_stmt(counter, HirBinaryOp::Add, span);
+                let mut out = vec![up];
+                out.extend(self.build_body(steps, i + 1, elem, terminal, acc, result_ty, span));
+                out
+            }
+            Step::Skip { counter, count } => {
+                let seen = self.path(counter, i64_ty, span);
+                let limit = self.int_lit(*count, i64_ty, span);
+                let skipping = self.binary(HirBinaryOp::Lt, seen, limit, bool_ty, span);
+                let up = self.step_stmt(counter, HirBinaryOp::Add, span);
+                let rest = self.build_body(steps, i + 1, elem, terminal, acc, result_ty, span);
+                vec![self.if_stmt(skipping, vec![up], Some(rest), span)]
+            }
+            Step::Stride { counter, step } => {
+                let (mut out, hit) = self.stride_hit(counter, *step, span);
+                let rest = self.build_body(steps, i + 1, elem, terminal, acc, result_ty, span);
+                out.push(self.if_stmt(hit, rest, None, span));
+                out
+            }
+            Step::Zip {
+                position,
+                end,
+                inclusive,
+                read,
+            } => {
+                let (mut out, pair) = self.zip_pair(position, end, *inclusive, read, elem, span);
+                out.extend(self.build_body(steps, i + 1, pair, terminal, acc, result_ty, span));
+                out
+            }
+            Step::TakeWhile(pred) => {
+                let elem_for_pred = self.reclone(&elem);
+                let holds = self.inline1(pred, elem_for_pred, span);
+                let fails = self.not(holds, span);
+                let mut out = vec![self.break_if(fails, span)];
+                out.extend(self.build_body(steps, i + 1, elem, terminal, acc, result_ty, span));
+                out
+            }
+            Step::SkipWhile { pred, skipping } => {
+                let (bind, dropping, passed) = self.skip_while_gate(pred, skipping, &elem, span);
+                let mut rest = vec![passed];
+                rest.extend(self.build_body(steps, i + 1, elem, terminal, acc, result_ty, span));
+                vec![bind, self.if_stmt(dropping, Vec::new(), Some(rest), span)]
+            }
+            Step::FilterMap(f) => {
+                let mapped = self.inline1(f, elem, span);
+                let option_ty = mapped.ty;
+                let Some(payload_ty) = option_payload(self.tcx, option_ty) else {
+                    return Vec::new();
+                };
+                let vname = self.temp_name("v");
+                let binding = self.entry_pat(Some(&vname), payload_ty, span);
+                let (some_pat, none_pat) = self.some_none_pats(binding, option_ty, span);
+                let payload = self.path(&vname, payload_ty, span);
+                let rest = self.build_body(steps, i + 1, payload, terminal, acc, result_ty, span);
+                let some_body = self.block(rest, None, unit_ty, span);
+                let none_body = self.block(Vec::new(), None, unit_ty, span);
+                let matched =
+                    self.match_some(mapped, (some_pat, some_body), (none_pat, none_body), span);
+                vec![self.expr_stmt(matched, span)]
+            }
         }
+    }
+
+    /// Binds whether this turn is one a `step_by` keeps and advances its
+    /// counter, answering those statements and the condition that reads the
+    /// binding.
+    fn stride_hit(&mut self, counter: &str, step: i64, span: Span) -> (Vec<HirStmt>, HirExpr) {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let bool_ty = self.tcx.bool_ty();
+        let seen = self.path(counter, i64_ty, span);
+        let every = self.int_lit(step, i64_ty, span);
+        let offset = self.binary(HirBinaryOp::Rem, seen, every, i64_ty, span);
+        let zero = self.int_lit(0, i64_ty, span);
+        let hit = self.binary(HirBinaryOp::Eq, offset, zero, bool_ty, span);
+        let hit_name = self.temp_name("hit");
+        let bind = self.let_stmt(&hit_name, false, bool_ty, hit, span);
+        let up = self.step_stmt(counter, HirBinaryOp::Add, span);
+        let cond = self.path(&hit_name, bool_ty, span);
+        (vec![bind, up], cond)
+    }
+
+    /// Ends the loop once the zipped sequence runs out, pairs the element with
+    /// that sequence's, and advances its position.
+    fn zip_pair(
+        &mut self,
+        position: &str,
+        end: &str,
+        inclusive: bool,
+        read: &ElemRead,
+        elem: HirExpr,
+        span: Span,
+    ) -> (Vec<HirStmt>, HirExpr) {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let bool_ty = self.tcx.bool_ty();
+        let at = self.path(position, i64_ty, span);
+        let bound = self.path(end, i64_ty, span);
+        let op = if inclusive {
+            HirBinaryOp::Gt
+        } else {
+            HirBinaryOp::Ge
+        };
+        let done = self.binary(op, at, bound, bool_ty, span);
+        let stop = self.break_if(done, span);
+        let other = self.elem_value(read, position, span);
+        let (bind, pair) = self.bind_pair(elem, other, span);
+        let up = self.step_stmt(position, HirBinaryOp::Add, span);
+        (vec![stop, bind, up], pair)
+    }
+
+    /// What a `skip_while` decides each turn: the binding of whether this
+    /// element is still dropped, the condition that reads it, and the store
+    /// that ends the skipping once an element passes.
+    fn skip_while_gate(
+        &mut self,
+        pred: &HirExpr,
+        skipping: &str,
+        elem: &HirExpr,
+        span: Span,
+    ) -> (HirStmt, HirExpr, HirStmt) {
+        let bool_ty = self.tcx.bool_ty();
+        let elem_for_pred = self.reclone(elem);
+        let holds = self.inline1(pred, elem_for_pred, span);
+        let still = self.path(skipping, bool_ty, span);
+        let no = self.bool_lit(false, span);
+        let asked = self.block(Vec::new(), Some(holds), bool_ty, span);
+        let not_asked = self.block(Vec::new(), Some(no), bool_ty, span);
+        let dropping = self.if_expr(still, asked, Some(not_asked), bool_ty, span);
+        let dropping_name = self.temp_name("dropping");
+        let bind = self.let_stmt(&dropping_name, false, bool_ty, dropping, span);
+        let place = self.path(skipping, bool_ty, span);
+        let stop_skipping = self.bool_lit(false, span);
+        let passed = self.assign_stmt(place, stop_skipping, span);
+        let cond = self.path(&dropping_name, bool_ty, span);
+        (bind, cond, passed)
+    }
+
+    /// The element a read answers at `counter`: the counter itself for a
+    /// range, `base[counter]` for a sequence, `base.byte_at(counter) as u8`
+    /// for the bytes of a `String`.
+    fn elem_value(&mut self, read: &ElemRead, counter: &str, span: Span) -> HirExpr {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let index = self.path(counter, i64_ty, span);
+        match read {
+            ElemRead::Counter => index,
+            ElemRead::Index(base, elem_ty) => {
+                let base = self.reclone(base);
+                self.expr(
+                    *elem_ty,
+                    span,
+                    HirExprKind::Index {
+                        base: Box::new(base),
+                        index: Box::new(index),
+                    },
+                )
+            }
+            ElemRead::Byte(base) => {
+                let u8_ty = self.tcx.int_ty(IntTy::U8);
+                let receiver = self.reclone(base);
+                let byte = self.expr(
+                    i64_ty,
+                    span,
+                    HirExprKind::MethodCall {
+                        receiver: Box::new(receiver),
+                        name: Ident::new("byte_at"),
+                        args: vec![index],
+                        owner: None,
+                    },
+                );
+                self.expr(
+                    u8_ty,
+                    span,
+                    HirExprKind::Cast {
+                        value: Box::new(byte),
+                        ty: u8_ty,
+                    },
+                )
+            }
+        }
+    }
+
+    /// `!value`
+    fn not(&mut self, value: HirExpr, span: Span) -> HirExpr {
+        let bool_ty = self.tcx.bool_ty();
+        self.expr(
+            bool_ty,
+            span,
+            HirExprKind::Unary {
+                op: HirUnaryOp::Not,
+                operand: Box::new(value),
+            },
+        )
+    }
+
+    /// `receiver.<name>()`
+    fn method0(&mut self, receiver: &HirExpr, name: &str, ty: Ty, span: Span) -> HirExpr {
+        let receiver = self.reclone(receiver);
+        self.expr(
+            ty,
+            span,
+            HirExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                name: Ident::new(name),
+                args: Vec::new(),
+                owner: None,
+            },
+        )
+    }
+
+    /// `Some(value)` of the option type `ty`.
+    fn some(&mut self, value: HirExpr, ty: Ty, span: Span) -> HirExpr {
+        let callee = self.path("Some", ty, span);
+        self.expr(
+            ty,
+            span,
+            HirExprKind::Call {
+                callee: Box::new(callee),
+                args: vec![value],
+            },
+        )
+    }
+
+    /// The bindings a terminal keeps beside its accumulator: the position a
+    /// `position` counts, and the best element a `min` / `max` holds.
+    fn terminal_bindings(
+        &mut self,
+        terminal: &Terminal,
+        acc: &str,
+        result_ty: Ty,
+        stmts: &mut Vec<HirStmt>,
+        span: Span,
+    ) {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        match terminal {
+            Terminal::Position(_) => {
+                let zero = self.int_lit(0, i64_ty, span);
+                let s = self.let_stmt(&format!("{acc}_pos"), true, i64_ty, zero, span);
+                stmts.push(s);
+            }
+            Terminal::Min | Terminal::Max => {
+                let Some(elem_ty) = option_payload(self.tcx, result_ty) else {
+                    return;
+                };
+                let zero = self.int_lit(0, elem_ty, span);
+                let s = self.let_stmt(&format!("{acc}_best"), true, elem_ty, zero, span);
+                stmts.push(s);
+                let bool_ty = self.tcx.bool_ty();
+                let no = self.bool_lit(false, span);
+                let s = self.let_stmt(&format!("{acc}_any"), true, bool_ty, no, span);
+                stmts.push(s);
+            }
+            _ => {}
+        }
+    }
+
+    /// `let v = (first, second)`, answering the statement and a read of `v`.
+    fn bind_pair(&mut self, first: HirExpr, second: HirExpr, span: Span) -> (HirStmt, HirExpr) {
+        let ty = self.tcx.intern(TyKind::Tuple(vec![first.ty, second.ty]));
+        let pair = self.expr(ty, span, HirExprKind::Tuple(vec![first, second]));
+        let name = self.temp_name("v");
+        let stmt = self.let_stmt(&name, false, ty, pair, span);
+        (stmt, self.path(&name, ty, span))
+    }
+
+    /// `name = name <op> 1`
+    fn step_stmt(&mut self, name: &str, op: HirBinaryOp, span: Span) -> HirStmt {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let read = self.path(name, i64_ty, span);
+        let one = self.int_lit(1, i64_ty, span);
+        let value = self.binary(op, read, one, i64_ty, span);
+        let place = self.path(name, i64_ty, span);
+        self.assign_stmt(place, value, span)
+    }
+
+    /// `if cond { break }` on the fused loop.
+    fn break_if(&mut self, cond: HirExpr, span: Span) -> HirStmt {
+        let unit_ty = self.tcx.unit();
+        let brk = self.expr(
+            unit_ty,
+            span,
+            HirExprKind::Break {
+                value: None,
+                label: None,
+            },
+        );
+        let brk = self.expr_stmt(brk, span);
+        let then = self.block(vec![brk], None, unit_ty, span);
+        let if_expr = self.expr(
+            unit_ty,
+            span,
+            HirExprKind::If {
+                condition: Box::new(cond),
+                then_branch: Box::new(then),
+                else_branch: None,
+            },
+        );
+        self.expr_stmt(if_expr, span)
+    }
+
+    /// `base.len()`
+    fn len_call(&mut self, base: &HirExpr, span: Span) -> HirExpr {
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let receiver = self.reclone(base);
+        self.expr(
+            i64_ty,
+            span,
+            HirExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                name: Ident::new("len"),
+                args: Vec::new(),
+                owner: None,
+            },
+        )
     }
 
     fn terminal_stmts(
@@ -465,28 +1674,35 @@ impl Fuser<'_> {
         terminal: &Terminal,
         elem: HirExpr,
         acc: &str,
+        result_ty: Ty,
         span: Span,
     ) -> Vec<HirStmt> {
-        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let ty = result_ty;
         match terminal {
-            Terminal::Sum => vec![self.acc_op(acc, elem, HirBinaryOp::Add, i64_ty, span)],
-            Terminal::Product => vec![self.acc_op(acc, elem, HirBinaryOp::Mul, i64_ty, span)],
+            Terminal::Sum => vec![self.acc_op(acc, elem, HirBinaryOp::Add, ty, span)],
+            Terminal::Product => vec![self.acc_op(acc, elem, HirBinaryOp::Mul, ty, span)],
             Terminal::Count => {
-                let one = self.int_lit(1, i64_ty, span);
-                vec![self.acc_op(acc, one, HirBinaryOp::Add, i64_ty, span)]
+                let one = self.int_lit(1, ty, span);
+                vec![self.acc_op(acc, one, HirBinaryOp::Add, ty, span)]
+            }
+            Terminal::CountBy(pred) => {
+                let cond = self.inline1(pred, elem, span);
+                let one = self.int_lit(1, ty, span);
+                let bump = self.acc_op(acc, one, HirBinaryOp::Add, ty, span);
+                vec![self.if_stmt(cond, vec![bump], None, span)]
             }
             Terminal::SumBy(f) => {
                 let mapped = self.inline1(f, elem, span);
-                vec![self.acc_op(acc, mapped, HirBinaryOp::Add, i64_ty, span)]
+                vec![self.acc_op(acc, mapped, HirBinaryOp::Add, ty, span)]
             }
             Terminal::ProductBy(f) => {
                 let mapped = self.inline1(f, elem, span);
-                vec![self.acc_op(acc, mapped, HirBinaryOp::Mul, i64_ty, span)]
+                vec![self.acc_op(acc, mapped, HirBinaryOp::Mul, ty, span)]
             }
             Terminal::Fold(_, f) => {
-                let acc_expr = self.path(acc, i64_ty, span);
+                let acc_expr = self.path(acc, ty, span);
                 let folded = self.inline2(f, acc_expr, elem, span);
-                let place = self.path(acc, i64_ty, span);
+                let place = self.path(acc, ty, span);
                 vec![self.assign_stmt(place, folded, span)]
             }
             Terminal::ForEach(f) => {
@@ -495,7 +1711,109 @@ impl Fuser<'_> {
             }
             Terminal::Any(p) => self.short_circuit(p, elem, acc, true, span),
             Terminal::All(p) => self.short_circuit(p, elem, acc, false, span),
+            Terminal::Collect => {
+                let unit_ty = self.tcx.unit();
+                let receiver = self.path(acc, ty, span);
+                let push = self.expr(
+                    unit_ty,
+                    span,
+                    HirExprKind::MethodCall {
+                        receiver: Box::new(receiver),
+                        name: Ident::new("push"),
+                        args: vec![elem],
+                        owner: None,
+                    },
+                );
+                vec![self.expr_stmt(push, span)]
+            }
+            Terminal::Find(p) => {
+                let elem_for_pred = self.reclone(&elem);
+                let holds = self.inline1(p, elem_for_pred, span);
+                let found = self.some(elem, ty, span);
+                let place = self.path(acc, ty, span);
+                let set = self.assign_stmt(place, found, span);
+                vec![self.set_and_break(holds, set, span)]
+            }
+            Terminal::Position(p) => {
+                let i64_ty = self.tcx.int_ty(IntTy::I64);
+                let counter = format!("{acc}_pos");
+                let holds = self.inline1(p, elem, span);
+                let at = self.path(&counter, i64_ty, span);
+                let found = self.some(at, ty, span);
+                let place = self.path(acc, ty, span);
+                let set = self.assign_stmt(place, found, span);
+                let stop = self.set_and_break(holds, set, span);
+                let up = self.step_stmt(&counter, HirBinaryOp::Add, span);
+                vec![stop, up]
+            }
+            Terminal::Min | Terminal::Max => {
+                self.extreme_stmts(matches!(terminal, Terminal::Min), elem, acc, ty, span)
+            }
         }
+    }
+
+    /// `min` / `max`: keeps the best element seen so far and answers its `Some`.
+    fn extreme_stmts(
+        &mut self,
+        min: bool,
+        elem: HirExpr,
+        acc: &str,
+        ty: Ty,
+        span: Span,
+    ) -> Vec<HirStmt> {
+        let bool_ty = self.tcx.bool_ty();
+        let elem_ty = elem.ty;
+        let best = format!("{acc}_best");
+        let any = format!("{acc}_any");
+        // The first smallest and the last largest win, as the runtime's.
+        let op = if min {
+            HirBinaryOp::Lt
+        } else {
+            HirBinaryOp::Ge
+        };
+        let candidate = self.reclone(&elem);
+        let held = self.path(&best, elem_ty, span);
+        let better = self.binary(op, candidate, held, bool_ty, span);
+        let seen = self.path(&any, bool_ty, span);
+        let yes = self.bool_lit(true, span);
+        let compared = self.block(Vec::new(), Some(better), bool_ty, span);
+        let first = self.block(Vec::new(), Some(yes), bool_ty, span);
+        let wins = self.if_expr(seen, compared, Some(first), bool_ty, span);
+        let best_place = self.path(&best, elem_ty, span);
+        let keep = self.reclone(&elem);
+        let set_best = self.assign_stmt(best_place, keep, span);
+        let any_place = self.path(&any, bool_ty, span);
+        let yes = self.bool_lit(true, span);
+        let set_any = self.assign_stmt(any_place, yes, span);
+        let found = self.some(elem, ty, span);
+        let acc_place = self.path(acc, ty, span);
+        let set_acc = self.assign_stmt(acc_place, found, span);
+        vec![self.if_stmt(wins, vec![set_best, set_any, set_acc], None, span)]
+    }
+
+    /// `if cond { <set>; break }`
+    fn set_and_break(&mut self, cond: HirExpr, set: HirStmt, span: Span) -> HirStmt {
+        let unit_ty = self.tcx.unit();
+        let brk = self.expr(
+            unit_ty,
+            span,
+            HirExprKind::Break {
+                value: None,
+                label: None,
+            },
+        );
+        let brk = self.expr_stmt(brk, span);
+        let then = self.block(vec![set, brk], None, unit_ty, span);
+        let if_expr = self.expr(
+            unit_ty,
+            span,
+            HirExprKind::If {
+                condition: Box::new(cond),
+                then_branch: Box::new(then),
+                else_branch: None,
+            },
+        );
+        self.expr_stmt(if_expr, span)
     }
 
     /// `if [!]pred(elem) { acc = <target>; break }` for `any` / `all`.
@@ -546,11 +1864,20 @@ impl Fuser<'_> {
     }
 
     fn acc_init(&mut self, terminal: &Terminal, ty: Ty, span: Span) -> HirExpr {
+        let float = matches!(self.tcx.kind_of(ty), TyKind::Float(_));
         match terminal {
             Terminal::Any(_) => self.bool_lit(false, span),
             Terminal::All(_) => self.bool_lit(true, span),
+            Terminal::Product | Terminal::ProductBy(_) if float => self.float_lit("1.0", ty, span),
             Terminal::Product | Terminal::ProductBy(_) => self.int_lit(1, ty, span),
             Terminal::Fold(init, _) => init.clone(),
+            Terminal::Find(_) | Terminal::Position(_) | Terminal::Min | Terminal::Max => {
+                self.path("None", ty, span)
+            }
+            Terminal::Collect => {
+                self.expr(ty, span, HirExprKind::Array(HirArrayExpr::List(Vec::new())))
+            }
+            _ if float => self.float_lit("0.0", ty, span),
             _ => self.int_lit(0, ty, span),
         }
     }
@@ -596,11 +1923,15 @@ impl Fuser<'_> {
     }
 
     fn param_let(&mut self, param: &HirParam, init: HirExpr, span: Span) -> HirStmt {
-        let name = match &param.pattern.kind {
-            HirPatKind::Binding { name, .. } => name.name.clone(),
-            _ => "_".to_string(),
-        };
-        self.let_stmt(&name, false, param.ty, init, span)
+        HirStmt {
+            id: self.ids.next(),
+            span,
+            kind: HirStmtKind::Let {
+                pattern: param.pattern.clone(),
+                ty: param.ty,
+                init: Some(init),
+            },
+        }
     }
 
     // ----- node constructors -----
@@ -619,6 +1950,14 @@ impl Fuser<'_> {
             ty,
             span,
             HirExprKind::Literal(HirLiteral::Int(v.to_string())),
+        )
+    }
+
+    fn float_lit(&mut self, text: &str, ty: Ty, span: Span) -> HirExpr {
+        self.expr(
+            ty,
+            span,
+            HirExprKind::Literal(HirLiteral::Float(text.to_string())),
         )
     }
 
@@ -833,10 +2172,11 @@ fn n_closure(expr: &HirExpr, n: usize) -> Option<&HirExpr> {
     if params.len() != n {
         return None;
     }
-    if params
-        .iter()
-        .any(|p| !matches!(p.pattern.kind, HirPatKind::Binding { .. }))
-    {
+    let simple = |p: &HirPat| matches!(p.kind, HirPatKind::Binding { .. } | HirPatKind::Wildcard);
+    if params.iter().any(|p| {
+        !(simple(&p.pattern)
+            || matches!(&p.pattern.kind, HirPatKind::Tuple(items) if items.iter().all(simple)))
+    }) {
         return None;
     }
     // Splicing the body into the loop must not move control flow that
@@ -933,10 +2273,186 @@ fn is_i64(tcx: &TyCtxt, ty: Ty) -> bool {
     matches!(tcx.kind_of(ty), TyKind::Int(IntTy::I64))
 }
 
+/// Integers and floats: the element types a sum or product accumulates.
+fn is_number(tcx: &TyCtxt, ty: Ty) -> bool {
+    matches!(tcx.kind_of(ty), TyKind::Int(_) | TyKind::Float(_))
+}
+
+/// Values a fused loop moves without taking a share: numbers, `bool`, `char`.
+fn is_scalar(tcx: &TyCtxt, ty: Ty) -> bool {
+    matches!(
+        tcx.kind_of(ty),
+        TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char
+    )
+}
+
+/// The payload type of an `Option`.
+fn option_payload(tcx: &TyCtxt, ty: Ty) -> Option<Ty> {
+    match tcx.kind_of(ty) {
+        TyKind::Adt { def, substs } if def.local == u32::MAX - 1 => substs.types().first().copied(),
+        _ => None,
+    }
+}
+
+/// Elements a fused loop may carry: plain values, and a type parameter. A
+/// generic body's fused loop is instantiated like the rest of the body, so
+/// each instantiation reads and hands on its elements with the ownership
+/// the concrete type takes, exactly as the loop written by hand would.
+fn is_walked_elem(tcx: &TyCtxt, ty: Ty) -> bool {
+    match tcx.kind_of(ty) {
+        TyKind::Param { .. } => true,
+        TyKind::Tuple(items) => items.iter().all(|item| is_walked_elem(tcx, *item)),
+        _ => is_scalar(tcx, ty),
+    }
+}
+
+/// An `i64` range with both ends, walked forwards.
+fn range_source(tcx: &TyCtxt, expr: &HirExpr) -> Option<Source> {
+    let HirExprKind::Range {
+        start: Some(start),
+        end: Some(end),
+        inclusive,
+    } = &expr.kind
+    else {
+        return None;
+    };
+    if !is_i64(tcx, start.ty) || !is_i64(tcx, end.ty) {
+        return None;
+    }
+    Some(Source::Range {
+        start: (**start).clone(),
+        end: (**end).clone(),
+        inclusive: *inclusive,
+        reversed: false,
+    })
+}
+
+/// An integer literal count of at least `min`. A computed count keeps the
+/// runtime adapter, which checks it when the chain is built and panics on one
+/// out of range.
+fn count_literal(expr: &HirExpr, min: i64) -> Option<i64> {
+    let HirExprKind::Literal(HirLiteral::Int(text)) = &expr.kind else {
+        return None;
+    };
+    let value: i64 = text.replace('_', "").parse().ok()?;
+    (value >= min).then_some(value)
+}
+
+/// Whether a fused eager chain calls its closures as the eager stages do.
+/// Each eager stage runs over every element before the next stage starts, so
+/// a second closure would interleave with the first, and a stage or terminal
+/// that stops early would skip calls a closure stage before it still makes.
+fn eager_order_kept(stages: &[Stage], terminal: &Terminal) -> bool {
+    let has_closure = |stage: &&Stage| {
+        matches!(
+            stage,
+            Stage::Map(_)
+                | Stage::Filter(_)
+                | Stage::TakeWhile(_)
+                | Stage::SkipWhile(_)
+                | Stage::FilterMap(_)
+        )
+    };
+    let closure_at = stages.iter().position(|stage| has_closure(&stage));
+    let stage_closures = stages.iter().filter(has_closure).count();
+    let terminal_closure = !matches!(
+        terminal,
+        Terminal::Sum
+            | Terminal::Product
+            | Terminal::Count
+            | Terminal::Min
+            | Terminal::Max
+            | Terminal::Collect
+    );
+    if stage_closures + usize::from(terminal_closure) > 1 {
+        return false;
+    }
+    let Some(at) = closure_at else {
+        return true;
+    };
+    let stops_later = stages[at + 1..]
+        .iter()
+        .any(|stage| matches!(stage, Stage::Take(_) | Stage::Zip(_) | Stage::TakeWhile(_)));
+    !stops_later
+        && !matches!(
+            terminal,
+            Terminal::Any(_) | Terminal::All(_) | Terminal::Find(_) | Terminal::Position(_)
+        )
+}
+
 fn map_closure_returns_i64(tcx: &TyCtxt, closure: &HirExpr) -> bool {
     if let HirExprKind::Closure { body, .. } = &closure.kind {
         is_i64(tcx, body.ty)
     } else {
         false
     }
+}
+
+/// The terminal a chain ends in, for the method name and arguments that name one.
+fn chain_terminal(name: &str, args: &[HirExpr]) -> Option<Terminal> {
+    Some(match (name, args.len()) {
+        ("sum", 0) => Terminal::Sum,
+        ("product", 0) => Terminal::Product,
+        ("count", 0) => Terminal::Count,
+        ("count", 1) => Terminal::CountBy(one_closure(&args[0])?.clone()),
+        ("fold", 2) => Terminal::Fold(args[0].clone(), n_closure(&args[1], 2)?.clone()),
+        ("for_each", 1) => Terminal::ForEach(one_closure(&args[0])?.clone()),
+        ("any", 1) => Terminal::Any(one_closure(&args[0])?.clone()),
+        ("all", 1) => Terminal::All(one_closure(&args[0])?.clone()),
+        ("find", 1) => Terminal::Find(one_closure(&args[0])?.clone()),
+        ("position", 1) => Terminal::Position(one_closure(&args[0])?.clone()),
+        ("min", 0) => Terminal::Min,
+        ("max", 0) => Terminal::Max,
+        ("collect", 0) => Terminal::Collect,
+        _ => return None,
+    })
+}
+
+/// Whether a closure of the chain names the sequence it walks. Such a closure
+/// could change the sequence while the loop reads it; the runtime iterator
+/// reports that and a plain index loop would not, so the chain keeps the
+/// runtime path. `None` when the base is not a binding.
+fn closures_name_base(base: &HirExpr, stages: &[Stage], terminal: &Terminal) -> Option<bool> {
+    let HirExprKind::Path { segments, .. } = &base.kind else {
+        return None;
+    };
+    let base_name = segments[0].name.clone();
+    let bound: HashSet<String> = HashSet::new();
+    let shadowed: HashSet<String> = HashSet::new();
+    let mut closures: Vec<&HirExpr> = stages
+        .iter()
+        .filter_map(|stage| match stage {
+            Stage::Filter(c)
+            | Stage::Map(c)
+            | Stage::TakeWhile(c)
+            | Stage::SkipWhile(c)
+            | Stage::FilterMap(c) => Some(c),
+            _ => None,
+        })
+        .collect();
+    match terminal {
+        Terminal::Fold(init, c) => {
+            closures.push(init);
+            closures.push(c);
+        }
+        Terminal::ForEach(c)
+        | Terminal::Any(c)
+        | Terminal::All(c)
+        | Terminal::CountBy(c)
+        | Terminal::SumBy(c)
+        | Terminal::ProductBy(c)
+        | Terminal::Find(c)
+        | Terminal::Position(c) => closures.push(c),
+        Terminal::Sum
+        | Terminal::Product
+        | Terminal::Count
+        | Terminal::Min
+        | Terminal::Max
+        | Terminal::Collect => {}
+    }
+    Some(
+        closures
+            .iter()
+            .any(|c| collect_free_vars(c, &bound, &shadowed).contains(&base_name)),
+    )
 }

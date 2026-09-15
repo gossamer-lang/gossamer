@@ -828,6 +828,143 @@ fn lifted_iter_map_closure_param_keeps_string_type() {
 }
 
 #[test]
+fn positional_method_chains_fuse_into_one_loop() {
+    let source = "fn main() {\n\
+                  let xs = #[1, 2, 3, 4]\n\
+                  let ys = #[5, 6, 7]\n\
+                  let a = xs.iter().enumerate().map(|(i, v)| i * v).sum()\n\
+                  let b = xs.iter().zip(ys.iter()).skip(1).step_by(2).count()\n\
+                  let c = (0..10).rev().take(3).fold(0, |acc, v| acc + v)\n\
+                  let _ = a + b + c\n\
+                  }\n";
+    let (bodies, _) = build_with_lift(source);
+    let main = bodies.iter().find(|b| b.name == "main").expect("main");
+    let names = call_names(main);
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("gos_rt_lazy_iter_") || name.starts_with("gos_rt_iter_")),
+        "positional stages over a range or a sequence must fuse into one loop: {names:?}"
+    );
+    assert!(
+        !bodies.iter().any(|b| b.name.starts_with("__closure_")),
+        "fused stage closures are inlined, so none is lifted"
+    );
+}
+
+#[test]
+fn map_entry_chains_fuse_into_the_map_walk() {
+    let source = "fn main() {\n\
+                  let mut m: Map<i64, i64> = Map::new()\n\
+                  m.insert(1, 2)\n\
+                  let a = m.iter().filter(|p| p.1 > 1).map(|p| p.0).sum()\n\
+                  let b = m.values().max()\n\
+                  let c = m.keys().take(1).count()\n\
+                  let _ = a + c\n\
+                  let _ = b\n\
+                  }\n";
+    let (bodies, _) = build_with_lift(source);
+    let main = bodies.iter().find(|b| b.name == "main").expect("main");
+    let names = call_names(main);
+    assert!(
+        !names.iter().any(|name| name.starts_with("gos_rt_lazy_iter_")
+            || name.starts_with("gos_rt_iter_")
+            || name.starts_with("gos_rt_map_iter")
+            || name.starts_with("gos_rt_map_values")),
+        "a Map entry chain walks the entries in one loop: {names:?}"
+    );
+    assert!(
+        !bodies.iter().any(|b| b.name.starts_with("__closure_")),
+        "fused stage closures are inlined, so none is lifted"
+    );
+}
+
+#[test]
+fn aggregate_unwrap_or_copies_the_payload_out_of_the_carrier() {
+    let source = "use std::{option, result}\n\
+                  struct Inner { a: i64, b: String }\n\
+                  fn pick(i: i64) -> Option<Inner> { if i > 0 { Some(Inner { a: i, b: \"x\" }) } else { None } }\n\
+                  fn load(i: i64) -> Result<Inner, errors::Error> { if i > 0 { Ok(Inner { a: i, b: \"y\" }) } else { Err(errors::new(\"no\")) } }\n\
+                  fn main() {\n\
+                  let a = pick(1).unwrap_or(Inner { a: 0, b: \"f\" })\n\
+                  let b = load(1).unwrap_or(Inner { a: 0, b: \"g\" })\n\
+                  let c = option::unwrap_or(pick(2), Inner { a: 0, b: \"h\" })\n\
+                  let d = result::unwrap_or(load(2), Inner { a: 0, b: \"i\" })\n\
+                  let _ = a.a + b.a + c.a + d.a\n\
+                  }\n";
+    let (bodies, _) = build_with_lift(source);
+    let main = bodies.iter().find(|b| b.name == "main").expect("main");
+    let names = call_names(main);
+    assert!(
+        !names.iter().any(|name| name.starts_with("gos_rt_result_unwrap_or")
+            || name.starts_with("gos_rt_result_default")
+            || name.starts_with("gos_rt_option_default")),
+        "an aggregate payload is copied out in place, not answered by a runtime unwrap: {names:?}"
+    );
+    let payload_reads = main
+        .blocks
+        .iter()
+        .flat_map(|block| block.stmts.iter())
+        .filter(|stmt| {
+            matches!(&stmt.kind, StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, .. },
+                ..
+            } if *name == "gos_rt_result_payload")
+        })
+        .count();
+    assert!(
+        payload_reads >= 4,
+        "each unwrap_or reads its carrier's payload in place: {payload_reads}"
+    );
+}
+
+#[test]
+fn generic_reader_shares_its_vec_when_the_element_is_a_copy() {
+    let source = "fn count_above<T: Ord>(xs: Vec<T>, lo: T) -> i64 {\n\
+                  xs.iter().filter(|v| v > lo).count()\n\
+                  }\n\
+                  fn ints(xs: Vec<i64>) -> i64 { count_above(xs, 1) }\n\
+                  fn words(xs: Vec<String>) -> i64 { count_above(xs, \"m\") }\n\
+                  fn main() {\n\
+                  let _ = ints(#[1, 2]) + words(#[\"a\"])\n\
+                  }\n";
+    let (bodies, _) = build_with_lift(source);
+    let clones = |name: &str| {
+        let body = bodies.iter().find(|b| b.name == name).expect(name);
+        call_names(body)
+            .iter()
+            .filter(|callee| callee.as_str() == "gos_rt_vec_clone")
+            .count()
+    };
+    assert_eq!(
+        clones("ints"),
+        0,
+        "an instantiation that reads copies of its elements shares the caller's Vec"
+    );
+    assert_eq!(
+        clones("words"),
+        1,
+        "an element that is not a copy can reach the caller's storage, so the Vec is copied"
+    );
+}
+
+#[test]
+fn eager_chain_with_two_closures_keeps_its_stage_order() {
+    let source = "fn main() {\n\
+                  let xs = #[1, 2, 3, 4]\n\
+                  let hit = xs.map(|v| v + 1).any(|v| v == 3)\n\
+                  let _ = hit\n\
+                  }\n";
+    let (bodies, _) = build_with_lift(source);
+    let main = bodies.iter().find(|b| b.name == "main").expect("main");
+    let names = call_names(main);
+    assert!(
+        names.iter().any(|name| name.starts_with("gos_rt_iter_map")),
+        "an eager map finishes every element before `any` runs, so the chain is not fused: {names:?}"
+    );
+}
+
+#[test]
 fn lifted_closure_destructures_tuple_parameter_before_body() {
     let source = "fn main() {\n\
                   let values = #[1, 2, 3, 4]\n\
@@ -1064,7 +1201,7 @@ enum Node {
 static mut SEED: i64 = 1
 
 fn rand() -> i64 {
-    SEED = SEED.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407)
+    SEED = SEED *% 6364136223846793005 +% 1442695040888963407
     SEED
 }
 
@@ -1559,12 +1696,6 @@ const COMBINATOR_MATRIX: &[(&str, &str, &str)] = &[
         "gos_rt_option_default_with",
     ),
     (
-        "option::zip",
-        "use std::option\nfn main() { let a: Option<i64> = Some(1)\n\
-             let b: Option<i64> = Some(2)\nlet m = a |> |v| option::zip(v, b)\nlet _ = m }",
-        "gos_rt_option_zip",
-    ),
-    (
         "option::flatten",
         "use std::option\nfn main() { let o: Option<Option<i64>> = Some(Some(4))\n\
              let m = o |> option::flatten\nlet _ = m }",
@@ -1616,16 +1747,6 @@ const COMBINATOR_MATRIX: &[(&str, &str, &str)] = &[
         "iter::flat_map (fixed array literal)",
         "use std::iter\nfn main() { let xs = [1, 2] |> |v| iter::flat_map(v, |x: i64| [x, x * 10])\nlet _ = xs }",
         "gos_rt_iter_flat_map_arr_i64",
-    ),
-    (
-        "iter::reduce",
-        "use std::iter\nfn main() { let v = #[1, 2] |> |v| iter::reduce(v, |a: i64, b: i64| a + b)\nlet _ = v }",
-        "gos_rt_iter_reduce_i64",
-    ),
-    (
-        "iter::scan",
-        "use std::iter\nfn main() { let xs = #[1, 2] |> |v| iter::scan(v, 0, |a: i64, x: i64| a + x)\nlet _ = xs }",
-        "gos_rt_iter_scan_i64",
     ),
     (
         "iter::product_by",
@@ -1699,8 +1820,69 @@ const COMBINATOR_MATRIX: &[(&str, &str, &str)] = &[
     ),
 ];
 
+/// `iter::reduce` and `iter::scan` over a sequence of scalars walk it in a
+/// counted loop that calls the closure per element, with no runtime iterator
+/// helper between the sequence and the closure.
+#[test]
+fn reduce_and_scan_free_calls_walk_the_sequence_inline() {
+    for (label, source, shim) in [
+        (
+            "iter::reduce",
+            "use std::iter\nfn main() { let v = #[1, 2] |> |v| iter::reduce(v, |a: i64, b: i64| a + b)\nlet _ = v }",
+            "gos_rt_iter_reduce_i64",
+        ),
+        (
+            "iter::scan",
+            "use std::iter\nfn main() { let xs = #[1, 2] |> |v| iter::scan(v, 0, |a: i64, x: i64| a + x)\nlet _ = xs }",
+            "gos_rt_iter_scan_i64",
+        ),
+    ] {
+        let (bodies, _) = build_with_lift(source);
+        let names: Vec<String> = bodies.iter().flat_map(call_names).collect();
+        assert!(
+            !names.iter().any(|n| n == shim),
+            "{label}: no `{shim}` call: {names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n == "gos_rt_vec_get_i64_unchecked"),
+            "{label}: the loop reads each element: {names:?}"
+        );
+    }
+}
+
+/// `option::zip` builds its pair in MIR and wraps it the way `Some((a, b))`
+/// is, so the carrier holds a copy its own release reclaims: each operand's
+/// discriminant is read, and no runtime zip is called.
+#[test]
+fn option_zip_free_call_builds_the_pair_inline() {
+    let source = "use std::option\nfn main() { let a: Option<i64> = Some(1)\n\
+                  let b: Option<i64> = Some(2)\nlet m = a |> |v| option::zip(v, b)\nlet _ = m }";
+    let (bodies, _) = build_with_lift(source);
+    let calls: Vec<String> = bodies.iter().flat_map(call_names).collect();
+    assert!(
+        !calls.iter().any(|n| n == "gos_rt_option_zip"),
+        "no runtime zip is called: {calls:?}"
+    );
+    let disc_reads = bodies
+        .iter()
+        .flat_map(|b| b.blocks.iter())
+        .flat_map(|b| b.stmts.iter())
+        .filter(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } if *name == "gos_rt_result_disc"
+            )
+        })
+        .count();
+    assert!(disc_reads >= 2, "both operands' arms are checked: {disc_reads} read(s)");
+}
+
 #[test]
 fn combinator_free_calls_lower_to_runtime_shims() {
+    let mut missing = Vec::new();
     for (label, source, shim) in COMBINATOR_MATRIX {
         let (bodies, _) = build_with_lift(source);
         assert!(
@@ -1713,10 +1895,9 @@ fn combinator_free_calls_lower_to_runtime_shims() {
         let fresh_collect_elided = matches!(*label, "iter::collect" | "Vec::collect")
             && *shim == "gos_rt_vec_clone"
             && names.iter().any(|n| n == "gos_rt_vec_from_arr");
-        assert!(
-            names.iter().any(|n| n == shim) || fresh_collect_elided,
-            "{label}: expected `{shim}` call, got {names:?}"
-        );
+        if !(names.iter().any(|n| n == shim) || fresh_collect_elided) {
+            missing.push(format!("{label}: expected `{shim}` call, got {names:?}"));
+        }
         assert!(
             !names
                 .iter()
@@ -1724,6 +1905,7 @@ fn combinator_free_calls_lower_to_runtime_shims() {
             "{label}: undefined high-level callee leaked into MIR: {names:?}"
         );
     }
+    assert!(missing.is_empty(), "{}", missing.join("\n"));
 }
 
 // ---------------------------------------------------------------
@@ -2254,15 +2436,13 @@ fn fill(mut b: Bag) -> i64 {
     );
 }
 
-/// A payload read out of a container and wrapped in `Ok(..)` retains its RC
-/// fields, whatever else the body does.
+/// A payload read out of a container and wrapped in `Ok(..)` hands the caller a
+/// share of its own.
 ///
-/// The wrap's retain is keyed on the payload's TYPE, not on any local the drop
-/// pass classifies as owned, so a body that owns nothing else still owes it.
-/// The pass's early exit consulted only its ownership sets, and a sibling match
-/// arm whose expression is a call (here a concatenation) leaves every one of
-/// them empty - so the retain went unbooked, the caller's release freed the
-/// fields, and the container's own entry was left naming freed storage.
+/// The wrapped payload is the copy blob the lookup answered, whose fields the
+/// blob holds counted shares of, so the return slot takes a share of the blob
+/// rather than one per field. A sibling match arm whose expression is a call
+/// leaves the body's other ownership sets empty, and the share is still taken.
 #[test]
 fn wrapped_container_payload_retains_its_fields_without_other_owned_locals() {
     let source = r#"
@@ -2278,15 +2458,15 @@ fn get_def(eng: Eng, table: String) -> Result<Def, String> {
 "#;
     let (bodies, _) = build(source);
     let body = bodies.iter().find(|b| b.name == "get_def").expect("body");
-    assert_eq!(
-        projected_rc_calls(body, "gos_rt_rc_retain", 0),
-        1,
-        "the payload's String field is retained for the caller"
+    assert!(
+        rc_calls_on(body, "gos_rt_option_slot_retain", Local::RETURN) >= 1,
+        "the returned carrier takes a share of the payload blob for the caller"
     );
     assert_eq!(
-        projected_rc_calls(body, "gos_rt_vec_retain", 1),
-        1,
-        "and so is its Vec field"
+        projected_rc_calls(body, "gos_rt_rc_retain", 0)
+            + projected_rc_calls(body, "gos_rt_vec_retain", 1),
+        0,
+        "the blob holds its fields' shares, so no field is retained on its own"
     );
 }
 

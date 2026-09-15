@@ -1,0 +1,89 @@
+// Trees of by-value structs held through `Option` children, built and torn
+// down many times. Each child is a reference-counted copy of the struct, so
+// the teardown walks every node, and the shapes below reach each branch of
+// that walk: a plain tree, nodes that also own a `String`, a subtree two
+// parents share (its count survives the first release), and a `Weak` into a
+// node.
+
+struct Node {
+    item: i64
+    left: Option<Node>
+    right: Option<Node>
+}
+
+struct Named {
+    name: String
+    item: i64
+    next: Option<Named>
+}
+
+fn build(item: i64, depth: i64) -> Node {
+    if depth > 0 {
+        let half = 1 << (depth - 1)
+        Node {
+            item: item
+            left: Some(build(item - half, depth - 1))
+            right: Some(build(item + half, depth - 1))
+        }
+    } else {
+        Node { item: item, left: None, right: None }
+    }
+}
+
+fn sum(node: Node) -> i64 {
+    let mut total = node.item + 1
+    if let Some(left) = node.left { total += sum(left) }
+    if let Some(right) = node.right { total += sum(right) }
+    total & 0xFFFFFFFF
+}
+
+fn chain(length: i64) -> Named {
+    let mut head = Named { name: "tail", item: 0, next: None }
+    for i in 1..length {
+        head = Named { name: format("n{}", i), item: i, next: Some(head) }
+    }
+    head
+}
+
+fn chain_len(head: Named) -> i64 {
+    let mut total = head.name.len() + head.item
+    let mut cursor = head.next
+    while let Some(node) = cursor {
+        total += node.name.len() + node.item
+        cursor = node.next
+    }
+    total
+}
+
+fn main() {
+    let mut plain = 0
+    for round in 0..40 {
+        let root = build(round, 10)
+        plain = (plain + sum(root)) & 0xFFFFFFFF
+    }
+    println("plain: {}", plain)
+
+    let mut named = 0
+    for round in 0..30 {
+        named += chain_len(chain(200 + round))
+    }
+    println("named: {}", named)
+
+    let mut shared_total = 0
+    for round in 0..50 {
+        let common = Some(build(round, 6))
+        let a = Node { item: 1, left: common, right: None }
+        let b = Node { item: 2, left: None, right: common }
+        shared_total += sum(a)
+        shared_total += sum(b)
+    }
+    println("shared: {}", shared_total)
+
+    let strong = build(7, 4)
+    let weak = strong.downgrade()
+    let alive = match weak.upgrade() {
+        Some(node) => sum(node)
+        None => -1
+    }
+    println("weak alive: {}", alive)
+}

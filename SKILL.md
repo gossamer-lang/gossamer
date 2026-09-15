@@ -155,6 +155,11 @@ Write clear, low-complexity, concise code.
   that genuinely changes, kept near a single update site. `if` /
   `match` / `loop ... break v` are expressions - bind their result.
 - **Compound-assign accumulators**: `x += 1`, never `x = x + 1`.
+- **Wrapping arithmetic**: `+%`, `-%`, `*%` (and `+%=`, `-%=`, `*%=`) wrap
+  at the operands' declared width on every tier and every profile, so a hash
+  step reads `h = (h << 5) +% h +% b as u32` with no mask. Plain `+ - *`
+  keep checking for overflow. The operators are the only spelling:
+  `x.wrapping_add(y)` reports GT0087 with the rewrite.
 - **`if let` / `while let`** for `Option` and single-variant matches;
   `while let Some(v) = rx.recv()` is the canonical channel drain.
   Let-chains: `if let Some(x) = a && let Some(y) = b && x > 0 { .. }`
@@ -480,9 +485,15 @@ let shout = "  Hi  ".trim().to_lowercase() |> exclaim
 - **Generics**: `fn f<T: Trait>(x: T)` monomorphises per call site
   on every tier (one or more bounds `T: A + B`, in the parameter list or a
   `where` clause; struct-typed params; no `dyn Trait`).
-  Generic structs `struct Wrapper<T>` + `impl<T>` work. Const-generic
-  array length `fn sum<const N: usize>(xs: [i64; N])` is inferred
-  from the argument (not usable as a bare value or repeat count).
+  Generic structs `struct Wrapper<T>` + `impl<T>` work. Const generics:
+  `fn sum<const N: usize>(xs: [i64; N])` takes `N` from the argument's
+  length or a turbofish (`zeros::<4>()`, else GT0088), `N` is a value in
+  the body (`N as i64`, `[0; N]`), and a `-> [T; N]` result is a fixed
+  array at the call. A struct, tuple struct, or enum takes one too:
+  `struct Ring<const N: usize> { items: [i64; N] }` infers `N` from the
+  field (an enum from its payload), and methods in
+  `impl<const N: usize> Ring<N>` read `N`, whether called as `r.m()` or
+  `Ring::m(r)`.
 - **Associated items**: a trait declares `type Item` (optional default)
   and `const MAX: i64` (optional default); each impl supplies one
   concrete `type Item = T` / `const MAX: i64 = 10`. Project with
@@ -514,7 +525,14 @@ let shout = "  Hi  ".trim().to_lowercase() |> exclaim
   rejects a second named `&mut` to the same root, overlap with an active
   named mutable alias, and repeated mutable roots in one call.
 - **Types**: `bool char i8..i64 u8..u64 isize usize f32 f64 String
-  [T] [T; N] (A, B) Option<T> Result<T, E> &mut T` + user types. `i128`
+  [T] [T; N] (A, B) Option<T> Result<T, E> &mut T` + user types.
+  `Simd<T, N>` is a lane vector (`f32 f64 i32 i64 u8 u32`, 2/4/8/16 lanes;
+  `Mask<N>` its `bool` form): `Simd::splat(v)` against an annotated type,
+  `Simd::from_array([..])`, `Simd::load(xs, offset)` /
+  `v.store(&mut xs, offset)` over a window checked once, lane-wise operators,
+  `min` `max` `abs` `sqrt` `lanes_lt` `select` `reduce_sum`, the same bits on
+  every tier. A kernel may be generic over its lanes:
+  `fn dot<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> f64`. `i128`
   / `u128` are rejected (GT0014). Transparent `type Id = i64` /
   `type Pair<A> = (A, A)` aliases substitute everywhere (cycle =
   GT0024). `newtype UserId = i64` is the OPAQUE form: a distinct
@@ -530,8 +548,10 @@ let shout = "  Hi  ".trim().to_lowercase() |> exclaim
   own, and it serializes as the representation.
 - **Casts**: `x as T` is whitelist-checked (numeric<->numeric,
   bool/char->int, u8->char). Int->narrow-int masks at width (`300 as
-  u8 == 44`); float->int truncates toward zero and saturates at i64
-  width, NO narrow mask (`300.7 as u8 == 300`, NaN -> 0).
+  u8 == 44`); float->int truncates toward zero and saturates at the
+  target's range (`300.7 as u8 == 255`, NaN -> 0). A narrow integer
+  never holds a value outside its range: unary `-`, `!`, `<<`, and a
+  signed `MIN / -1` wrap at the declared width on every tier.
 - **Patterns**: literals, `_`, `name`, `mut name`, variants, structs,
   tuples, ranges (`1..=5`, `1..5`, open-ended `lo..` / `..=hi`;
   range arms still need a `_` arm - opaque to exhaustiveness),
@@ -828,7 +848,8 @@ Full path spelling is validated (GR0005); discover signatures with
   tuples, `Map<String, V>`, nested structs, and `Vec<T>` of those;
   fixed arrays/slices are rejected with a type diagnostic. For dynamic or
   partially-known shapes use `json::parse` + `get`/`at`/`as_i64`/
-  `as_str`/`keys`/`len`. Unknown JSON keys are ignored.
+  `as_u64`/`as_str`/`keys`/`len`; `as_u64` holds the whole unsigned range.
+  Unknown JSON keys are ignored.
 - Web: `net` (Tcp/Udp/Unix sockets, `url`, `netip`, `ip`), `http`
   (client: `Client::builder()` or free `http::get/post/..`,
   `stream` for SSE; server: `http::serve(addr, handler)`,

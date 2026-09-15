@@ -138,8 +138,9 @@ blake3 = { version = "1", default-features = false, features = ["std"] }
 mimalloc = "0.1"
 # Direct handle on the same native lib `mimalloc` links, with the
 # `extended` bindings so the runtime can set `mi_option_purge_delay`
-# (return freed pages to the OS promptly - see `configure_allocator`).
-libmimalloc-sys = { version = "0.1", features = ["extended"] }
+# (return freed pages to the OS promptly - see `configure_allocator`),
+# and the `arena` bindings for the exclusive arena copy blobs live in.
+libmimalloc-sys = { version = "0.1", features = ["extended", "arena"] }
 # Real machine-stack unwinding for compiled-tier panic / SIGQUIT
 # backtraces. `std::backtrace` reports "unsupported" on the
 # static-musl release target, so the standalone crate - which builds

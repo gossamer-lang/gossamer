@@ -607,7 +607,7 @@ pub(crate) fn elide_vec_clone_in_three_way_swaps(body: &mut Body) {
                 place: destination,
                 rvalue: Rvalue::Use(Operand::Copy(source)),
             },
-            span,
+            span, inlined: None,
         });
         body.blocks[bi].terminator = Terminator::Goto { target };
     }
@@ -982,14 +982,14 @@ fn apply_fresh_vec_clone_rewrites(
                     args: vec![Operand::Copy(Place::local(rewrite.source))],
                 },
             },
-            span: rewrite.span,
+            span: rewrite.span, inlined: None,
         });
         body.blocks[rewrite.block].stmts.push(Statement {
             kind: StatementKind::Assign {
                 place: rewrite.destination,
                 rvalue: Rvalue::Use(Operand::Copy(Place::local(rewrite.source))),
             },
-            span: rewrite.span,
+            span: rewrite.span, inlined: None,
         });
         body.blocks[rewrite.block].terminator = Terminator::Goto {
             target: rewrite.target,
@@ -1211,7 +1211,7 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
                 place: Place::local(cloned),
                 rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
             },
-            span,
+            span, inlined: None,
         });
         body.blocks[bi].terminator = Terminator::Goto { target };
         body.blocks[ti].stmts.drain(0..3);
@@ -1237,7 +1237,7 @@ pub(crate) fn elide_vec_clone_of_dead_aggregate_source(body: &mut Body, user_fns
                         args: vec![Operand::Copy(field)],
                     },
                 },
-                span,
+                span, inlined: None,
             },
         );
     }

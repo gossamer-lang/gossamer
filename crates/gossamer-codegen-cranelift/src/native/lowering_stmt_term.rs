@@ -680,6 +680,18 @@ fn callee_sret_slots(
 /// slot rather than aliased by rebinding the variable. Inline two-word enums
 /// (`Result` / `Option` / inline user enums) are register-packed `i128`
 /// values, not slot storage, so they are excluded.
+/// Whether `local` is an aggregate held through the address of its words, the
+/// shape a carrier payload read answers as the box's own storage.
+pub(super) fn payload_takes_own_storage(tcx: &TyCtxt, body: &Body, local: Local) -> bool {
+    let ty = body.local_ty(local);
+    !is_inline_two_word_ty(tcx, ty)
+        && (type_slot_count(tcx, ty) > 1 || single_slot_addr_aggregate(tcx, ty))
+        && matches!(
+            tcx.kind_of(ty),
+            TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. }
+        )
+}
+
 fn is_aggregate_copy_src(body: &Body, tcx: &TyCtxt, rvalue: &Rvalue) -> bool {
     let Rvalue::Use(Operand::Copy(src)) = rvalue else {
         return false;
@@ -747,7 +759,7 @@ pub(super) fn local_fields_written_through_address(body: &Body, local: Local) ->
     })
 }
 
-fn local_flows_to_return(body: &Body, local: Local) -> bool {
+pub(super) fn local_flows_to_return(body: &Body, local: Local) -> bool {
     let n = body.locals.len();
     let mut in_return = vec![false; n];
     if (Local::RETURN.0 as usize) < n {
@@ -1027,23 +1039,6 @@ pub(super) fn lower_statement(
                             builder
                                 .ins()
                                 .store(MemFlagsData::trusted(), word, dst_ptr, off);
-                        }
-                        // The words are in the destination's own slot now, so
-                        // the copy the container allocated for this read has
-                        // no reader left.
-                        if matches!(rvalue, Rvalue::CallIntrinsic { name, .. } if *name == "gos_result_payload_owned")
-                        {
-                            let free_fn = intrinsics.extern_fn(
-                                module,
-                                "gos_rt_aggr_free",
-                                &[ptr_ty, types::I64],
-                                &[],
-                            )?;
-                            let free_ref = module.declare_func_in_func(free_fn, builder.func);
-                            let size_val = builder
-                                .ins()
-                                .iconst(types::I64, i64::from((slots * 8).max(8)));
-                            builder.ins().call(free_ref, &[src_ptr, size_val]);
                         }
                     }
                 } else if heap_agg_copy {
@@ -1879,6 +1874,7 @@ pub(super) fn lower_terminator(
                     let coerced = coerce_arg_to(builder, v, want).unwrap_or(v);
                     arg_values.push(coerced);
                 }
+                let mut sret_slot_addr = None;
                 if let Some(slots) = indirect_sret_slots {
                     let bytes = slots.max(1).saturating_mul(8);
                     let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -1886,17 +1882,62 @@ pub(super) fn lower_terminator(
                         bytes,
                         3,
                     ));
-                    arg_values.push(builder.ins().stack_addr(ptr_ty, slot, 0));
+                    let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+                    arg_values.push(addr);
+                    sret_slot_addr = Some((addr, slots.max(1)));
                 }
                 let call = builder.ins().call_indirect(sig_ref, fn_ptr, &arg_values);
                 let results = builder.inst_results(call).to_vec();
-                let results: Vec<ir::Value> = match (typed_ret_ty, wire_ret_ty) {
+                let mut results: Vec<ir::Value> = match (typed_ret_ty, wire_ret_ty) {
                     (Some(logical), Some(wire)) if logical != wire => results
                         .into_iter()
                         .map(|v| bitcast_same_width(builder, logical, v))
                         .collect(),
                     _ => results,
                 };
+                // A callee compiled with the result slot writes into it and
+                // answers its address. One compiled without it answers a heap
+                // block of its own; its words move into the slot and the block
+                // is freed, so either way the destination holds the slot.
+                if let (Some((slot_addr, slots)), Some(&returned)) =
+                    (sret_slot_addr, results.first())
+                {
+                    let returned = coerce_arg_to(builder, returned, ptr_ty).unwrap_or(returned);
+                    let is_slot = builder.ins().icmp(IntCC::Equal, returned, slot_addr);
+                    let copy_block = builder.create_block();
+                    let done_block = builder.create_block();
+                    builder
+                        .ins()
+                        .brif(is_slot, done_block, &[], copy_block, &[]);
+                    builder.switch_to_block(copy_block);
+                    builder.seal_block(copy_block);
+                    for slot_idx in 0..slots {
+                        let offset =
+                            ir::immediates::Offset32::new(i32::try_from(slot_idx * 8).unwrap_or(0));
+                        let word = builder.ins().load(
+                            types::I64,
+                            MemFlagsData::trusted(),
+                            returned,
+                            offset,
+                        );
+                        builder
+                            .ins()
+                            .store(MemFlagsData::trusted(), word, slot_addr, offset);
+                    }
+                    let free_fn = intrinsics.extern_fn(
+                        module,
+                        "gos_rt_aggr_free",
+                        &[ptr_ty, types::I64],
+                        &[],
+                    )?;
+                    let free_ref = module.declare_func_in_func(free_fn, builder.func);
+                    let bytes = builder.ins().iconst(types::I64, i64::from(slots) * 8);
+                    builder.ins().call(free_ref, &[returned, bytes]);
+                    builder.ins().jump(done_block, &[]);
+                    builder.switch_to_block(done_block);
+                    builder.seal_block(done_block);
+                    results = vec![slot_addr];
+                }
                 if let Some(&ret) = results.first() {
                     store_call_result(
                         module,
@@ -1938,9 +1979,17 @@ pub(super) fn lower_terminator(
                     let mut arg_values: Vec<ir::Value> = Vec::with_capacity(args.len());
                     let ptr_ty_local = module.target_config().pointer_type();
                     for (idx, op) in args.iter().enumerate() {
-                        let mut v = lower_operand(
-                            module, builder, locals, body, tcx, op, None, intrinsics,
-                        )?;
+                        let mut v = if idx == 1 && gossamer_abi::takes_elem_by_address(name) {
+                            lower_elem_by_address(
+                                module, builder, locals, body, tcx, op, intrinsics,
+                            )?
+                        } else if idx == 1 && gossamer_abi::takes_key_by_address(name) {
+                            lower_key_by_address(
+                                module, builder, locals, body, tcx, op, intrinsics,
+                            )?
+                        } else {
+                            lower_operand(module, builder, locals, body, tcx, op, None, intrinsics)?
+                        };
                         // Special case: char→ptr promotion for
                         // string-API helpers where the user
                         // passed a `char` literal where a
@@ -1983,7 +2032,7 @@ pub(super) fn lower_terminator(
                     let call = builder.ins().call(func_ref, &arg_values);
                     let results = builder.inst_results(call).to_vec();
                     if let Some(&ret) = results.first() {
-                        store_call_result(
+                        store_runtime_call_result(
                             module,
                             builder,
                             locals,
@@ -1992,6 +2041,7 @@ pub(super) fn lower_terminator(
                             destination,
                             ret,
                             intrinsics,
+                            name,
                         )?;
                     }
                     match target {
@@ -2022,9 +2072,19 @@ pub(super) fn lower_terminator(
                             .collect();
                         let mut arg_values: Vec<ir::Value> = Vec::with_capacity(args.len());
                         for (idx, op) in args.iter().enumerate() {
-                            let mut v = lower_operand(
-                                module, builder, locals, body, tcx, op, None, intrinsics,
-                            )?;
+                            let mut v = if idx == 1 && gossamer_abi::takes_elem_by_address(name) {
+                                lower_elem_by_address(
+                                    module, builder, locals, body, tcx, op, intrinsics,
+                                )?
+                            } else if idx == 1 && gossamer_abi::takes_key_by_address(name) {
+                                lower_key_by_address(
+                                    module, builder, locals, body, tcx, op, intrinsics,
+                                )?
+                            } else {
+                                lower_operand(
+                                    module, builder, locals, body, tcx, op, None, intrinsics,
+                                )?
+                            };
                             if let Some(want) = logical.get(idx).copied() {
                                 v = coerce_arg_to(builder, v, want)?;
                             }
@@ -2038,7 +2098,7 @@ pub(super) fn lower_terminator(
                             &arg_values,
                         )?;
                         if let Some(ret) = result {
-                            store_call_result(
+                            store_runtime_call_result(
                                 module,
                                 builder,
                                 locals,
@@ -2047,6 +2107,7 @@ pub(super) fn lower_terminator(
                                 destination,
                                 ret,
                                 intrinsics,
+                                entry.name,
                             )?;
                         }
                         match target {

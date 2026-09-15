@@ -23,18 +23,19 @@
 
 mod emit;
 mod jit;
+mod jit_frames;
 mod jit_memory;
 mod native;
 pub mod native_symbols;
 
 pub use emit::{FunctionText, Module, emit_function, emit_module};
 pub use jit::{
-    ArrayElem, JitArtifact, JitBodyDecision, JitFn, JitKind, ResultScalarKind, TupleElem,
-    compile_to_jit, compile_to_jit_for_promotion, compile_to_jit_for_promotion_owned,
-    has_worthy_jit_body, jit_compile_body_names, jit_compile_body_names_for_trigger,
-    jit_eager_loop_bodies, jit_entry_body_names, jit_entry_body_names_with_admitted,
-    jit_promotion_report,
+    ArrayElem, JitArtifact, JitBodyDecision, JitFn, JitKind, TupleElem, compile_to_jit,
+    compile_to_jit_for_promotion, compile_to_jit_for_promotion_owned, has_worthy_jit_body,
+    jit_compile_body_names, jit_compile_body_names_for_trigger, jit_eager_loop_bodies,
+    jit_entry_body_names, jit_entry_body_names_with_admitted, jit_promotion_report,
 };
+pub use jit_frames::{JitFrame, active_frames as active_jit_frames};
 pub use native::{
     CompileOptions, NativeObject, compile_to_object, compile_to_object_at_path,
     compile_to_object_at_path_with_options, compile_to_object_with_options,

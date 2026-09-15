@@ -10,6 +10,30 @@ use std::collections::HashMap;
 
 use crate::ty::{FloatTy, IntTy, Ty, TyKind};
 
+/// The byte layout of a plain-data value: see [`TyCtxt::plain_layout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlainLayout {
+    /// Size in bytes, a multiple of `align`.
+    pub size: u32,
+    /// Alignment in bytes: the largest alignment of any leaf.
+    pub align: u32,
+    /// Byte offset of each field of a tuple or struct, in declaration order;
+    /// empty for a scalar or an array.
+    pub field_offsets: Vec<u32>,
+}
+
+/// The storage layout of a struct whose fields narrower than a word sit at
+/// their own width: see [`TyCtxt::packed_layout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackedLayout {
+    /// Size in bytes, a whole number of words.
+    pub size: u32,
+    /// Byte offset of each field, in declaration order.
+    pub field_offsets: Vec<u32>,
+    /// Bytes each field occupies at its offset.
+    pub field_bytes: Vec<u32>,
+}
+
 /// Interner that maps [`TyKind`]s to stable [`Ty`] handles.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct TyCtxt {
@@ -45,6 +69,11 @@ pub struct TyCtxt {
     /// the local component. Populated by the type checker for user
     /// structs and by sentinel registrations for `Result`/`Option`.
     def_names: HashMap<gossamer_resolve::DefId, String>,
+    /// The `Param` type each generic type parameter's resolver `DefId`
+    /// stands for, recorded by the type checker where a path is headed by
+    /// the parameter (`T::zero`). Lowering reads it to name the parameter's
+    /// position without re-deriving the enclosing generic scope.
+    type_param_defs: HashMap<gossamer_resolve::DefId, Ty>,
     /// Reference-counting type-meta blobs, keyed by the codegen symbol
     /// name (`gos_rc_meta_<id>`). Populated by MIR lowering when it
     /// emits a `gos_rc_alloc` for an RC-managed ADT; consumed by both
@@ -90,6 +119,12 @@ pub struct TyCtxt {
     /// reports them as values (their payload, if a managed pointer, is
     /// released per-discriminant on drop).
     inline_enum_defs: std::collections::HashSet<u32>,
+    /// Structs a program takes a `&mut` to a narrow field of. The borrow hands
+    /// its callee an address a whole word is written through, so such a
+    /// struct keeps one word per field. MIR lowering records these before it
+    /// reads a layout; they are not part of the front-end result.
+    #[serde(skip)]
+    word_field_structs: std::collections::HashSet<gossamer_resolve::DefId>,
 }
 
 /// Cached handles for the primitive types that every program uses. The
@@ -138,7 +173,7 @@ impl TyCtxt {
 
         write!(
             output,
-            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?};boxed_enum_payload_tys={:?}",
+            "kinds={:?};primitives={:?};struct_fields={:?};enum_variant_tys={:?};enum_variant_names={:?};enum_repr_bits={:?};enum_ty_by_name={:?};struct_fields_inst={:?};def_names={:?};type_param_defs={:?};rc_metas={:?};aggr_copy_metas={:?};rc_managed_tys={:?};rc_managed_enum_defs={:?};tuple_struct_defs={:?};inline_enum_defs={:?};boxed_enum_payload_tys={:?}",
             self.kinds,
             self.primitives,
             sorted(
@@ -172,6 +207,11 @@ impl TyCtxt {
                     .map(|(k, v)| format!("{k:?}:{v:?}"))
             ),
             sorted(self.def_names.iter().map(|(k, v)| format!("{k:?}:{v:?}"))),
+            sorted(
+                self.type_param_defs
+                    .iter()
+                    .map(|(k, v)| format!("{k:?}:{v:?}"))
+            ),
             sorted(self.rc_metas.iter().map(|(k, v)| format!("{k:?}:{v:?}"))),
             sorted(
                 self.aggr_copy_metas
@@ -209,6 +249,12 @@ impl TyCtxt {
     #[must_use]
     pub fn kind(&self, ty: Ty) -> Option<&TyKind> {
         self.kinds.get(ty.0 as usize)
+    }
+
+    /// The type already interned for `kind`, without interning it.
+    #[must_use]
+    pub fn interned(&self, kind: &TyKind) -> Option<Ty> {
+        self.index.get(kind).copied()
     }
 
     /// Borrows `kind(ty)`, panicking if the handle is not owned by this
@@ -526,7 +572,7 @@ impl TyCtxt {
     #[must_use]
     pub fn elem_is_addressed_aggregate(&self, ty: Ty) -> bool {
         match self.kind_of(ty) {
-            TyKind::Tuple(_) | TyKind::Array { .. } => true,
+            TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Simd { .. } => true,
             TyKind::Adt { def, substs } => {
                 let (def, substs) = (*def, substs.clone());
                 let user_struct =
@@ -554,7 +600,7 @@ impl TyCtxt {
                 let elems = elems.clone();
                 elems.iter().all(|t| self.scalar_leaves_only(*t))
             }
-            TyKind::Array { elem, .. } => {
+            TyKind::Array { elem, .. } | TyKind::Simd { elem, .. } => {
                 let elem = *elem;
                 self.scalar_leaves_only(elem)
             }
@@ -566,6 +612,265 @@ impl TyCtxt {
                         .is_some_and(|fields| fields.iter().all(|t| self.scalar_leaves_only(*t)))
             }
             _ => false,
+        }
+    }
+
+    /// Whether a value of this type is plain data: every leaf a scalar, through
+    /// tuples, fixed arrays, `Simd` lanes, and structs, with no handle, `Weak`,
+    /// or heap child anywhere and no cycle through its own definition. Moving
+    /// its bytes moves the whole value, so it needs no reference count.
+    #[must_use]
+    pub fn is_plain_data(&self, ty: Ty) -> bool {
+        self.plain_layout(ty).is_some()
+    }
+
+    /// The byte layout a plain-data value takes under the C `repr(C)` rule:
+    /// each field at its own size and alignment in declaration order, and the
+    /// whole padded to its largest alignment. `None` for a type that is not
+    /// plain data.
+    #[must_use]
+    pub fn plain_layout(&self, ty: Ty) -> Option<PlainLayout> {
+        self.plain_layout_within(ty, &mut Vec::new())
+    }
+
+    fn plain_layout_within(
+        &self,
+        ty: Ty,
+        visiting: &mut Vec<gossamer_resolve::DefId>,
+    ) -> Option<PlainLayout> {
+        let scalar = |size: u32| {
+            Some(PlainLayout {
+                size,
+                align: size,
+                field_offsets: Vec::new(),
+            })
+        };
+        match self.kind_of(ty) {
+            TyKind::Bool => scalar(1),
+            TyKind::Char => scalar(4),
+            TyKind::Int(int) => match int {
+                IntTy::I8 | IntTy::U8 => scalar(1),
+                IntTy::I16 | IntTy::U16 => scalar(2),
+                IntTy::I32 | IntTy::U32 => scalar(4),
+                IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize => scalar(8),
+                IntTy::I128 | IntTy::U128 => scalar(16),
+            },
+            TyKind::Float(FloatTy::F32) => scalar(4),
+            TyKind::Float(FloatTy::F64) => scalar(8),
+            TyKind::Array { elem, len } | TyKind::Simd { elem, lanes: len } => {
+                let (elem, count) = (*elem, u32::try_from(len.to_usize()).ok()?);
+                let lane = self.plain_layout_within(elem, visiting)?;
+                Some(PlainLayout {
+                    size: lane.size.checked_mul(count)?,
+                    align: lane.align,
+                    field_offsets: Vec::new(),
+                })
+            }
+            TyKind::Tuple(items) => {
+                let items = items.clone();
+                self.plain_record_layout(&items, visiting)
+            }
+            TyKind::Adt { def, substs } => {
+                let (def, substs) = (*def, substs.clone());
+                if def.local >= u32::MAX - 16 || visiting.contains(&def) {
+                    return None;
+                }
+                let fields = self.adt_field_tys(def, &substs)?;
+                visiting.push(def);
+                let layout = self.plain_record_layout(fields, visiting);
+                visiting.pop();
+                layout
+            }
+            _ => None,
+        }
+    }
+
+    /// Fields laid out one after another at their own alignment.
+    fn plain_record_layout(
+        &self,
+        fields: &[Ty],
+        visiting: &mut Vec<gossamer_resolve::DefId>,
+    ) -> Option<PlainLayout> {
+        let mut offset = 0u32;
+        let mut align = 1u32;
+        let mut field_offsets = Vec::with_capacity(fields.len());
+        for field in fields {
+            let layout = self.plain_layout_within(*field, visiting)?;
+            offset = offset.next_multiple_of(layout.align);
+            field_offsets.push(offset);
+            offset = offset.checked_add(layout.size)?;
+            align = align.max(layout.align);
+        }
+        Some(PlainLayout {
+            size: offset.next_multiple_of(align),
+            align,
+            field_offsets,
+        })
+    }
+
+    /// Records that `def` keeps one word per field, because a program borrows
+    /// one of its narrow fields.
+    pub fn keep_word_fields(&mut self, def: gossamer_resolve::DefId) {
+        self.word_field_structs.insert(def);
+    }
+
+    /// Bytes a scalar field occupies inside a packed struct, or `None` for a
+    /// field that is not a scalar. An `f32` is held as a double on every tier,
+    /// so it keeps a whole word.
+    fn packed_scalar_bytes(&self, ty: Ty) -> Option<u32> {
+        match self.kind_of(ty) {
+            TyKind::Bool | TyKind::Int(IntTy::I8 | IntTy::U8) => Some(1),
+            TyKind::Int(IntTy::I16 | IntTy::U16) => Some(2),
+            TyKind::Char | TyKind::Int(IntTy::I32 | IntTy::U32) => Some(4),
+            TyKind::Int(IntTy::I64 | IntTy::U64 | IntTy::Isize | IntTy::Usize)
+            | TyKind::Float(_) => Some(8),
+            _ => None,
+        }
+    }
+
+    /// Whether `ty` is a non-generic struct whose fields are scalars and
+    /// structs of scalars, the only shape a packed struct is made of.
+    fn is_scalar_struct(&self, ty: Ty, depth: u32) -> bool {
+        if depth > 16 {
+            return false;
+        }
+        let TyKind::Adt { def, substs } = self.kind_of(ty) else {
+            return false;
+        };
+        if def.local >= u32::MAX - 16 || !substs.as_slice().is_empty() || self.is_inline_enum_ty(ty)
+        {
+            return false;
+        }
+        self.struct_field_tys(*def).is_some_and(|fields| {
+            fields.iter().all(|field| {
+                self.packed_scalar_bytes(*field).is_some()
+                    || self.is_scalar_struct(*field, depth + 1)
+            })
+        })
+    }
+
+    /// Walks the packed layout of `ty`, handing each field's offset and bytes
+    /// to `on_field` in declaration order, and answers the struct's size, or
+    /// `None` when the struct keeps one word per field.
+    fn packed_walk(&self, ty: Ty, on_field: impl FnMut(u32, u32)) -> Option<u32> {
+        let TyKind::Adt { def, substs } = self.kind_of(ty) else {
+            return None;
+        };
+        if !substs.as_slice().is_empty() || self.is_inline_enum_ty(ty) {
+            return None;
+        }
+        self.packed_walk_def(*def, on_field)
+    }
+
+    /// [`Self::packed_walk`] for the non-generic struct `def`.
+    fn packed_walk_def(
+        &self,
+        def: gossamer_resolve::DefId,
+        mut on_field: impl FnMut(u32, u32),
+    ) -> Option<u32> {
+        if def.local >= u32::MAX - 16 || self.word_field_structs.contains(&def) {
+            return None;
+        }
+        let fields = self.struct_field_tys(def)?;
+        if !fields.iter().all(|field| {
+            self.packed_scalar_bytes(*field).is_some() || self.is_scalar_struct(*field, 1)
+        }) {
+            return None;
+        }
+        let mut offset = 0u32;
+        let mut word_offset = 0u32;
+        let mut changed = false;
+        for field in fields {
+            let (bytes, align) = match self.packed_scalar_bytes(*field) {
+                Some(bytes) => (bytes, bytes),
+                None => (self.slot_bytes(*field).max(8), 8),
+            };
+            offset = offset.next_multiple_of(align);
+            changed |= offset != word_offset;
+            on_field(offset, bytes);
+            offset += bytes;
+            word_offset += bytes.next_multiple_of(8);
+        }
+        let size = offset.next_multiple_of(8).max(8);
+        changed |= size != word_offset.max(8);
+        changed.then_some(size)
+    }
+
+    /// The layout of a struct whose fields narrower than a word sit at their
+    /// own width, or `None` when the struct keeps one word per field.
+    ///
+    /// A non-generic struct of scalars and structs of scalars qualifies. A
+    /// scalar field sits at its own size and alignment and a nested struct at
+    /// a word boundary, and the whole rounds up to a word, so a copy, an
+    /// element stride, and a slot count are still whole words. A struct this
+    /// would not change, or one a program borrows a narrow field of, answers
+    /// `None`.
+    #[must_use]
+    pub fn packed_layout(&self, ty: Ty) -> Option<PackedLayout> {
+        let mut field_offsets = Vec::new();
+        let mut field_bytes = Vec::new();
+        let size = self.packed_walk(ty, |offset, bytes| {
+            field_offsets.push(offset);
+            field_bytes.push(bytes);
+        })?;
+        Some(PackedLayout {
+            size,
+            field_offsets,
+            field_bytes,
+        })
+    }
+
+    /// The packed layout of the non-generic struct `def`: see
+    /// [`Self::packed_layout`].
+    #[must_use]
+    pub fn packed_struct_layout(&self, def: gossamer_resolve::DefId) -> Option<PackedLayout> {
+        let mut field_offsets = Vec::new();
+        let mut field_bytes = Vec::new();
+        let size = self.packed_walk_def(def, |offset, bytes| {
+            field_offsets.push(offset);
+            field_bytes.push(bytes);
+        })?;
+        Some(PackedLayout {
+            size,
+            field_offsets,
+            field_bytes,
+        })
+    }
+
+    /// Every scalar leaf of a packed struct with its byte offset in the value,
+    /// in field order, nested structs flattened.
+    #[must_use]
+    pub fn packed_leaves(&self, ty: Ty) -> Option<Vec<(u32, Ty)>> {
+        self.packed_walk(ty, |_, _| {})?;
+        let mut leaves = Vec::new();
+        self.push_scalar_leaves(ty, 0, &mut leaves);
+        Some(leaves)
+    }
+
+    fn push_scalar_leaves(&self, ty: Ty, base: u32, out: &mut Vec<(u32, Ty)>) {
+        if self.packed_scalar_bytes(ty).is_some() {
+            out.push((base, ty));
+            return;
+        }
+        let TyKind::Adt { def, .. } = self.kind_of(ty) else {
+            return;
+        };
+        let Some(fields) = self.struct_field_tys(*def) else {
+            return;
+        };
+        let offsets: Vec<u32> = match self.packed_layout(ty) {
+            Some(layout) => layout.field_offsets,
+            None => fields
+                .iter()
+                .scan(0u32, |at, field| {
+                    let here = *at;
+                    *at += self.slot_bytes(*field).max(8);
+                    Some(here)
+                })
+                .collect(),
+        };
+        for (field, offset) in fields.iter().zip(offsets) {
+            self.push_scalar_leaves(*field, base + offset, out);
         }
     }
 
@@ -591,7 +896,7 @@ impl TyCtxt {
                 let total: u32 = elems.iter().map(|t| self.slot_bytes(*t).max(8) / 8).sum();
                 total.max(1) * 8
             }
-            TyKind::Array { elem, len } => {
+            TyKind::Array { elem, len } | TyKind::Simd { elem, lanes: len } => {
                 let elem_bytes = self.slot_bytes(*elem).max(8);
                 u32::try_from(len.to_usize())
                     .unwrap_or(1)
@@ -604,11 +909,26 @@ impl TyCtxt {
                 if def.local >= u32::MAX - 6 {
                     return 8;
                 }
+                if let Some(size) = self.packed_walk(ty, |_, _| {}) {
+                    return size;
+                }
                 if let Some(field_tys) = self.adt_field_tys(*def, substs) {
                     let total_slots: u32 = field_tys
                         .iter()
                         .map(|t| self.slot_bytes(*t).max(8) / 8)
                         .sum();
+                    // A plain struct of word-wide fields already sits at the
+                    // offsets its natural layout gives it.
+                    debug_assert!(
+                        self.plain_layout(ty).is_none_or(|layout| {
+                            layout.align != 8
+                                || field_tys
+                                    .iter()
+                                    .any(|t| self.plain_layout(*t).is_none_or(|f| f.size != 8))
+                                || layout.size == total_slots.max(1) * 8
+                        }),
+                        "slot layout and plain layout disagree for a word-field struct"
+                    );
                     return total_slots.max(1) * 8;
                 }
                 8
@@ -630,6 +950,18 @@ impl TyCtxt {
     #[must_use]
     pub fn def_name(&self, def: gossamer_resolve::DefId) -> Option<&str> {
         self.def_names.get(&def).map(String::as_str)
+    }
+
+    /// Records the `Param` type the generic type parameter `def` stands for.
+    pub fn register_type_param_def(&mut self, def: gossamer_resolve::DefId, param: Ty) {
+        self.type_param_defs.insert(def, param);
+    }
+
+    /// The `Param` type the generic type parameter `def` stands for, when the
+    /// checker recorded one.
+    #[must_use]
+    pub fn type_param_of_def(&self, def: gossamer_resolve::DefId) -> Option<Ty> {
+        self.type_param_defs.get(&def).copied()
     }
 
     /// Records a reference-counting type-meta blob under `symbol`,
@@ -738,9 +1070,9 @@ impl TyCtxt {
         ) {
             return false;
         }
-        // Opaque runtime-handle / heap-blob stdlib structs - `fs::DirInfo`
-        // (`u32::MAX - 2`), `process::Output` (`- 3`), `http::ResponseStream`
-        // (`- 4`), and `http::Response` (`- 5`). Each is a plain `Box`
+        // Opaque runtime-handle / heap-blob stdlib structs -
+        // `http::ResponseStream` (`u32::MAX - 4`) and `http::Response`
+        // (`- 5`). Each is a plain `Box`
         // handle with no RC header, so `gos_rt_rc_release` on the whole
         // local reads a non-existent header and corrupts the heap. They are
         // never reference-counted: handle locals leak (process-teardown
@@ -750,7 +1082,7 @@ impl TyCtxt {
         if matches!(
             self.kind(ty),
             Some(TyKind::Adt { def, .. })
-                if (u32::MAX - 5..=u32::MAX - 2).contains(&def.local)
+                if (u32::MAX - 5..=u32::MAX - 4).contains(&def.local)
         ) {
             return false;
         }
@@ -790,6 +1122,11 @@ impl TyCtxt {
             return false;
         }
         if matches!(self.kind(ty), Some(TyKind::String)) {
+            return true;
+        }
+        // An `errors::Error` is a reference-counted cell holding its message,
+        // a share of its cause, and its fields.
+        if matches!(self.kind(ty), Some(TyKind::DynError)) {
             return true;
         }
         // A callable value carries its captures in an environment the closure

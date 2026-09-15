@@ -151,6 +151,8 @@ pub(crate) struct LoweredProgram {
         reason = "exposed for the LLVM backend to populate without an extra pass"
     )]
     pub function_ids_by_def: HashMap<u32, FuncId>,
+    /// What each lowered function's code records about its frames.
+    pub frames: Vec<crate::jit_frames::FunctionFrames>,
 }
 
 pub(super) fn resolve_callee(
@@ -218,12 +220,11 @@ pub(super) fn fcmp_bool(
 
 pub(super) fn shape_char_to_cl_type(c: char, ptr_ty: ir::Type) -> Option<ir::Type> {
     Some(match c {
-        'b' | 'y' => types::I8,
-        'k' => types::I16,
-        'c' | 'j' => types::I32,
+        'b' | 'y' | 'Y' => types::I8,
+        'k' | 'K' => types::I16,
+        'c' | 'j' | 'J' => types::I32,
         'i' => types::I64,
-        'f' => types::F64,
-        'g' => types::F32,
+        'f' | 'g' => types::F64,
         'u' => types::I64,
         // 2-word packed Result/Option.
         'r' => types::I128,
@@ -264,10 +265,18 @@ pub(super) fn define_shape_thunk(
     let ret_ty = shape_char_to_cl_type(ret_char, ptr_ty)
         .ok_or_else(|| anyhow!("define_shape_thunk: unknown ret shape `{ret_char}` in `{name}`"))?;
     let unit_ret = ret_char == 'u';
+    // A narrow integer, `bool`, or `char` result is answered as a whole word:
+    // a caller reading the word the runtime's callback types declare would
+    // otherwise see whatever the narrow return left in the upper bits.
+    let widened = matches!(ret_char, 'b' | 'c' | 'y' | 'Y' | 'k' | 'K' | 'j' | 'J');
     // Thunk signature: (env: ptr, typed args...) -> typed ret. The runtime is
     // the caller, so the return crosses in the platform's wire shape: a
     // two-word carrier comes back in a vector register under the Win64 ABI.
-    let wire_ret_ty = win64_wire_return(module.target_config(), ret_ty);
+    let wire_ret_ty = if widened {
+        types::I64
+    } else {
+        win64_wire_return(module.target_config(), ret_ty)
+    };
     let mut sig = module.make_signature();
     sig.params.push(AbiParam::new(ptr_ty));
     for t in &input_tys {
@@ -340,7 +349,13 @@ pub(super) fn define_shape_thunk(
                 .first()
                 .copied()
                 .unwrap_or_else(|| builder.ins().iconst(ret_ty, 0));
-            let wire = if wire_ret_ty == ret_ty {
+            let wire = if widened {
+                if matches!(ret_char, 'y' | 'k' | 'j') {
+                    builder.ins().sextend(types::I64, value)
+                } else {
+                    builder.ins().uextend(types::I64, value)
+                }
+            } else if wire_ret_ty == ret_ty {
                 value
             } else {
                 bitcast_same_width(&mut builder, wire_ret_ty, value)
@@ -444,19 +459,86 @@ pub(super) fn emit_cabi_vector_return_thunk(
     Ok(thunk_id)
 }
 
-/// Emits an out-pointer wrapper for a `Result<Enum, _>`-returning body.
+/// Emits the address-returning wrapper `<name>$addr` for a body that returns
+/// an aggregate through a caller-supplied result slot.
 ///
-/// The body returns its two-word `[disc, payload]` carrier by value as an
-/// `i128`. Within Cranelift-compiled code the `i128` return register
-/// convention is self-consistent on every target, but a Rust
-/// `extern "C" fn(..) -> i128` trampoline reads that return from a
-/// different register than the body writes on Windows x64, so the
-/// in-process JIT cannot read the carrier by value there. This thunk calls
-/// the body (a Cranelift-to-Cranelift call, so both sides agree) and stores
-/// the carrier through `out`, a plain pointer argument whose ABI is
-/// identical on every target. The trampoline calls the thunk with a stack
-/// buffer and reads `out[0]` (disc) / `out[1]` (payload) back from memory.
-pub(crate) fn emit_carrier_outptr_thunk(
+/// A callable's entry is reached with the logical parameters only - by the
+/// shape thunk at the front of its env and by the runtime combinators through
+/// that thunk - and the aggregate is read back as the address of its storage.
+/// The wrapper takes those parameters, allocates a heap block of `slots` words
+/// the value outlives the call in, passes it as the body's result slot, and
+/// answers its address. Its address is what `gos_fn_addr` hands over.
+pub(super) fn emit_sret_address_thunk(
+    module: &mut dyn Module,
+    intrinsics: &mut IntrinsicContext,
+    body_id: FuncId,
+    body_name: &str,
+    slots: u32,
+) -> Result<FuncId> {
+    let ptr_ty = module.target_config().pointer_type();
+    let body_sig = module
+        .declarations()
+        .get_function_decl(body_id)
+        .signature
+        .clone();
+    // The body's trailing parameter is the result slot this wrapper supplies.
+    let logical_params: Vec<ir::Type> = body_sig
+        .params
+        .split_last()
+        .map(|(_, rest)| rest.iter().map(|p| p.value_type).collect())
+        .unwrap_or_default();
+    let mut sig = module.make_signature();
+    for t in &logical_params {
+        sig.params.push(AbiParam::new(*t));
+    }
+    sig.returns.push(AbiParam::new(ptr_ty));
+    let static_name: &'static str = Box::leak(format!("{body_name}$addr").into_boxed_str());
+    let thunk_id = module
+        .declare_function(static_name, Linkage::Local, &sig)
+        .map_err(|e| anyhow!("declare {static_name}: {e}"))?;
+    let alloc_fn = intrinsics.extern_fn(module, "gos_rt_aggr_alloc", &[types::I64], &[ptr_ty])?;
+    let mut func = Function::with_name_signature(UserFuncName::user(0, thunk_id.as_u32()), sig);
+    let mut fb_ctx = FunctionBuilderContext::new();
+    {
+        let mut builder = FunctionBuilder::new(&mut func, &mut fb_ctx);
+        let entry = builder.create_block();
+        builder.append_block_params_for_function_params(entry);
+        builder.switch_to_block(entry);
+        let mut args: Vec<ir::Value> = (0..logical_params.len())
+            .map(|i| builder.block_params(entry)[i])
+            .collect();
+        let alloc_ref = module.declare_func_in_func(alloc_fn, builder.func);
+        let bytes = builder
+            .ins()
+            .iconst(types::I64, i64::from(slots.max(1)) * 8);
+        let alloc = builder.ins().call(alloc_ref, &[bytes]);
+        let block = builder.inst_results(alloc)[0];
+        args.push(block);
+        let body_ref = module.declare_func_in_func(body_id, builder.func);
+        builder.ins().call(body_ref, &args);
+        builder.ins().return_(&[block]);
+        builder.seal_all_blocks();
+        builder.finalize(module.target_config());
+    }
+    let mut ctx = Context::for_function(func);
+    module
+        .define_function(thunk_id, &mut ctx)
+        .map_err(|e| anyhow!("define {static_name}: {e}"))?;
+    Ok(thunk_id)
+}
+
+/// Emits the entry thunk the VM trampoline calls for a body that takes or
+/// answers a two-word `Option` / `Result` carrier.
+///
+/// Within Cranelift-compiled code an `i128` carrier crosses in the
+/// self-consistent Cranelift convention, but a Rust `extern "C"` trampoline
+/// passes and reads `i128` values in registers that Windows x64 places
+/// differently. The thunk takes every carrier parameter as a pointer to its
+/// two words (`[disc, payload]`) and, when the body answers a carrier, a
+/// leading out-pointer it writes the answer's two words to. Pointers have one
+/// ABI on every target; the call into the body is Cranelift to Cranelift.
+/// Every other parameter and return passes through unchanged.
+pub(crate) fn emit_carrier_entry_thunk(
     module: &mut dyn Module,
     body_id: FuncId,
     body_name: &str,
@@ -468,11 +550,18 @@ pub(crate) fn emit_carrier_outptr_thunk(
         .signature
         .clone();
     let param_tys: Vec<ir::Type> = body_sig.params.iter().map(|p| p.value_type).collect();
-    // Thunk signature: (out: *mut i128, <body params>) -> ()
+    let return_tys: Vec<ir::Type> = body_sig.returns.iter().map(|p| p.value_type).collect();
+    let carrier_return = matches!(return_tys.as_slice(), [types::I128]);
     let mut sig = module.make_signature();
-    sig.params.push(AbiParam::new(ptr_ty));
+    if carrier_return {
+        sig.params.push(AbiParam::new(ptr_ty));
+    } else {
+        sig.returns
+            .extend(return_tys.iter().map(|t| AbiParam::new(*t)));
+    }
     for t in &param_tys {
-        sig.params.push(AbiParam::new(*t));
+        let crossing = if *t == types::I128 { ptr_ty } else { *t };
+        sig.params.push(AbiParam::new(crossing));
     }
     let static_name: &'static str =
         Box::leak(format!("__gos_jit_carrier_{body_name}").into_boxed_str());
@@ -486,34 +575,56 @@ pub(crate) fn emit_carrier_outptr_thunk(
         let entry = builder.create_block();
         builder.append_block_params_for_function_params(entry);
         builder.switch_to_block(entry);
-        let out_ptr = builder.block_params(entry)[0];
-        let args: Vec<ir::Value> = (0..param_tys.len())
-            .map(|i| builder.block_params(entry)[i + 1])
-            .collect();
+        let incoming = builder.block_params(entry).to_vec();
+        let (out_ptr, incoming) = if carrier_return {
+            (Some(incoming[0]), &incoming[1..])
+        } else {
+            (None, &incoming[..])
+        };
+        let mut args = Vec::with_capacity(param_tys.len());
+        for (t, value) in param_tys.iter().zip(incoming) {
+            if *t == types::I128 {
+                // Two plain `i64` loads rather than one `i128` load: the words
+                // sit at +0 (disc) and +8 (payload), and the backend's 128-bit
+                // memory access is not relied on.
+                let flags = MemFlagsData::new();
+                let disc =
+                    builder
+                        .ins()
+                        .load(types::I64, flags, *value, ir::immediates::Offset32::new(0));
+                let payload =
+                    builder
+                        .ins()
+                        .load(types::I64, flags, *value, ir::immediates::Offset32::new(8));
+                args.push(builder.ins().iconcat(disc, payload));
+            } else {
+                args.push(*value);
+            }
+        }
         let body_ref = module.declare_func_in_func(body_id, builder.func);
         let call = builder.ins().call(body_ref, &args);
-        let carrier = builder.inst_results(call)[0];
-        // Split the carrier into its two 64-bit words and store each
-        // separately, rather than a single `i128` store: the disc word at
-        // +0, the payload word at +8 - the layout the trampoline reads back
-        // as `out[0]` / `out[1]`. Two plain `i64` stores avoid relying on the
-        // backend's 128-bit memory-access lowering.
-        let disc = builder.ins().ireduce(types::I64, carrier);
-        let high = builder.ins().ushr_imm_u(carrier, 64);
-        let payload = builder.ins().ireduce(types::I64, high);
-        builder.ins().store(
-            MemFlagsData::new(),
-            disc,
-            out_ptr,
-            ir::immediates::Offset32::new(0),
-        );
-        builder.ins().store(
-            MemFlagsData::new(),
-            payload,
-            out_ptr,
-            ir::immediates::Offset32::new(8),
-        );
-        builder.ins().return_(&[]);
+        let results = builder.inst_results(call).to_vec();
+        match out_ptr {
+            Some(out_ptr) => {
+                let (disc, payload) = builder.ins().isplit(results[0]);
+                builder.ins().store(
+                    MemFlagsData::new(),
+                    disc,
+                    out_ptr,
+                    ir::immediates::Offset32::new(0),
+                );
+                builder.ins().store(
+                    MemFlagsData::new(),
+                    payload,
+                    out_ptr,
+                    ir::immediates::Offset32::new(8),
+                );
+                builder.ins().return_(&[]);
+            }
+            None => {
+                builder.ins().return_(&results);
+            }
+        }
         builder.seal_all_blocks();
         builder.finalize(module.target_config());
     }

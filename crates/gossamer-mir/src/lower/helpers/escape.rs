@@ -15,7 +15,7 @@ use std::collections::{HashMap, HashSet};
 
 use gossamer_hir::{HirBlock, HirExpr, HirExprKind, HirItemKind, HirProgram, HirStmt, HirStmtKind};
 use gossamer_resolve::DefId;
-use gossamer_types::{Ty, TyCtxt, TyKind};
+use gossamer_types::{ParamIdx, Ty, TyCtxt, TyKind};
 
 /// Method names that mutate their receiver in place (could stash an
 /// argument into a caller-owned container).
@@ -664,8 +664,10 @@ impl<'a> LoopEligibility<'a> {
                 name,
                 args,
                 owner: None,
-            } if matches!(name.name.as_str(), "wrapping_add" | "wrapping_mul")
-                && is_copy_ty(self.tcx, receiver.ty)
+            } if matches!(
+                name.name.as_str(),
+                "__gos_wrapping_add" | "__gos_wrapping_sub" | "__gos_wrapping_mul"
+            ) && is_copy_ty(self.tcx, receiver.ty)
                 && args.iter().all(|arg| is_copy_ty(self.tcx, arg.ty)) =>
             {
                 self.expr(receiver, false);
@@ -767,8 +769,11 @@ impl<'a> LoopEligibility<'a> {
 /// Whether a parameter stays inside its call is a property of that parameter,
 /// so it is answered per parameter: a helper that writes through one `&mut`
 /// parameter still only reads the collection handed to another.
-pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> HashMap<DefId, Vec<bool>> {
-    let mut out = HashMap::new();
+pub fn collect_shareable_params(
+    program: &HirProgram,
+    tcx: &TyCtxt,
+) -> HashMap<DefId, Vec<ParamShare>> {
+    let mut out: HashMap<DefId, Vec<ParamShare>> = HashMap::new();
     let mut pending: HashMap<DefId, Vec<Vec<(DefId, usize)>>> = HashMap::new();
     for item in &program.items {
         let HirItemKind::Fn(f) = &item.kind else {
@@ -789,7 +794,7 @@ pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> HashMap<D
                 TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Unit
             ) || matches!(tcx.kind_of(ret), TyKind::String)
         });
-        let mut flags: Vec<bool> = Vec::with_capacity(f.params.len());
+        let mut flags: Vec<ParamShare> = Vec::with_capacity(f.params.len());
         let mut param_forwards: Vec<Vec<(DefId, usize)>> = Vec::with_capacity(f.params.len());
         for p in &f.params {
             let mut forwards = Vec::new();
@@ -799,7 +804,7 @@ pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> HashMap<D
                     mutable: false,
                 } = &p.pattern.kind
                 else {
-                    break 'param false;
+                    break 'param ParamShare::Never;
                 };
                 if !matches!(
                     tcx.kind_of(p.ty),
@@ -810,7 +815,7 @@ pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> HashMap<D
                         | TyKind::Adt { .. }
                         | TyKind::Tuple(_)
                 ) {
-                    break 'param false;
+                    break 'param ParamShare::Never;
                 }
                 let mut scan = ShareScan {
                     tcx,
@@ -818,10 +823,15 @@ pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> HashMap<D
                     escaped: false,
                     ret_carries,
                     forwards: Vec::new(),
+                    copy_params: Vec::new(),
                 };
                 scan.block(&body.block, false, ret_carries);
                 forwards = scan.forwards;
-                !scan.escaped
+                if scan.escaped {
+                    ParamShare::Never
+                } else {
+                    ParamShare::WhenCopy(scan.copy_params)
+                }
             };
             flags.push(shareable);
             param_forwards.push(forwards);
@@ -839,15 +849,20 @@ pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> HashMap<D
         let mut changed = false;
         for (def, forwards) in &pending {
             for (idx, targets) in forwards.iter().enumerate() {
-                if !out[def][idx] {
+                if out[def][idx] == ParamShare::Never {
                     continue;
                 }
+                // A forward keeps the parameter shareable only through a
+                // target that shares unconditionally: a target's own type
+                // parameters are not this body's, so its conditions do not
+                // translate into conditions here.
                 let reaches_unshareable = targets.iter().any(|(callee, pos)| {
-                    out.get(callee)
-                        .is_none_or(|flags| !flags.get(*pos).copied().unwrap_or(false))
+                    out.get(callee).is_none_or(|flags| {
+                        flags.get(*pos) != Some(&ParamShare::WhenCopy(Vec::new()))
+                    })
                 });
                 if reaches_unshareable {
-                    out.get_mut(def).expect("summary present")[idx] = false;
+                    out.get_mut(def).expect("summary present")[idx] = ParamShare::Never;
                     changed = true;
                 }
             }
@@ -857,6 +872,34 @@ pub fn collect_shareable_params(program: &HirProgram, tcx: &TyCtxt) -> HashMap<D
         }
     }
     out
+}
+
+/// Whether a parameter's storage stays inside its call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ParamShare {
+    /// The callee may write the parameter or let it outlive the call.
+    Never,
+    /// The callee only reads the parameter once each listed type parameter is
+    /// instantiated with a copy type; an empty list holds for every call.
+    WhenCopy(Vec<ParamIdx>),
+}
+
+impl ParamShare {
+    /// Whether the parameter is shared at a call instantiating the callee's
+    /// type parameters with `type_args`, indexed by parameter position.
+    #[must_use]
+    pub fn holds(&self, tcx: &TyCtxt, type_args: &[Option<Ty>]) -> bool {
+        match self {
+            Self::Never => false,
+            Self::WhenCopy(params) => params.iter().all(|idx| {
+                type_args
+                    .get(idx.0 as usize)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|ty| is_copy_ty(tcx, ty))
+            }),
+        }
+    }
 }
 
 /// Methods whose arguments they only read: the argument's storage stays the
@@ -898,9 +941,26 @@ struct ShareScan<'a> {
     /// helper hand its collection to another helper without the caller
     /// copying it first.
     forwards: Vec<(DefId, usize)>,
+    /// Type parameters the walk read as copies. A generic body is summarised
+    /// once for all its instantiations, and a value typed by one of these is a
+    /// copy exactly in the instantiations that choose a copy type for it, so
+    /// the answer holds for those.
+    copy_params: Vec<ParamIdx>,
 }
 
 impl ShareScan<'_> {
+    /// Whether a value of `ty` is a copy, reading a type parameter as one and
+    /// recording it as a condition of the answer.
+    fn copy(&mut self, ty: Ty) -> bool {
+        if let TyKind::Param { idx, .. } = self.tcx.kind_of(ty) {
+            if !self.copy_params.contains(idx) {
+                self.copy_params.push(*idx);
+            }
+            return true;
+        }
+        is_copy_ty(self.tcx, ty)
+    }
+
     fn block(&mut self, b: &HirBlock, place: bool, returned: bool) {
         for s in &b.stmts {
             match &s.kind {
@@ -918,7 +978,7 @@ impl ShareScan<'_> {
                             mutable: false,
                         } = &pattern.kind
                             && self.projection_of_tracked(e)
-                            && !is_copy_ty(self.tcx, e.ty)
+                            && !self.copy(e.ty)
                         {
                             self.walk_projection_indices(e);
                             self.names.push(name.name.as_str().to_string());
@@ -953,7 +1013,7 @@ impl ShareScan<'_> {
         // is. A scalar read is a copy and falls through to the walk below.
         if !matches!(e.kind, HirExprKind::Path { .. })
             && self.projection_of_tracked(e)
-            && !is_copy_ty(self.tcx, e.ty)
+            && !self.copy(e.ty)
         {
             if !place || returned {
                 self.escaped = true;
@@ -981,7 +1041,7 @@ impl ShareScan<'_> {
                 // a view of it - and is read-only only where the whole call
                 // already sits in a read-only place. This is the rule the
                 // field projection below follows, for the same reason.
-                let scalar = is_copy_ty(self.tcx, e.ty);
+                let scalar = self.copy(e.ty);
                 self.expr(receiver, place || scalar, returned && !scalar);
                 // A method that only reads the argument it is handed leaves
                 // the argument's storage inside the call, exactly as a field
@@ -992,7 +1052,7 @@ impl ShareScan<'_> {
                 }
             }
             HirExprKind::Index { base, index } => {
-                let scalar = is_copy_ty(self.tcx, e.ty);
+                let scalar = self.copy(e.ty);
                 self.expr(base, true, returned && !scalar);
                 self.expr(index, false, false);
             }
@@ -1026,10 +1086,7 @@ impl ShareScan<'_> {
                 // field type yields something that still reaches the
                 // parameter's storage, and is read-only only where the whole
                 // projection already sits in a read-only place.
-                let scalar = matches!(
-                    self.tcx.kind_of(e.ty),
-                    TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::Unit
-                );
+                let scalar = self.copy(e.ty);
                 self.expr(receiver, place || scalar, returned && !scalar);
             }
             HirExprKind::Unary { operand, .. } => self.expr(operand, false, false),

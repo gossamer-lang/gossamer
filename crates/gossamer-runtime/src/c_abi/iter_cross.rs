@@ -48,7 +48,7 @@ type FloatCmp = unsafe extern "C" fn(env: *const u8, a: f64, b: f64) -> i64;
 type PtrCmp = unsafe extern "C" fn(env: *const u8, a: *mut u8, b: *mut u8) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null or zero env.
-fn env_fn_addr(env: *const u8) -> Option<*const ()> {
+pub(crate) fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     if env.is_null() {
         return None;
     }
@@ -804,6 +804,8 @@ unsafe fn chunk_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mu
     for (k, g) in keys.into_iter().zip(groups) {
         unsafe { gos_rt_map_insert_i64_i64(out, k, g as i64) };
     }
+    // Each group was built here and handed to the map, so the map owns it.
+    unsafe { crate::c_abi::map::gos_rt_map_set_vec_values(out) };
     out
 }
 
@@ -871,6 +873,9 @@ unsafe fn flat_map_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mu
         for j in 0..vec_len_of(inner) {
             unsafe { vec_push_elem_from(out, inner, j) };
         }
+        // The callback answered a share of its sequence; each copied element
+        // took a share of its own, so the sequence's share is given back.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(inner) };
     }
     if out.is_null() {
         // SAFETY: fresh allocation.
@@ -985,7 +990,7 @@ type PtrToF64 = unsafe extern "C" fn(env: *const u8, x: *mut u8) -> f64;
 /// fixed by the `key_is_f64` flag the lowering passes, so the two never mix
 /// within one traversal.
 #[derive(Clone, Copy)]
-enum SortKey {
+pub(crate) enum SortKey {
     Int(i64),
     Float(f64),
 }
@@ -994,7 +999,7 @@ impl SortKey {
     /// Order against another key of the same shape. Float keys order by
     /// `f64::total_cmp`, the same total order `iter::max` and `iter::min`
     /// place a float sequence in.
-    fn order(self, other: Self) -> std::cmp::Ordering {
+    pub(crate) fn order(self, other: Self) -> std::cmp::Ordering {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a.cmp(&b),
             (Self::Float(a), Self::Float(b)) => a.total_cmp(&b),
@@ -1039,7 +1044,12 @@ unsafe fn key_of_float(env: *const u8, addr: *const (), bits: i64, key_is_f64: b
 }
 
 /// Calls the key callback for an aggregate element, passed by address.
-unsafe fn key_of_ptr(env: *const u8, addr: *const (), x: *mut u8, key_is_f64: bool) -> SortKey {
+pub(crate) unsafe fn key_of_ptr(
+    env: *const u8,
+    addr: *const (),
+    x: *mut u8,
+    key_is_f64: bool,
+) -> SortKey {
     if key_is_f64 {
         // SAFETY: addr is the callable stored by the closure lowering, whose
         // shape the flag names.

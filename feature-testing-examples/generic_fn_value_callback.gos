@@ -1,0 +1,35 @@
+// A generic function passed as a value to callable parameters of several
+// concrete signatures, one instantiation per signature.
+
+struct Point {
+    x: f64
+    y: f64
+}
+
+fn ident<T>(x: T) -> T {
+    x
+}
+
+fn apply(f: Fn(f64) -> f64, x: f64) -> f64 {
+    f(x)
+}
+
+fn apply_int(f: Fn(i64) -> i64, x: i64) -> i64 {
+    f(x)
+}
+
+fn apply_pt(f: Fn(Point) -> Point, p: Point) -> Point {
+    f(p)
+}
+
+fn apply_str(f: Fn(String) -> String, s: String) -> String {
+    f(s)
+}
+
+fn main() {
+    let a = apply(ident, 2.5)
+    let n = apply_int(ident, 7)
+    let p = apply_pt(ident, Point { x: 1.5, y: -2.5 })
+    let s = apply_str(ident, "same")
+    println("{} {} {} {} {}", a, n, p.x, p.y, s)
+}

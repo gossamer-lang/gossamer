@@ -481,28 +481,12 @@ impl<'a> Lowerer<'a> {
         let result_new_heap_copy = matches!(symbol, "gos_rt_result_new");
         // An ordered container's push takes the address of the element's
         // slots; the store copies its own stride from it.
-        let heap_push_by_address = matches!(
-            symbol,
-            "gos_rt_bheap_max_push_desc" | "gos_rt_bheap_min_push_desc"
-        );
+        let heap_push_by_address = gossamer_abi::takes_elem_by_address(symbol);
         // A content-keyed map or set reads the key's slots through the
         // descriptor that travels with the call, so the key is passed by
         // address - an aggregate's own storage, or a fresh slot holding a
         // two-word `Option` carrier.
-        let skey_by_address = matches!(
-            symbol,
-            "gos_rt_map_insert_skey_opt"
-                | "gos_rt_map_insert_skey"
-                | "gos_rt_map_get_skey_opt"
-                | "gos_rt_map_get_or_skey"
-                | "gos_rt_map_contains_skey"
-                | "gos_rt_map_remove_skey"
-                | "gos_rt_map_or_insert_skey"
-                | "gos_rt_map_inc_skey"
-                | "gos_rt_set_insert_skey"
-                | "gos_rt_set_contains_skey"
-                | "gos_rt_set_remove_skey"
-        );
+        let skey_by_address = gossamer_abi::takes_key_by_address(symbol);
 
         // HashMap insert with a struct value: the value arg is the
         // stack address of an Rvalue::Aggregate local that goes out
@@ -552,12 +536,19 @@ impl<'a> Lowerer<'a> {
         // entry reads back as the last one inserted.
         let skey_insert_heap_copy = matches!(
             symbol,
-            "gos_rt_map_insert_skey"
-                | "gos_rt_map_insert_skey_opt"
-                // `or_insert` stores its default when the slot is
-                // absent, so that default is a stored value too.
-                | "gos_rt_map_or_insert_skey"
+            "gos_rt_map_insert_skey" | "gos_rt_map_insert_skey_opt"
         );
+        // An `or_insert` default is a stored value too, but the runtime keeps
+        // its box when the slot is absent and gives it back when it is not, so
+        // the box's share leaves with the call rather than being given back
+        // after it.
+        let or_insert_default_arg = match symbol {
+            "gos_rt_map_or_insert_i64_i64"
+            | "gos_rt_map_or_insert_str_i64"
+            | "gos_rt_map_or_insert_typed_str_i64" => Some(2),
+            "gos_rt_map_or_insert_skey" => Some(3),
+            _ => None,
+        };
         // Win64: the runtime invokes a two-word spawn callable as
         // `extern "C-unwind" fn(usize) -> i128` and reads the result from
         // xmm0, but the callable is a gossamer `ret i128` (GP-register
@@ -598,6 +589,29 @@ impl<'a> Lowerer<'a> {
                 arg_tys_for_decl.push("ptr".to_string());
                 continue;
             }
+            // A `get_or` default of a two-word value is answered by address,
+            // exactly as a stored value is: the reader hands back a box address
+            // either way, and a default that is not stored needs no box.
+            if symbol.starts_with("gos_rt_map_get_or")
+                && i + 1 == args.len()
+                && let Operand::Copy(place) = arg
+                && place.projection.is_empty()
+                && matches!(
+                    self.tcx.kind(self.body.local_ty(place.local)),
+                    Some(gossamer_types::TyKind::Adt { def, .. })
+                        if def.local == u32::MAX || def.local == u32::MAX - 1
+                )
+            {
+                let addr = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {addr} = ptrtoint ptr {} to i64",
+                    local_slot(place.local)
+                )
+                .unwrap();
+                let _ = write!(arg_text, "i64 {addr}");
+                continue;
+            }
             let want = expected_param_tys.get(i).copied().flatten();
             let (a_v, mut a_ty) = self.lower_call_arg(arg, want)?;
             if result_new_heap_copy
@@ -612,11 +626,19 @@ impl<'a> Lowerer<'a> {
             if map_insert_heap_copy
                 && i == 2
                 && let Some(heap_v) = self
-                    .maybe_heap_copy_value_enum(arg)
-                    .or_else(|| self.maybe_heap_copy_aggregate_for_map(arg))
+                    .maybe_heap_copy_aggregate_for_map(arg)
+                    .or_else(|| self.maybe_heap_copy_value_enum(arg))
             {
                 let _ = write!(arg_text, "i64 {heap_v}");
                 minted_blob = Some(heap_v);
+                continue;
+            }
+            if or_insert_default_arg == Some(i)
+                && let Some(heap_v) = self
+                    .maybe_heap_copy_aggregate_for_map(arg)
+                    .or_else(|| self.maybe_heap_copy_value_enum(arg))
+            {
+                let _ = write!(arg_text, "i64 {heap_v}");
                 continue;
             }
             if router_env_arg == Some(i)
@@ -632,8 +654,8 @@ impl<'a> Lowerer<'a> {
             if skey_insert_heap_copy
                 && i == 3
                 && let Some(heap_v) = self
-                    .maybe_heap_copy_value_enum(arg)
-                    .or_else(|| self.maybe_heap_copy_aggregate_for_map(arg))
+                    .maybe_heap_copy_aggregate_for_map(arg)
+                    .or_else(|| self.maybe_heap_copy_value_enum(arg))
             {
                 let _ = write!(arg_text, "i64 {heap_v}");
                 minted_blob = Some(heap_v);
@@ -713,7 +735,7 @@ impl<'a> Lowerer<'a> {
                     continue;
                 }
                 if &a_ty != want_ty {
-                    let coerced = self.coerce_llvm_value(&a_v, &a_ty, want_ty);
+                    let coerced = self.runtime_word_arg(&a_v, &a_ty, want_ty);
                     let _ = write!(arg_text, "{want_ty} {coerced}");
                     a_ty.clone_from(want_ty);
                     let _ = a_ty;
@@ -923,7 +945,9 @@ impl<'a> Lowerer<'a> {
                     // returned by value leaks its buffer. Runtime accessors
                     // (`gos_rt_vec_get_ptr`, …) instead return a BORROWED
                     // pointer into a container, which must never be freed here.
-                    if !symbol.starts_with("gos_rt_") {
+                    if !symbol.starts_with("gos_rt_")
+                        || gossamer_abi::returns_fresh_aggregate(symbol)
+                    {
                         declare_rt(&mut self.runtime_refs, "gos_rt_aggr_free");
                         writeln!(
                             self.out,
@@ -942,6 +966,32 @@ impl<'a> Lowerer<'a> {
                     // store-the-handle shape used by enum construction.
                     self.store_value_to_place(destination, "ptr", &tmp);
                 }
+            } else if call_ret_ty == "i64"
+                && dest_ty == "i128"
+                && (symbol.starts_with("gos_rt_map_get_or")
+                    || symbol.starts_with("gos_rt_map_or_insert"))
+            {
+                // A map keeps a two-word value boxed, so its reader answers the
+                // box's address and the carrier is read back through it.
+                declare_rt(&mut self.runtime_refs, "gos_rt_carrier_from_box");
+                let loaded = self.fresh();
+                if super::misc::needs_win64_fat_ret(crate::emit::target_is_windows(), Some("i128"))
+                {
+                    let wire = self.fresh();
+                    writeln!(
+                        self.out,
+                        "  {wire} = call <16 x i8> @\"gos_rt_carrier_from_box\"(i64 {tmp})"
+                    )
+                    .unwrap();
+                    writeln!(self.out, "  {loaded} = bitcast <16 x i8> {wire} to i128").unwrap();
+                } else {
+                    writeln!(
+                        self.out,
+                        "  {loaded} = call i128 @\"gos_rt_carrier_from_box\"(i64 {tmp})"
+                    )
+                    .unwrap();
+                }
+                self.store_value_to_place(destination, "i128", &loaded);
             } else if call_ret_ty != dest_ty {
                 // Registry-typed call result differs from the
                 // destination slot's MIR-derived shape. The

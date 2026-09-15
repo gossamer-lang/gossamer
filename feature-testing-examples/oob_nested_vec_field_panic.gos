@@ -1,0 +1,24 @@
+// An out-of-range outer index on a nested Vec reached through a struct field
+// panics with the Vec index diagnostic on every tier. The in-range reads before
+// it print first, so the matching stdout and exit code are the assertion.
+
+struct Cell {
+    alive: bool
+    neighbors: Vec<(i64, i64)>
+}
+
+struct Grid {
+    cells: Vec<Vec<Cell>>
+}
+
+fn probe(g: Grid, y: i64, x: i64) -> bool { g.cells[y][x].alive }
+
+fn main() {
+    let mut rows: Vec<Vec<Cell>> = #[]
+    for _ in 0..2 {
+        rows.push(#[Cell { alive: true, neighbors: #[] }, Cell { alive: false, neighbors: #[] }])
+    }
+    let g = Grid { cells: rows }
+    println("in-range {} {}", probe(g, 0, 0), probe(g, 1, 1))
+    println("unreachable {}", probe(g, 5, 0))
+}

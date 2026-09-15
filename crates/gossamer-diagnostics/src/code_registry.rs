@@ -644,6 +644,19 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `isolation: Isolation::Thread`. `--fix` rewrites it.",
     ),
     (
+        "GP0057",
+        "A string literal handed to `regex::compile` is not a pattern the\n\
+            regex engine compiles. The literal is compiled while the program is\n\
+            parsed, with the engine and settings `regex::compile` uses at run\n\
+            time, so the call would only ever answer `Err`.",
+    ),
+    (
+        "GP0058",
+        "A string literal handed to `sql::statement` is not a well-formed\n\
+            statement: it is empty, or its parentheses do not balance. The\n\
+            statement is checked while the program is parsed.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\
@@ -1404,6 +1417,28 @@ pub const REGISTRY: &[(&str, &str)] = &[
             collects from them. `main` is exempt: the root cohort's extent is\n\
             main's own, so a child there does not outlive the scope that owns\n\
             it.",
+    ),
+    (
+        "GT0087",
+        "`wrapping_add` or `wrapping_mul` was called as a method. Wrapping\n\
+            arithmetic has one spelling, the operator: write `x +% y`,\n\
+            `x -% y`, or `x *% y`, which wrap at the operands' declared width\n\
+            on every tier. `--fix` rewrites the call.",
+    ),
+    (
+        "GT0088",
+        "A call to a function with a const generic parameter gave it no\n\
+            value. A const parameter takes its value from the call: an explicit\n\
+            `f::<4>(..)` argument, or the length of an array argument whose\n\
+            type names it. Name the value with a turbofish.",
+    ),
+    (
+        "GT0089",
+        "A `Simd` or `Mask` vector named an element type, a lane count, or an\n\
+            operation the vector type does not support. `Simd<T, N>` takes\n\
+            `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` lanes and `N` of 2, 4, 8,\n\
+            or 16 (16 for `u8`, `i32`, and `u32`); `Simd::splat` takes its lane\n\
+            count from the annotated type.",
     ),
     (
         "GX0001",

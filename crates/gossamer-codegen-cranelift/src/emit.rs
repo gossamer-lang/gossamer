@@ -316,6 +316,7 @@ fn binop_mnemonic(op: BinOp) -> &'static str {
         BinOp::Add => "iadd",
         BinOp::WrappingAdd => "iadd.wrap",
         BinOp::Sub => "isub",
+        BinOp::WrappingSub => "isub.wrap",
         BinOp::Mul => "imul",
         BinOp::WrappingMul => "imul.wrap",
         BinOp::Div => "sdiv",

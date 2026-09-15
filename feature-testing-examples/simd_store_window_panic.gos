@@ -1,0 +1,25 @@
+// A lane window is checked as a whole before any lane moves: a `store` whose
+// window reaches past the end panics with the same message on every tier and
+// leaves the in-range elements it did not reach unwritten. The store sits in a
+// body hot enough to be promoted, so the compiled tiers prove the same bound
+// the bytecode VM does.
+
+fn put(value: i64, at: i64) -> Vec<i64> {
+    let mut out = #[0; 6]
+    let lanes: Simd<i64, 4> = Simd::splat(value)
+    lanes.store(&mut out, at)
+    out
+}
+
+fn main() {
+    let mut total = 0
+    let mut round = 0
+    while round < 200 {
+        let row = put(round, round % 3)
+        total += row[2]
+        round += 1
+    }
+    println("{} {:?}", total, put(7, 2))
+    let bad = put(7, 3)
+    println("unreachable {:?}", bad)
+}

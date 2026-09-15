@@ -1059,6 +1059,48 @@ pub unsafe extern "C" fn gos_rt_map_insert_skey(
     val: i64,
 ) {
     ffi_entry!((), {
+        unsafe { insert_skey_entry(m, key, desc, val, true) };
+        unsafe { consume_moved_skey(key, desc) };
+    });
+}
+
+/// Gives back the shares the counted slots of a moved aggregate key carry. The
+/// map keys an entry by the bytes `build_skey` folds out of those slots, so no
+/// entry keeps the key's own `String` or `Vec`.
+pub(crate) unsafe fn consume_moved_skey(key: *const u8, desc: *const c_char) {
+    if key.is_null() || desc.is_null() {
+        return;
+    }
+    let desc = unsafe { crate::c_abi::gos_str_arg_bytes(desc) };
+    for (index, &kind) in desc.iter().enumerate() {
+        let raw = unsafe { (key.add(index * 8) as *const usize).read_unaligned() };
+        match kind {
+            b'S' => {
+                let text: *mut c_char = std::ptr::with_exposed_provenance_mut(raw);
+                if !text.is_null() {
+                    unsafe { crate::c_abi::string::consume_moved_string_typed(text) };
+                }
+            }
+            b'V' => {
+                let vec: *mut crate::c_abi::GosVec = std::ptr::with_exposed_provenance_mut(raw);
+                unsafe { gos_rt_vec_free(vec) };
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Stores `val` under the aggregate key at `key`. With `retain_value`, an
+/// owning map takes a share of a value word it did not already hold; without
+/// it, the caller has already handed the map that share.
+unsafe fn insert_skey_entry(
+    m: *mut GosMap,
+    key: *const u8,
+    desc: *const c_char,
+    val: i64,
+    retain_value: bool,
+) {
+    {
         let Some(k) = (unsafe { build_skey(key, desc) }) else {
             return;
         };
@@ -1089,13 +1131,13 @@ pub unsafe extern "C" fn gos_rt_map_insert_skey(
         // gives back the one taken here.
         let owns_values = map_has_owned_values(map);
         let replaced = prev.filter(|old| *old != val);
-        if owns_values && (replaced.is_some() || prev.is_none()) {
+        if retain_value && owns_values && (replaced.is_some() || prev.is_none()) {
             unsafe { retain_owned_value(map, val) };
         }
         if owns_values && let Some(old) = replaced {
             unsafe { release_owned_value(map, old) };
         }
-    });
+    }
 }
 
 /// Struct-keyed lookup. Returns `Option<i64>` in the `gos_rt_result_new`
@@ -1861,8 +1903,12 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
         let MapStorage::I64I64(inner) = &mut *storage else {
             return default;
         };
-        if let Some(v) = inner.get(&key) {
-            return *v;
+        if let Some(v) = inner.get(&key).copied() {
+            // The default arrived as a moved share the entry does not keep.
+            if default != v && map_has_owned_values(map) {
+                unsafe { release_owned_value(map, default) };
+            }
+            return v;
         }
         inner.insert(key, default);
         map.len_cache += 1;
@@ -1992,6 +2038,8 @@ pub(crate) unsafe fn render_tagged_word(out: &mut String, word: i64, tag: u8) {
             let rendered = unsafe { crate::c_abi::gos_rt_vec_format_i64(vp, 0) };
             if !rendered.is_null() {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                // The formatter answered a fresh rendering whose bytes are now copied.
+                unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         7 => {
@@ -1999,6 +2047,8 @@ pub(crate) unsafe fn render_tagged_word(out: &mut String, word: i64, tag: u8) {
             let rendered = unsafe { gos_rt_map_format(mp) };
             if !rendered.is_null() {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                // The formatter answered a fresh rendering whose bytes are now copied.
+                unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         _ => out.push_str(&crate::builtins::format_int(word)),
@@ -2041,6 +2091,12 @@ unsafe fn desc_slot_span_walk(tags: DescStream, cursor: &mut usize) -> usize {
             *cursor += 3;
             slots
         }
+        gossamer_abi::DESC_PACKED => {
+            let words = tags.byte(*cursor) as usize;
+            let leaves = tags.byte(*cursor + 1) as usize;
+            *cursor += 2 + leaves * 3;
+            words
+        }
         gossamer_abi::DESC_OPTION => {
             unsafe { skip_desc(tags, cursor) };
             2
@@ -2082,6 +2138,10 @@ unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
             unsafe { skip_desc(tags, cursor) };
         }
         gossamer_abi::DESC_ADT => *cursor += 3,
+        gossamer_abi::DESC_PACKED => {
+            let leaves = tags.byte(*cursor + 1) as usize;
+            *cursor += 2 + leaves * 3;
+        }
         gossamer_abi::DESC_OPTION => unsafe { skip_desc(tags, cursor) },
         gossamer_abi::DESC_ARRAY => {
             // Element count and per-element slot span, a `u16` each, then
@@ -2265,6 +2325,8 @@ pub(crate) unsafe fn render_desc_storage(
                 out.push_str("{}");
             } else {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                // The formatter answered a fresh rendering whose bytes are now copied.
+                unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         gossamer_abi::DESC_ARRAY => {
@@ -2305,6 +2367,8 @@ pub(crate) unsafe fn render_desc_storage(
             };
             if !rendered.is_null() {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                // The formatter answered a fresh rendering whose bytes are now copied.
+                unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         gossamer_abi::DESC_RESULT | gossamer_abi::DESC_OPTION => {
@@ -2405,11 +2469,17 @@ pub(crate) unsafe fn render_desc_storage(
         }
         gossamer_abi::DESC_SET_I64 | gossamer_abi::DESC_SET_STR => {
             *cursor += 1;
-            let ordered = i32::from(tags.byte(*cursor));
+            // The byte after the tag carries the ordered flag in bit 0 and, for
+            // an integer set, whether its elements were declared `u64` /
+            // `usize` in bit 1.
+            let flags = tags.byte(*cursor);
+            let ordered = i32::from(flags & 1);
             *cursor += 1;
             let word = unsafe { (slot as *const i64).read_unaligned() };
             let handle = std::ptr::with_exposed_provenance(word as usize);
-            let rendered = if tag == gossamer_abi::DESC_SET_I64 {
+            let rendered = if tag == gossamer_abi::DESC_SET_I64 && flags & 2 != 0 {
+                unsafe { crate::c_abi::gos_rt_set_format_u64(handle, ordered) }
+            } else if tag == gossamer_abi::DESC_SET_I64 {
                 unsafe { crate::c_abi::gos_rt_set_format_i64(handle, ordered) }
             } else {
                 unsafe { crate::c_abi::gos_rt_set_format_string(handle, ordered) }
@@ -2418,6 +2488,8 @@ pub(crate) unsafe fn render_desc_storage(
                 out.push_str("#{}");
             } else {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                // The formatter answered a fresh rendering whose bytes are now copied.
+                unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         _ => {
@@ -2506,6 +2578,8 @@ pub(crate) unsafe fn render_tuple_elements(
                 let rendered = unsafe { crate::c_abi::gos_rt_vec_format_i64(vp, 0) };
                 if !rendered.is_null() {
                     out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                    // The formatter answered a fresh rendering whose bytes are now copied.
+                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
                 }
             }
             7 => {
@@ -2513,6 +2587,8 @@ pub(crate) unsafe fn render_tuple_elements(
                 let rendered = unsafe { gos_rt_map_format(mp) };
                 if !rendered.is_null() {
                     out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                    // The formatter answered a fresh rendering whose bytes are now copied.
+                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
                 }
             }
             _ => {}
@@ -2571,8 +2647,8 @@ pub unsafe extern "C" fn gos_rt_tuple_format(
 /// Lexicographically compares two tuples' flat slot buffers, returning
 /// `-1` / `0` / `1`. `a` and `b` point at `n` contiguous 8-byte slots;
 /// `tags[i]` selects each slot's kind (same encoding as
-/// [`gos_rt_tuple_format`]: `0` Int, `2` Float, `3` Bool, `4` Char, `5`
-/// Str). The first non-equal element decides; equal prefixes continue.
+/// [`gos_rt_tuple_format`]: `0` Int, `1` Uint, `2` Float, `3` Bool, `4`
+/// Char, `5` Str). The first non-equal element decides; equal prefixes continue.
 /// Routed to by the compiled tiers for tuple `== != < <= > >=`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tuple_cmp(
@@ -2650,6 +2726,7 @@ unsafe fn compare_tuple_elements(
             continue;
         }
         let ord = match tag {
+            1 => (wa as u64).cmp(&(wb as u64)),
             2 => f64::from_bits(wa as u64)
                 .partial_cmp(&f64::from_bits(wb as u64))
                 .unwrap_or(Ordering::Equal),
@@ -3037,7 +3114,9 @@ unsafe fn map_format_desc_stream(
             out.push('}');
             return alloc_cstring(out.as_bytes());
         }
-        let entries = unsafe { map_word_entries(m) };
+        // A key descriptor naming the unsigned tag orders its keys unsigned.
+        let unsigned_keys = tags.byte(key_desc) == 1;
+        let entries = unsafe { map_word_entries(m, unsigned_keys) };
         let mut out = String::from("{");
         let mut first = true;
         for (string_key, key, value) in entries {
@@ -3063,16 +3142,25 @@ unsafe fn map_format_desc_stream(
     }
 }
 
-/// Key/value words of a map in deterministic key order. A string key travels
-/// as its own bytes; shapes whose values are not single words yield nothing.
-unsafe fn map_word_entries(m: *const GosMap) -> Vec<(Option<Vec<u8>>, i64, i64)> {
+/// Key/value words of a map in deterministic key order - unsigned for a key
+/// declared `u64` / `usize`, signed for every other integer key. A string key
+/// travels as its own bytes; shapes whose values are not single words yield
+/// nothing.
+unsafe fn map_word_entries(
+    m: *const GosMap,
+    unsigned_keys: bool,
+) -> Vec<(Option<Vec<u8>>, i64, i64)> {
     let map = unsafe { &*m };
     let storage = map.storage.lock();
     match &*storage {
         MapStorage::I64I64(inner) => {
             let mut out: Vec<(Option<Vec<u8>>, i64, i64)> =
                 inner.iter().map(|(k, v)| (None, *k, *v)).collect();
-            out.sort_unstable_by_key(|(_, k, _)| *k);
+            if unsigned_keys {
+                out.sort_unstable_by_key(|(_, k, _)| *k as u64);
+            } else {
+                out.sort_unstable_by_key(|(_, k, _)| *k);
+            }
             out
         }
         MapStorage::StrI64(inner) => {
@@ -3242,11 +3330,21 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
             unsafe { render_tagged_word(&mut out, k, key_tag as u8) };
             out
         };
+        // A key declared `u64` / `usize` orders unsigned, as the language
+        // orders those words everywhere else; every other integer key orders
+        // as the signed word it is.
+        let key_order = |k: i64| {
+            if key_tag == 1 {
+                k as u64
+            } else {
+                (k as u64) ^ (1 << 63)
+            }
+        };
         let mut first = true;
         match &*storage {
             MapStorage::I64I64(inner) => {
                 let mut entries: Vec<(i64, i64)> = inner.iter().map(|(k, v)| (*k, *v)).collect();
-                entries.sort_unstable_by_key(|(k, _)| *k);
+                entries.sort_unstable_by_key(|(k, _)| key_order(*k));
                 for (k, v) in entries {
                     let mut value = String::new();
                     unsafe { render_map_value(&mut value, v, val_tag, aux, aux_n) };
@@ -3278,7 +3376,7 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
             MapStorage::I64Str(inner) => {
                 let mut entries: Vec<(i64, &[u8])> =
                     inner.iter().map(|(k, v)| (*k, v.as_ref())).collect();
-                entries.sort_unstable_by_key(|(k, _)| *k);
+                entries.sort_unstable_by_key(|(k, _)| key_order(*k));
                 for (k, v) in entries {
                     push_entry(
                         &mut out,
@@ -3290,7 +3388,7 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
             }
             MapStorage::I64Bytes(inner) => {
                 let mut entries = inner.entries_vec();
-                entries.sort_unstable_by_key(|(k, _)| *k);
+                entries.sort_unstable_by_key(|(k, _)| key_order(*k));
                 for (k, v) in entries {
                     let value = format!(
                         "[{}]",
@@ -3367,8 +3465,7 @@ fn map_has_owned_values(m: &GosMap) -> bool {
     map_value_owner(m) != MAP_VALUE_NONE
 }
 
-/// Release one stored blob value word (set-gated inside the RC layer
-/// via the copy blob's explicit owner carrier).
+/// Release one stored blob value word: a copy blob the map holds a share of.
 unsafe fn release_blob_value(word: i64) {
     if word != 0 {
         unsafe { crate::c_abi::rc::gos_rt_rc_release(word as usize as *mut u8) };
@@ -3801,15 +3898,6 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         let compact_header = crate::c_abi::vec::vec_has_compact_header(unsafe { &*v });
         let inline_ptr = v.cast::<crate::c_abi::vec::InlineVec>();
         let boxed = unsafe { &*v };
-        if boxed.elem_kind == vec_elem_kind::PACKED_ROWS {
-            unsafe { crate::c_abi::vec::free_packed_rows(boxed) };
-            if compact_header {
-                drop(unsafe { Box::from_raw(v) });
-            } else {
-                drop(unsafe { Box::from_raw(inline_ptr) });
-            }
-            return;
-        }
         if !boxed.ptr.is_null() && boxed.cap > 0 {
             // Deep-free pointer-bearing element payloads BEFORE
             // reclaiming the backing buffer. Each branch walks the
@@ -3846,10 +3934,13 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
                     let slot: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
                     match boxed.elem_kind {
                         vec_elem_kind::STRING => {
-                            // SAFETY: each slot in a STRING-typed vec was
-                            // populated via gos_rt_str_clone / alloc_cstring
-                            // and therefore carries the allocator tag.
-                            unsafe { gos_rt_str_free(slot.cast::<c_char>()) };
+                            // SAFETY: each slot in a STRING-typed vec holds a
+                            // compiler-typed string, so its owner header is
+                            // read directly, as every other release of a
+                            // STRING slot does.
+                            unsafe {
+                                crate::c_abi::string::gos_rt_str_free_typed(slot.cast::<c_char>());
+                            };
                         }
                         vec_elem_kind::VEC => {
                             unsafe { gos_rt_vec_free(slot.cast::<GosVec>()) };
@@ -3858,12 +3949,8 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
                             unsafe { gos_rt_map_free(slot.cast::<GosMap>()) };
                         }
                         vec_elem_kind::ERROR => {
-                            // No dedicated free helper yet; drop the
-                            // raw Box (allocated via `Box::into_raw`
-                            // elsewhere in the file). Safe because
-                            // `GosError`'s own drop chains through the
-                            // message + cause heap allocations.
-                            let _ = unsafe { Box::from_raw(slot.cast::<GosError>()) };
+                            // Each element is a share of an error cell.
+                            unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
                         }
                         vec_elem_kind::RC_ENUM => {
                             // The vec owns each enum-node element (the push
@@ -3926,6 +4013,39 @@ pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_i64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_keys_ordered(m, KeyOrder::Signed) }
+    })
+}
+
+/// [`gos_rt_map_keys_i64`] for a map whose keys were declared `u64` /
+/// `usize`, which order unsigned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_keys_u64(m: *const GosMap) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_keys_ordered(m, KeyOrder::Unsigned) }
+    })
+}
+
+/// The order an integer-stored key walks in: the signed word it is, or, for a
+/// key declared `u64` / `usize`, the unsigned value its bits spell.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KeyOrder {
+    Signed,
+    Unsigned,
+}
+
+impl KeyOrder {
+    /// A sort key that orders stored words the way this order does.
+    pub(crate) const fn rank(self, key: i64) -> u64 {
+        match self {
+            Self::Signed => (key as u64) ^ (1 << 63),
+            Self::Unsigned => key as u64,
+        }
+    }
+}
+
+unsafe fn map_keys_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    {
         let out = unsafe { gos_rt_vec_new(8) };
         if m.is_null() {
             return out;
@@ -3944,10 +4064,10 @@ pub unsafe extern "C" fn gos_rt_map_keys_i64(m: *const GosMap) -> *mut GosVec {
             MapStorage::I64Str(inner) => inner.keys().copied().collect(),
             _ => Vec::new(),
         };
-        keys.sort_unstable();
+        keys.sort_unstable_by_key(|key| order.rank(*key));
         keys.iter().for_each(push_key);
         out
-    })
+    }
 }
 
 /// Snapshots the i64 values of an i64-valued `HashMap` into a
@@ -3957,6 +4077,96 @@ pub unsafe extern "C" fn gos_rt_map_keys_i64(m: *const GosMap) -> *mut GosVec {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_i64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_values_ordered(m, KeyOrder::Signed) }
+    })
+}
+
+/// [`gos_rt_map_values_i64`] for a map whose keys were declared `u64` /
+/// `usize`: the values in unsigned key order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_values_u64(m: *const GosMap) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_values_ordered(m, KeyOrder::Unsigned) }
+    })
+}
+
+/// The values of a map whose value is an `Option` / `Result`, as a vec of the
+/// two-word carriers in key order.
+///
+/// Such a value is stored boxed, so each stored word is the address of the
+/// carrier. The vec owns the `String` or `Vec` payload of each `Some` / `Ok` it
+/// holds - the kind the boxes' own meta names - so its pushes take that share
+/// and its free gives it back.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_values_carrier(m: *const GosMap) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_values_carrier_ordered(m, KeyOrder::Signed) }
+    })
+}
+
+/// [`gos_rt_map_values_carrier`] for a map whose keys were declared `u64` /
+/// `usize`: the values in unsigned key order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_values_carrier_u64(m: *const GosMap) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_values_carrier_ordered(m, KeyOrder::Unsigned) }
+    })
+}
+
+unsafe fn map_values_carrier_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    let boxes = unsafe { map_values_ordered(m, order) };
+    let out = unsafe { crate::c_abi::vec::gos_rt_vec_new_typed(16, vec_elem_kind::PRIMITIVE) };
+    if boxes.is_null() {
+        return out;
+    }
+    let words = unsafe { &*boxes };
+    let boxed_at = |index: usize| -> *mut u8 {
+        // SAFETY: a values snapshot holds one 8-byte word per entry.
+        let word = unsafe {
+            words
+                .ptr
+                .as_ptr()
+                .add(index * 8)
+                .cast::<i64>()
+                .read_unaligned()
+        };
+        std::ptr::with_exposed_provenance_mut(word as usize)
+    };
+    let count = words.len.max(0) as usize;
+    let child_kind = (0..count)
+        .map(boxed_at)
+        .find(|boxed| !boxed.is_null())
+        .and_then(|boxed| unsafe { crate::c_abi::rc::boxed_carrier_child_kind(boxed) })
+        .and_then(|kind| match kind {
+            gossamer_abi::rc::RC_CHILD_RC => Some(vec_elem_kind::STRING),
+            gossamer_abi::rc::RC_CHILD_VEC => Some(vec_elem_kind::VEC),
+            _ => None,
+        });
+    if let Some(child_kind) = child_kind {
+        crate::c_abi::vec::vec_own_slot_children(
+            out,
+            Box::new([crate::c_abi::vec::VecSlotChild {
+                gate: 0,
+                disc_word: 0,
+                word: 1,
+                kind: child_kind,
+            }]),
+        );
+    }
+    for index in 0..count {
+        let boxed = boxed_at(index);
+        if boxed.is_null() {
+            continue;
+        }
+        // SAFETY: the stored word addresses the entry's two-word carrier.
+        unsafe { gos_rt_vec_push(out, boxed.cast_const()) };
+    }
+    unsafe { gos_rt_vec_free(boxes) };
+    out
+}
+
+unsafe fn map_values_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    {
         let out = unsafe { gos_rt_vec_new(8) };
         if m.is_null() {
             return out;
@@ -3972,16 +4182,14 @@ pub unsafe extern "C" fn gos_rt_map_values_i64(m: *const GosMap) -> *mut GosVec 
         match &*storage {
             MapStorage::I64I64(inner) => {
                 let mut entries: Vec<(i64, i64)> = inner.iter().map(|(k, v)| (*k, *v)).collect();
-                entries.sort_unstable_by_key(|(k, _)| *k);
+                entries.sort_unstable_by_key(|(k, _)| order.rank(*k));
                 for (_, v) in entries {
                     push_val(v);
                 }
             }
             MapStorage::StrI64(inner) => {
-                let mut rows: Vec<(&[u8], i64)> =
-                    inner.iter().map(|(k, v)| (k.as_slice(), *v)).collect();
-                rows.sort_unstable_by(|a, b| a.0.cmp(b.0));
-                for (_, v) in rows {
+                let rows = sorted_by_byte_key(inner.iter().map(|(k, v)| (k.as_slice(), *v)));
+                for (_, _, v) in rows {
                     push_val(v);
                 }
             }
@@ -3993,10 +4201,22 @@ pub unsafe extern "C" fn gos_rt_map_values_i64(m: *const GosMap) -> *mut GosVec 
                     push_val(v);
                 }
             }
+            // Canonical-key order, the order `gos_rt_map_keys_ekey` snapshots
+            // the nodes in.
+            MapStorage::EkeyVal { entries } => {
+                let mut rows: Vec<(&[u8], i64)> = entries
+                    .iter()
+                    .map(|(k, e)| (k.as_slice(), e.value))
+                    .collect();
+                rows.sort_by(|a, b| a.0.cmp(b.0));
+                for (_, v) in rows {
+                    push_val(v);
+                }
+            }
             _ => {}
         }
         out
-    })
+    }
 }
 
 /// Snapshots the string keys of a string-keyed `HashMap` into a
@@ -4021,13 +4241,17 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
         };
         // Sort by key (lexicographic byte order, matching the VM's
         // `SmolStr` ordering) for deterministic, cross-tier order.
-        let mut keys: Vec<&[u8]> = match &*storage {
-            MapStorage::StrI64(inner) => inner.keys().map(ByteKey::as_slice).collect(),
-            MapStorage::StrStr(inner) => inner.keys().map(ByteKey::as_slice).collect(),
+        let keys = match &*storage {
+            MapStorage::StrI64(inner) => {
+                sorted_by_byte_key(inner.keys().map(|k| (k.as_slice(), ())))
+            }
+            MapStorage::StrStr(inner) => {
+                sorted_by_byte_key(inner.keys().map(|k| (k.as_slice(), ())))
+            }
             _ => Vec::new(),
         };
-        keys.sort_unstable();
-        for k in keys {
+        unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(out, keys.len() as i64) };
+        for (_, k, ()) in keys {
             push_key(k);
         }
         out
@@ -4039,6 +4263,12 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_str(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_values_str_ordered(m, KeyOrder::Signed) }
+    })
+}
+
+unsafe fn map_values_str_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    {
         // STRING-typed - same ownership contract as `gos_rt_map_keys_str`.
         let out = unsafe { crate::c_abi::vec::gos_rt_vec_new_typed(8, vec_elem_kind::STRING) };
         if m.is_null() {
@@ -4055,17 +4285,15 @@ pub unsafe extern "C" fn gos_rt_map_values_str(m: *const GosMap) -> *mut GosVec 
         // agree and the order is deterministic across tiers.
         match &*storage {
             MapStorage::StrStr(inner) => {
-                let mut entries: Vec<(&[u8], &[u8])> =
-                    inner.iter().map(|(k, v)| (k.as_slice(), &**v)).collect();
-                entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
-                for (_, v) in entries {
+                let entries = sorted_by_byte_key(inner.iter().map(|(k, v)| (k.as_slice(), &**v)));
+                for (_, _, v) in entries {
                     push_val(v);
                 }
             }
             MapStorage::I64Str(inner) => {
                 let mut entries: Vec<(i64, &[u8])> =
                     inner.iter().map(|(k, v)| (*k, &**v)).collect();
-                entries.sort_unstable_by_key(|(k, _)| *k);
+                entries.sort_unstable_by_key(|(k, _)| order.rank(*k));
                 for (_, v) in entries {
                     push_val(v);
                 }
@@ -4073,7 +4301,280 @@ pub unsafe extern "C" fn gos_rt_map_values_str(m: *const GosMap) -> *mut GosVec 
             _ => {}
         }
         out
-    })
+    }
+}
+
+/// Big-endian first eight bytes of `key`, zero-padded. When two keys'
+/// prefixes differ they compare the way the full byte strings do: a shorter
+/// key pads with the smallest byte, which is also where `<[u8]>::cmp` puts a
+/// proper prefix.
+#[inline]
+fn byte_key_prefix(key: &[u8]) -> u64 {
+    let mut word = [0u8; 8];
+    let n = key.len().min(8);
+    word[..n].copy_from_slice(&key[..n]);
+    u64::from_be_bytes(word)
+}
+
+/// Collects byte-keyed rows sorted in `<[u8]>::cmp` key order. Each row
+/// carries its key's prefix word: a large table is ordered by that word with a
+/// radix sort, which never reads a key's heap bytes, and only rows sharing a
+/// whole prefix are then compared by their full keys. Map keys are unique, so
+/// the result is one order whichever way it is reached.
+fn sorted_by_byte_key<'a, T: Copy>(
+    rows: impl Iterator<Item = (&'a [u8], T)>,
+) -> Vec<(u64, &'a [u8], T)> {
+    let mut rows: Vec<(u64, &'a [u8], T)> = rows
+        .map(|(key, value)| (byte_key_prefix(key), key, value))
+        .collect();
+    if rows.len() <= RADIX_SORT_MIN_ROWS {
+        rows.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(b.1)));
+        return rows;
+    }
+    radix_sort_by_prefix(&mut rows);
+    let mut start = 0;
+    while start < rows.len() {
+        let prefix = rows[start].0;
+        let end = start
+            + rows[start..]
+                .iter()
+                .take_while(|row| row.0 == prefix)
+                .count();
+        if end - start > 1 {
+            rows[start..end].sort_unstable_by(|a, b| a.1.cmp(b.1));
+        }
+        start = end;
+    }
+    rows
+}
+
+/// Below this many rows a comparison sort touches less memory than the eight
+/// histogram-and-scatter passes a radix sort makes.
+const RADIX_SORT_MIN_ROWS: usize = 256;
+
+/// Stable least-significant-byte radix sort on the prefix word. A byte
+/// position every row agrees on is skipped, so a short-key table pays only
+/// for the bytes its keys actually spell.
+fn radix_sort_by_prefix<T: Copy + RadixRow>(rows: &mut Vec<T>) {
+    let mut counts = [[0usize; 256]; 8];
+    for row in rows.iter() {
+        let word = row.radix_word();
+        for (pass, count) in counts.iter_mut().enumerate() {
+            count[((word >> (pass * 8)) & 0xff) as usize] += 1;
+        }
+    }
+    let len = rows.len();
+    let mut scratch: Vec<T> = rows.clone();
+    let mut sorted_in_rows = true;
+    for (pass, count) in counts.iter().enumerate() {
+        if count.contains(&len) {
+            continue;
+        }
+        let mut offsets = [0usize; 256];
+        let mut next = 0;
+        for (offset, &c) in offsets.iter_mut().zip(count.iter()) {
+            *offset = next;
+            next += c;
+        }
+        let (src, dst) = if sorted_in_rows {
+            (&rows[..], &mut scratch[..])
+        } else {
+            (&scratch[..], &mut rows[..])
+        };
+        for row in src {
+            let digit = ((row.radix_word() >> (pass * 8)) & 0xff) as usize;
+            dst[offsets[digit]] = *row;
+            offsets[digit] += 1;
+        }
+        sorted_in_rows = !sorted_in_rows;
+    }
+    if !sorted_in_rows {
+        std::mem::swap(rows, &mut scratch);
+    }
+}
+
+/// A row a radix sort orders by one 64-bit word.
+trait RadixRow {
+    fn radix_word(&self) -> u64;
+}
+
+impl<T> RadixRow for (u64, &[u8], T) {
+    #[inline]
+    fn radix_word(&self) -> u64 {
+        self.0
+    }
+}
+
+/// Appends every entry of a map to `out`, a `Vec<(K, V)>` of two-word slots,
+/// in ascending key order - the order `keys()`, `values()`, and `iter()`
+/// share on every tier. Keys and values are each a `String` or a
+/// word-sized scalar; a string is written as a fresh copy the vec owns
+/// outright, so nothing is retained on its way into the slot.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_entries_into(m: *const GosMap, out: *mut GosVec) {
+    ffi_entry!((), {
+        unsafe { map_entries_ordered(m, out, KeyOrder::Signed) }
+    });
+}
+
+/// [`gos_rt_map_entries_into`] for a map whose keys were declared `u64` /
+/// `usize`: the pairs in unsigned key order.
+///
+/// # Safety
+/// As [`gos_rt_map_entries_into`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_entries_into_u64(m: *const GosMap, out: *mut GosVec) {
+    ffi_entry!((), {
+        unsafe { map_entries_ordered(m, out, KeyOrder::Unsigned) }
+    });
+}
+
+unsafe fn map_entries_ordered(m: *const GosMap, out: *mut GosVec, order: KeyOrder) {
+    {
+        if m.is_null() || out.is_null() {
+            return;
+        }
+        if unsafe { (*out).elem_bytes } != 16 {
+            crate::c_abi::panic::panic_text("map entries need a two-word pair slot");
+            return;
+        }
+        let map = unsafe { &*m };
+        let storage = map.storage.lock();
+        let string_word = |bytes: &[u8]| alloc_cstring(bytes) as usize as i64;
+        let pairs: Vec<[i64; 2]> = match &*storage {
+            MapStorage::Empty => Vec::new(),
+            MapStorage::I64I64(inner) => {
+                let mut rows: Vec<[i64; 2]> = inner.iter().map(|(k, v)| [*k, *v]).collect();
+                rows.sort_unstable_by_key(|row| order.rank(row[0]));
+                rows
+            }
+            MapStorage::I64Str(inner) => {
+                let mut rows: Vec<(i64, &[u8])> = inner.iter().map(|(k, v)| (*k, &**v)).collect();
+                rows.sort_unstable_by_key(|(k, _)| order.rank(*k));
+                rows.into_iter().map(|(k, v)| [k, string_word(v)]).collect()
+            }
+            MapStorage::StrI64(inner) => {
+                sorted_by_byte_key(inner.iter().map(|(k, v)| (k.as_slice(), *v)))
+                    .into_iter()
+                    .map(|(_, k, v)| [string_word(k), v])
+                    .collect()
+            }
+            MapStorage::StrStr(inner) => {
+                sorted_by_byte_key(inner.iter().map(|(k, v)| (k.as_slice(), &**v)))
+                    .into_iter()
+                    .map(|(_, k, v)| [string_word(k), string_word(v)])
+                    .collect()
+            }
+            _ => {
+                drop(storage);
+                crate::c_abi::panic::panic_text(
+                    "map read reached a storage shape this accessor does not handle",
+                );
+                return;
+            }
+        };
+        drop(storage);
+        let len = unsafe { (*out).len };
+        unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(out, len + pairs.len() as i64) };
+        unsafe { append_pair_slots(out, &pairs) };
+    }
+}
+
+/// Appends two-word pair slots to a vec whose element is exactly one pair.
+///
+/// SAFETY: `out` is a live vec with a 16-byte element, and any string pointer a
+/// pair carries is a share the vec takes over.
+unsafe fn append_pair_slots(out: *mut GosVec, pairs: &[[i64; 2]]) {
+    let len = unsafe { (*out).len };
+    unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(out, len + pairs.len() as i64) };
+    let vec = unsafe { &mut *out };
+    let base = unsafe { vec.ptr.as_ptr().add(vec.len as usize * 16) };
+    // SAFETY: the reserve above leaves room for every pair past `len`, and a
+    // pair is exactly the vec's 16-byte slot.
+    unsafe {
+        std::ptr::copy_nonoverlapping(pairs.as_ptr().cast::<u8>(), base, pairs.len() * 16);
+    }
+    vec.len += pairs.len() as i64;
+}
+
+/// Appends to `out`, a `Vec<(K, V)>` of two-word slots, the one entry of a
+/// scalar-valued map whose callback key is the greatest (`want_max`) or the
+/// least, ties going to the entry whose map key sorts first. That is the entry
+/// a walk in ascending key order keeps, found here without ordering the table.
+///
+/// The lowering routes a callback here only when its body has no observable
+/// effect, so the order it runs in is not visible, and, for a string-keyed map,
+/// when it never reads the key: the pair it is handed carries the value beside
+/// a null key word.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_select_by_key_into(
+    m: *const GosMap,
+    out: *mut GosVec,
+    env: *const u8,
+    key_is_f64: i64,
+    want_max: i64,
+) {
+    use crate::c_abi::iter_cross::{SortKey, env_fn_addr, key_of_ptr};
+    ffi_entry!((), {
+        if m.is_null() || out.is_null() {
+            return;
+        }
+        if unsafe { (*out).elem_bytes } != 16 {
+            crate::c_abi::panic::panic_text("map entries need a two-word pair slot");
+            return;
+        }
+        let Some(addr) = env_fn_addr(env) else {
+            return;
+        };
+        let (key_is_f64, want_max) = (key_is_f64 != 0, want_max != 0);
+        let key_of = |key_word: i64, value: i64| {
+            let mut pair = [key_word, value];
+            // SAFETY: `addr` is the callback the lowering stored for `env`, and
+            // it reads the pair through the address for the call only.
+            unsafe { key_of_ptr(env, addr, pair.as_mut_ptr().cast::<u8>(), key_is_f64) }
+        };
+        let displaces = |key: SortKey, best: SortKey, key_first: bool| {
+            let ord = key.order(best);
+            (if want_max { ord.is_gt() } else { ord.is_lt() }) || (ord.is_eq() && key_first)
+        };
+        let map = unsafe { &*m };
+        let storage = map.storage.lock();
+        let winner: Option<[i64; 2]> = match &*storage {
+            MapStorage::Empty => None,
+            MapStorage::I64I64(inner) => {
+                let mut best: Option<(SortKey, i64, i64)> = None;
+                for (&k, &v) in inner {
+                    let key = key_of(k, v);
+                    if best.is_none_or(|(bk, bmk, _)| displaces(key, bk, k < bmk)) {
+                        best = Some((key, k, v));
+                    }
+                }
+                best.map(|(_, k, v)| [k, v])
+            }
+            MapStorage::StrI64(inner) => {
+                let mut best: Option<(SortKey, &[u8], i64)> = None;
+                for (k, &v) in inner {
+                    let k = k.as_slice();
+                    let key = key_of(0, v);
+                    if best.is_none_or(|(bk, bmk, _)| displaces(key, bk, k < bmk)) {
+                        best = Some((key, k, v));
+                    }
+                }
+                best.map(|(_, k, v)| [alloc_cstring(k) as usize as i64, v])
+            }
+            _ => {
+                drop(storage);
+                crate::c_abi::panic::panic_text(
+                    "map read reached a storage shape this accessor does not handle",
+                );
+                return;
+            }
+        };
+        drop(storage);
+        if let Some(pair) = winner {
+            unsafe { append_pair_slots(out, &[pair]) };
+        }
+    });
 }
 
 fn empty_cstring() -> *mut c_char {
@@ -4119,13 +4620,18 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
             }
             unsafe { gos_rt_vec_push(out, slot_buf.as_ptr().cast::<u8>()) };
         }
-        // String slots hold freshly allocated c-strings the snapshot owns, so
-        // record where they sit for `gos_rt_vec_free` to release them.
+        // String and sequence slots hold a freshly allocated c-string or vec
+        // the snapshot owns, so record where they sit for `gos_rt_vec_free` to
+        // release them.
         let string_slots: Vec<i64> = desc
             .iter()
             .enumerate()
-            .filter(|(_, c)| **c == b'S')
-            .flat_map(|(i, _)| [-1, 0, i as i64, i64::from(vec_elem_kind::STRING)])
+            .filter_map(|(i, c)| match *c {
+                b'S' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::STRING)]),
+                b'V' => Some([-1, 0, i as i64, i64::from(vec_elem_kind::VEC)]),
+                _ => None,
+            })
+            .flatten()
             .collect();
         if !string_slots.is_empty() {
             let mut meta = Vec::with_capacity(string_slots.len() + 1);
@@ -4319,6 +4825,21 @@ fn decode_skey_into(key: &[u8], desc: &[u8], slots: &mut [i64]) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_keys_vec_ordered(m, KeyOrder::Signed) }
+    })
+}
+
+/// [`gos_rt_map_keys_vec`] for a map whose keys were declared `u64` /
+/// `usize`, which walk in unsigned order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_keys_vec_u64(m: *const GosMap) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_keys_vec_ordered(m, KeyOrder::Unsigned) }
+    })
+}
+
+unsafe fn map_keys_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    {
         if m.is_null() {
             return unsafe { gos_rt_vec_new(8) };
         }
@@ -4327,7 +4848,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
         match &*storage {
             MapStorage::I64I64(_) | MapStorage::I64Bytes(_) | MapStorage::I64Str(_) => {
                 drop(storage);
-                unsafe { gos_rt_map_keys_i64(m) }
+                unsafe { map_keys_ordered(m, order) }
             }
             MapStorage::StrI64(_)
             | MapStorage::StrStr(_)
@@ -4346,7 +4867,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
             }
             MapStorage::Empty => unsafe { gos_rt_vec_new(8) },
         }
-    })
+    }
 }
 
 /// Auto-dispatch `m.values() -> Vec<V>` based on the live map
@@ -4354,6 +4875,21 @@ pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_values_vec_ordered(m, KeyOrder::Signed) }
+    })
+}
+
+/// [`gos_rt_map_values_vec`] for a map whose keys were declared `u64` /
+/// `usize`: the values in unsigned key order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_values_vec_u64(m: *const GosMap) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { map_values_vec_ordered(m, KeyOrder::Unsigned) }
+    })
+}
+
+unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    {
         if m.is_null() {
             return unsafe { gos_rt_vec_new(8) };
         }
@@ -4362,11 +4898,11 @@ pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec 
         match &*storage {
             MapStorage::I64I64(_) | MapStorage::StrI64(_) => {
                 drop(storage);
-                unsafe { gos_rt_map_values_i64(m) }
+                unsafe { map_values_ordered(m, order) }
             }
             MapStorage::I64Bytes(inner) => {
                 let mut entries = inner.entries_vec();
-                entries.sort_unstable_by_key(|(key, _)| *key);
+                entries.sort_unstable_by_key(|(key, _)| order.rank(*key));
                 let values: Vec<*mut GosVec> = entries
                     .into_iter()
                     .map(|(_, value)| unsafe { byte_vec_from_slice(value) })
@@ -4386,7 +4922,7 @@ pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec 
             }
             MapStorage::StrStr(_) | MapStorage::I64Str(_) | MapStorage::Bytes(_) => {
                 drop(storage);
-                unsafe { gos_rt_map_values_str(m) }
+                unsafe { map_values_str_ordered(m, order) }
             }
             MapStorage::StrBytes(inner) => {
                 let mut entries: Vec<(&[u8], &[u8])> = inner.iter().collect();
@@ -4413,11 +4949,11 @@ pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec 
             // m.values()` see the real values instead of an empty Vec.
             MapStorage::SkeyVal { .. } | MapStorage::EkeyVal { .. } => {
                 drop(storage);
-                unsafe { gos_rt_map_values_i64(m) }
+                unsafe { map_values_ordered(m, order) }
             }
             MapStorage::Empty => unsafe { gos_rt_vec_new(8) },
         }
-    })
+    }
 }
 
 /// `m.pop(k) -> Option<V>` for an i64-keyed map. Removes the entry
@@ -4646,10 +5182,21 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_skey(
     default: i64,
 ) -> i64 {
     ffi_entry!(default, {
+        // The key and the value arrive as moved shares: the key is folded into
+        // the entry's own bytes either way, and the value share becomes the
+        // entry's when the key is absent.
         if let Some(found) = unsafe { skey_lookup(m, key, desc) } {
+            if !m.is_null() && default != found {
+                let map = unsafe { &*m };
+                if map_has_owned_values(map) {
+                    unsafe { release_owned_value(map, default) };
+                }
+            }
+            unsafe { consume_moved_skey(key, desc) };
             return found;
         }
-        unsafe { gos_rt_map_insert_skey(m, key, desc, default) };
+        unsafe { insert_skey_entry(m, key, desc, default, false) };
+        unsafe { consume_moved_skey(key, desc) };
         default
     })
 }
@@ -4667,7 +5214,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_skey(
         let next = unsafe { skey_lookup(m, key, desc) }
             .unwrap_or(0)
             .wrapping_add(by);
-        unsafe { gos_rt_map_insert_skey(m, key, desc, next) };
+        unsafe { insert_skey_entry(m, key, desc, next, true) };
         next
     })
 }
@@ -4838,7 +5385,20 @@ pub unsafe extern "C" fn gos_rt_map_insert_ekey_opt(
     val: i64,
 ) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
-        match unsafe { ekey_insert(m, key, desc, val) } {
+        let previous = unsafe { ekey_insert(m, key, desc, val) };
+        // The entry took its own share of the key node; the caller's moved
+        // share goes back.
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
+        // An owning map keeps a share of the stored value, and a replaced value
+        // leaves with the share the entry held, so the caller owns what comes
+        // back - including the stored value itself when it is inserted again.
+        if !m.is_null() {
+            let map = unsafe { &*m };
+            if map_has_owned_values(map) {
+                unsafe { retain_owned_value(map, val) };
+            }
+        }
+        match previous {
             Some(prev) => unsafe { gos_rt_result_new(0, prev) },
             None => unsafe { gos_rt_result_new(1, 0) },
         }
@@ -4921,10 +5481,21 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_ekey(
     default: i64,
 ) -> i64 {
     ffi_entry!(default, {
+        // The key node and the value arrive as moved shares. The entry takes a
+        // key share of its own, and keeps the value share only when the key is
+        // absent.
         if let Some(found) = unsafe { ekey_lookup(m, key, desc) } {
+            if !m.is_null() && default != found {
+                let map = unsafe { &*m };
+                if map_has_owned_values(map) {
+                    unsafe { release_owned_value(map, default) };
+                }
+            }
+            unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
             return found;
         }
         unsafe { ekey_insert(m, key, desc, default) };
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
         default
     })
 }
@@ -5101,6 +5672,80 @@ mod map_iter_tests {
                 crate::c_abi::string::test_gos_str("alpha")
             ));
             assert_eq!(gos_rt_map_len(m), 0);
+            gos_rt_map_free(m);
+        }
+    }
+
+    #[test]
+    fn sorted_by_byte_key_matches_slice_order_above_and_below_the_radix_threshold() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for count in [
+            0usize,
+            1,
+            7,
+            RADIX_SORT_MIN_ROWS,
+            RADIX_SORT_MIN_ROWS + 1,
+            3000,
+        ] {
+            let mut keys: Vec<Vec<u8>> = (0..count)
+                .map(|i| {
+                    let len = (next() % 12) as usize;
+                    let mut key: Vec<u8> = (0..len)
+                        .map(|_| b"ab\0\xff"[(next() % 4) as usize])
+                        .collect();
+                    key.extend_from_slice(&(i as u32).to_be_bytes()[..(i % 3)]);
+                    key
+                })
+                .collect();
+            keys.sort();
+            keys.dedup();
+            let mut shuffled = keys.clone();
+            for i in (1..shuffled.len()).rev() {
+                shuffled.swap(i, (next() % (i as u64 + 1)) as usize);
+            }
+            let sorted = sorted_by_byte_key(shuffled.iter().map(|k| (k.as_slice(), ())));
+            let got: Vec<&[u8]> = sorted.iter().map(|row| row.1).collect();
+            let want: Vec<&[u8]> = keys.iter().map(Vec::as_slice).collect();
+            assert_eq!(got, want, "{count} keys");
+        }
+    }
+
+    #[test]
+    fn entries_into_writes_string_keyed_pairs_in_key_order() {
+        unsafe {
+            let m = gos_rt_map_new(0, 0);
+            for (key, value) in [("pear", 3), ("apple", 1), ("fig", 2)] {
+                gos_rt_map_insert_str_i64(m, crate::c_abi::string::test_gos_str(key), value);
+            }
+            let out = crate::c_abi::vec::gos_rt_vec_new_typed(16, vec_elem_kind::PRIMITIVE);
+            gos_rt_map_entries_into(m, out);
+            assert_eq!(gos_rt_vec_len(out), 3);
+            let slots = std::slice::from_raw_parts((*out).ptr.as_ptr().cast::<[i64; 2]>(), 3);
+            let rows: Vec<(String, i64)> = slots
+                .iter()
+                .map(|[k, v]| {
+                    let text = CStr::from_ptr(*k as usize as *const c_char);
+                    (text.to_string_lossy().into_owned(), *v)
+                })
+                .collect();
+            assert_eq!(
+                rows,
+                vec![
+                    ("apple".to_string(), 1),
+                    ("fig".to_string(), 2),
+                    ("pear".to_string(), 3)
+                ]
+            );
+            for [k, _] in slots {
+                crate::c_abi::string::gos_rt_str_free(*k as usize as *mut c_char);
+            }
+            gos_rt_vec_free(out);
             gos_rt_map_free(m);
         }
     }

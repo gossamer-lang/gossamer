@@ -355,6 +355,34 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_aggr(
     })
 }
 
+/// `xs.binary_search(needle) -> Result<i64, i64>` for an element the tag
+/// stream orders: `Ok(index)` of a matching element, `Err(index)` of the
+/// position an insert would keep sorted. `target` addresses the needle's
+/// slots, laid out as one element of the sequence.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_binary_search_aggr(
+    v: *const GosVec,
+    target: *const u8,
+    n: i64,
+    tags: *const u8,
+) -> i128 {
+    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+        let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
+            return unsafe { gos_rt_result_new(1, 0) };
+        };
+        if target.is_null() || tags.is_null() {
+            return unsafe { gos_rt_result_new(1, 0) };
+        }
+        let at = lower_bound(len, |mid| unsafe {
+            aggregate_cmp(base, stride, mid, target, n, tags)
+        });
+        let found = at < len
+            && unsafe { aggregate_cmp(base, stride, at, target, n, tags) }
+                == std::cmp::Ordering::Equal;
+        unsafe { gos_rt_result_new(i64::from(!found), at as i64) }
+    })
+}
+
 /// `sort::partition_point(xs, pivot) -> i64` for a tuple or struct element.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_partition_point_aggr(

@@ -219,6 +219,9 @@ fn json_value_to_yaml(v: &gossamer_std::json::Value) -> gossamer_std::encoding::
         JV::Null => YV::Null,
         JV::Bool(b) => YV::Bool(*b),
         JV::Int(n) => YV::Int(*n),
+        // YAML's integer is signed, so an unsigned value past its range keeps
+        // its magnitude as a float.
+        JV::Uint(n) => YV::Float(*n as f64),
         JV::Number(f) => YV::Float(*f),
         JV::String(s) => YV::String(s.clone()),
         JV::Array(items) => YV::Seq(items.iter().map(json_value_to_yaml).collect()),

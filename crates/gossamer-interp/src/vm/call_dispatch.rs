@@ -1,5 +1,9 @@
 #![allow(clippy::too_many_lines, clippy::wildcard_imports)]
 use super::*;
+#[cfg(target_arch = "wasm32")]
+use crate::jit_stub as jit_backend;
+#[cfg(not(target_arch = "wasm32"))]
+use gossamer_codegen_cranelift as jit_backend;
 
 /// How a spawned goroutine is named in the diagnostic registry.
 struct GoroutineOrigin {
@@ -50,20 +54,56 @@ impl Vm {
         out
     }
 
+    /// A JIT frame found on the machine stack, placed in the source.
+    fn jit_call_stack_frame(&self, frame: &jit_backend::JitFrame) -> CallStackFrame {
+        let location = frame.span.and_then(|span| {
+            self.jit_source_locations
+                .borrow()
+                .as_ref()
+                .and_then(|locations| locations.get(&span).copied())
+        });
+        CallStackFrame {
+            function: frame.function.to_string(),
+            file: location.map(|location| location.file.to_string()),
+            line: location.map(|location| location.line),
+            column: location.map(|location| location.column),
+        }
+    }
+
     /// Snapshot of the in-flight (or last failing) call stack with source
     /// positions for frames whose bytecode was compiled with a source map.
     #[must_use]
     pub fn call_stack_frames(&self) -> Vec<CallStackFrame> {
-        self.call_stack
-            .borrow()
-            .iter()
-            .map(|frame| CallStackFrame {
-                function: frame.function.to_string(),
-                file: frame.location.map(|location| location.file.to_string()),
-                line: frame.location.map(|location| location.line),
-                column: frame.location.map(|location| location.column),
-            })
-            .collect()
+        let rendered =
+            |function: &str, location: Option<crate::bytecode::SourceLocation>| CallStackFrame {
+                function: function.to_string(),
+                file: location.map(|location| location.file.to_string()),
+                line: location.map(|location| location.line),
+                column: location.map(|location| location.column),
+            };
+        let mut frames = Vec::new();
+        for frame in self.call_stack.borrow().iter() {
+            // An inlined call has no frame of its own: the chain of sites the
+            // position sits in, outermost first, names each function and the
+            // call in it that led inward.
+            let mut chain = Vec::new();
+            let mut site = frame.inline_site;
+            while let Some(index) = site {
+                let Some(inline) = frame.inline_sites.get(index as usize) else {
+                    break;
+                };
+                chain.push(inline);
+                site = inline.parent;
+            }
+            chain.reverse();
+            let mut function = frame.function;
+            for inline in chain {
+                frames.push(rendered(function, inline.call));
+                function = inline.function;
+            }
+            frames.push(rendered(function, frame.location));
+        }
+        frames
     }
 
     /// Public entry for invoking a function VALUE (not a name): used by
@@ -862,7 +902,24 @@ extern "C" fn render_active_vm_trace() -> *mut std::ffi::c_char {
     }
     // SAFETY: the slot holds a borrow of a VM live for the whole of
     // `with_active_trace`, which is the only window this hook runs in.
-    let frames = unsafe { &*ptr }.call_stack_frames();
+    let vm = unsafe { &*ptr };
+    let mut frames = vm.call_stack_frames();
+    // A JIT-compiled body runs on the machine stack beneath the bytecode frame
+    // that dispatched into it, so the frames found there continue the chain;
+    // the dispatching frame itself, which never ran bytecode, is the first of
+    // them.
+    let mut native: Vec<CallStackFrame> = jit_backend::active_jit_frames()
+        .iter()
+        .rev()
+        .map(|frame| vm.jit_call_stack_frame(frame))
+        .collect();
+    if let (Some(last), Some(first)) = (frames.last(), native.first())
+        && last.function == first.function
+        && last.line.is_none()
+    {
+        frames.pop();
+    }
+    frames.append(&mut native);
     if frames.is_empty() {
         return std::ptr::null_mut();
     }

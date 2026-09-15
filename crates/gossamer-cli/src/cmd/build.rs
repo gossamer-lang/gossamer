@@ -393,6 +393,7 @@ struct BuildTimings {
     pruned_count: usize,
     llvm_object_count: usize,
     cranelift_companion: bool,
+    mir: gossamer_driver::MirPhaseTimes,
     codegen: Duration,
     link: Duration,
     total: Duration,
@@ -407,7 +408,7 @@ impl BuildTimings {
     fn print(&self, cache_hit: bool) {
         let phases = codegen_phases();
         println!(
-            "build-timings: {{\"bundle_us\":{},\"stamp_us\":{},\"autoderive_us\":{},\"comptime_us\":{},\"frontend_us\":{},\"parse_us\":{},\"resolve_us\":{},\"typecheck_us\":{},\"exhaustiveness_us\":{},\"arena_escape_us\":{},\"parse_cache_hit\":{},\"body_count\":{},\"pruned_count\":{},\"llvm_object_count\":{},\"cranelift_companion\":{},\"codegen_us\":{},\"cachekey_us\":{},\"render_us\":{},\"llvm_tool_us\":{},\"link_us\":{},\"total_us\":{},\"final_artifact_cache_hit\":{cache_hit}}}",
+            "build-timings: {{\"bundle_us\":{},\"stamp_us\":{},\"autoderive_us\":{},\"comptime_us\":{},\"frontend_us\":{},\"parse_us\":{},\"resolve_us\":{},\"typecheck_us\":{},\"exhaustiveness_us\":{},\"arena_escape_us\":{},\"parse_cache_hit\":{},\"body_count\":{},\"pruned_count\":{},\"llvm_object_count\":{},\"cranelift_companion\":{},\"hir_us\":{},\"mir_lower_us\":{},\"specialise_us\":{},\"mir_passes_us\":{},\"mir_verify_us\":{},\"codegen_us\":{},\"cachekey_us\":{},\"render_us\":{},\"llvm_tool_us\":{},\"link_us\":{},\"total_us\":{},\"final_artifact_cache_hit\":{cache_hit}}}",
             self.bundle.as_micros(),
             self.stamp.as_micros(),
             self.autoderive.as_micros(),
@@ -423,6 +424,11 @@ impl BuildTimings {
             self.pruned_count,
             self.llvm_object_count,
             self.cranelift_companion,
+            self.mir.hir.as_micros(),
+            self.mir.mir_lower.as_micros(),
+            self.mir.specialise.as_micros(),
+            self.mir.passes.as_micros(),
+            self.mir.verify.as_micros(),
             self.codegen.as_micros(),
             phases.cache_key_us,
             phases.render_us,
@@ -684,6 +690,8 @@ fn validate_source(
     // Compile-time codegen pass for from_json/to_json (and friends).
     let phase_started = Instant::now();
     let augmented = gossamer_parse::autoderive::augment_source(&source);
+    // Autoderive appends; what it appended is generated code, not a file.
+    let generated_len = augmented.len().saturating_sub(source.len());
     timings.autoderive = phase_started.elapsed();
     // The augmented source supersedes the file contents for every subsequent
     // frontend stage. Release the original before parsing so large generated
@@ -701,6 +709,7 @@ fn validate_source(
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(file.to_string_lossy().into_owned(), augmented);
     crate::paths::register_unit_origins(&mut map, file_id, origins.0, origins.1);
+    crate::paths::register_generated_tail(&mut map, file_id, generated_len);
     let render_opts = gossamer_diagnostics::RenderOptions {
         colour: crate::paths::stderr_supports_colour(),
     };
@@ -729,12 +738,13 @@ fn validate_source(
     // The backend resolves a MIR span to the line a panic report names, and
     // the source map does not outlive the frontend, so hand over the compact
     // line table first.
-    gossamer_driver::register_source_lines(
+    gossamer_driver::register_source_positions(
         &file.file_name().map_or_else(
             || file.to_string_lossy().into_owned(),
             |base| base.to_string_lossy().into_owned(),
         ),
-        map.source(file_id),
+        &map,
+        file_id,
     );
     // Drop the source map before backend lowering so peak RSS reflects
     // only the live frontend artifacts.
@@ -1925,6 +1935,7 @@ fn emit_native_objects(
     timings.pruned_count = build.pruned_count;
     timings.llvm_object_count = build.llvm_object_count;
     timings.cranelift_companion = build.has_cranelift_companion;
+    timings.mir = build.mir_phases;
     let _ = cl_path;
     Ok((build.llvm_objects, Some(build.triple)))
 }

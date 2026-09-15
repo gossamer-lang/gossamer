@@ -59,7 +59,9 @@ pub fn fixes(sf: &SourceFile, registry: &Registry, source: &str) -> Vec<Fix> {
 #[must_use]
 pub fn apply(source: &str, fixes: &[Fix]) -> String {
     let mut ordered: Vec<&Fix> = fixes.iter().collect();
-    ordered.sort_by_key(|f| f.span.start);
+    // Of two edits starting at one offset, the wider one is applied: it
+    // rewrites the whole construct the narrower one sits inside.
+    ordered.sort_by_key(|f| (f.span.start, std::cmp::Reverse(f.span.end)));
     let mut out = String::with_capacity(source.len());
     let mut cursor: usize = 0;
     for fix in ordered {
@@ -313,6 +315,19 @@ mod tests {
         let registry = Registry::with_defaults();
         let fx = fixes(&sf, &registry, source);
         apply(source, &fx)
+    }
+
+    #[test]
+    fn the_wider_of_two_edits_at_one_offset_is_applied() {
+        let mut map = SourceMap::new();
+        let file = map.add_file("t.gos".to_string(), String::new());
+        let edit = |start, end, replacement: &str| Fix {
+            span: gossamer_lex::Span::new(file, start, end),
+            replacement: replacement.to_string(),
+            lint_id: "diagnostic",
+        };
+        let fixes = [edit(0, 4, "inner"), edit(0, 8, "outer")];
+        assert_eq!(apply("abcdefgh tail", &fixes), "outer tail");
     }
 
     #[test]

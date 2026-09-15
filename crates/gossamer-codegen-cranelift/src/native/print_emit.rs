@@ -143,7 +143,7 @@ use super::*;
 /// and both consumers copy out of it - `gos_rt_print_str` writes the bytes and
 /// `gos_rt_concat_str` appends them - so the rendering is dead once the call
 /// it fed returns.
-fn free_rendered_string(
+pub(super) fn free_rendered_string(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,
     intrinsics: &mut IntrinsicContext,
@@ -439,6 +439,14 @@ pub(super) fn emit_per_arg_print(
                 builder.ins().call(fref, &[s]);
                 free_rendered_string(module, builder, intrinsics, s)?;
             }
+            PrintKind::VecTuple(tags, arity) => {
+                let s = emit_vec_tuple_format_value(
+                    module, builder, value, &tags, arity, bare, intrinsics,
+                )?;
+                let fref = module.declare_func_in_func(print_str, builder.func);
+                builder.ins().call(fref, &[s]);
+                free_rendered_string(module, builder, intrinsics, s)?;
+            }
             PrintKind::Map => {
                 let s = emit_map_format_value(module, builder, value, intrinsics)?;
                 let fref = module.declare_func_in_func(print_str, builder.func);
@@ -640,6 +648,37 @@ pub(super) fn emit_tuple_format_value(
     let f = intrinsics.extern_fn_by_name(module, "gos_rt_tuple_format")?;
     let fref = module.declare_func_in_func(f, builder.func);
     let call = builder.ins().call(fref, &[value, n_v, tags_ptr]);
+    Ok(builder.inst_results(call)[0])
+}
+
+/// Emits `gos_rt_vec_format_tuple(vec, arity, tags, bare)` and returns the
+/// rendered string pointer. `tags` is the per-field tag stream every element
+/// renders through, interned before the parallel lowering phase.
+pub(super) fn emit_vec_tuple_format_value(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    value: ir::Value,
+    tags: &[u8],
+    arity: i64,
+    bare: bool,
+    intrinsics: &mut IntrinsicContext,
+) -> Result<ir::Value> {
+    let ptr_ty = module.target_config().pointer_type();
+    let tags_data = intrinsics.intern_tuple_tags(module, tags)?;
+    let tags_global = module.declare_data_in_func(tags_data, builder.func);
+    let tags_ptr = builder.ins().symbol_value(ptr_ty, tags_global);
+    let format_fn = intrinsics.extern_fn(
+        module,
+        "gos_rt_vec_format_tuple",
+        &[ptr_ty, types::I64, ptr_ty, types::I32],
+        &[ptr_ty],
+    )?;
+    let format_ref = module.declare_func_in_func(format_fn, builder.func);
+    let arity_v = builder.ins().iconst(types::I64, arity);
+    let spelling = builder.ins().iconst(types::I32, i64::from(bare));
+    let call = builder
+        .ins()
+        .call(format_ref, &[value, arity_v, tags_ptr, spelling]);
     Ok(builder.inst_results(call)[0])
 }
 
@@ -950,6 +989,15 @@ pub(super) fn emit_args_to_concat_string(
             PrintKind::Tuple => {
                 let s =
                     emit_tuple_format_value(module, builder, body, tcx, arg, value, intrinsics)?;
+                let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
+                let fref = module.declare_func_in_func(f, builder.func);
+                builder.ins().call(fref, &[s]);
+                free_rendered_string(module, builder, intrinsics, s)?;
+            }
+            PrintKind::VecTuple(tags, arity) => {
+                let s = emit_vec_tuple_format_value(
+                    module, builder, value, &tags, arity, bare, intrinsics,
+                )?;
                 let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
                 let fref = module.declare_func_in_func(f, builder.func);
                 builder.ins().call(fref, &[s]);

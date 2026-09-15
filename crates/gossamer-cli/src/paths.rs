@@ -109,6 +109,43 @@ pub(crate) fn register_unit_origins(
     map.set_origins(unit, origins);
 }
 
+/// Name the source map gives the code autoderive synthesizes for a unit.
+const GENERATED_FILE: &str = "<generated>";
+
+/// Records the trailing `generated_len` bytes of `unit` - the code autoderive
+/// appends after the program - as a file of their own.
+///
+/// A position in that code then resolves to a line within it, so a generated
+/// method keeps its position, and a debug build its cached object, whatever
+/// edits change the length of the files assembled before it.
+pub(crate) fn register_generated_tail(
+    map: &mut gossamer_lex::SourceMap,
+    unit: gossamer_lex::FileId,
+    generated_len: usize,
+) {
+    let source = map.source(unit);
+    let Some(start) = source.len().checked_sub(generated_len) else {
+        return;
+    };
+    if generated_len == 0 || !source.is_char_boundary(start) {
+        return;
+    }
+    let (Ok(start), Ok(end)) = (u32::try_from(start), u32::try_from(source.len())) else {
+        return;
+    };
+    let tail = source[start as usize..].to_string();
+    let generated = map.add_file(GENERATED_FILE, tail);
+    map.add_origin(
+        unit,
+        gossamer_lex::OriginSpan {
+            start,
+            end,
+            origin: generated,
+            origin_start: 0,
+        },
+    );
+}
+
 /// Renders a `std::io::Error` as a clean diagnostic free of
 /// libc artefacts (`(os error N)` tails, `stat`/`reading`
 /// syscall prefixes). Path-aware where a path is available.

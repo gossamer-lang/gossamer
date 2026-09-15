@@ -1139,7 +1139,7 @@ fn drain_lazy_iter_result(value: &Value) -> RuntimeResult<Option<Vec<Value>>> {
     Ok(Some(out))
 }
 
-fn drain_iter_with_dispatch(
+pub(crate) fn drain_iter_with_dispatch(
     value: &Value,
     dispatch: &mut dyn NativeDispatch,
 ) -> RuntimeResult<Vec<Value>> {
@@ -1206,12 +1206,27 @@ eager_seq_natives! {
 /// Reversing a bounded range is position arithmetic, so that shape reaches
 /// the entry point undrained.
 fn native_iter_reversed(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(Value::LazyIter(id)) = args.first()
-        && lazy_range_bounds(id.id()).is_some()
-    {
+    let Some(Value::LazyIter(id)) = args.first() else {
+        return builtin_iter_reversed(args);
+    };
+    if lazy_range_bounds(id.id()).is_some() {
         return builtin_iter_reversed(args);
     }
-    builtin_iter_reversed(&drained_args(dispatch, args)?)
+    // Reversal reads every element, so a cursor is drained here. What comes
+    // back is still iterator state: the adapters after `rev` run their
+    // callbacks as the reversed elements are pulled, not all at once.
+    let mut drained = drained_args(dispatch, args)?;
+    let Some(Value::Array(items)) = drained.first_mut() else {
+        return builtin_iter_reversed(&drained);
+    };
+    let mut xs = std::mem::take(Arc::make_mut(items));
+    xs.reverse();
+    Ok(new_lazy_iter(LazyIterState::Array {
+        items: Arc::new(xs),
+        source_id: 0,
+        generation: 0,
+        index: 0,
+    }))
 }
 
 fn native_iterator_windows_method(
@@ -1864,10 +1879,43 @@ pub(crate) fn builtin_iter_dedup(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Array(Arc::new(out)))
 }
 
+/// The panic an integer `sum` raises where its total leaves the element type,
+/// the same one `+` raises.
+fn add_overflow() -> RuntimeError {
+    RuntimeError::Panic("attempt to add with overflow".to_string())
+}
+
+/// The panic an integer `product` raises where its total leaves the element
+/// type, the same one `*` raises.
+fn mul_overflow() -> RuntimeError {
+    RuntimeError::Panic("attempt to multiply with overflow".to_string())
+}
+
+fn checked_int_sum(mut values: impl Iterator<Item = i64>) -> RuntimeResult<i64> {
+    values.try_fold(0i64, |total, value| {
+        total.checked_add(value).ok_or_else(add_overflow)
+    })
+}
+
+fn checked_int_product(mut values: impl Iterator<Item = i64>) -> RuntimeResult<i64> {
+    values.try_fold(1i64, |total, value| {
+        total.checked_mul(value).ok_or_else(mul_overflow)
+    })
+}
+
 pub(crate) fn builtin_iter_sum(args: &[Value]) -> RuntimeResult<Value> {
     match args.first() {
-        Some(Value::IntArray(arr)) => Ok(Value::Int(arr.iter().sum())),
-        Some(Value::FloatVec(arr)) => Ok(Value::Float(arr.iter().sum())),
+        Some(Value::IntArray(arr)) => checked_int_sum(arr.iter().copied()).map(Value::Int),
+        // A `Vec<u8>` the VM holds packed sums its bytes, as the compiled
+        // tiers read them.
+        Some(bytes @ (Value::ByteArray(_) | Value::InlineByteArray(_) | Value::ByteVec(_))) => {
+            let packed = bytes.byte_slice().unwrap_or_default();
+            checked_int_sum(packed.iter().map(|b| i64::from(*b))).map(Value::Int)
+        }
+        // A float sum starts from +0.0, as the compiled tiers' sum does.
+        Some(Value::FloatVec(arr)) => Ok(Value::Float(
+            arr.iter().fold(0.0, |total, value| total + value),
+        )),
         Some(Value::Array(arr)) => {
             // Integer arrays use the signed or unsigned runtime value that
             // their element type selected. Keep `Uint` values in the unsigned
@@ -1880,13 +1928,13 @@ pub(crate) fn builtin_iter_sum(args: &[Value]) -> RuntimeResult<Value> {
             for v in arr.iter() {
                 match v {
                     Value::Int(n) => {
-                        int_sum += n;
+                        int_sum = int_sum.checked_add(*n).ok_or_else(add_overflow)?;
                         uint_sum = uint_sum.wrapping_add(*n as u64);
                         float_sum += *n as f64;
                     }
                     Value::Uint(n) => {
                         is_uint = true;
-                        uint_sum = uint_sum.wrapping_add(*n);
+                        uint_sum = uint_sum.checked_add(*n).ok_or_else(add_overflow)?;
                         float_sum += *n as f64;
                     }
                     Value::Float(f) => {
@@ -2078,16 +2126,38 @@ pub(crate) fn native_iter_fold(
     // Signature: fold(init, f, xs) - data still last.
     let mut acc = args.first().cloned().unwrap_or(Value::Unit);
     let f = args.get(1).cloned().unwrap_or(Value::Unit);
-    let source = args.get(2).unwrap_or(&Value::Unit);
-    let values = if matches!(source, Value::LazyIter(_)) {
-        drain_iter_with_dispatch(source, dispatch)?
-    } else {
-        seq_arg(dispatch, source)?
-    };
-    for value in values {
+    let mut pull = ElementPull::new(args.get(2).unwrap_or(&Value::Unit));
+    while let Some(value) = pull.next(dispatch)? {
         acc = dispatch.call_value(&f, vec![acc, value])?;
     }
     Ok(acc)
+}
+
+/// The elements of a combinator's source, one per request.
+///
+/// A lazy source is advanced only when the combinator asks for the next
+/// element, so its adapters' callbacks run interleaved with the combinator's
+/// own and a short-circuiting terminal leaves the rest of the source unread.
+enum ElementPull<'v> {
+    Lazy(&'v Value),
+    Eager(std::vec::IntoIter<Value>),
+}
+
+impl<'v> ElementPull<'v> {
+    fn new(source: &'v Value) -> Self {
+        if matches!(source, Value::LazyIter(_)) {
+            Self::Lazy(source)
+        } else {
+            Self::Eager(collect_array(source).into_iter())
+        }
+    }
+
+    fn next(&mut self, dispatch: &mut dyn NativeDispatch) -> RuntimeResult<Option<Value>> {
+        match self {
+            Self::Lazy(source) => lazy_next(source, &mut Some(dispatch)),
+            Self::Eager(values) => Ok(values.next()),
+        }
+    }
 }
 
 pub(crate) fn native_iter_reduce(
@@ -2095,13 +2165,11 @@ pub(crate) fn native_iter_reduce(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     let f = args.first().cloned().unwrap_or(Value::Unit);
-    let xs = seq_arg(dispatch, args.get(1).unwrap_or(&Value::Unit))?;
-    let mut iter = xs.into_iter();
-    let Some(first) = iter.next() else {
+    let mut pull = ElementPull::new(args.get(1).unwrap_or(&Value::Unit));
+    let Some(mut acc) = pull.next(dispatch)? else {
         return Ok(none_variant());
     };
-    let mut acc = first;
-    for x in iter {
+    while let Some(x) = pull.next(dispatch)? {
         acc = dispatch.call_value(&f, vec![acc, x])?;
     }
     Ok(some_variant(acc))
@@ -2193,8 +2261,8 @@ pub(crate) fn native_iter_any(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     let p = args.first().cloned().unwrap_or(Value::Unit);
-    let xs = seq_arg(dispatch, args.get(1).unwrap_or(&Value::Unit))?;
-    for x in xs {
+    let mut pull = ElementPull::new(args.get(1).unwrap_or(&Value::Unit));
+    while let Some(x) = pull.next(dispatch)? {
         if matches!(dispatch.call_value(&p, vec![x])?, Value::Bool(true)) {
             return Ok(Value::Bool(true));
         }
@@ -2207,8 +2275,8 @@ pub(crate) fn native_iter_all(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     let p = args.first().cloned().unwrap_or(Value::Unit);
-    let xs = seq_arg(dispatch, args.get(1).unwrap_or(&Value::Unit))?;
-    for x in xs {
+    let mut pull = ElementPull::new(args.get(1).unwrap_or(&Value::Unit));
+    while let Some(x) = pull.next(dispatch)? {
         if !matches!(dispatch.call_value(&p, vec![x])?, Value::Bool(true)) {
             return Ok(Value::Bool(false));
         }
@@ -2221,8 +2289,8 @@ pub(crate) fn native_iter_find(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     let p = args.first().cloned().unwrap_or(Value::Unit);
-    let xs = seq_arg(dispatch, args.get(1).unwrap_or(&Value::Unit))?;
-    for x in xs {
+    let mut pull = ElementPull::new(args.get(1).unwrap_or(&Value::Unit));
+    while let Some(x) = pull.next(dispatch)? {
         if matches!(dispatch.call_value(&p, vec![x.clone()])?, Value::Bool(true)) {
             return Ok(some_variant(x));
         }
@@ -2235,11 +2303,13 @@ pub(crate) fn native_iter_position(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     let p = args.first().cloned().unwrap_or(Value::Unit);
-    let xs = seq_arg(dispatch, args.get(1).unwrap_or(&Value::Unit))?;
-    for (i, x) in xs.into_iter().enumerate() {
+    let mut pull = ElementPull::new(args.get(1).unwrap_or(&Value::Unit));
+    let mut index = 0i64;
+    while let Some(x) = pull.next(dispatch)? {
         if matches!(dispatch.call_value(&p, vec![x])?, Value::Bool(true)) {
-            return Ok(some_variant(Value::Int(i as i64)));
+            return Ok(some_variant(Value::Int(index)));
         }
+        index += 1;
     }
     Ok(none_variant())
 }
@@ -2249,8 +2319,8 @@ pub(crate) fn native_iter_find_map(
     args: &[Value],
 ) -> RuntimeResult<Value> {
     let f = args.first().cloned().unwrap_or(Value::Unit);
-    let xs = seq_arg(dispatch, args.get(1).unwrap_or(&Value::Unit))?;
-    for x in xs {
+    let mut pull = ElementPull::new(args.get(1).unwrap_or(&Value::Unit));
+    while let Some(x) = pull.next(dispatch)? {
         let r = dispatch.call_value(&f, vec![x])?;
         if let Some(v) = some_payload(&r) {
             return Ok(some_variant(v));
@@ -2537,7 +2607,13 @@ pub(crate) fn native_iter_flat_map(
 
 pub(crate) fn builtin_iter_product(args: &[Value]) -> RuntimeResult<Value> {
     match args.first() {
-        Some(Value::IntArray(arr)) => Ok(Value::Int(arr.iter().product())),
+        Some(Value::IntArray(arr)) => checked_int_product(arr.iter().copied()).map(Value::Int),
+        // A `Vec<u8>` the VM holds packed multiplies its bytes, as the
+        // compiled tiers read them.
+        Some(bytes @ (Value::ByteArray(_) | Value::InlineByteArray(_) | Value::ByteVec(_))) => {
+            let packed = bytes.byte_slice().unwrap_or_default();
+            checked_int_product(packed.iter().map(|b| i64::from(*b))).map(Value::Int)
+        }
         Some(Value::FloatVec(arr)) => Ok(Value::Float(arr.iter().product())),
         Some(Value::Array(arr)) => {
             let mut int_prod: i64 = 1;
@@ -2548,13 +2624,13 @@ pub(crate) fn builtin_iter_product(args: &[Value]) -> RuntimeResult<Value> {
             for v in arr.iter() {
                 match v {
                     Value::Int(n) => {
-                        int_prod = int_prod.wrapping_mul(*n);
+                        int_prod = int_prod.checked_mul(*n).ok_or_else(mul_overflow)?;
                         uint_prod = uint_prod.wrapping_mul(*n as u64);
                         float_prod *= *n as f64;
                     }
                     Value::Uint(n) => {
                         is_uint = true;
-                        uint_prod = uint_prod.wrapping_mul(*n);
+                        uint_prod = uint_prod.checked_mul(*n).ok_or_else(mul_overflow)?;
                         float_prod *= *n as f64;
                     }
                     Value::Float(f) => {

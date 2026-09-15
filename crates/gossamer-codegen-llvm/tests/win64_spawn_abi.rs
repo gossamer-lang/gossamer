@@ -36,6 +36,7 @@ fn spawn_main(ret_words: i64) -> (Body, TyCtxt) {
             rvalue,
         },
         span,
+        inlined: None,
     };
     let copy = |local: u32| {
         Operand::Copy(Place {
@@ -107,12 +108,16 @@ fn spawn_main(ret_words: i64) -> (Body, TyCtxt) {
                     target: Some(BlockId(1)),
                 },
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             },
             BasicBlock {
                 id: BlockId(1),
                 stmts: Vec::new(),
                 terminator: Terminator::Return,
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             },
         ],
         span,

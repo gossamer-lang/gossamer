@@ -200,8 +200,10 @@ no opt-in needed.
 
 ```
 +  -  *  /  %
++%  -%  *%                          // wrapping arithmetic
 &  |  ^  <<  >>
 += -= *= /= %= &= |= ^= <<= >>=
++%= -%= *%=
 =  ==  !=  <  <=  >  >=
 !  &&  ||
 |>                                  // pipe (F#-style forward pipe)
@@ -362,10 +364,10 @@ statement whose value is discarded, and the implicit `main` returns
 
 **The i64 runtime model.** Every integer type of 64 bits or less
 (`i8`-`i64`, `u8`-`u64`, `isize`, `usize`) is represented at runtime
-as a 64-bit signed value, on every tier. Arithmetic, comparison,
-division, remainder, and shifts all run at 64-bit signed width; the
-declared narrow or unsigned width is observable only at an explicit
-`as` cast, which truncates to the declared width and then extends by
+as a 64-bit signed value, on every tier. A value of a narrower type
+never holds a value outside its declared range: an operation whose
+64-bit result could leave that range answers at the declared width. An
+explicit `as` cast truncates to the target width and then extends by
 the target's signedness (`300 as u8 == 44`, `200 as i8 == -56`).
 Consequences of the model:
 
@@ -373,6 +375,10 @@ Consequences of the model:
   behavior at the declared type width. Debug execution, including `gos`
   and `gos build`, panics on overflow. `gos build --release` wraps at the
   declared width, so a release `200u8 + 200u8` evaluates to `144`.
+- Unary `-`, unary `!` (the bitwise complement on an integer), `<<`,
+  and a signed `MIN / -1` wrap at the declared width in every profile:
+  `-(-128i8) == -128`, `!5u8 == 250`, `200u8 << 2 == 32`,
+  `-128i8 / -1 == -128`, and `i64::MIN / -1 == i64::MIN`.
 - `u64`/`usize` values use the same 64-bit payload as signed integers,
   but arithmetic, comparison, shifts, division/remainder, and display are
   type-aware on every tier. Casts reinterpret or truncate to the target
@@ -381,13 +387,32 @@ Consequences of the model:
 - `<<` and `>>` mask the shift amount to the low 6 bits
   (`1 << 70 == 1 << 6`); `>>` is the arithmetic (sign-propagating)
   shift.
-- Float → int casts saturate at i64 width with no narrow mask
-  (`300.7 as u8 == 300`, `1e20 as i64 == i64::MAX`, NaN → 0).
+- Float → int casts truncate toward zero and saturate at the target
+  type's range (`300.7 as u8 == 255`, `-5.0 as u8 == 0`,
+  `1e20 as i64 == i64::MAX`, NaN → 0).
 
 The VM, Cranelift JIT, and LLVM debug backend all enforce the same checked
-behavior. Explicit `wrapping_add` and `wrapping_mul` retain wrapping behavior
-at the declared integer width in every profile. Other Rust integer arithmetic
-method families are not yet part of Gossamer's public method surface.
+behavior.
+
+**Wrapping arithmetic.** `+%`, `-%`, and `*%` add, subtract, and multiply with
+two's-complement wrapping at the operands' declared integer width, on every
+tier and in every profile, and `+%=`, `-%=`, `*%=` are their compound forms.
+Both operands share one integer type (a byte literal joins an integer operand,
+as for `+`); any other operand type is GT0003. They bind like the operators
+they wrap: `*%` at level 5, `+%` and `-%` at level 6.
+
+```gossamer
+fn djb2(text: String) -> u32 {
+    let mut hash: u32 = 5381
+    for b in text.bytes() { hash = (hash << 5) +% hash +% b as u32 }
+    hash
+}
+```
+
+Wrapping arithmetic has this one spelling. `x.wrapping_add(y)` and
+`x.wrapping_mul(y)` are not integer methods: a call reports GT0087 with the
+operator rewrite. Other Rust integer arithmetic method families are not part of
+Gossamer's method surface.
 
 `i128` and `u128` are not supported on any tier. The checker rejects
 every spelling of these types at the declaration site with a
@@ -931,15 +956,36 @@ fn sum<const N: usize>(xs: [i64; N]) -> i64 {
 }
 ```
 
-`N` is inferred from the array argument's length at the call site and
-keyed into monomorphisation, so each distinct length instantiates an
-independent specialisation that runs identically on the bytecode VM,
-the Cranelift JIT, and the LLVM AOT tiers. The body may iterate the
-parameter and read `xs.len()`, the const may appear in the return type
-(`-> [i64; N]`), and a function may take more than one const parameter
-(`<const N: usize, const M: usize>`). The const is inferred from a
-`[T; N]` argument; it is not yet usable as a bare value expression in
-the body or as a repeat count (`[0; N]`).
+Each call supplies `N`: from the length of an array argument whose type
+names it, or from an explicit turbofish (`zeros::<4>()`), and a call that
+gives it neither reports `GT0088`. A caller's own const parameter may
+supply a callee's (`fn outer<const M: usize>(xs: [i64; M]) -> i64 {
+sum(xs) }`). Inside the body `N` is a value of its declared type
+(`N as i64`) and a repeat count (`[0; N]`); the body may iterate the
+parameter and read `xs.len()`, and a function may take more than one const
+parameter (`<const N: usize, const M: usize>`). A `-> [T; N]` result is a
+fixed `[T; k]` array at the call site.
+
+A struct, a tuple struct, or an enum may declare const generic parameters,
+and a field or variant payload may name one as an array length
+(`struct Ring<const N: usize> { items: [i64; N], head: i64 }`,
+`enum Grid<const N: usize> { Filled([i64; N]), Empty }`). A variant
+constructor takes each const argument from its payload the way a literal
+takes it from its fields.
+A struct literal takes each const argument from the length of the array field
+that names it, from a caller's own const parameter it forwards, or from the
+type the context expects (`let r: Ring<3> = ...`); a literal that gives it
+none reports `GT0088`. A variant with no payload (`Grid::Empty`) takes each
+const argument from the type the context expects. Methods in
+`impl<const N: usize> Ring<N>` read `N` as a value, and a method call supplies
+it from the receiver's type, whether written `r.capacity()` or
+`Ring::capacity(r)`; a method's signature may name it
+(`fn snapshot(&self) -> [i64; N]`), and its array result is a fixed `[T; k]` at
+the call. An associated function with no receiver takes the block's const
+arguments from the turbofish on the type it is called through
+(`Ring::<3>::blank()`), and a call that names none reports `GT0088`. All of this
+runs identically on the bytecode VM, the Cranelift JIT, and the LLVM AOT
+tiers.
 
 Monomorphisation specialises each `(def, substs)` pair independently
 and runs identically on the bytecode VM, the Cranelift JIT, and the
@@ -952,6 +998,34 @@ specialise per instantiation on every tier. Bounds are static dispatch
 and may be written several to a parameter (`T: A + B`), in the parameter
 list or in a `where` clause; there is no `dyn Trait`, no blanket impl,
 and no supertrait method inheritance through the bound.
+
+### 3.10a Lane vectors
+
+`Simd<T, N>` is a fixed-width vector of `N` lanes of one scalar type, and
+`Mask<N>` is its `bool` form. Both are prelude types. The lane type is `f32`,
+`f64`, `i32`, `i64`, `u8`, or `u32`; `N` is 2, 4, or 8, and also 16 for `u8`,
+`i32`, `u32`, and `Mask`. Any other lane type or count, and any operation the
+lane type does not define, reports `GT0089`.
+
+A vector is built with `Simd::from_array([..])`, which takes `N` from the
+array's length; `Simd::splat(v)`, whose lane count comes from the type the
+context expects; or `Simd::load(xs, offset)`, which reads `N` lanes of a `Vec`,
+slice, or fixed array and also takes `N` from the expected type.
+`v.store(&mut xs, offset)` writes the lanes back. A load or store checks its
+whole window once and panics with the same message on every tier when the
+window reaches past either end, before any lane moves.
+
+`+`, `-`, and `*` apply lane by lane to float and integer lanes, `/` to float
+lanes, `+%`, `-%`, `*%`, `<<`, and `>>` to integer lanes, and `&`, `|`, and `^`
+to integer lanes and masks. Both operands share one vector type, which the
+result has too. The methods are `to_array`, `min`, `max`, `abs`, `sqrt` (float
+lanes), `lanes_eq`, `lanes_lt`, and `lanes_le` (each answering a `Mask<N>`),
+`reduce_sum`, `reduce_min`, `reduce_max`, `reduce_and` and `reduce_or` (integer
+lanes and masks), and, on a mask, `select(if_true, if_false)`. `reduce_sum`
+folds its lanes in one fixed pairing order. A function may be generic over the
+lane count, `fn dot<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> f64`,
+and every operation answers the same bits on the bytecode VM, the Cranelift
+JIT, and the LLVM AOT tiers.
 
 ### 3.11 Dynamic dispatch
 
@@ -1684,8 +1758,8 @@ From highest to lowest:
 | 2 | `.` method/field, `[]`, `()`, `?`, postfix | left |
 | 3 | unary `-`, `!`, `&`, `&mut`, `*` (deref) | right |
 | 4 | `as` cast | left |
-| 5 | `*`, `/`, `%` | left |
-| 6 | `+`, `-` | left |
+| 5 | `*`, `/`, `%`, `*%` | left |
+| 6 | `+`, `-`, `+%`, `-%` | left |
 | 7 | `<<`, `>>` | left |
 | 8 | `&` bitand | left |
 | 9 | `^` bitxor | left |
@@ -2487,7 +2561,9 @@ expression of a block, either branch of an `if`, any arm of a `match`,
 and the body of a `for`, `while`, or `loop`. An else-less `if` is
 typed `()` while its branch keeps the branch's own type, so
 `if ready() { flush() }` discards `flush()`'s `Result` and is
-reported at the call.
+reported at the call. An `else if` chain with no final `else` is
+else-less in the same way: it is typed `()` and each branch keeps its
+own type.
 
 Two forms discard deliberately and are accepted:
 
@@ -3066,8 +3142,9 @@ at compile time as `[(String, String)]` - a named struct's fields, a tuple
 struct's positions, or an enum's variants and payloads, with the arguments
 substituted in for a generic instantiation - so a `comptime fn` can
 generate per-type code. A type with nothing to reflect is `GR0012`. The
-`regex::compile` / `sql::statement` calls validate their
-argument at build time, failing the build on malformed input. See the
+`regex::compile` / `sql::statement` calls check a literal argument while
+the program is parsed, failing the build on a pattern that does not compile
+(`GP0057`) or a malformed statement (`GP0058`). See the
 [`comptime` language page](docs_src/language/comptime.md).
 
 Gossamer does not provide runtime reflection. Programs that require dynamic

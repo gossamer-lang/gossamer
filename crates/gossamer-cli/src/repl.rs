@@ -325,10 +325,226 @@ const CORE_TYPES: &[CoreTypeHelp] = &[CoreTypeHelp {
     example: "let t = (1, \"two\", 3.0); println(\"{} {}\", t.0, t.1); let n, s, f = t",
 }];
 
+/// A built-in operator, named in `%info` by its spelling.
+struct CoreOperatorHelp {
+    spelling: &'static str,
+    signature: &'static str,
+    doc: &'static str,
+    example: &'static str,
+}
+
+// Operators have no type or module to be found through, so each one the
+// language defines beyond the arithmetic every reader already knows is listed
+// by the spelling a program writes.
+const CORE_OPERATORS: &[CoreOperatorHelp] = &[
+    CoreOperatorHelp {
+        spelling: "+%",
+        signature: "a +% b -> T",
+        doc: "Wrapping add: adds two values of one integer type `T` with two's-complement \
+              wrapping at `T`'s declared width, on every tier and in every build profile. \
+              Binds like `+` (level 6). A float or `String` operand is GT0003; \
+              `x.wrapping_add(y)` is not a method (GT0087).",
+        example: "let hash: u32 = (hash << 5) +% hash +% b as u32",
+    },
+    CoreOperatorHelp {
+        spelling: "-%",
+        signature: "a -% b -> T",
+        doc: "Wrapping subtract: subtracts two values of one integer type `T` with \
+              two's-complement wrapping at `T`'s declared width, on every tier and in \
+              every build profile. Binds like `-` (level 6). A float or `String` operand \
+              is GT0003.",
+        example: "let before: u8 = 0 as u8 -% 1",
+    },
+    CoreOperatorHelp {
+        spelling: "*%",
+        signature: "a *% b -> T",
+        doc: "Wrapping multiply: multiplies two values of one integer type `T` with \
+              two's-complement wrapping at `T`'s declared width, on every tier and in \
+              every build profile. Binds like `*` (level 5). A float or `String` operand \
+              is GT0003; `x.wrapping_mul(y)` is not a method (GT0087).",
+        example: "let mixed: u32 = hash *% 16_777_619",
+    },
+    CoreOperatorHelp {
+        spelling: "+%=",
+        signature: "place +%= value",
+        doc: "Compound wrapping add: `place = place +% value`, evaluating the place once. \
+              The place must be writable and hold an integer.",
+        example: "let mut total: i32 = 2_147_483_000; total +%= 1_000",
+    },
+    CoreOperatorHelp {
+        spelling: "-%=",
+        signature: "place -%= value",
+        doc: "Compound wrapping subtract: `place = place -% value`, evaluating the place \
+              once. The place must be writable and hold an integer.",
+        example: "let mut countdown: u8 = 2; countdown -%= 5",
+    },
+    CoreOperatorHelp {
+        spelling: "*%=",
+        signature: "place *%= value",
+        doc: "Compound wrapping multiply: `place = place *% value`, evaluating the place \
+              once. The place must be writable and hold an integer.",
+        example: "let mut hash: u32 = 2_166_136_261; hash *%= 16_777_619",
+    },
+];
+
 // Core receiver and associated methods are runtime builtins, not stdlib module
 // exports. Keep them visible to REPL discovery so working calls such as
 // `"123".parse()` are not hidden from `%help` and `%info`.
 const CORE_METHODS: &[CoreMethodHelp] = &[
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "splat",
+        kind: "assoc",
+        signature: "fn splat(value: T) -> Simd<T, N>",
+        doc: "A vector whose every lane holds `value`. The lane count comes from the \
+              type the context expects, as in `let v: Simd<f64, 4> = Simd::splat(1.5)`.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "from_array",
+        kind: "assoc",
+        signature: "fn from_array(lanes: [T; N]) -> Simd<T, N>",
+        doc: "A vector with one lane per array element, in order; the array's length is \
+              the lane count.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "load",
+        kind: "assoc",
+        signature: "fn load(source: [T], offset: i64) -> Simd<T, N>",
+        doc: "Reads N lanes from a `Vec`, slice, or fixed array starting at `offset`. The \
+              whole window is checked once, and a window past either end panics before \
+              any lane is read. The lane count comes from the type the context expects.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "store",
+        kind: "method",
+        signature: "fn store(self: Simd<T, N>, target: &mut [T], offset: i64) -> ()",
+        doc: "Writes the lanes into a `Vec`, slice, or fixed array through `&mut`, starting \
+              at `offset`. The whole window is checked once, before any lane is written.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "to_array",
+        kind: "method",
+        signature: "fn to_array(self: Simd<T, N>) -> [T; N]",
+        doc: "The lanes as a fixed array, in lane order.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "min",
+        kind: "method",
+        signature: "fn min(self: Simd<T, N>, other: Simd<T, N>) -> Simd<T, N>",
+        doc: "The smaller of each pair of lanes.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "max",
+        kind: "method",
+        signature: "fn max(self: Simd<T, N>, other: Simd<T, N>) -> Simd<T, N>",
+        doc: "The larger of each pair of lanes.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "abs",
+        kind: "method",
+        signature: "fn abs(self: Simd<T, N>) -> Simd<T, N>",
+        doc: "Each lane's absolute value.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "sqrt",
+        kind: "method",
+        signature: "fn sqrt(self: Simd<T, N>) -> Simd<T, N>",
+        doc: "Each lane's square root. Float lanes only.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "lanes_eq",
+        kind: "method",
+        signature: "fn lanes_eq(self: Simd<T, N>, other: Simd<T, N>) -> Mask<N>",
+        doc: "A mask whose lane is true where the two vectors' lanes are equal.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "lanes_lt",
+        kind: "method",
+        signature: "fn lanes_lt(self: Simd<T, N>, other: Simd<T, N>) -> Mask<N>",
+        doc: "A mask whose lane is true where this vector's lane is less than the other's.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "lanes_le",
+        kind: "method",
+        signature: "fn lanes_le(self: Simd<T, N>, other: Simd<T, N>) -> Mask<N>",
+        doc: "A mask whose lane is true where this vector's lane is at most the other's.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "reduce_sum",
+        kind: "method",
+        signature: "fn reduce_sum(self: Simd<T, N>) -> T",
+        doc: "The sum of every lane, folded in one fixed pairing order, so every tier \
+              answers the same bits.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "reduce_min",
+        kind: "method",
+        signature: "fn reduce_min(self: Simd<T, N>) -> T",
+        doc: "The smallest lane.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "reduce_max",
+        kind: "method",
+        signature: "fn reduce_max(self: Simd<T, N>) -> T",
+        doc: "The largest lane.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "reduce_and",
+        kind: "method",
+        signature: "fn reduce_and(self: Simd<T, N>) -> T",
+        doc: "The bitwise AND of every lane. Integer lanes only.",
+    },
+    CoreMethodHelp {
+        owner: "Simd",
+        name: "reduce_or",
+        kind: "method",
+        signature: "fn reduce_or(self: Simd<T, N>) -> T",
+        doc: "The bitwise OR of every lane. Integer lanes only.",
+    },
+    CoreMethodHelp {
+        owner: "Mask",
+        name: "select",
+        kind: "method",
+        signature: "fn select(self: Mask<N>, if_true: Simd<T, N>, if_false: Simd<T, N>) -> Simd<T, N>",
+        doc: "A vector taking each lane from `if_true` where the mask's lane is true, and \
+              from `if_false` where it is false.",
+    },
+    CoreMethodHelp {
+        owner: "Mask",
+        name: "reduce_and",
+        kind: "method",
+        signature: "fn reduce_and(self: Mask<N>) -> bool",
+        doc: "True when every lane is true.",
+    },
+    CoreMethodHelp {
+        owner: "Mask",
+        name: "reduce_or",
+        kind: "method",
+        signature: "fn reduce_or(self: Mask<N>) -> bool",
+        doc: "True when any lane is true.",
+    },
+    CoreMethodHelp {
+        owner: "Mask",
+        name: "to_array",
+        kind: "method",
+        signature: "fn to_array(self: Mask<N>) -> [bool; N]",
+        doc: "The lanes as a fixed array of `bool`, in lane order.",
+    },
     CoreMethodHelp {
         owner: "Tuple",
         name: "len",
@@ -2502,6 +2718,14 @@ impl ReplValueType {
             Some(gossamer_types::TyKind::Duration) => (Some("Duration".to_string()), false),
             Some(gossamer_types::TyKind::Instant) => (Some("Instant".to_string()), false),
             Some(gossamer_types::TyKind::Tuple(_)) => (Some("Tuple".to_string()), false),
+            Some(gossamer_types::TyKind::Simd { elem, .. }) => {
+                let owner = if matches!(tcx.kind(*elem), Some(gossamer_types::TyKind::Bool)) {
+                    "Mask"
+                } else {
+                    "Simd"
+                };
+                (Some(owner.to_string()), false)
+            }
             Some(gossamer_types::TyKind::Adt { def, .. }) => {
                 (tcx.def_name(*def).map(str::to_string), false)
             }
@@ -2952,6 +3176,7 @@ fn repl_binding_info_for(
             &session_index(declarations),
             base_type_name(&ty.rendered),
             Some(&var.name),
+            &rendered_type_args(&ty.rendered),
         ) {
             out.push_str(&session);
             out.push('\n');
@@ -2973,10 +3198,13 @@ fn repl_binding_info_for(
             ));
         }
         let methods = available_repl_binding_methods(&ty, owner, can_mutate);
+        let lane_names = lane_type_param_names(owner);
+        let lane_args = rendered_type_args(&ty.rendered);
         let mut found = false;
         for method in methods {
             found = true;
-            let signature = signature_suffix(&method.signature, &method.name);
+            let signature = substitute_generic_names(&method.signature, &lane_names, &lane_args);
+            let signature = signature_suffix(&signature, &method.name);
             out.push_str(&format!(
                 "{}.{}{signature} [method]\n    {}\n    Builtin\n    Example: {}.{}({})\n",
                 var.name,
@@ -2987,7 +3215,8 @@ fn repl_binding_info_for(
                 signature_example_arguments(signature)
             ));
         }
-        if !found {
+        // A session type's own methods are listed with its declaration above.
+        if !found && !index_has_facts(declarations, base_type_name(&ty.rendered)) {
             out.push_str(&format!(
                 "\nNo methods are available with this binding's capability.\nExample: let copy = {}",
                 var.name
@@ -3024,6 +3253,7 @@ fn repl_binding_listing_for(
             &session_index(declarations),
             base_type_name(&ty.rendered),
             Some(name),
+            &rendered_type_args(&ty.rendered),
         ) {
             out.push_str(&session);
             out.push('\n');
@@ -3032,8 +3262,11 @@ fn repl_binding_listing_for(
             return out.trim_end().to_string();
         };
         let can_mutate = binding_can_mutate(var, &ty);
+        let lane_names = lane_type_param_names(owner);
+        let lane_args = rendered_type_args(&ty.rendered);
         for method in available_repl_binding_methods(&ty, owner, can_mutate) {
-            let signature = signature_suffix(&method.signature, &method.name);
+            let signature = substitute_generic_names(&method.signature, &lane_names, &lane_args);
+            let signature = signature_suffix(&signature, &method.name);
             out.push_str(&format!("{name}.{}{signature} [method]\n", method.name));
         }
         out.trim_end().to_string()
@@ -3268,6 +3501,7 @@ fn input_is_declaration(input: &str) -> bool {
         || input.starts_with("struct ")
         || input.starts_with("enum ")
         || input.starts_with("impl ")
+        || input.starts_with("impl<")
         || input.starts_with("trait ")
         || input.starts_with("use ")
         || input.starts_with("const ")
@@ -3579,6 +3813,11 @@ fn push_owned_method_entries(entries: &mut Vec<String>, owner: &str, details: bo
 
 fn render_catalog_query_matches(query: &str, details: bool) -> String {
     let mut entries = Vec::new();
+    for operator in matching_core_operators(query) {
+        let mut entry = String::new();
+        push_operator_match(&mut entry, operator, details);
+        entries.push(entry);
+    }
     for builtin in matching_builtin_macros(query) {
         let mut entry = String::new();
         push_catalog_match(
@@ -3798,6 +4037,8 @@ fn example_receiver(owner: &str) -> &'static str {
         "Queue" => "queue",
         "Stack" => "stack",
         "MaxHeap" | "MinHeap" => "heap",
+        "Simd" => "lanes",
+        "Mask" => "mask",
         "Option" => "option",
         "Result" => "result",
         "Iterator" | "Range" => "iter",
@@ -3873,6 +4114,19 @@ fn core_namespace_description(owner: &str) -> &'static str {
             "UTF-8 text. Two index spaces: `len`, `s[i]`, and bare iteration count Unicode \
              scalars (so `s[i]` is a `char`); `byte_len`, `byte_at`, `as_bytes`, `bytes`, \
              and `substring` count UTF-8 bytes. Literals are already `String`."
+        }
+        "Simd" => {
+            "Fixed-width lane vector `Simd<T, N>`: N lanes of `f32`, `f64`, or `i64` (2, 4, \
+             or 8 lanes), or of `u8`, `i32`, or `u32` (2, 4, 8, or 16). `+`, `-`, and `*` \
+             work lane by lane, `/` on float lanes, and `+%`, `-%`, `*%`, `<<`, `>>`, `&`, \
+             `|`, and `^` on integer lanes, with the same bits on every tier. Build one with \
+             `Simd::splat`, `Simd::from_array`, or `Simd::load`; a function may take one \
+             over a const generic lane count."
+        }
+        "Mask" => {
+            "Lane vector of `bool`, `Mask<N>`, answered by `lanes_eq`, `lanes_lt`, and \
+             `lanes_le`. `select` picks each lane from one of two vectors by it; `&`, `|`, \
+             and `^` combine two masks lane by lane."
         }
         "Buffer" => "Growable byte buffer for binary assembly.",
         "Tuple" => {
@@ -4649,13 +4903,6 @@ fn runtime_core_method_signature(owner: &str, name: &str, kind: &str) -> Option<
     // These runtime-backed handle constructors are registered by the
     // interpreter rather than the stdlib function catalog. Keep their public
     // contracts here so `%info` never fabricates an ellipsis signature.
-    if matches!(
-        owner,
-        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
-    ) && matches!(name, "wrapping_add" | "wrapping_mul")
-    {
-        return Some(format!("fn {name}(self: {owner}, rhs: {owner}) -> {owner}"));
-    }
     if let Some(signature) = match (owner, name) {
         // The cursor pull a `for` desugars to, and the one iterator method
         // that is not a `std::iter` free function.
@@ -4740,20 +4987,6 @@ fn runtime_core_method_doc(owner: &str, name: &str) -> Option<&'static str> {
             "len" => Some("Returns the number of entries."),
             "contains_key" => Some("Reports whether the map contains a key."),
             "keys" => Some("Returns a snapshot of the current keys."),
-            _ => None,
-        };
-    }
-    if matches!(
-        owner,
-        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize"
-    ) {
-        return match name {
-            "wrapping_add" => {
-                Some("Adds with two's-complement wrapping at this integer type's width.")
-            }
-            "wrapping_mul" => {
-                Some("Multiplies with two's-complement wrapping at this integer type's width.")
-            }
             _ => None,
         };
     }
@@ -4998,6 +5231,27 @@ fn matching_builtin_macros(query: &str) -> Vec<&'static BuiltinMacro> {
     BUILTIN_MACROS
         .iter()
         .filter(|builtin| symbol_query_matches(builtin.name, query))
+        .collect()
+}
+
+/// An operator's `%info` entry: the form it is written in, then, with details,
+/// what it does and an example.
+fn push_operator_match(out: &mut String, operator: &CoreOperatorHelp, details: bool) {
+    out.push_str(&format!("{} [operator]\n", operator.signature));
+    if details {
+        out.push_str(&format!("    {}\n", operator.doc));
+        push_catalog_origin(out, "Builtin");
+        out.push_str(&format!("    Example: {}\n", operator.example));
+    }
+}
+
+/// The operator a query names. An operator is answered only for its exact
+/// spelling: `*` is itself part of the operators, so no wildcard reading of
+/// the query can say which one was meant.
+fn matching_core_operators(query: &str) -> Vec<&'static CoreOperatorHelp> {
+    CORE_OPERATORS
+        .iter()
+        .filter(|operator| operator.spelling == query)
         .collect()
 }
 
@@ -6677,12 +6931,22 @@ struct SessionIndex {
     kinds: BTreeMap<String, &'static str>,
     /// Type-alias name to the type it stands for, as written.
     aliases: BTreeMap<String, String>,
+    /// Declared item name to its header as written: the item keyword, the name
+    /// with its generic parameters, and a function's signature.
+    headers: BTreeMap<String, String>,
+    /// Declared item name to its generic parameter list as written.
+    generics: BTreeMap<String, String>,
+    /// Declared item name to its generic parameter names, in order.
+    generic_names: BTreeMap<String, Vec<String>>,
+    /// Enum name to its variants as written, in declaration order.
+    variants: BTreeMap<String, Vec<String>>,
 }
 
 impl SessionIndex {
     /// `true` when nothing in the session declares `name`.
     fn is_empty_for(&self, name: &str) -> bool {
         !self.kinds.contains_key(name)
+            && !self.headers.contains_key(name)
             && !self.aliases.contains_key(name)
             && !self.fields.contains_key(name)
             && !self.implements.contains_key(name)
@@ -6748,6 +7012,140 @@ fn render_fn_signature(decl: &gossamer_ast::FnDecl) -> String {
     format!("({params}){ret}")
 }
 
+/// Renders a generic parameter list as source, or nothing when there is none.
+fn render_generics(generics: &gossamer_ast::Generics) -> String {
+    let mut printer = gossamer_ast::Printer::new();
+    printer.print_generics(generics);
+    printer.finish()
+}
+
+/// The names a generic parameter list declares, in order.
+fn generic_param_names(generics: &gossamer_ast::Generics) -> Vec<String> {
+    generics
+        .params
+        .iter()
+        .map(|param| match param {
+            gossamer_ast::GenericParam::Lifetime { name } => format!("'{name}"),
+            gossamer_ast::GenericParam::Type { name, .. }
+            | gossamer_ast::GenericParam::Const { name, .. } => name.name.clone(),
+        })
+        .collect()
+}
+
+/// An enum variant as written: its name and the shape of its payload.
+fn render_variant(variant: &gossamer_ast::EnumVariant) -> String {
+    use gossamer_ast::StructBody;
+    let name = &variant.name.name;
+    match &variant.body {
+        StructBody::Unit => name.clone(),
+        StructBody::Tuple(fields) => format!(
+            "{name}({})",
+            fields
+                .iter()
+                .map(|field| render_type(&field.ty))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        StructBody::Named(fields) => format!(
+            "{name} {{ {} }}",
+            fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name.name, render_type(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Records a declared item's header and generic parameters.
+fn index_item_header(
+    index: &mut SessionIndex,
+    name: &str,
+    header: String,
+    generics: &gossamer_ast::Generics,
+) {
+    index.headers.insert(name.to_string(), header);
+    if !generics.is_empty() {
+        index
+            .generics
+            .insert(name.to_string(), render_generics(generics));
+        index
+            .generic_names
+            .insert(name.to_string(), generic_param_names(generics));
+    }
+}
+
+/// The parameter names a lane vector's catalog rows are written over, which a
+/// binding's own type `Simd<f64, 4>` or `Mask<4>` supplies in order.
+fn lane_type_param_names(owner: &str) -> Vec<String> {
+    match owner {
+        "Simd" => vec!["T".to_string(), "N".to_string()],
+        "Mask" => vec!["N".to_string()],
+        _ => Vec::new(),
+    }
+}
+
+/// The type arguments a rendered type spells: `Ring<3>` answers `["3"]`.
+fn rendered_type_args(rendered: &str) -> Vec<String> {
+    let Some(open) = rendered.find('<') else {
+        return Vec::new();
+    };
+    let Some(inner) = rendered[open + 1..].strip_suffix('>') else {
+        return Vec::new();
+    };
+    let mut args = Vec::new();
+    let mut depth = 0usize;
+    let mut current = String::new();
+    for ch in inner.chars() {
+        match ch {
+            '<' | '(' | '[' => {
+                depth += 1;
+                current.push(ch);
+            }
+            '>' | ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                current.push(ch);
+            }
+            ',' if depth == 0 => {
+                args.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.trim().is_empty() {
+        args.push(current.trim().to_string());
+    }
+    args
+}
+
+/// `text` with each whole-word generic parameter name replaced by the argument
+/// an instance gives it, so a binding's fields read as that instance's types.
+fn substitute_generic_names(text: &str, names: &[String], args: &[String]) -> String {
+    if names.is_empty() || names.len() != args.len() {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        match names.iter().position(|name| name == word) {
+            Some(index) => out.push_str(&args[index]),
+            None => out.push_str(word),
+        }
+        word.clear();
+    };
+    for ch in text.chars() {
+        if ch.is_alphanumeric() || ch == '_' {
+            word.push(ch);
+        } else {
+            flush(&mut word, &mut out);
+            out.push(ch);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 /// The base name of a self type, so `impl Trait for Wrapper<T>` indexes
 /// under `Wrapper`.
 fn self_type_name(ty: &gossamer_ast::Type) -> String {
@@ -6765,7 +7163,7 @@ fn self_type_name(ty: &gossamer_ast::Type) -> String {
 /// Builds the session's type index from the declarations replayed into
 /// every REPL evaluation.
 fn session_index(declarations: &[String]) -> SessionIndex {
-    use gossamer_ast::{ImplItem, ItemKind, StructBody, TraitItem};
+    use gossamer_ast::{ItemKind, StructBody, TraitItem};
 
     let mut index = SessionIndex::default();
     for declaration in declarations {
@@ -6780,6 +7178,8 @@ fn session_index(declarations: &[String]) -> SessionIndex {
                 ItemKind::Struct(decl) => {
                     let name = decl.name.name.clone();
                     index.kinds.insert(name.clone(), "struct");
+                    let header = format!("struct {name}{}", render_generics(&decl.generics));
+                    index_item_header(&mut index, &name, header, &decl.generics);
                     let fields = match &decl.body {
                         StructBody::Named(fields) => fields
                             .iter()
@@ -6795,11 +7195,19 @@ fn session_index(declarations: &[String]) -> SessionIndex {
                     index.fields.insert(name, fields);
                 }
                 ItemKind::Enum(decl) => {
-                    index.kinds.insert(decl.name.name.clone(), "enum");
+                    let name = decl.name.name.clone();
+                    index.kinds.insert(name.clone(), "enum");
+                    let header = format!("enum {name}{}", render_generics(&decl.generics));
+                    index_item_header(&mut index, &name, header, &decl.generics);
+                    index
+                        .variants
+                        .insert(name, decl.variants.iter().map(render_variant).collect());
                 }
                 ItemKind::Trait(decl) => {
                     let name = decl.name.name.clone();
                     index.kinds.insert(name.clone(), "trait");
+                    let header = format!("trait {name}{}", render_generics(&decl.generics));
+                    index_item_header(&mut index, &name, header, &decl.generics);
                     let signatures = decl
                         .items
                         .iter()
@@ -6815,46 +7223,66 @@ fn session_index(declarations: &[String]) -> SessionIndex {
                     index.trait_methods.insert(name, signatures);
                 }
                 ItemKind::Fn(decl) => {
-                    index.kinds.insert(decl.name.name.clone(), "fn");
+                    let name = decl.name.name.clone();
+                    index.kinds.insert(name.clone(), "fn");
+                    let header = format!(
+                        "fn {name}{}{}",
+                        render_generics(&decl.generics),
+                        render_fn_signature(decl)
+                    );
+                    index_item_header(&mut index, &name, header, &decl.generics);
                 }
                 ItemKind::TypeAlias(decl) => {
                     index.kinds.insert(decl.name.name.clone(), "type");
+                    let header = format!(
+                        "type {}{} = {}",
+                        decl.name.name,
+                        render_generics(&decl.generics),
+                        render_type(&decl.ty)
+                    );
+                    index_item_header(&mut index, &decl.name.name, header, &decl.generics);
                     index
                         .aliases
                         .insert(decl.name.name.clone(), render_type(&decl.ty));
                 }
-                ItemKind::Impl(decl) => {
-                    let owner = self_type_name(&decl.self_ty);
-                    let trait_name = decl.trait_ref.as_ref().map(render_trait_path);
-                    if let Some(trait_name) = &trait_name {
-                        push_unique(
-                            index.implements.entry(owner.clone()).or_default(),
-                            trait_name.clone(),
-                        );
-                        push_unique(
-                            index.implementors.entry(trait_name.clone()).or_default(),
-                            owner.clone(),
-                        );
-                        // A name reached only through an `impl X for Y` header
-                        // is a trait; without this it would fall to the
-                        // default kind and be listed as a type.
-                        index.kinds.entry(trait_name.clone()).or_insert("trait");
-                    }
-                    let methods = index.methods.entry(owner).or_default();
-                    for impl_item in &decl.items {
-                        if let ImplItem::Fn(fn_decl) = impl_item {
-                            methods.push((
-                                format!("{}{}", fn_decl.name.name, render_fn_signature(fn_decl)),
-                                trait_name.clone(),
-                            ));
-                        }
-                    }
-                }
+                ItemKind::Impl(decl) => index_session_impl(&mut index, decl),
                 _ => {}
             }
         }
     }
     index
+}
+
+/// Records an `impl` block's methods under its owner, and a trait impl's
+/// pairing in both directions.
+fn index_session_impl(index: &mut SessionIndex, decl: &gossamer_ast::ImplDecl) {
+    use gossamer_ast::ImplItem;
+
+    let owner = self_type_name(&decl.self_ty);
+    let trait_name = decl.trait_ref.as_ref().map(render_trait_path);
+    if let Some(trait_name) = &trait_name {
+        push_unique(
+            index.implements.entry(owner.clone()).or_default(),
+            trait_name.clone(),
+        );
+        push_unique(
+            index.implementors.entry(trait_name.clone()).or_default(),
+            owner.clone(),
+        );
+        // A name reached only through an `impl X for Y` header
+        // is a trait; without this it would fall to the
+        // default kind and be listed as a type.
+        index.kinds.entry(trait_name.clone()).or_insert("trait");
+    }
+    let methods = index.methods.entry(owner).or_default();
+    for impl_item in &decl.items {
+        if let ImplItem::Fn(fn_decl) = impl_item {
+            methods.push((
+                format!("{}{}", fn_decl.name.name, render_fn_signature(fn_decl)),
+                trait_name.clone(),
+            ));
+        }
+    }
 }
 
 /// Names the session declares that a type position may name, for the
@@ -6882,11 +7310,20 @@ fn push_unique(list: &mut Vec<String>, value: String) {
 /// `%explain p` shows `p.area()` where `%info Point` shows
 /// `Point::area(&self)`. Returns `None` when the session declares
 /// nothing under `name`.
-fn render_session_type(index: &SessionIndex, name: &str, receiver: Option<&str>) -> Option<String> {
+fn render_session_type(
+    index: &SessionIndex,
+    name: &str,
+    receiver: Option<&str>,
+    type_args: &[String],
+) -> Option<String> {
     if index.is_empty_for(name) {
         return None;
     }
+    let names = index.generic_names.get(name).map_or(&[][..], Vec::as_slice);
     let mut out = String::new();
+    if let Some(header) = index.headers.get(name) {
+        out.push_str(&format!("  declared as\n    {header}\n"));
+    }
     if let Some(target) = index.aliases.get(name) {
         out.push_str(&format!("  alias of\n    {target}\n"));
     }
@@ -6895,7 +7332,17 @@ fn render_session_type(index: &SessionIndex, name: &str, receiver: Option<&str>)
     {
         out.push_str("  fields\n");
         for (field, ty) in fields {
+            let ty = substitute_generic_names(ty, names, type_args);
             out.push_str(&format!("    {field}: {ty}\n"));
+        }
+    }
+    if let Some(variants) = index.variants.get(name)
+        && !variants.is_empty()
+    {
+        out.push_str("  variants\n");
+        for variant in variants {
+            let variant = substitute_generic_names(variant, names, type_args);
+            out.push_str(&format!("    {variant}\n"));
         }
     }
     if let Some(traits) = index.implements.get(name)
@@ -6932,6 +7379,7 @@ fn render_session_type(index: &SessionIndex, name: &str, receiver: Option<&str>)
                     let call = call.replacen("(&self)", "()", 1);
                     let call = call.replacen("(self, ", "(", 1);
                     let call = call.replacen("(self)", "()", 1);
+                    let call = substitute_generic_names(&call, names, type_args);
                     out.push_str(&format!("    {binding}.{call} {origin}\n"));
                 }
                 None => out.push_str(&format!("    {name}::{signature} {origin}\n")),
@@ -6960,11 +7408,17 @@ fn repl_session_info(index: &SessionIndex, query: &str) -> Option<String> {
         if !symbol_query_matches(name, query) {
             continue;
         }
-        let Some(body) = render_session_type(index, name, None) else {
+        let Some(body) = render_session_type(index, name, None, &[]) else {
             continue;
         };
         let kind = index.kinds.get(name).copied().unwrap_or("type");
-        sections.push(format!("{name} [{kind}]\n{body}"));
+        // A session function is inspected by `%explain`, which shows the
+        // declaration as written; `%info` answers the types a session adds.
+        if kind == "fn" {
+            continue;
+        }
+        let generics = index.generics.get(name).map_or("", String::as_str);
+        sections.push(format!("{name}{generics} [{kind}]\n{body}"));
     }
     (!sections.is_empty()).then(|| sections.join("\n"))
 }

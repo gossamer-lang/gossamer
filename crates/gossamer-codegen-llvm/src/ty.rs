@@ -113,8 +113,8 @@ pub(crate) fn param_llvm_ty(tcx: &TyCtxt, ty: Ty) -> String {
 /// a single i64 slot: the collection handles (`HashSet` `u32::MAX - 7`,
 /// `BTreeSet` `- 18`, `Deque` `- 19`, `MaxHeap` `- 28`, `MinHeap` `- 30`,
 /// `Queue` `- 31`, `Stack` `- 32`) and the opaque stdlib handles in the
-/// `- 48 ..= - 34` band. The field-bearing sentinel blobs (`fs::DirInfo`,
-/// `process::Output`, `http::Response`) are excluded: their fields are
+/// `- 48 ..= - 34` band. The field-bearing sentinel blobs
+/// (`http::ResponseStream`, `http::Response`) are excluded: their fields are
 /// read through a pointer.
 fn is_bare_handle_def(def_local: u32) -> bool {
     let offset = u32::MAX - def_local;
@@ -252,9 +252,8 @@ pub(crate) fn slot_count(tcx: &TyCtxt, ty: Ty) -> Option<u32> {
             // here picks the heap-pointer code path in
             // `lower_call_arg` and the assignment-of-Ok-payload sites.
             //
-            // The sibling sentinels (DirInfo @ u32::MAX-2, Output @
-            // u32::MAX-3, ResponseStream @ u32::MAX-4) ARE inline
-            // heap blobs the runtime allocates with raw `*mut i64`
+            // The sibling sentinel ResponseStream @ u32::MAX-4 IS an
+            // inline heap blob the runtime allocates with raw `*mut i64`
             // sized for the declared field count - their fields are
             // read by `Field(idx)` projection, so the existing
             // inline slot_count path is correct.
@@ -268,6 +267,9 @@ pub(crate) fn slot_count(tcx: &TyCtxt, ty: Ty) -> Option<u32> {
             // exists but a single field has a `Var` type, mirror
             // the `Tuple` fallback above so the alloca still gets
             // sized for the known fields.
+            if let Some(layout) = tcx.packed_layout(ty) {
+                return Some(layout.size / 8);
+            }
             let field_tys = tcx.adt_field_tys(*def, substs)?;
             let mut total = 0u32;
             for t in field_tys {

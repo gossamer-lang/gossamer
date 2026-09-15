@@ -35,8 +35,12 @@ enum FieldKind {
     /// stored as its source-level spelling. JSON round-trips through
     /// `i64` then casts back at extract time.
     Int(&'static str),
+    /// `u64` / `usize`, stored as its spelling. JSON reads it through
+    /// `json::as_u64`, which holds the whole unsigned range.
+    U64(&'static str),
     I64,
-    F64,
+    /// `f64` / `f32`, stored as its spelling. JSON reads it as `f64`.
+    Float(&'static str),
     Bool,
     String,
     /// `[T]` / `Vec<T>` of any supported kind.
@@ -109,8 +113,10 @@ impl FieldKind {
                         "u8" => Some(Self::Int("u8")),
                         "u16" => Some(Self::Int("u16")),
                         "u32" => Some(Self::Int("u32")),
-                        "f64" => Some(Self::F64),
-                        "f32" => Some(Self::F64),
+                        "u64" => Some(Self::U64("u64")),
+                        "usize" => Some(Self::U64("usize")),
+                        "f64" => Some(Self::Float("f64")),
+                        "f32" => Some(Self::Float("f32")),
                         "bool" => Some(Self::Bool),
                         "String" => Some(Self::String),
                         other => {
@@ -172,8 +178,8 @@ impl FieldKind {
     /// value, used by `#[derive(Default)]` synthesis.
     fn default_literal(&self) -> String {
         match self {
-            Self::I64 | Self::Int(_) => "0".to_string(),
-            Self::F64 => "0.0".to_string(),
+            Self::I64 | Self::Int(_) | Self::U64(_) => "0".to_string(),
+            Self::Float(_) => "0.0".to_string(),
             Self::Bool => "false".to_string(),
             Self::String => "\"\"".to_string(),
             Self::Vec(_) => "Vec::from([])".to_string(),
@@ -197,8 +203,7 @@ impl FieldKind {
     fn type_spelling(&self) -> String {
         match self {
             Self::I64 => "i64".to_string(),
-            Self::Int(name) => (*name).to_string(),
-            Self::F64 => "f64".to_string(),
+            Self::Int(name) | Self::U64(name) | Self::Float(name) => (*name).to_string(),
             Self::Bool => "bool".to_string(),
             Self::String => "String".to_string(),
             Self::Vec(inner) => format!("Vec<{}>", inner.type_spelling()),
@@ -222,7 +227,7 @@ impl FieldKind {
     /// `String` - or, for nested structs, a `?`-propagating call.
     fn render_to_json(&self, expr: &str) -> String {
         match self {
-            Self::I64 | Self::Int(_) | Self::F64 | Self::Bool => {
+            Self::I64 | Self::Int(_) | Self::U64(_) | Self::Float(_) | Self::Bool => {
                 format!("format(\"{{}}\", {expr})")
             }
             Self::String => format!("format(\"\\\"{{}}\\\"\", {expr})"),
@@ -252,8 +257,11 @@ impl FieldKind {
             Self::Int(width) => format!(
                 "match json::as_i64({value_expr}) {{ Some(__v) => __v as {width}, None => return Err(errors::new(\"{path}: expected {width}\")) }}"
             ),
-            Self::F64 => format!(
-                "match json::as_f64({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected f64\")) }}"
+            Self::U64(width) => format!(
+                "match json::as_u64({value_expr}) {{ Some(__v) => __v as {width}, None => return Err(errors::new(\"{path}: expected {width}\")) }}"
+            ),
+            Self::Float(width) => format!(
+                "match json::as_f64({value_expr}) {{ Some(__v) => __v as {width}, None => return Err(errors::new(\"{path}: expected {width}\")) }}"
             ),
             Self::Bool => format!(
                 "match json::as_bool({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected bool\")) }}"
@@ -520,98 +528,14 @@ pub(crate) fn type_info_fn(ty: &str) -> String {
     format!("__gos_typeinfo_{ty}")
 }
 
-/// Synthesizes the `comptime fn` backers for the compile-time macros:
-/// the `regex::compile("…")` / `sql::statement("…")` validators, and the `codegen(…)`
-/// source-emitter. Emitted only when the source uses the matching macro,
-/// so programs that use none carry no extra items. Each validator returns
-/// its input on success and `panic!`s on malformed input - a comptime
-/// panic fails the build. `__gos_codegen` is the identity passthrough the
+/// Synthesizes the `comptime fn` backer for `codegen(…)`, emitted only when
+/// the source calls it. `__gos_codegen` is the identity passthrough the
 /// comptime pass keys on to splice a result as raw source rather than as a
 /// quoted literal.
-/// Every string literal `source` hands to `head` as a first argument,
-/// in source spelling (escapes included), ignoring the whitespace a call
-/// may carry after the `(`.
-fn literal_call_arguments(source: &str, head: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut at = 0usize;
-    while let Some(found) = source[at..].find(head) {
-        let after_head = at + found + head.len();
-        let trimmed = source[after_head..].trim_start();
-        let start = source.len() - trimmed.len();
-        at = after_head;
-        if !trimmed.starts_with('"') {
-            continue;
-        }
-        // Walk to the closing quote, stepping over an escaped one.
-        let bytes = source.as_bytes();
-        let mut i = start + 1;
-        while i < bytes.len() {
-            match bytes[i] {
-                b'\\' => i += 2,
-                b'"' => break,
-                _ => i += 1,
-            }
-        }
-        if i < bytes.len() {
-            out.push(source[start..=i].to_string());
-            at = i + 1;
-        }
-    }
-    out
-}
-
-/// Whether `source` calls `head` with a string literal as its first
-/// argument.
-fn contains_literal_call(source: &str, head: &str) -> bool {
-    !literal_call_arguments(source, head).is_empty()
-}
-
 fn synthesize_validators(source: &str) -> String {
     let mut out = String::new();
     if source.contains("codegen(") {
         out.push_str("comptime fn __gos_codegen(__src: String) -> String { __src }\n");
-    }
-    // Only a literal argument is validated while the program is compiled,
-    // so only a literal call site needs the validator spliced in. A
-    // pattern built at run time reaches `regex::compile` directly, and a
-    // body the unit never calls would still cost every pass that walks it.
-    let regex_literals = literal_call_arguments(source, "regex::compile(");
-    if source.contains("regex!") || !regex_literals.is_empty() {
-        out.push_str(
-            "comptime fn __gos_regex_validate(p: String) -> String {\n\
-             \tmatch regex::compile(p) {\n\
-             \t\tOk(_) => p,\n\
-             \t\tErr(__e) => panic(\"invalid regex `{}`: {}\", p, __e),\n\
-             \t}\n\
-             }\n",
-        );
-        // One `const` per literal pattern. The initialiser folds while the
-        // program is compiled, which is where the validation happens, and
-        // the call site keeps the ordinary `regex::compile` it was written
-        // as - so nothing of the check survives into the running program.
-        for (i, literal) in regex_literals.iter().enumerate() {
-            out.push_str(&format!(
-                "const __GOS_REGEX_CHECK_{i}: String = __gos_regex_validate({literal})\n"
-            ));
-        }
-    }
-    if source.contains("sql!") || contains_literal_call(source, "sql::statement(") {
-        out.push_str(
-            "comptime fn __gos_sql_validate(q: String) -> String {\n\
-             \tif q.len() == 0 { panic(\"empty SQL statement\") }\n\
-             \tlet mut depth = 0\n\
-             \tlet mut i = 0\n\
-             \twhile i < q.len() {\n\
-             \t\tlet b = q.byte_at(i)\n\
-             \t\tif b == 40 { depth += 1 }\n\
-             \t\tif b == 41 { depth -= 1 }\n\
-             \t\tif depth < 0 { panic(\"unbalanced parentheses in SQL: {}\", q) }\n\
-             \t\ti += 1\n\
-             \t}\n\
-             \tif depth != 0 { panic(\"unbalanced parentheses in SQL: {}\", q) }\n\
-             \tq\n\
-             }\n",
-        );
     }
     out
 }

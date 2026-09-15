@@ -263,12 +263,18 @@ fn try_fold_typed_int(
     }
     if !matches!(
         op,
-        BinOp::Add | BinOp::WrappingAdd | BinOp::Sub | BinOp::Mul | BinOp::WrappingMul
+        BinOp::Add
+            | BinOp::WrappingAdd
+            | BinOp::Sub
+            | BinOp::WrappingSub
+            | BinOp::Mul
+            | BinOp::WrappingMul
     ) {
         return fold_binary(*op, &ConstValue::Int(*lhs), &ConstValue::Int(*rhs));
     }
     let fold_op = match op {
         BinOp::WrappingAdd => BinOp::Add,
+        BinOp::WrappingSub => BinOp::Sub,
         BinOp::WrappingMul => BinOp::Mul,
         _ => *op,
     };

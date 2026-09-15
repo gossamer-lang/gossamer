@@ -1,24 +1,26 @@
 //! Monomorphisation pass.
-//! Walks every [`Body`] and materialises one specialised copy per
-//! `(def, substs)` pair observed at a call site. The HIR lowering
-//! upstream already stamps each MIR local with its concrete [`Ty`]
-//! (no `TyKind::Param` escapes the type table's post-solve
-//! projection), so a specialised copy is structurally identical to
-//! its generic source under the flat-i64-per-slot layout - but the
-//! copy is registered under a stable mangled name so each call site
-//! can dispatch to its own specialisation.
 //!
+//! Walks every [`Body`] and materialises one body per `(def, substs)` pair a
+//! call site instantiates, and one per generic method a receiver's type
+//! arguments instantiate. Each is lowered afresh from its HIR declaration with
+//! the type parameters replaced, so every layout, comparison, and call the
+//! builder chooses is the one the concrete program gets. Call sites are then
+//! routed to the instantiation by its mangled name.
 
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};
 
+use gossamer_hir::{HirFn, HirItemKind, HirProgram};
+use gossamer_lex::Span;
 use gossamer_resolve::DefId;
 use gossamer_types::{GenericArg, Mutbl, Substs, Ty, TyCtxt, TyKind};
 
 use crate::ir::{
     Body, ConstValue, Local, Operand, Place, Projection, Rvalue, StatementKind, Terminator,
 };
+use crate::lower::instantiate::{Instantiation, map_fn_types};
+use crate::lower::{ProgramTables, finish_lowered_bodies};
 
 /// Cap on the number of fixed-point iterations the monomorphiser
 /// will run before bailing. Real workloads converge in ≤ 5; the
@@ -35,6 +37,8 @@ const MAX_MONOMORPHISE_ITERATIONS: u32 = 32;
 /// a string, and a fieldless enum all travel in a slot the flat value model
 /// types exactly the way it types an `i64`.
 struct ReceiverConventions {
+    /// Every method and associated function body, whatever its arity.
+    declared: HashSet<String>,
     reference: HashMap<String, bool>,
     mut_reference: HashMap<String, bool>,
     scalar_reference: HashMap<String, bool>,
@@ -46,6 +50,11 @@ impl ReceiverConventions {
         let mut reference = HashMap::new();
         let mut mut_reference = HashMap::new();
         let mut scalar_reference = HashMap::new();
+        let declared: HashSet<String> = bodies
+            .iter()
+            .filter(|b| b.name.contains("::"))
+            .map(|b| b.name.clone())
+            .collect();
         for body in bodies
             .iter()
             .filter(|b| b.arity >= 1 && b.name.contains("::"))
@@ -75,6 +84,7 @@ impl ReceiverConventions {
             scalar_reference.insert(body.name.clone(), scalar_ref);
         }
         Self {
+            declared,
             reference,
             mut_reference,
             scalar_reference,
@@ -83,7 +93,7 @@ impl ReceiverConventions {
 
     /// Whether the program declares a method body under this name.
     fn declares(&self, name: &str) -> bool {
-        self.reference.contains_key(name)
+        self.declared.contains(name)
     }
 
     /// Whether the named method declares a reference receiver.
@@ -103,6 +113,144 @@ impl ReceiverConventions {
     }
 }
 
+/// Lowers a generic declaration once per instantiation.
+///
+/// The builder chooses how a value is compared, rendered, hashed, stored, and
+/// passed from the value's type, so a body lowered against a type parameter
+/// has made every one of those choices for an opaque slot. An instantiation is
+/// therefore lowered from its declaration with the parameters already
+/// replaced, and each choice is the one the concrete program gets.
+struct Instantiator<'p> {
+    program: &'p HirProgram,
+    /// Every function and method declaration, under the name its body carries.
+    decls: HashMap<String, (&'p HirFn, Span)>,
+    /// Read off the program the first time an instantiation needs them.
+    tables: Option<ProgramTables>,
+}
+
+impl<'p> Instantiator<'p> {
+    fn new(program: &'p HirProgram) -> Self {
+        let mut decls = HashMap::new();
+        for item in &program.items {
+            match &item.kind {
+                HirItemKind::Fn(decl) => {
+                    let name = if item.module_path.is_empty() {
+                        decl.name.name.clone()
+                    } else {
+                        format!("{}::{}", item.module_path.join("::"), decl.name.name)
+                    };
+                    decls.insert(name, (decl, item.span));
+                }
+                HirItemKind::Impl(block) => {
+                    for method in &block.methods {
+                        let name = match &block.self_name {
+                            Some(owner) => format!("{}::{}", owner.name, method.name.name),
+                            None => method.name.name.clone(),
+                        };
+                        decls.insert(name, (method, item.span));
+                    }
+                }
+                HirItemKind::Const(_)
+                | HirItemKind::Static(_)
+                | HirItemKind::Adt(_)
+                | HirItemKind::Trait(_) => {}
+            }
+        }
+        Self {
+            program,
+            decls,
+            tables: None,
+        }
+    }
+
+    /// Lowers the declaration behind the body `template` with each type
+    /// parameter replaced by its `subst_tys` entry, naming the result `name`.
+    ///
+    /// The declaration keeps its own name while it is lowered, so every
+    /// name-keyed table the builder reads about it answers as it did for the
+    /// template.
+    fn lower(
+        &mut self,
+        template: &str,
+        name: String,
+        subst_tys: &[Option<Ty>],
+        tcx: &mut TyCtxt,
+    ) -> Body {
+        let Some(&(decl, span)) = self.decls.get(template) else {
+            panic!("monomorphise: the generic body `{template}` has no declaration to instantiate");
+        };
+        let program = self.program;
+        let tables = self
+            .tables
+            .get_or_insert_with(|| ProgramTables::collect(program, tcx));
+        let mut decl = decl.clone();
+        map_fn_types(
+            &mut decl,
+            &mut Substitution {
+                tcx,
+                subst_tys,
+                tables,
+            },
+        );
+        let Some(mut body) = tables.lower_fn(&decl, None, span, tcx) else {
+            panic!("monomorphise: the generic body `{template}` has no body to instantiate");
+        };
+        body.name = name;
+        body
+    }
+}
+
+/// One instantiation's type arguments, applied to a declaration.
+struct Substitution<'a> {
+    tcx: &'a mut TyCtxt,
+    subst_tys: &'a [Option<Ty>],
+    tables: &'a ProgramTables,
+}
+
+impl Instantiation for Substitution<'_> {
+    fn ty(&mut self, ty: Ty) -> Ty {
+        subst_param_ty(self.tcx, ty, self.subst_tys)
+    }
+
+    fn method_owner(
+        &mut self,
+        template: Ty,
+        concrete: Ty,
+        method: &str,
+    ) -> Option<gossamer_ast::Ident> {
+        param_index(self.tcx, template)?;
+        let owner = adt_name(self.tcx, peel_refs(self.tcx, concrete))?;
+        self.tables
+            .declares_method(&format!("{owner}::{method}"))
+            .then(|| gossamer_ast::Ident::new(owner))
+    }
+}
+
+/// `ty` with every reference layer removed.
+fn peel_refs(tcx: &TyCtxt, ty: Ty) -> Ty {
+    let mut ty = ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    ty
+}
+
+/// What the specialisation steps build up as they go.
+struct SpecialisationState<'p> {
+    /// Name of every specialised body emitted so far.
+    emitted: HashSet<String>,
+    instantiator: Instantiator<'p>,
+}
+
+/// What a specialisation step reads besides the bodies it copies.
+struct SpecialisationContext<'a> {
+    /// Receiver convention of every method body.
+    receivers: &'a ReceiverConventions,
+    /// Lifted closure bodies typed against an enclosing body's parameters,
+    /// by name, with their index in the body list.
+    closures: &'a HashMap<String, usize>,
+}
+
 /// Monomorphises `bodies` by emitting one specialised copy per
 /// distinct `(def, substs)` pair observed at a call site whose
 /// substitution is non-empty. Monomorphic calls are untouched.
@@ -115,14 +263,32 @@ impl ReceiverConventions {
 /// fn(T)->U, xs)` calling `fn each<T>(f, xs)` now produces both
 /// `map_i64_str` and `each_i64`. Cap at
 /// `MAX_MONOMORPHISE_ITERATIONS` as a runaway guard.
-pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
+pub fn monomorphise(program: &HirProgram, bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
     let receivers = ReceiverConventions::of(bodies, tcx);
-    let mut emitted: HashSet<String> = HashSet::new();
+    let first_instantiation = bodies.len();
+    let mut state = SpecialisationState {
+        emitted: HashSet::new(),
+        instantiator: Instantiator::new(program),
+    };
     let sources: HashMap<u32, usize> = bodies
         .iter()
         .enumerate()
         .filter_map(|(i, b)| b.def.map(|d| (d.local, i)))
         .collect();
+    let closure_templates: HashMap<String, usize> = bodies
+        .iter()
+        .enumerate()
+        .filter(|(_, b)| {
+            b.def.is_none()
+                && b.name.starts_with(gossamer_hir::LIFTED_CLOSURE_PREFIX)
+                && body_has_param(b, tcx)
+        })
+        .map(|(i, b)| (b.name.clone(), i))
+        .collect();
+    let ctx = SpecialisationContext {
+        receivers: &receivers,
+        closures: &closure_templates,
+    };
     let method_bases: HashMap<String, usize> = bodies
         .iter()
         .enumerate()
@@ -144,9 +310,9 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
         let specialised = specialise_functions_step(
             bodies,
             &sources,
-            &mut emitted,
+            &mut state,
             &mut trait_specialised_defs,
-            &receivers,
+            &ctx,
             tcx,
             function_scan_start,
         );
@@ -155,9 +321,9 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
         let (method_progress, method_scan_end) = specialise_methods_step(
             bodies,
             &method_bases,
-            &mut emitted,
+            &mut state,
             &mut trait_specialised_methods,
-            &receivers,
+            &ctx,
             tcx,
             method_scan_start,
         );
@@ -174,6 +340,11 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
             or the cap needs to be raised after auditing the offending bodies"
         );
     }
+    // Each instantiation was lowered as a new body, so it takes the ownership
+    // and canonicalisation passes every body lowered with the program took.
+    if bodies.len() > first_instantiation {
+        finish_lowered_bodies(bodies, first_instantiation, tcx);
+    }
     // Route a generic call to its specialised concrete copy. The copy's
     // locals carry the instantiation's real types, which is what lets the
     // backends pick the per-type element read, the per-type register class,
@@ -182,17 +353,7 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
     // read is an out-of-line runtime call and each callable goes through the
     // pointer-shaped thunk. Const-only instantiations have no copy.
     for body in bodies.iter_mut() {
-        for block in &mut body.blocks {
-            if let Terminator::Call { callee, .. } = &mut block.terminator
-                && let Operand::FnRef { def, substs } = callee
-                && !substs.is_empty()
-            {
-                let name = mangled_name(*def, substs);
-                if emitted.contains(&name) {
-                    *callee = Operand::Const(ConstValue::Str(name));
-                }
-            }
-        }
+        route_to_specialisations(body, &state.emitted, tcx);
     }
     // Trait-specialised templates carry an unresolved trait-method call in
     // their body; every caller now routes to a copy, so drop them.
@@ -203,6 +364,16 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
                 && !trait_specialised_methods.contains(&b.name)
         });
     }
+    // A generic method template serves no call once every call names an
+    // instantiation, so it goes. One still named is a call nothing could
+    // instantiate, which the reachable-template gate reports.
+    let referenced = names_referenced_elsewhere(bodies);
+    bodies.retain(|b| {
+        b.def.is_some()
+            || !b.name.contains("::")
+            || referenced.contains(&b.name)
+            || !body_has_param(b, tcx)
+    });
     // A `&self` method reads its receiver as an address on every tier, so
     // every call to one has to hand it an address. A generic template keeps
     // serving scalar instantiations directly, and its receiver travelled as
@@ -230,22 +401,18 @@ pub fn monomorphise(bodies: &mut Vec<Body>, tcx: &mut TyCtxt) {
 fn specialise_functions_step(
     bodies: &[Body],
     sources: &HashMap<u32, usize>,
-    emitted: &mut HashSet<String>,
+    state: &mut SpecialisationState<'_>,
     trait_specialised_defs: &mut HashSet<u32>,
-    receivers: &ReceiverConventions,
+    ctx: &SpecialisationContext<'_>,
     tcx: &mut TyCtxt,
     scan_start: usize,
 ) -> Vec<Body> {
+    let receivers = ctx.receivers;
     let mut needs: HashMap<DefId, Vec<Substs>> = HashMap::new();
     for body in &bodies[scan_start..] {
-        for block in &body.blocks {
-            for stmt in &block.stmts {
-                if let StatementKind::Assign { rvalue, .. } = &stmt.kind {
-                    collect_from_rvalue(rvalue, &mut needs);
-                }
-            }
-            collect_from_terminator(&block.terminator, &mut needs);
-        }
+        for_each_operand(body, &mut |operand| {
+            collect_from_operand(operand, tcx, &mut needs);
+        });
     }
     // Sorted rather than in the map's own order: the specialisations are
     // appended to the body list, so an iteration order that varies per
@@ -264,75 +431,74 @@ fn specialise_functions_step(
                 continue;
             }
             let name = mangled_name(*def, substs);
-            if !emitted.insert(name.clone()) {
+            if !state.emitted.insert(name.clone()) {
                 continue;
             }
-            let mut copy = bodies[*src_idx].clone();
-            copy.name = name;
-            copy.def = None;
-            let subst_tys = subst_type_arguments(substs);
-            // Do this while locals retain template parameters. The rewrite
-            // recognises a parameter receiver and selects the concrete impl.
-            if rewrite_trait_method_calls(&mut copy, substs, receivers, tcx) {
+            let template = &bodies[*src_idx];
+            if !trait_specialised_defs.contains(&def.local)
+                && calls_trait_through_parameter(template, substs, receivers, tcx)
+            {
                 trait_specialised_defs.insert(def.local);
             }
-            for local in &mut copy.locals {
-                local.ty = subst_param_ty(tcx, local.ty, &subst_tys);
-            }
-            repair_generic_element_reads(&mut copy, tcx);
-            borrow_scalar_receivers_for_ref_methods(&mut copy, receivers, tcx);
-            own_specialised_aggregate_params(&mut copy, tcx);
-            specialise_call_substs(&mut copy, &subst_tys, tcx);
+            let subst_tys = subst_type_arguments(substs);
+            let mut copy = state
+                .instantiator
+                .lower(&template.name, name, &subst_tys, tcx);
+            rewrite_trait_method_calls(&mut copy, substs, receivers, tcx);
+            let mut closures = Vec::new();
+            specialise_lifted_closures(&mut copy, substs, ctx, state, tcx, &mut closures);
             specialised.push(copy);
+            specialised.extend(closures);
         }
     }
     specialised
 }
 
-/// Repairs a container element read whose element type was a parameter.
+/// Gives a specialised copy its own copy of every lifted closure it names.
 ///
-/// The template lowered `xs[i]` for an opaque one-slot parameter, which is the
-/// scalar read. Once the parameter is known to be an aggregate the element
-/// occupies its slot inline and the address of that slot is the value, so the
-/// read has to become the pointer form the concrete lowering emits. Leaving
-/// the scalar read in place hands the callee the element's first bytes where
-/// it expects the element's address.
-///
-/// Mirrors the element-representation predicate in the index/loop lowering:
-/// a struct ADT is address-is-value at any width, and other aggregates are
-/// once they exceed a single slot.
-fn repair_generic_element_reads(copy: &mut Body, tcx: &TyCtxt) {
-    let local_tys: Vec<Ty> = copy.locals.iter().map(|l| l.ty).collect();
-    for block in &mut copy.blocks {
-        let Terminator::Call {
-            callee,
-            destination,
-            ..
-        } = &mut block.terminator
-        else {
-            continue;
-        };
-        let Operand::Const(ConstValue::Str(name)) = callee else {
-            continue;
-        };
-        if name != "gos_rt_vec_get_i64" && name != "gos_rt_vec_get_i64_unchecked" {
+/// A closure written inside a generic body is lifted to a top-level body
+/// before MIR lowering, typed against the enclosing body's own parameters, so
+/// one lifted body would otherwise serve every instantiation with its
+/// captured values and locals left as opaque parameter slots. Each
+/// instantiation of the enclosing body instead names a copy of the closure
+/// under the same substitution, and a closure nested in that closure is
+/// reached through the copy in turn. `out` receives every closure copy made.
+fn specialise_lifted_closures(
+    copy: &mut Body,
+    substs: &Substs,
+    ctx: &SpecialisationContext<'_>,
+    state: &mut SpecialisationState<'_>,
+    tcx: &mut TyCtxt,
+    out: &mut Vec<Body>,
+) {
+    let mut renames: Vec<(String, String)> = Vec::new();
+    for_each_operand(copy, &mut |operand| {
+        if let Operand::Const(ConstValue::Str(name)) = operand
+            && ctx.closures.contains_key(name)
+            && !renames.iter().any(|(from, _)| from == name)
+        {
+            renames.push((name.clone(), method_mangled_name(name, substs)));
+        }
+    });
+    if renames.is_empty() {
+        return;
+    }
+    for_each_operand_mut(copy, &mut |operand| {
+        if let Operand::Const(ConstValue::Str(name)) = operand
+            && let Some((_, to)) = renames.iter().find(|(from, _)| from == name)
+        {
+            name.clone_from(to);
+        }
+    });
+    let subst_tys = subst_type_arguments(substs);
+    for (from, to) in renames {
+        if !state.emitted.insert(to.clone()) {
             continue;
         }
-        if !destination.projection.is_empty() {
-            continue;
-        }
-        let Some(elem_ty) = local_tys.get(destination.local.0 as usize).copied() else {
-            continue;
-        };
-        let is_struct_adt = matches!(
-            tcx.kind_of(elem_ty),
-            TyKind::Adt { def, .. }
-                if def.local < u32::MAX - 16 && tcx.struct_field_tys(*def).is_some()
-        );
-        let is_wide_aggregate = tcx.elem_is_addressed_aggregate(elem_ty);
-        if is_struct_adt || is_wide_aggregate {
-            *callee = Operand::Const(ConstValue::Str("gos_rt_vec_get_ptr".to_string()));
-        }
+        let mut closure = state.instantiator.lower(&from, to, &subst_tys, tcx);
+        rewrite_trait_method_calls(&mut closure, substs, ctx.receivers, tcx);
+        specialise_lifted_closures(&mut closure, substs, ctx, state, tcx, out);
+        out.push(closure);
     }
 }
 
@@ -417,6 +583,7 @@ fn borrow_scalar_receivers_for_ref_methods(
                 },
             },
             span,
+            inlined: None,
         });
         if let Terminator::Call { args, .. } = &mut block.terminator
             && let Some(first) = args.first_mut()
@@ -426,113 +593,13 @@ fn borrow_scalar_receivers_for_ref_methods(
     }
 }
 
-/// Books the frame's own share of a by-value aggregate parameter's heap
-/// fields, for a specialised body whose parameter type only became concrete
-/// here.
-///
-/// The ownership passes run on the template, where the parameter is one opaque
-/// slot with no fields to own. A callee that writes through the borrow this
-/// body takes replaces those fields, so the frame has to hold a share of them
-/// across the call and give it back at its death, exactly as a body written
-/// against the concrete type does.
-fn own_specialised_aggregate_params(copy: &mut Body, tcx: &TyCtxt) {
-    let arity = copy.arity as usize;
-    if arity == 0 || copy.locals.is_empty() {
-        return;
-    }
-    let n_locals = copy.locals.len();
-    let mut booked: Vec<(Local, Vec<u32>, &'static str, &'static str)> = Vec::new();
-    for i in 1..=arity.min(n_locals - 1) {
-        let decl = &copy.locals[i];
-        if decl.region || matches!(tcx.kind_of(decl.ty), TyKind::Ref { .. }) {
-            continue;
-        }
-        let local = Local(u32::try_from(i).expect("local index fits in u32"));
-        let borrowed_mutably = copy.blocks.iter().flat_map(|b| b.stmts.iter()).any(|stmt| {
-            matches!(
-                &stmt.kind,
-                StatementKind::Assign {
-                    rvalue: Rvalue::Ref {
-                        mutable: true,
-                        place,
-                    },
-                    ..
-                } if place.local == local && place.projection.is_empty()
-            )
-        });
-        if !borrowed_mutably {
-            continue;
-        }
-        for (path, kind) in crate::lower::aggregate_rc_field_paths(tcx, decl.ty) {
-            let (retain, release) = kind.helpers();
-            booked.push((local, path, retain, release));
-        }
-    }
-    if booked.is_empty() {
-        return;
-    }
-    let unit_ty = tcx.unit_interned().unwrap_or(copy.locals[0].ty);
-    let fresh_unit = |copy: &mut Body| -> Local {
-        let local = Local(u32::try_from(copy.locals.len()).expect("local index fits in u32"));
-        copy.locals.push(crate::ir::LocalDecl {
-            ty: unit_ty,
-            debug_name: None,
-            mutable: false,
-            region: false,
-        });
-        local
-    };
-    let field_place = |local: Local, path: &[u32]| Place {
-        local,
-        projection: path.iter().map(|idx| Projection::Field(*idx)).collect(),
-    };
-    for (local, path, _, release) in &booked {
-        for bi in 0..copy.blocks.len() {
-            if !matches!(copy.blocks[bi].terminator, Terminator::Return) {
-                continue;
-            }
-            let span = copy.blocks[bi].span;
-            let dest = fresh_unit(copy);
-            let place = field_place(*local, path);
-            copy.blocks[bi].stmts.push(crate::ir::Statement {
-                kind: StatementKind::Assign {
-                    place: Place::local(dest),
-                    rvalue: Rvalue::CallIntrinsic {
-                        name: release,
-                        args: vec![Operand::Copy(place)],
-                    },
-                },
-                span,
-            });
-        }
-    }
-    let span = copy.blocks[0].span;
-    for (local, path, retain, _) in booked.iter().rev() {
-        let dest = fresh_unit(copy);
-        let place = field_place(*local, path);
-        copy.blocks[0].stmts.insert(
-            0,
-            crate::ir::Statement {
-                kind: StatementKind::Assign {
-                    place: Place::local(dest),
-                    rvalue: Rvalue::CallIntrinsic {
-                        name: retain,
-                        args: vec![Operand::Copy(place)],
-                    },
-                },
-                span,
-            },
-        );
-    }
-}
-
 fn substs_are_const_only(substs: &Substs) -> bool {
     // A const-generic array parameter is lowered to a runtime-length sequence,
     // so one body serves every const value and a specialised copy is wasted.
     substs
         .as_slice()
         .iter()
-        .all(|arg| matches!(arg, GenericArg::Const(_)))
+        .all(|arg| matches!(arg, GenericArg::Const(_) | GenericArg::ConstParam(_)))
 }
 
 pub(crate) fn subst_type_arguments(substs: &Substs) -> Vec<Option<Ty>> {
@@ -541,9 +608,71 @@ pub(crate) fn subst_type_arguments(substs: &Substs) -> Vec<Option<Ty>> {
         .iter()
         .map(|arg| match arg {
             GenericArg::Type(ty) => Some(*ty),
-            GenericArg::Const(_) => None,
+            GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
         })
         .collect()
+}
+
+/// Every call to a generic method template in `bodies[scan]`, with the
+/// substitution the call instantiates it with: the block it sits in, the
+/// template's index, and the method's name.
+///
+/// A receiver whose type is a concrete instantiation supplies the leading
+/// parameters, and a method's own parameters are read off the arguments and
+/// the call's destination. A call whose receiver says nothing - a method with
+/// its own type parameters on a type that has none, `impl Cmd { fn arg<T:
+/// Arg>(self, v: T) }` - is instantiated from the arguments and destination
+/// alone, exactly as a generic free function's call is.
+fn method_call_instantiations(
+    bodies: &[Body],
+    method_bases: &HashMap<String, usize>,
+    scan: std::ops::Range<usize>,
+    tcx: &TyCtxt,
+) -> Vec<(usize, usize, usize, Substs, String)> {
+    let mut found = Vec::new();
+    for (bi, body) in bodies.iter().enumerate().take(scan.end).skip(scan.start) {
+        for (blk, block) in body.blocks.iter().enumerate() {
+            let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                destination,
+                ..
+            } = &block.terminator
+            else {
+                continue;
+            };
+            let Some(&base_idx) = method_bases.get(name) else {
+                continue;
+            };
+            let template = &bodies[base_idx];
+            let receiver_substs = args
+                .first()
+                .and_then(|arg| match arg {
+                    Operand::Copy(place) => body.locals.get(place.local.0 as usize),
+                    Operand::Const(_) | Operand::FnRef { .. } => None,
+                })
+                .and_then(|decl| match tcx.kind_of(peel_ref(tcx, decl.ty)) {
+                    TyKind::Adt { substs, .. }
+                        if !substs.is_empty()
+                            && !substs.types().iter().any(|t| ty_contains_param(tcx, *t)) =>
+                    {
+                        Some(substs.clone())
+                    }
+                    _ => None,
+                });
+            let substs = match receiver_substs {
+                Some(base) => complete_method_substs(template, body, args, destination, &base, tcx)
+                    .or_else(|| {
+                        call_site_method_substs(template, body, args, destination, &[], tcx)
+                    }),
+                None => call_site_method_substs(template, body, args, destination, &[], tcx),
+            };
+            if let Some(substs) = substs {
+                found.push((bi, blk, base_idx, substs, name.clone()));
+            }
+        }
+    }
+    found
 }
 
 /// One fixed-point round of generic-method specialisation. Methods are
@@ -559,116 +688,60 @@ pub(crate) fn subst_type_arguments(substs: &Substs) -> Vec<Option<Ty>> {
 fn specialise_methods_step(
     bodies: &mut Vec<Body>,
     method_bases: &HashMap<String, usize>,
-    emitted: &mut HashSet<String>,
+    state: &mut SpecialisationState<'_>,
     trait_specialised_methods: &mut HashSet<String>,
-    receivers: &ReceiverConventions,
+    ctx: &SpecialisationContext<'_>,
     tcx: &mut TyCtxt,
     scan_start: usize,
 ) -> (bool, usize) {
+    let receivers = ctx.receivers;
     if method_bases.is_empty() {
         return (false, bodies.len());
     }
     let mut rewrites: Vec<(usize, usize, String)> = Vec::new();
     let mut to_create: Vec<(usize, Substs, String, String)> = Vec::new();
     let scan_end = bodies.len();
-    for (bi, body) in bodies.iter().enumerate().take(scan_end).skip(scan_start) {
-        for (blk, block) in body.blocks.iter().enumerate() {
-            let Terminator::Call {
-                callee: Operand::Const(ConstValue::Str(name)),
-                args,
-                ..
-            } = &block.terminator
-            else {
-                continue;
-            };
-            let Some(&base_idx) = method_bases.get(name) else {
-                continue;
-            };
-            let Some(Operand::Copy(p)) = args.first() else {
-                continue;
-            };
-            let Some(recv_decl) = body.locals.get(p.local.0 as usize) else {
-                continue;
-            };
-            let recv_ty = peel_ref(tcx, recv_decl.ty);
-            let TyKind::Adt { substs, .. } = tcx.kind_of(recv_ty).clone() else {
-                continue;
-            };
-            if substs.is_empty() || substs.types().iter().any(|t| ty_contains_param(tcx, *t)) {
-                continue;
-            }
-            // A method on a generic type may carry type parameters of its
-            // own (`impl<T> Gen<T> { fn m<U: Named>(&self, tag: U) }`).
-            // The receiver's substitution names `T` and says nothing about
-            // `U`, so the rest is read off the argument types - otherwise
-            // `U`'s slot would take `T`'s argument, or stay rigid, and
-            // either way the parameter is read as the wrong shape.
-            let Some(substs) = complete_method_substs(&bodies[base_idx], body, args, &substs, tcx)
-            else {
-                continue;
-            };
-            let spec_name = method_mangled_name(name, &substs);
-            rewrites.push((bi, blk, spec_name.clone()));
-            if emitted.insert(spec_name.clone()) {
-                to_create.push((base_idx, substs, spec_name, name.clone()));
-            }
+    for (bi, blk, base_idx, substs, name) in
+        method_call_instantiations(bodies, method_bases, scan_start..scan_end, tcx)
+    {
+        let spec_name = method_mangled_name(&name, &substs);
+        rewrites.push((bi, blk, spec_name.clone()));
+        if state.emitted.insert(spec_name.clone()) {
+            to_create.push((base_idx, substs, spec_name, name));
         }
     }
-    // A method may carry its own type parameters on a type that has none -
-    // `impl Cmd { fn arg<T: Arg>(self, v: T) }`. The receiver's substs say
-    // nothing about `T`, so the instantiation is read off the argument types
-    // at the call site, exactly as a generic free function's is.
-    for (bi, body) in bodies.iter().enumerate().take(scan_end).skip(scan_start) {
-        for (blk, block) in body.blocks.iter().enumerate() {
-            let Terminator::Call {
-                callee: Operand::Const(ConstValue::Str(name)),
-                args,
-                ..
-            } = &block.terminator
-            else {
-                continue;
-            };
-            let Some(&base_idx) = method_bases.get(name) else {
-                continue;
-            };
-            let Some(substs) = method_param_substs(&bodies[base_idx], body, args, tcx) else {
-                continue;
-            };
-            let spec_name = method_mangled_name(name, &substs);
-            rewrites.push((bi, blk, spec_name.clone()));
-            if emitted.insert(spec_name.clone()) {
-                to_create.push((base_idx, substs, spec_name, name.clone()));
+    // A generic type's rendering methods are reached by a formatter that
+    // walks a container's elements, not by a call, so every instance a body
+    // holds gets its own.
+    for body in &bodies[scan_start..scan_end] {
+        for (base_name, substs) in rendering_instantiations(body, method_bases, tcx) {
+            let spec_name = method_mangled_name(&base_name, &substs);
+            if let Some(&base_idx) = method_bases.get(&base_name)
+                && state.emitted.insert(spec_name.clone())
+            {
+                to_create.push((base_idx, substs, spec_name, base_name));
             }
         }
     }
     let made = !to_create.is_empty();
     for (base_idx, substs, spec_name, base_name) in to_create {
-        let mut copy = bodies[base_idx].clone();
-        copy.name = spec_name;
-        copy.def = None;
-        let subst_tys: Vec<Option<Ty>> = substs
-            .as_slice()
-            .iter()
-            .map(|a| match a {
-                GenericArg::Type(t) => Some(*t),
-                GenericArg::Const(_) => None,
-            })
-            .collect();
         // A method on a bounded `impl<T: Trait>` block calls the trait method
-        // through its type parameter, so the same receiver rewrite a generic
-        // free function needs applies here. It runs while the locals still
-        // carry the template parameter, which is what identifies the receiver.
-        if rewrite_trait_method_calls(&mut copy, &substs, receivers, tcx) {
-            trait_specialised_methods.insert(base_name);
+        // through its type parameter, which leaves the template with a callee
+        // only an instantiation resolves.
+        if !trait_specialised_methods.contains(&base_name)
+            && calls_trait_through_parameter(&bodies[base_idx], &substs, receivers, tcx)
+        {
+            trait_specialised_methods.insert(base_name.clone());
         }
-        reference_aggregate_trait_receivers(&mut copy, &subst_tys, tcx);
-        for local in &mut copy.locals {
-            local.ty = subst_param_ty(tcx, local.ty, &subst_tys);
-        }
-        repair_generic_element_reads(&mut copy, tcx);
-        borrow_scalar_receivers_for_ref_methods(&mut copy, receivers, tcx);
-        specialise_call_substs(&mut copy, &subst_tys, tcx);
+        let subst_tys = subst_type_arguments(&substs);
+        let mut copy = state
+            .instantiator
+            .lower(&base_name, spec_name, &subst_tys, tcx);
+        rewrite_trait_method_calls(&mut copy, &substs, receivers, tcx);
+        let mut closures = Vec::new();
+        specialise_lifted_closures(&mut copy, &substs, ctx, state, tcx, &mut closures);
         bodies.push(copy);
+        bodies.extend(closures);
     }
     for (bi, blk, spec_name) in rewrites {
         if let Terminator::Call { callee, .. } = &mut bodies[bi].blocks[blk].terminator {
@@ -683,7 +756,7 @@ fn specialise_methods_step(
 /// `substs` are concrete (no rigid `Param`). Recurses through the
 /// substituted field types so a nested instantiation (`Outer<Inner<T>>`)
 /// is registered too.
-fn register_struct_instantiations(bodies: &[Body], tcx: &mut TyCtxt) {
+pub(crate) fn register_struct_instantiations(bodies: &[Body], tcx: &mut TyCtxt) {
     let mut done: HashSet<(DefId, Substs)> = HashSet::new();
     let mut stack: Vec<Ty> = Vec::new();
     for body in bodies {
@@ -711,7 +784,7 @@ fn register_struct_instantiations(bodies: &[Body], tcx: &mut TyCtxt) {
                     .iter()
                     .map(|a| match a {
                         GenericArg::Type(t) => Some(*t),
-                        GenericArg::Const(_) => None,
+                        GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
                     })
                     .collect();
                 let inst: Vec<Ty> = decl
@@ -726,6 +799,8 @@ fn register_struct_instantiations(bodies: &[Body], tcx: &mut TyCtxt) {
             TyKind::Ref { inner, .. }
             | TyKind::Vec(inner)
             | TyKind::Slice(inner)
+            | TyKind::Iterator(inner)
+            | TyKind::Range(inner)
             | TyKind::Sender(inner)
             | TyKind::Receiver(inner)
             | TyKind::JoinHandle(inner) => stack.push(inner),
@@ -734,6 +809,10 @@ fn register_struct_instantiations(bodies: &[Body], tcx: &mut TyCtxt) {
             TyKind::HashMap { key, value, .. } => {
                 stack.push(key);
                 stack.push(value);
+            }
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
+                stack.extend(sig.inputs);
+                stack.push(sig.output);
             }
             _ => {}
         }
@@ -758,8 +837,188 @@ fn ty_contains_param(tcx: &TyCtxt, ty: Ty) -> bool {
         TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => {
             substs.types().iter().any(|t| ty_contains_param(tcx, *t))
         }
+        TyKind::Iterator(inner) => ty_contains_param(tcx, *inner),
+        TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
+            sig.inputs.iter().any(|t| ty_contains_param(tcx, *t))
+                || ty_contains_param(tcx, sig.output)
+        }
         _ => false,
     }
+}
+
+/// Binds every type parameter `template` names to the type `actual` holds in
+/// the same position, keeping the first binding each parameter receives.
+///
+/// A parameter can sit anywhere inside a signature - `Fn() -> T`, `Vec<T>`,
+/// `Option<T>` - so the call site's instantiation is read structurally rather
+/// than only off a parameter declared as a bare `T`. A position whose actual
+/// type is not concrete binds nothing.
+pub fn bind_template_params(
+    tcx: &TyCtxt,
+    template: Ty,
+    actual: Ty,
+    resolved: &mut Vec<Option<Ty>>,
+) {
+    let template_kind = tcx.kind_of(template);
+    let actual_kind = tcx.kind_of(actual);
+    match (template_kind, actual_kind) {
+        (TyKind::Param { idx, .. }, _) => {
+            if ty_contains_param(tcx, actual)
+                || matches!(actual_kind, TyKind::Var(_) | TyKind::Error)
+            {
+                return;
+            }
+            let slot = idx.0 as usize;
+            if resolved.len() <= slot {
+                resolved.resize(slot + 1, None);
+            }
+            resolved[slot].get_or_insert(actual);
+        }
+        (TyKind::Ref { inner: t, .. }, TyKind::Ref { inner: a, .. }) => {
+            bind_template_params(tcx, *t, *a, resolved);
+        }
+        (TyKind::Ref { inner: t, .. }, _) => bind_template_params(tcx, *t, actual, resolved),
+        (_, TyKind::Ref { inner: a, .. }) => bind_template_params(tcx, template, *a, resolved),
+        (
+            TyKind::Vec(t)
+            | TyKind::Slice(t)
+            | TyKind::Iterator(t)
+            | TyKind::Sender(t)
+            | TyKind::Receiver(t)
+            | TyKind::JoinHandle(t),
+            TyKind::Vec(a)
+            | TyKind::Slice(a)
+            | TyKind::Iterator(a)
+            | TyKind::Sender(a)
+            | TyKind::Receiver(a)
+            | TyKind::JoinHandle(a),
+        )
+        | (TyKind::Array { elem: t, .. }, TyKind::Array { elem: a, .. }) => {
+            bind_template_params(tcx, *t, *a, resolved);
+        }
+        (TyKind::Tuple(ts), TyKind::Tuple(actuals)) if ts.len() == actuals.len() => {
+            for (t, a) in ts.iter().zip(actuals.iter()) {
+                bind_template_params(tcx, *t, *a, resolved);
+            }
+        }
+        (
+            TyKind::HashMap {
+                key: tk, value: tv, ..
+            },
+            TyKind::HashMap {
+                key: ak, value: av, ..
+            },
+        ) => {
+            bind_template_params(tcx, *tk, *ak, resolved);
+            bind_template_params(tcx, *tv, *av, resolved);
+        }
+        (
+            TyKind::Adt {
+                def: td,
+                substs: ts,
+            },
+            TyKind::Adt {
+                def: ad,
+                substs: actuals,
+            },
+        ) if td == ad => {
+            for (t, a) in ts.types().iter().zip(actuals.types().iter()) {
+                bind_template_params(tcx, *t, *a, resolved);
+            }
+        }
+        (
+            TyKind::FnPtr(ts) | TyKind::FnTrait(ts),
+            TyKind::FnPtr(actuals) | TyKind::FnTrait(actuals),
+        ) if ts.inputs.len() == actuals.inputs.len() => {
+            for (t, a) in ts.inputs.iter().zip(actuals.inputs.iter()) {
+                bind_template_params(tcx, *t, *a, resolved);
+            }
+            bind_template_params(tcx, ts.output, actuals.output, resolved);
+        }
+        _ => {}
+    }
+}
+
+/// One past the highest type-parameter index any local of `body` names.
+fn param_count(tcx: &TyCtxt, body: &Body) -> usize {
+    fn visit(tcx: &TyCtxt, ty: Ty, highest: &mut usize) {
+        match tcx.kind_of(ty) {
+            TyKind::Param { idx, .. } => *highest = (*highest).max(idx.0 as usize + 1),
+            TyKind::Ref { inner, .. }
+            | TyKind::Vec(inner)
+            | TyKind::Slice(inner)
+            | TyKind::Iterator(inner)
+            | TyKind::Sender(inner)
+            | TyKind::Receiver(inner)
+            | TyKind::JoinHandle(inner)
+            | TyKind::Array { elem: inner, .. } => visit(tcx, *inner, highest),
+            TyKind::Tuple(elems) => elems.iter().for_each(|t| visit(tcx, *t, highest)),
+            TyKind::HashMap { key, value, .. } => {
+                visit(tcx, *key, highest);
+                visit(tcx, *value, highest);
+            }
+            TyKind::Adt { substs, .. } | TyKind::Alias { substs, .. } => {
+                substs.types().iter().for_each(|t| visit(tcx, *t, highest));
+            }
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => {
+                sig.inputs.iter().for_each(|t| visit(tcx, *t, highest));
+                visit(tcx, sig.output, highest);
+            }
+            _ => {}
+        }
+    }
+    let mut highest = 0;
+    for local in &body.locals {
+        visit(tcx, local.ty, &mut highest);
+    }
+    highest
+}
+
+/// Reads a method's type parameters off one call site: the receiver's own
+/// substitution fills the leading positions, and each argument and the call's
+/// destination are matched structurally against the template's parameter and
+/// return locals. `None` when some parameter the body names stays unbound, so
+/// the call keeps the template.
+fn call_site_method_substs(
+    template: &Body,
+    caller: &Body,
+    args: &[Operand],
+    destination: &Place,
+    base: &[Ty],
+    tcx: &TyCtxt,
+) -> Option<Substs> {
+    let mut resolved: Vec<Option<Ty>> = base.iter().map(|t| Some(*t)).collect();
+    let caller_tys: Vec<Ty> = caller.locals.iter().map(|l| l.ty).collect();
+    for (index, arg) in args.iter().enumerate() {
+        let Some(decl) = template.locals.get(index + 1) else {
+            break;
+        };
+        if !ty_contains_param(tcx, decl.ty) {
+            continue;
+        }
+        // A constant or a function item carries no local type to read; the
+        // other positions and the destination still can.
+        let Operand::Copy(place) = arg else {
+            continue;
+        };
+        let Some(actual) = place_ty(tcx, &caller_tys, place) else {
+            continue;
+        };
+        bind_template_params(tcx, decl.ty, actual, &mut resolved);
+    }
+    if let (Some(ret), Some(dest_ty)) = (
+        template.locals.first(),
+        place_ty(tcx, &caller_tys, destination),
+    ) {
+        bind_template_params(tcx, ret.ty, dest_ty, &mut resolved);
+    }
+    let count = param_count(tcx, template).max(base.len());
+    if count == 0 {
+        return None;
+    }
+    resolved.resize(count, None);
+    let types: Option<Vec<Ty>> = resolved.into_iter().collect();
+    Some(Substs::from_types(types?))
 }
 
 /// `true` if any of `body`'s locals carry a generic `Param`, marking it a
@@ -779,100 +1038,32 @@ fn peel_ref(tcx: &TyCtxt, ty: Ty) -> Ty {
     }
 }
 
-/// Mangled name of a generic method instantiation. Methods carry no `DefId`,
-/// so the name keys the specialisation: the base `Type::method` name plus the
-/// interned id of each concrete type argument (equal types share an id, so a
-/// call site and the materialised copy agree).
-/// The instantiation a call site gives a method's own type parameters.
-///
-/// The template's parameter locals still carry their `Param`s; each is paired
-/// with the type the call actually passes, so `cmd.arg(1)` reads `T = i64`.
-/// `None` when the method declares no parameters of its own, or when a
-/// parameter's instantiation is not concrete at this site.
 /// Extends `base` (the receiver's own substitution) with the method's own
-/// type parameters, read off the argument types at the call site. Answers
-/// `base` unchanged when the method declares none, and `None` when a
-/// parameter the body uses cannot be resolved - the call then keeps the
-/// template, which is what it did before.
+/// type parameters, read off the call site by [`call_site_method_substs`].
+/// Answers `base` unchanged when the method declares none, and `None` when a
+/// parameter the body uses cannot be resolved, so the call keeps the template.
 fn complete_method_substs(
     template: &Body,
     caller: &Body,
     args: &[Operand],
+    destination: &Place,
     base: &Substs,
     tcx: &TyCtxt,
 ) -> Option<Substs> {
-    let mut resolved: Vec<Option<Ty>> = base.types().iter().map(|t| Some(*t)).collect();
-    let mut highest = resolved.len();
-    for local in &template.locals {
-        if let TyKind::Param { idx, .. } = tcx.kind_of(peel_ref(tcx, local.ty)) {
-            highest = highest.max(idx.0 as usize + 1);
-        }
-    }
-    if highest <= resolved.len() {
+    // A method that declares no parameters of its own is instantiated by the
+    // receiver alone, const arguments included.
+    if param_count(tcx, template) <= base.len() {
         return Some(base.clone());
     }
-    resolved.resize(highest, None);
-    for (index, arg) in args.iter().enumerate() {
-        let Some(decl) = template.locals.get(index + 1) else {
-            break;
-        };
-        let TyKind::Param { idx, .. } = tcx.kind_of(peel_ref(tcx, decl.ty)) else {
-            continue;
-        };
-        let param = idx.0 as usize;
-        if param < resolved.len() && resolved[param].is_some() {
-            continue;
-        }
-        let Operand::Copy(place) = arg else {
-            return None;
-        };
-        let actual = peel_ref(tcx, caller.locals.get(place.local.0 as usize)?.ty);
-        if ty_contains_param(tcx, actual) {
-            return None;
-        }
-        resolved[param] = Some(actual);
-    }
-    let types: Option<Vec<Ty>> = resolved.into_iter().collect();
-    Some(Substs::from_types(types?))
+    call_site_method_substs(template, caller, args, destination, &base.types(), tcx)
 }
 
-fn method_param_substs(
-    template: &Body,
-    caller: &Body,
-    args: &[Operand],
-    tcx: &TyCtxt,
-) -> Option<Substs> {
-    let mut resolved: Vec<Option<Ty>> = Vec::new();
-    let mut saw_param = false;
-    for (index, arg) in args.iter().enumerate() {
-        let Some(decl) = template.locals.get(index + 1) else {
-            break;
-        };
-        let TyKind::Param { idx, .. } = tcx.kind_of(peel_ref(tcx, decl.ty)) else {
-            continue;
-        };
-        let param = idx.0 as usize;
-        let Operand::Copy(place) = arg else {
-            return None;
-        };
-        let actual = peel_ref(tcx, caller.locals.get(place.local.0 as usize)?.ty);
-        if ty_contains_param(tcx, actual) {
-            return None;
-        }
-        saw_param = true;
-        if resolved.len() <= param {
-            resolved.resize(param + 1, None);
-        }
-        resolved[param] = Some(actual);
-    }
-    if !saw_param {
-        return None;
-    }
-    let types: Option<Vec<Ty>> = resolved.into_iter().collect();
-    Some(Substs::from_types(types?))
-}
-
-fn method_mangled_name(base: &str, substs: &Substs) -> String {
+/// Mangled name of a generic method instantiation. Methods carry no `DefId`,
+/// so the name keys the specialisation: the base `Type::method` name plus the
+/// interned id of each concrete type argument (equal types share an id, so a
+/// call site and the materialised copy agree).
+#[must_use]
+pub fn method_mangled_name(base: &str, substs: &Substs) -> String {
     let mut out = format!("{base}$mono$");
     for (i, arg) in substs.as_slice().iter().enumerate() {
         if i > 0 {
@@ -887,9 +1078,45 @@ fn method_mangled_name(base: &str, substs: &Substs) -> String {
                 out.push('c');
                 out.push_str(&c.to_string());
             }
+            GenericArg::ConstParam(idx) => {
+                out.push('p');
+                out.push_str(&idx.0.to_string());
+            }
         }
     }
     out
+}
+
+/// Name prefix of a callee that reaches a trait function through a type
+/// parameter. The `__gos_` prefix is reserved for compiler-generated names, so
+/// no program item can spell it.
+const PARAM_ASSOC_PREFIX: &str = "__gos_param_assoc#";
+
+/// Callee spelling of the trait function `function` reached through the type
+/// parameter `param` (`T::zero`), which monomorphisation resolves per
+/// instantiation. `None` when `param` is not a type parameter.
+pub(crate) fn param_assoc_callee(tcx: &TyCtxt, param: Ty, function: &str) -> Option<String> {
+    let TyKind::Param { idx, .. } = tcx.kind_of(param) else {
+        return None;
+    };
+    Some(format!("{PARAM_ASSOC_PREFIX}{}::{function}", idx.0))
+}
+
+/// The parameter position and function name a [`param_assoc_callee`] names.
+fn parse_param_assoc_callee(name: &str) -> Option<(usize, &str)> {
+    let (index, function) = name.strip_prefix(PARAM_ASSOC_PREFIX)?.split_once("::")?;
+    Some((index.parse().ok()?, function))
+}
+
+/// Whether `template` reaches a trait function through a type parameter, which
+/// only an instantiation can resolve.
+fn calls_trait_through_parameter(
+    template: &Body,
+    substs: &Substs,
+    receivers: &ReceiverConventions,
+    tcx: &TyCtxt,
+) -> bool {
+    rewrite_trait_method_calls(&mut template.clone(), substs, receivers, tcx)
 }
 
 /// Static trait dispatch for a monomorphised generic body: a method
@@ -910,11 +1137,24 @@ fn rewrite_trait_method_calls(
         .iter()
         .map(|a| match a {
             GenericArg::Type(t) => Some(*t),
-            GenericArg::Const(_) => None,
+            GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
         })
         .collect();
     let local_tys: Vec<Ty> = copy.locals.iter().map(|l| l.ty).collect();
     let mut rewrote = false;
+    // A trait function reached through a type parameter (`T::zero()`) names
+    // the parameter's position; this instantiation says which impl that is.
+    // It is resolved wherever it appears, as a callee or as a function value.
+    for_each_operand_mut(copy, &mut |operand| {
+        if let Operand::Const(ConstValue::Str(name)) = operand
+            && let Some((index, function)) = parse_param_assoc_callee(name)
+            && let Some(Some(concrete)) = subst_tys.get(index)
+            && let Some(owner) = adt_name(tcx, *concrete)
+        {
+            *name = format!("{owner}::{function}");
+            rewrote = true;
+        }
+    });
     for block in &mut copy.blocks {
         let Terminator::Call { callee, args, .. } = &mut block.terminator else {
             continue;
@@ -951,88 +1191,6 @@ fn rewrite_trait_method_calls(
         }
     }
     rewrote
-}
-
-/// Repoints a trait-method receiver that reached the callee by value at the
-/// reference the concrete impl expects.
-///
-/// A method body written against `T` copies the receiver out of its slot,
-/// because a type parameter is one opaque slot to the generic template. The
-/// impl it resolves to declares `&self`, so once `T` is known to be an
-/// aggregate the copy has to become the address of that place, and the local
-/// holding it has to be typed as a reference so the backend keeps a pointer
-/// rather than an aggregate. A scalar receiver already travels correctly in
-/// its slot and is left alone.
-///
-/// Runs while the locals still carry their template parameters, which is what
-/// identifies the receiver.
-fn reference_aggregate_trait_receivers(
-    copy: &mut Body,
-    subst_tys: &[Option<Ty>],
-    tcx: &mut TyCtxt,
-) {
-    let mut retarget: Vec<(Local, Place, Ty)> = Vec::new();
-    for block in &copy.blocks {
-        let Terminator::Call { callee, args, .. } = &block.terminator else {
-            continue;
-        };
-        let Operand::Const(ConstValue::Str(name)) = callee else {
-            continue;
-        };
-        if !name.contains("::") {
-            continue;
-        }
-        let Some(Operand::Copy(recv)) = args.first() else {
-            continue;
-        };
-        if !recv.projection.is_empty() {
-            continue;
-        }
-        let Some(decl) = copy.locals.get(recv.local.0 as usize) else {
-            continue;
-        };
-        let TyKind::Param { idx, .. } = tcx.kind_of(decl.ty) else {
-            continue;
-        };
-        let Some(Some(concrete)) = subst_tys.get(idx.0 as usize).copied() else {
-            continue;
-        };
-        if !matches!(tcx.kind_of(concrete), TyKind::Adt { .. } | TyKind::Tuple(_)) {
-            continue;
-        }
-        for stmt in &block.stmts {
-            if let StatementKind::Assign { place, rvalue } = &stmt.kind
-                && place.local == recv.local
-                && place.projection.is_empty()
-                && let Rvalue::Use(Operand::Copy(source)) = rvalue
-            {
-                retarget.push((recv.local, source.clone(), concrete));
-            }
-        }
-    }
-    for (local, source, concrete) in retarget {
-        let referenced = tcx.intern(TyKind::Ref {
-            mutability: Mutbl::Not,
-            inner: concrete,
-        });
-        if let Some(decl) = copy.locals.get_mut(local.0 as usize) {
-            decl.ty = referenced;
-        }
-        for block in &mut copy.blocks {
-            for stmt in &mut block.stmts {
-                if let StatementKind::Assign { place, rvalue } = &mut stmt.kind
-                    && place.local == local
-                    && place.projection.is_empty()
-                    && matches!(rvalue, Rvalue::Use(Operand::Copy(_)))
-                {
-                    *rvalue = Rvalue::Ref {
-                        mutable: false,
-                        place: source.clone(),
-                    };
-                }
-            }
-        }
-    }
 }
 
 /// Type of the value `place` denotes, walking its projection chain from the
@@ -1082,57 +1240,317 @@ fn param_index(tcx: &TyCtxt, ty: Ty) -> Option<usize> {
     }
 }
 
-/// Source name of a concrete named type, or `None` for non-ADTs.
-/// Name the impl block for `ty` registers its methods under.
-///
-/// A trait is implementable for a primitive as much as for a declared type,
-/// and such an impl keys its methods by the primitive's spelling. Resolving
-/// only ADTs left a trait call on a parameter that turned out to be `i64`
-/// pointing at the unqualified trait name, which names no body.
-/// The name an `impl` block for `ty` registers its methods under, which is
-/// what a resolved trait call has to spell.
-///
-/// A container and a structural type carry the shape their receiver is
-/// dispatched by rather than a spelling of their own: every tuple is reached
-/// as a tuple, and an array shares its representation with a `Vec`.
+/// The name an `impl` block for `ty` registers its methods under; see
+/// [`gossamer_types::printer::impl_owner_name`].
 fn adt_name(tcx: &TyCtxt, ty: Ty) -> Option<String> {
-    match tcx.kind_of(ty).clone() {
-        TyKind::Adt { def, .. } => tcx.def_name(def).map(str::to_string),
-        TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::String => {
-            Some(gossamer_types::printer::render_ty(tcx, ty))
-        }
-        TyKind::Vec(_) => Some("Vec".to_string()),
-        TyKind::Tuple(_) => gossamer_types::printer::structural_impl_owner(tcx, ty),
-        TyKind::HashMap { ordered, .. } => {
-            Some(if ordered { "BTreeMap" } else { "Map" }.to_string())
-        }
-        _ => None,
-    }
+    gossamer_types::printer::impl_owner_name(tcx, ty)
 }
 
-fn collect_from_rvalue(rvalue: &Rvalue, out: &mut HashMap<DefId, Vec<Substs>>) {
-    if let Rvalue::Use(operand) = rvalue {
-        collect_from_operand(operand, out);
-    }
-}
-
-fn collect_from_terminator(term: &Terminator, out: &mut HashMap<DefId, Vec<Substs>>) {
-    if let Terminator::Call { callee, args, .. } = term {
-        collect_from_operand(callee, out);
-        for arg in args {
-            collect_from_operand(arg, out);
+/// The rendering methods (`fmt`, `to_string`) of every generic type instance a
+/// local of `body` holds, at any depth, that the program declares, with the
+/// instance's type arguments.
+fn rendering_instantiations(
+    body: &Body,
+    method_bases: &HashMap<String, usize>,
+    tcx: &TyCtxt,
+) -> Vec<(String, Substs)> {
+    fn visit(
+        tcx: &TyCtxt,
+        ty: Ty,
+        method_bases: &HashMap<String, usize>,
+        seen: &mut HashSet<Ty>,
+        out: &mut Vec<(String, Substs)>,
+    ) {
+        if !seen.insert(ty) {
+            return;
+        }
+        match tcx.kind_of(ty) {
+            TyKind::Ref { inner, .. }
+            | TyKind::Vec(inner)
+            | TyKind::Slice(inner)
+            | TyKind::Iterator(inner)
+            | TyKind::Sender(inner)
+            | TyKind::Receiver(inner)
+            | TyKind::JoinHandle(inner)
+            | TyKind::Array { elem: inner, .. } => visit(tcx, *inner, method_bases, seen, out),
+            TyKind::Tuple(elems) => {
+                for elem in elems {
+                    visit(tcx, *elem, method_bases, seen, out);
+                }
+            }
+            TyKind::HashMap { key, value, .. } => {
+                visit(tcx, *key, method_bases, seen, out);
+                visit(tcx, *value, method_bases, seen, out);
+            }
+            TyKind::Adt { substs, .. } => {
+                for arg in substs.types() {
+                    visit(tcx, arg, method_bases, seen, out);
+                }
+                if substs.types().is_empty()
+                    || substs.types().iter().any(|t| ty_contains_param(tcx, *t))
+                {
+                    return;
+                }
+                let Some(owner) = adt_name(tcx, ty) else {
+                    return;
+                };
+                for method in ["fmt", "to_string"] {
+                    let base = format!("{owner}::{method}");
+                    if method_bases.contains_key(&base) {
+                        out.push((base, substs.clone()));
+                    }
+                }
+            }
+            _ => {}
         }
     }
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for local in &body.locals {
+        visit(tcx, local.ty, method_bases, &mut seen, &mut out);
+    }
+    out
 }
 
-fn collect_from_operand(operand: &Operand, out: &mut HashMap<DefId, Vec<Substs>>) {
-    if let Operand::FnRef { def, substs } = operand {
-        if !substs.is_empty() {
-            let list = out.entry(*def).or_default();
-            if !list.iter().any(|existing| existing == substs) {
-                list.push(substs.clone());
+/// Every body name some other body spells as an operand: a callee, a function
+/// address, or a value handed along.
+fn names_referenced_elsewhere(bodies: &[Body]) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for body in bodies {
+        for_each_operand(body, &mut |operand| {
+            if let Operand::Const(ConstValue::Str(name)) = operand
+                && *name != body.name
+            {
+                names.insert(name.clone());
+            }
+        });
+    }
+    names
+}
+
+/// Visits every operand `body` holds, in statements and terminators alike.
+///
+/// Exhaustive on purpose: a function value can reach any operand position -
+/// a call argument, an aggregate field, an intrinsic argument - and one this
+/// walk skipped would keep naming the template.
+fn for_each_operand(body: &Body, f: &mut impl FnMut(&Operand)) {
+    for block in &body.blocks {
+        for statement in &block.stmts {
+            match &statement.kind {
+                StatementKind::Assign { rvalue, .. } => match rvalue {
+                    Rvalue::Use(operand)
+                    | Rvalue::UnaryOp { operand, .. }
+                    | Rvalue::Cast { operand, .. }
+                    | Rvalue::Repeat { value: operand, .. } => f(operand),
+                    Rvalue::BinaryOp { lhs, rhs, .. } => {
+                        f(lhs);
+                        f(rhs);
+                    }
+                    Rvalue::Aggregate { operands, .. }
+                    | Rvalue::CallIntrinsic { args: operands, .. } => {
+                        operands.iter().for_each(&mut *f);
+                    }
+                    Rvalue::Len(_) | Rvalue::Ref { .. } | Rvalue::StaticLoad(_) => {}
+                },
+                StatementKind::StaticStore { value, .. } => f(value),
+                StatementKind::IterSource { source, .. } => f(source),
+                StatementKind::IterAdapter {
+                    closure_or_arg: Some(operand),
+                    ..
+                } => f(operand),
+                StatementKind::IterAdapter { .. }
+                | StatementKind::StorageLive(_)
+                | StatementKind::StorageDead(_)
+                | StatementKind::SetDiscriminant { .. }
+                | StatementKind::IterNext { .. }
+                | StatementKind::Nop => {}
             }
         }
+        match &block.terminator {
+            Terminator::Call { callee, args, .. } => {
+                f(callee);
+                args.iter().for_each(&mut *f);
+            }
+            Terminator::SwitchInt { discriminant, .. } => f(discriminant),
+            Terminator::Assert { cond, .. } => f(cond),
+            Terminator::Goto { .. }
+            | Terminator::Return
+            | Terminator::Unreachable
+            | Terminator::Panic { .. }
+            | Terminator::Drop { .. } => {}
+        }
+    }
+}
+
+/// Mutable counterpart of [`for_each_operand`], over the same positions.
+fn for_each_operand_mut(body: &mut Body, f: &mut impl FnMut(&mut Operand)) {
+    for block in &mut body.blocks {
+        for statement in &mut block.stmts {
+            match &mut statement.kind {
+                StatementKind::Assign { rvalue, .. } => match rvalue {
+                    Rvalue::Use(operand)
+                    | Rvalue::UnaryOp { operand, .. }
+                    | Rvalue::Cast { operand, .. }
+                    | Rvalue::Repeat { value: operand, .. } => f(operand),
+                    Rvalue::BinaryOp { lhs, rhs, .. } => {
+                        f(lhs);
+                        f(rhs);
+                    }
+                    Rvalue::Aggregate { operands, .. }
+                    | Rvalue::CallIntrinsic { args: operands, .. } => {
+                        operands.iter_mut().for_each(&mut *f);
+                    }
+                    Rvalue::Len(_) | Rvalue::Ref { .. } | Rvalue::StaticLoad(_) => {}
+                },
+                StatementKind::StaticStore { value, .. } => f(value),
+                StatementKind::IterSource { source, .. } => f(source),
+                StatementKind::IterAdapter {
+                    closure_or_arg: Some(operand),
+                    ..
+                } => f(operand),
+                StatementKind::IterAdapter { .. }
+                | StatementKind::StorageLive(_)
+                | StatementKind::StorageDead(_)
+                | StatementKind::SetDiscriminant { .. }
+                | StatementKind::IterNext { .. }
+                | StatementKind::Nop => {}
+            }
+        }
+        match &mut block.terminator {
+            Terminator::Call { callee, args, .. } => {
+                f(callee);
+                args.iter_mut().for_each(&mut *f);
+            }
+            Terminator::SwitchInt { discriminant, .. } => f(discriminant),
+            Terminator::Assert { cond, .. } => f(cond),
+            Terminator::Goto { .. }
+            | Terminator::Return
+            | Terminator::Unreachable
+            | Terminator::Panic { .. }
+            | Terminator::Drop { .. } => {}
+        }
+    }
+}
+
+/// Records the instantiation a function reference names. A substitution the
+/// checker left with an unsolved position names no instantiation at all, so
+/// the reference keeps the template.
+fn collect_from_operand(operand: &Operand, tcx: &TyCtxt, out: &mut HashMap<DefId, Vec<Substs>>) {
+    if let Operand::FnRef { def, substs } = operand {
+        // A type argument that is still a parameter names the template
+        // itself, reached from another template's body, and is no
+        // instantiation of it.
+        if substs.is_empty()
+            || substs.types().iter().any(|t| {
+                matches!(tcx.kind_of(*t), TyKind::Var(_) | TyKind::Error)
+                    || ty_contains_param(tcx, *t)
+            })
+        {
+            return;
+        }
+        let list = out.entry(*def).or_default();
+        if !list.iter().any(|existing| existing == substs) {
+            list.push(substs.clone());
+        }
+    }
+}
+
+/// Points every reference to an instantiated generic function at the copy
+/// monomorphisation emitted for it.
+///
+/// A callee becomes the copy's name. A function used as a value becomes the
+/// copy's address, because a copy has no `DefId` for a value operand to name:
+/// an assignment of the value takes the address directly, and a value in any
+/// other position is first bound to a local holding that address.
+fn route_to_specialisations(body: &mut Body, emitted: &HashSet<String>, tcx: &mut TyCtxt) {
+    let emitted_name = |operand: &Operand| match operand {
+        Operand::FnRef { def, substs } if !substs.is_empty() => {
+            let name = mangled_name(*def, substs);
+            emitted.contains(&name).then_some(name)
+        }
+        _ => None,
+    };
+    for block in &mut body.blocks {
+        if let Terminator::Call { callee, .. } = &mut block.terminator
+            && let Some(name) = emitted_name(callee)
+        {
+            *callee = Operand::Const(ConstValue::Str(name));
+        }
+    }
+    for block in &mut body.blocks {
+        for stmt in &mut block.stmts {
+            if let StatementKind::Assign { rvalue, .. } = &mut stmt.kind
+                && let Rvalue::Use(operand) = rvalue
+                && let Some(name) = emitted_name(operand)
+            {
+                *rvalue = Rvalue::CallIntrinsic {
+                    name: "gos_fn_addr",
+                    args: vec![Operand::Const(ConstValue::Str(name))],
+                };
+            }
+        }
+    }
+    // Every remaining value reference is hoisted into a fresh local, typed as
+    // the function item it names so the backends keep it pointer-shaped.
+    let mut hoisted: Vec<(Operand, String)> = Vec::new();
+    for_each_operand_mut(body, &mut |operand| {
+        if let Some(name) = emitted_name(operand) {
+            hoisted.push((operand.clone(), name));
+        }
+    });
+    if hoisted.is_empty() {
+        return;
+    }
+    let mut addresses: HashMap<String, Local> = HashMap::new();
+    let mut fresh: Vec<(Local, Ty, String)> = Vec::new();
+    for (operand, name) in hoisted {
+        if addresses.contains_key(&name) {
+            continue;
+        }
+        let Operand::FnRef { def, substs } = operand else {
+            continue;
+        };
+        let ty = tcx.intern(TyKind::FnDef { def, substs });
+        // A body's local count is bounded by what lowering could index with a
+        // `u32`, so the next index fits.
+        let local = Local(u32::try_from(body.locals.len() + fresh.len()).unwrap_or(u32::MAX));
+        addresses.insert(name.clone(), local);
+        fresh.push((local, ty, name));
+    }
+    for (_, ty, _) in &fresh {
+        body.locals.push(crate::ir::LocalDecl {
+            ty: *ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+    }
+    for_each_operand_mut(body, &mut |operand| {
+        if let Some(name) = emitted_name(operand)
+            && let Some(local) = addresses.get(&name)
+        {
+            *operand = Operand::Copy(Place::local(*local));
+        }
+    });
+    // Bind each address at entry. A function address is a link-time constant,
+    // so taking it once before any use is equivalent to taking it at each.
+    let span = body.span;
+    let entry: Vec<crate::ir::Statement> = fresh
+        .into_iter()
+        .map(|(local, _, name)| crate::ir::Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(local),
+                rvalue: Rvalue::CallIntrinsic {
+                    name: "gos_fn_addr",
+                    args: vec![Operand::Const(ConstValue::Str(name))],
+                },
+            },
+            span,
+            inlined: None,
+        })
+        .collect();
+    if let Some(first) = body.blocks.first_mut() {
+        first.stmts.splice(0..0, entry);
     }
 }
 
@@ -1144,7 +1562,7 @@ fn resolve(tcx: &mut TyCtxt, ty: Ty) -> Ty {
 /// Substitutes a specialisation's concrete types for the template's type
 /// parameters within `ty`, recursing through composite types. A `Param` whose
 /// position holds a const argument (`subst_tys[i] == None`) is left unchanged.
-pub(crate) fn subst_param_ty(tcx: &mut TyCtxt, ty: Ty, subst_tys: &[Option<Ty>]) -> Ty {
+pub fn subst_param_ty(tcx: &mut TyCtxt, ty: Ty, subst_tys: &[Option<Ty>]) -> Ty {
     let kind = tcx.kind_of(ty).clone();
     match kind {
         TyKind::Param { idx, .. } => subst_tys
@@ -1192,6 +1610,25 @@ pub(crate) fn subst_param_ty(tcx: &mut TyCtxt, ty: Ty, subst_tys: &[Option<Ty>])
             let elem = subst_param_ty(tcx, elem, subst_tys);
             tcx.intern(TyKind::Iterator(elem))
         }
+        TyKind::Range(elem) => {
+            let elem = subst_param_ty(tcx, elem, subst_tys);
+            tcx.intern(TyKind::Range(elem))
+        }
+        // A channel endpoint and a join handle name the payload they carry,
+        // and the send, receive, and join lowering picks its value
+        // representation from that payload type.
+        TyKind::Sender(elem) => {
+            let elem = subst_param_ty(tcx, elem, subst_tys);
+            tcx.intern(TyKind::Sender(elem))
+        }
+        TyKind::Receiver(elem) => {
+            let elem = subst_param_ty(tcx, elem, subst_tys);
+            tcx.intern(TyKind::Receiver(elem))
+        }
+        TyKind::JoinHandle(elem) => {
+            let elem = subst_param_ty(tcx, elem, subst_tys);
+            tcx.intern(TyKind::JoinHandle(elem))
+        }
         // A callable parameter carries the template's parameters inside
         // its signature, and the compiled tiers build the call from that
         // signature: an unsubstituted `Fn(T) -> T` on an `f64`
@@ -1206,21 +1643,36 @@ pub(crate) fn subst_param_ty(tcx: &mut TyCtxt, ty: Ty, subst_tys: &[Option<Ty>])
             tcx.intern(TyKind::FnTrait(sig))
         }
         TyKind::Adt { def, substs } => {
-            let new_args = substs
-                .as_slice()
-                .iter()
-                .map(|a| match a {
-                    GenericArg::Type(t) => GenericArg::Type(subst_param_ty(tcx, *t, subst_tys)),
-                    GenericArg::Const(c) => GenericArg::Const(*c),
-                })
-                .collect();
-            tcx.intern(TyKind::Adt {
-                def,
-                substs: Substs::from_args(new_args),
-            })
+            let substs = subst_param_substs(tcx, &substs, subst_tys);
+            tcx.intern(TyKind::Adt { def, substs })
+        }
+        TyKind::Alias { def, substs } => {
+            let substs = subst_param_substs(tcx, &substs, subst_tys);
+            tcx.intern(TyKind::Alias { def, substs })
+        }
+        // A generic function named inside a generic body carries the body's
+        // parameters as its own type arguments, and those say which
+        // instantiation the call reaches.
+        TyKind::FnDef { def, substs } => {
+            let substs = subst_param_substs(tcx, &substs, subst_tys);
+            tcx.intern(TyKind::FnDef { def, substs })
         }
         _ => ty,
     }
+}
+
+/// [`subst_param_ty`] over every type argument of `substs`; const arguments
+/// are carried unchanged.
+fn subst_param_substs(tcx: &mut TyCtxt, substs: &Substs, subst_tys: &[Option<Ty>]) -> Substs {
+    let new_args = substs
+        .as_slice()
+        .iter()
+        .map(|a| match a {
+            GenericArg::Type(t) => GenericArg::Type(subst_param_ty(tcx, *t, subst_tys)),
+            other @ (GenericArg::Const(_) | GenericArg::ConstParam(_)) => other.clone(),
+        })
+        .collect();
+    Substs::from_args(new_args)
 }
 
 /// [`subst_param_ty`] over every type a callable signature names.
@@ -1239,200 +1691,38 @@ fn subst_param_sig(
     }
 }
 
-/// Rewrites every internal call site's `FnRef` generic args in `copy`,
-/// substituting the specialisation's concrete types for the template's type
-/// parameters. Mirrors the operand set `collect_from_*` inspects.
-fn specialise_call_substs(copy: &mut Body, subst_tys: &[Option<Ty>], tcx: &mut TyCtxt) {
-    fn subst_operand(op: &mut Operand, subst_tys: &[Option<Ty>], tcx: &mut TyCtxt) {
-        if let Operand::FnRef { substs, .. } = op
-            && !substs.is_empty()
-        {
-            let new_args = substs
-                .as_slice()
-                .iter()
-                .map(|a| match a {
-                    GenericArg::Type(t) => GenericArg::Type(subst_param_ty(tcx, *t, subst_tys)),
-                    GenericArg::Const(c) => GenericArg::Const(*c),
-                })
-                .collect();
-            *substs = Substs::from_args(new_args);
-        }
-    }
-    for block in &mut copy.blocks {
-        for stmt in &mut block.stmts {
-            if let StatementKind::Assign {
-                rvalue: Rvalue::Use(op),
-                ..
-            } = &mut stmt.kind
-            {
-                subst_operand(op, subst_tys, tcx);
-            }
-        }
-        if let Terminator::Call { callee, args, .. } = &mut block.terminator {
-            subst_operand(callee, subst_tys, tcx);
-            for arg in args.iter_mut() {
-                subst_operand(arg, subst_tys, tcx);
-            }
-        }
-    }
-}
-
-/// Walks every call site that supplies generic arguments and
-/// rejects substitutions whose `T` does not fit the codegen's
-/// flat-i64 ABI. Returns one human-readable error per offending
-/// site; the empty `Vec` means every generic instantiation is
-/// representable.
-///
-/// The flat-i64 ABI passes every generic parameter through a
-/// single `i64` register slot. Layout-driven specialisation
-/// (parity plan §P4) is the long-term fix; until then any `T`
-/// wider than 8 bytes by value (tuples, fixed arrays, named ADTs,
-/// strings, vecs, hashmaps, function references, closures) will
-/// either corrupt memory at runtime (compiled tier) or produce a
-/// runtime type error (interp). This check shifts that failure
-/// to compile time.
-///
-/// The allowed set is intentionally narrow:
-/// `Bool`, `Char`, `Int(_)`, `Float(_)`, `Unit`, `Never`. Anything
-/// else flips the diagnostic on. `Sender<T>`, `Receiver<T>`,
-/// `Ref<T>`, and pointer-shaped runtime handles do round-trip
-/// through `i64` in some paths but are conservatively refused
-/// here so generic code that "happens to work today" doesn't
-/// silently break when a user instantiates it with an
-/// incompatible `T` next month.
-///
-/// Doc pointer the diagnostic cites: `docs/codegen_abi.md`.
+/// Rejects a body that reaches code generation with a type parameter still
+/// in its locals. Every call site of a generic body is routed to an
+/// instantiation lowered with concrete types, so a template that is still
+/// reachable was called with type arguments nothing could name, and its
+/// layouts, comparisons, and calls were chosen for an opaque slot. Returns
+/// one message per such body; empty when every reachable body is concrete.
 #[must_use]
 pub fn check_generic_layouts(bodies: &[Body], tcx: &TyCtxt) -> Vec<String> {
-    let mut needs: HashMap<DefId, Vec<Substs>> = HashMap::new();
-    for body in bodies {
-        for block in &body.blocks {
-            for stmt in &block.stmts {
-                if let StatementKind::Assign { rvalue, .. } = &stmt.kind {
-                    collect_from_rvalue(rvalue, &mut needs);
-                }
-            }
-            collect_from_terminator(&block.terminator, &mut needs);
-        }
-    }
-    let mut errors: Vec<String> = Vec::new();
-    let mut seen: HashSet<String> = HashSet::new();
-    for (def, subst_list) in &needs {
-        for substs in subst_list {
-            if substs.is_empty() {
-                continue;
-            }
-            for (i, arg) in substs.as_slice().iter().enumerate() {
-                let GenericArg::Type(ty) = arg else { continue };
-                if !fits_flat_i64_abi(tcx, *ty) {
-                    let key = format!("{}|{}|{}", def.local, i, ty.as_u32());
-                    if !seen.insert(key) {
-                        continue;
-                    }
-                    let render = render_ty_for_diagnostic(tcx, *ty);
-                    errors.push(format!(
-                        "error[GM0001]: generic parameter at position {i} of fn#{} \
-                         instantiated with `{render}`, which is not representable in \
-                         the flat-i64 ABI used by codegen.\n  \
-                         Until layout-driven specialisation lands (parity plan §P4), \
-                         only primitive scalars (`bool`, `char`, integer / float \
-                         types, `()`) are permitted as generic arguments. See \
-                         docs/codegen_abi.md.",
-                        def.local
-                    ));
-                }
-            }
-        }
-    }
-    errors
-}
-
-/// Predicate matching the set of types the codegen can plumb
-/// through a generic parameter. The original ABI restricted this
-/// to scalars (Bool/Char/Int/Float/Unit/Never); the widened ABI
-/// allows aggregate types as generics by passing them through a
-/// single-pointer environment slot, mirroring the closure
-/// strategy already in use (see `lowering_bugs_round2.md`).
-///
-/// Permitted today:
-///
-/// - Scalars: `bool`, `char`, integer / float, `()`, `!`.
-/// - `String`, `Vec<T>`, `HashMap<K, V>`, `HashSet<T>`,
-///   `BTreeMap<K, V>` - by-pointer in the flat ABI.
-/// - Tuples and named ADTs (struct/enum) - by-pointer.
-/// - Function references and channel handles (`Sender<T>` /
-///   `Receiver<T>`) - already round-trip through `i64` in the
-///   compiled tier.
-/// - Refs (`&T`).
-///
-/// Still rejected:
-/// - `TyKind::Closure` - needs explicit env pointer wiring at
-///   the call site that monomorphisation doesn't yet rewrite.
-/// - `TyKind::Alias` (unresolved type alias) - should never
-///   reach codegen, but flagged here defensively.
-fn fits_flat_i64_abi(tcx: &TyCtxt, ty: Ty) -> bool {
-    match tcx.kind_of(ty) {
-        TyKind::Bool
-        | TyKind::Char
-        | TyKind::Int(_)
-        | TyKind::Float(_)
-        | TyKind::Unit
-        | TyKind::Never
-        | TyKind::String
-        | TyKind::Vec(_)
-        | TyKind::Iterator(_)
-        | TyKind::HashMap { .. }
-        | TyKind::Sender(_)
-        | TyKind::Receiver(_)
-        | TyKind::JoinHandle(_)
-        | TyKind::Ref { .. }
-        | TyKind::FnDef { .. }
-        | TyKind::FnPtr(_)
-        | TyKind::Adt { .. }
-        | TyKind::Tuple(_)
-        | TyKind::Array { .. }
-        | TyKind::Slice(_) => true,
-        // A `Param`-typed generic argument is a template-internal call site -
-        // a recursive generic's self-call (`fn rec<T>(..) { rec(..) }`) carries
-        // `substs = [T]`, or a scalar generic keeps calling its template. It is
-        // not a concrete instantiation; the real instantiations are checked
-        // when their own (concrete) substs are observed. Rejecting it was a
-        // false positive that blocked recursive generics from compiling.
-        TyKind::Param { .. } => true,
-        TyKind::Closure { .. } | TyKind::Alias { .. } => false,
-        _ => false,
-    }
-}
-
-/// Best-effort one-line spelling of a `Ty` for the diagnostic.
-/// Intentionally terse - full type printing lives in
-/// `gossamer-types::printer`; we don't want to drag the printer
-/// crate's full dependency surface into the MIR diagnostic path.
-fn render_ty_for_diagnostic(tcx: &TyCtxt, ty: Ty) -> String {
-    match tcx.kind_of(ty) {
-        TyKind::Bool => "bool".to_string(),
-        TyKind::Char => "char".to_string(),
-        TyKind::String => "String".to_string(),
-        TyKind::Int(_) => "int".to_string(),
-        TyKind::Float(_) => "float".to_string(),
-        TyKind::Unit => "()".to_string(),
-        TyKind::Never => "!".to_string(),
-        TyKind::Tuple(_) => "tuple".to_string(),
-        TyKind::Array { .. } => "array".to_string(),
-        TyKind::Slice(_) => "slice".to_string(),
-        TyKind::Vec(_) => "Vec<...>".to_string(),
-        TyKind::HashMap { .. } => "HashMap<...>".to_string(),
-        TyKind::Sender(_) => "Sender<...>".to_string(),
-        TyKind::Receiver(_) => "Receiver<...>".to_string(),
-        TyKind::JoinHandle(_) => "JoinHandle<...>".to_string(),
-        TyKind::Ref { .. } => "&T".to_string(),
-        TyKind::FnDef { .. } => "fn-item".to_string(),
-        TyKind::FnPtr(_) => "fn-pointer".to_string(),
-        TyKind::Closure { .. } => "closure".to_string(),
-        TyKind::Adt { .. } => "named struct/enum".to_string(),
-        TyKind::Alias { .. } => "alias".to_string(),
-        _ => "<unrenderable>".to_string(),
-    }
+    bodies
+        .iter()
+        .filter(|body| body_has_param(body, tcx))
+        .map(|body| {
+            let locals: Vec<String> = body
+                .locals
+                .iter()
+                .enumerate()
+                .filter(|(_, local)| ty_contains_param(tcx, local.ty))
+                .map(|(index, local)| {
+                    format!(
+                        "_{index}: {}",
+                        gossamer_types::printer::render_ty(tcx, local.ty)
+                    )
+                })
+                .collect();
+            format!(
+                "internal compiler error: the generic body `{}` reached code \
+                 generation without an instantiation for its type parameters ({})",
+                body.name,
+                locals.join(", ")
+            )
+        })
+        .collect()
 }
 
 /// Returns the stable mangled name for a specialised copy of
@@ -1454,6 +1744,10 @@ pub fn mangled_name(def: DefId, substs: &Substs) -> String {
             GenericArg::Const(c) => {
                 out.push('c');
                 out.push_str(&c.to_string());
+            }
+            GenericArg::ConstParam(idx) => {
+                out.push('p');
+                out.push_str(&idx.0.to_string());
             }
         }
     }
@@ -1502,9 +1796,9 @@ mod tests {
         };
         let before = body.locals[1].ty;
         let mut bodies = vec![body];
-        monomorphise(&mut bodies, &mut tcx);
+        monomorphise(&gossamer_hir::HirProgram::default(), &mut bodies, &mut tcx);
         assert_eq!(bodies[0].locals[1].ty, before);
-        monomorphise(&mut bodies, &mut tcx);
+        monomorphise(&gossamer_hir::HirProgram::default(), &mut bodies, &mut tcx);
         assert_eq!(bodies[0].locals[1].ty, before);
     }
 }

@@ -1,0 +1,53 @@
+// Wrapping arithmetic: `+%`, `-%`, `*%` and their compound forms wrap at the
+// operands' declared width on every tier and every profile, where `+`, `-`,
+// and `*` check for overflow.
+
+fn djb2(text: String) -> u32 {
+    let mut hash: u32 = 5381
+    for b in text.bytes() { hash = (hash << 5) +% hash +% b as u32 }
+    hash
+}
+
+fn fnv1a(bytes: [u8]) -> u32 {
+    let mut hash: u32 = 2166136261
+    for b in bytes {
+        hash ^= b as u32
+        hash *%= 16777619
+    }
+    hash
+}
+
+struct Acc { total: u16 }
+
+fn main() {
+    let a: u8 = 250
+    println("u8 {} {} {}", a +% 10, a -% 255, a *% 3)
+    let b: i8 = 127
+    println("i8 {} {} {}", b +% 1, (-b) -% 2, b *% 2)
+    let c: u16 = 65535
+    let d: i16 = -32768
+    println("16 {} {}", c +% 2, d -% 1)
+    let e: u32 = 4000000000
+    let f: i32 = 2147483647
+    println("32 {} {}", e +% 500000000, f +% f)
+    let g: u64 = 0
+    let h: i64 = -9223372036854775807 - 1
+    println("64 {} {} {}", g -% 1, h -% 1, h *% -1)
+    let prec: u8 = 200
+    println("prec {}", prec +% prec *% 2)
+    let mut acc = Acc { total: 65000 }
+    for _ in 0..10 { acc.total +%= 100 }
+    println("field {}", acc.total)
+    let mut x: u32 = 1
+    let mut y: u32 = 2
+    x, y *%= 4000000000, 3000000000
+    println("pair {} {}", x, y)
+    let mut counts: Vec<i64> = #[9223372036854775807, 0]
+    counts[0] +%= 1
+    counts[1] -%= 1
+    println("index {:?}", counts)
+    let byte_step: u8 = 250
+    println("byte {}", byte_step +% b'z')
+    println("djb2 {}", djb2("wrapping arithmetic across tiers"))
+    println("fnv {}", fnv1a("gossamer".as_bytes()))
+}

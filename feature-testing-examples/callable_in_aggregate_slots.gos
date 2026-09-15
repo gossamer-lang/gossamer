@@ -1,0 +1,82 @@
+// A function item, a generic function, and a closure that captures nothing
+// stored in every kind of slot a value can fill: a Vec literal, a pushed and
+// an inserted element, a fixed array, a struct field, a tuple position, and an
+// enum payload. Each one is read back and called.
+
+struct Op {
+    f: Fn(f64) -> f64
+    n: i64
+}
+
+enum Step {
+    Apply(Fn(i64) -> i64)
+    Skip
+}
+
+fn dbl(x: f64) -> f64 {
+    x * 2.0
+}
+
+fn inc(x: i64) -> i64 {
+    x + 1
+}
+
+fn ident<T>(x: T) -> T {
+    x
+}
+
+fn run(steps: Vec<Step>, start: i64) -> i64 {
+    let mut acc = start
+    for s in steps {
+        match s {
+            Step::Apply(f) => acc = f(acc)
+            Step::Skip => acc += 100
+        }
+    }
+    acc
+}
+
+fn main() {
+    let fs: Vec<Fn(f64) -> f64> = #[ident, dbl, |x| x + 0.25]
+    let mut acc = 1.5
+    for f in fs {
+        acc = f(acc)
+    }
+    println("vec literal {}", acc)
+    let picked = fs[1]
+    println("indexed {} {}", picked(4.0), fs[2](1.0))
+
+    let mut pushed: Vec<Fn(f64) -> f64> = #[]
+    pushed.push(dbl)
+    pushed.push(|x| x - 1.0)
+    pushed.push(ident)
+    let _ = pushed.insert(0, |x| x * 10.0)
+    let mut p = 0.5
+    for f in pushed {
+        p = f(p)
+    }
+    println("pushed {} {}", p, pushed.len())
+
+    let closures = #[|x: i64| x * 3, |x: i64| x - 2]
+    let mut c = 4
+    for f in closures {
+        c = f(c)
+    }
+    println("closures {}", c)
+
+    let arr: [Fn(i64) -> i64; 2] = [inc, |x| x * 5]
+    println("array {} {}", arr[0](1), arr[1](2))
+
+    let op = Op { f: dbl, n: 3 }
+    let g = op.f
+    println("struct {} {}", g(1.25), op.n)
+    let anon = Op { f: |x| x + 1.0, n: 4 }
+    let h = anon.f
+    println("struct closure {} {}", h(1.25), anon.n)
+
+    let t: (Fn(f64) -> f64, i64) = (dbl, 2)
+    let tf = t.0
+    println("tuple {} {}", tf(0.75), t.1)
+
+    println("enum {}", run(#[Step::Apply(inc), Step::Skip, Step::Apply(|x| x * 2)], 1))
+}

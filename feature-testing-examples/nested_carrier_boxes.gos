@@ -1,0 +1,102 @@
+// An `Option` / `Result` whose payload is itself a carrier keeps that inner
+// carrier in a counted box, and the box owns the inner payload. Every reader
+// that answers the inner carrier - `unwrap`, `expect`, `unwrap_or`, a nested
+// pattern, a map read - hands back two words the box still owns, so each
+// answer takes a share of its own. Each check allocates over what it built
+// before reading it back, so an answer naming a released block reads whatever
+// the later allocation put there, and the text is part of every answer.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::{option, result}
+
+fn inner(i: i64) -> Option<String> {
+    if i % 3 == 0 { None } else { Some("in" + i.to_string()) }
+}
+
+fn wrap(i: i64) -> Option<Option<String>> {
+    if i % 2 == 0 { None } else { Some(inner(i)) }
+}
+
+fn parse(i: i64) -> Result<Option<String>, String> {
+    if i % 5 == 0 { Err("bad" + i.to_string()) } else { Ok(inner(i)) }
+}
+
+fn churn(i: i64) -> i64 {
+    let mut junk: Vec<String> = #[]
+    for k in 0..6 {
+        junk.push("junk" + (i * 10 + k).to_string())
+    }
+    junk.len()
+}
+
+fn describe(o: Option<String>) -> String {
+    match o {
+        Some(s) => s
+        None => "none"
+    }
+}
+
+fn unwrap_forms(i: i64) -> String {
+    let d = Some(inner(i + 1))
+    let e = d.unwrap()
+    let f = Some(inner(i + 2)).expect("present")
+    let g = option::unwrap(Some(inner(i + 4)))
+    let h = wrap(i).unwrap_or(Some("fallback"))
+    let k = option::unwrap_or(wrap(i + 1), Some("free"))
+    let m = wrap(i + 3).unwrap_or_else(|| Some("lazy"))
+    let n = option::unwrap_or_else(wrap(i + 5), || Some("lazy free"))
+    let q = result::unwrap_or_else(parse(i + 4), |e| Some(e))
+    let _ = churn(i)
+    describe(e) + "," + describe(f) + "," + describe(g) + "," + describe(h) + "," + describe(k) + ","
+    + describe(m) + "," + describe(n) + "," + describe(q)
+}
+
+fn read_twice(i: i64) -> String {
+    let w = wrap(i)
+    let mut out = ""
+    if let Some(Some(s)) = w {
+        out = out + s
+    }
+    let _ = churn(i)
+    if let Some(Some(s)) = w {
+        out = out + "|" + s
+    }
+    out
+}
+
+fn chain(i: i64) -> Result<i64, String> {
+    let v = parse(i)?
+    Ok(match v {
+        Some(s) => s.len()
+        None => 0
+    })
+}
+
+fn in_containers(rounds: i64) -> String {
+    let mut kept: Vec<Option<Option<String>>> = #[]
+    let mut m: Map<i64, Option<String>> = Map::new()
+    for i in 0..rounds {
+        kept.push(wrap(i))
+        m.insert(i % 5, inner(i))
+    }
+    let _ = churn(rounds)
+    let mut out = ""
+    for k in kept {
+        if let Some(Some(s)) = k {
+            out = out + s + ";"
+        }
+    }
+    let got = m.get(1).unwrap()
+    let filled = m.or_insert(7, Some("x"))
+    let fallback = m.get_or(9, Some("d"))
+    out + format("{:?} {:?} {:?} {}", got, filled, fallback, m.len())
+}
+
+fn main() {
+    let mut i = 0
+    while i < 12 {
+        println("{} [{}] {:?}", unwrap_forms(i), read_twice(i), chain(i))
+        i += 1
+    }
+    println("{}", in_containers(20))
+}

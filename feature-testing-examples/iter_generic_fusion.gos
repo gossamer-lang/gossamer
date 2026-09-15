@@ -1,0 +1,94 @@
+// Method chains inside generic bodies, instantiated with scalar, String,
+// struct, and tuple elements, answer what the unfused chain answers and call
+// each closure as often.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn count_above<T: Ord>(xs: Vec<T>, lo: T) -> i64 {
+    xs.iter().filter(|v| v > lo).count()
+}
+
+fn first_above<T: Ord>(xs: Vec<T>, lo: T) -> Option<T> {
+    xs.iter().find(|v| v > lo)
+}
+
+fn index_of<T: Eq>(xs: Vec<T>, want: T) -> Option<i64> {
+    xs.iter().position(|v| v == want)
+}
+
+fn keep_below<T: Ord>(xs: Vec<T>, hi: T) -> Vec<T> {
+    xs.iter().filter(|v| v < hi).collect()
+}
+
+fn any_equal<T: Eq>(xs: Vec<T>, want: T) -> bool {
+    xs.iter().any(|v| v == want)
+}
+
+fn all_differ<T: Eq>(xs: Vec<T>, avoid: T) -> bool {
+    xs.iter().all(|v| v != avoid)
+}
+
+fn tally<T: Ord>(xs: Vec<T>, lo: T) -> i64 {
+    xs.iter().fold(0, |acc, v| if v > lo { acc + 1 } else { acc })
+}
+
+fn every_other<T>(xs: Vec<T>) -> Vec<T> {
+    xs.iter().step_by(2).collect()
+}
+
+fn skipped_pairs<T>(xs: Vec<T>) -> Vec<(i64, T)> {
+    xs.iter().enumerate().skip(1).take(2).collect()
+}
+
+fn traced<T: Ord>(xs: Vec<T>, lo: T, mut seen: Vec<i64>) -> i64 {
+    xs.iter().map(|v| {
+        seen.push(1)
+        v
+    }).filter(|v| v > lo).take(2).count()
+}
+
+fn value_count<K, V: Ord>(m: Map<K, V>, lo: V) -> i64 {
+    m.values().filter(|v| v > lo).count()
+}
+
+fn main() {
+    let ints = #[5, 1, 9, 3, 7, 2]
+    let floats = #[0.5, 2.25, -1.0, 8.5]
+    let chars = #['q', 'a', 'z', 'm']
+    let words = #["pear", "apple", "zebra", "fig"]
+    let points = #[Point { x: 1, y: 2 }, Point { x: 3, y: 0 }, Point { x: 1, y: 5 }]
+    let pairs = #[(2, "b"), (1, "z"), (2, "a")]
+
+    println("count {} {} {} {} {}", count_above(ints, 4), count_above(floats, 0.0), count_above(chars, 'l'), count_above(words, "c"), count_above(pairs, (1, "zz")))
+    println("first {:?} {:?} {:?} {:?}", first_above(ints, 6), first_above(floats, 9.0), first_above(words, "b"), first_above(pairs, (2, "a")))
+    println("index {:?} {:?} {:?}", index_of(words, "zebra"), index_of(chars, 'x'), index_of(points, Point { x: 3, y: 0 }))
+    println("below {:?} {:?} {:?}", keep_below(ints, 6), keep_below(words, "g"), keep_below(pairs, (2, "a")))
+    println("any {} {} all {} {}", any_equal(words, "fig"), any_equal(ints, 4), all_differ(chars, 'b'), all_differ(points, Point { x: 1, y: 5 }))
+    println("tally {} {}", tally(ints, 2), tally(words, "fig"))
+    println("every_other {:?} {:?}", every_other(words), every_other(points).len())
+    println("skipped {:?} {:?}", skipped_pairs(ints), skipped_pairs(words))
+
+    let mut seen = #[]
+    let hits = traced(words, "b", seen)
+    println("traced {} seen {}", hits, seen.len())
+
+    let mut stock: Map<String, i64> = Map::new()
+    stock.insert("bolts", 40)
+    stock.insert("nuts", 3)
+    stock.insert("washers", 12)
+    println("stocked {}", value_count(stock, 10))
+
+    let mut total = 0
+    for round in 0..200 {
+        let fresh = #[format("w{round}"), "a", format("z{round}")]
+        total += count_above(fresh, "b") + keep_below(fresh, "m").len()
+        let found = first_above(fresh, "x")
+        if found.is_some() {
+            total += 1
+        }
+    }
+    println("rounds {}", total)
+}

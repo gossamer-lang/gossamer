@@ -54,10 +54,15 @@ pub(crate) fn shape_char(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -
     match tcx.kind_of(ty) {
         TyKind::Bool => 'b',
         TyKind::Char => 'c',
+        // A narrow integer's thunk widens its result to a whole word, which
+        // takes the sign for a signed width and zeroes for an unsigned one.
         TyKind::Int(int) => match int {
-            It::I8 | It::U8 => 'y',
-            It::I16 | It::U16 => 'k',
-            It::I32 | It::U32 => 'j',
+            It::I8 => 'y',
+            It::U8 => 'Y',
+            It::I16 => 'k',
+            It::U16 => 'K',
+            It::I32 => 'j',
+            It::U32 => 'J',
             It::I64 | It::U64 | It::Isize | It::Usize | It::I128 | It::U128 => 'i',
         },
         TyKind::Float(f) => match f {

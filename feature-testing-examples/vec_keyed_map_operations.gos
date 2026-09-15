@@ -1,0 +1,79 @@
+// A map keyed by a `Vec`, or by an aggregate holding one, inserts, reads,
+// counts, removes, and snapshots its keys identically on every tier, including
+// when the map and its keys are rebuilt every turn of a loop.
+
+fn rebuilt(rounds: i64) -> i64 {
+    let mut total = 0
+    for i in 0..rounds {
+        let mut by_path: Map<Vec<i64>, i64> = Map::new()
+        by_path.insert(#[i, 2], 3)
+        by_path.insert(#[i, 2], 4)
+        total += by_path.keys().len() + by_path.get(#[i, 2]).unwrap_or(0)
+    }
+    total
+}
+
+fn lookups(rounds: i64) -> (i64, i64) {
+    let mut total = 0
+    let mut lookup: Map<Vec<i64>, i64> = Map::new()
+    for i in 0..rounds {
+        lookup.insert(#[i % 7], i)
+        total += lookup.get_or(#[i % 3], 0)
+        if lookup.contains_key(#[i % 5]) {
+            total += 1
+        }
+        total += lookup.or_insert(#[i % 11, 1], i)
+    }
+    (total, lookup.len())
+}
+
+fn counted(rounds: i64) -> Option<i64> {
+    let mut counts: Map<Vec<i64>, i64> = Map::new()
+    for i in 0..rounds {
+        counts.inc(#[i % 4])
+    }
+    counts.get(#[2])
+}
+
+fn shrinking(rounds: i64) -> String {
+    let mut total = 0
+    let mut by_path: Map<Vec<i64>, i64> = Map::new()
+    for i in 0..rounds {
+        by_path.insert(#[i % 5, 1], i)
+        let popped = by_path.pop(#[(i + 2) % 5, 1])
+        let removed = by_path.remove(#[(i + 4) % 5, 1])
+        total += popped.unwrap_or(-1) + removed.unwrap_or(-1)
+    }
+    format("{} {} {:?}", total, by_path.len(), by_path.keys())
+}
+
+fn pairs(rounds: i64) -> (i64, i64) {
+    let mut total = 0
+    let mut by_pair: Map<(Vec<i64>, i64), i64> = Map::new()
+    for i in 0..rounds {
+        by_pair.insert((#[i % 3], i % 2), i)
+        total += by_pair.remove((#[(i + 1) % 3], (i + 1) % 2)).unwrap_or(0)
+    }
+    (total, by_pair.len())
+}
+
+fn seen(rounds: i64) -> (i64, i64) {
+    let mut total = 0
+    let mut seen: Set<Vec<i64>> = Set::new()
+    for i in 0..rounds {
+        seen.insert(#[i % 6])
+        if i % 4 == 0 && seen.remove(#[i % 6]) {
+            total += 1
+        }
+    }
+    (total, seen.len())
+}
+
+fn main() {
+    println("rebuilt {}", rebuilt(40))
+    println("lookup {:?}", lookups(30))
+    println("counts {:?}", counted(25))
+    println("shrinking {}", shrinking(30))
+    println("pairs {:?}", pairs(20))
+    println("seen {:?}", seen(30))
+}

@@ -419,7 +419,10 @@ impl<'a> Builder<'a> {
                 self.tcx.intern(gossamer_types::TyKind::Vec(s))
             }
             "gos_rt_sync_map_get" => self.option_string_adt_ty(),
-            "gos_rt_map_keys_i64" | "gos_rt_map_values_i64" => {
+            "gos_rt_map_keys_i64"
+            | "gos_rt_map_values_i64"
+            | "gos_rt_map_keys_u64"
+            | "gos_rt_map_values_u64" => {
                 let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
                 self.tcx.intern(gossamer_types::TyKind::Vec(i))
             }
@@ -458,6 +461,13 @@ impl<'a> Builder<'a> {
                 let value_ty = self.hash_map_kv_tys(receiver_ty).map(|(_, v)| v);
                 match value_ty.map(|v| self.tcx.kind_of(v).clone()) {
                     Some(TyKind::Vec(_) | TyKind::Slice(_)) => {
+                        value_ty.expect("kind matched above")
+                    }
+                    // A two-word carrier is answered as the address of its box,
+                    // which the backend reads the carrier back out of.
+                    Some(TyKind::Adt { def, .. })
+                        if def.local == u32::MAX || def.local == u32::MAX - 1 =>
+                    {
                         value_ty.expect("kind matched above")
                     }
                     _ => self.tcx.int_ty(gossamer_types::IntTy::I64),
@@ -530,6 +540,9 @@ impl<'a> Builder<'a> {
             | "gos_rt_min_i64"
             | "gos_rt_max_i64"
             | "gos_rt_clamp_i64" => self.tcx.int_ty(gossamer_types::IntTy::I64),
+            "gos_rt_min_u64" | "gos_rt_max_u64" | "gos_rt_clamp_u64" => {
+                self.tcx.int_ty(gossamer_types::IntTy::U64)
+            }
             "gos_rt_str_strip_chars"
             | "gos_rt_str_lstrip_chars"
             | "gos_rt_str_rstrip_chars"
@@ -616,7 +629,8 @@ impl<'a> Builder<'a> {
             | "gos_rt_map_pop_str"
             | "gos_rt_map_pop_typed_str"
             | "gos_rt_deque_pop_front"
-            | "gos_rt_lazy_iter_next_i64" => {
+            | "gos_rt_lazy_iter_next_i64"
+            | "gos_rt_lazy_iter_next_pair_i64" => {
                 use gossamer_types::TyKind;
                 if matches!(self.tcx.kind_of(ty), TyKind::Adt { .. }) {
                     ty
@@ -771,7 +785,7 @@ impl<'a> Builder<'a> {
                 let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
                 self.tcx.intern(gossamer_types::TyKind::Vec(i))
             }
-            "gos_rt_map_keys_vec" => {
+            "gos_rt_map_keys_vec" | "gos_rt_map_keys_vec_u64" => {
                 // The element type is the map's KEY type, so a bound
                 // `let ks = m.keys()` on a `HashMap<String, _>` iterates
                 // strings rather than reading the key pointers as i64.
@@ -792,7 +806,21 @@ impl<'a> Builder<'a> {
             // box pointer (a single word) and field access derefs it, instead
             // of materialising an inline struct from the pointer bits. Scalar
             // and string values keep their direct element type.
-            "gos_rt_map_values_vec" => {
+            // The carriers themselves, read out of their boxes.
+            "gos_rt_map_values_carrier" | "gos_rt_map_values_carrier_u64" => {
+                use gossamer_types::TyKind;
+                let mut flat = receiver_ty;
+                while let TyKind::Ref { inner, .. } = self.tcx.kind_of(flat) {
+                    flat = *inner;
+                }
+                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                let elem = match self.tcx.kind_of(flat) {
+                    TyKind::HashMap { value, .. } => *value,
+                    _ => i64_ty,
+                };
+                self.tcx.intern(TyKind::Vec(elem))
+            }
+            "gos_rt_map_values_vec" | "gos_rt_map_values_vec_u64" => {
                 use gossamer_types::TyKind;
                 let mut flat = receiver_ty;
                 while let TyKind::Ref { inner, .. } = self.tcx.kind_of(flat) {
@@ -829,15 +857,20 @@ impl<'a> Builder<'a> {
             | "gos_rt_result_map_err_bare"
             | "gos_rt_result_map_bare" => {
                 use gossamer_types::TyKind;
-                // `map` answers the closure's value, not the receiver's.
-                // Typing the destination from the receiver would tell the
-                // drop pass that `Option<Struct>.map(|s| 1)` owns a pointer,
-                // and releasing the integer `1` as one faults.
-                let mapped_payload = if matches!(
-                    sym,
-                    "gos_rt_result_map" | "gos_rt_result_map_bare"
-                ) && self.is_option_adt(receiver_ty)
-                {
+                // `map` answers the closure's value, not the receiver's, in
+                // the arm it maps: `map` replaces the `Ok` / `Some` payload and
+                // `map_err` the `Err` one. Typing the destination from the
+                // receiver would tell the drop pass that
+                // `Option<Struct>.map(|s| 1)` owns a pointer, and releasing the
+                // integer `1` as one faults.
+                let maps_err = matches!(sym, "gos_rt_result_map_err" | "gos_rt_result_map_err_bare");
+                let mapped_payload = if maps_err || self.is_option_adt(receiver_ty) || {
+                    let mut t = receiver_ty;
+                    while let TyKind::Ref { inner, .. } = self.tcx.kind_of(t) {
+                        t = *inner;
+                    }
+                    matches!(self.tcx.kind_of(t), TyKind::Adt { def, .. } if def.local == u32::MAX)
+                } {
                     args.first()
                         .and_then(|closure| self.closure_expr_output_ty(closure))
                         .or_else(|| {
@@ -854,7 +887,25 @@ impl<'a> Builder<'a> {
                 } else {
                     None
                 };
-                if let Some(payload) = mapped_payload {
+                let mut receiver_adt = receiver_ty;
+                while let TyKind::Ref { inner, .. } = self.tcx.kind_of(receiver_adt) {
+                    receiver_adt = *inner;
+                }
+                let result_substs = match self.tcx.kind_of(receiver_adt) {
+                    TyKind::Adt { def, substs } if def.local == u32::MAX => {
+                        Some(substs.types().clone())
+                    }
+                    _ => None,
+                };
+                if let (Some(payload), Some(mut substs)) = (mapped_payload, result_substs)
+                    && substs.len() == 2
+                {
+                    substs[usize::from(maps_err)] = payload;
+                    self.tcx.intern(TyKind::Adt {
+                        def: gossamer_resolve::DefId::local(u32::MAX),
+                        substs: gossamer_types::Substs::from_types(substs),
+                    })
+                } else if let Some(payload) = mapped_payload.filter(|_| !maps_err) {
                     self.option_payload_adt_ty(payload)
                 } else {
                 let mut t = receiver_ty;
@@ -918,6 +969,8 @@ impl<'a> Builder<'a> {
             // to i64.
             "gos_rt_option_unwrap"
             | "gos_rt_result_unwrap"
+            | "gos_rt_option_unwrap_carrier"
+            | "gos_rt_result_unwrap_carrier"
             | "gos_rt_result_unwrap_or"
             | "gos_rt_result_ok" => self
                 .first_generic_of(receiver_ty)
@@ -970,6 +1023,10 @@ impl<'a> Builder<'a> {
                 self.tcx.dyn_value_ty()
             }
             "gos_rt_json_as_i64_opt" => self.option_i64_adt_ty(),
+            "gos_rt_json_as_u64_opt" => {
+                let u = self.tcx.int_ty(gossamer_types::IntTy::U64);
+                self.option_payload_adt_ty(u)
+            }
             "gos_rt_json_as_f64_opt" => self.option_f64_adt_ty(),
             "gos_rt_json_as_bool_opt" => self.option_bool_adt_ty(),
             "gos_rt_json_as_str_opt" => self.option_string_adt_ty(),
@@ -1102,7 +1159,7 @@ impl<'a> Builder<'a> {
         };
         let dest = self.fresh(pinned_ret);
         // Propagate element-struct tag so `xs.map_err(...)?[i].field`
-        // chains keep the DirInfo / other elem-struct annotations.
+        // chains keep their elem-struct annotations.
         if let Some(en) = self.local_elem_struct.get(&receiver_local).cloned() {
             self.local_elem_struct.insert(dest, en);
         }

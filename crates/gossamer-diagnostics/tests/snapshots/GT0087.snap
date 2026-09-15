@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0087]: `wrapping_add` or `wrapping_mul` was called as a method. Wrapping - here
+--- framed ---
+error[GT0087]: `wrapping_add` or `wrapping_mul` was called as a method. Wrapping
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -1,0 +1,141 @@
+// An `errors::Error` is reclaimed when its last holder lets go, wherever it
+// is held: a binding, a cause another error wraps, a `Result` arm, a struct
+// field, a tuple position, or a `Vec`. `map`, `and_then`, `map_err`, and
+// `or_else` give back the payload they hand their closure, an answer that
+// passes the receiver's error through holds a share of its own, a receiver
+// read again after `unwrap_or` keeps its value, and an error read out of a
+// `Vec` renders as the error it is.
+
+use std::{errors, fs, option, result}
+
+struct Failure {
+    code: i64
+    err: errors::Error
+}
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn located(i: i64) -> Result<Point, errors::Error> {
+    if i % 2 == 0 {
+        return Err(errors::new("unplaced"))
+    }
+    Ok(Point { x: i, y: 1 })
+}
+
+fn check(i: i64) -> Result<i64, errors::Error> {
+    if i % 2 == 0 {
+        return Err(errors::new("even"))
+    }
+    Ok(i)
+}
+
+fn layered(i: i64) -> Result<i64, errors::Error> {
+    let v = check(i).map_err(|e| errors::wrap(e, "layer"))?
+    Ok(v + 1)
+}
+
+fn read_missing(i: i64) -> Result<String, errors::Error> {
+    let path = "/nonexistent/dir/file-" + i.to_string()
+    let text = fs::read_to_string(path)?
+    Ok(text)
+}
+
+fn pair(i: i64) -> (Result<String, errors::Error>, i64) {
+    if i % 3 == 0 {
+        (Err(errors::new("third")), i)
+    } else {
+        (Ok("node-" + i.to_string()), i)
+    }
+}
+
+fn kept(i: i64) -> Result<String, errors::Error> {
+    let r, _n = pair(i)
+    r
+}
+
+fn measured(reply: Result<String, errors::Error>) -> i64 {
+    reply.unwrap_or("none").len()
+}
+
+fn ignored(i: i64) -> i64 {
+    let _r, n = pair(i)
+    n
+}
+
+fn main() {
+    let mut total = 0
+    let mut held: Vec<errors::Error> = #[]
+    let mut i = 0
+    while i < 400 {
+        match layered(i) {
+            Ok(v) => total += v
+            Err(e) => {
+                total += e.to_string().len()
+                if let Some(c) = e.cause() {
+                    total += c.message().len()
+                }
+            }
+        }
+        if read_missing(i).is_err() {
+            total += 1
+        }
+        let f = Failure { code: i, err: errors::new("f") }
+        total += f.code + f.err.message().len()
+        let text = check(i).map_err(|e| e.to_string())
+        match text {
+            Ok(v) => total += v
+            Err(s) => total += s.len()
+        }
+        let same = check(i).map_err(|e| e)
+        if same.is_err() {
+            total += 1
+        }
+        let named = check(i).map(|v| "v" + v.to_string())
+        match named {
+            Ok(s) => total += s.len()
+            Err(e) => total += e.message().len()
+        }
+        match kept(i) {
+            Ok(s) => total += s.len()
+            Err(e) => total += e.message().len()
+        }
+        total += ignored(i)
+        let reply = kept(i)
+        if reply.is_ok() {
+            total += 1
+        }
+        total += measured(reply) + reply.unwrap_or("fallback").len()
+        match reply {
+            Ok(s) => total += s.len()
+            Err(e) => total += e.message().len()
+        }
+        if check(i) |> result::err |> option::is_some {
+            total += 1
+        }
+        let spot = located(i)
+        match spot |> |v| result::map(v, |p: Point| p.x) {
+            Ok(v) => total += v
+            Err(e) => total += e.message().len()
+        }
+        match spot.and_then(|p| Ok(p.y)) {
+            Ok(v) => total += v
+            Err(e) => total += e.to_string().len()
+        }
+        match spot |> |v| result::or_else(v, |_e: errors::Error| Ok(Point { x: 2, y: 2 })) {
+            Ok(p) => total += p.x
+            Err(_) => total += 9
+        }
+        if i % 100 == 0 {
+            held.push(errors::wrap(errors::new("keep"), "held"))
+        }
+        let chained = errors::wrap(errors::wrap(errors::new("root"), "mid"), "top")
+        total += chained.chain().len()
+        i += 1
+    }
+    let first = held[0]
+    println("{} {} {} {}", total, held.len(), held[1], first)
+    println("{:?} {:?}", check(2).map_err(|e| e.to_string()), kept(3))
+}

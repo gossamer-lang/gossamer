@@ -186,3 +186,68 @@ pub(super) fn emit_array_bounds_check(
     builder.switch_to_block(ok);
     Ok(())
 }
+
+/// Address of element `idx` of the `Vec` / slice whose header is `handle`.
+///
+/// A null handle is an empty Vec. Both out-of-range shapes raise the same
+/// `vec index` panic the other tiers raise, so the address this answers is
+/// always inside the element buffer.
+pub(super) fn emit_vec_index_address(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    handle: ir::Value,
+    idx: ir::Value,
+    ptr_ty: ir::Type,
+) -> Result<ir::Value> {
+    let panic_fn = intrinsics.extern_fn_by_name(module, "gos_rt_panic_oob")?;
+    let what_data = intrinsics.intern_string(module, "vec index")?;
+
+    let nonnull = builder.create_block();
+    let null_fail = builder.create_block();
+    let is_null = builder.ins().icmp_imm_s(IntCC::Equal, handle, 0);
+    builder.ins().brif(is_null, null_fail, &[], nonnull, &[]);
+
+    builder.switch_to_block(null_fail);
+    builder.set_cold_block(null_fail);
+    let panic_ref = module.declare_func_in_func(panic_fn, builder.func);
+    let what_ptr = intrinsics.static_string_body_ptr(module, builder, what_data);
+    let zero = builder.ins().iconst(types::I64, 0);
+    let _ = builder.ins().call(panic_ref, &[what_ptr, idx, zero]);
+    builder.ins().trap(ir::TrapCode::user(5).unwrap());
+
+    builder.switch_to_block(nonnull);
+    let len = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), handle, 0);
+    // Unsigned >=: a negative index wraps past every length.
+    let oob = builder
+        .ins()
+        .icmp(IntCC::UnsignedGreaterThanOrEqual, idx, len);
+    let in_range = builder.create_block();
+    let oob_fail = builder.create_block();
+    builder.ins().brif(oob, oob_fail, &[], in_range, &[]);
+
+    builder.switch_to_block(oob_fail);
+    builder.set_cold_block(oob_fail);
+    let panic_ref = module.declare_func_in_func(panic_fn, builder.func);
+    let what_ptr = intrinsics.static_string_body_ptr(module, builder, what_data);
+    let _ = builder.ins().call(panic_ref, &[what_ptr, idx, len]);
+    builder.ins().trap(ir::TrapCode::user(5).unwrap());
+
+    builder.switch_to_block(in_range);
+    let stride32 = builder
+        .ins()
+        .load(types::I32, MemFlagsData::trusted(), handle, 16);
+    let stride = builder.ins().uextend(types::I64, stride32);
+    let off64 = builder.ins().imul(idx, stride);
+    let off = if ptr_ty == types::I64 {
+        off64
+    } else {
+        builder.ins().ireduce(ptr_ty, off64)
+    };
+    let data = builder
+        .ins()
+        .load(ptr_ty, MemFlagsData::trusted(), handle, 24);
+    Ok(builder.ins().iadd(data, off))
+}

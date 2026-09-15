@@ -1132,10 +1132,40 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "`sql::statement` was handed something other than a literal. The statement is checked while the program is compiled, so it has to be there to check; a statement built at run time is an ordinary `String` and needs no wrapper.",
     ),
     (
+        "GT0087",
+        "Types",
+        "wrapping arithmetic written as a method",
+        "Wrapping arithmetic has one spelling, the operator: `x +% y`, `x -% y`, and `x *% y` wrap at the operands' declared width on every tier. `x.wrapping_add(y)` and `x.wrapping_mul(y)` are not integer methods; `gos check --fix` rewrites them.",
+    ),
+    (
+        "GT0088",
+        "Types",
+        "const generic argument not inferred",
+        "A call to a function with a const generic parameter gave it no value. A const parameter takes its value from the call: an explicit `f::<4>(..)` argument, or the length of an array argument whose type names it. Name the value with a turbofish.",
+    ),
+    (
+        "GT0089",
+        "Types",
+        "unsupported vector type or operation",
+        "A `Simd` or `Mask` vector named an element type, a lane count, or an operation the vector type does not support. `Simd<T, N>` takes `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` lanes and `N` of 2, 4, 8, or 16 (16 for `u8`, `i32`, and `u32`); `Simd::splat` takes its lane count from the annotated type.",
+    ),
+    (
         "GP0056",
         "Parser",
         "retired cohort isolation spelling",
         "`context::Context` is the cancellation type a cohort may one day inherit; this setting decides whether a child gets an OS thread of its own, so it is `isolation: Isolation::Shared` or `isolation: Isolation::Thread`. `--fix` rewrites it.",
+    ),
+    (
+        "GP0057",
+        "Parser",
+        "literal regex pattern that does not compile",
+        "A string literal handed to `regex::compile` is not a pattern the regex engine compiles. The literal is compiled while the program is parsed, with the engine and settings `regex::compile` uses at run time, so the call would only ever answer `Err`.",
+    ),
+    (
+        "GP0058",
+        "Parser",
+        "malformed literal SQL statement",
+        "A string literal handed to `sql::statement` is not a well-formed statement: it is empty, or its parentheses do not balance. The statement is checked while the program is parsed.",
     ),
     (
         "GP0053",

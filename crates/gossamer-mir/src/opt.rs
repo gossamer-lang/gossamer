@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 include!("opt/entry.rs");
+include!("opt/unbox_carriers.rs");
 include!("opt/reserve.rs");
 include!("opt/inline.rs");
 include!("opt/simple_passes.rs");

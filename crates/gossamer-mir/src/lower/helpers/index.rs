@@ -266,6 +266,18 @@ pub(crate) fn arg_is_float(tcx: &gossamer_types::TyCtxt, expr: &HirExpr) -> bool
     matches!(tcx.kind_of(expr.ty), TyKind::Float(_))
 }
 
+/// True when `expr` types as `u64` / `usize` (peeling references). Used by
+/// the `min`/`max`/`clamp` dispatch: those words order unsigned, so they take
+/// the unsigned helpers and keep their own type.
+pub(crate) fn arg_is_unsigned64(tcx: &gossamer_types::TyCtxt, expr: &HirExpr) -> bool {
+    use gossamer_types::{IntTy, TyKind};
+    let mut walk = expr.ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(walk) {
+        walk = *inner;
+    }
+    matches!(tcx.kind_of(walk), TyKind::Int(IntTy::U64 | IntTy::Usize))
+}
+
 /// True when `expr` types as `char` (peeling references). Used by the
 /// `min`/`max`/`clamp` dispatch to keep the result `char`-typed - the
 /// codepoint compares correctly as an i64, but the result must print as a

@@ -59,6 +59,18 @@ fn main() {
   parameters). Each construction site is a separate monomorphisation;
   parameters are inferred from the field values at the call site.
   Runs under `gos` and `gos build`.
+- **`const_generics.gos`** - a `const N: usize` parameter as a value:
+  `N as i64`, `[0; N]`, a turbofish (`zeros::<4>()`), a `Ring<const N: usize>`
+  struct whose methods read `N`, and a `Grid<const N: usize>` enum whose payload
+  names it. Identical output on every tier.
+- **`wrapping_hash.gos`** - wrapping arithmetic with `+%`, `-%`, `*%` and
+  their compound forms: a djb2 and an FNV-1a string hash over `u32`, a `u8`
+  countdown past zero, and an `i32` total past its maximum. Identical output on
+  every tier and in every build profile.
+- **`simd_lanes.gos`** - lane vectors: `Simd::from_array`, `Simd::splat`,
+  lane-wise arithmetic, a `dot` generic over its lane count, a `Mask` from
+  `lanes_lt` feeding `select`, integer `abs` and `reduce_max`, wrapping lanes,
+  and `Simd::load` / `store` over a `Vec`. Identical output on every tier.
 - **`trait_bounds.gos`** - generic functions with trait bounds dispatched
   statically. One `report<T: Shape>(s: &T)` serves every type that
   implements `Shape`; the bound is enforced at compile time and each

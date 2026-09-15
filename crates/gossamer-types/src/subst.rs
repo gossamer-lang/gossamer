@@ -13,6 +13,10 @@ pub enum GenericArg {
     /// pre-evaluated i128 so that trait solving can treat equal values
     /// as equal without re-evaluating expressions.
     Const(i128),
+    /// A const argument that is the enclosing item's own const generic
+    /// parameter at this position - the `N` in `impl<const N: usize> Ring<N>`.
+    /// A use site substitutes the value the instantiation carries.
+    ConstParam(crate::ParamIdx),
 }
 
 /// Ordered list of generic arguments attached to an item reference.
@@ -73,7 +77,7 @@ impl Substs {
             .iter()
             .filter_map(|arg| match arg {
                 GenericArg::Type(ty) => Some(*ty),
-                GenericArg::Const(_) => None,
+                GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
             })
             .collect()
     }

@@ -16,7 +16,7 @@ use gossamer_types::TyCtxt;
 fn monomorphise_is_a_no_op_on_an_empty_program() {
     let mut bodies = Vec::new();
     let mut tcx = TyCtxt::new();
-    monomorphise(&mut bodies, &mut tcx);
+    monomorphise(&gossamer_hir::HirProgram::default(), &mut bodies, &mut tcx);
     assert!(bodies.is_empty());
 }
 

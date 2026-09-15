@@ -3,11 +3,13 @@
 
 #![forbid(unsafe_code)]
 
+use std::time::{Duration, Instant};
+
 use anyhow::anyhow;
 use gossamer_ast::SourceFile;
 use gossamer_codegen_cranelift::{NativeObject, compile_to_object, emit_module};
 use gossamer_hir::{lift_closures, lower_source_file};
-use gossamer_lex::SourceMap;
+use gossamer_lex::{FileId, SourceMap};
 use gossamer_mir::{
     Body, check_generic_layouts, inline_general, inline_small_callees, inline_trivial_wrappers,
     lower_program, optimise, optimise_debug,
@@ -147,6 +149,24 @@ pub struct ReleaseBuildPaths {
     pub llvm_object_count: usize,
     /// Paths to the LLVM-emitted per-body object files.
     pub llvm_objects: Vec<std::path::PathBuf>,
+    /// Where the build's time between the checked front end and LLVM went.
+    pub mir_phases: MirPhaseTimes,
+}
+
+/// Wall time of each step from the checked front end to the MIR handed to
+/// LLVM, so a slow build names the step that holds it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MirPhaseTimes {
+    /// AST to HIR, closure lifting included.
+    pub hir: Duration,
+    /// HIR to MIR bodies.
+    pub mir_lower: Duration,
+    /// Reachability pruning and generic specialisation.
+    pub specialise: Duration,
+    /// The profile's MIR optimisation passes.
+    pub passes: Duration,
+    /// The backend invariant and generic-layout checks.
+    pub verify: Duration,
 }
 
 /// Path-oriented variant of
@@ -173,10 +193,12 @@ pub fn compile_at_paths_from_frontend(
     } else {
         MirProfile::Debug
     };
-    let (bodies, tcx, prune) = lower_to_mir_reporting_prune(checked, profile);
+    let (bodies, tcx, prune, mut mir_phases) = lower_to_mir_reporting_prune(checked, profile);
     let body_count = bodies.len();
+    let started = Instant::now();
     enforce_mir_backend_invariants(&bodies, &tcx)?;
     enforce_generic_abi(&bodies, &tcx)?;
+    mir_phases.verify = started.elapsed();
     let (llvm_objects, triple, fallback_bodies) =
         gossamer_codegen_llvm::compile_with_fallback_at_path(&bodies, &tcx, llvm_obj_dir)?;
     debug_assert!(fallback_bodies.is_empty());
@@ -188,6 +210,7 @@ pub fn compile_at_paths_from_frontend(
         pruned_count: prune.pruned,
         llvm_object_count: llvm_objects.len(),
         llvm_objects,
+        mir_phases,
     })
 }
 
@@ -233,7 +256,7 @@ fn lower_to_mir_from_frontend(
     checked: CheckedFrontend,
     profile: MirProfile,
 ) -> (Vec<Body>, TyCtxt) {
-    let (bodies, tcx, _) = lower_to_mir_reporting_prune(checked, profile);
+    let (bodies, tcx, _, _) = lower_to_mir_reporting_prune(checked, profile);
     (bodies, tcx)
 }
 
@@ -242,16 +265,22 @@ fn lower_to_mir_from_frontend(
 fn lower_to_mir_reporting_prune(
     checked: CheckedFrontend,
     profile: MirProfile,
-) -> (Vec<Body>, TyCtxt, gossamer_mir::PruneReport) {
+) -> (Vec<Body>, TyCtxt, gossamer_mir::PruneReport, MirPhaseTimes) {
     let CheckedFrontend {
         sf,
         resolutions,
         table,
         mut tcx,
     } = checked;
+    let mut phases = MirPhaseTimes::default();
+    let started = Instant::now();
     let hir = lower_source_file(&sf, &resolutions, &table, &mut tcx);
     let hir = lift_closures(hir, &mut tcx);
+    phases.hir = started.elapsed();
+    let started = Instant::now();
     let mut bodies = lower_program(&hir, &mut tcx);
+    phases.mir_lower = started.elapsed();
+    let started = Instant::now();
     // Twice, for two different reasons. The first pass keeps every
     // method whatever the graph says, because specialisation is where a
     // trait call through a type parameter becomes a call to a concrete
@@ -267,12 +296,14 @@ fn lower_to_mir_reporting_prune(
         &roots,
         gossamer_mir::Scope::BeforeSpecialisation,
     );
-    gossamer_mir::monomorphise(&mut bodies, &mut tcx);
+    gossamer_mir::monomorphise(&hir, &mut bodies, &mut tcx);
     let late = gossamer_mir::prune_unreachable(&mut bodies, &roots);
     let prune = gossamer_mir::PruneReport {
         kept: late.kept,
         pruned: early.pruned + late.pruned,
     };
+    phases.specialise = started.elapsed();
+    let started = Instant::now();
     match profile {
         // Debug deliberately keeps calls intact and runs only the inexpensive
         // canonicalisation needed by native codegen. This is both faster to
@@ -294,7 +325,8 @@ fn lower_to_mir_reporting_prune(
             }
         }
     }
-    (bodies, tcx, prune)
+    phases.passes = started.elapsed();
+    (bodies, tcx, prune, phases)
 }
 
 /// Surfaces the Tier B6.3 generic-ABI check as an `anyhow::Error`
@@ -329,18 +361,33 @@ fn enforce_mir_backend_invariants(bodies: &[Body], tcx: &TyCtxt) -> anyhow::Resu
     }
 }
 
-/// Hands the native backend the byte offset each source line begins at, so a
-/// MIR span resolves to the line a panic report names. The source map itself
-/// lives only for the duration of the frontend, which is why the table is
-/// registered rather than threaded through.
-pub fn register_source_lines(unit_name: &str, source: &str) {
-    let mut starts = vec![0u32];
-    for (offset, byte) in source.bytes().enumerate() {
-        if byte == b'\n' {
-            starts.push(u32::try_from(offset + 1).unwrap_or(u32::MAX));
+/// Hands the native backend where each line of `file` begins and which file
+/// each assembled region of it was read from, so a MIR span resolves to the
+/// file and line a panic report names. The source map itself lives only for
+/// the duration of the frontend, which is why the table is registered rather
+/// than threaded through.
+pub fn register_source_positions(unit_name: &str, map: &SourceMap, file: FileId) {
+    let mut positions = gossamer_codegen_llvm::SourcePositions::new(unit_name, map.source(file));
+    for region in map.origins(file) {
+        // A region read from the unit's own entry file keeps the unit's
+        // positions, as `SourceMap::origin_of` does.
+        if region.origin == file {
+            continue;
         }
+        let path = map.file_name(region.origin);
+        let name = std::path::Path::new(path).file_name().map_or_else(
+            || path.to_string(),
+            |base| base.to_string_lossy().into_owned(),
+        );
+        positions.add_region(
+            region.start,
+            region.end,
+            region.origin_start,
+            &name,
+            map.source(region.origin),
+        );
     }
-    gossamer_codegen_llvm::set_source_lines(unit_name, starts);
+    gossamer_codegen_llvm::set_source_positions(positions);
 }
 
 /// Same as `lower_to_mir`, but returns the [`TyCtxt`] alongside
@@ -361,9 +408,9 @@ fn lower_to_mir_with_tcx(
     profile: MirProfile,
 ) -> (Vec<Body>, TyCtxt) {
     let augmented = gossamer_parse::autoderive::augment_source(source);
-    register_source_lines(unit_name, &augmented);
     let mut map = SourceMap::new();
     let file = map.add_file(unit_name, augmented.clone());
+    register_source_positions(unit_name, &map, file);
     let outcome = crate::frontend::check_frontend(&augmented, file);
     lower_to_mir_from_frontend(outcome.checked, profile)
 }

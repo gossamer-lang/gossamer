@@ -91,6 +91,13 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn lower_expr(&mut self, expr: &HirExpr) -> Option<Local> {
+        let outer = std::mem::replace(&mut self.expr_span, expr.span);
+        let local = self.lower_expr_kind(expr);
+        self.expr_span = outer;
+        local
+    }
+
+    fn lower_expr_kind(&mut self, expr: &HirExpr) -> Option<Local> {
         match &expr.kind {
             HirExprKind::Literal(lit) => Some(self.lower_literal(lit, expr.ty, expr.span)),
             HirExprKind::Path { segments, def, .. } => {
@@ -530,6 +537,26 @@ impl<'a> Builder<'a> {
             if let Some(local) = self.lookup_local(&first.name) {
                 return Some(local);
             }
+        }
+        // `T::name` used as a value names a trait function through a type
+        // parameter. It is spelled the way a call through the parameter is,
+        // and recorded as a function name, so the environment a callable
+        // parameter receives takes the address of whichever impl
+        // monomorphisation resolves it to in each specialised copy.
+        if let [_, function] = segments
+            && let Some(def) = def
+            && let Some(name) = self.tcx.type_param_of_def(def).and_then(|param| {
+                crate::monomorph::param_assoc_callee(self.tcx, param, &function.name)
+            })
+        {
+            let local = self.fresh(ty);
+            self.local_fn_name.insert(local, name.clone());
+            self.emit_assign(
+                Place::local(local),
+                Rvalue::Use(Operand::Const(ConstValue::Str(name))),
+                span,
+            );
+            return Some(local);
         }
         // A `static mut` read loads the live global cell rather than
         // inlining the declaration value.
@@ -1081,6 +1108,33 @@ impl<'a> Builder<'a> {
         } else {
             ty
         };
+        // Negation and complement run at i64 width. A narrower type takes its
+        // value back from the wide result, so `-(-128i8)` is `-128` and
+        // `!5u8` is `250`.
+        if let gossamer_types::TyKind::Int(int_ty) = self.tcx.kind_of(ty)
+            && narrow_int_width(*int_ty).is_some()
+        {
+            let wide_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let wide = self.fresh(wide_ty);
+            self.emit_assign(
+                Place::local(wide),
+                Rvalue::UnaryOp {
+                    op: mir_op,
+                    operand: Operand::Copy(Place::local(inner)),
+                },
+                span,
+            );
+            let local = self.fresh(ty);
+            self.emit_assign(
+                Place::local(local),
+                Rvalue::Cast {
+                    operand: Operand::Copy(Place::local(wide)),
+                    target: ty,
+                },
+                span,
+            );
+            return Some(local);
+        }
         let local = self.fresh(ty);
         self.emit_assign(
             Place::local(local),
@@ -1600,6 +1654,45 @@ impl<'a> Builder<'a> {
                 return Some(self.lower_tuple_cmp(op, lhs_local, rhs_local, &tags, span));
             }
         }
+        // Sequence ordering: a `Vec` or a slice orders lexicographically, each
+        // element by the language's rule for its type.
+        if matches!(
+            op,
+            HirBinaryOp::Lt | HirBinaryOp::Le | HirBinaryOp::Gt | HirBinaryOp::Ge
+        ) && let Some(desc) = self
+            .sequence_ordering_desc(lhs.ty)
+            .or_else(|| self.sequence_ordering_desc(self.locals[lhs_local.0 as usize].ty))
+        {
+            let args = vec![
+                Operand::Copy(Place::local(lhs_local)),
+                Operand::Copy(Place::local(rhs_local)),
+                Operand::Const(ConstValue::Str(desc)),
+            ];
+            return Some(self.lower_ordering_call(op, "gos_rt_vec_desc_cmp", args, span));
+        }
+        // Carrier ordering: an `Option` / `Result` orders by arm - `Some`
+        // before `None`, `Ok` before `Err`, their declaration order - and then
+        // by payload, so its two words are compared through the carrier's
+        // ordering descriptor rather than as a scalar.
+        if matches!(
+            op,
+            HirBinaryOp::Lt | HirBinaryOp::Le | HirBinaryOp::Gt | HirBinaryOp::Ge
+        ) && let Some((carrier, desc)) = [lhs.ty, self.locals[lhs_local.0 as usize].ty]
+            .into_iter()
+            .map(|ty| self.peel_ref_ty(ty))
+            .find(|ty| self.is_result_or_option_adt(*ty))
+            .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))
+        {
+            let lhs_slots = self.ordered_value_slots(lhs_local, carrier, span);
+            let rhs_slots = self.ordered_value_slots(rhs_local, carrier, span);
+            let desc_text: String = desc.iter().map(|&b| b as char).collect();
+            let args = vec![
+                Operand::Copy(Place::local(lhs_slots)),
+                Operand::Copy(Place::local(rhs_slots)),
+                Operand::Const(ConstValue::Str(desc_text)),
+            ];
+            return Some(self.lower_ordering_call(op, "gos_rt_desc_cmp", args, span));
+        }
         // Vec/array equality: route `[..] == [..]` / `!=` to a runtime
         // element-wise compare (ordering on vecs is left to the scalar path).
         if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
@@ -1733,12 +1826,9 @@ impl<'a> Builder<'a> {
         }
         // Signed `MIN / -1`: the wrapped result the VM produces (`MIN` for
         // `/`, `0` for `%`) instead of a trapping `sdiv`. Only the widths that
-        // actually overflow the i64 runtime representation need the guard:
-        // integer arithmetic runs at i64 width, so `i8`/`i16`/`i32 MIN / -1`
-        // do NOT overflow there (the VM's `i64::wrapping_div` yields the
-        // non-wrapped `+2^(n-1)`); guarding them with the narrow MIN would
-        // const-fold the wrong wrapped value. Only `i64`/`isize` (and the
-        // rejected `i128`) overflow.
+        // overflow the i64 runtime representation trap, so only `i64`/`isize`
+        // (and the rejected `i128`) take this guard. A narrower `MIN / -1`
+        // cannot trap at i64 width; its quotient is narrowed back below.
         let signed_min: Option<i128> = match int_ty {
             Some(gossamer_types::IntTy::I64 | gossamer_types::IntTy::Isize) => {
                 Some(i128::from(i64::MIN))
@@ -1814,6 +1904,42 @@ impl<'a> Builder<'a> {
             self.terminate(Terminator::Goto { target: join });
             self.set_current(join);
             return Some(result);
+        }
+        // A narrow signed `MIN / -1` answers `2^(n-1)` at i64 width, one past
+        // the type's range. The quotient wraps at the declared width, as the
+        // i64 case does, so the wide result is narrowed back.
+        if matches!(bin_op, BinOp::Div)
+            && divisor_maybe_neg1
+            && matches!(
+                int_ty,
+                Some(
+                    gossamer_types::IntTy::I8
+                        | gossamer_types::IntTy::I16
+                        | gossamer_types::IntTy::I32
+                )
+            )
+        {
+            let wide_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let wide = self.fresh(wide_ty);
+            self.emit_assign(
+                Place::local(wide),
+                Rvalue::BinaryOp {
+                    op: bin_op,
+                    lhs: Operand::Copy(Place::local(lhs_local)),
+                    rhs: Operand::Copy(Place::local(rhs_local)),
+                },
+                span,
+            );
+            let local = self.fresh(ty);
+            self.emit_assign(
+                Place::local(local),
+                Rvalue::Cast {
+                    operand: Operand::Copy(Place::local(wide)),
+                    target: ty,
+                },
+                span,
+            );
+            return Some(local);
         }
         // A shift moves bits past the operand's own width, and the ones that
         // leave it are gone. The op runs at i64 width, so a narrower type
@@ -2061,14 +2187,18 @@ impl<'a> Builder<'a> {
     }
 
     /// Runtime structural-compare tag for a scalar/string type (matching the
-    /// `gos_rt_tuple_format` encoding: 0 Int, 2 Float, 3 Bool, 4 Char, 5 Str),
-    /// or `None` for an aggregate / unsupported element.
+    /// `gos_rt_tuple_format` encoding: 0 Int, 1 Uint, 2 Float, 3 Bool, 4 Char,
+    /// 5 Str), or `None` for an aggregate / unsupported element.
     fn scalar_cmp_tag(&self, ty: Ty) -> Option<u8> {
-        use gossamer_types::TyKind;
+        use gossamer_types::{IntTy, TyKind};
         let mut t = ty;
         loop {
             match self.tcx.kind_of(t) {
                 TyKind::Ref { inner, .. } => t = *inner,
+                // A `u64` / `usize` word spans the whole unsigned range, so it
+                // orders and renders as unsigned rather than as the signed
+                // word its bits spell.
+                TyKind::Int(IntTy::U64 | IntTy::Usize) => return Some(1),
                 TyKind::Int(_) => return Some(0),
                 TyKind::Float(_) => return Some(2),
                 TyKind::Bool => return Some(3),
@@ -2119,11 +2249,45 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The [`gossamer_abi::DESC_PACKED`] ordering descriptor of a packed
+    /// struct, or `None` for a type that keeps one word per field.
+    pub(crate) fn packed_ordering_stream(&self, ty: Ty) -> Option<Vec<u8>> {
+        use gossamer_abi::packed_leaf;
+        use gossamer_types::{IntTy, TyKind};
+        let layout = self.tcx.packed_layout(ty)?;
+        let leaves = self.tcx.packed_leaves(ty)?;
+        let mut out = vec![
+            gossamer_abi::DESC_PACKED,
+            u8::try_from(layout.size / 8).ok()?,
+            u8::try_from(leaves.len()).ok()?,
+        ];
+        for (offset, leaf) in leaves {
+            out.extend(u16::try_from(offset).ok()?.to_le_bytes());
+            out.push(match self.tcx.kind_of(leaf) {
+                TyKind::Bool => packed_leaf::BOOL,
+                TyKind::Char => packed_leaf::CHAR,
+                TyKind::Float(_) => packed_leaf::FLOAT,
+                TyKind::Int(IntTy::I8) => packed_leaf::I8,
+                TyKind::Int(IntTy::U8) => packed_leaf::U8,
+                TyKind::Int(IntTy::I16) => packed_leaf::I16,
+                TyKind::Int(IntTy::U16) => packed_leaf::U16,
+                TyKind::Int(IntTy::I32) => packed_leaf::I32,
+                TyKind::Int(IntTy::U32) => packed_leaf::U32,
+                TyKind::Int(IntTy::U64 | IntTy::Usize) => packed_leaf::U64,
+                _ => packed_leaf::I64,
+            });
+        }
+        Some(out)
+    }
+
     pub(crate) fn tuple_stream_tags(&self, ty: Ty) -> Option<Vec<u8>> {
         use gossamer_types::TyKind;
         let mut peeled = ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(peeled) {
             peeled = *inner;
+        }
+        if let Some(stream) = self.packed_ordering_stream(peeled) {
+            return Some(stream);
         }
         if let Some(elems) = self.inline_field_tys(peeled) {
             if elems.is_empty() || elems.len() > usize::from(u8::MAX) {
@@ -2143,7 +2307,33 @@ impl<'a> Builder<'a> {
             let value = self.scalar_cmp_tag(payload)?;
             return Some(vec![gossamer_abi::TUPLE_TAG_NESTED, 2, 0, value]);
         }
-        self.scalar_cmp_tag(ty).map(|tag| vec![tag])
+        if let Some(tag) = self.scalar_cmp_tag(ty) {
+            return Some(vec![tag]);
+        }
+        // A variant-only enum's slot spells its variant rank, which is its
+        // order.
+        if matches!(self.tcx.kind_of(peeled), TyKind::Adt { def, .. }
+            if def.local < u32::MAX - 16 && self.tcx.enum_variant_tys(*def).is_some())
+            && !self.enum_has_payload(peeled)
+            && !self.tcx.is_inline_enum_ty(peeled)
+        {
+            return Some(vec![0]);
+        }
+        // Any other field's slot is not its own order - a sequence handle, a
+        // fixed array, a payload enum, a carrier over a non-scalar payload -
+        // so the field carries its ordering descriptor, which the runtime
+        // walks alongside the field's slots.
+        self.field_ordering_desc(peeled)
+    }
+
+    /// The ordering descriptor of a value the flat tag stream cannot name,
+    /// or `None` when the value's slot already spells its order (a scalar)
+    /// or the type has no ordering.
+    fn field_ordering_desc(&self, ty: Ty) -> Option<Vec<u8>> {
+        let desc = self.ordering_stream(ty)?;
+        desc.first()
+            .is_some_and(|&tag| tag >= gossamer_abi::DESC_VEC)
+            .then_some(desc)
     }
 
     /// The top-level element count and tag stream for a tuple type, or
@@ -2227,6 +2417,9 @@ impl<'a> Builder<'a> {
                 if self_enum == Some(def) {
                     return Some(vec![gossamer_abi::DESC_SELF]);
                 }
+                if let Some(stream) = self.packed_ordering_stream(peeled) {
+                    return Some(stream);
+                }
                 if let Some(fields) = self.tcx.struct_field_tys(def) {
                     let fields = fields.to_vec();
                     let arity = u8::try_from(fields.len()).ok()?;
@@ -2285,21 +2478,37 @@ impl<'a> Builder<'a> {
             let value = self.scalar_cmp_tag(payload)?;
             return Some((2, vec![0, value]));
         }
+        // A `u64` / `usize` word is not its own signed order, so a sequence of
+        // them orders through its one-slot unsigned tag rather than through the
+        // word entry points, which compare signed.
+        if matches!(
+            self.tcx.kind_of(peeled),
+            TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize)
+        ) {
+            return Some((1, vec![1]));
+        }
+        if let (Some(layout), Some(stream)) = (
+            self.tcx.packed_layout(peeled),
+            self.packed_ordering_stream(peeled),
+        ) {
+            return Some(((layout.size / 8) as usize, stream));
+        }
         let Some(elems) = self.inline_field_tys(peeled).filter(|e| !e.is_empty()) else {
-            // An element whose slot word is not its own order - a payload
-            // enum reached through its RC node - is ordered by the descriptor
-            // the runtime walks alongside its slot. An inline enum keeps the
-            // word path: its slot spells the tag its order is, and the
-            // descriptor's own inline layout spans a second slot no sequence
-            // element carries.
-            if self.tcx.is_inline_enum_ty(peeled) || !self.enum_has_payload(peeled) {
+            // An element whose slot word is not its own order - a sequence
+            // handle, a fixed array, a carrier over a non-scalar payload, a
+            // payload enum reached through its RC node - is ordered by the
+            // descriptor the runtime walks alongside its slots. An inline enum
+            // keeps the word path: its slot spells the tag its order is, and
+            // the descriptor's own inline layout spans a second slot no
+            // sequence element carries.
+            if self.tcx.is_inline_enum_ty(peeled) {
                 return None;
             }
-            let desc = self.ordering_stream(peeled)?;
-            return desc
-                .first()
-                .is_some_and(|tag| *tag == gossamer_abi::DESC_ENUM)
-                .then_some((1, desc));
+            let desc = self.field_ordering_desc(peeled)?;
+            if desc.first() == Some(&gossamer_abi::DESC_ENUM) && !self.enum_has_payload(peeled) {
+                return None;
+            }
+            return Some((1, desc));
         };
         let mut tags = Vec::with_capacity(elems.len());
         for e in &elems {
@@ -2570,18 +2779,46 @@ impl<'a> Builder<'a> {
         tags: &[u8],
         span: Span,
     ) -> Local {
+        let tag_str: String = tags.iter().map(|&b| b as char).collect();
+        let args = vec![
+            Operand::Copy(Place::local(lhs_local)),
+            Operand::Copy(Place::local(rhs_local)),
+            Operand::Const(ConstValue::Int(tags.len() as i128)),
+            Operand::Const(ConstValue::Str(tag_str)),
+        ];
+        self.lower_ordering_call(op, "gos_rt_tuple_cmp", args, span)
+    }
+
+    /// The element ordering descriptor of a `Vec` or slice type, or `None`
+    /// for any other type.
+    fn sequence_ordering_desc(&self, ty: Ty) -> Option<String> {
+        use gossamer_types::TyKind;
+        let mut t = ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(t) {
+            t = *inner;
+        }
+        let (TyKind::Vec(elem) | TyKind::Slice(elem)) = self.tcx.kind_of(t) else {
+            return None;
+        };
+        let stream = self.ordering_stream(*elem)?;
+        Some(stream.iter().map(|&b| b as char).collect())
+    }
+
+    /// Emits a call to a runtime comparison answering `-1` / `0` / `1`, then
+    /// maps it to a bool for the comparison operator (`cmp <op> 0`).
+    fn lower_ordering_call(
+        &mut self,
+        op: HirBinaryOp,
+        symbol: &str,
+        args: Vec<Operand>,
+        span: Span,
+    ) -> Local {
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let cmp = self.fresh(i64_ty);
-        let tag_str: String = tags.iter().map(|&b| b as char).collect();
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_tuple_cmp".to_string())),
-            args: vec![
-                Operand::Copy(Place::local(lhs_local)),
-                Operand::Copy(Place::local(rhs_local)),
-                Operand::Const(ConstValue::Int(tags.len() as i128)),
-                Operand::Const(ConstValue::Str(tag_str)),
-            ],
+            callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+            args,
             destination: Place::local(cmp),
             target: Some(next),
         });
@@ -3258,6 +3495,7 @@ impl<'a> Builder<'a> {
         for (i, elem) in elems.iter().enumerate() {
             let mut local = self.lower_expr(elem)?;
             if let Some(field_ty) = elem_tys.as_ref().and_then(|t| t.get(i)).copied() {
+                local = self.coerce_to_fn_trait_if_needed(local, field_ty, span);
                 let val_ty = self.locals[local.0 as usize].ty;
                 if let TyKind::Array { elem: e, len } = self.tcx.kind_of(val_ty).clone()
                     && matches!(
@@ -3688,6 +3926,12 @@ impl<'a> Builder<'a> {
                 // for a concrete instantiation then reads an aggregate element
                 // as its first eight bytes.
                 TyKind::Param { .. } => elem_unwrapped,
+                // A callable element is called through its environment, and
+                // only its type tells a call site to take that indirect path.
+                TyKind::FnPtr(_) | TyKind::FnTrait(_) => elem_unwrapped,
+                // An error element is a counted cell that renders and is owned
+                // by its type; the element read itself is a borrow of the slot.
+                TyKind::DynError => elem_unwrapped,
                 _ => match self.tcx.kind_of(ty) {
                     TyKind::Int(_) | TyKind::String | TyKind::Bool | TyKind::Float(_) => ty,
                     _ => self.tcx.int_ty(gossamer_types::IntTy::I64),

@@ -65,8 +65,11 @@ pub enum Value {
     /// without the precision loss an `f64` would impose and so `100`
     /// renders without a trailing `.0`, matching `serde_json`.
     Int(i64),
+    /// Integer above `i64::MAX` that fits a `u64`, preserved exactly so an
+    /// unsigned value renders with its own digits.
+    Uint(u64),
     /// Non-integer numeric literal (has a fractional part or exponent),
-    /// or an integer too large for `i64`, preserved as `f64`.
+    /// or an integer too large for `u64`, preserved as `f64`.
     Number(f64),
     /// UTF-8 string.
     String(String),
@@ -134,6 +137,13 @@ pub fn from_i64(n: i64) -> Value {
     Value::Int(n)
 }
 
+/// Builds the exact integer value for a `u64`: [`Value::Int`] when it fits an
+/// `i64`, [`Value::Uint`] above that.
+#[must_use]
+pub fn from_u64(n: u64) -> Value {
+    i64::try_from(n).map_or(Value::Uint(n), Value::Int)
+}
+
 /// Retrieves an `i64` from a [`Value::Int`], or from a [`Value::Number`]
 /// whose value is integral and within `i64` range.
 #[must_use]
@@ -147,12 +157,28 @@ pub fn as_i64(value: &Value) -> Option<i64> {
     }
 }
 
-/// Retrieves an `f64` from a [`Value::Number`] or [`Value::Int`].
+/// Retrieves a `u64` from a non-negative [`Value::Int`], a [`Value::Uint`], or
+/// a [`Value::Number`] whose value is integral and within `u64` range.
+#[must_use]
+pub fn as_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Int(n) => u64::try_from(*n).ok(),
+        Value::Uint(n) => Some(*n),
+        Value::Number(n) if n.fract() == 0.0 && *n >= 0.0 && *n <= u64::MAX as f64 => {
+            Some(*n as u64)
+        }
+        _ => None,
+    }
+}
+
+/// Retrieves an `f64` from a [`Value::Number`], [`Value::Int`], or
+/// [`Value::Uint`].
 #[must_use]
 pub fn as_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Number(n) => Some(*n),
         Value::Int(n) => Some(*n as f64),
+        Value::Uint(n) => Some(*n as f64),
         _ => None,
     }
 }
@@ -870,12 +896,16 @@ impl<'a> Parser<'a> {
         // Integer-form tokens that fit `i64` are kept as `Int` so large
         // integers round-trip exactly and render without a trailing `.0`
         // (matching serde_json's number handling on the compiled tier).
+        // An integer above `i64::MAX` that fits `u64` stays exact as `Uint`.
         // Anything with a fractional part or exponent - or too large for
-        // `i64` - falls back to `f64`.
+        // `u64` - falls back to `f64`.
         let is_float = text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'));
         if !is_float {
             if let Ok(n) = text.parse::<i64>() {
                 return Ok(Value::Int(n));
+            }
+            if let Ok(n) = text.parse::<u64>() {
+                return Ok(Value::Uint(n));
             }
         }
         text.parse::<f64>()
@@ -908,7 +938,7 @@ fn encoded_capacity_hint(value: &Value) -> usize {
         Value::Null => 4,
         Value::Bool(false) => 5,
         Value::Bool(true) => 4,
-        Value::Int(_) => 20,
+        Value::Int(_) | Value::Uint(_) => 20,
         Value::Number(_) => 32,
         Value::String(s) => escaped_string_len(s),
         Value::Array(values) => values.iter().fold(2usize, |size, value| {
@@ -941,6 +971,9 @@ fn write_value(out: &mut String, value: &Value) {
         Value::Null => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         Value::Int(n) => {
+            let _ = write!(out, "{n}");
+        }
+        Value::Uint(n) => {
             let _ = write!(out, "{n}");
         }
         Value::Number(n) => {
@@ -1066,6 +1099,7 @@ fn write_value_to<W: std::io::Write>(out: &mut W, value: &Value) -> std::io::Res
             }
         }
         Value::Int(n) => write!(out, "{n}"),
+        Value::Uint(n) => write!(out, "{n}"),
         // A non-finite float has no JSON spelling, so it renders as the zero
         // the boxed form stores for it.
         Value::Number(n) if !n.is_finite() => write!(out, "0.0"),

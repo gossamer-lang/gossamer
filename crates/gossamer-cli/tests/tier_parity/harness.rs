@@ -194,6 +194,20 @@ const SPECS: &[Spec] = &[
     // callable it takes all follow the instantiation rather than an opaque
     // parameter slot.
     spec("feature-testing-examples/generic_specialisation.gos"),
+    // A generic body compares, orders, renders, hashes, and sorts the values
+    // it is instantiated with as the concrete body would, and a closure handed
+    // to a generic function or method takes its parameter types from the
+    // signature before its body is checked.
+    spec("feature-testing-examples/generic_structural_ops.gos"),
+    spec("feature-testing-examples/generic_method_closures.gos"),
+    // A generic struct renders through a formatter made for its own type
+    // arguments, directly or inside a container.
+    spec("feature-testing-examples/generic_struct_rendering.gos"),
+    // Sequences order lexicographically, element by element.
+    spec("feature-testing-examples/vec_ordering.gos"),
+    // A `for` over a lazy adapter chain pulls one element per turn, so each
+    // callback runs just before its body and a `break` ends the pulling.
+    spec("feature-testing-examples/lazy_for_adapters.gos"),
     spec("feature-testing-examples/triple_quoted_strings.gos"),
     // A field-less struct is the zero-slot aggregate: it compares, orders,
     // renders, keys a map, and pads a tuple element identically on every
@@ -282,6 +296,72 @@ const SPECS: &[Spec] = &[
     // A carrier payload no flat tag names renders through the descriptor
     // walk, which measures the slots each element spans.
     spec("feature-testing-examples/carrier_payload_debug_shapes.gos"),
+    // A carrier nested in a carrier lives in a counted box that owns the
+    // inner payload, and every reader of the inner carrier takes its own
+    // share of what the box still holds.
+    spec("feature-testing-examples/nested_carrier_boxes.gos"),
+    // A carrier handed to a Gossamer function stays the caller's; the callee
+    // takes a share only for a payload it hands on.
+    spec("feature-testing-examples/carrier_params_and_extractions.gos"),
+    // An integer declared `u64` / `usize` keeps its digits in JSON text and
+    // reads back through `json::as_u64`; a map keyed by an integer, a `bool`,
+    // or a `char` renders its keys as member names.
+    spec("feature-testing-examples/json_unsigned_and_map_keys.gos"),
+    // A `Map` field owns its table outright, so every struct built from, copied
+    // from, or handed a map reads its own; a lent carrier pushed into a `Vec`
+    // gives the vector a share of its own.
+    spec("feature-testing-examples/map_field_ownership.gos"),
+    // A struct payload is owned by its carrier's box, so one carrier can be
+    // taken apart any number of times and a dropped one gives its fields back.
+    spec("feature-testing-examples/carrier_struct_payload_ownership.gos"),
+    // An iterator method chain compiles to one loop; stage order, short
+    // circuits, and closure call counts match the runtime iterator's.
+    spec("feature-testing-examples/iter_method_fusion.gos"),
+    // `Self` in impl paths, literals, and patterns; a program's own `Unit`;
+    // generic and `Option`-held function items as callables.
+    spec("feature-testing-examples/self_unit_and_generic_callbacks.gos"),
+    // Lane vectors: wrapping integer lanes, width-wrapped shifts, NaN and
+    // signed-zero min/max, and a fixed reduction tree agree on every tier.
+    spec("feature-testing-examples/simd_lanes.gos"),
+    // A const generic lane kernel folds in the same tree at every lane count,
+    // and a `[T; N]` result is released by the caller that receives it.
+    spec("feature-testing-examples/simd_const_generic_kernels.gos"),
+    // Lane windows load from and store into a sequence after one check of the
+    // whole window, sized by a literal or a const generic lane count.
+    spec("feature-testing-examples/simd_load_store.gos"),
+    // A window past the end panics before any lane is written.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/simd_store_window_panic.gos")
+    },
+    // An `f32` in array, field, tuple, and `Vec` slots keeps one width on every
+    // tier; a decoded struct keeps its `Vec` fields past the unwrap.
+    spec("feature-testing-examples/f32_storage_and_decoded_vec_fields.gos"),
+    // Errors are reclaimed from every holder, `map` / `map_err` give back the
+    // payload they hand on, and an error read from a `Vec` renders as one.
+    spec("feature-testing-examples/error_cell_ownership.gos"),
+    // Pairs from `enumerate` / `zip`, mapped tuples, and tuples read from a
+    // `Vec` run through every lazy adapter and loop.
+    spec("feature-testing-examples/lazy_pair_streams.gos"),
+    // Positional stages fused into one loop keep the runtime iterator's
+    // pulls and closure calls.
+    spec("feature-testing-examples/iter_positional_fusion.gos"),
+    // Search terminals, while-stages, `filter_map`, and `bytes()` fused into
+    // one loop keep the runtime iterator's pulls and closure calls.
+    spec("feature-testing-examples/iter_search_fusion.gos"),
+    spec("feature-testing-examples/iter_map_fusion.gos"),
+    spec("feature-testing-examples/iter_generic_fusion.gos"),
+    spec("feature-testing-examples/vec_keyed_map_operations.gos"),
+    spec("feature-testing-examples/unwrap_or_aggregate_payload.gos"),
+    spec("feature-testing-examples/container_element_reads.gos"),
+    spec("feature-testing-examples/narrow_int_tuple_format.gos"),
+    spec("feature-testing-examples/sequence_tuple_format.gos"),
+    spec("feature-testing-examples/heap_scalar_elements.gos"),
+    spec("feature-testing-examples/unwrap_recursive_carrier_payload.gos"),
+    spec("feature-testing-examples/packed_struct_layout.gos"),
+    // `Vec<u8>` reductions read packed bytes, and a lazy `filter_map` calls
+    // its callback one element per pull.
+    spec("feature-testing-examples/narrow_and_lazy_combinators.gos"),
     // Every goroutine blocks at some point here; a pending handoff is
     // progress, so none of it reads as a deadlock.
     spec("feature-testing-examples/channel_progress_not_deadlock.gos"),
@@ -522,6 +602,12 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/byte_literal_compare.gos"),
     spec("feature-testing-examples/byte_literal_match.gos"),
     spec("feature-testing-examples/narrow_int_width.gos"),
+    // Negation, complement, shifts, and the wrapping methods answer at the
+    // declared width of a narrow integer on every tier and in both profiles.
+    spec("feature-testing-examples/narrow_int_unary_width.gos"),
+    // An `else if` chain with no final `else`, and a loop body whose tail is
+    // an `if` chain, discard their branch values the way a statement does.
+    spec("feature-testing-examples/if_chain_discarded_value.gos"),
     spec("feature-testing-examples/nested_container_places.gos"),
     spec("feature-testing-examples/struct_field_reassign.gos"),
     spec("feature-testing-examples/trait_default_body.gos"),
@@ -776,6 +862,16 @@ const SPECS: &[Spec] = &[
         allow_nonzero: true,
         ..spec("feature-testing-examples/oob_index_aggregate_panic.gos")
     },
+    // An out-of-range outer index through a struct field panics rather than
+    // reading through the address an out-of-range lookup does not have.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/oob_nested_vec_field_panic.gos")
+    },
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/oob_nested_scalar_rows_panic.gos")
+    },
     // Vec insert/remove are invariant mutators in method and qualified forms:
     // invalid indices panic instead of clamping or silently no-oping.
     Spec {
@@ -931,6 +1027,31 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/trait_bounds.gos"),
     spec("feature-testing-examples/nested_field_access.gos"),
     spec("feature-testing-examples/deque_drain_scaling.gos"),
+    spec("feature-testing-examples/nested_vec_place_index.gos"),
+    spec("feature-testing-examples/heap_word_tuple_order.gos"),
+    spec("feature-testing-examples/wrapping_arithmetic_operators.gos"),
+    spec("feature-testing-examples/const_generic_values.gos"),
+    spec("feature-testing-examples/const_generic_struct.gos"),
+    spec("feature-testing-examples/generic_method_fn_only_param.gos"),
+    spec("feature-testing-examples/generic_fn_value_callback.gos"),
+    spec("feature-testing-examples/generic_body_closure.gos"),
+    spec("feature-testing-examples/generic_static_trait_item.gos"),
+    // Sort, binary search, and min/max order sequence elements, and
+    // aggregates holding one, lexicographically through their descriptor.
+    spec("feature-testing-examples/sort_nested_sequences.gos"),
+    // A u64 orders and renders unsigned at every depth, and a Vec renders
+    // `#[..]` inside a set, a map key, and a prelude min/max result.
+    spec("feature-testing-examples/unsigned_and_nested_rendering.gos"),
+    spec("feature-testing-examples/open_range_take.gos"),
+    spec("feature-testing-examples/generic_enum_float_payload.gos"),
+    spec("feature-testing-examples/generic_assoc_fn_result_method.gos"),
+    spec("feature-testing-examples/generic_channel_payload.gos"),
+    // A fn item, a generic fn, or a capture-free closure stored in a Vec, a
+    // fixed array, a struct field, a tuple, or an enum payload is the
+    // env-shaped callable a call through that slot reads.
+    spec("feature-testing-examples/callable_in_aggregate_slots.gos"),
+    // The same callables stored as Map values, by literal and by insert.
+    spec("feature-testing-examples/callable_in_map_values.gos"),
     spec("feature-testing-examples/pop_scalar_aggregate_into.gos"),
     spec("feature-testing-examples/json_encode_stream.gos"),
     spec("feature-testing-examples/json_encode_stream_shapes.gos"),
@@ -980,11 +1101,12 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/fixed_array_mut_param_copy.gos"),
     Spec {
         skip_all: Some(
-            "contains an intentional narrow-integer overflow whose debug panic and release wrapping are tested directly by spec_conformance",
+            "contains an intentional narrow-integer overflow whose debug panic and release wrapping are tested by overflow_profile.rs",
         ),
         ..spec("feature-testing-examples/byte_vec_i64_model.gos")
     },
     spec("feature-testing-examples/map_iteration_order.gos"),
+    spec("feature-testing-examples/map_traversal_key_order.gos"),
     spec("feature-testing-examples/usize_compare.gos"),
     spec("feature-testing-examples/u64_unsigned.gos"),
     spec("feature-testing-examples/channel_close_drain.gos"),
@@ -1128,7 +1250,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/http3_serve_err_binding.gos"),
     Spec {
         skip_all: Some(
-            "contains an intentional unsigned underflow whose debug panic and release wrapping are tested directly by spec_conformance",
+            "contains an intentional unsigned underflow whose debug panic and release wrapping are tested by overflow_profile.rs",
         ),
         ..spec("feature-testing-examples/integer_overflow_edges.gos")
     },
@@ -1237,6 +1359,10 @@ const SPECS: &[Spec] = &[
     // stores copy and `downgrade()` pins its referent for the enclosing
     // scope, so `upgrade()` never observes when the collector ran.
     spec("feature-testing-examples/weak_into_strong_cycle.gos"),
+    // Trees of `Option<Struct>` children torn down repeatedly: a plain tree,
+    // nodes that also own a `String`, a subtree two parents share, and a
+    // `Weak` into a node.
+    spec("feature-testing-examples/rc_tree_teardown.gos"),
     // A Gossamer `String` carries a byte length and may hold interior NULs;
     // every compiled-tier shim must read it through that length rather than
     // scanning for a terminator.
@@ -1473,6 +1599,9 @@ const SPECS: &[Spec] = &[
     // Top-level statements (implicit `fn main`): plain, `?`-propagation,
     // mixed-with-items, and an explicit process exit code.
     spec("examples/top_level_statements.gos"),
+    spec("examples/const_generics.gos"),
+    spec("examples/simd_lanes.gos"),
+    spec("examples/wrapping_hash.gos"),
     spec("feature-testing-examples/top_level_hello.gos"),
     spec("feature-testing-examples/top_level_question.gos"),
     spec("feature-testing-examples/top_level_mixed.gos"),

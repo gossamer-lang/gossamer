@@ -1092,6 +1092,11 @@ impl<'a> Builder<'a> {
                         declared_tys.as_deref().unwrap_or(&[]),
                         order.len(),
                     );
+                    let payload_tys = self.instantiated_variant_field_tys(
+                        self.locals[scrutinee.0 as usize].ty,
+                        &matched_enum,
+                        &name.name,
+                    );
                     for f in fields {
                         let pos = order.iter().position(|n| n == &f.name.name);
                         let Some(pos) = pos else { continue };
@@ -1127,7 +1132,7 @@ impl<'a> Builder<'a> {
                                 _ => None,
                             }
                         };
-                        let declared_field_ty = declared_tys
+                        let declared_field_ty = payload_tys
                             .as_ref()
                             .and_then(|tys| tys.get(pos).copied())
                             .or(scrut_field_ty)
@@ -1345,6 +1350,11 @@ impl<'a> Builder<'a> {
                         declared_tys.as_deref().unwrap_or(&[]),
                         fields.len(),
                     );
+                    let payload_tys = self.instantiated_variant_field_tys(
+                        self.locals[scrutinee.0 as usize].ty,
+                        &matched_enum,
+                        &name.name,
+                    );
                     let mut acc = cmp;
                     for (i, field) in fields.iter().enumerate() {
                         if let HirPatKind::Binding { name: bname, .. } = &field.kind {
@@ -1370,7 +1380,7 @@ impl<'a> Builder<'a> {
                                         name.name.as_str(),
                                     )
                                     .or_else(|| {
-                                        declared_tys
+                                        payload_tys
                                             .as_ref()
                                             .and_then(|tys| tys.get(i).copied())
                                             .filter(|&ty| {
@@ -1421,7 +1431,7 @@ impl<'a> Builder<'a> {
                                         name.name.as_str(),
                                     )
                                     .or_else(|| {
-                                        declared_tys
+                                        payload_tys
                                             .as_ref()
                                             .and_then(|tys| tys.get(i).copied())
                                             .filter(|&ty| {
@@ -1493,7 +1503,7 @@ impl<'a> Builder<'a> {
                                 // aggregate so `gos_enum_load` materialises it
                                 // by value, then the nested struct / tuple
                                 // pattern reads real field slots.
-                                let nested_ty = declared_tys
+                                let nested_ty = payload_tys
                                     .as_ref()
                                     .and_then(|tys| tys.get(i).copied())
                                     .filter(|&t| {
@@ -2471,12 +2481,17 @@ impl<'a> Builder<'a> {
             || self.enums.has_any_payload(std::slice::from_ref(name)),
             |en| self.enums.enum_has_any_payload(&en),
         );
-        let declared_tys = self
-            .enum_index_name_of(scrut_ty)
-            .and_then(|en| self.enums.field_tys_of(&en, &name.name))
+        let scrut_enum = self.enum_index_name_of(scrut_ty);
+        let declared_tys = scrut_enum
+            .as_ref()
+            .and_then(|en| self.enums.field_tys_of(en, &name.name))
             .or_else(|| self.enums.variant_field_tys.get(&name.name).cloned());
         let payload_offsets =
             self.variant_payload_offsets(declared_tys.as_deref().unwrap_or(&[]), fields.len());
+        let payload_tys = match &scrut_enum {
+            Some(en) => self.instantiated_variant_field_tys(scrut_ty, en, &name.name),
+            None => declared_tys.clone(),
+        };
         for (i, field) in fields.iter().enumerate() {
             if matches!(field.kind, HirPatKind::Wildcard | HirPatKind::Rest) {
                 continue;
@@ -2484,7 +2499,7 @@ impl<'a> Builder<'a> {
             let binding_ty = self
                 .variant_payload_ty(scrut_ty, name.name.as_str())
                 .or_else(|| {
-                    declared_tys
+                    payload_tys
                         .as_ref()
                         .and_then(|tys| tys.get(i).copied())
                         .filter(|&ty| {
@@ -3308,10 +3323,21 @@ impl<'a> Builder<'a> {
                 .map(|elem| self.peel_ref_ty(elem))
                 .filter(|elem| self.is_aggregate_key(*elem))
                 .and_then(|elem| self.key_descriptor(elem).map(|desc| (elem, desc)));
+            // An integer set's snapshot slots hold the elements' own words, so
+            // the loop binds the width the set declares - a `u64` element
+            // reads unsigned.
+            let integer_elem = self
+                .first_generic_of(probe_expr.ty)
+                .map(|elem| self.peel_ref_ty(elem))
+                .filter(|elem| matches!(self.tcx.kind_of(*elem), gossamer_types::TyKind::Int(_)));
             let (elem_ty, sym, descriptor) = match (is_i64, aggregate_elem) {
                 (true, _) => (
-                    self.tcx.int_ty(gossamer_types::IntTy::I64),
-                    "gos_rt_set_to_vec_i64",
+                    integer_elem.unwrap_or_else(|| self.tcx.int_ty(gossamer_types::IntTy::I64)),
+                    if self.set_elems_unsigned(probe_expr.ty) {
+                        "gos_rt_set_to_vec_u64"
+                    } else {
+                        "gos_rt_set_to_vec_i64"
+                    },
                     None,
                 ),
                 (false, Some((elem, desc))) => (elem, "gos_rt_set_to_vec_skey", Some(desc)),
@@ -3499,21 +3525,8 @@ impl<'a> Builder<'a> {
                 } => matches!(operand.kind, HirExprKind::Path { .. }),
                 _ => false,
             };
-            let drivable = matches!(
-                self.lazy_iter_elem_family(elem_ty),
-                Some(
-                    crate::lower::builder::method_call::LazyElemFamily::Word
-                        | crate::lower::builder::method_call::LazyElemFamily::Ptr
-                        | crate::lower::builder::method_call::LazyElemFamily::Float
-                )
-            );
-            if bound_state && drivable {
-                return None;
-            }
-            // A pair element has no `next` shim to advance through, so its
-            // elements are read out once and walked in the buffer that holds
-            // them. The collect shim takes the state handle, so a `&mut`
-            // wrapper is peeled to the local that holds it.
+            // The collect shim and the state marker both name the local that
+            // holds the handle, so a `&mut` wrapper is peeled to it.
             let handle_expr = match &for_loop.iter_expr.kind {
                 HirExprKind::Unary {
                     op: gossamer_hir::HirUnaryOp::RefShared | gossamer_hir::HirUnaryOp::RefMut,
@@ -3522,6 +3535,18 @@ impl<'a> Builder<'a> {
                 } => operand.as_ref(),
                 _ => for_loop.iter_expr,
             };
+            // Every element family the lazy runtime carries has an advance of
+            // its own, and an address-carrying stream advances through the
+            // word one, so bound state is always pulled one element per turn.
+            let aggr_state = self
+                .receiver_local_from_path(handle_expr)
+                .is_some_and(|local| self.local_aggr_iter.contains(&local));
+            let drivable = aggr_state || self.lazy_iter_next_symbol(elem_ty).is_some();
+            if bound_state && drivable {
+                return None;
+            }
+            // State with no advance reaches the loop through the buffer its
+            // collect shim fills.
             let iter_local = self.lower_expr(handle_expr)?;
             let vec_ty = self.tcx.intern(TyKind::Vec(elem_ty));
             // An address-carrying stream is collected through the helper that
@@ -3534,6 +3559,9 @@ impl<'a> Builder<'a> {
                 vec_ty,
                 span,
             );
+            if helper == "gos_rt_lazy_iter_collect_aggr" {
+                self.tag_owned_elements(vec_local, elem_ty, span);
+            }
             return self.lower_for_vec_over_local(
                 vec_local,
                 elem_ty,
@@ -3783,7 +3811,11 @@ impl<'a> Builder<'a> {
                                         // binding takes the key type itself -
                                         // reading it as a scalar word would
                                         // address a fraction of the element.
-                                        Some(MapKeyKind::Other) => {
+                                        // A scalar key's slot holds its own
+                                        // bits, so a `char` or `bool` key is
+                                        // bound as itself, as an aggregate key
+                                        // is.
+                                        Some(MapKeyKind::Other | MapKeyKind::I64) => {
                                             self.hash_map_kv_tys(recv_ty).map_or_else(
                                                 || self.tcx.int_ty(gossamer_types::IntTy::I64),
                                                 |(k, _)| k,
@@ -3800,11 +3832,27 @@ impl<'a> Builder<'a> {
                                         // single box-pointer word) so field
                                         // access derefs the box rather than
                                         // reading the pointer bits inline.
+                                        // A two-word carrier is read back out
+                                        // of its box into the snapshot, so it
+                                        // is bound as itself.
+                                        Some(MapValueKind::Other)
+                                            if self.map_value_is_carrier(recv_ty) =>
+                                        {
+                                            self.hash_map_kv_tys(recv_ty).map_or(i64_ty, |(_, v)| v)
+                                        }
+                                        // A tuple or fixed array is boxed the
+                                        // same way, so it is bound the same way.
                                         Some(MapValueKind::Other) => {
                                             let value_struct = self
                                                 .hash_map_kv_tys(recv_ty)
                                                 .map(|(_, v)| v)
-                                                .filter(|v| self.struct_name_of(*v).is_some());
+                                                .filter(|v| {
+                                                    self.struct_name_of(*v).is_some()
+                                                        || matches!(
+                                                            self.tcx.kind_of(*v),
+                                                            TyKind::Tuple(_) | TyKind::Array { .. }
+                                                        )
+                                                });
                                             match value_struct {
                                                 Some(v) => self.tcx.intern(TyKind::Ref {
                                                     mutability: gossamer_types::Mutbl::Not,
@@ -3812,6 +3860,13 @@ impl<'a> Builder<'a> {
                                                 }),
                                                 None => i64_ty,
                                             }
+                                        }
+                                        // A scalar value's slot holds its own
+                                        // bits, so an `f64` value is read as a
+                                        // float rather than the integer those
+                                        // bits spell.
+                                        Some(MapValueKind::I64) => {
+                                            self.hash_map_kv_tys(recv_ty).map_or(i64_ty, |(_, v)| v)
                                         }
                                         _ => i64_ty,
                                     }

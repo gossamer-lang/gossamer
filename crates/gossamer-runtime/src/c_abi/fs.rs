@@ -312,6 +312,16 @@ pub unsafe extern "C" fn gos_rt_fs_temp_dir(prefix: *const c_char) -> i128 {
     })
 }
 
+/// Layout of the `fs::temp_file` `(File, String)` pair: the path string is
+/// owned by the blob; the file handle is a registry id.
+static TEMP_FILE_PAIR_META: [i64; 5] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    1,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
+
 /// `fs::temp_file(prefix) -> Result<(File, String), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_temp_file(prefix: *const c_char) -> i128 {
@@ -330,15 +340,12 @@ pub unsafe extern "C" fn gos_rt_fs_temp_file(prefix: *const c_char) -> i128 {
                 .open(path)
         }) {
             Ok(Ok(file)) => {
-                let pair = unsafe { gos_rt_gc_alloc(16) }.cast::<i64>();
+                let words = [insert_file(file), alloc_cstring(context.as_bytes()) as i64];
+                let pair = crate::c_abi::rc::counted_words(&words, &TEMP_FILE_PAIR_META);
                 if pair.is_null() {
                     return fs_err("fs::temp_file: allocation failed");
                 }
-                unsafe {
-                    *pair = insert_file(file);
-                    *pair.add(1) = alloc_cstring(context.as_bytes()) as i64;
-                    gos_rt_result_new(0, pair as i64)
-                }
+                unsafe { gos_rt_result_new(0, pair as i64) }
             }
             Ok(Err(error)) => fs_io_err(&error, &context),
             Err(error) => fs_err(&error),
@@ -1375,6 +1382,24 @@ pub extern "C" fn gos_rt_max_i64(a: i64, b: i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_clamp_i64(x: i64, lo: i64, hi: i64) -> i64 {
+    x.clamp(lo, hi)
+}
+
+/// Scalar `min(a, b)` for `u64` / `usize`, whose words order unsigned.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_min_u64(a: u64, b: u64) -> u64 {
+    a.min(b)
+}
+
+/// Scalar `max(a, b)` for `u64` / `usize`, whose words order unsigned.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_max_u64(a: u64, b: u64) -> u64 {
+    a.max(b)
+}
+
+/// Scalar `clamp(x, lo, hi)` for `u64` / `usize`, whose words order unsigned.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_clamp_u64(x: u64, lo: u64, hi: u64) -> u64 {
     x.clamp(lo, hi)
 }
 

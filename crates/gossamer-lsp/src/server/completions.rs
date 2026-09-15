@@ -1226,20 +1226,7 @@ const ALL_BUILTIN_METHODS: &[BuiltinMethod] = &[
     },
 ];
 
-const INTEGER_METHODS: &[BuiltinMethod] = &[
-    BuiltinMethod {
-        name: "wrapping_add",
-        signature: "fn wrapping_add(self, rhs: Self) -> Self",
-        doc: "Adds with two's-complement wrapping at the declared integer width.",
-        snippet: "wrapping_add($0)",
-    },
-    BuiltinMethod {
-        name: "wrapping_mul",
-        signature: "fn wrapping_mul(self, rhs: Self) -> Self",
-        doc: "Multiplies with two's-complement wrapping at the declared integer width.",
-        snippet: "wrapping_mul($0)",
-    },
-];
+const INTEGER_METHODS: &[BuiltinMethod] = &[];
 
 fn builtin_methods_for(receiver: &ReceiverDescriptor) -> Vec<&'static BuiltinMethod> {
     let methods: Vec<_> = match receiver.builtin {

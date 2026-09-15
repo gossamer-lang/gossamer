@@ -421,6 +421,14 @@ pub(super) fn lower_body(
                         // Bound the slot size so an oversized `[v; N]` array
                         // still avoids blowing the machine stack.
                         field_store_targets.insert(place.local.0);
+                    } else if matches!(rvalue, Rvalue::CallIntrinsic { name, .. }
+                        if *name == "gos_rt_result_payload")
+                    {
+                        // A payload read out of a carrier's box is copied into
+                        // storage of its own: its shares outlive the box on
+                        // the next overwrite, and the map-field helpers write
+                        // through its fields' addresses.
+                        field_store_targets.insert(place.local.0);
                     }
                 }
             }
@@ -430,7 +438,13 @@ pub(super) fn lower_body(
         // the local that binds it - needs the local to own storage before
         // any statement has given it one.
         for block in &body.blocks {
-            let Terminator::Call { args, .. } = &block.terminator else {
+            let Terminator::Call {
+                callee,
+                args,
+                destination,
+                ..
+            } = &block.terminator
+            else {
                 continue;
             };
             for arg in args {
@@ -439,6 +453,17 @@ pub(super) fn lower_body(
                 {
                     field_store_targets.insert(place.local.0);
                 }
+            }
+            // An `unwrap` answers the payload words a carrier's box keeps, and
+            // the destination copies them into storage of its own.
+            if let Operand::Const(gossamer_mir::ConstValue::Str(name)) = callee
+                && matches!(
+                    name.as_str(),
+                    "gos_rt_result_unwrap" | "gos_rt_option_unwrap"
+                )
+                && destination.projection.is_empty()
+            {
+                field_store_targets.insert(destination.local.0);
             }
         }
         let mut targets: Vec<u32> = field_store_targets.into_iter().collect();
@@ -504,9 +529,28 @@ pub(super) fn lower_body(
     }
 
     let cleanup_plan = gossamer_mir::plan_cleanup_with_summary(body, capture_summary);
+    // A lane loop whose blocks carry cleanup keeps its scalar form, where the
+    // cleanup is emitted.
+    let mut lane_loops = super::simd_lanes::find_lane_loops(body, tcx);
+    for (header, loop_body) in lane_loops.blocks() {
+        let has_cleanup = [header, loop_body].iter().any(|id| {
+            cleanup_plan.at_block_entry(*id).next().is_some()
+                || cleanup_plan.at_block_exit(*id).next().is_some()
+        });
+        if has_cleanup {
+            lane_loops.keep_scalar(header);
+        }
+    }
     let entry_block_id = body.blocks.first().map(|b| b.id.as_u32());
     let mut entry_block_filled = false;
+    // Each statement and terminator tags its instructions with its position
+    // in `source_spans(body)`, so a frame found on the stack names its line.
+    let mut source_index = 0u32;
     for block in &body.blocks {
+        if lane_loops.replaces(block.id) {
+            source_index += u32::try_from(block.stmts.len() + 1)?;
+            continue;
+        }
         let cl_block = blocks[&block.id.as_u32()];
         // The entry block is already current from the parameter-
         // binding section above. Cranelift's debug-assert trips if we
@@ -529,7 +573,26 @@ pub(super) fn lower_body(
             }
         }
 
+        if let Some(lane_loop) = lane_loops.headed_by(block.id) {
+            builder.set_srcloc(ir::SourceLoc::new(source_index));
+            source_index += u32::try_from(block.stmts.len() + 1)?;
+            let exit = blocks[&lane_loop.exit().as_u32()];
+            super::simd_lanes::emit_lane_loop(
+                module,
+                &mut builder,
+                &mut locals,
+                body,
+                tcx,
+                intrinsics,
+                lane_loop,
+                exit,
+            )?;
+            continue;
+        }
+
         for statement in &block.stmts {
+            builder.set_srcloc(ir::SourceLoc::new(source_index));
+            source_index += 1;
             lower_statement(
                 module,
                 &mut builder,
@@ -547,6 +610,8 @@ pub(super) fn lower_body(
             }
         }
 
+        builder.set_srcloc(ir::SourceLoc::new(source_index));
+        source_index += 1;
         lower_terminator(
             module,
             &mut builder,
@@ -566,6 +631,25 @@ pub(super) fn lower_body(
     builder.seal_all_blocks();
     builder.finalize(module.target_config());
     Ok(())
+}
+
+/// The source position of every statement and terminator of `body`, in the
+/// order `lower_body` numbers the instructions it lowers them to.
+pub(crate) fn source_spans(body: &Body) -> Vec<(gossamer_lex::Span, gossamer_mir::InlineChain)> {
+    let mut spans = Vec::new();
+    for block in &body.blocks {
+        spans.extend(
+            block
+                .stmts
+                .iter()
+                .map(|statement| (statement.span, statement.inlined.clone())),
+        );
+        spans.push((
+            block.terminator_span.unwrap_or(body.span),
+            block.terminator_inlined.clone(),
+        ));
+    }
+    spans
 }
 
 pub(super) fn ensure_var(

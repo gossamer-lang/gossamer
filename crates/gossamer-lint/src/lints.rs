@@ -1266,11 +1266,11 @@ fn lint_identity_op(sf: &SourceFile) -> Vec<Finding> {
             let lhs_one = is_int_literal(lhs, 1);
             let rhs_one = is_int_literal(rhs, 1);
             let hit = match op {
-                BinaryOp::Add | BinaryOp::Sub => {
-                    rhs_zero || (matches!(op, BinaryOp::Add) && lhs_zero)
+                BinaryOp::Add | BinaryOp::Sub | BinaryOp::WrappingAdd | BinaryOp::WrappingSub => {
+                    rhs_zero || (matches!(op, BinaryOp::Add | BinaryOp::WrappingAdd) && lhs_zero)
                 }
-                BinaryOp::Mul | BinaryOp::Div => {
-                    rhs_one || (matches!(op, BinaryOp::Mul) && lhs_one)
+                BinaryOp::Mul | BinaryOp::Div | BinaryOp::WrappingMul => {
+                    rhs_one || (matches!(op, BinaryOp::Mul | BinaryOp::WrappingMul) && lhs_one)
                 }
                 _ => false,
             };
@@ -1676,6 +1676,9 @@ fn is_repeatable_scrutinee(expr: &Expr) -> bool {
                     | BinaryOp::Rem
                     | BinaryOp::Add
                     | BinaryOp::Sub
+                    | BinaryOp::WrappingAdd
+                    | BinaryOp::WrappingSub
+                    | BinaryOp::WrappingMul
                     | BinaryOp::Shl
                     | BinaryOp::Shr
                     | BinaryOp::BitAnd

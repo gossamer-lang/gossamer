@@ -269,16 +269,17 @@ impl<'a> Lowerer<'a> {
         )
     }
 
-    /// Same shape as [`Self::maybe_heap_copy_aggregate`]; when `moved`, the
-    /// blob takes the share the source's words already carried rather than
-    /// minting one of its own.
+    /// Boxes a carrier's aggregate payload. The box owns the payload's heap
+    /// children under the structural meta when one is registered, the way a
+    /// map entry does; when `moved`, the blob takes the share the source's
+    /// words already carried rather than minting one of its own.
     pub(crate) fn maybe_heap_copy_aggregate_moved(
         &mut self,
         arg: &Operand,
         moved: bool,
     ) -> Option<String> {
         self.maybe_heap_copy_aggregate_with(
-            arg, /* leak */ false, /* map_owned */ false, moved,
+            arg, /* leak */ false, /* map_owned */ true, moved,
         )
     }
 
@@ -303,6 +304,14 @@ impl<'a> Lowerer<'a> {
         ) || self.tcx.is_inline_enum_ty(local_ty);
         if !is_value_enum {
             return None;
+        }
+        // A carrier whose box meta is registered travels as a counted blob
+        // holding its own share of the payload, which is what every holder
+        // of the outer carrier gives back.
+        if !self.tcx.is_inline_enum_ty(local_ty)
+            && let Some(blob) = self.maybe_heap_copy_aggregate_with(arg, false, true, false)
+        {
+            return Some(blob);
         }
         declare_rt(&mut self.runtime_refs, "gos_rt_aggr_alloc");
         // `noalias`: a fresh allocation, so the memcpy below cannot be writing
@@ -457,9 +466,13 @@ impl<'a> Lowerer<'a> {
             writeln!(self.out, "  call void @{name}(ptr {v})").unwrap();
             return Ok(());
         }
-        // `vec_set_elem_meta` takes the vec POINTER VALUE; the walk
-        // intrinsics take the aggregate's slot address.
-        if name == "gos_rt_vec_set_elem_meta" {
+        // `vec_set_elem_meta` takes the vec POINTER VALUE, and
+        // `lazy_iter_set_elem_meta` the handle's; the walk intrinsics take the
+        // aggregate's slot address.
+        if matches!(
+            name,
+            "gos_rt_vec_set_elem_meta" | "gos_rt_lazy_iter_set_elem_meta"
+        ) {
             if !p.projection.is_empty() {
                 return Ok(());
             }
@@ -477,11 +490,7 @@ impl<'a> Lowerer<'a> {
                 _ => "null".to_string(),
             };
             declare_rt(&mut self.runtime_refs, name);
-            writeln!(
-                self.out,
-                "  call void @gos_rt_vec_set_elem_meta(ptr {v}, ptr {meta})"
-            )
-            .unwrap();
+            writeln!(self.out, "  call void @{name}(ptr {v}, ptr {meta})").unwrap();
             return Ok(());
         }
         // `vec_set_slot_children` likewise takes the vec POINTER VALUE plus
@@ -576,15 +585,28 @@ impl<'a> Lowerer<'a> {
             return None;
         }
         let local_ty = self.body.local_ty(place.local);
-        if !is_aggregate(self.tcx, local_ty) {
+        // A two-word `Option` / `Result` stored as a map value is boxed the way
+        // an aggregate is, into a counted block its meta describes, so the map
+        // owns the box and the payload it carries.
+        let carrier = matches!(
+            self.tcx.kind(local_ty),
+            Some(TyKind::Adt { def, .. }) if def.local == u32::MAX || def.local == u32::MAX - 1
+        );
+        let boxed_carrier = map_owned
+            && carrier
+            && (self
+                .tcx
+                .rc_meta(&format!("gos_rc_meta_boxaggr_{}", local_ty.as_u32()))
+                .is_some()
+                || self
+                    .tcx
+                    .rc_meta(&format!("gos_rc_meta_carrierbox_{}", local_ty.as_u32()))
+                    .is_some()
+                || self.tcx.aggr_copy_meta(local_ty).is_some());
+        if carrier && !boxed_carrier {
             return None;
         }
-        // Sentinel Adts (Result/Option, u32::MAX / u32::MAX-1)
-        // are themselves heap-allocated pointers - the slot
-        // holds the pointer directly. No copy needed.
-        if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(local_ty)
-            && (def.local == u32::MAX || def.local == u32::MAX - 1)
-        {
+        if !boxed_carrier && !is_aggregate(self.tcx, local_ty) {
             return None;
         }
         let slots = slot_count(self.tcx, local_ty)?;
@@ -599,10 +621,18 @@ impl<'a> Lowerer<'a> {
         // The explicit `leak` variant remains only for legacy escape paths
         // whose storage does not participate in deterministic teardown.
         let copy_meta = if map_owned {
+            // A carrier's box takes the meta that walks what the box owns: its
+            // payload's children, then its payload blob, then the leaf.
             let structural = format!("gos_rc_meta_boxaggr_{}", local_ty.as_u32());
+            let carrier_box = format!("gos_rc_meta_carrierbox_{}", local_ty.as_u32());
             self.tcx
                 .rc_meta(&structural)
                 .map(|_| structural)
+                .or_else(|| {
+                    carrier
+                        .then(|| self.tcx.rc_meta(&carrier_box).map(|_| carrier_box))
+                        .flatten()
+                })
                 .or_else(|| self.tcx.aggr_copy_meta(local_ty).map(str::to_owned))
         } else {
             self.tcx.aggr_copy_meta(local_ty).map(str::to_owned)
@@ -697,7 +727,7 @@ impl<'a> Lowerer<'a> {
                     // container, a struct - is read through its descriptor.
                     let elem = substs.types().first().copied();
                     if let Some(elem) = elem
-                        && !matches!(self.tcx.kind(self.unwrap_ref(elem)), Some(TyKind::Int(_)))
+                        && !self.is_signed_word_int(elem)
                         && let Some(desc_sym) = container_format_desc_symbol(def.local)
                         && let Some(desc) = self.value_descriptor(elem, method)
                     {
@@ -747,12 +777,15 @@ impl<'a> Lowerer<'a> {
                     Some(TyKind::JsonValue) => ConcatKind::JsonValue,
                     Some(TyKind::DynValue) => ConcatKind::DynValue,
                     Some(TyKind::DynError) => ConcatKind::ErrorMessage,
-                    Some(TyKind::Array { elem, len }) => {
+                    // A lane vector is laid out, and renders, as its lanes' array.
+                    Some(TyKind::Array { elem, len } | TyKind::Simd { elem, lanes: len }) => {
                         let n = i64::try_from(len.to_usize()).unwrap_or(0);
                         let elem = *elem;
                         match self.tcx.kind(elem) {
                             Some(TyKind::Int(gossamer_types::IntTy::U8)) => ConcatKind::ArrU8(n),
-                            Some(TyKind::Int(_)) => ConcatKind::ArrI64(n),
+                            Some(TyKind::Int(_)) if self.is_signed_word_int(elem) => {
+                                ConcatKind::ArrI64(n)
+                            }
                             Some(TyKind::Float(_)) => ConcatKind::ArrF64(n),
                             Some(TyKind::Bool) => ConcatKind::ArrBool(n),
                             Some(TyKind::Char) => ConcatKind::ArrChar(n),
@@ -766,7 +799,11 @@ impl<'a> Lowerer<'a> {
                             }) => {
                                 let m = i64::try_from(inner_len.to_usize()).unwrap_or(0);
                                 match self.tcx.kind(*inner_elem) {
-                                    Some(TyKind::Int(_)) => ConcatKind::ArrArrI64(n, m),
+                                    Some(TyKind::Int(_))
+                                        if self.is_signed_word_int(*inner_elem) =>
+                                    {
+                                        ConcatKind::ArrArrI64(n, m)
+                                    }
                                     Some(TyKind::Float(_)) => ConcatKind::ArrArrF64(n, m),
                                     Some(TyKind::Bool) => ConcatKind::ArrArrBool(n, m),
                                     // A deeper nesting is a run of slots the
@@ -814,7 +851,9 @@ impl<'a> Lowerer<'a> {
                             Some(TyKind::String) => ConcatKind::VecString,
                             Some(TyKind::Vec(inner) | TyKind::Slice(inner)) => {
                                 match self.tcx.kind(*inner) {
-                                    Some(TyKind::Int(_)) => ConcatKind::VecVecI64,
+                                    Some(TyKind::Int(_)) if self.is_signed_word_int(*inner) => {
+                                        ConcatKind::VecVecI64
+                                    }
                                     Some(TyKind::Float(_)) => ConcatKind::VecVecF64,
                                     Some(TyKind::String) => ConcatKind::VecVecString,
                                     _ => self
@@ -918,9 +957,9 @@ impl<'a> Lowerer<'a> {
                                 Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => {
                                     Some(ConcatKind::SetUint(is_btree))
                                 }
-                                Some(TyKind::Int(i)) if int_width(*i) == 64 => {
-                                    Some(ConcatKind::SetI64(is_btree))
-                                }
+                                // Every other integer element is held in the
+                                // set's word, widened to its own value.
+                                Some(TyKind::Int(_)) => Some(ConcatKind::SetI64(is_btree)),
                                 Some(TyKind::String) => Some(ConcatKind::SetString(is_btree)),
                                 // A `bool`, `char`, or float element is one
                                 // word the renderer reads through its tag.
@@ -1251,8 +1290,18 @@ impl<'a> Lowerer<'a> {
         // `to_string` is the `Display` contract (`{}`) and `fmt` the `Debug`
         // one (`{:?}`); each channel reaches only its own method, so a type
         // implementing one keeps the synthesized rendering on the other.
+        // A generic instance is rendered by the instantiation monomorphisation
+        // made for its own type arguments.
+        let substs = match self.tcx.kind(ty) {
+            Some(TyKind::Adt { substs, .. }) if !substs.types().is_empty() => Some(substs.clone()),
+            _ => None,
+        };
         [format!("{path}::{method}"), format!("{bare}::{method}")]
             .into_iter()
+            .map(|base| match &substs {
+                Some(substs) => gossamer_mir::method_mangled_name(&base, substs),
+                None => base,
+            })
             .find(|sym| self.param_tys_by_name.contains_key(sym))
     }
 
@@ -1445,6 +1494,11 @@ impl<'a> Lowerer<'a> {
                 let ordered = u8::from(def.local == u32::MAX - 18);
                 let elem = self.unwrap_ref(*substs.types().first()?);
                 match self.tcx.kind(elem) {
+                    // Bit 1 of the flag byte marks elements declared `u64` /
+                    // `usize`, which render and order unsigned.
+                    Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => {
+                        Some(vec![gossamer_abi::DESC_SET_I64, ordered | 2])
+                    }
                     Some(TyKind::Int(_) | TyKind::Bool | TyKind::Char) => {
                         Some(vec![gossamer_abi::DESC_SET_I64, ordered])
                     }
@@ -1542,24 +1596,44 @@ impl<'a> Lowerer<'a> {
             // A `u64` / `usize` slot spans the whole unsigned range, so it
             // reads as unsigned wherever a tag stream names it.
             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => Some(1),
-            Some(TyKind::Int(i)) if int_width(*i) == 64 => Some(0),
+            // Every other integer's slot holds its value widened to a word -
+            // sign-extended when signed, zero-extended when not - so the
+            // signed word is the value itself.
+            Some(TyKind::Int(_)) => Some(0),
             Some(TyKind::Duration | TyKind::Instant) => Some(0),
-            Some(TyKind::Float(FloatTy::F64)) => Some(2),
+            Some(TyKind::Float(_)) => Some(2),
             Some(TyKind::Bool) => Some(3),
             Some(TyKind::Char) => Some(4),
             Some(TyKind::String) => Some(5),
-            Some(TyKind::Vec(inner) | TyKind::Slice(inner))
-                if matches!(self.tcx.kind(self.unwrap_ref(*inner)), Some(TyKind::Int(_))) =>
-            {
+            Some(TyKind::Vec(inner) | TyKind::Slice(inner)) if self.is_signed_word_int(*inner) => {
                 Some(6)
             }
+            // The tag-7 formatter reads every integer word signed, so a map
+            // declaring a `u64` / `usize` key or value renders through its
+            // descriptor instead.
             Some(TyKind::HashMap { key, value, .. })
-                if self.map_kv_supported(*key) && self.map_kv_supported(*value) =>
+                if self.map_kv_supported(*key)
+                    && self.map_kv_supported(*value)
+                    && ![*key, *value].iter().any(|ty| {
+                        matches!(
+                            self.tcx.kind(self.unwrap_ref(*ty)),
+                            Some(TyKind::Int(IntTy::U64 | IntTy::Usize))
+                        )
+                    }) =>
             {
                 Some(7)
             }
             _ => None,
         }
+    }
+
+    /// Whether `ty` is an integer whose slot word reads as its own signed
+    /// value. A `u64` / `usize` slot spans the whole unsigned range, so a
+    /// renderer that prints the word signed would spell a value at or above
+    /// `i64::MAX` as a negative; those take the descriptor path instead.
+    pub(crate) fn is_signed_word_int(&self, ty: Ty) -> bool {
+        matches!(self.tcx.kind(self.unwrap_ref(ty)), Some(TyKind::Int(int_ty))
+            if !matches!(int_ty, IntTy::U64 | IntTy::Usize))
     }
 
     /// True when a `HashMap` key/value type is one `gos_rt_map_format`
@@ -1730,6 +1804,30 @@ impl<'a> Lowerer<'a> {
     /// No-op when the types already match. Handles the common
     /// scalar-to-pointer / pointer-to-scalar / int-width and
     /// float-width permutations the variant-stub path needs.
+    /// Converts an operand to the type a runtime parameter declares.
+    ///
+    /// A runtime word slot holds a payload's bits, so a float crossing into a
+    /// word parameter (or a word into a float one) keeps its IEEE-754 pattern,
+    /// the reinterpretation the Cranelift call makes. Every other pairing is a
+    /// value conversion.
+    pub(crate) fn runtime_word_arg(&mut self, value: &str, from_ty: &str, to_ty: &str) -> String {
+        match (from_ty, to_ty) {
+            ("double", "i64") | ("i64", "double") => {
+                let tmp = self.fresh();
+                writeln!(self.out, "  {tmp} = bitcast {from_ty} {value} to {to_ty}").unwrap();
+                tmp
+            }
+            ("float", "i64") => {
+                let bits = self.fresh();
+                writeln!(self.out, "  {bits} = bitcast float {value} to i32").unwrap();
+                let tmp = self.fresh();
+                writeln!(self.out, "  {tmp} = sext i32 {bits} to i64").unwrap();
+                tmp
+            }
+            _ => self.coerce_llvm_value(value, from_ty, to_ty),
+        }
+    }
+
     pub(crate) fn coerce_llvm_value(&mut self, value: &str, from_ty: &str, to_ty: &str) -> String {
         if from_ty == to_ty {
             return value.to_string();

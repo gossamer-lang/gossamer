@@ -241,6 +241,11 @@ pub const ENCODING_JSON: StdModule = StdModule {
             doc: "Reads a dynamic Value as Option<i64>.",
         },
         StdItem {
+            name: "as_u64",
+            kind: StdItemKind::Function,
+            doc: "Reads a dynamic Value as Option<u64>, for a non-negative integer up to u64::MAX.",
+        },
+        StdItem {
             name: "as_f64",
             kind: StdItemKind::Function,
             doc: "Reads a dynamic Value as Option<f64>.",

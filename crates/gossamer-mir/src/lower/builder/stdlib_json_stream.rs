@@ -119,6 +119,9 @@ impl<'a> Builder<'a> {
             TyKind::JsonValue => {
                 self.emit_writer_call("gos_rt_json_writer_value", vec![writer, local], span)
             }
+            TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
+                self.emit_writer_call("gos_rt_json_writer_u64", vec![writer, local], span)
+            }
             TyKind::Int(_) => {
                 self.emit_writer_call("gos_rt_json_writer_i64", vec![writer, local], span)
             }

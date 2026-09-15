@@ -181,6 +181,71 @@ pub(super) fn store_call_result(
     )
 }
 
+/// Stores a runtime call's by-value aggregate result that arrived as a block
+/// the callee allocated: its words move into a slot of this frame and the
+/// block is freed. Any other result is stored as it is.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the same place-store context `store_call_result` takes"
+)]
+pub(super) fn store_runtime_call_result(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    locals: &mut HashMap<Local, Variable>,
+    body: &Body,
+    tcx: &TyCtxt,
+    destination: &Place,
+    value: ir::Value,
+    intrinsics: &mut IntrinsicContext,
+    callee: &str,
+) -> Result<()> {
+    let slots = type_slot_count(tcx, body.local_ty(destination.local));
+    if !gossamer_abi::returns_fresh_aggregate(callee)
+        || !destination.projection.is_empty()
+        || slots <= 1
+    {
+        return store_call_result(
+            module,
+            builder,
+            locals,
+            body,
+            tcx,
+            destination,
+            value,
+            intrinsics,
+        );
+    }
+    let ptr_ty = module.target_config().pointer_type();
+    let bytes = slots.saturating_mul(8);
+    let slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3));
+    let slot_addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+    let block = coerce_arg_to(builder, value, ptr_ty).unwrap_or(value);
+    for index in 0..slots {
+        let offset = ir::immediates::Offset32::new(i32::try_from(index * 8).unwrap_or(0));
+        let word = builder
+            .ins()
+            .load(types::I64, MemFlagsData::trusted(), block, offset);
+        builder
+            .ins()
+            .store(MemFlagsData::trusted(), word, slot_addr, offset);
+    }
+    let free_fn = intrinsics.extern_fn(module, "gos_rt_aggr_free", &[ptr_ty, types::I64], &[])?;
+    let free_ref = module.declare_func_in_func(free_fn, builder.func);
+    let size = builder.ins().iconst(types::I64, i64::from(bytes));
+    builder.ins().call(free_ref, &[block, size]);
+    store_call_result(
+        module,
+        builder,
+        locals,
+        body,
+        tcx,
+        destination,
+        slot_addr,
+        intrinsics,
+    )
+}
+
 pub(super) fn emit_cleanup_drop(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,

@@ -18,10 +18,12 @@ impl Vm {
             globals: Arc::new(rustc_hash::FxHashMap::default()),
             prelude: builtins::prelude_globals(),
             free_fn_names: Arc::new(rustc_hash::FxHashSet::default()),
+            param_dispatch: Arc::new(crate::compile::ParamDispatch::default()),
             bare_fn_depth: rustc_hash::FxHashMap::default(),
             qualified_names: RefCell::new(Vec::new()),
             pool: RefCell::new(FramePool::default()),
             mir_bodies: RefCell::new(None),
+            jit_source_locations: RefCell::new(None),
             tcx_snapshot: RefCell::new(None),
             enum_shape_defs: RefCell::new(None),
             enum_shape_handles: RefCell::new(None),
@@ -78,10 +80,12 @@ impl Vm {
             globals,
             prelude: builtins::prelude_globals(),
             free_fn_names: Arc::new(rustc_hash::FxHashSet::default()),
+            param_dispatch: Arc::new(crate::compile::ParamDispatch::default()),
             bare_fn_depth: rustc_hash::FxHashMap::default(),
             qualified_names: RefCell::new(Vec::new()),
             pool: RefCell::new(FramePool::default()),
             mir_bodies: RefCell::new(mir_bodies),
+            jit_source_locations: RefCell::new(None),
             tcx_snapshot: RefCell::new(tcx_snapshot),
             enum_shape_defs: RefCell::new(enum_shape_defs),
             enum_shape_handles: RefCell::new(enum_shape_handles),
@@ -271,7 +275,7 @@ impl Vm {
         match self.comptime_denial(name) {
             Some(capability) => RuntimeError::ComptimeDenied(
                 gossamer_runtime::comptime_policy::Denied {
-                    operation: name.to_string(),
+                    operation: crate::comptime_gate::operation_spelling(name),
                     capability,
                     level: gossamer_runtime::comptime_policy::level(),
                     path: None,
@@ -418,6 +422,8 @@ impl Vm {
         tcx: TyCtxt,
         enable_inlining: bool,
     ) -> RuntimeResult<()> {
+        let mut tcx = tcx;
+        self.param_dispatch = Arc::new(crate::compile::ParamDispatch::build(program, &mut tcx));
         // Prepass: collect struct field orderings so `__struct`
         // can place literal fields in declaration order and the
         // VM compiler can emit compile-time offset reads.
@@ -452,8 +458,12 @@ impl Vm {
             for item in &program.items {
                 if let HirItemKind::Fn(decl) = &item.kind
                     && let Some(def) = item.def
-                    && let Some(flags) = by_def.get(&def)
+                    && let Some(shares) = by_def.get(&def)
                 {
+                    // Bytecode runs a generic body for every instantiation, so
+                    // only an answer that holds for all of them shares here.
+                    let flags: Vec<bool> =
+                        shares.iter().map(|share| share.holds(&tcx, &[])).collect();
                     fn_param_shareable.insert(decl.name.name.clone(), flags.clone());
                     if !item.module_path.is_empty() {
                         fn_param_shareable.insert(
@@ -532,7 +542,16 @@ impl Vm {
                     } else {
                         None
                     };
-                    if nearest && let Some(info) = inlinable {
+                    // A function compiled per instantiation is reached through
+                    // its instance chunk; inlining its body at a call site
+                    // would lose which instantiation the call names.
+                    if nearest
+                        && let Some(info) = inlinable
+                        && !self
+                            .param_dispatch
+                            .dependent_names
+                            .contains(&decl.name.name)
+                    {
                         inline_fns.insert(decl.name.name.clone(), info);
                     }
                 }
@@ -624,6 +643,12 @@ impl Vm {
         // lookup. DefId keys preserve lexical scope for same-named nested
         // consts.
         let mut module_consts = crate::compile::ConstValues::new();
+
+        for instance in &self.param_dispatch.instances {
+            if let Some(params) = fn_param_tys.get(&instance.base_name).cloned() {
+                fn_param_tys.insert(instance.global.clone(), params);
+            }
+        }
 
         // Pass A: register ADT constructors so const/static initializers
         // and function bodies can resolve enum variants.
@@ -790,6 +815,60 @@ impl Vm {
                 )?;
             }
         }
+        // Pass C': one chunk per instantiation of a function whose body
+        // reaches a trait function through a type parameter, registered under
+        // the global name its call sites were pointed at.
+        let dispatch = Arc::clone(&self.param_dispatch);
+        for instance in &dispatch.instances {
+            let Some(decl) =
+                program
+                    .items
+                    .iter()
+                    .find_map(|item| match (&item.kind, &instance.callable) {
+                        (HirItemKind::Fn(decl), crate::compile::Callable::Free(def))
+                            if item.def == Some(*def) =>
+                        {
+                            Some(decl)
+                        }
+                        (HirItemKind::Impl(decl), crate::compile::Callable::Method(qualified)) => {
+                            let self_name = decl.self_name.as_ref()?;
+                            decl.methods.iter().find(|method| {
+                                format!("{}::{}", self_name.name, method.name.name) == *qualified
+                            })
+                        }
+                        _ => None,
+                    })
+            else {
+                continue;
+            };
+            let mut compiled = decl.clone();
+            compiled.name = gossamer_ast::Ident::new(instance.global.clone());
+            let source_map = self.diagnostic_source_map();
+            let cov_map = self.coverage_source_map();
+            let chunk = compile_fn(
+                &compiled,
+                &tcx,
+                &def_layouts,
+                &wrappers,
+                &inline_fns,
+                &fn_param_shareable,
+                &fn_param_tys,
+                &module_consts,
+                &method_muts,
+                &impl_methods,
+                &mut_statics,
+                source_map.as_deref(),
+                cov_map.as_deref(),
+                Some((&dispatch, instance.global.as_str())),
+            )?;
+            validate_chunk_for_execution(&chunk)?;
+            self.bump_globals_generation();
+            let globals = Arc::make_mut(&mut self.globals);
+            globals.insert(
+                crate::value::intern_type_name(&instance.global),
+                Global::Fn(chunk.into_shared()),
+            );
+        }
         // Pass D: comptime folding. When enabled, evaluate every
         // `comptime { ... }` block and `comptime fn` call now that
         // every function and const is compiled, recording each result
@@ -833,7 +912,13 @@ impl Vm {
         // Coverage runs stay on the bytecode path: the cranelift JIT
         // lowers from MIR and never sees the `Op::CovHit` markers, so a
         // promoted function would silently stop recording line hits.
-        if jit_call::jit_enabled() && has_jit_eligible_fn(program) && !self.coverage_active() {
+        // A comptime fold evaluates its regions during this load and discards
+        // the VM, so nothing it loads is ever entered again to tier up.
+        if jit_call::jit_enabled()
+            && !self.collect_comptime.get()
+            && has_jit_eligible_fn(program)
+            && !self.coverage_active()
+        {
             let mut jit_tcx = tcx.clone();
             let slice_pattern_bodies = jit_slice_pattern_body_names(program);
             let (shapes, enum_shape_handles) = build_native_enum_shapes(program, &jit_tcx);
@@ -847,7 +932,6 @@ impl Vm {
             // rewrite happens on a private copy.
             let lifted = gossamer_hir::lift_closures(program.clone(), &mut jit_tcx);
             let mut bodies = gossamer_mir::lower_program(&lifted, &mut jit_tcx);
-            drop(lifted);
             bodies.retain(|body| !slice_pattern_bodies.contains(body.name.as_str()));
             // Drop what no entry reaches before the passes that are paid per
             // body run over it. The snapshot exists to promote hot bodies, and
@@ -870,7 +954,8 @@ impl Vm {
             // instead of two) and overflows its stack slot. The bytecode VM is
             // unaffected - it runs the separately-compiled chunks, not these
             // MIR bodies, which are JIT-only.
-            gossamer_mir::monomorphise(&mut bodies, &mut jit_tcx);
+            gossamer_mir::monomorphise(&lifted, &mut bodies, &mut jit_tcx);
+            drop(lifted);
             if !roots.is_empty() {
                 gossamer_mir::prune_unreachable(&mut bodies, &roots);
             }
@@ -976,6 +1061,36 @@ impl Vm {
                 *self.enum_shape_handles.borrow_mut() = Some(enum_shape_handles);
                 *self.struct_shape_defs.borrow_mut() = Some(Arc::new(struct_shapes));
                 *self.struct_shape_handles.borrow_mut() = Some(struct_shape_handles);
+                if let Some(map) = self.source_map.as_deref() {
+                    let mut locations = HashMap::new();
+                    for body in &bodies {
+                        // Every position, and every call an inliner placed
+                        // code through, since a JIT frame names both.
+                        let mut spans = Vec::new();
+                        for block in &body.blocks {
+                            let positions = block
+                                .stmts
+                                .iter()
+                                .map(|statement| (statement.span, &statement.inlined))
+                                .chain(std::iter::once((
+                                    block.terminator_span.unwrap_or(body.span),
+                                    &block.terminator_inlined,
+                                )));
+                            for (span, chain) in positions {
+                                spans.push(span);
+                                if let Some(chain) = chain {
+                                    spans.extend(chain.iter().map(|frame| frame.call));
+                                }
+                            }
+                        }
+                        for span in spans {
+                            locations.entry(span).or_insert_with(|| {
+                                crate::compile::resolve_source_location(map, span)
+                            });
+                        }
+                    }
+                    *self.jit_source_locations.borrow_mut() = Some(Arc::new(locations));
+                }
                 *self.mir_bodies.borrow_mut() = Some(Arc::new(bodies));
                 // Store the JIT-local type context. MIR lowering and
                 // monomorphisation intern additional types, so they must not
@@ -2152,6 +2267,7 @@ impl Vm {
         let prelude = Arc::clone(&self.prelude);
         let free_fns = Arc::clone(&self.free_fn_names);
         let mut bare_depth = std::mem::take(&mut self.bare_fn_depth);
+        let dispatch = Arc::clone(&self.param_dispatch);
         let globals = Arc::make_mut(&mut self.globals);
         let module_prefix = if item.module_path.is_empty() {
             None
@@ -2187,6 +2303,7 @@ impl Vm {
                     mut_statics,
                     source_map.as_deref(),
                     cov_map.as_deref(),
+                    Some((&dispatch, "")),
                 )?;
                 validate_chunk_for_execution(&chunk)?;
                 let shared = chunk.into_shared();
@@ -2222,6 +2339,7 @@ impl Vm {
                         mut_statics,
                         source_map.as_deref(),
                         cov_map.as_deref(),
+                        Some((&dispatch, "")),
                     )?;
                     validate_chunk_for_execution(&chunk)?;
                     let shared = chunk.into_shared();
@@ -2288,6 +2406,7 @@ impl Vm {
                             mut_statics,
                             source_map.as_deref(),
                             cov_map.as_deref(),
+                            Some((&dispatch, "")),
                         )?;
                         validate_chunk_for_execution(&chunk)?;
                         let shared = chunk.into_shared();
@@ -2761,13 +2880,16 @@ fn build_native_struct_shapes(
     Arc<Vec<Arc<crate::value::NativeStructShape>>>,
 ) {
     use crate::value::{
-        NativeFieldKind, NativeStructShape, intern_type_name, register_native_struct_shapes,
+        NativeFieldKind, NativeFieldPlacement, NativeStructShape, intern_type_name,
+        register_native_struct_shapes,
     };
-    use gossamer_types::TyKind;
+    use gossamer_types::{IntTy, TyKind};
     struct Cand<'a> {
         def_local: u32,
         name: &'a str,
         fields: Vec<(&'a str, NativeFieldKind)>,
+        placements: Vec<NativeFieldPlacement>,
+        words: usize,
     }
     let mut cands: Vec<Cand> = Vec::new();
     for item in &program.items {
@@ -2812,10 +2934,39 @@ fn build_native_struct_shapes(
         if !supported {
             continue;
         }
+        let (placements, words) = match tcx.packed_struct_layout(def) {
+            Some(layout) => {
+                let placements = field_tys
+                    .iter()
+                    .zip(layout.field_offsets.iter().zip(&layout.field_bytes))
+                    .map(|(ty, (offset, bytes))| NativeFieldPlacement {
+                        offset: *offset,
+                        bytes: u8::try_from(*bytes).unwrap_or(8),
+                        signed: matches!(
+                            tcx.kind_of(*ty),
+                            TyKind::Int(IntTy::I8 | IntTy::I16 | IntTy::I32)
+                        ),
+                    })
+                    .collect();
+                (placements, layout.size as usize / 8)
+            }
+            None => {
+                let placements = (0..fields.len())
+                    .map(|i| NativeFieldPlacement {
+                        offset: u32::try_from(i * 8).unwrap_or(u32::MAX),
+                        bytes: 8,
+                        signed: true,
+                    })
+                    .collect();
+                (placements, fields.len())
+            }
+        };
         cands.push(Cand {
             def_local: def.local,
             name: adt.name.name.as_str(),
             fields,
+            placements,
+            words,
         });
     }
     if cands.is_empty() {
@@ -2839,6 +2990,8 @@ fn build_native_struct_shapes(
                     struct_name: intern_type_name(c.name),
                     index: idx_of[&c.def_local],
                     fields,
+                    placements: c.placements.clone(),
+                    words: c.words,
                 })
             })
             .collect();

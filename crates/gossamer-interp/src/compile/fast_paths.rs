@@ -2046,22 +2046,18 @@ impl<'tcx> FnBuilder<'tcx> {
                             if name.name == "iter" && args.is_empty()
                     )
         );
-        // A range, or an adapter chain over one, carries live iterator state
-        // instead of an indexable buffer, and its `next()` receiver is an
-        // rvalue the generic loop re-evaluates on every pull. Snapshot it
-        // once below and drive the snapshot by index - the shape the
-        // compiled tiers lower to. A stateful `impl Iterator` receiver
-        // (`(&mut __for_iter).next()`) keeps the `next()` protocol.
+        // Lazy iterator state yields one element per pull, and its adapters
+        // run their callbacks as each element is pulled, so an index walk
+        // over a snapshot would run every callback before the first body.
+        // The `for` desugar binds a chain built in place, so the receiver
+        // here names state that lives across turns; the generic loop's
+        // `next()` advances it in place.
         let lazy_source = self.receiver_is_lazy_iterator(next_recv)
             && !collection_iter_method
-            && !concrete_enumerate_method
-            && !matches!(
-                &next_recv.kind,
-                HirExprKind::Unary {
-                    op: HirUnaryOp::RefMut,
-                    ..
-                }
-            );
+            && !concrete_enumerate_method;
+        if lazy_source {
+            return Ok(None);
+        }
         // Walk the iterator chain. Recognise:
         //   `vec.iter()`              → element binding, no enumerate
         //   `vec.iter().enumerate()`  → tuple binding (i, x)
@@ -2073,10 +2069,6 @@ impl<'tcx> FnBuilder<'tcx> {
         // `impl Iterator` (Adt receiver) falls through to `None` so the
         // stateful `.next()` desugar keeps its own handling.
         let (vec_expr, is_enumerate, write_back_elem) = match &next_recv.kind {
-            // A lazy pipeline yields its elements (pairs included) straight
-            // from the snapshot, so it is driven as a plain sequence: the
-            // `enumerate` index rides in the tuple the snapshot holds.
-            _ if lazy_source => (next_recv.as_ref(), false, false),
             HirExprKind::MethodCall {
                 receiver: chain_recv,
                 name: chain_name,
@@ -2251,11 +2243,30 @@ impl<'tcx> FnBuilder<'tcx> {
         // Compile the iterable and capture it once.
         let mut vec_reg = self.compile_expr(source_expr)?;
 
-        // A lazy pipeline's value is iterator state with no indexable
-        // length. `collect` drains it into the snapshot the index walk
-        // drives; on an already-materialized sequence it hands back the
-        // same buffer.
-        if lazy_source {
+        // A map or set declaring a `u64` / `usize` key walks in unsigned key
+        // order, which only the copy described by its static type can say.
+        if (source_is_set || source_is_map)
+            && let Some(desc) =
+                crate::value::ordering_descriptor(self.tcx, self.static_ty(source_expr))
+        {
+            let dst = self.alloc_reg();
+            let desc_idx = self.const_idx(
+                ConstKey::String(desc.clone()),
+                Value::String(desc.as_str().into()),
+            );
+            self.emit(Op::UintLeaves {
+                dst,
+                src: vec_reg,
+                desc_idx,
+            });
+            vec_reg = dst;
+        }
+
+        // A bare `.iter()` over a receiver the walk cannot index directly (a
+        // map) answers iterator state, which has no indexable length. No
+        // adapter runs on it, so draining it once into the buffer the index
+        // walk reads reorders nothing observable.
+        if !source_is_set && !source_is_map && self.receiver_is_lazy_iterator(source_expr) {
             let snap = self.alloc_reg();
             let collect_idx = self.global_idx("collect");
             let cache_idx = self.alloc_cache_idx();
@@ -2292,13 +2303,26 @@ impl<'tcx> FnBuilder<'tcx> {
             // storage is keyed rather than numerically indexable. Snapshot
             // entries exactly as `m.iter()` does before using the common
             // indexed loop machinery. This covers both HashMap and BTreeMap.
-            let snap = self.alloc_reg();
+            let cursor = self.alloc_reg();
             let iter_idx = self.global_idx("iter");
             let cache_idx = self.alloc_cache_idx();
             self.emit(Op::MethodCall {
-                dst: snap,
+                dst: cursor,
                 receiver: vec_reg,
                 name_idx: iter_idx,
+                args: 0,
+                argc: 0,
+                cache_idx,
+            });
+            // `iter()` answers a cursor over the sorted entries; the index
+            // walk below reads the buffer that cursor drains into.
+            let snap = self.alloc_reg();
+            let collect_idx = self.global_idx("collect");
+            let cache_idx = self.alloc_cache_idx();
+            self.emit(Op::MethodCall {
+                dst: snap,
+                receiver: cursor,
+                name_idx: collect_idx,
                 args: 0,
                 argc: 0,
                 cache_idx,

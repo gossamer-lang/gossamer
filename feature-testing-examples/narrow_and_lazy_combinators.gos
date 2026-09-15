@@ -1,0 +1,40 @@
+// A `Vec<u8>` holds one byte per element, and `sum`, `min`, and `max` read
+// those bytes on every tier whether a chain fuses or runs through the runtime.
+// A lazy `filter_map` whose callback the compiler cannot inline still calls it
+// one element per pull, so a `take` after it stops the calls.
+
+use std::iter
+
+fn main() {
+    let bytes: Vec<u8> = #[5, 20, 7, 5]
+    let bound = bytes.iter()
+    println("u8 {} {} {} {:?} {:?} {:?}", bytes.sum(), iter::sum(bytes), bytes.iter().sum(), bound.max(), bytes.min(), iter::max(bytes))
+
+    let xs: Vec<i64> = #[3, 8, 1, 9, 4, 7, 2, 9, 1]
+    let mut hits: Vec<i64> = #[]
+    let pick = |v: i64| {
+        hits.push(v)
+        if v % 2 == 0 { Some(v * 10) } else { None }
+    }
+    let kept = xs.iter().filter_map(pick).take(2).sum()
+    println("words {} {:?}", kept, hits)
+
+    let mut seen: Vec<i64> = #[]
+    let letter = |v: i64| {
+        seen.push(v)
+        if v > 5 { Some('a') } else { None }
+    }
+    println("chars {}", xs.iter().filter_map(letter).take(3).count())
+    println("seen {:?}", seen)
+
+    let mut asked: Vec<i64> = #[]
+    let label = |v: i64| {
+        asked.push(v)
+        if v % 3 == 0 { Some(format("n{}", v)) } else { None }
+    }
+    let mut names: Vec<String> = #[]
+    for name in xs.iter().filter_map(label).take(2) {
+        names.push(name)
+    }
+    println("strings {:?} {:?}", names, asked)
+}

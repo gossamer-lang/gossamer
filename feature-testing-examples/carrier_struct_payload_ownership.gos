@@ -1,0 +1,63 @@
+// A struct inside an `Option` or `Result` is owned by the carrier's box: a
+// carrier dropped unread gives its fields back, and every extraction - `if
+// let`, `match`, `unwrap`, `?` - reads a value of its own, so one carrier can
+// be taken apart any number of times.
+
+struct Tags {
+    name: String
+    tags: Map<String, i64>
+    ids: Vec<i64>
+}
+
+fn build(i: i64) -> Result<Tags, i64> {
+    if i % 3 == 0 {
+        return Err(i)
+    }
+    let mut m: Map<String, i64> = Map::new()
+    m.insert("k" + i.to_string(), i)
+    Ok(Tags { name: "t" + i.to_string(), tags: m, ids: #[i, i + 1] })
+}
+
+fn relay(r: Result<Tags, i64>) -> Result<String, i64> {
+    let t = r?
+    Ok(t.name + ":" + t.tags.len().to_string())
+}
+
+fn main() {
+    let mut out: Vec<String> = #[]
+    for i in 0..6 {
+        let r = build(i)
+        if let Ok(t) = r {
+            out.push(t.name + "/" + t.ids.len().to_string())
+        }
+        if let Ok(u) = r {
+            out.push(u.name + "/" + u.tags.len().to_string())
+        }
+        match r {
+            Ok(t) => out.push("m" + t.name)
+            Err(e) => out.push("e" + e.to_string())
+        }
+        if r.is_ok() {
+            let a = r.unwrap()
+            let b = r.unwrap()
+            out.push(a.name + b.name)
+        }
+        let dropped = build(i + 1)
+        let stored = #[build(i + 2)]
+        for s in stored {
+            if let Ok(t) = s {
+                out.push("s" + t.name)
+            }
+        }
+        match relay(build(i)) {
+            Ok(s) => out.push(s)
+            Err(e) => out.push("r" + e.to_string())
+        }
+        let mut junk: Vec<String> = #[]
+        for k in 0..4 {
+            junk.push("junk" + k.to_string())
+        }
+    }
+    println("{}", out.len())
+    println("{:?}", out)
+}

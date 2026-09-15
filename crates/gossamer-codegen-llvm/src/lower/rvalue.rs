@@ -341,7 +341,6 @@ impl<'a> Lowerer<'a> {
             // drop pass.
             "gos_rt_result_disc"
             | "gos_rt_result_payload"
-            | "gos_result_payload_owned"
             | "gos_rt_weak_opt_payload"
             | "gos_rt_result_payload_f64"
                 if args.len() == 1 =>
@@ -364,8 +363,12 @@ impl<'a> Lowerer<'a> {
                 writeln!(self.out, "  {hi} = lshr i128 {r}, 64").unwrap();
                 let p64 = self.fresh();
                 writeln!(self.out, "  {p64} = trunc i128 {hi} to i64").unwrap();
-                if name == "gos_rt_result_payload_f64" {
-                    // Reinterpret the payload bits as an f64.
+                // A float payload is carried as its bit pattern, so the word
+                // is reinterpreted whenever the destination is a float. A
+                // generic template names the plain extractor before its
+                // payload type is known, and its specialised copy reads into
+                // the float local that instantiation declares.
+                if name == "gos_rt_result_payload_f64" || matches!(dest_ty, "double" | "float") {
                     let f = self.fresh();
                     writeln!(self.out, "  {f} = bitcast i64 {p64} to double").unwrap();
                     return Ok(Some(coerce_dest(self, f, "double")));
@@ -511,28 +514,12 @@ impl<'a> Lowerer<'a> {
         // An ordered container's push takes the address of the element's
         // slots: the store copies its own stride from it, and the sift
         // compares through the descriptor that follows.
-        let heap_push_by_address = matches!(
-            name,
-            "gos_rt_bheap_max_push_desc" | "gos_rt_bheap_min_push_desc"
-        );
+        let heap_push_by_address = gossamer_abi::takes_elem_by_address(name);
         // A content-keyed map or set reads the key's slots through the
         // descriptor that travels with the call, so the key is passed by
         // address - an aggregate's own storage, or a fresh slot holding a
         // two-word `Option` carrier.
-        let skey_by_address = matches!(
-            name,
-            "gos_rt_map_insert_skey_opt"
-                | "gos_rt_map_insert_skey"
-                | "gos_rt_map_get_skey_opt"
-                | "gos_rt_map_get_or_skey"
-                | "gos_rt_map_contains_skey"
-                | "gos_rt_map_remove_skey"
-                | "gos_rt_map_or_insert_skey"
-                | "gos_rt_map_inc_skey"
-                | "gos_rt_set_insert_skey"
-                | "gos_rt_set_contains_skey"
-                | "gos_rt_set_remove_skey"
-        );
+        let skey_by_address = gossamer_abi::takes_key_by_address(name);
 
         let mut arg_text = String::new();
         // A map insert whose value is an aggregate copies it into a
@@ -680,7 +667,7 @@ impl<'a> Lowerer<'a> {
                     continue;
                 }
                 if &a_ty != want_ty {
-                    let coerced = self.coerce_llvm_value(&a_v, &a_ty, want_ty);
+                    let coerced = self.runtime_word_arg(&a_v, &a_ty, want_ty);
                     let _ = write!(arg_text, "{want_ty} {coerced}");
                     continue;
                 }
@@ -897,7 +884,6 @@ impl<'a> Lowerer<'a> {
             | RawIntrinsic::MapEnumKey
             | RawIntrinsic::FnAddr
             | RawIntrinsic::WeakOptPayload
-            | RawIntrinsic::OwnedAggregatePayload
             | RawIntrinsic::JitUnsupportedUserIterator => {
                 return Err(BuildError::InternalLoweringBug(
                     "raw pointer intrinsic reached rvalue lowering",

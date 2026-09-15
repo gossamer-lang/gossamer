@@ -234,17 +234,17 @@ pub(crate) fn set_deep_clone(value: &Value) -> Value {
         "Set"
     };
     let handle = set_handle_named(name, new_id);
-    // A rendered copy carries the unsigned-element marker; the clone a `let`
-    // or a by-value argument takes must keep it, or the elements read signed
-    // on the way out.
-    if inner
+    // A rendered copy carries its element descriptor; the clone a `let` or a
+    // by-value argument takes must keep it, or the elements lose the spelling
+    // their type gives them on the way out.
+    if let Some((_, elem_desc)) = inner
         .fields
         .iter()
-        .any(|(field, _)| *field == crate::value::SET_UINT_MARKER)
+        .find(|(field, _)| **field == crate::value::ELEM_DESC_MARKER)
         && let Value::Struct(cloned) = &handle
     {
         let mut fields = cloned.fields.to_vec();
-        fields.push((crate::value::SET_UINT_MARKER, Value::Int(1)));
+        fields.push((crate::value::ELEM_DESC_MARKER, elem_desc.clone()));
         return Value::struct_(name, fields);
     }
     handle
@@ -402,7 +402,7 @@ pub(crate) fn set_display_snapshot(value: &Value) -> Option<Vec<Value>> {
 
 fn set_values(value: &Value, sorted: bool) -> Option<Vec<Value>> {
     let id = set_id_of(value)?;
-    Some(SET_REGISTRY.with(|r| {
+    let values: Vec<Value> = SET_REGISTRY.with(|r| {
         r.borrow()
             .get(&id)
             .map(|s| {
@@ -416,7 +416,15 @@ fn set_values(value: &Value, sorted: bool) -> Option<Vec<Value>> {
                     .collect()
             })
             .unwrap_or_default()
-    }))
+    });
+    // A stored key orders an element the way the language orders it, except
+    // one declared `u64` / `usize`, whose bits order unsigned. A handle the
+    // compiler described carries that element descriptor.
+    Some(if sorted {
+        crate::value::described_set_order(value, values)
+    } else {
+        values
+    })
 }
 
 fn set_pair_ids(args: &[Value]) -> Option<(i64, i64)> {

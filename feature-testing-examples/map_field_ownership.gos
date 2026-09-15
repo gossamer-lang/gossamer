@@ -1,0 +1,56 @@
+// A struct field holding a `Map` owns its table: building one from a map the
+// function created, from a `Map` parameter, copying one inside a loop, and a
+// lent `Option` parameter pushed into a `Vec` each leave every holder its own
+// value.
+
+struct Tags {
+    name: String
+    tags: Map<String, i64>
+}
+
+fn build(i: i64) -> Tags {
+    let mut m: Map<String, i64> = Map::new()
+    m.insert("k" + i.to_string(), i)
+    Tags { name: "t" + i.to_string(), tags: m }
+}
+
+fn wrap(m: Map<String, i64>) -> Tags {
+    Tags { name: "w", tags: m }
+}
+
+fn keep(o: Option<Option<String>>) -> Vec<Option<Option<String>>> {
+    let mut v: Vec<Option<Option<String>>> = #[]
+    v.push(o)
+    v
+}
+
+fn main() {
+    let mut names: Vec<String> = #[]
+    for i in 0..3 {
+        let t = build(i)
+        let u = t
+        names.push(u.name + ":" + u.tags.len().to_string())
+    }
+    println("{:?}", names)
+
+    let mut m: Map<String, i64> = Map::new()
+    m.insert("a", 1)
+    let w = wrap(m)
+    m.insert("b", 2)
+    println("wrapped {} {}, caller {}", w.name, w.tags.len(), m.len())
+
+    let mut kept: Vec<String> = #[]
+    for i in 0..4 {
+        let held = keep(Some(Some("in" + i.to_string())))
+        let mut junk: Vec<String> = #[]
+        for k in 0..6 {
+            junk.push("junk" + (i * 10 + k).to_string())
+        }
+        for k in held {
+            if let Some(Some(s)) = k {
+                kept.push(s)
+            }
+        }
+    }
+    println("{:?}", kept)
+}

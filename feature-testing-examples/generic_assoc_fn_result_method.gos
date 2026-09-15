@@ -1,0 +1,24 @@
+// An associated function of a generic `impl` block answers the instantiation
+// its arguments give it, so a method called on that result reaches the copy
+// made for the concrete type.
+
+struct Point { x: f64, y: f64 }
+
+struct Bag<T> { items: Vec<T> }
+
+impl<T> Bag<T> {
+    fn of(v: T) -> Bag<T> { Bag { items: #[v] } }
+    fn add(&mut self, v: T) { self.items.push(v) }
+    fn top(&self) -> T { self.items[self.items.len() - 1] }
+}
+
+fn main() {
+    let bf = Bag::of(2.5)
+    println("{}", bf.top())
+    let mut bp = Bag::of(Point { x: 1.0, y: 2.0 })
+    bp.add(Point { x: 7.5, y: 8.5 })
+    let t = bp.top()
+    println("{} {}", t.x, t.y)
+    let bs = Bag::of("word")
+    println("{} {}", bs.top(), bs.items.len())
+}

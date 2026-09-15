@@ -1,0 +1,141 @@
+// Nested Vec indexing through struct fields, reads and writes in loops, over
+// aggregate rows, scalar rows, tuple rows, and slice views; then the scalar
+// queue shapes whose push and pop run inline on the compiled tiers.
+
+struct Cell {
+    alive: bool
+    next_state: bool
+    neighbors: Vec<(i64, i64)>
+}
+
+struct Grid {
+    width: i64
+    height: i64
+    cells: Vec<Vec<Cell>>
+}
+
+impl Grid {
+    fn new(width: i64, height: i64) -> Grid {
+        let mut cells: Vec<Vec<Cell>> = #[]
+        for _ in 0..height {
+            let mut row: Vec<Cell> = #[]
+            for _ in 0..width { row.push(Cell { alive: false, next_state: false, neighbors: #[] }) }
+            cells.push(row)
+        }
+        let mut grid = Grid { width: width, height: height, cells: cells }
+        for y in 0..height {
+            for x in 0..width {
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        if dx == 0 && dy == 0 { continue }
+                        let ny = (y + dy + height) % height
+                        let nx = (x + dx + width) % width
+                        grid.cells[y][x].neighbors.push((nx, ny))
+                    }
+                }
+            }
+        }
+        grid
+    }
+
+    fn step(&mut self) {
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let mut alive = 0
+                for (nx, ny) in self.cells[y][x].neighbors {
+                    if self.cells[ny][nx].alive { alive += 1 }
+                }
+                self.cells[y][x].next_state = if self.cells[y][x].alive {
+                    alive == 2 || alive == 3
+                } else {
+                    alive == 3
+                }
+            }
+        }
+        for y in 0..self.height {
+            for x in 0..self.width { self.cells[y][x].alive = self.cells[y][x].next_state }
+        }
+    }
+
+    fn count(&self) -> i64 {
+        let mut n = 0
+        for row in self.cells { for c in row { if c.alive { n += 1 } } }
+        n
+    }
+}
+
+struct Matrix {
+    rows: Vec<Vec<i64>>
+}
+
+impl Matrix {
+    fn at(&self, i: i64, j: i64) -> i64 { self.rows[i][j] }
+    fn set(&mut self, i: i64, j: i64, v: i64) { self.rows[i][j] = v }
+}
+
+fn trace(rows: [Vec<f64>]) -> f64 {
+    let mut s = 0.0
+    for i in 0..rows.len() { s += rows[i][i] }
+    s
+}
+
+fn main() {
+    let mut g = Grid::new(12, 9)
+    let mut seed = 7
+    for y in 0..9 {
+        for x in 0..12 {
+            seed = (seed * 3877 + 29573) % 139968
+            if (seed / 11) % 3 == 0 { g.cells[y][x].alive = true }
+        }
+    }
+    for i in 0..6 {
+        g.step()
+        println("gen {} alive {}", i, g.count())
+    }
+    println("neighbors of corner {:?}", g.cells[0][0].neighbors)
+
+    let mut rows: Vec<Vec<i64>> = #[]
+    for i in 0..1100 { rows.push(#[i, i * 2, i * 3]) }
+    let mut m = Matrix { rows: rows }
+    let mut total = 0
+    for i in 0..1100 { total += m.at(i, 2) - m.rows[i][1] }
+    println("matrix total {}", total)
+    m.set(5, 1, -9)
+    m.rows.push(#[7, 8, 9])
+    let copy = m.rows.clone()
+    println("row5 {:?} last {:?} copy {:?} len {}", m.rows[5], m.rows[1100], copy[5], copy.len())
+    let mut firsts = 0
+    for r in m.rows { firsts += r[0] }
+    println("firsts {}", firsts)
+
+    let mut pairs: Vec<Vec<(i64, i64)>> = #[#[(1, 2)], #[(3, 4), (5, 6)]]
+    pairs[1][0] = (30, 40)
+    println("pairs {:?} {}", pairs[1], pairs[1][1].0 + pairs[0][0].1)
+
+    let ident: Vec<Vec<f64>> = #[#[1.5, 0.0], #[0.0, 2.25]]
+    println("trace {}", trace(ident))
+
+    let mut q: Deque<i64> = Deque::new()
+    let mut drained = 0
+    for round in 0..50 {
+        for i in 0..round { q.push_back(i * round) }
+        for _ in 0..(round / 2) {
+            if let Some(v) = q.pop_front() { drained += v }
+        }
+    }
+    let mut rest = 0
+    while let Some(v) = q.pop_front() { rest += v }
+    println("deque drained {} rest {} empty {:?}", drained, rest, q.pop_front())
+
+    let mut queue: Queue<i64> = Queue::new()
+    for i in 0..5000 { queue.push(i) }
+    let mut qsum = 0
+    while let Some(v) = queue.pop() { qsum += v }
+    println("queue {}", qsum)
+
+    let mut chars: Deque<char> = Deque::new()
+    for c in "gossamer".chars() { chars.push_back(c) }
+    let mut word = ""
+    while let Some(c) = chars.pop_front() { word.push_char(c) }
+    println("chars {}", word)
+}

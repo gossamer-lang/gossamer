@@ -53,6 +53,21 @@ fn err(msg: &str) -> i128 {
     unsafe { gos_rt_result_new(1, e as i64) }
 }
 
+/// Layout of the parsed certificate tuple `(subject, issuer, serial,
+/// not_before, not_after, san_dns, sha256)`: its strings and vectors are owned
+/// by the blob.
+static CERT_INFO_META: [i64; 9] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    5,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+    (gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 2,
+    (gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 5,
+    (gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 6,
+];
+
 /// `crypto::x509::parse_pem(s)` leaf -> Result<(subject, issuer,
 /// serial, not_before_unix, not_after_unix, san_dns, sha256), Error>.
 #[unsafe(no_mangle)]
@@ -82,18 +97,18 @@ pub unsafe extern "C" fn gos_rt_x509_parse_pem_raw(s: *const c_char) -> i128 {
         }
         let sha256 = Sha256::digest(&der);
 
-        let blob = crate::c_abi::gos_rt_gc_alloc(56) as *mut i64;
+        let words = [
+            alloc_cstring(subject.as_bytes()) as i64,
+            alloc_cstring(issuer.as_bytes()) as i64,
+            byte_vec(&serial) as i64,
+            not_before,
+            not_after,
+            str_vec(&san_dns) as i64,
+            byte_vec(&sha256) as i64,
+        ];
+        let blob = crate::c_abi::rc::counted_words(&words, &CERT_INFO_META);
         if blob.is_null() {
             return err("x509: alloc failed");
-        }
-        unsafe {
-            *blob = alloc_cstring(subject.as_bytes()) as i64;
-            *blob.add(1) = alloc_cstring(issuer.as_bytes()) as i64;
-            *blob.add(2) = byte_vec(&serial) as i64;
-            *blob.add(3) = not_before;
-            *blob.add(4) = not_after;
-            *blob.add(5) = str_vec(&san_dns) as i64;
-            *blob.add(6) = byte_vec(&sha256) as i64;
         }
         unsafe { gos_rt_result_new(0, blob as i64) }
     })

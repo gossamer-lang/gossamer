@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0057]: A string literal handed to `regex::compile` is not a pattern the - here
+--- framed ---
+error[GP0057]: A string literal handed to `regex::compile` is not a pattern the
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

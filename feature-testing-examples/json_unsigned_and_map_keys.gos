@@ -1,0 +1,91 @@
+// JSON text for integers declared `u64` / `usize` and for maps whose keys are
+// not `String`. An unsigned value past `i64::MAX` keeps its own digits in the
+// text and reads back through `json::as_u64`, and a map keyed by an integer,
+// a `bool`, or a `char` renders each key as the member name the map spells it
+// with, in the same order on every tier.
+// Bit-identical on the VM, Cranelift, and LLVM tiers.
+
+use std::encoding::json
+
+struct Counters {
+    hits: u64
+    slots: usize
+    peak: u64
+    per_host: Map<String, u64>
+}
+
+fn keyed_maps() {
+    let mut by_int: Map<i64, i64> = Map::new()
+    by_int.insert(3, 1)
+    by_int.insert(-7, 2)
+    by_int.insert(10, 5)
+    println("int keys {}", json::encode(by_int))
+
+    let mut by_bool: Map<bool, String> = Map::new()
+    by_bool.insert(true, "yes")
+    by_bool.insert(false, "no")
+    println("bool keys {}", json::encode(by_bool))
+
+    let mut by_char: Map<char, i64> = Map::new()
+    by_char.insert('b', 2)
+    by_char.insert('a', 1)
+    println("char keys {}", json::encode(by_char))
+
+    let big: u64 = 18446744073709551615
+    let mut by_unsigned: Map<u64, String> = Map::new()
+    by_unsigned.insert(big, "max")
+    by_unsigned.insert(4, "four")
+    println("u64 keys {}", json::encode(by_unsigned))
+}
+
+fn unsigned_values() {
+    let big: u64 = 18446744073709551615
+    let mid: u64 = 9223372036854775808
+    let small: usize = 12
+    println("scalars {} {} {}", json::encode(big), json::encode(mid), json::encode(small))
+
+    let values: Vec<u64> = #[big, mid, 5]
+    println("vec {}", json::encode(values))
+
+    let mut named: Map<String, u64> = Map::new()
+    named.insert("max", big)
+    named.insert("mid", mid)
+    println("map {}", json::encode(named))
+}
+
+fn read_back() {
+    match json::parse("{\"max\": 18446744073709551615, \"neg\": -1, \"small\": 7}") {
+        Ok(doc) => {
+            let max = json::get(doc, "max").and_then(json::as_u64)
+            let neg = json::get(doc, "neg").and_then(json::as_u64)
+            let small = json::get(doc, "small").and_then(json::as_u64)
+            println("as_u64 {:?} {:?} {:?}", max, neg, small)
+            println("as_i64 of max {:?}", json::get(doc, "max").and_then(json::as_i64))
+        }
+        Err(e) => println("parse error {}", e)
+    }
+}
+
+fn derived() {
+    let mut per_host: Map<String, u64> = Map::new()
+    per_host.insert("a", 18446744073709551000)
+    per_host.insert("b", 2)
+    let c = Counters { hits: 18446744073709551615, slots: 64, peak: 9223372036854775808, per_host: per_host }
+    match to_json::<Counters>(c) {
+        Ok(text) => {
+            println("to_json {}", text)
+            match from_json::<Counters>(text) {
+                Ok(back) => println("from_json {} {} {} {}", back.hits, back.slots, back.peak, back.per_host.len())
+                Err(e) => println("from_json error {}", e)
+            }
+        }
+        Err(e) => println("to_json error {}", e)
+    }
+}
+
+fn main() {
+    keyed_maps()
+    unsigned_values()
+    read_back()
+    derived()
+}

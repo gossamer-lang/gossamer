@@ -1,0 +1,58 @@
+// A kernel written once over `Simd<T, N>` runs at every lane count its callers
+// use, and folds exactly as the same kernel over a literal count: a float
+// reduction adds in the same balanced tree, integer lanes wrap, and `min` /
+// `max` propagate NaN. A `[T; N]` a const generic function answers is released
+// by the caller that receives it.
+
+fn dot<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> f64 {
+    (a * b).reduce_sum()
+}
+
+fn blend<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> Simd<f64, N> {
+    a * b + a
+}
+
+fn extremes<const N: usize>(a: Simd<f64, N>) -> (f64, f64) {
+    (a.reduce_min(), a.reduce_max())
+}
+
+fn wrapped<const N: usize>(a: Simd<i32, N>) -> i32 {
+    a.reduce_sum()
+}
+
+fn doubled<const N: usize>(a: [i64; N]) -> [i64; N] {
+    let mut out = [0; N]
+    let mut i = 0
+    while i < N as i64 {
+        out[i] = a[i] * 2
+        i += 1
+    }
+    out
+}
+
+fn main() {
+    let four = Simd::from_array([1.5, 2.25, -3.0, 4.0])
+    let half: Simd<f64, 4> = Simd::splat(0.5)
+    let eight = Simd::from_array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+    println("dot {} {} {}", dot(four, half), dot(eight, eight), dot(four, half) == (four * half).reduce_sum())
+    println("blend {:?}", blend(four, half))
+    println("blend {:?}", blend(eight, eight))
+
+    let nan = 0.0 / 0.0
+    let odd = Simd::from_array([3.0, nan, -0.0, 0.0])
+    println("extremes {:?} {:?}", extremes(four), extremes(odd))
+    println("extremes {:?}", extremes(eight))
+
+    let big: Simd<i32, 8> = Simd::from_array([2147483647, 1, 2, 3, -4, 5, 6, 7])
+    println("wrapped {} {}", wrapped(big), big.reduce_sum())
+
+    let mut total = 0
+    let mut round = 0
+    while round < 200 {
+        let d = doubled([4, 5, 6, 7])
+        let e: [i64; 4] = doubled(d)
+        total += d[3] + e[0]
+        round += 1
+    }
+    println("doubled {} {:?}", total, doubled([1, 2]))
+}

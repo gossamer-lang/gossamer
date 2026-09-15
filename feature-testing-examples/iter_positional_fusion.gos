@@ -1,0 +1,63 @@
+// Positional iterator stages - `enumerate`, `take`, `skip`, `step_by`, `rev`,
+// `zip` - run in one fused loop with the runtime iterator's observable
+// behaviour: `take` stops pulling once its count has passed, `skip` and
+// `step_by` still pull every element before them, `zip` pulls its first side
+// before finding the second exhausted, and an eager stage finishes every
+// element before the next stage starts.
+
+fn main() {
+    let xs: Vec<i64> = #[1, 2, 3, 4, 5, 6, 7, 8]
+    let ys: Vec<i64> = #[10, 20, 30]
+    let mut seen: Vec<i64> = #[]
+    let t = xs.iter().map(|x| {
+        seen.push(x)
+        x * 2
+    }).take(3).sum()
+    println("take {} {:?}", t, seen)
+    let mut seen2: Vec<i64> = #[]
+    let s = xs.iter().map(|x| {
+        seen2.push(x)
+        x
+    }).skip(5).sum()
+    println("skip {} {:?}", s, seen2)
+    let mut seen3: Vec<i64> = #[]
+    let st = xs.iter().map(|x| {
+        seen3.push(x)
+        x
+    }).step_by(3).sum()
+    println("step_by {} {:?}", st, seen3)
+    println("enumerate {} {}", xs.iter().enumerate().map(|(i, v)| i * v).sum(), xs.iter().enumerate().filter(|(i, _v)| i % 2 == 0).count())
+    let mut seen4: Vec<i64> = #[]
+    let z = xs.iter().map(|x| {
+        seen4.push(x)
+        x
+    }).zip(ys.iter()).map(|(a, b)| a * b).sum()
+    println("zip {} {:?} {}", z, seen4, (1..4).zip(xs.iter()).fold(0, |acc, (a, b)| acc + a * b))
+    println("rev {} {} {}", xs.iter().rev().take(2).sum(), (0..5).rev().fold(0, |acc, v| acc * 10 + v), xs.rev().map(|v| v * 3).take(2).sum())
+    let mut seen5: Vec<i64> = #[]
+    let ft = xs.iter().filter(|x| {
+        seen5.push(x)
+        x % 2 == 0
+    }).take(2).count()
+    println("filter-take {} {:?}", ft, seen5)
+    let mut eager: Vec<i64> = #[]
+    let hit = xs.map(|x| {
+        eager.push(x)
+        x
+    }).any(|v| v == 2)
+    println("eager-any {} {:?}", hit, eager)
+    let mut order: Vec<i64> = #[]
+    let both = xs.map(|x| {
+        order.push(x)
+        x
+    }).filter(|x| {
+        order.push(0 - x)
+        x > 6
+    }).count()
+    println("eager-two {} {:?}", both, order)
+    xs.iter().enumerate().skip(1).step_by(3).for_each(|(i, v)| print("{}:{} ", i, v))
+    println("")
+    println("zero {} {} {}", xs.iter().take(0).count(), xs.iter().skip(100).count(), xs.iter().zip(ys.iter()).any(|(a, b)| a * 10 == b))
+    let fs: Vec<f64> = #[0.5, 1.5, 2.5]
+    println("floats {} {}", fs.iter().enumerate().map(|(i, v)| v * 2.0).sum(), fs.iter().rev().fold(0.0, |a, v| a * 2.0 + v))
+}

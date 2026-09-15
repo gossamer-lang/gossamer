@@ -135,9 +135,10 @@ static RC_LIVE_TEST_ISOLATION: (
     std::sync::Condvar,
 ) = (std::sync::Mutex::new(None), std::sync::Condvar::new());
 
+/// `GOS_RC_DEBUG` as read once: 0 not yet read, 1 unset, 2 set. Every RC
+/// allocation and free consults it, so the settled answer is one load.
 #[cfg(not(test))]
-static RC_LIVE_ENABLED: std::sync::LazyLock<bool> =
-    std::sync::LazyLock::new(|| std::env::var_os("GOS_RC_DEBUG").is_some());
+static RC_LIVE_ENABLED: AtomicU8 = AtomicU8::new(0);
 
 #[inline]
 fn rc_live_enabled() -> bool {
@@ -147,8 +148,21 @@ fn rc_live_enabled() -> bool {
     }
     #[cfg(not(test))]
     {
-        *RC_LIVE_ENABLED
+        match RC_LIVE_ENABLED.load(Ordering::Relaxed) {
+            1 => false,
+            2 => true,
+            _ => rc_live_enabled_slow(),
+        }
     }
+}
+
+#[cfg(not(test))]
+#[cold]
+#[inline(never)]
+fn rc_live_enabled_slow() -> bool {
+    let enabled = std::env::var_os("GOS_RC_DEBUG").is_some();
+    RC_LIVE_ENABLED.store(if enabled { 2 } else { 1 }, Ordering::Relaxed);
+    enabled
 }
 
 /// Number of RC-managed objects currently alive. Diagnostic hook;
@@ -836,13 +850,22 @@ fn rc_block_alloc_zeroed(total: usize) -> *mut u8 {
     }
 }
 
+/// mimalloc's small-object ceiling (`MI_SMALL_SIZE_MAX`): a request at or
+/// below it may take the entry that skips the size-class dispatch.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+const MI_SMALL_SIZE_MAX: usize = 128 * std::mem::size_of::<usize>();
+
 /// Like [`rc_block_alloc_zeroed`] without the zero fill, for callers
 /// that provably write every byte.
 #[inline]
 fn rc_block_alloc_unzeroed(total: usize) -> *mut u8 {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
-        unsafe { libmimalloc_sys::mi_malloc(total).cast() }
+        if total <= MI_SMALL_SIZE_MAX {
+            unsafe { libmimalloc_sys::mi_malloc_small(total).cast() }
+        } else {
+            unsafe { libmimalloc_sys::mi_malloc(total).cast() }
+        }
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
     {
@@ -897,9 +920,11 @@ fn tsan_sizes() -> &'static parking_lot::Mutex<std::collections::HashMap<usize, 
 // silently turning a managed aggregate into a leaf and leaking its children.
 const META_TABLE_CAP: usize = u16::MAX as usize;
 
-/// Append-only id -> blob-pointer table. Slot 0 is permanently null.
-static META_TABLE: [std::sync::atomic::AtomicUsize; META_TABLE_CAP] =
-    [const { std::sync::atomic::AtomicUsize::new(0) }; META_TABLE_CAP];
+/// Append-only id -> blob-pointer table. Slot 0 is permanently null. It holds a
+/// slot for every `u16` id, so a header's id indexes it without a bounds check;
+/// the sentinel's slot is never assigned and reads null.
+static META_TABLE: [std::sync::atomic::AtomicUsize; META_TABLE_CAP + 1] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; META_TABLE_CAP + 1];
 
 static META_IDS: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashMap<usize, u16>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
@@ -925,6 +950,10 @@ const fn meta_memo_slot(key: usize) -> usize {
     (key >> 4) & (META_MEMO_SLOTS - 1)
 }
 
+/// Interned id for a meta blob. A type's id is resolved through the table once
+/// per thread; every later allocation of that type is the cache compare below,
+/// inlined into the allocator.
+#[inline]
 fn meta_intern(meta: *const i64) -> Option<u16> {
     if meta.is_null() {
         return Some(0);
@@ -937,6 +966,12 @@ fn meta_intern(meta: *const i64) -> Option<u16> {
     }) {
         return Some(id);
     }
+    meta_intern_slow(key, slot)
+}
+
+#[cold]
+#[inline(never)]
+fn meta_intern_slow(key: usize, slot: usize) -> Option<u16> {
     let mut ids = META_IDS.lock();
     let id = if let Some(&id) = ids.get(&key) {
         id
@@ -1874,6 +1909,34 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_tagged(size: u64, meta: *const i64) -> 
     unsafe { base.add(RC_HEADER_SIZE) }
 }
 
+/// A reference-counted allocation that never lands in a region, for a runtime
+/// value whose lifetime no region scope bounds.
+pub(crate) unsafe fn rc_alloc_global(size: u64, meta: *const i64) -> *mut u8 {
+    let total = (size as usize).saturating_add(RC_HEADER_SIZE);
+    let Some(meta_id) = meta_intern(meta) else {
+        return std::ptr::null_mut();
+    };
+    let base = rc_block_alloc_zeroed(total);
+    if base.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = base as *mut RcHeader;
+    unsafe {
+        (*h).strong = 1;
+        (*h).weak = AtomicU8::new(0);
+        (*h).disc = 0;
+        (*h).meta_id = meta_id;
+    }
+    rc_live_inc();
+    let usable = if crate::c_abi::ledger::rc_alloc_stats_enabled() {
+        unsafe { rc_block_usable_size(base) }
+    } else {
+        0
+    };
+    crate::c_abi::ledger::rc_alloc(size as usize, usable, false, false);
+    unsafe { base.add(RC_HEADER_SIZE) }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8 {
     // Exact-size request: mimalloc's bins serve it without padding and
@@ -2376,6 +2439,10 @@ unsafe fn release_rc_children(payload: *mut u8) {
             }
             RC_CHILD_VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
             RC_CHILD_MAP => queue_map_child(child),
+            gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
+            gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => drop(Box::from_raw(
+                child.cast::<crate::c_abi::errors::ErrorFields>(),
+            )),
             _ => {}
         });
     }
@@ -2549,7 +2616,7 @@ unsafe fn rc_release_impl(root: *mut u8) {
         // outermost teardown exit.
         unsafe { release_children_into(root, &mut worklist) };
         let _ = meta;
-        unsafe { try_reclaim_zero(root) };
+        unsafe { reclaim_dead(root, h, d.shared) };
         while let Some(payload) = worklist.pop() {
             if payload.is_null() {
                 continue;
@@ -2573,10 +2640,42 @@ unsafe fn rc_release_impl(root: *mut u8) {
             unsafe {
                 release_children_into(payload, &mut worklist);
             }
-            unsafe { try_reclaim_zero(payload) };
+            unsafe { reclaim_dead(payload, h, d.shared) };
         }
     });
     unsafe { teardown_exit() };
+}
+
+/// Reclaims a block whose strong count just reached zero and whose children
+/// have been handed to the walk. A thread-local block that no weak reference
+/// and no collector buffer pins is freed on the spot, from the header word
+/// already read; every other shape takes the general claim.
+///
+/// The header is unchanged since the decrement: handing children off only
+/// queues them, and a child string's free never touches an RC header.
+#[inline]
+unsafe fn reclaim_dead(payload: *mut u8, h: *mut RcHeader, shared: bool) {
+    if !shared
+        && unsafe { (*h).strong } & BUFFERED_BIT == 0
+        && unsafe { (*h).weak.load(Ordering::Relaxed) } == 0
+    {
+        rc_live_dec();
+        unsafe { rc_block_free(block_base(h)) };
+        return;
+    }
+    unsafe { try_reclaim_zero(payload) };
+}
+
+/// The allocation base of the block `h` heads. A copy blob outside the arena
+/// has its owner word in front of its header; every other block starts at the
+/// header.
+#[inline]
+unsafe fn block_base(h: *mut RcHeader) -> *mut u8 {
+    if unsafe { (*h).disc } == COPY_BLOB_DISC && !in_copy_blob_arena(h.cast()) {
+        unsafe { (h as *mut u8).sub(COPY_BLOB_OWNER_BYTES) }
+    } else {
+        h.cast::<u8>()
+    }
 }
 
 /// Fused child dispatch for the worklist loop: strings are freed
@@ -2586,8 +2685,28 @@ unsafe fn rc_release_impl(root: *mut u8) {
 /// One pass over the node's meta covers all three kinds. A node's children
 /// are read once per teardown, which is what keeps the per-node cost
 /// proportional to the children it has rather than to the kinds it might
-/// have had.
+/// have had. A guarded copy blob names only copy-blob children, which are
+/// never strings or containers, so its walk pushes each validated child
+/// straight onto the worklist.
+#[allow(
+    clippy::inline_always,
+    reason = "runs once per node of every teardown walk: left to the heuristic, LLVM keeps it out of line at its three call sites, which callgrind measured as a call per node on a tree workload"
+)]
+#[inline(always)]
 unsafe fn release_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
+    let meta = unsafe { meta_of(header_ptr(payload)) };
+    if meta.is_null() {
+        return;
+    }
+    if unsafe { *meta } == RC_KIND_STRUCT_GUARDED {
+        unsafe { visit_guarded_children(payload, meta, |child| worklist.push(child)) };
+        return;
+    }
+    unsafe { release_structural_children_into(payload, worklist) };
+}
+
+#[inline(never)]
+unsafe fn release_structural_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
     use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_VEC};
     unsafe {
         visit_entries(payload, |kind, child| match kind {
@@ -2601,6 +2720,10 @@ unsafe fn release_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
             }
             RC_CHILD_VEC => queue_vec_child(child),
             RC_CHILD_MAP => queue_map_child(child),
+            gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
+            gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => drop(Box::from_raw(
+                child.cast::<crate::c_abi::errors::ErrorFields>(),
+            )),
             _ => {}
         });
     }
@@ -2623,6 +2746,10 @@ thread_local! {
     /// which re-enters the release path.
     static PENDING_MAP_FREES: std::cell::RefCell<Vec<*mut u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Owned `Set` children of dead nodes, on the same terms as
+    /// [`PENDING_MAP_FREES`].
+    static PENDING_SET_FREES: std::cell::RefCell<Vec<*mut u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Nesting depth of teardown frames (release walks / collection
     /// slices) on this thread; pending Vec frees drain when it reaches 0.
     static TEARDOWN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -2638,6 +2765,12 @@ fn queue_vec_child(v: *mut u8) {
 /// teardown exit.
 fn queue_map_child(m: *mut u8) {
     PENDING_MAP_FREES.with(|q| q.borrow_mut().push(m));
+}
+
+/// Queue a dead node's owned `Set` child for release at the outermost
+/// teardown exit.
+fn queue_set_child(s: *mut u8) {
+    PENDING_SET_FREES.with(|q| q.borrow_mut().push(s));
 }
 
 /// Enter a teardown frame (release walk or collection slice).
@@ -2666,6 +2799,11 @@ unsafe fn teardown_exit() {
         let next = PENDING_MAP_FREES.with(|q| q.borrow_mut().pop());
         let Some(m) = next else { break };
         unsafe { crate::c_abi::map::gos_rt_map_free(m.cast()) };
+    }
+    loop {
+        let next = PENDING_SET_FREES.with(|q| q.borrow_mut().pop());
+        let Some(s) = next else { break };
+        unsafe { crate::c_abi::map::gos_rt_set_free(s.cast()) };
     }
 }
 
@@ -2711,18 +2849,71 @@ unsafe fn visit_children_raw(payload: *mut u8, mut raw_f: impl FnMut(*mut u8)) {
     }
 }
 
-/// Replaces every owned `Map` child of `payload` with a table of its own.
-/// A `GosMap` carries no reference count, so a copy that kept the source's
+/// Replaces every owned `Map` and `Set` child of `payload` with a table of its
+/// own. Neither carries a reference count, so a copy that kept the source's
 /// handle would leave one table under two owners.
 unsafe fn clone_map_children(payload: *mut u8) {
     unsafe {
         visit_entry_slots(payload, |kind, slot, child| {
-            if kind != gossamer_abi::rc::RC_CHILD_MAP || slot.is_null() {
+            if slot.is_null() {
                 return;
             }
-            let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
-            slot.write_unaligned((cloned as *mut u8).expose_provenance());
+            let cloned: *mut u8 = match kind {
+                gossamer_abi::rc::RC_CHILD_MAP => {
+                    crate::c_abi::gos_rt_map_clone(child.cast()).cast()
+                }
+                gossamer_abi::rc::RC_CHILD_SET => {
+                    crate::c_abi::set::gos_rt_set_clone(child.cast()).cast()
+                }
+                _ => return,
+            };
+            slot.write_unaligned(cloned.expose_provenance());
         });
+    }
+}
+
+/// Walks the children an element copy's slot-children meta names, yielding
+/// each as the child kind the structural walks dispatch on.
+unsafe fn visit_slot_children_meta(
+    payload: *mut u8,
+    meta: *const i64,
+    mut f: impl FnMut(i64, *mut usize, *mut u8),
+) {
+    use crate::c_abi::vec::vec_elem_kind;
+    use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_SET, RC_CHILD_VEC};
+    let count = usize::try_from(unsafe { *meta.add(1) }).unwrap_or(0);
+    for i in 0..count {
+        let entry = unsafe { meta.add(2 + i * 4) };
+        let (gate, disc_word, word, child_kind) =
+            unsafe { (*entry, *entry.add(1), *entry.add(2), *entry.add(3)) };
+        if gate >= 0 {
+            let disc = unsafe {
+                payload
+                    .add(usize::try_from(disc_word).unwrap_or(0) * 8)
+                    .cast::<i64>()
+                    .read_unaligned()
+            };
+            if disc != gate {
+                continue;
+            }
+        }
+        let kind = match u8::try_from(child_kind) {
+            Ok(vec_elem_kind::STRING | vec_elem_kind::RC_NODE) => RC_CHILD_RC,
+            Ok(vec_elem_kind::VEC) => RC_CHILD_VEC,
+            Ok(vec_elem_kind::MAP) => RC_CHILD_MAP,
+            Ok(vec_elem_kind::SET) => RC_CHILD_SET,
+            _ => continue,
+        };
+        let slot = unsafe {
+            payload
+                .add(usize::try_from(word).unwrap_or(0) * 8)
+                .cast::<usize>()
+        };
+        let raw = unsafe { slot.read_unaligned() };
+        let child: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+        if !child.is_null() {
+            f(kind, slot, child);
+        }
     }
 }
 
@@ -2772,6 +2963,10 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut usize,
         };
         return;
     }
+    if kind == gossamer_abi::rc::RC_KIND_SLOT_CHILDREN {
+        unsafe { visit_slot_children_meta(payload, meta, f) };
+        return;
+    }
     // Only Enum and Struct carry child layouts today. String / Vec / Map
     // / Closure layouts are wired in a later phase and never reach here.
     if kind != RC_KIND_ENUM && kind != RC_KIND_STRUCT {
@@ -2798,8 +2993,20 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut usize,
                 let slot = unsafe { payload.add((word as usize) * 8).cast::<usize>() };
                 let raw = unsafe { slot.read_unaligned() };
                 let child: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
-                if !child.is_null() {
-                    f(child_kind, slot, child);
+                if child.is_null() {
+                    continue;
+                }
+                match gossamer_abi::rc::rc_child_blob_gate(child_kind) {
+                    // A carrier field's payload word names a copy blob only on
+                    // the arm the gate names, so the carrier's discriminant,
+                    // the word before the payload, is read first.
+                    Some(gate) => {
+                        let disc = unsafe { slot.cast::<i64>().sub(1).read_unaligned() };
+                        if (gate < 0 || disc == gate) && unsafe { is_copy_blob(child) } {
+                            f(gossamer_abi::rc::RC_CHILD_RC, slot, child);
+                        }
+                    }
+                    None => f(child_kind, slot, child),
                 }
             }
             return;
@@ -2812,25 +3019,16 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut usize,
 /// longer observed by any strong *or* weak reference. The payload's children
 /// must already have been released (at the strong→0 transition). The byte
 /// size is recovered from the header's `size_u` (or the oversized side table).
+#[inline]
 unsafe fn free_block(payload: *mut u8) {
     let h = unsafe { header_ptr(payload) };
-    // A copy blob's explicit carrier changes the allocation base. Ordinary
-    // RC objects still start at their compact header.
-    let copy_base = if unsafe { (*h).disc } == COPY_BLOB_DISC {
-        // Copy blobs carry their allocation base in the explicit owner that
-        // precedes the ordinary compact RC header.  Other guarded objects are
-        // ordinary RC allocations and keep `h` as their base.
-        Some(unsafe { (h as *mut u8).sub(COPY_BLOB_OWNER_BYTES) })
-    } else {
-        None
-    };
     if unsafe { load_strong(h) } & SHARED_BIT != 0 {
         // A shared object is being reclaimed: keep the live-shared diagnostic
         // count in step. (A shared cycle never reaches here, which is exactly
         // what the non-zero exit count surfaces.)
         rc_shared_dec();
     }
-    let base = copy_base.unwrap_or(h.cast::<u8>());
+    let base = unsafe { block_base(h) };
     rc_live_dec();
     // Straight back to mimalloc - see `gos_rt_rc_alloc` for why a custom
     // slab/pool is not used (measured net-neutral), and
@@ -2850,16 +3048,141 @@ unsafe fn free_block(payload: *mut u8) {
 // owning aggregate slot dies.
 //
 // A guarded payload may also hold a non-copy pointer (map-get result,
-// construction aggregate, or borrow). Copy blobs therefore carry a real
-// owner immediately before their compact `RcHeader`, which is what a walk
-// over an untyped slot reads to tell one apart. This is the block's own
-// state rather than an address-keyed side table.
-/// The carrier in front of a guarded copy blob's ordinary RC header: one
-/// word naming the ABI version, the carrier kind, and the destructor the
-/// block answers to, under a magic that no ordinary payload word carries.
+// construction aggregate, or borrow), so a walk over an untyped slot has to
+// tell a copy blob apart without trusting the bytes in front of an arbitrary
+// pointer. Copy blobs are allocated in an exclusive mimalloc arena that holds
+// nothing else, so membership is an address-range test and the block is just
+// `[RcHeader | payload]`. A blob the arena cannot serve (the arena is full,
+// or the build has no mimalloc) carries a tagged owner word in front of its
+// header instead, which is what the walk reads outside the arena.
+
+/// Virtual size reserved for the copy-blob arena: the largest power of two
+/// mimalloc reserves as one arena (16 GiB is past its per-arena limit once
+/// the arena's own bitmap is counted). Address space only; pages are
+/// committed as blobs are allocated.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+const COPY_BLOB_ARENA_BYTES: usize = 1 << 33;
+
+/// Start of the copy-blob arena. Until the arena exists it names the top
+/// `COPY_BLOB_ARENA_BYTES` of the address space, which is kernel half on every
+/// supported 64-bit target, so the range test is false for any user pointer
+/// before, during, and after a failed reservation.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+static COPY_BLOB_ARENA_LO: AtomicUsize = AtomicUsize::new(COPY_BLOB_ARENA_BYTES.wrapping_neg());
+
+/// The heap that allocates only in the copy-blob arena; null until reserved,
+/// and for good when the reservation is unavailable.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+static COPY_BLOB_HEAP: std::sync::atomic::AtomicPtr<libmimalloc_sys::mi_heap_t> =
+    std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+unsafe extern "C" {
+    // Exported by the mimalloc build `libmimalloc-sys` links; the binding
+    // crate declares the reservation calls but not this accessor.
+    fn mi_arena_area(arena_id: libmimalloc_sys::mi_arena_id_t, size: *mut usize) -> *mut u8;
+}
+
+/// Whether `p` lies in the copy-blob arena.
+#[inline]
+fn in_copy_blob_arena(p: *const u8) -> bool {
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    {
+        (p as usize).wrapping_sub(COPY_BLOB_ARENA_LO.load(Ordering::Relaxed))
+            < COPY_BLOB_ARENA_BYTES
+    }
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    {
+        let _ = p;
+        false
+    }
+}
+
+/// `total` bytes for a copy blob's header and payload from the arena heap, or
+/// null when the arena cannot serve it.
+#[inline]
+fn copy_blob_arena_alloc(total: usize, zeroed: bool) -> *mut u8 {
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    {
+        let mut heap = COPY_BLOB_HEAP.load(Ordering::Relaxed);
+        if heap.is_null() {
+            heap = copy_blob_heap_init();
+            if heap.is_null() {
+                return std::ptr::null_mut();
+            }
+        }
+        // SAFETY: `heap` is the live arena heap; mimalloc heaps in v3 serve
+        // allocations from any thread.
+        let block: *mut u8 = unsafe {
+            match (total <= MI_SMALL_SIZE_MAX, zeroed) {
+                (true, false) => libmimalloc_sys::mi_heap_malloc_small(heap, total),
+                (true, true) => libmimalloc_sys::mi_heap_zalloc_small(heap, total),
+                (false, false) => libmimalloc_sys::mi_heap_malloc(heap, total),
+                (false, true) => libmimalloc_sys::mi_heap_zalloc(heap, total),
+            }
+        }
+        .cast();
+        debug_assert!(block.is_null() || in_copy_blob_arena(block));
+        block
+    }
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    {
+        let _ = (total, zeroed);
+        std::ptr::null_mut()
+    }
+}
+
+/// Reserves the copy-blob arena once and answers its heap, or null when the
+/// platform refuses the reservation.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+#[cold]
+#[inline(never)]
+fn copy_blob_heap_init() -> *mut libmimalloc_sys::mi_heap_t {
+    static INIT: std::sync::Once = std::sync::Once::new();
+    INIT.call_once(|| {
+        let mut id: libmimalloc_sys::mi_arena_id_t = std::ptr::null_mut();
+        // SAFETY: reserving address space has no precondition; `id` is written
+        // only on success.
+        let reserved = unsafe {
+            libmimalloc_sys::mi_reserve_os_memory_ex(
+                COPY_BLOB_ARENA_BYTES,
+                false,
+                false,
+                true,
+                &raw mut id,
+            )
+        };
+        if reserved != 0 {
+            return;
+        }
+        let mut size = 0usize;
+        // SAFETY: `id` names the arena just reserved.
+        let start = unsafe { mi_arena_area(id, &raw mut size) };
+        // The range test uses the constant span, so an arena of any other
+        // size would misclassify addresses; such an arena is left unused.
+        if start.is_null() || size != COPY_BLOB_ARENA_BYTES {
+            return;
+        }
+        // SAFETY: `id` names a live exclusive arena.
+        let heap = unsafe { libmimalloc_sys::mi_heap_new_in_arena(id) };
+        if heap.is_null() {
+            return;
+        }
+        // The range is published before the heap, so every block the heap
+        // hands out is already recognised.
+        COPY_BLOB_ARENA_LO.store(start as usize, Ordering::Release);
+        COPY_BLOB_HEAP.store(heap, Ordering::Release);
+    });
+    COPY_BLOB_HEAP.load(Ordering::Acquire)
+}
+
+/// The carrier in front of a copy blob's ordinary RC header when the blob
+/// lives outside the copy-blob arena: one word naming the ABI version, the
+/// carrier kind, and the destructor the block answers to, under a magic that
+/// no ordinary payload word carries.
 ///
-/// The word is what says a pointer read out of an untyped `Option` /
-/// `Result` slot is a copy blob rather than some other managed allocation,
+/// Outside the arena this word is what says a pointer read out of an untyped
+/// `Option` / `Result` slot is a copy blob rather than some other allocation,
 /// so it is a whole word of tag rather than a flag. The child layout is not
 /// repeated here: the RC header interns it as `meta_id`, and `meta_of` reads
 /// the same blob back.
@@ -2918,9 +3241,41 @@ unsafe fn copy_blob_owner(payload: *mut u8) -> Option<&'static CopyBlobOwner> {
     (owner.tag == COPY_BLOB_OWNER_TAG && !unsafe { meta_of(header) }.is_null()).then_some(owner)
 }
 
+/// Whether `payload` is a live copy blob's payload. The arena holds only copy
+/// blobs, each a header followed by its payload, so a word-aligned address
+/// whose header lies in it needs only the header's own marks; anywhere else
+/// the owner tag decides.
 #[inline]
 unsafe fn is_copy_blob(payload: *mut u8) -> bool {
+    let header = payload.wrapping_sub(RC_HEADER_SIZE).cast::<RcHeader>();
+    if in_copy_blob_arena(header.cast()) {
+        return (payload as usize).is_multiple_of(std::mem::align_of::<usize>())
+            && unsafe { (*header).disc } == COPY_BLOB_DISC
+            && !unsafe { meta_of(header) }.is_null();
+    }
     unsafe { copy_blob_owner(payload).is_some() }
+}
+
+/// `total` bytes for a copy blob that carries its owner word, answered as the
+/// address of its RC header. Null when the allocator refuses.
+#[inline]
+fn owner_blob_header(total: usize, zeroed: bool) -> *mut RcHeader {
+    let total = total.saturating_add(COPY_BLOB_OWNER_BYTES);
+    let base = if zeroed {
+        rc_block_alloc_zeroed(total)
+    } else {
+        rc_block_alloc_unzeroed(total)
+    };
+    if base.is_null() {
+        return std::ptr::null_mut();
+    }
+    // SAFETY: `base` is a fresh block of at least the owner word plus a header.
+    unsafe {
+        base.cast::<CopyBlobOwner>().write(CopyBlobOwner {
+            tag: COPY_BLOB_OWNER_TAG,
+        });
+        base.add(COPY_BLOB_OWNER_BYTES).cast::<RcHeader>()
+    }
 }
 
 /// Walk the `(disc_word, payload_word)` pairs of an `RC_KIND_STRUCT_GUARDED`
@@ -2928,6 +3283,48 @@ unsafe fn is_copy_blob(payload: *mut u8) -> bool {
 /// is live (negative disc word, or the disc word reads 0), non-null, and a
 /// copy blob with a validated owner. `base` may be a heap payload or a stack slot - the
 /// walk only reads the flat words the meta names.
+#[allow(
+    clippy::inline_always,
+    reason = "the per-node child walk of every guarded teardown: left to the heuristic, LLVM keeps it out of line, which callgrind measured as a call per node on a tree workload"
+)]
+#[inline(always)]
+/// Whether a structural `meta` names a `Map` child. A map is never allocated in
+/// a region, so a blob whose words name one cannot take the region's no-owner
+/// shortcut: its copy needs a table of its own and a release that frees it.
+///
+/// # Safety
+/// `meta` must be null or a well-formed RC meta blob.
+unsafe fn meta_names_map_child(meta: *const i64) -> bool {
+    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_MAP};
+    if meta.is_null() {
+        return false;
+    }
+    if unsafe { *meta } == gossamer_abi::rc::RC_KIND_SLOT_CHILDREN {
+        use crate::c_abi::vec::vec_elem_kind;
+        let count = usize::try_from(unsafe { *meta.add(1) }).unwrap_or(0);
+        return (0..count).any(|i| {
+            let child = unsafe { *meta.add(2 + i * 4 + 3) };
+            child == i64::from(vec_elem_kind::MAP) || child == i64::from(vec_elem_kind::SET)
+        });
+    }
+    if unsafe { *meta } != RC_KIND_STRUCT {
+        return false;
+    }
+    let variants = unsafe { *meta.add(1) };
+    let mut idx: usize = 2;
+    for _ in 0..variants.max(0) {
+        let count = usize::try_from(unsafe { *meta.add(idx + 1) }).unwrap_or(0);
+        for j in 0..count {
+            let entry = unsafe { *meta.add(idx + 2 + j) };
+            if entry >> RC_CHILD_KIND_SHIFT == RC_CHILD_MAP {
+                return true;
+            }
+        }
+        idx += 2 + count;
+    }
+    false
+}
+
 unsafe fn visit_guarded_children(base: *mut u8, meta: *const i64, mut f: impl FnMut(*mut u8)) {
     let entry_count = unsafe { *meta.add(1) };
     for i in 0..entry_count.max(0) {
@@ -2986,6 +3383,38 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_move(
     unsafe { rc_alloc_from(size, meta, src, false) }
 }
 
+/// Copies `size` payload bytes. Escaped aggregates are a few words wide, and a
+/// fixed-width move of those is a handful of instructions where the general
+/// copy is a library call.
+#[inline]
+unsafe fn copy_payload(src: *const u8, dst: *mut u8, size: usize) {
+    #[inline]
+    unsafe fn words<const N: usize>(src: *const u8, dst: *mut u8) {
+        unsafe {
+            dst.cast::<[u64; N]>()
+                .write_unaligned(src.cast::<[u64; N]>().read_unaligned());
+        }
+    }
+    unsafe {
+        match size {
+            8 => words::<1>(src, dst),
+            16 => words::<2>(src, dst),
+            24 => words::<3>(src, dst),
+            32 => words::<4>(src, dst),
+            40 => words::<5>(src, dst),
+            48 => words::<6>(src, dst),
+            56 => words::<7>(src, dst),
+            64 => words::<8>(src, dst),
+            _ => std::ptr::copy_nonoverlapping(src, dst, size),
+        }
+    }
+}
+
+#[allow(
+    clippy::inline_always,
+    reason = "the allocation path of every escaped aggregate: left to the heuristic, LLVM keeps it out of line in both entry points, which callgrind measured at 15% more instructions on a tree workload"
+)]
+#[inline(always)]
 unsafe fn rc_alloc_from(
     size: u64,
     meta: *const i64,
@@ -2993,37 +3422,80 @@ unsafe fn rc_alloc_from(
     retain_children: bool,
 ) -> *mut u8 {
     let in_region = region_active();
-    if in_region {
+    if in_region && !unsafe { meta_names_map_child(meta) } {
         let payload = unsafe { gos_rt_rc_alloc(size, std::ptr::null()) };
         if !payload.is_null() && !src.is_null() {
             unsafe { std::ptr::copy_nonoverlapping(src, payload, size as usize) };
         }
         return payload;
     }
+    unsafe { heap_blob_from(size, meta, src, retain_children) }
+}
+
+/// Layout of a runtime-built blob whose words own no heap child.
+pub(crate) static LEAF_BLOB_META: [i64; 2] = [RC_KIND_STRUCT_GUARDED, 0];
+
+/// Copies a container element's `size` bytes at `src` into a counted blob laid
+/// out by `meta`, which takes over the shares those words carry, and answers
+/// whether it did. Inside a region the copy is the region's and is reclaimed
+/// with it: a region local is a view, so no share is minted for it.
+///
+/// # Safety
+/// `src` must name `size` readable bytes laid out for `meta`, a static layout.
+pub(crate) unsafe fn counted_element_copy(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+) -> (*mut u8, bool) {
+    if region_active() && !unsafe { meta_names_map_child(meta) } {
+        return (unsafe { rc_alloc_from(size, meta, src, false) }, false);
+    }
+    (unsafe { heap_blob_from(size, meta, src, false) }, true)
+}
+
+/// Moves `words` into a counted blob laid out by `meta`, which takes over the
+/// shares those words carry.
+///
+/// A runtime call answering an aggregate payload hands this blob to the frame,
+/// whose release of the carrier gives the children back. It never takes a
+/// region's no-owner shortcut: the children a runtime call builds are not
+/// region allocations the arena reclaims.
+pub(crate) fn counted_words(words: &[i64], meta: &'static [i64]) -> *mut u8 {
+    let size = u64::try_from(words.len().saturating_mul(8)).unwrap_or(u64::MAX);
+    // SAFETY: `words` is `size` readable bytes and `meta` is a static, well-formed layout
+    // naming only words inside them.
+    unsafe { heap_blob_from(size, meta.as_ptr(), words.as_ptr().cast::<u8>(), false) }
+}
+
+/// Allocates a counted copy blob on the heap, outside any region.
+///
+/// # Safety
+/// As [`gos_rt_rc_alloc_copy`].
+unsafe fn heap_blob_from(
+    size: u64,
+    meta: *const i64,
+    src: *const u8,
+    retain_children: bool,
+) -> *mut u8 {
     let Some(meta_id) = meta_intern(meta) else {
         return std::ptr::null_mut();
     };
-    let total = COPY_BLOB_OWNER_BYTES
-        .saturating_add(RC_HEADER_SIZE)
-        .saturating_add(size as usize);
-    // Every byte of the block is written below - the owner carrier, the
-    // header, and the payload the copy fills - so the zero fill would be
-    // overwritten wholesale. A source that covers the payload is the only
-    // shape that holds; anything else keeps the zeroed block.
-    let base = if src.is_null() {
-        rc_block_alloc_zeroed(total)
+    let total = RC_HEADER_SIZE.saturating_add(size as usize);
+    // Every byte of the block is written below - the header and the payload
+    // the copy fills - so the zero fill would be overwritten wholesale. A
+    // source that covers the payload is the only shape that holds; anything
+    // else keeps the zeroed block.
+    let zeroed = src.is_null();
+    let arena_block = copy_blob_arena_alloc(total, zeroed);
+    let header = if arena_block.is_null() {
+        owner_blob_header(total, zeroed)
     } else {
-        rc_block_alloc_unzeroed(total)
+        arena_block.cast::<RcHeader>()
     };
-    if base.is_null() {
+    if header.is_null() {
         return std::ptr::null_mut();
     }
-    let owner = base.cast::<CopyBlobOwner>();
-    let header = unsafe { base.add(COPY_BLOB_OWNER_BYTES).cast::<RcHeader>() };
     unsafe {
-        owner.write(CopyBlobOwner {
-            tag: COPY_BLOB_OWNER_TAG,
-        });
         (*header).strong = 1;
         (*header).weak = AtomicU8::new(0);
         (*header).disc = COPY_BLOB_DISC;
@@ -3034,7 +3506,7 @@ unsafe fn rc_alloc_from(
     if payload.is_null() || src.is_null() {
         return payload;
     }
-    unsafe { std::ptr::copy_nonoverlapping(src, payload, size as usize) };
+    unsafe { copy_payload(src, payload, size as usize) };
     if meta.is_null() {
         // A leaf blob: its words are scalars, so the copy shares no RC
         // child with the source and there is nothing to retain. The
@@ -3046,6 +3518,13 @@ unsafe fn rc_alloc_from(
         // count they already carried.
         return payload;
     }
+    unsafe { retain_blob_children(payload, meta) };
+    payload
+}
+
+/// Takes a share of every child a copy blob's `meta` names, for words that
+/// were copied from storage keeping its own.
+unsafe fn retain_blob_children(payload: *mut u8, meta: *const i64) {
     unsafe {
         if *meta == gossamer_abi::rc::RC_KIND_STRUCT_GUARDED {
             visit_guarded_children(payload, meta, |child| {
@@ -3059,14 +3538,55 @@ unsafe fn rc_alloc_from(
             visit_entries(payload, |kind, child| {
                 if kind == gossamer_abi::rc::RC_CHILD_VEC {
                     crate::c_abi::gos_rt_vec_retain(child.cast());
-                } else if kind != gossamer_abi::rc::RC_CHILD_MAP {
+                } else if kind == gossamer_abi::rc::RC_CHILD_RC {
                     gos_rt_rc_retain(child);
                 }
             });
             clone_map_children(payload);
         }
     }
-    payload
+}
+
+/// The structural child kind a map-boxed carrier's meta names for its payload
+/// word - `RC_CHILD_RC` for a `String`, `RC_CHILD_VEC` for a `Vec` - or `None`
+/// for a block whose meta names no single child.
+pub(crate) unsafe fn boxed_carrier_child_kind(payload: *mut u8) -> Option<i64> {
+    if payload.is_null() || in_region_arena(payload) {
+        return None;
+    }
+    let meta = unsafe { meta_of(header_ptr(payload)) };
+    // `[RC_KIND_STRUCT, variants, disc, child_count, entry..]`.
+    if meta.is_null() || unsafe { *meta } != RC_KIND_STRUCT || unsafe { *meta.add(3) } != 1 {
+        return None;
+    }
+    Some(unsafe { *meta.add(4) } >> gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
+}
+
+/// Gives back a copy blob whose words were just copied into another owner,
+/// which takes the blob's child shares with them. A blob no one else holds is
+/// freed without walking its children; one that is still held keeps them, so
+/// the new owner takes shares of its own first.
+pub(crate) unsafe fn release_blob_moved(payload: *mut u8) {
+    if payload.is_null() || in_region_arena(payload) {
+        return;
+    }
+    let h = unsafe { header_ptr(payload) };
+    let strong = unsafe { load_strong(h) };
+    let exclusive = strong & (SHARED_BIT | BUFFERED_BIT | REGION_BIT) == 0
+        && strong & STRONG_COUNT_MASK == 1
+        && unsafe { (*h).weak.load(Ordering::Relaxed) } == 0;
+    if exclusive {
+        rc_live_dec();
+        // SAFETY: the count is one and thread-local, and no weak reference or
+        // collector buffer pins the block, so this is its last reference.
+        unsafe { rc_block_free(block_base(h)) };
+        return;
+    }
+    let meta = unsafe { meta_of(h) };
+    if !meta.is_null() {
+        unsafe { retain_blob_children(payload, meta) };
+    }
+    unsafe { gos_rt_rc_release(payload) };
 }
 
 /// Release the guarded children held in the aggregate slots at `base`
@@ -4793,7 +5313,7 @@ mod tests {
     }
 
     #[test]
-    fn guarded_copy_blob_owns_a_versioned_carrier_without_a_side_table() {
+    fn guarded_copy_blob_is_recognised_without_a_side_table() {
         let _g = count_guard();
         fresh_cycle_state();
         let base = rc_live_count();
@@ -4801,21 +5321,61 @@ mod tests {
         let source = [17_u64];
         unsafe {
             let first = gos_rt_rc_alloc_copy(8, meta.as_ptr(), source.as_ptr().cast());
-            let first_owner = copy_blob_owner(first).expect("copy blob owner");
-            assert_eq!(first_owner.tag, COPY_BLOB_OWNER_TAG);
+            assert!(is_copy_blob(first), "an allocated blob is recognised");
+            assert!(
+                in_copy_blob_arena(first) || copy_blob_owner(first).is_some(),
+                "a blob is either in the arena or carries its owner word"
+            );
             assert_eq!(meta_of(header_ptr(first)), meta.as_ptr(), "child layout");
             assert_eq!(unsafe { first.cast::<u64>().read() }, 17);
             gos_rt_rc_release(first);
 
             let second = gos_rt_rc_alloc_copy(8, meta.as_ptr(), source.as_ptr().cast());
-            assert_eq!(
-                copy_blob_owner(second).expect("copy blob owner").tag,
-                COPY_BLOB_OWNER_TAG
-            );
+            assert!(is_copy_blob(second));
             assert_eq!(meta_of(header_ptr(second)), meta.as_ptr(), "child layout");
             gos_rt_rc_release(second);
         }
         assert_eq!(rc_live_count(), base);
+    }
+
+    #[test]
+    fn copy_blob_outside_the_arena_is_recognised_by_its_owner_word() {
+        let _g = count_guard();
+        fresh_cycle_state();
+        let base = rc_live_count();
+        let meta = [RC_KIND_STRUCT_GUARDED, 0];
+        let meta_id = meta_intern(meta.as_ptr()).expect("meta id");
+        unsafe {
+            let header = owner_blob_header(RC_HEADER_SIZE + 8, true);
+            assert!(!header.is_null());
+            (*header).strong = 1;
+            (*header).weak = AtomicU8::new(0);
+            (*header).disc = COPY_BLOB_DISC;
+            (*header).meta_id = meta_id;
+            rc_live_inc();
+            let payload = header.cast::<u8>().add(RC_HEADER_SIZE);
+            assert!(!in_copy_blob_arena(payload));
+            assert!(is_copy_blob(payload), "the owner word marks it");
+            assert_eq!(
+                block_base(header),
+                header.cast::<u8>().sub(COPY_BLOB_OWNER_BYTES)
+            );
+            gos_rt_rc_release(payload);
+        }
+        assert_eq!(rc_live_count(), base);
+    }
+
+    #[test]
+    fn forged_blob_header_outside_the_arena_is_not_a_copy_blob() {
+        let meta = [RC_KIND_STRUCT_GUARDED, 0];
+        let meta_id = meta_intern(meta.as_ptr()).expect("meta id");
+        // A plain block whose second word reads like a blob header, as an
+        // element copy or any other untagged allocation might by chance.
+        let mut words = [0_u64; 4];
+        words[1] = 1 | (u64::from(COPY_BLOB_DISC) << 40) | (u64::from(meta_id) << 48);
+        let payload = unsafe { words.as_mut_ptr().add(2).cast::<u8>() };
+        assert!(!in_copy_blob_arena(payload));
+        assert!(!unsafe { is_copy_blob(payload) });
     }
 
     /// Goroutine-shaped stress: worker threads churn atomic retains /

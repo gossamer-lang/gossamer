@@ -181,19 +181,19 @@ fn main() {
 }
 
 #[test]
-fn explicit_wrapping_integer_methods_match_across_tiers() {
+fn wrapping_arithmetic_operators_match_across_tiers() {
     let src = r"
 fn main() {
     let max: i64 = 9223372036854775807
-    println(max.wrapping_add(1))
-    println(max.wrapping_mul(2))
-    println(127i8.wrapping_add(1i8))
-    println(200u8.wrapping_add(100u8))
+    println(max +% 1)
+    println(max *% 2)
+    println(127i8 +% 1i8)
+    println(200u8 +% 100u8)
 }
 ";
     let expected = "-9223372036854775808\n-2\n-128\n44\n";
-    let dir = fresh_dir("wrapping_integer_methods");
-    let path = write_source(&dir, "wrapping_integer_methods", src);
+    let dir = fresh_dir("wrapping_arithmetic_operators");
+    let path = write_source(&dir, "wrapping_arithmetic_operators", src);
 
     let vm = run_vm(&path);
     assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);

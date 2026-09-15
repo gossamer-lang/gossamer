@@ -36,12 +36,11 @@ use super::vec::{GosVec, gos_rt_result_new};
 /// Each entry of `commands` is a whitespace-split shell command
 /// (single-quote / double-quote groups are honoured; backslashes
 /// pass through verbatim). Stages are spawned in order; stdout of
-/// stage N feeds stdin of stage N+1. The Ok payload matches the
-/// `Output { stdout: String, stderr: String, code: i64 }` shape
-/// already registered by `gos_rt_exec_run` (`[i64; 3]` heap
-/// aggregate). Err payload is `*mut GosError`.
+/// stage N feeds stdin of stage N+1. The Ok payload is the counted
+/// `(stdout, stderr, code)` tuple `gos_rt_exec_run_raw` answers, which owns
+/// both strings. Err payload is `*mut GosError`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_exec_pipeline_run(commands: *mut GosVec) -> i128 {
+pub unsafe extern "C" fn gos_rt_exec_pipeline_run_raw(commands: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
         let stages = match unsafe { gather_command_lines(commands) } {
             Ok(s) => s,
@@ -59,7 +58,16 @@ pub unsafe extern "C" fn gos_rt_exec_pipeline_run(commands: *mut GosVec) -> i128
             Ok(Ok((stdout, stderr, code))) => {
                 let stdout_cs = alloc_cstring(stdout.as_bytes()) as i64;
                 let stderr_cs = alloc_cstring(stderr.as_bytes()) as i64;
-                let blob = Box::into_raw(Box::new([stdout_cs, stderr_cs, code])).cast::<i64>();
+                let blob = crate::c_abi::rc::counted_words(
+                    &[stdout_cs, stderr_cs, code],
+                    &crate::c_abi::args::OUTPUT_META,
+                );
+                if blob.is_null() {
+                    let err = crate::c_abi::errors::error_new_from_bytes(
+                        b"exec::pipeline_run: out of memory",
+                    );
+                    return unsafe { gos_rt_result_new(1, err as i64) };
+                }
                 unsafe { gos_rt_result_new(0, blob as i64) }
             }
             Ok(Err(msg)) | Err(msg) => {

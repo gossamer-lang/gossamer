@@ -83,5 +83,28 @@ contents are disposable, so a corrupt entry costs one recompile.
 Comptime folding (`gos check` and `gos build` evaluate `comptime` regions on
 the bytecode VM before the gate) runs the gate itself and so benefits from
 the cache, but the fold's own output is not separately cached. Lints,
-HIR/MIR lowering, and native code generation have their own caches or none;
-the LLVM backend keeps a per-body object cache under `ir-cache`.
+HIR/MIR lowering, and native code generation have their own caches or none.
+
+## The LLVM object cache
+
+The LLVM backend splits a program into one LLVM module per source module
+(modules joined by a recursive call cycle share one) and keeps one object per
+module under `ir-cache`. A module's cache key is its rendered IR text, plus the
+target triple, the profile, the compiler build, and the `opt` / `llc` / `clang`
+identities and code-generation settings. The text is what LLVM compiles, so an
+edit that leaves a module's IR unchanged - a comment, a function moved within
+its file, a body edited in another module that this one does not inline - is
+served from the cache, and an edit that reaches the IR is recompiled.
+
+A release module carries an `available_externally` copy of each small callee it
+reaches in another module, so `opt` inlines across the module boundary as it
+would inside one whole-program module. The copies are part of the module's
+text, and therefore of its key: editing a callee recompiles every module that
+inlined it. A module declares only the functions and RC type metadata its own
+text names, so adding a function elsewhere does not change it.
+
+Cache misses compile in parallel, one `opt` + `llc` pair per module, on up to
+eight workers (`GOS_LLVM_JOBS` overrides the count). A finished object is
+copied to a temporary name and renamed into the cache. `--reproducible` builds
+the program as one module. `GOS_PIPELINE_TRACE=1` names each module, its body
+and import counts, and whether it was cached or compiled.

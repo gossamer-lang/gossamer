@@ -21,6 +21,19 @@ mod elision_tests {
         Span::new(map.add_file("t.gos", ""), 0, 0)
     }
 
+    /// An empty block at `span`, for struct update: a test names the fields
+    /// its block is built from.
+    fn block_at(span: Span) -> BasicBlock {
+        BasicBlock {
+            id: BlockId(0),
+            stmts: Vec::new(),
+            terminator: Terminator::Return,
+            span,
+            terminator_span: None,
+            terminator_inlined: None,
+        }
+    }
+
     fn decl(ty: gossamer_types::Ty) -> LocalDecl {
         LocalDecl {
             ty,
@@ -33,7 +46,7 @@ mod elision_tests {
     fn assign(place: Place, rvalue: Rvalue) -> Statement {
         Statement {
             kind: StatementKind::Assign { place, rvalue },
-            span: span(),
+            span: span(), inlined: None,
         }
     }
 
@@ -97,7 +110,7 @@ mod elision_tests {
                         destination: Place::local(Local(2)),
                         target: Some(BlockId(1)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -117,13 +130,13 @@ mod elision_tests {
                         destination: Place::local(Local(5)),
                         target: Some(BlockId(2)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(2),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,
@@ -196,7 +209,7 @@ mod elision_tests {
                     copy(0, 4),
                 ],
                 terminator: Terminator::Return,
-                span: span(),
+                ..block_at(span())
             }],
             span: span(),
         };
@@ -258,7 +271,7 @@ mod elision_tests {
                     ),
                 ],
                 terminator: Terminator::Return,
-                span: span(),
+                ..block_at(span())
             }],
             span: span(),
         };
@@ -308,7 +321,7 @@ mod elision_tests {
                     terminator: Terminator::Goto {
                         target: BlockId(1),
                     },
-                    span: span(),
+                    ..block_at(span())
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -320,7 +333,7 @@ mod elision_tests {
                         })),
                     )],
                     terminator: Terminator::Return,
-                    span: span(),
+                    ..block_at(span())
                 },
             ],
             span: span(),
@@ -378,7 +391,7 @@ mod elision_tests {
                 id: BlockId(0),
                 stmts,
                 terminator: Terminator::Return,
-                span: span(),
+                ..block_at(span())
             }],
             span: span(),
         }
@@ -425,13 +438,13 @@ mod elision_tests {
                         destination: Place::local(Local(3)),
                         target: Some(BlockId(1)),
                     },
-                    span: span(),
+                    ..block_at(span())
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: vec![rc_call(5, "gos_rt_vec_free", Place::local(Local(2)))],
                     terminator: Terminator::Return,
-                    span: span(),
+                    ..block_at(span())
                 },
             ],
             span: span(),
@@ -524,13 +537,13 @@ mod elision_tests {
                         destination: Place::local(Local(3)),
                         target: Some(BlockId(1)),
                     },
-                    span: span(),
+                    ..block_at(span())
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: vec![rc_call(5, "gos_rt_vec_free", field(2))],
                     terminator: Terminator::Return,
-                    span: span(),
+                    ..block_at(span())
                 },
             ],
             span: span(),
@@ -597,13 +610,13 @@ mod elision_tests {
                         destination: Place::local(Local(3)),
                         target: Some(BlockId(1)),
                     },
-                    span: span(),
+                    ..block_at(span())
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: vec![walk_call(5, "gos_rt_aggr_release_children", 2, meta)],
                     terminator: Terminator::Return,
-                    span: span(),
+                    ..block_at(span())
                 },
             ],
             span: span(),
@@ -660,7 +673,7 @@ mod elision_tests {
                         walk_call(10, "gos_rt_aggr_release_children", 2, meta),
                     ],
                     terminator: Terminator::Return,
-                    span: span(),
+                    ..block_at(span())
                 },
             ],
             span: span(),
@@ -714,6 +727,118 @@ mod elision_tests {
             intrinsic_name(&body.blocks[0].stmts[6]),
             Some("gos_rt_aggr_release_children"),
             "the release of live words stays"
+        );
+    }
+
+    /// `L2 = 0` at entry, a branch, then on one arm `release(L2); L2 = <call>;
+    /// retain(L2); release(L2)` and on the other `L2 = <param>; release(L2)`.
+    fn option_holder_body(tcx: &mut TyCtxt) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let node = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(41),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_aggr_copy_meta(node, "gos_rc_meta_copyblob_9");
+        let locals = vec![
+            decl(unit),   // L0 return
+            decl(i64_ty), // L1 parameter
+            decl(i64_ty), // L2 option holder
+            decl(i64_ty), // L3 branch condition
+            decl(unit),
+            decl(unit),
+            decl(unit),
+            decl(unit),
+        ];
+        let zero = |local: u32| {
+            assign(
+                Place::local(Local(local)),
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            )
+        };
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: vec![zero(2)],
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(Local(3))),
+                        arms: vec![(0, BlockId(2))],
+                        default: BlockId(1),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: vec![rc_call(4, "gos_rt_option_slot_release", Place::local(Local(2)))],
+                    terminator: Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("mint".into())),
+                        args: vec![],
+                        destination: Place::local(Local(2)),
+                        target: Some(BlockId(3)),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(2),
+                    stmts: vec![
+                        copy(2, 1),
+                        rc_call(5, "gos_rt_option_slot_release", Place::local(Local(2))),
+                    ],
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    stmts: vec![
+                        rc_call(6, "gos_rt_option_slot_retain", Place::local(Local(2))),
+                        rc_call(7, "gos_rt_option_slot_release", Place::local(Local(2))),
+                    ],
+                    terminator: Terminator::Return,
+                    ..block_at(span())
+                },
+            ],
+            span: span(),
+        }
+    }
+
+    #[test]
+    fn drops_the_option_slot_release_that_reads_the_entry_zero() {
+        let mut tcx = TyCtxt::new();
+        let mut body = option_holder_body(&mut tcx);
+        elide_settled_guarded_walks(&mut body);
+        assert!(
+            is_nop(&body.blocks[1].stmts[0]),
+            "the release before the first assignment reads the entry zero"
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[2].stmts[1]),
+            Some("gos_rt_option_slot_release"),
+            "a release after a copy into the holder stays"
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[3].stmts[0]),
+            Some("gos_rt_option_slot_retain"),
+            "a call destination refills the holder, so its retain stays"
+        );
+        assert_eq!(
+            intrinsic_name(&body.blocks[3].stmts[1]),
+            Some("gos_rt_option_slot_release"),
+            "and so does its release"
+        );
+        assert!(
+            matches!(
+                body.blocks[0].stmts[0].kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    ..
+                }
+            ),
+            "the entry zero itself stays"
         );
     }
 
@@ -822,7 +947,7 @@ mod elision_tests {
                         destination: Place::local(Local(4)),
                         target: Some(BlockId(1)),
                     },
-                    span: span(),
+                    ..block_at(span())
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -836,7 +961,7 @@ mod elision_tests {
                         rc_call(8, "gos_rt_option_slot_release", Place::local(Local(2))),
                     ],
                     terminator: Terminator::Return,
-                    span: span(),
+                    ..block_at(span())
                 },
             ],
             span: span(),
@@ -958,7 +1083,7 @@ mod elision_tests {
                     terminator: Terminator::Goto {
                         target: BlockId(1),
                     },
-                    span: span(),
+                    ..block_at(span())
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -968,7 +1093,7 @@ mod elision_tests {
                         arms: vec![(0, BlockId(2))],
                         default: BlockId(1),
                     },
-                    span: span(),
+                    ..block_at(span())
                 },
                 BasicBlock {
                     id: BlockId(2),
@@ -978,7 +1103,7 @@ mod elision_tests {
                         rc_call(8, "gos_rt_option_slot_release", Place::local(Local(4))),
                     ],
                     terminator: Terminator::Return,
-                    span: span(),
+                    ..block_at(span())
                 },
             ],
             span: span(),
@@ -1282,7 +1407,7 @@ mod elision_tests {
                     2,
                     1,
                 ),
-                span: sp,
+                ..block_at(sp)
             },
             // bb1 header: cmp = counter < bound; switch
             BasicBlock {
@@ -1300,7 +1425,7 @@ mod elision_tests {
                     arms: vec![(0, BlockId(3))],
                     default: BlockId(2),
                 },
-                span: sp,
+                ..block_at(sp)
             },
             // bb2 body: idx = counter; elem = xs[idx]; -> latch via call target
             BasicBlock {
@@ -1315,14 +1440,14 @@ mod elision_tests {
                     6,
                     4,
                 ),
-                span: sp,
+                ..block_at(sp)
             },
             // bb3 exit
             BasicBlock {
                 id: BlockId(3),
                 stmts: vec![],
                 terminator: Terminator::Return,
-                span: sp,
+                ..block_at(sp)
             },
             // bb4 latch: counter += 1; goto header
             BasicBlock {
@@ -1336,7 +1461,7 @@ mod elision_tests {
                     },
                 )],
                 terminator: Terminator::Goto { target: BlockId(1) },
-                span: sp,
+                ..block_at(sp)
             },
         ];
         Body {
@@ -1416,7 +1541,7 @@ mod elision_tests {
                     destination: Place::local(Local(2)),
                     target: Some(BlockId(1)),
                 },
-                span: sp,
+                ..block_at(sp)
             },
             BasicBlock {
                 id: BlockId(1),
@@ -1433,7 +1558,7 @@ mod elision_tests {
                     arms: vec![(0, BlockId(3))],
                     default: BlockId(2),
                 },
-                span: sp,
+                ..block_at(sp)
             },
             BasicBlock {
                 id: BlockId(2),
@@ -1447,13 +1572,13 @@ mod elision_tests {
                     destination: Place::local(Local(5)),
                     target: Some(BlockId(3)),
                 },
-                span: sp,
+                ..block_at(sp)
             },
             BasicBlock {
                 id: BlockId(3),
                 stmts: vec![],
                 terminator: Terminator::Return,
-                span: sp,
+                ..block_at(sp)
             },
         ];
         let mut body = Body {
@@ -1513,7 +1638,7 @@ mod elision_tests {
                         destination: Place::local(Local(2)),
                         target: Some(BlockId(1)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -1530,7 +1655,7 @@ mod elision_tests {
                         arms: vec![(0, BlockId(4))],
                         default: BlockId(2),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(2),
@@ -1546,7 +1671,7 @@ mod elision_tests {
                         destination: Place::local(Local(5)),
                         target: Some(BlockId(3)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(3),
@@ -1562,13 +1687,13 @@ mod elision_tests {
                         copy(3, 6),
                     ],
                     terminator: Terminator::Goto { target: BlockId(1) },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(4),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,
@@ -1635,7 +1760,7 @@ mod elision_tests {
                         destination: Place::local(Local(2)),
                         target: Some(BlockId(1)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -1652,7 +1777,7 @@ mod elision_tests {
                         arms: vec![(0, BlockId(3))],
                         default: BlockId(2),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(2),
@@ -1669,13 +1794,13 @@ mod elision_tests {
                         destination: Place::local(Local(5)),
                         target: Some(BlockId(3)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(3),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,
@@ -1727,7 +1852,7 @@ mod elision_tests {
                         destination: Place::local(Local(2)),
                         target: Some(BlockId(1)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -1744,7 +1869,7 @@ mod elision_tests {
                         arms: vec![(0, BlockId(5))],
                         default: BlockId(2),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(2),
@@ -1758,13 +1883,13 @@ mod elision_tests {
                         destination: Place::local(Local(5)),
                         target: Some(BlockId(3)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(3),
                     stmts: vec![],
                     terminator: Terminator::Goto { target: BlockId(4) },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(4),
@@ -1778,13 +1903,13 @@ mod elision_tests {
                         destination: Place::local(Local(6)),
                         target: Some(BlockId(5)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(5),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,
@@ -1853,7 +1978,7 @@ mod elision_tests {
                     destination: Place::local(Local(4)),
                     target: Some(BlockId(1)),
                 },
-                span: sp,
+                ..block_at(sp)
             },
             BasicBlock {
                 id: BlockId(1),
@@ -1880,7 +2005,7 @@ mod elision_tests {
                     destination: Place::local(Local(7)),
                     target: Some(BlockId(2)),
                 },
-                span: sp,
+                ..block_at(sp)
             },
             BasicBlock {
                 id: BlockId(2),
@@ -1892,7 +2017,7 @@ mod elision_tests {
                     },
                 )],
                 terminator: Terminator::Return,
-                span: sp,
+                ..block_at(sp)
             },
         ];
         let mut body = Body {
@@ -1960,7 +2085,7 @@ mod elision_tests {
                         destination: Place::local(Local(1)),
                         target: Some(BlockId(1)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -1977,7 +2102,7 @@ mod elision_tests {
                         arms: vec![(0, BlockId(4))],
                         default: BlockId(2),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(2),
@@ -1991,7 +2116,7 @@ mod elision_tests {
                         destination: Place::local(Local(6)),
                         target: Some(BlockId(3)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(3),
@@ -2004,13 +2129,13 @@ mod elision_tests {
                         },
                     )],
                     terminator: Terminator::Goto { target: BlockId(1) },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(4),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,
@@ -2058,19 +2183,19 @@ mod elision_tests {
                     id: BlockId(0),
                     stmts: vec![],
                     terminator: push(BlockId(1)),
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: vec![],
                     terminator: Terminator::Goto { target: BlockId(2) },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(2),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,
@@ -2134,7 +2259,7 @@ mod elision_tests {
                         destination: Place::local(Local(1)),
                         target: Some(BlockId(1)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
@@ -2143,7 +2268,7 @@ mod elision_tests {
                         Rvalue::Use(Operand::Const(ConstValue::Int(10))),
                     )],
                     terminator: Terminator::Goto { target: BlockId(2) },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(2),
@@ -2160,7 +2285,7 @@ mod elision_tests {
                         arms: vec![(0, BlockId(5))],
                         default: BlockId(3),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(3),
@@ -2174,7 +2299,7 @@ mod elision_tests {
                         destination: Place::local(Local(6)),
                         target: Some(BlockId(4)),
                     },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(4),
@@ -2187,13 +2312,13 @@ mod elision_tests {
                         },
                     )],
                     terminator: Terminator::Goto { target: BlockId(2) },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(5),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,
@@ -2227,13 +2352,13 @@ mod elision_tests {
                         Rvalue::Use(Operand::Const(ConstValue::Int(10))),
                     )],
                     terminator: Terminator::Goto { target: BlockId(1) },
-                    span: sp,
+                    ..block_at(sp)
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: vec![],
                     terminator: Terminator::Return,
-                    span: sp,
+                    ..block_at(sp)
                 },
             ],
             span: sp,

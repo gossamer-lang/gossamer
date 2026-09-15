@@ -15,6 +15,11 @@ fn build(source: &str) -> (Vec<gossamer_mir::Body>, TyCtxt) {
 }
 
 fn build_inner(source: &str) -> (Vec<gossamer_mir::Body>, TyCtxt) {
+    let (_, bodies, tcx) = build_with_hir(source);
+    (bodies, tcx)
+}
+
+fn build_with_hir(source: &str) -> (gossamer_hir::HirProgram, Vec<gossamer_mir::Body>, TyCtxt) {
     let mut map = SourceMap::new();
     let file = map.add_file("test.gos", source.to_string());
     let (mut sf, parse_diags) = parse_with_autoderive(source, file);
@@ -27,7 +32,7 @@ fn build_inner(source: &str) -> (Vec<gossamer_mir::Body>, TyCtxt) {
     assert!(diagnostics.is_empty(), "typecheck: {diagnostics:?}");
     let hir = lower_source_file(&sf, &resolutions, &table, &mut tcx);
     let bodies = lower_program(&hir, &mut tcx);
-    (bodies, tcx)
+    (hir, bodies, tcx)
 }
 
 fn call_symbol_names(body: &gossamer_mir::Body) -> Vec<String> {
@@ -637,6 +642,67 @@ fn main() {
 }
 
 #[test]
+fn an_unwrapped_aggregate_takes_shares_of_the_children_its_carrier_keeps() {
+    // A `Vec<Node>` gives `Node` the copy-blob meta whose children the frame
+    // walks, which is what makes the unwrap destination release any.
+    let source = r"
+struct Node { id: i64, kid: Option<Node> }
+
+fn made(i: i64) -> Option<Node> {
+    Some(Node { id: i, kid: Some(Node { id: 0 - i, kid: None }) })
+}
+
+fn kept_count(i: i64) -> i64 {
+    let mut kept: Vec<Node> = #[]
+    let node = made(i).unwrap()
+    kept.push(node)
+    kept.len()
+}
+";
+    let (bodies, tcx) = build(source);
+    let body = bodies
+        .iter()
+        .find(|body| body.name == "kept_count")
+        .expect("kept_count body");
+    let unwraps: Vec<(Local, usize)> = body
+        .blocks
+        .iter()
+        .filter_map(|block| match &block.terminator {
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                destination,
+                target: Some(target),
+                ..
+            } if (name == "gos_rt_result_unwrap" || name == "gos_rt_option_unwrap")
+                && destination.projection.is_empty()
+                && tcx.aggr_copy_meta(body.locals[destination.local.0 as usize].ty).is_some() =>
+            {
+                Some((destination.local, target.0 as usize))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(!unwraps.is_empty(), "no aggregate unwrap in body: {body:#?}");
+    for (dest, target) in unwraps {
+        let retained = body.blocks[target].stmts.iter().any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                    ..
+                } if *name == "gos_rt_aggr_retain_children"
+                    && matches!(args.first(), Some(Operand::Copy(p))
+                        if p.projection.is_empty() && p.local == dest)
+            )
+        });
+        assert!(
+            retained,
+            "unwrap destination {dest:?} releases children it never retained; body: {body:#?}"
+        );
+    }
+}
+
+#[test]
 fn map_insert_registers_structural_children_for_aggregate_values() {
     let source = r#"
 use std::collections::Map
@@ -1100,11 +1166,11 @@ fn main() -> i64 {
     a + b
 }
 ";
-    let (mut bodies, mut tcx) = build(source);
+    let (hir, mut bodies, mut tcx) = build_with_hir(source);
     // Before monomorphisation: one generic body + main.
     assert!(bodies.iter().any(|b| b.name == "ident"));
     let before_count = bodies.len();
-    gossamer_mir::monomorphise(&mut bodies, &mut tcx);
+    gossamer_mir::monomorphise(&hir, &mut bodies, &mut tcx);
     // After: at least one specialised `ident` copy registered under
     // a `fn#…__mono__…` name. Two call sites with the same substs
     // collapse into a single specialisation.
@@ -1133,8 +1199,8 @@ fn main() -> i64 {
     if b { i } else { 0i64 }
 }
 ";
-    let (mut bodies, mut tcx) = build(source);
-    gossamer_mir::monomorphise(&mut bodies, &mut tcx);
+    let (hir, mut bodies, mut tcx) = build_with_hir(source);
+    gossamer_mir::monomorphise(&hir, &mut bodies, &mut tcx);
     let specialised: Vec<&String> = bodies
         .iter()
         .map(|b| &b.name)
@@ -1386,8 +1452,8 @@ fn main() -> i64 {
     x + y
 }
 ";
-    let (mut bodies, mut tcx) = build(source);
-    gossamer_mir::monomorphise(&mut bodies, &mut tcx);
+    let (hir, mut bodies, mut tcx) = build_with_hir(source);
+    gossamer_mir::monomorphise(&hir, &mut bodies, &mut tcx);
     // The distinct (def, substs) pair deduplicates to one specialised
     // body, shared between the two call sites.
     let mangled: Vec<String> = bodies
@@ -1434,9 +1500,9 @@ fn main() -> i64 {
     double(21i64)
 }
 ";
-    let (mut bodies, mut tcx) = build(source);
+    let (hir, mut bodies, mut tcx) = build_with_hir(source);
     let before = bodies.len();
-    gossamer_mir::monomorphise(&mut bodies, &mut tcx);
+    gossamer_mir::monomorphise(&hir, &mut bodies, &mut tcx);
     let mangled_count = bodies
         .iter()
         .filter(|b| b.name.starts_with("fn#") && b.name.contains("__mono__"))

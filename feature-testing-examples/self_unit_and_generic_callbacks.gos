@@ -1,0 +1,100 @@
+// `Self` inside an impl names the implementing type in paths, struct literals,
+// and patterns; a program may declare its own `Unit`; a generic function or a
+// function item in an `Option` passes where a callable is expected.
+
+struct Point { x: i64, y: i64 }
+
+enum Shape {
+    Dot
+    Line(i64)
+}
+
+impl Point {
+    fn origin() -> Point { Point { x: 0, y: 0 } }
+
+    fn shifted(dx: i64) -> Point {
+        let o = Self::origin()
+        Self { x: o.x + dx, y: o.y }
+    }
+
+    fn sum(&self) -> i64 {
+        match self {
+            Self { x, y } => x + y
+        }
+    }
+}
+
+impl Shape {
+    fn line(n: i64) -> Shape { Self::Line(n) }
+
+    fn size(&self) -> i64 {
+        match self {
+            Self::Dot => 0
+            Self::Line(n) => n
+        }
+    }
+}
+
+trait Make {
+    fn make() -> Self
+    fn twice() -> Self
+}
+
+impl Make for Point {
+    fn make() -> Self { Self { x: 7, y: 8 } }
+    fn twice() -> Self {
+        let p = Self::make()
+        Self { x: p.x * 2, y: p.y * 2 }
+    }
+}
+
+trait Unit {
+    fn label(&self) -> String
+}
+
+struct Meter { v: i64 }
+
+impl Unit for Meter {
+    fn label(&self) -> String { "m" }
+}
+
+fn ident<T>(x: T) -> T { x }
+
+fn dbl(x: f64) -> f64 { x * 2.0 }
+
+fn pick(flag: bool) -> Option<Fn(f64) -> f64> {
+    if flag { Some(dbl) } else { None }
+}
+
+fn first() -> Option<Fn(f64) -> f64> {
+    return Some(dbl)
+}
+
+fn main() {
+    let p = Point::shifted(3)
+    let q = Point::twice()
+    println("{} {} {} {} {}", p.x, p.y, q.x, q.y, q.sum())
+    println("{} {}", Shape::line(4).size(), Shape::Dot.size())
+    let m = Meter { v: 3 }
+    println("{} {}", m.v, m.label())
+    println("{:?} {:?}", #[1.5, 2.5].map(ident), #[1, 2].map(ident))
+    let o: Option<Fn(f64) -> f64> = Some(dbl)
+    match o {
+        Some(f) => println("{}", f(1.5))
+        None => println("none")
+    }
+    match pick(true) {
+        Some(f) => println("{}", f(2.5))
+        None => println("none")
+    }
+    match pick(false) {
+        Some(f) => println("{}", f(2.5))
+        None => println("none")
+    }
+    match first() {
+        Some(f) => println("{}", f(4.0))
+        None => println("none")
+    }
+    let pair: (Fn(f64) -> f64, i64) = (dbl, 3)
+    println("{} {}", (pair.0)(1.0), pair.1)
+}

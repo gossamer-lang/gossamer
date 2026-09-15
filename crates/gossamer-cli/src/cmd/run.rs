@@ -62,6 +62,7 @@ fn run_source_on_vm(
     // for every user struct so the resulting program has real
     // methods (no VM-only intercept).
     let source = gossamer_parse::autoderive::augment_source(user_source);
+    let generated_len = source.len().saturating_sub(user_source.len());
     // Comptime fold: evaluate `comptime { ... }` / `comptime fn` calls
     // now and splice their result literals in, so the VM compiles a
     // constant identical to what the compiled tiers see.
@@ -72,6 +73,7 @@ fn run_source_on_vm(
     if let Some((entry, spans)) = origins {
         crate::paths::register_unit_origins(&mut map, file_id, entry, spans);
     }
+    crate::paths::register_generated_tail(&mut map, file_id, generated_len);
     // Static checks always run first. A program with parse / resolve /
     // type errors has no business reaching the VM - execution would
     // either crash or produce unsound output.

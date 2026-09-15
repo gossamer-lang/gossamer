@@ -38,78 +38,159 @@ pub fn stdlib_wrapper_source(source: &str) -> String {
     synthesize_stdlib_wrappers(source)
 }
 
-/// Stdlib modules `source` reached through `use std::...`, or `None` where the
-/// source does not parse cleanly - a tree built by error recovery answers for
-/// no import, and the parse diagnostics are that program's report.
-fn imported_std_modules(source: &str) -> Option<std::collections::HashSet<String>> {
+/// What `source` reached through `use std::...`: the stdlib modules in scope,
+/// and the wrapper names its item imports bind. `None` where the source does
+/// not parse cleanly - a tree built by error recovery answers for no import,
+/// and the parse diagnostics are that program's report.
+struct StdImports {
+    /// Binding name to the stdlib module it reaches.
+    modules: std::collections::HashMap<String, String>,
+    wrapper_names: std::collections::HashSet<String>,
+}
+
+fn imported_std(source: &str) -> Option<StdImports> {
     let mut probe = SourceMap::new();
     let file = probe.add_file("<stdlib-wrapper-probe>", source.to_string());
     let (parsed, diags) = crate::parse_source_file(source, file);
     if !diags.is_empty() {
         return None;
     }
-    Some(stdlib_modules_in_scope(&parsed))
+    let modules = stdlib_modules_in_scope(&parsed);
+    // The rewrite decides which wrapper names the program's paths become, so
+    // the names it produces are the ones whose wrappers are needed: a bare
+    // import, a module alias, and a qualified path all reach them the same way.
+    let mut rewritten = parsed;
+    rewrite_stdlib_struct_surface(&mut rewritten);
+    let mut collector = WrapperNameCollector::default();
+    gossamer_ast::Visitor::visit_source_file(&mut collector, &rewritten);
+    Some(StdImports {
+        modules,
+        wrapper_names: collector.names,
+    })
+}
+
+/// The injected wrapper names a rewritten tree's paths spell.
+#[derive(Default)]
+struct WrapperNameCollector {
+    names: std::collections::HashSet<String>,
+}
+
+impl WrapperNameCollector {
+    fn note<'a>(&mut self, segments: impl Iterator<Item = &'a str>) {
+        for name in segments.filter(|name| name.starts_with("__gos_")) {
+            self.names.insert(name.to_string());
+        }
+    }
+}
+
+impl gossamer_ast::Visitor for WrapperNameCollector {
+    fn visit_path_expr(&mut self, path: &gossamer_ast::PathExpr) {
+        self.note(path.segments.iter().map(|segment| segment.name.name.as_str()));
+        gossamer_ast::visitor::walk_path_expr(self, path);
+    }
+
+    fn visit_type_path(&mut self, path: &gossamer_ast::ty::TypePath) {
+        self.note(path.segments.iter().map(|segment| segment.name.name.as_str()));
+        gossamer_ast::visitor::walk_type_path(self, path);
+    }
+}
+
+/// The mangled names a wrapper source declares, each a `fn` or `struct` the
+/// rewrite of an item import can name.
+fn declared_wrapper_names(wrappers: &str) -> impl Iterator<Item = &str> {
+    wrappers.lines().filter_map(|line| {
+        let rest = line
+            .trim_start()
+            .strip_prefix("fn ")
+            .or_else(|| line.trim_start().strip_prefix("struct "))?;
+        let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+        Some(&rest[..end]).filter(|name| name.starts_with("__gos_"))
+    })
 }
 
 fn synthesize_stdlib_wrappers(source: &str) -> String {
     // A wrapper set declares top-level items, so it is injected only for a
     // module the source reached through `use std::...`: a project with its
     // own `sql` module keeps its own `Value` and its own `Int`.
-    let mut imported: Option<Option<std::collections::HashSet<String>>> = None;
-    let mut from_std = |module: &str| {
-        imported
-            .get_or_insert_with(|| imported_std_modules(source))
-            .as_ref()
-            .is_none_or(|in_scope| {
-                // The module itself was imported, or it is reached through one
-                // that was: `use std::archive` then `archive::tar::read`.
-                in_scope.contains(module)
-                    || in_scope
-                        .iter()
-                        .any(|outer| mentions_path(source, &format!("{outer}::{module}::")))
-            })
+    let imported = imported_std(source);
+    let from_std = |module: &str| {
+        imported.as_ref().is_none_or(|found| {
+            // The module itself was imported, or it is reached through one
+            // that was: `use std::archive` then `archive::tar::read`.
+            found.modules.values().any(|reached| reached == module)
+                || found
+                    .modules
+                    .keys()
+                    .any(|outer| mentions_path(source, &format!("{outer}::{module}::")))
+        })
+    };
+    // An item import (`use std::fs::{read_dir}`) rewrites the bare name to the
+    // wrapper it reaches, so that wrapper set is injected whatever the source
+    // text spells.
+    let item_imported = |wrappers: &str| {
+        imported.as_ref().is_some_and(|found| {
+            declared_wrapper_names(wrappers).any(|name| found.wrapper_names.contains(name))
+        })
     };
 
     let mut stdlib_wrappers = String::new();
-    if mentions_path(source, "pem::") && from_std("pem") {
+    if (mentions_path(source, "pem::") && from_std("pem")) || item_imported(PEM_WRAPPERS) {
         stdlib_wrappers.push_str(PEM_WRAPPERS);
     }
-    if mentions_path(source, "x509::") && from_std("x509") {
+    if (mentions_path(source, "x509::") && from_std("x509")) || item_imported(X509_WRAPPERS) {
         stdlib_wrappers.push_str(X509_WRAPPERS);
     }
-    if source.contains("fs::metadata") && from_std("fs") {
+    if (source.contains("fs::metadata") && from_std("fs")) || item_imported(FS_METADATA_WRAPPERS) {
         stdlib_wrappers.push_str(FS_METADATA_WRAPPERS);
     }
-    if source.contains("path::Path") && from_std("path") {
+    if item_imported(FS_DIR_WRAPPERS)
+        || (FS_DIR_MARKERS.iter().any(|m| source.contains(m))
+            && (from_std("fs") || from_std("path")))
+    {
+        stdlib_wrappers.push_str(FS_DIR_WRAPPERS);
+    }
+    if item_imported(PROCESS_WRAPPERS)
+        || (PROCESS_MARKERS.iter().any(|m| source.contains(m))
+            && (from_std("process") || from_std("exec")))
+    {
+        stdlib_wrappers.push_str(PROCESS_WRAPPERS);
+    }
+    if (source.contains("path::Path") && from_std("path")) || item_imported(PATH_WRAPPERS) {
         stdlib_wrappers.push_str(PATH_WRAPPERS);
     }
     if source.contains("Http2Config") {
         stdlib_wrappers.push_str(HTTP2_CONFIG_WRAPPERS);
     }
-    if mentions_path(source, "tar::") && from_std("tar") {
+    if (mentions_path(source, "tar::") && from_std("tar")) || item_imported(TAR_WRAPPERS) {
         stdlib_wrappers.push_str(TAR_WRAPPERS);
     }
-    if mentions_path(source, "zip::") && from_std("zip") {
+    if (mentions_path(source, "zip::") && from_std("zip")) || item_imported(ZIP_WRAPPERS) {
         stdlib_wrappers.push_str(ZIP_WRAPPERS);
     }
-    if mentions_path(source, "sql::") && from_std("sql") {
+    if (mentions_path(source, "sql::") && from_std("sql")) || item_imported(SQL_WRAPPERS) {
         stdlib_wrappers.push_str(SQL_WRAPPERS);
     }
     if HTTP_SECURITY_MARKERS.iter().any(|m| source.contains(m)) {
         stdlib_wrappers.push_str(HTTP_SECURITY_WRAPPERS);
     }
-    if mentions_module_item(source, "time", "after") && from_std("time") {
+    if item_imported(TIME_TIMER_WRAPPERS)
+        || (mentions_module_item(source, "time", "after") && from_std("time"))
+    {
         stdlib_wrappers.push_str(TIME_TIMER_WRAPPERS);
     }
-    if mentions_module_item(source, "sync", "shield") && from_std("sync") {
+    if item_imported(SYNC_SHIELD_WRAPPERS)
+        || (mentions_module_item(source, "sync", "shield") && from_std("sync"))
+    {
         stdlib_wrappers.push_str(SYNC_SHIELD_WRAPPERS);
     }
-    if mentions_module_item(source, "sync", "with_timeout") && from_std("sync") {
+    if item_imported(SYNC_TIMEOUT_WRAPPERS)
+        || (mentions_module_item(source, "sync", "with_timeout") && from_std("sync"))
+    {
         stdlib_wrappers.push_str(SYNC_TIMEOUT_WRAPPERS);
     }
-    if ["time::Location", "time::CivilTime", "time::CivilResolution", "time::format_in", "time::add_date"]
-        .iter().any(|marker| source.contains(marker))
-        && from_std("time")
+    if item_imported(TIME_CIVIL_WRAPPERS)
+        || (TIME_CIVIL_MARKERS.iter().any(|marker| source.contains(marker))
+            && from_std("time"))
     {
         stdlib_wrappers.push_str(TIME_CIVIL_WRAPPERS);
     }
@@ -271,6 +352,68 @@ fn __gos_fs_metadata(path: String) -> Result<__gos_fs_Metadata, errors::Error> {
     Ok(__gos_fs_Metadata { size: size, is_file: is_file, is_dir: is_dir, is_symlink: is_symlink, readonly: readonly, modified_unix_ms: modified })
 }
 ";
+
+/// Real-struct + wrapper source for `std::fs::read_dir`. The leaf answers
+/// each entry as a tuple its vec owns; the wrapper folds them into
+/// `DirInfo` structs, so every field reads through ordinary ownership on
+/// every tier. Field order matches the VM's `fs::DirInfo`.
+const FS_DIR_WRAPPERS: &str = r"
+struct __gos_fs_DirInfo { name: String, path: String, is_file: bool, is_dir: bool, is_symlink: bool, size: i64, modified_ms: i64 }
+fn __gos_fs_read_dir(path: String) -> Result<Vec<__gos_fs_DirInfo>, errors::Error> {
+    let raws = __gos_fs_read_dir_raw(path)?
+    let mut out: Vec<__gos_fs_DirInfo> = Vec::from([])
+    for r in raws {
+        out.push(__gos_fs_DirInfo { name: r.0, path: r.1, is_file: r.2, is_dir: r.3, is_symlink: r.4, size: r.5, modified_ms: r.6 })
+    }
+    Ok(out)
+}
+fn __gos_fs_walk_dir(root: String, visit: Fn(__gos_fs_DirInfo) -> Result<(), errors::Error>) -> Result<(), errors::Error> {
+    __gos_fs_walk_dir_raw(root, |r: (String, String, bool, bool, bool, i64, i64)| visit(__gos_fs_DirInfo { name: r.0, path: r.1, is_file: r.2, is_dir: r.3, is_symlink: r.4, size: r.5, modified_ms: r.6 }))
+}
+";
+
+/// Spellings that reach the civil-time wrappers.
+const TIME_CIVIL_MARKERS: &[&str] = &[
+    "time::Location",
+    "time::CivilTime",
+    "time::CivilResolution",
+    "time::format_in",
+    "time::add_date",
+];
+
+/// Spellings that reach the `fs` directory wrappers, including the older
+/// `path::walk`.
+const FS_DIR_MARKERS: &[&str] = &["fs::read_dir", "fs::walk_dir", "fs::DirInfo", "path::walk"];
+
+/// Real-struct + wrapper source for `std::process::run` / `run_in`. The
+/// leaf answers `(stdout, stderr, code)` as a counted tuple that owns both
+/// strings; the wrapper folds it into the `Output` struct.
+const PROCESS_WRAPPERS: &str = r"
+struct __gos_process_Output { stdout: String, stderr: String, code: i64 }
+fn __gos_process_run(program: String, args: Vec<String>) -> Result<__gos_process_Output, errors::Error> {
+    let stdout, stderr, code = __gos_process_run_raw(program, args)?
+    Ok(__gos_process_Output { stdout: stdout, stderr: stderr, code: code })
+}
+fn __gos_process_run_in(program: String, args: Vec<String>, dir: String, env: Vec<(String, String)>) -> Result<__gos_process_Output, errors::Error> {
+    let stdout, stderr, code = __gos_process_run_in_raw(program, args, dir, env)?
+    Ok(__gos_process_Output { stdout: stdout, stderr: stderr, code: code })
+}
+fn __gos_process_pipeline_run(commands: Vec<String>) -> Result<__gos_process_Output, errors::Error> {
+    let stdout, stderr, code = __gos_process_pipeline_run_raw(commands)?
+    Ok(__gos_process_Output { stdout: stdout, stderr: stderr, code: code })
+}
+";
+
+/// Spellings that reach the `process` wrappers: the `process` module and
+/// its older `exec` / `os::exec` names.
+const PROCESS_MARKERS: &[&str] = &[
+    "process::run",
+    "process::pipeline_run",
+    "process::Output",
+    "exec::run",
+    "exec::pipeline_run",
+    "exec::Output",
+];
 
 /// `http::Http2Config` as a real Gossamer struct, so the tuning fields
 /// read the same words on every tier instead of leaving the compiled

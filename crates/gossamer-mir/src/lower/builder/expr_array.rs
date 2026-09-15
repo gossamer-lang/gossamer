@@ -123,10 +123,20 @@ impl<'a> Builder<'a> {
             gossamer_types::TyKind::Vec(e)
                 if matches!(self.tcx.kind_of(*e), gossamer_types::TyKind::Array { .. })
         );
+        let binding_elem_ty = match self.tcx.kind_of(binding_ty) {
+            gossamer_types::TyKind::Vec(e) => Some(*e),
+            _ => None,
+        };
         for elem in elems {
             let Some(mut elem_local) = self.lower_expr(elem) else {
                 return false;
             };
+            // A callable element slot holds the env-shaped callable every
+            // callable slot holds, so a bare fn item or capture-free closure
+            // is wrapped before it is stored.
+            if let Some(slot_ty) = binding_elem_ty {
+                elem_local = self.coerce_to_fn_trait_if_needed(elem_local, slot_ty, span);
+            }
             // If an element is itself a flat Array{T,N} (e.g. the inner
             // arrays in `[[i64]]`), coerce it to a heap GosVec so the
             // outer Vec stores *mut GosVec pointers, not flat aggregates
@@ -179,8 +189,15 @@ impl<'a> Builder<'a> {
         let mut operands = Vec::with_capacity(elems.len());
         let mut elem_struct: Option<String> = None;
         let mut elem_ty: Option<Ty> = None;
+        let declared_elem = match self.tcx.kind_of(ty) {
+            TyKind::Array { elem, .. } => Some(*elem),
+            _ => None,
+        };
         for elem in elems {
-            let local = self.lower_expr(elem)?;
+            let mut local = self.lower_expr(elem)?;
+            if let Some(slot_ty) = declared_elem {
+                local = self.coerce_to_fn_trait_if_needed(local, slot_ty, span);
+            }
             if elem_struct.is_none() {
                 if let Some(name) = self.local_struct.get(&local).cloned() {
                     elem_struct = Some(name);
@@ -288,7 +305,12 @@ impl<'a> Builder<'a> {
         // builds a heap GosVec of N copies, byte-correct for the element
         // type - not a fixed inline array. Mirrors `lower_array_list`'s
         // Vec promotion and covers both a literal and a runtime count.
-        let wants_vec = matches!(self.tcx.kind_of(ty), TyKind::Vec(_));
+        // An array whose length is a const generic parameter is held as the
+        // same runtime-length sequence, built from the parameter's value.
+        let carrier = crate::lower::helpers::const_generic_array_as_vec(self.tcx, ty)
+            .filter(|_| !matches!(self.tcx.kind_of(ty), TyKind::Ref { .. }));
+        let ty = carrier.unwrap_or(ty);
+        let wants_vec = carrier.is_some() || matches!(self.tcx.kind_of(ty), TyKind::Vec(_));
         if !wants_vec {
             if let Some(count_u64) = self.static_repeat_len(ty, count) {
                 let value_local = self.lower_expr(value)?;
@@ -343,7 +365,11 @@ impl<'a> Builder<'a> {
         // multi-slot elements (tuples, String, fixed arrays) copies the
         // whole element on every push rather than truncating to 8 bytes.
         let elem_src_ty = match self.tcx.kind_of(ty) {
-            TyKind::Vec(e) if !matches!(self.tcx.kind_of(*e), TyKind::Var(_) | TyKind::Error) => *e,
+            TyKind::Vec(e) | TyKind::Slice(e)
+                if !matches!(self.tcx.kind_of(*e), TyKind::Var(_) | TyKind::Error) =>
+            {
+                *e
+            }
             _ => self.locals[value_local.0 as usize].ty,
         };
         let elem_bytes_val = i128::from(self.elem_bytes_of(elem_src_ty).max(1));

@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+backtrace = "0.3"
 gossamer-abi = { workspace = true }
 cranelift-codegen = "=0.134.2"
 cranelift-frontend = "=0.134.2"
@@ -21,6 +22,7 @@ cranelift-module = "=0.134.2"
 cranelift-object = "=0.134.2"
 cranelift-native = "=0.134.2"
 gossamer-hir = { workspace = true }
+gossamer-lex = { workspace = true }
 gossamer-mir = { workspace = true }
 gossamer-runtime = { workspace = true }
 gossamer-types = { workspace = true }

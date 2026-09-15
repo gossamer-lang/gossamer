@@ -1,0 +1,29 @@
+// `start..` stays an open range under `take`, `skip`, and a loop: no bound
+// past the last value it yields is ever computed, and its start expression
+// is evaluated once.
+
+fn next_start(calls: &mut Vec<i64>) -> i64 {
+    calls.push(1)
+    10
+}
+
+fn main() {
+    let mut calls = #[]
+    let mut total = 0
+    for v in (next_start(&mut calls)..).take(3) {
+        total += v
+    }
+    println("{} {}", total, calls.len())
+
+    let none: Vec<i64> = (5..).take(0).collect()
+    println("{}", none.len())
+
+    let tail: Vec<i64> = (1..).skip(2).take(3).collect()
+    println("{:?}", tail)
+
+    let mut seen = #[]
+    for v in (7..).take(2) {
+        seen.push(v)
+    }
+    println("{:?}", seen)
+}

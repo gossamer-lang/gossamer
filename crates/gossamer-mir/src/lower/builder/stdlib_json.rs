@@ -94,6 +94,9 @@ impl<'a> Builder<'a> {
         }
         let helper = match self.tcx.kind_of(ty) {
             TyKind::JsonValue => return Some(arg_local),
+            TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
+                "gos_rt_json_value_uint"
+            }
             TyKind::Int(_) | TyKind::Var(_) | TyKind::Error => "gos_rt_json_value_int",
             TyKind::Bool => "gos_rt_json_value_bool",
             TyKind::Float(_) => "gos_rt_json_value_float",
@@ -422,6 +425,10 @@ impl<'a> Builder<'a> {
             // the `Some`/`None` to validate field types; a bare-value
             // return made every non-matching field silently coerce.
             "as_i64" => ("gos_rt_json_as_i64_opt", self.option_i64_adt_ty()),
+            "as_u64" => {
+                let u = self.tcx.int_ty(gossamer_types::IntTy::U64);
+                ("gos_rt_json_as_u64_opt", self.option_payload_adt_ty(u))
+            }
             "as_f64" => ("gos_rt_json_as_f64_opt", self.option_f64_adt_ty()),
             "as_str" => ("gos_rt_json_as_str_opt", self.option_string_adt_ty()),
             "as_bool" => ("gos_rt_json_as_bool_opt", self.option_bool_adt_ty()),
@@ -551,6 +558,9 @@ impl<'a> Builder<'a> {
             let json_local = match self.tcx.kind_of(flat_fty) {
                 TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::String => {
                     let json_helper = match self.tcx.kind_of(flat_fty) {
+                        TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
+                            "gos_rt_json_value_uint"
+                        }
                         TyKind::Int(_) => "gos_rt_json_value_int",
                         TyKind::Float(_) => "gos_rt_json_value_float",
                         TyKind::Bool => "gos_rt_json_value_bool",
@@ -878,6 +888,9 @@ impl<'a> Builder<'a> {
             TyKind::JsonValue => Some(local),
             TyKind::Int(_) | TyKind::Bool | TyKind::Float(_) | TyKind::String => {
                 let helper = match self.tcx.kind_of(ty) {
+                    TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
+                        "gos_rt_json_value_uint"
+                    }
                     TyKind::Int(_) => "gos_rt_json_value_int",
                     TyKind::Bool => "gos_rt_json_value_bool",
                     TyKind::Float(_) => "gos_rt_json_value_float",
@@ -909,8 +922,9 @@ impl<'a> Builder<'a> {
     /// Builds the `json::Value` object a `Map<String, V>` renders as, one
     /// member per key in the map's own order.
     ///
-    /// A JSON member name is text, so only a string-keyed map has a rendering;
-    /// every other key type answers `None` and the caller renders `null`.
+    /// A JSON member name is text: a `String` key is the name itself, and an
+    /// integer, `bool`, or `char` key is spelled the way the map renders it.
+    /// Any other key type answers `None` and the caller renders `null`.
     pub(crate) fn build_json_object_from_map(
         &mut self,
         map_local: Local,
@@ -919,9 +933,16 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Option<Local> {
         use gossamer_types::TyKind;
-        if !matches!(self.tcx.kind_of(key_ty), TyKind::String) {
-            return None;
-        }
+        // The runtime's member-name kind for the key words the walk pushes.
+        let key_kind: i64 = match self.tcx.kind_of(self.peel_ref_ty(key_ty)) {
+            TyKind::String => 0,
+            TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => 2,
+            TyKind::Int(_) => 1,
+            TyKind::Bool => 3,
+            TyKind::Char => 4,
+            _ => return None,
+        };
+        let text_keys = key_kind == 0;
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let unit_ty = self.tcx.unit();
         let string_ty = self.tcx.string_ty();
@@ -933,11 +954,20 @@ impl<'a> Builder<'a> {
             value_ty = *inner;
         }
 
-        let keys_ty = self.tcx.intern(TyKind::Vec(string_ty));
+        let keys_ty = if text_keys {
+            self.tcx.intern(TyKind::Vec(string_ty))
+        } else {
+            vec_of_i64_ty
+        };
         let keys = self.fresh(keys_ty);
+        let keys_reader = if key_kind == 2 {
+            "gos_rt_map_keys_vec_u64"
+        } else {
+            "gos_rt_map_keys_vec"
+        };
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
-            callee: Operand::Const(ConstValue::Str("gos_rt_map_keys_vec".to_string())),
+            callee: Operand::Const(ConstValue::Str(keys_reader.to_string())),
             args: vec![Operand::Copy(Place::local(map_local))],
             destination: Place::local(keys),
             target: Some(next),
@@ -1002,8 +1032,9 @@ impl<'a> Builder<'a> {
         });
 
         self.set_current(body_block);
-        // The key word is the member's name text; it is read as a word so the
-        // object constructor copies the bytes it points at.
+        // The key word is read as a word: the member's name text for a `String`
+        // key, which the object constructor copies, and the key itself for any
+        // other key type, which the constructor spells.
         let key_local = self.fresh(i64_ty);
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
@@ -1019,10 +1050,14 @@ impl<'a> Builder<'a> {
 
         // The member's value word. A `String` carries its own reader so the
         // pointer keeps its string identity; every other shape is one word.
-        let value_reader = if matches!(self.tcx.kind_of(value_ty), TyKind::String) {
-            "gos_rt_map_get_str_str"
-        } else {
-            "gos_rt_map_get_str_i64"
+        let value_reader = match (
+            text_keys,
+            matches!(self.tcx.kind_of(value_ty), TyKind::String),
+        ) {
+            (true, true) => "gos_rt_map_get_str_str",
+            (true, false) => "gos_rt_map_get_str_i64",
+            (false, true) => "gos_rt_map_get_i64_str",
+            (false, false) => "gos_rt_map_get_i64",
         };
         let value_local = self.fresh(value_ty);
         let next = self.new_block(span);
@@ -1077,13 +1112,16 @@ impl<'a> Builder<'a> {
         let json_obj = self.fresh(json_val_ty);
         let next = self.new_block(span);
         let ctor = if owns_values {
-            "gos_rt_json_value_object_owned"
+            "gos_rt_json_value_object_owned_keyed"
         } else {
-            "gos_rt_json_value_object"
+            "gos_rt_json_value_object_keyed"
         };
         self.terminate(Terminator::Call {
             callee: Operand::Const(ConstValue::Str(ctor.to_string())),
-            args: vec![Operand::Copy(Place::local(pairs_vec))],
+            args: vec![
+                Operand::Copy(Place::local(pairs_vec)),
+                Operand::Const(ConstValue::Int(i128::from(key_kind))),
+            ],
             destination: Place::local(json_obj),
             target: Some(next),
         });
@@ -1277,6 +1315,9 @@ impl<'a> Builder<'a> {
             TyKind::JsonValue => arg_local,
             TyKind::Int(_) | TyKind::Bool | TyKind::Float(_) | TyKind::String => {
                 let helper = match self.tcx.kind_of(value_ty) {
+                    TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
+                        "gos_rt_json_value_uint"
+                    }
                     TyKind::Int(_) => "gos_rt_json_value_int",
                     TyKind::Bool => "gos_rt_json_value_bool",
                     TyKind::Float(_) => "gos_rt_json_value_float",
@@ -1302,6 +1343,7 @@ impl<'a> Builder<'a> {
                     TyKind::Float(_) => 1,
                     TyKind::String => 2,
                     TyKind::Bool => 3,
+                    TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => 4,
                     // Int, or an unresolved `Var` left by the typer on
                     // an integer array literal (`encode([1, 2, 3])`):
                     // default to the i64 slot reading. Numeric literals

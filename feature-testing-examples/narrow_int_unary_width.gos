@@ -1,0 +1,73 @@
+// Negation, complement, shifts, and the wrapping methods answer at the
+// operand's declared width, so a narrow integer never holds a value outside
+// its range. None of these operations is overflow-checked, so every tier and
+// both profiles print the same lines.
+
+fn neg8(a: i8) -> i8 { -a }
+
+fn neg16(a: i16) -> i16 { -a }
+
+fn neg32(a: i32) -> i32 { -a }
+
+fn neg64(a: i64) -> i64 { -a }
+
+fn not8(a: u8) -> u8 { !a }
+
+fn not16(a: u16) -> u16 { !a }
+
+fn not32(a: u32) -> u32 { !a }
+
+fn not_i8(a: i8) -> i8 { !a }
+
+fn not_i32(a: i32) -> i32 { !a }
+
+fn not64(a: u64) -> u64 { !a }
+
+fn fnv1a(text: String) -> u32 {
+    let mut hash: u32 = 2_166_136_261
+    for b in text.bytes() {
+        hash = (hash ^ b as u32) *% 16_777_619
+    }
+    hash
+}
+
+fn main() {
+    println("neg i8: {} {} {}", neg8(-128), neg8(-127), neg8(5))
+    println("neg i16: {} {}", neg16(-32_768), neg16(300))
+    println("neg i32: {} {}", neg32(-2_147_483_647 - 1), neg32(-7))
+    println("neg i64: {}", neg64(-9_223_372_036_854_775_807 - 1))
+    println("not u8: {} {}", not8(5), not8(255))
+    println("not u16: {}", not16(1))
+    println("not u32: {} {}", not32(0), not32(4_000_000_000))
+    println("not i8: {} {}", not_i8(5), not_i8(-128))
+    println("not i32: {}", not_i32(5))
+    println("not u64: {}", not64(5))
+    let x: u32 = 4_000_000_000
+    println("wrapping u32: {} {}", x +% 1_000_000_000, x *% 3)
+    let y: i16 = 300
+    println("wrapping i16: {}", y *% 300)
+    let z: u8 = 200
+    println("wrapping u8: {} shl {}", z +% 100, z << 2)
+    println("fnv1a: {}", fnv1a("the quick brown fox jumps over the lazy dog"))
+    let bits: u8 = 0b1010_0101
+    println("mask: {}", !bits & 0x0F)
+    println("div min: {} {} {}", div8(-128, -1), div16(-32_768, -1), div32(-2_147_483_647 - 1, -1))
+    let mut q: i8 = -128
+    q /= -1
+    println("div assign: {} rem: {}", q, rem8(-128, -1))
+    println("float casts: {} {} {} {}", to_u8(300.7), to_u8(-5.0), to_i8(-300.0), to_u32(1e12))
+}
+
+fn div8(a: i8, b: i8) -> i8 { a / b }
+
+fn div16(a: i16, b: i16) -> i16 { a / b }
+
+fn div32(a: i32, b: i32) -> i32 { a / b }
+
+fn rem8(a: i8, b: i8) -> i8 { a % b }
+
+fn to_u8(f: f64) -> u8 { f as u8 }
+
+fn to_i8(f: f64) -> i8 { f as i8 }
+
+fn to_u32(f: f64) -> u32 { f as u32 }

@@ -130,7 +130,27 @@ pub struct BasicBlock {
     pub terminator: Terminator,
     /// Source span covering the original construct.
     pub span: Span,
+    /// Source span of the expression the terminator was lowered from, when
+    /// the builder knew it. A debug frame names this line for a raise inside
+    /// the terminator, where `span` names the construct the block opened with.
+    pub terminator_span: Option<Span>,
+    /// The inlined calls the terminator's code came through.
+    pub terminator_inlined: InlineChain,
 }
+
+/// One call whose callee body an inliner placed in the caller: the callee
+/// and where the call is written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineFrame {
+    /// The inlined callee.
+    pub function: String,
+    /// Where the call is written, in the function it was inlined into.
+    pub call: Span,
+}
+
+/// The inlined calls a piece of code came through, outermost first, or
+/// `None` for a body's own code.
+pub type InlineChain = Option<std::sync::Arc<[InlineFrame]>>;
 
 /// One statement inside a [`BasicBlock`].
 #[derive(Debug, Clone)]
@@ -139,6 +159,8 @@ pub struct Statement {
     pub kind: StatementKind,
     /// Source span.
     pub span: Span,
+    /// The inlined calls this statement's code came through.
+    pub inlined: InlineChain,
 }
 
 /// Non-terminator statement kinds.
@@ -530,10 +552,6 @@ pub enum RawIntrinsic {
     FnAddr,
     /// `gos_rt_weak_opt_payload(option_carrier)`.
     WeakOptPayload,
-    /// `gos_result_payload_owned(carrier)` - the carrier's payload is an
-    /// aggregate copy the container allocated for this read, so the back ends
-    /// reclaim it once its words are in the destination's own storage.
-    OwnedAggregatePayload,
     /// Runtime helper with an ABI registry entry.
     Runtime,
     /// Floating point LLVM intrinsic facade.
@@ -635,7 +653,6 @@ impl RawIntrinsic {
             | "gos_rt_map_inc_ekey" => Self::MapEnumKey,
             "gos_fn_addr" => Self::FnAddr,
             "gos_rt_weak_opt_payload" => Self::WeakOptPayload,
-            "gos_result_payload_owned" => Self::OwnedAggregatePayload,
             "gos_jit_unsupported_user_iterator" => Self::JitUnsupportedUserIterator,
             "f64.sqrt" | "sqrt" => Self::F64Math(F64MathIntrinsic::Sqrt),
             "f64.sin" | "sin" => Self::F64Math(F64MathIntrinsic::Sin),
@@ -674,7 +691,6 @@ impl RawIntrinsic {
             | Self::EnumDisc
             | Self::FnAddr
             | Self::WeakOptPayload
-            | Self::OwnedAggregatePayload
             | Self::F64Math(_) => RawIntrinsicArity::Exact(1),
             Self::Alloc => RawIntrinsicArity::Range { min: 0, max: 1 },
             Self::RcAlloc | Self::RcAllocTagged => RawIntrinsicArity::Range { min: 0, max: 2 },
@@ -727,6 +743,8 @@ pub enum BinOp {
     WrappingAdd,
     /// `-`.
     Sub,
+    /// Explicit `wrapping_sub`.
+    WrappingSub,
     /// `*`.
     Mul,
     /// Explicit `wrapping_mul`.

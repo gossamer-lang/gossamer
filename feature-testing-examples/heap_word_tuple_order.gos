@@ -1,0 +1,98 @@
+// Min and max heaps over integers and integer tuples of one to five words,
+// with ties, negative values, and interleaved pushes and pops, beside the
+// shapes that order through their descriptor. Every pop sequence is the
+// language's ordering of the elements pushed, on every tier.
+
+fn lcg(seed: i64) -> i64 { (seed * 3877 + 29573) % 139968 }
+
+fn drain_min_words() {
+    let mut h: MinHeap<i64> = MinHeap::new()
+    let mut seed = 11
+    for _ in 0..300 {
+        seed = lcg(seed)
+        h.push(seed % 50 - 25)
+    }
+    let mut prev = -100
+    let mut ok = true
+    let mut sum = 0
+    while let Some(v) = h.pop() {
+        if v < prev { ok = false }
+        prev = v
+        sum += v
+    }
+    println("min i64 ordered={} sum={}", ok, sum)
+}
+
+fn pairs() {
+    let mut open = MinHeap::new()
+    let mut seed = 5
+    for i in 0..400 {
+        seed = lcg(seed)
+        open.push((seed % 17, i))
+        if i % 3 == 0 {
+            if let Some((cost, idx)) = open.pop() { if idx % 50 == 0 { println("early {} {}", cost, idx) } }
+        }
+    }
+    let mut last = (-1, -1)
+    let mut ok = true
+    let mut count = 0
+    while let Some(p) = open.pop() {
+        if p < last { ok = false }
+        last = p
+        count += 1
+    }
+    println("pairs ordered={} count={} last={:?}", ok, count, last)
+
+    let mut high: MaxHeap<(i64, i64)> = MaxHeap::new()
+    for i in 0..20 { high.push((i % 4, -i)) }
+    let mut out: Vec<(i64, i64)> = #[]
+    while let Some(p) = high.pop() { out.push(p) }
+    println("max pairs {:?}", out)
+}
+
+fn wider() {
+    let mut three: MinHeap<(i64, i64, i64)> = MinHeap::new()
+    let mut four: MaxHeap<(i64, i64, i64, i64)> = MaxHeap::new()
+    let mut five: MinHeap<(i64, i64, i64, i64, i64)> = MinHeap::new()
+    let mut seed = 3
+    for i in 0..60 {
+        seed = lcg(seed)
+        three.push((seed % 3, seed % 5, i))
+        four.push((seed % 2, -(seed % 7), i % 3, i))
+        five.push((seed % 2, seed % 3, seed % 4, seed % 5, i))
+    }
+    let mut a: Vec<(i64, i64, i64)> = #[]
+    for _ in 0..8 { if let Some(t) = three.pop() { a.push(t) } }
+    let mut b: Vec<(i64, i64, i64, i64)> = #[]
+    for _ in 0..8 { if let Some(t) = four.pop() { b.push(t) } }
+    let mut c: Vec<(i64, i64, i64, i64, i64)> = #[]
+    for _ in 0..8 { if let Some(t) = five.pop() { c.push(t) } }
+    println("three {:?}", a)
+    println("four {:?}", b)
+    println("five {:?}", c)
+    println("left {} {} {}", three.len(), four.len(), five.len())
+}
+
+fn described() {
+    let mut words: MinHeap<String> = MinHeap::new()
+    for w in "pear fig apple kiwi banana fig date".split_whitespace() { words.push(w) }
+    let mut order: Vec<String> = #[]
+    while let Some(w) = words.pop() { order.push(w) }
+    println("strings {:?}", order)
+
+    let mut tagged: MaxHeap<(i64, String)> = MaxHeap::new()
+    tagged.push((2, "b"))
+    tagged.push((3, "a"))
+    tagged.push((2, "c"))
+    tagged.push((-1, "z"))
+    let mut tags: Vec<(i64, String)> = #[]
+    while let Some(t) = tagged.pop() { tags.push(t) }
+    println("tagged {:?}", tags)
+}
+
+fn main() {
+    drain_min_words()
+    pairs()
+    wider()
+    described()
+}

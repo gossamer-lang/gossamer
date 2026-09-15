@@ -1,0 +1,86 @@
+// A generic body compares, orders, renders, hashes, sorts, and projects the
+// values it is instantiated with exactly as the same body written for the
+// concrete type would, whatever shape that type has.
+
+struct Point {
+    x: f64
+    y: f64
+}
+
+enum Shade {
+    Light
+    Dark(i64)
+}
+
+fn same<T>(a: T, b: T) -> bool {
+    a == b
+}
+
+fn differ<T>(a: T, b: T) -> bool {
+    a != b
+}
+
+fn before<T>(a: T, b: T) -> bool {
+    a < b
+}
+
+fn after<T>(a: T, b: T) -> bool {
+    a >= b
+}
+
+fn show<T>(v: T) -> String {
+    format("<{}> {:?}", v, v)
+}
+
+fn tally<T>(xs: Vec<T>) -> i64 {
+    let mut m = Map::new()
+    for x in xs {
+        m.inc(x)
+    }
+    m.len()
+}
+
+fn distinct<T>(xs: Vec<T>) -> i64 {
+    let mut s = Set::new()
+    for x in xs {
+        s.insert(x)
+    }
+    s.len()
+}
+
+fn holds<T>(xs: Vec<T>, v: T) -> bool {
+    xs.contains(v)
+}
+
+fn sorted<T>(xs: Vec<T>) -> Vec<T> {
+    let mut ys = xs.clone()
+    ys.sort()
+    ys
+}
+
+fn gmap<T, U>(xs: [T], f: Fn(T) -> U) -> Vec<U> {
+    let mut out = #[]
+    for x in xs {
+        out.push(f(x))
+    }
+    out
+}
+
+fn main() {
+    let p = Point { x: 0.5, y: -0.5 }
+    let q = Point { x: 0.5, y: 1.5 }
+    println("point {} {} {} {} {}", same(p, p), differ(p, q), before(p, q), before(q, p), after(q, p))
+    println("string {} {} {}", same("ab", "ab"), before("ab", "ac"), after("ab", "ac"))
+    println("tuple {} {} {}", same((1, 2.5), (1, 2.5)), before((2, 1), (1, 9)), after((2, 1), (1, 9)))
+    println("option {} {}", same(Some(2), Some(2)), differ(Some(2), None))
+    println("vec {} {} {}", same(#[1, 2], #[1, 2]), before(#[3], #[1, 2]), after(#[3], #[1, 2]))
+    println("enum {} {}", same(Shade::Dark(3), Shade::Dark(3)), differ(Shade::Light, Shade::Dark(1)))
+    println("show {} {}", show(Point { x: 3.0, y: 4.0 }), show((1, "z")))
+    let ps = #[Point { x: 1.0, y: 2.0 }, Point { x: 1.0, y: 2.0 }, Point { x: 0.0, y: 5.0 }]
+    println("tally {} {}", tally(ps.clone()), tally(#["a", "b", "a"]))
+    println("distinct {} {}", distinct(ps.clone()), distinct(#[(1, 2), (1, 2), (2, 1)]))
+    println("holds {} {}", holds(ps.clone(), Point { x: 0.0, y: 5.0 }), holds(#["a", "b"], "c"))
+    println("sorted {:?}", sorted(ps.clone()))
+    println("sorted {:?}", sorted(#[#[2], #[1, 9], #[1]]))
+    println("project {}", gmap(ps, |p| p.x + p.y))
+}

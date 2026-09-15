@@ -832,6 +832,36 @@ fn alloc_growable_with_fill<F>(
 where
     F: FnOnce(*mut u8),
 {
+    alloc_growable_filled(content_len, cap, force_heap, false, fill)
+}
+
+/// Copies `bytes`, which the caller has proven ASCII, into a fresh string.
+/// Knowing the content is ASCII lets the character index be written as the
+/// identity instead of rescanning the bytes just copied.
+fn alloc_ascii_cstring(bytes: &[u8]) -> *mut c_char {
+    debug_assert!(
+        bytes.is_ascii(),
+        "alloc_ascii_cstring: content is not ASCII"
+    );
+    let force_heap = crate::c_abi::rc::in_region_arena(bytes.as_ptr());
+    alloc_growable_filled(bytes.len(), bytes.len(), force_heap, true, |out| unsafe {
+        // SAFETY: the allocation passes `bytes.len()` writable content bytes.
+        copy_builder_part(bytes.as_ptr(), out, bytes.len());
+    })
+}
+
+/// [`alloc_growable_with_fill`], told whether the filled content is known to
+/// be ASCII.
+fn alloc_growable_filled<F>(
+    content_len: usize,
+    cap: usize,
+    force_heap: bool,
+    known_ascii: bool,
+    fill: F,
+) -> *mut c_char
+where
+    F: FnOnce(*mut u8),
+{
     debug_assert!(
         cap >= content_len,
         "alloc_growable_with_fill: cap < content length"
@@ -911,7 +941,14 @@ where
             // cleared once at its full size and again as it fills.
             *content.add(content_len) = 0;
         }
-        rebuild_str_index(content.cast::<c_char>(), content_len, cap);
+        if known_ascii {
+            content
+                .add(cap + 1)
+                .cast::<u32>()
+                .write_unaligned(STR_INDEX_ASCII);
+        } else {
+            rebuild_str_index(content.cast::<c_char>(), content_len, cap);
+        }
         if tag != STR_REGION_TAG {
             register_heap_string_body(content.cast::<c_char>());
             crate::c_abi::ledger::str_inc();
@@ -3511,7 +3548,15 @@ unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
 /// STRING-typed: the vec owns the pieces, so `gos_rt_vec_free` reclaims them
 /// even when a consumer loop breaks early.
 fn alloc_str_vec<'a>(parts: impl Iterator<Item = &'a str>) -> *mut GosVec {
-    let parts: Vec<*mut c_char> = parts.map(|p| alloc_cstring(p.as_bytes())).collect();
+    let parts: Vec<i64> = parts
+        .map(|p| alloc_cstring(p.as_bytes()) as usize as i64)
+        .collect();
+    str_vec_from_words(&parts)
+}
+
+/// Wraps already-allocated string pointers in a STRING-typed vec that owns
+/// them, writing the slots in one copy.
+fn str_vec_from_words(parts: &[i64]) -> *mut GosVec {
     let vec = unsafe {
         crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
             8,
@@ -3519,11 +3564,44 @@ fn alloc_str_vec<'a>(parts: impl Iterator<Item = &'a str>) -> *mut GosVec {
             crate::c_abi::vec::vec_elem_kind::STRING,
         )
     };
-    for p in parts {
-        let pv = p as i64;
-        unsafe { gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>()) };
+    if vec.is_null() || parts.is_empty() {
+        return vec;
+    }
+    // SAFETY: the vec was created with room for `parts.len()` 8-byte slots,
+    // and a STRING vec takes ownership of the pointer each slot holds.
+    unsafe {
+        let v = &mut *vec;
+        std::ptr::copy_nonoverlapping(parts.as_ptr().cast::<u8>(), v.ptr.as_ptr(), parts.len() * 8);
+        v.len = parts.len() as i64;
     }
     vec
+}
+
+/// The whitespace-separated pieces of `text` as a `[String]`, split exactly
+/// as `str::split_whitespace` splits. An ASCII input is split on bytes: the
+/// only ASCII characters Unicode counts as whitespace are `\t` through `\r`
+/// and the space, and every piece of an ASCII input is itself ASCII.
+fn split_whitespace_vec(text: &str) -> *mut GosVec {
+    let bytes = text.as_bytes();
+    if !bytes.is_ascii() {
+        return alloc_str_vec(text.split_whitespace());
+    }
+    let is_space = |b: u8| matches!(b, b' ' | b'\t'..=b'\r');
+    let mut parts: Vec<i64> = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && is_space(bytes[i]) {
+            i += 1;
+        }
+        let start = i;
+        while i < bytes.len() && !is_space(bytes[i]) {
+            i += 1;
+        }
+        if i > start {
+            parts.push(alloc_ascii_cstring(&bytes[start..i]) as usize as i64);
+        }
+    }
+    str_vec_from_words(&parts)
 }
 
 /// `strings::splitn(s, n, sep) -> [String]`.
@@ -3546,7 +3624,7 @@ pub unsafe extern "C" fn gos_rt_str_splitn(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        alloc_str_vec(unsafe { cstr(s) }.split_whitespace())
+        split_whitespace_vec(unsafe { cstr(s) })
     })
 }
 
@@ -3555,7 +3633,7 @@ pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_fields(s: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        alloc_str_vec(unsafe { cstr(s) }.split_whitespace())
+        split_whitespace_vec(unsafe { cstr(s) })
     })
 }
 

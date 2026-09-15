@@ -568,7 +568,40 @@ fn builtin_time_parse_rfc3339(args: &[Value]) -> RuntimeResult<Value> {
 /// streamed output; this entry point covers the dominant
 /// "run a command and read its output" use case.
 fn builtin_exec_run(args: &[Value]) -> RuntimeResult<Value> {
-    exec_run_with("exec::run", args, None, None)
+    exec_run_with("exec::run", args, None, None, OutputShape::Struct)
+}
+
+/// `process::run` leaf for the injected `Output` wrapper: the same run,
+/// answered as the `(stdout, stderr, code)` tuple the wrapper folds.
+pub(crate) fn builtin_process_run_raw(args: &[Value]) -> RuntimeResult<Value> {
+    exec_run_with("process::run", args, None, None, OutputShape::Tuple)
+}
+
+/// How a finished child's output is answered: the `ExecOutput` struct the
+/// module builtins give, or the tuple an injected wrapper folds.
+#[derive(Clone, Copy)]
+enum OutputShape {
+    Struct,
+    Tuple,
+}
+
+/// The finished child's `(stdout, stderr, code)` in `shape`.
+fn output_value(stdout: String, stderr: String, code: i64, shape: OutputShape) -> Value {
+    match shape {
+        OutputShape::Struct => Value::struct_(
+            "ExecOutput",
+            vec![
+                ("stdout", Value::String(SmolStr::from(stdout))),
+                ("stderr", Value::String(SmolStr::from(stderr))),
+                ("code", Value::Int(code)),
+            ],
+        ),
+        OutputShape::Tuple => Value::Tuple(Arc::from(vec![
+            Value::String(SmolStr::from(stdout)),
+            Value::String(SmolStr::from(stderr)),
+            Value::Int(code),
+        ])),
+    }
 }
 
 /// `process::run_in(prog, args, dir, env) -> Result<Output, errors::Error>`.
@@ -577,6 +610,15 @@ fn builtin_exec_run(args: &[Value]) -> RuntimeResult<Value> {
 /// inherits the caller's working directory, and each `env` pair
 /// overrides the inherited environment rather than replacing it.
 fn builtin_exec_run_in(args: &[Value]) -> RuntimeResult<Value> {
+    exec_run_in_with(args, OutputShape::Struct)
+}
+
+/// `process::run_in` leaf for the injected `Output` wrapper.
+pub(crate) fn builtin_process_run_in_raw(args: &[Value]) -> RuntimeResult<Value> {
+    exec_run_in_with(args, OutputShape::Tuple)
+}
+
+fn exec_run_in_with(args: &[Value], shape: OutputShape) -> RuntimeResult<Value> {
     let dir = args.get(2).and_then(as_str).unwrap_or("").to_owned();
     let mut environment: Vec<(String, String)> = Vec::new();
     if let Some(Value::Array(pairs)) = args.get(3) {
@@ -591,7 +633,7 @@ fn builtin_exec_run_in(args: &[Value]) -> RuntimeResult<Value> {
             }
         }
     }
-    exec_run_with("process::run_in", args, Some(dir), Some(environment))
+    exec_run_with("process::run_in", args, Some(dir), Some(environment), shape)
 }
 
 /// Runs a child and answers the `Output` struct, for whichever entry
@@ -601,6 +643,7 @@ fn exec_run_with(
     args: &[Value],
     dir: Option<String>,
     environment: Option<Vec<(String, String)>>,
+    shape: OutputShape,
 ) -> RuntimeResult<Value> {
     let Some(prog) = args.first().and_then(as_str) else {
         return Ok(err_variant(format!(
@@ -635,15 +678,7 @@ fn exec_run_with(
             let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
             let code = i64::from(out.status.code().unwrap_or(-1));
-            let fields = vec![
-                ("stdout", Value::String(SmolStr::from(stdout))),
-                ("stderr", Value::String(SmolStr::from(stderr))),
-                ("code", Value::Int(code)),
-            ];
-            Ok(ok_variant(Value::struct_(
-                "ExecOutput",
-                Arc::unwrap_or_clone(Arc::new(fields)),
-            )))
+            Ok(ok_variant(output_value(stdout, stderr, code, shape)))
         }
         Ok(Err(e)) => Ok(err_variant(format!("{e}"))),
         Err(e) => Ok(err_variant(e)),
@@ -866,10 +901,19 @@ fn builtin_exec_wait_timeout(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// `exec::pipeline_run(commands: [String]) -> Result<Output, errors::Error>`.
-/// Mirrors `gos_rt_exec_pipeline_run`. Each entry is a
+/// Mirrors `gos_rt_exec_pipeline_run_raw`. Each entry is a
 /// whitespace-split shell command; stdout of stage N feeds stdin
 /// of stage N+1.
 fn builtin_exec_pipeline_run(args: &[Value]) -> RuntimeResult<Value> {
+    exec_pipeline_run_with(args, OutputShape::Struct)
+}
+
+/// `process::pipeline_run` leaf for the injected `Output` wrapper.
+pub(crate) fn builtin_process_pipeline_run_raw(args: &[Value]) -> RuntimeResult<Value> {
+    exec_pipeline_run_with(args, OutputShape::Tuple)
+}
+
+fn exec_pipeline_run_with(args: &[Value], shape: OutputShape) -> RuntimeResult<Value> {
     let Some(Value::Array(arr)) = args.first() else {
         return Ok(err_variant(
             "exec::pipeline_run: commands must be Vec<String>",
@@ -887,17 +931,7 @@ fn builtin_exec_pipeline_run(args: &[Value]) -> RuntimeResult<Value> {
     match gossamer_runtime::sched_global::run_blocking("exec-pipeline", move || {
         run_pipeline_stages(stages)
     }) {
-        Ok(Ok((stdout, stderr, code))) => {
-            let fields = vec![
-                ("stdout", Value::String(SmolStr::from(stdout))),
-                ("stderr", Value::String(SmolStr::from(stderr))),
-                ("code", Value::Int(code)),
-            ];
-            Ok(ok_variant(Value::struct_(
-                "ExecOutput",
-                Arc::unwrap_or_clone(Arc::new(fields)),
-            )))
-        }
+        Ok(Ok((stdout, stderr, code))) => Ok(ok_variant(output_value(stdout, stderr, code, shape))),
         Ok(Err(e)) => Ok(err_variant(e)),
         Err(e) => Ok(err_variant(e)),
     }
@@ -1058,7 +1092,7 @@ fn builtin_fs_list_dir(args: &[Value]) -> RuntimeResult<Value> {
 
 /// Builds the `DirInfo` struct value shared by `fs::read_dir` and
 /// `fs::walk_dir`; field order matches the compiled tier's blob.
-fn dir_info_value(entry: &fs_std::DirEntry) -> Value {
+fn dir_info_fields(entry: &fs_std::DirEntry) -> Vec<(&'static str, Value)> {
     // Every entry a compile-time listing hands back is an input of the
     // fold: its name, size, and modification time are all values the
     // region can compile into the program. A walk reaches each
@@ -1075,7 +1109,7 @@ fn dir_info_value(entry: &fs_std::DirEntry) -> Value {
         (size, modified_ms)
     });
     let path_str = fs_std::encode_path(&entry.path);
-    let fields = vec![
+    vec![
         ("name", Value::String(SmolStr::from(entry.name.clone()))),
         ("path", Value::String(SmolStr::from(path_str))),
         ("is_file", Value::Bool(entry.is_file)),
@@ -1083,8 +1117,35 @@ fn dir_info_value(entry: &fs_std::DirEntry) -> Value {
         ("is_symlink", Value::Bool(entry.is_symlink)),
         ("size", Value::Int(size)),
         ("modified_ms", Value::Int(modified_ms)),
-    ];
-    Value::struct_("DirInfo", Arc::unwrap_or_clone(Arc::new(fields)))
+    ]
+}
+
+/// The `DirInfo` struct value `fs::walk_dir` hands its visitor.
+fn dir_info_value(entry: &fs_std::DirEntry) -> Value {
+    Value::struct_("DirInfo", dir_info_fields(entry))
+}
+
+/// `fs::read_dir` leaf for the injected `DirInfo` wrapper: each entry as the
+/// `(name, path, is_file, is_dir, is_symlink, size, modified_ms)` tuple the
+/// wrapper folds.
+pub(crate) fn builtin_fs_read_dir_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(path) = args.first().and_then(as_str) else {
+        return Ok(err_variant("fs::read_dir: path argument must be a string"));
+    };
+    let path = gossamer_runtime::comptime_paths::resolve(path);
+    crate::comptime_gate::guard_read("fs::read_dir", &path)?;
+    let entries = match fs_std::read_dir(fs_std::decode_path(&path)) {
+        Ok(es) => es,
+        Err(e) => return Ok(err_variant(format!("{e}"))),
+    };
+    let items: Vec<Value> = entries
+        .iter()
+        .map(|entry| {
+            let values: Vec<Value> = dir_info_fields(entry).into_iter().map(|(_, v)| v).collect();
+            Value::Tuple(Arc::from(values))
+        })
+        .collect();
+    Ok(ok_variant(Value::Array(Arc::new(items))))
 }
 
 /// `fs::walk_dir(root: String, visit: Fn(fs::DirInfo) -> Result<(),
@@ -1093,7 +1154,28 @@ fn dir_info_value(entry: &fs_std::DirEntry) -> Value {
 /// `fs::read_dir`. Stops as soon as `visit` returns `Err`, propagating that
 /// value as the walk's own result. Aliased as `path::walk` for Go-shaped
 /// spelling.
+/// `fs::walk_dir` leaf for the injected `DirInfo` wrapper: the same walk,
+/// handing the visitor each entry as the tuple the wrapper folds.
+pub(crate) fn native_fs_walk_dir_raw(
+    dispatch: &mut dyn NativeDispatch,
+    args: &[Value],
+) -> RuntimeResult<Value> {
+    walk_dir_with(dispatch, args, |entry| {
+        let values: Vec<Value> = dir_info_fields(entry).into_iter().map(|(_, v)| v).collect();
+        Value::Tuple(Arc::from(values))
+    })
+}
+
 fn native_fs_walk_dir(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> RuntimeResult<Value> {
+    walk_dir_with(dispatch, args, dir_info_value)
+}
+
+/// Walks `args[0]`, calling `args[1]` with each entry `entry_value` builds.
+fn walk_dir_with(
+    dispatch: &mut dyn NativeDispatch,
+    args: &[Value],
+    entry_value: impl Fn(&fs_std::DirEntry) -> Value,
+) -> RuntimeResult<Value> {
     let Some(root) = args.first().and_then(as_str) else {
         return Ok(err_variant("fs::walk_dir: root argument must be a string"));
     };
@@ -1103,7 +1185,7 @@ fn native_fs_walk_dir(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> Runt
     let root = gossamer_runtime::comptime_paths::resolve(root);
     crate::comptime_gate::guard_read("fs::walk_dir", &root)?;
     let visit_result = fs_std::walk_dir(fs_std::decode_path(&root), |entry| {
-        match dispatch.call_value(&visit, vec![dir_info_value(entry)]) {
+        match dispatch.call_value(&visit, vec![entry_value(entry)]) {
             Ok(Value::Variant(v)) if v.name == "Err" => {
                 stop_err = Some(v.fields.first().cloned().unwrap_or(Value::Unit));
                 Err(std::io::Error::other("gossamer visitor stop"))

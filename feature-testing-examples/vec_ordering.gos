@@ -1,0 +1,21 @@
+// A sequence orders lexicographically: the first differing element decides,
+// each element by the language's rule for its type, and a sequence that is a
+// prefix of another orders first.
+
+struct Row {
+    id: i64
+    name: String
+}
+
+fn main() {
+    let a = #[3]
+    let b = #[1, 2]
+    println("ints {} {} {} {}", a < b, a > b, a <= a, #[1, 2] < #[1, 2, 0])
+    println("strings {} {}", #["b"] < #["a", "z"], #["a"] < #["a", "b"])
+    println("nested {}", #[#[1, 2], #[3]] < #[#[1, 2], #[2, 9]])
+    println("structs {}", #[Row { id: 1, name: "x" }] < #[Row { id: 1, name: "y" }])
+    println("floats {} {}", #[1.5, 2.0] > #[1.5, -3.0], #[-0.5] < #[0.5])
+    println("tuples {}", #[(1, "b")] >= #[(1, "a"), (0, "z")])
+    let empty: Vec<i64> = #[]
+    println("empty {} {}", empty < #[0], #[0] > empty)
+}

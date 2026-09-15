@@ -1,0 +1,42 @@
+// A method whose own type parameter appears only inside a callable
+// parameter and the return type, instantiated with a float, a struct, and a
+// string, beside the free-function form and a non-generic method taking a
+// callable.
+
+struct Point {
+    x: f64
+    y: f64
+}
+
+struct Runner {
+    n: i64
+}
+
+impl Runner {
+    fn run<T>(&self, f: Fn() -> T) -> T {
+        f()
+    }
+
+    fn twice<T>(&self, f: Fn(T) -> T, v: T) -> T {
+        f(f(v))
+    }
+
+    fn scaled(&self, f: Fn() -> f64) -> f64 {
+        f() * 2.0
+    }
+}
+
+fn call0<T>(f: Fn() -> T) -> T {
+    f()
+}
+
+fn main() {
+    let r = Runner { n: 3 }
+    let a = r.run(|| 2.5)
+    let p = r.run(|| Point { x: 1.5, y: -2.5 })
+    let s = r.run(|| "text")
+    let t = r.twice(|v| v * 1.5, 2.0)
+    let b = call0(|| 3.75)
+    println("{} {} {} {} {} {} {}", a, p.x, p.y, s, t, b, r.n)
+    println("{}", r.scaled(|| 1.25))
+}

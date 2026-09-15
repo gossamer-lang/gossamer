@@ -329,6 +329,7 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
 const BARE_PREFIX_CAPABILITIES: &[(&str, Capability)] = &[
     ("__gos_sql_", Capability::Network),
     ("__gos_fs_", Capability::Read),
+    ("__gos_process_", Capability::Exec),
 ];
 
 /// Name-to-capability map over every registered builtin.
@@ -439,6 +440,45 @@ pub(crate) fn denied(name: &str, level: ComptimeIo) -> Option<Capability> {
     Some(capability)
 }
 
+/// Wrapper types whose methods reach a leaf, by the lowercase prefix the leaf
+/// carries after its module: `__gos_sql_conn_query_raw` is `sql::Conn::query`.
+const WRAPPER_METHOD_TYPES: &[(&str, &str, &str)] = &[
+    ("sql", "conn_", "Conn"),
+    ("sql", "notification_", "Notification"),
+    ("sql", "pool_", "Pool"),
+    ("sql", "rows_", "Rows"),
+    ("sql", "row_", "Row"),
+    ("sql", "stmt_", "Stmt"),
+    ("sql", "tx_", "Tx"),
+];
+
+/// The Gossamer spelling a denial names for the builtin `name`.
+///
+/// A `__gos_` builtin is the wrapper a program's own call is rewritten to, or
+/// that wrapper's native `_raw` half, so the denial names the call:
+/// `__gos_<module>_<item>` and `__gos_<module>_<item>_raw` are `module::item`,
+/// and a leaf of a wrapper type's method is `module::Type::method`. Every
+/// other name is already the spelling a program writes.
+#[must_use]
+pub(crate) fn operation_spelling(name: &str) -> String {
+    let Some(rest) = name.strip_prefix("__gos_") else {
+        return name.to_string();
+    };
+    let stem = rest.strip_suffix("_raw").unwrap_or(rest);
+    let Some((module, item)) = stem.split_once('_') else {
+        return name.to_string();
+    };
+    WRAPPER_METHOD_TYPES
+        .iter()
+        .find_map(|(owner, prefix, ty)| {
+            (*owner == module)
+                .then(|| item.strip_prefix(prefix))
+                .flatten()
+                .map(|method| format!("{module}::{ty}::{method}"))
+        })
+        .unwrap_or_else(|| format!("{module}::{item}"))
+}
+
 /// Refuses a compile-time read of `path` that leaves the confinement
 /// root, and records the path as an input of the fold.
 ///
@@ -481,6 +521,73 @@ mod comptime_gate_tests {
         assert!(
             unclassified.is_empty(),
             "these builtin modules have no compile-time capability class: {unclassified:?}"
+        );
+    }
+
+    #[test]
+    fn every_wrapper_leaf_is_classified() {
+        // A `__gos_` leaf is the native half of a source-level wrapper, so it
+        // needs the capability of the call it implements. These families
+        // compute over values they are handed, and the zone database the
+        // `time` leaves read is compiled in.
+        let pure_prefixes: &[&str] = &[
+            "__gos_codegen",
+            "__gos_pem_",
+            "__gos_strconv_",
+            "__gos_tar_",
+            "__gos_time_",
+            "__gos_wrapping_",
+            "__gos_x509_",
+            "__gos_zip_",
+        ];
+        let mut unclassified: Vec<&str> = crate::registered_names()
+            .into_iter()
+            .filter(|name| name.starts_with("__gos_"))
+            .filter(|name| {
+                !BARE_PREFIX_CAPABILITIES
+                    .iter()
+                    .any(|(prefix, _)| name.starts_with(prefix))
+                    && !pure_prefixes.iter().any(|prefix| name.starts_with(prefix))
+            })
+            .collect();
+        unclassified.sort_unstable();
+        unclassified.dedup();
+        assert!(
+            unclassified.is_empty(),
+            "these wrapper leaves have no compile-time capability class: {unclassified:?}"
+        );
+    }
+
+    #[test]
+    fn a_denied_wrapper_leaf_is_named_by_the_call_the_program_wrote() {
+        assert_eq!(operation_spelling("__gos_process_run_raw"), "process::run");
+        assert_eq!(
+            operation_spelling("__gos_process_pipeline_run_raw"),
+            "process::pipeline_run"
+        );
+        assert_eq!(operation_spelling("__gos_fs_read_dir_raw"), "fs::read_dir");
+        assert_eq!(operation_spelling("__gos_sql_open_raw"), "sql::open");
+        assert_eq!(
+            operation_spelling("__gos_sql_native_url"),
+            "sql::native_url"
+        );
+        assert_eq!(
+            operation_spelling("__gos_sql_conn_query_raw"),
+            "sql::Conn::query"
+        );
+        assert_eq!(
+            operation_spelling("__gos_sql_rows_next_row_raw"),
+            "sql::Rows::next_row"
+        );
+        assert_eq!(operation_spelling("fs::write"), "fs::write");
+        let leaked: Vec<&str> = crate::registered_names()
+            .into_iter()
+            .filter(|name| denied(name, ComptimeIo::None).is_some())
+            .filter(|name| operation_spelling(name).contains("__gos_"))
+            .collect();
+        assert!(
+            leaked.is_empty(),
+            "these denials would name a synthesized leaf: {leaked:?}"
         );
     }
 
@@ -571,6 +678,10 @@ mod comptime_gate_tests {
         assert_eq!(denied("fs::read_to_string", ComptimeIo::Confined), None);
         assert_eq!(
             denied("process::run", ComptimeIo::Confined),
+            Some(Capability::Exec)
+        );
+        assert_eq!(
+            denied("__gos_process_run_raw", ComptimeIo::Confined),
             Some(Capability::Exec)
         );
         assert_eq!(

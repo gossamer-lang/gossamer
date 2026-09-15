@@ -62,11 +62,15 @@ impl<'a> Builder<'a> {
         fn_ret_names: &'a HashMap<String, Ty>,
         fn_returns: &'a HashMap<gossamer_resolve::DefId, Ty>,
         fn_inputs: &'a HashMap<gossamer_resolve::DefId, Vec<Ty>>,
-        fn_param_shareable: &'a HashMap<gossamer_resolve::DefId, Vec<bool>>,
+        fn_param_shareable: &'a HashMap<
+            gossamer_resolve::DefId,
+            Vec<crate::lower::helpers::escape::ParamShare>,
+        >,
         consts: &'a HashMap<gossamer_resolve::DefId, ConstValue>,
         mut_statics: &'a HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
         const_inits: &'a HashMap<gossamer_resolve::DefId, HirExpr>,
         region_unsafe: &'a std::collections::HashSet<gossamer_resolve::DefId>,
+        effect_free_pair_keys: &'a HashMap<String, bool>,
     ) -> Self {
         Self {
             tcx,
@@ -77,6 +81,7 @@ impl<'a> Builder<'a> {
             named_locals: std::collections::HashSet::new(),
             reference_aliases: vec![HashMap::new()],
             fn_span: span,
+            expr_span: span,
             structs,
             struct_defs,
             enums,
@@ -91,6 +96,7 @@ impl<'a> Builder<'a> {
             mut_statics,
             const_inits,
             region_unsafe,
+            effect_free_pair_keys,
             local_struct: HashMap::new(),
             mut_receiver_reloads: HashMap::new(),
             slot_ref_locals: std::collections::HashSet::new(),
@@ -100,6 +106,7 @@ impl<'a> Builder<'a> {
             local_runtime_kind: HashMap::new(),
             local_binary_heap_min_i64: std::collections::HashSet::new(),
             local_aggr_iter: std::collections::HashSet::new(),
+            fresh_loop_results: std::collections::HashSet::new(),
             local_define_layout: HashMap::new(),
             param_locals: std::collections::HashSet::new(),
             loop_stack: Vec::new(),
@@ -253,8 +260,8 @@ impl<'a> Builder<'a> {
                 }
                 TyKind::Ref { inner, .. } => cur = *inner,
                 // The typechecker resolves stdlib types whose path
-                // isn't declared in the resolver (e.g.
-                // `&fs::DirInfo`) to `JsonValue` as a default. The
+                // isn't declared in the resolver to `JsonValue` as a
+                // default. The
                 // path information is lost in the typed `Ty`, but
                 // the rendered form still reports the original
                 // segment when the path matched a stdlib module
@@ -523,6 +530,18 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Whether a map's value is an `Option` / `Result`, which the map keeps
+    /// boxed rather than in its value word.
+    pub(crate) fn map_value_is_carrier(&self, map_ty: Ty) -> bool {
+        use gossamer_types::TyKind;
+        self.hash_map_kv_tys(map_ty).is_some_and(|(_, value)| {
+            matches!(
+                self.tcx.kind_of(value),
+                TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1
+            )
+        })
+    }
+
     /// The typed `gos_rt_map_insert_*_opt` entry point for a map of type
     /// `map_ty`, whose key is one of the scalar / `String` fast paths.
     ///
@@ -645,6 +664,15 @@ impl<'a> Builder<'a> {
             TyKind::Adt { def, substs } => {
                 if self.struct_name_of(ty).is_none() {
                     return false;
+                }
+                // A packed struct's words are its content: construction zeroes
+                // the padding between its narrow fields, so equal values have
+                // equal words.
+                if let Some(layout) = self.tcx.packed_layout(ty) {
+                    for _ in 0..layout.size / 8 {
+                        out.push('s');
+                    }
+                    return true;
                 }
                 let fields = self.tcx.adt_field_tys(*def, substs).map(<[Ty]>::to_vec);
                 // A field-less struct contributes no slots: every value of it
@@ -840,7 +868,7 @@ impl<'a> Builder<'a> {
                         .iter()
                         .filter_map(|arg| match arg {
                             GenericArg::Type(t) => Some(*t),
-                            GenericArg::Const(_) => None,
+                            GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
                         })
                         .collect();
                     return types.get(1).copied();
@@ -1079,6 +1107,24 @@ impl<'a> Builder<'a> {
             .intern(gossamer_types::TyKind::Tuple(vec![i, b, b, b, b, i]))
     }
 
+    /// The `fs::read_dir` leaf tuple `(name, path, is_file, is_dir,
+    /// is_symlink, size, modified_ms)`.
+    pub(crate) fn tuple_dir_entry_ty(&mut self) -> Ty {
+        let s = self.tcx.string_ty();
+        let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let b = self.tcx.bool_ty();
+        self.tcx
+            .intern(gossamer_types::TyKind::Tuple(vec![s, s, b, b, b, i, i]))
+    }
+
+    /// The `process::run` leaf tuple `(stdout, stderr, code)`.
+    pub(crate) fn tuple_process_output_ty(&mut self) -> Ty {
+        let s = self.tcx.string_ty();
+        let i = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        self.tcx
+            .intern(gossamer_types::TyKind::Tuple(vec![s, s, i]))
+    }
+
     /// The archive entry leaf tuple `(String, [u8], bool)`.
     pub(crate) fn tuple_entry_ty(&mut self) -> Ty {
         let s = self.tcx.string_ty();
@@ -1195,17 +1241,6 @@ impl<'a> Builder<'a> {
         self.tcx.intern(gossamer_types::TyKind::Adt {
             def: gossamer_resolve::DefId::local(u32::MAX),
             substs,
-        })
-    }
-
-    /// The opaque `fs::DirInfo` blob handle shared by `fs::read_dir` and
-    /// `fs::walk_dir` - a heap blob address held in a single scalar slot,
-    /// not an inline struct.
-    pub(crate) fn dir_info_adt_ty(&mut self) -> Ty {
-        let def = gossamer_resolve::DefId::local(u32::MAX - 2);
-        self.tcx.intern(gossamer_types::TyKind::Adt {
-            def,
-            substs: gossamer_types::Substs::new(),
         })
     }
 
@@ -1453,6 +1488,55 @@ impl<'a> Builder<'a> {
         self.expr_runtime_kind(expr) == Some("http::SendResult")
     }
 
+    /// Payload field types of `variant` as a value of `scrut_ty` holds them.
+    ///
+    /// A generic enum declares its payloads over its own type parameters, and
+    /// the value's type names the arguments this use gives them. The enum's
+    /// parameter positions are not the reading body's: in a non-generic body
+    /// they name nothing, and in a generic one they may name a different
+    /// parameter. A binding takes the instantiated type so its value
+    /// representation is the one the payload was stored with. Payload offsets
+    /// stay on the declared list, which is what construction lays out by.
+    pub(crate) fn instantiated_variant_field_tys(
+        &mut self,
+        scrut_ty: Ty,
+        enum_name: &str,
+        variant: &str,
+    ) -> Option<Vec<Ty>> {
+        use gossamer_types::{GenericArg, TyKind};
+        let declared = self.enums.field_tys_of(enum_name, variant)?;
+        let mut cur = scrut_ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(cur) {
+            cur = *inner;
+        }
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(cur).clone() else {
+            return Some(declared);
+        };
+        if substs.is_empty() || self.tcx.enum_variant_names(def).is_none() {
+            return Some(declared);
+        }
+        // An argument inference left open says nothing about the payload, so
+        // its position keeps the declared parameter.
+        let subst_tys: Vec<Option<Ty>> = substs
+            .as_slice()
+            .iter()
+            .map(|arg| match arg {
+                GenericArg::Type(t)
+                    if !matches!(self.tcx.kind_of(*t), TyKind::Var(_) | TyKind::Error) =>
+                {
+                    Some(*t)
+                }
+                _ => None,
+            })
+            .collect();
+        Some(
+            declared
+                .into_iter()
+                .map(|t| crate::monomorph::subst_param_ty(self.tcx, t, &subst_tys))
+                .collect(),
+        )
+    }
+
     /// Byte offset of each payload field within a heap enum node's slot slab.
     ///
     /// A field occupies its declared slot width, the way a struct field does,
@@ -1655,6 +1739,74 @@ impl<'a> Builder<'a> {
         pairs
     }
 
+    /// The discriminant under which a by-value carrier's payload word holds a
+    /// copy blob: 0 for `Ok` / `Some`, 1 for `Err`, -1 for both, or `None`
+    /// when neither arm's payload is one.
+    ///
+    /// The shape has to match what the backend actually copies. A one-field
+    /// struct is a single slot and is copied like any other, so its owner keeps
+    /// a share of it too.
+    fn carrier_blob_gate(&self, ty: Ty) -> Option<i64> {
+        use gossamer_types::TyKind;
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
+            return None;
+        };
+        if def.local != u32::MAX && def.local != u32::MAX - 1 {
+            return None;
+        }
+        let is_copy_shape = |t: Ty| self.is_inline_slot_block(t) || self.is_result_or_option_adt(t);
+        let ok_side = substs.types().first().copied().is_some_and(is_copy_shape);
+        let err_side = substs.types().get(1).copied().is_some_and(is_copy_shape);
+        match (ok_side, err_side) {
+            (true, true) => Some(-1),
+            (true, false) => Some(0),
+            (false, true) => Some(1),
+            (false, false) => None,
+        }
+    }
+
+    /// `ty` with each type parameter replaced by its argument in `type_args`,
+    /// so a field declared as `T` reads as the type an instantiation gives it.
+    /// The rebuilt type is one the program already interned wherever it holds
+    /// a value of it; a shape nothing interned keeps its declared spelling.
+    fn instantiated_ty(&self, ty: Ty, type_args: &[Option<Ty>]) -> Ty {
+        use gossamer_types::TyKind;
+        let rebuilt = match self.tcx.kind_of(ty).clone() {
+            TyKind::Param { idx, .. } => {
+                return type_args
+                    .get(idx.0 as usize)
+                    .copied()
+                    .flatten()
+                    .unwrap_or(ty);
+            }
+            TyKind::Vec(elem) => TyKind::Vec(self.instantiated_ty(elem, type_args)),
+            TyKind::Slice(elem) => TyKind::Slice(self.instantiated_ty(elem, type_args)),
+            TyKind::Array { elem, len } => TyKind::Array {
+                elem: self.instantiated_ty(elem, type_args),
+                len,
+            },
+            TyKind::Tuple(items) => TyKind::Tuple(
+                items
+                    .iter()
+                    .map(|item| self.instantiated_ty(*item, type_args))
+                    .collect(),
+            ),
+            TyKind::Adt { def, substs } if substs.types().len() == substs.as_slice().len() => {
+                let args: Vec<Ty> = substs
+                    .types()
+                    .iter()
+                    .map(|arg| self.instantiated_ty(*arg, type_args))
+                    .collect();
+                TyKind::Adt {
+                    def,
+                    substs: gossamer_types::Substs::from_types(args),
+                }
+            }
+            _ => return ty,
+        };
+        self.tcx.interned(&rebuilt).unwrap_or(ty)
+    }
+
     fn collect_guarded_pairs(
         &self,
         ty: Ty,
@@ -1666,7 +1818,7 @@ impl<'a> Builder<'a> {
         if depth > 8 {
             return;
         }
-        let TyKind::Adt { def, .. } = self.tcx.kind_of(ty) else {
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
             return;
         };
         if def.local == u32::MAX || def.local == u32::MAX - 1 {
@@ -1675,36 +1827,23 @@ impl<'a> Builder<'a> {
         let Some(field_tys) = self.tcx.struct_field_tys(*def) else {
             return;
         };
-        let field_tys: Vec<Ty> = field_tys.to_vec();
+        let type_args = crate::monomorph::subst_type_arguments(substs);
+        let field_tys: Vec<Ty> = field_tys
+            .iter()
+            .map(|field| self.instantiated_ty(*field, &type_args))
+            .collect();
         let mut word = base_word;
         for fty in field_tys {
             let fwords = i64::from(self.type_slot_bytes(fty).max(8) / 8);
             match self.tcx.kind_of(fty) {
-                TyKind::Adt { def, substs }
-                    if def.local == u32::MAX || def.local == u32::MAX - 1 =>
-                {
-                    // By-value `{disc, payload}` field. The payload word
-                    // holds a heap-copy pointer whenever the active side's
-                    // payload is a by-value aggregate, one slot or many:
-                    // substs[0] (Ok/Some) under disc 0, substs[1] (Err)
-                    // under disc 1. When both sides are copies the entry
-                    // is unconditional (gate -1). The runtime walk
-                    // re-checks the discriminant gate and the copy-blob
-                    // provenance set, so over-approximating is safe.
-                    //
-                    // The shape has to match what the backend actually
-                    // copies. A one-field struct is a single slot and is
-                    // copied like any other, so its owner needs the entry
-                    // to keep a share of it - the payload the option local
-                    // released on its way out is the same blob.
-                    let is_copy_shape = |t: Ty| self.is_inline_slot_block(t);
-                    let ok_side = substs.types().first().copied().is_some_and(is_copy_shape);
-                    let err_side = substs.types().get(1).copied().is_some_and(is_copy_shape);
-                    match (ok_side, err_side) {
-                        (true, true) => out.push((-1, word, word + 1)),
-                        (true, false) => out.push((0, word, word + 1)),
-                        (false, true) => out.push((1, word, word + 1)),
-                        (false, false) => {}
+                TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
+                    // By-value `{disc, payload}` field: the payload word holds
+                    // a heap-copy pointer on the arms `carrier_blob_gate`
+                    // names. The runtime walk re-checks the discriminant gate
+                    // and the copy-blob provenance set, so over-approximating
+                    // is safe.
+                    if let Some(gate) = self.carrier_blob_gate(fty) {
+                        out.push((gate, word, word + 1));
                     }
                 }
                 TyKind::Adt { .. } if fwords > 1 => {
@@ -1718,11 +1857,61 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Registers (idempotently) the guarded meta for a counted box holding a
+    /// carrier of type `ty` whose payload is a copy blob on some arm - a
+    /// struct, a tuple, or another boxed carrier - and returns its symbol, or
+    /// `None` when neither arm's payload is one.
+    ///
+    /// A carrier held by value is two words its owner reaches through the
+    /// option-slot helpers, so its own copy meta stays a leaf; only the box
+    /// walks the payload blob, under this symbol.
+    pub(crate) fn ensure_carrier_box_meta(&mut self, ty: Ty) -> Option<String> {
+        use gossamer_types::TyKind;
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(ty).clone() else {
+            return None;
+        };
+        if def.local != u32::MAX && def.local != u32::MAX - 1 {
+            return None;
+        }
+        let is_copy_shape = |t: Ty| self.is_inline_slot_block(t) || self.is_result_or_option_adt(t);
+        let ok_side = substs.types().first().copied().is_some_and(is_copy_shape);
+        let err_side = substs.types().get(1).copied().is_some_and(is_copy_shape);
+        let gate = match (ok_side, err_side) {
+            (true, true) => -1,
+            (true, false) => 0,
+            (false, true) => 1,
+            (false, false) => return None,
+        };
+        let symbol = format!("gos_rc_meta_carrierbox_{}", ty.as_u32());
+        if self.tcx.rc_meta(&symbol).is_none() {
+            self.tcx.register_rc_meta(
+                symbol.clone(),
+                vec![gossamer_abi::rc::RC_KIND_STRUCT_GUARDED, 1, gate, 0, 1],
+            );
+        }
+        Some(symbol)
+    }
+
     /// Registers (idempotently) the `RC_KIND_STRUCT_GUARDED` copy-blob
     /// meta for `ty` and returns its symbol, or `None` when the type has
     /// no guarded child slots (a leaf - its copies need no meta and no
     /// drop-pass walks).
     pub(crate) fn ensure_aggr_copy_meta(&mut self, ty: Ty) -> Option<String> {
+        use gossamer_types::TyKind;
+        // A scalar or a string is held in its own word and is never a copy
+        // blob; a meta keyed on one would make every carrier of that type an
+        // option holder whose payload word the slot helpers read as a pointer.
+        if matches!(
+            self.tcx.kind_of(ty),
+            TyKind::Int(_)
+                | TyKind::Float(_)
+                | TyKind::Bool
+                | TyKind::Char
+                | TyKind::Unit
+                | TyKind::String
+        ) {
+            return None;
+        }
         if let Some(sym) = self.tcx.aggr_copy_meta(ty) {
             return Some(sym.to_string());
         }
@@ -1770,12 +1959,20 @@ impl<'a> Builder<'a> {
         if depth > 16 {
             return;
         }
+        if let Some(entry) = self.carrier_payload_child(ty, base_word) {
+            out.push(entry);
+            return;
+        }
         let field_tys: Vec<Ty> = match self.tcx.kind_of(ty) {
-            TyKind::Adt { def, .. }
+            TyKind::Adt { def, substs }
                 if def.local < u32::MAX - 16 && !self.tcx.is_inline_enum_ty(ty) =>
             {
+                let type_args = crate::monomorph::subst_type_arguments(substs);
                 match self.tcx.struct_field_tys(*def) {
-                    Some(fields) => fields.to_vec(),
+                    Some(fields) => fields
+                        .iter()
+                        .map(|field| self.instantiated_ty(*field, &type_args))
+                        .collect(),
                     None => return,
                 }
             }
@@ -1803,6 +2000,14 @@ impl<'a> Builder<'a> {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word,
                 );
+            } else if let Some(entry) = self.carrier_payload_child(fty, word) {
+                out.push(entry);
+            } else if let Some(gate) = self.carrier_blob_gate(fty) {
+                out.push(
+                    (gossamer_abi::rc::rc_child_blob_kind(gate)
+                        << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
+                        | (word + 1),
+                );
             } else if matches!(
                 self.tcx.kind_of(fty),
                 TyKind::Tuple(_) | TyKind::Adt { .. } | TyKind::Array { .. }
@@ -1813,6 +2018,32 @@ impl<'a> Builder<'a> {
             }
             word += fwords;
         }
+    }
+
+    /// The child entry for the payload word of an `Option` / `Result` at
+    /// `word`, when that word holds a heap value on every arm that has one: an
+    /// `Option`'s `None` payload word is zero, which the child walk skips, and a
+    /// `Result` qualifies only when both arms carry the same heap kind.
+    fn carrier_payload_child(&self, ty: Ty, word: i64) -> Option<i64> {
+        use gossamer_types::TyKind;
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(ty) else {
+            return None;
+        };
+        let child_kind = |t: Ty| match self.tcx.kind_of(t) {
+            TyKind::String => Some(gossamer_abi::rc::RC_CHILD_RC),
+            TyKind::Vec(_) | TyKind::Slice(_) => Some(gossamer_abi::rc::RC_CHILD_VEC),
+            _ => None,
+        };
+        let tys = substs.types();
+        let kind = if def.local == u32::MAX - 1 {
+            child_kind(*tys.first()?)?
+        } else if def.local == u32::MAX {
+            let ok = child_kind(*tys.first()?)?;
+            (child_kind(*tys.get(1)?)? == ok).then_some(ok)?
+        } else {
+            return None;
+        };
+        Some((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | (word + 1))
     }
 
     /// Registers (idempotently) the `RC_KIND_STRUCT` child-word meta for an
@@ -2100,6 +2331,11 @@ impl<'a> Builder<'a> {
     /// instantiation's type arguments for any `Param` field it reaches.
     fn slot_bytes_instantiated(&self, ty: Ty, params: &[Ty]) -> u32 {
         use gossamer_types::TyKind;
+        // A packed struct is never generic, so its own layout is the whole
+        // answer.
+        if let Some(layout) = self.tcx.packed_layout(ty) {
+            return layout.size;
+        }
         match self.tcx.kind_of(ty) {
             TyKind::Param { idx, .. } => params
                 .get(idx.0 as usize)

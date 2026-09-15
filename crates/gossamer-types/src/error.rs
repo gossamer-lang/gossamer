@@ -870,6 +870,41 @@ pub enum TypeError {
         /// The argument as written.
         argument: String,
     },
+    /// A wrapping arithmetic operation was written as an integer method.
+    /// The operator is the one spelling.
+    #[error(
+        "`{method}` is not an integer method; wrapping arithmetic is the `{operator}` operator"
+    )]
+    WrappingMethodRetired {
+        /// The method as written.
+        method: String,
+        /// The operator that spells the operation.
+        operator: String,
+        /// The whole call rewritten to the operator, when both operands have
+        /// a short spelling.
+        replacement: Option<String>,
+    },
+    /// A `Simd` / `Mask` type or operation outside the supported lane set:
+    /// an element type or lane count the vector type does not take, or an
+    /// operator its lanes do not define.
+    #[error("unsupported vector: {reason}")]
+    SimdShape {
+        /// What the vector type or operation does not support.
+        reason: String,
+    },
+    /// A call to a function with a const generic parameter gave no value
+    /// for it: no turbofish names it and no array argument's length does.
+    #[error("cannot infer the const generic argument of `{callee}`")]
+    ConstGenericNotInferred {
+        /// The callee as written.
+        callee: String,
+        /// The type a struct literal or an enum variant builds, which names
+        /// the argument where the value is bound; `None` for a function call.
+        literal_ty: Option<String>,
+        /// The type an associated function is called through, whose turbofish
+        /// names the argument; `None` for any other call.
+        assoc_owner: Option<String>,
+    },
     /// `String::parse` was called. The strict `to_T()` family is the one
     /// parse surface, and it answers an `Option<T>`.
     #[error("`parse` is not a string method; the parse family is `to_i64` / `to_f64` / `to_bool`")]
@@ -1080,6 +1115,9 @@ impl TypeError {
             Self::NoTupleField { .. } => "no-tuple-field",
             Self::TransparentWrapper { .. } => "transparent-wrapper",
             Self::StringParseRetired { .. } => "string-parse-retired",
+            Self::WrappingMethodRetired { .. } => "wrapping-method-retired",
+            Self::ConstGenericNotInferred { .. } => "const-generic-not-inferred",
+            Self::SimdShape { .. } => "simd-shape",
             Self::ReferenceArgumentNeedsDeref { .. } => "reference-argument-needs-deref",
             Self::DerefWriteToNonReference { .. } => "deref-write-to-non-reference",
             Self::EnumReprTooNarrow { .. } => "enum-repr-too-narrow",
@@ -1124,6 +1162,9 @@ impl TypeError {
             Self::SlotCollectionElement { .. } => "GT0068",
             Self::ContainerIgnoresUserOrder { .. } => "GT0085",
             Self::SpawnOutsideCohort { .. } => "GT0086",
+            Self::WrappingMethodRetired { .. } => "GT0087",
+            Self::ConstGenericNotInferred { .. } => "GT0088",
+            Self::SimdShape { .. } => "GT0089",
             Self::UnresolvedMethod { .. } => "GT0002",
             Self::UnresolvedOp { .. } | Self::UnresolvedOpImpl { .. } => "GT0003",
             Self::NonExhaustiveMatch { .. } => "GT0004",
@@ -2019,6 +2060,77 @@ impl TypeDiagnostic {
                         format!("write `*{argument}`"),
                         format!("*{argument}"),
                     ));
+            }
+            TypeError::WrappingMethodRetired {
+                operator,
+                replacement,
+                ..
+            } => {
+                out = out
+                    .with_help(match replacement {
+                        Some(rewrite) => format!("write `{rewrite}`"),
+                        None => format!("write the `{operator}` operator"),
+                    })
+                    .with_note(
+                        "wrapping arithmetic has one spelling, the operator, which wraps at \
+                         the operands' declared width on every tier",
+                    );
+                if let Some(rewrite) = replacement {
+                    out = out.with_suggestion(gossamer_diagnostics::Suggestion::replacement(
+                        location,
+                        format!("write `{rewrite}`"),
+                        rewrite.clone(),
+                    ));
+                }
+            }
+            TypeError::SimdShape { .. } => {
+                out = out.with_note(
+                    "`Simd<T, N>` takes `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` lanes, \
+                     `N` of 2, 4, 8, or 16 (16 for `u8`, `i32`, and `u32`); `Mask<N>` is the \
+                     `bool`-laned form a lane comparison answers",
+                );
+            }
+            TypeError::ConstGenericNotInferred {
+                callee,
+                literal_ty: None,
+                assoc_owner: Some(owner),
+            } => {
+                out = out
+                    .with_help(format!(
+                        "name the value on the type: `{owner}::<4>::{callee}(..)`"
+                    ))
+                    .with_note(
+                        "an associated function of a const generic `impl` takes the block's \
+                         const parameters from the type it is called through",
+                    );
+            }
+            TypeError::ConstGenericNotInferred {
+                callee,
+                literal_ty: None,
+                assoc_owner: None,
+            } => {
+                out = out
+                    .with_help(format!(
+                        "name the value with a turbofish: `{callee}::<4>(..)`"
+                    ))
+                    .with_note(
+                        "a const generic parameter takes its value from the call: an explicit \
+                         `::<N>` argument, or the length of an array argument whose type names it",
+                    );
+            }
+            TypeError::ConstGenericNotInferred {
+                literal_ty: Some(ty),
+                ..
+            } => {
+                out = out
+                    .with_help(format!(
+                        "name the value in the type it is bound to: `let value: {ty}<4> = ..`"
+                    ))
+                    .with_note(
+                        "a const generic parameter of a literal or a variant takes its value from \
+                         the length of an array field or payload that names it, or from the type \
+                         the context expects",
+                    );
             }
             TypeError::StringParseRetired { suggestion } => {
                 out = out

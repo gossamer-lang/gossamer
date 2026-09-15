@@ -9,6 +9,7 @@
 /// the MIR lowerer and the runtime.
 pub mod format_pad;
 pub mod int_range;
+pub mod jit_carrier;
 pub mod rc;
 /// ABI registry - the typed list of all `gos_rt_*` symbols.
 pub mod registry;
@@ -88,6 +89,39 @@ pub const DESC_CONTAINER: u8 = 23;
 /// little-endian `u16` - then the element's own descriptor once.
 pub const DESC_ARRAY: u8 = 20;
 
+/// Ordering-descriptor tag for a struct whose fields narrower than a word sit
+/// at their own width. Two bytes follow - the words the value spans and its
+/// leaf count - then, per leaf in field order with nested structs flattened,
+/// the leaf's byte offset as a little-endian `u16` and its [`packed_leaf`]
+/// kind.
+pub const DESC_PACKED: u8 = 24;
+
+/// How a [`DESC_PACKED`] leaf is stored and ordered.
+pub mod packed_leaf {
+    /// A signed integer in one byte.
+    pub const I8: u8 = 0;
+    /// An unsigned integer in one byte.
+    pub const U8: u8 = 1;
+    /// A signed integer in two bytes.
+    pub const I16: u8 = 2;
+    /// An unsigned integer in two bytes.
+    pub const U16: u8 = 3;
+    /// A signed integer in four bytes.
+    pub const I32: u8 = 4;
+    /// An unsigned integer in four bytes.
+    pub const U32: u8 = 5;
+    /// A signed integer in a word.
+    pub const I64: u8 = 6;
+    /// An unsigned integer in a word.
+    pub const U64: u8 = 7;
+    /// A float in a word, held as a double.
+    pub const FLOAT: u8 = 8;
+    /// A `bool` in one byte.
+    pub const BOOL: u8 = 9;
+    /// A `char` in four bytes.
+    pub const CHAR: u8 = 10;
+}
+
 /// Runtime shims that invoke a gossamer callback through
 /// `extern "C" fn(..) -> i128`, reading the callback's address from offset
 /// zero of the closure env blob handed to the shim.
@@ -98,15 +132,53 @@ pub const DESC_ARRAY: u8 = 20;
 /// place of the callback's own address. Callbacks that answer `i64`, `bool`,
 /// or `f64` agree on the register already and are not listed.
 pub const I128_CALLBACK_SHIMS: &[&str] = &[
-    "gos_rt_fs_walk_dir",
+    "gos_rt_fs_walk_dir_raw",
     "gos_rt_iter_filter_map_i64",
     "gos_rt_iter_find_map_i64",
     "gos_rt_iter_map_ptr_i64",
+    "gos_rt_lazy_iter_filter_map_i64",
+    "gos_rt_lazy_iter_filter_map_str",
     "gos_rt_option_and_then",
     "gos_rt_option_or_else",
     "gos_rt_result_and_then",
     "gos_rt_result_or_else",
 ];
+
+/// Content-keyed map and set entry points that take a key. Each reads the key's
+/// slots through the layout descriptor that follows it, so every backend passes
+/// the key by address: an aggregate's own storage, or a slot holding a one-word
+/// value such as a `Vec` or `String` pointer, or a two-word `Option` carrier.
+pub const SKEY_BY_ADDRESS: &[&str] = &[
+    "gos_rt_map_contains_skey",
+    "gos_rt_map_get_or_skey",
+    "gos_rt_map_get_skey_opt",
+    "gos_rt_map_inc_skey",
+    "gos_rt_map_insert_skey",
+    "gos_rt_map_insert_skey_opt",
+    "gos_rt_map_or_insert_skey",
+    "gos_rt_map_pop_skey",
+    "gos_rt_set_contains_skey",
+    "gos_rt_set_insert_skey",
+    "gos_rt_set_remove_skey",
+];
+
+/// Whether `name` is a content-keyed entry point whose second argument, the
+/// key, crosses by address. See [`SKEY_BY_ADDRESS`].
+#[must_use]
+pub fn takes_key_by_address(name: &str) -> bool {
+    SKEY_BY_ADDRESS.contains(&name)
+}
+
+/// Ordered-container pushes whose second argument, the element, crosses as
+/// the address of its slots: the store copies its own stride from it, and the
+/// sift compares through the descriptor that follows.
+pub const ELEM_BY_ADDRESS: &[&str] = &["gos_rt_bheap_max_push_desc", "gos_rt_bheap_min_push_desc"];
+
+/// Whether `name` takes its element by address. See [`ELEM_BY_ADDRESS`].
+#[must_use]
+pub fn takes_elem_by_address(name: &str) -> bool {
+    ELEM_BY_ADDRESS.contains(&name)
+}
 
 /// Runtime registration shims that store a gossamer handler's address and
 /// later invoke it as `extern "C" fn(..) -> i128`, paired with the position
@@ -141,10 +213,27 @@ pub const I128_HANDLER_REGISTRATIONS: &[(&str, usize)] = &[
 ];
 
 pub use registry::{
-    REGISTRY, all_llvm_declarations, combinator_abi_of, combinator_crossings, combinator_symbol,
-    lookup, mints_owned_string,
+    REGISTRY, all_llvm_declarations, answers_counted_element, answers_counted_payload,
+    combinator_abi_of, combinator_crossings, combinator_symbol, lookup, mints_owned_string,
+    returns_fresh_aggregate,
 };
 pub use types::{AbiSig, AbiType, CombinatorAbi, ElemClass, RuntimeEntry, Tier};
+
+/// The overflow-checked runtime entry for an integer shim, for the build
+/// profiles in which `+` and `*` panic on overflow. `sum` and `product` over
+/// integers, and an open `start..` range stepping past its type, follow the
+/// same rule as the operators they are built from.
+#[must_use]
+pub fn checked_integer_entry(name: &str) -> Option<&'static str> {
+    match name {
+        "gos_rt_lazy_iter_range_from_i64" => Some("gos_rt_lazy_iter_range_from_i64_checked"),
+        "gos_rt_iter_sum_i64" => Some("gos_rt_iter_sum_i64_checked"),
+        "gos_rt_iter_product_i64" => Some("gos_rt_iter_product_i64_checked"),
+        "gos_rt_lazy_iter_sum_i64" => Some("gos_rt_lazy_iter_sum_i64_checked"),
+        "gos_rt_lazy_iter_product_i64" => Some("gos_rt_lazy_iter_product_i64_checked"),
+        _ => None,
+    }
+}
 
 #[cfg(test)]
 mod tests {

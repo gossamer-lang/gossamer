@@ -341,6 +341,7 @@ fn inline_into_body(
                     rvalue: Rvalue::Use(args[(idx - 1) as usize].clone()),
                 },
                 span: body.blocks[bi].span,
+                inlined: body.blocks[bi].terminator_inlined.clone(),
             });
             param_copies.push((idx, copy));
         }
@@ -364,11 +365,8 @@ fn inline_into_body(
             Local(orig_local_count + temp_idx)
         };
 
-        let remapped: Vec<crate::ir::Statement> = ic
-            .stmts
-            .iter()
-            .map(|stmt| remap_statement(stmt, &remap))
-            .collect();
+        let site = call_site_chain(&body.blocks[bi], &callee_name);
+        let remapped = inlined_statements(&ic.stmts, &site, &remap);
 
         // Replace the Call terminator with Goto and splice statements.
         let continuation = target.unwrap_or(BlockId(bi as u32 + 1));
@@ -395,7 +393,7 @@ fn remap_statement(
             place: new_place,
             rvalue: new_rvalue,
         },
-        span: stmt.span,
+        span: stmt.span, inlined: stmt.inlined.clone(),
     }
 }
 
@@ -621,6 +619,8 @@ fn splice_callee(
     destination: &Place,
     continuation: BlockId,
 ) {
+    let site = call_site_chain(&body.blocks[call_block], &callee.name);
+    let caller_chain = body.blocks[call_block].terminator_inlined.clone();
     let base_local = body.locals.len() as u32;
     for decl in &callee.locals {
         body.locals.push(decl.clone());
@@ -635,7 +635,11 @@ fn splice_callee(
         let stmts = cb
             .stmts
             .iter()
-            .map(|s| remap_statement_full(s, &remap_local))
+            .map(|s| {
+                let mut remapped = remap_statement_full(s, &remap_local);
+                remapped.inlined = Some(extend_chain(&site, &s.inlined));
+                remapped
+            })
             .collect();
         let terminator =
             remap_terminator_full(&cb.terminator, &remap_local, &remap_block, landing_id);
@@ -644,6 +648,8 @@ fn splice_callee(
             stmts,
             terminator,
             span: cb.span,
+            terminator_span: cb.terminator_span,
+            terminator_inlined: Some(extend_chain(&site, &cb.terminator_inlined)),
         });
     }
 
@@ -658,11 +664,14 @@ fn splice_callee(
                 })),
             },
             span: callee.span,
+            inlined: caller_chain.clone(),
         }],
         terminator: Terminator::Goto {
             target: continuation,
         },
         span: callee.span,
+        terminator_span: None,
+        terminator_inlined: caller_chain.clone(),
     });
 
     let entry = remap_block(callee.blocks[0].id);
@@ -676,10 +685,56 @@ fn splice_callee(
                 rvalue: Rvalue::Use(args[i as usize].clone()),
             },
             span: callee.span,
+            inlined: caller_chain.clone(),
         })
         .collect();
     body.blocks[call_block].stmts.extend(bind);
     body.blocks[call_block].terminator = Terminator::Goto { target: entry };
+}
+
+use crate::ir::{InlineChain, InlineFrame};
+
+/// The chain a callee's code carries once inlined at `call_block`'s call:
+/// the call block's own chain, then the call itself.
+fn call_site_chain(call_block: &BasicBlock, callee: &str) -> std::sync::Arc<[InlineFrame]> {
+    let mut frames: Vec<InlineFrame> = call_block
+        .terminator_inlined
+        .as_deref()
+        .map(<[InlineFrame]>::to_vec)
+        .unwrap_or_default();
+    frames.push(InlineFrame {
+        function: callee.to_string(),
+        call: call_block.terminator_span.unwrap_or(call_block.span),
+    });
+    frames.into()
+}
+
+/// `site` followed by the chain the callee's own code already carries.
+fn extend_chain(
+    site: &std::sync::Arc<[InlineFrame]>,
+    inner: &InlineChain,
+) -> std::sync::Arc<[InlineFrame]> {
+    match inner {
+        None => std::sync::Arc::clone(site),
+        Some(inner) => site.iter().chain(inner.iter()).cloned().collect(),
+    }
+}
+
+/// `stmts` remapped into the caller, each carrying the call it was inlined
+/// through.
+fn inlined_statements(
+    stmts: &[crate::ir::Statement],
+    site: &std::sync::Arc<[InlineFrame]>,
+    remap: &impl Fn(Local) -> Local,
+) -> Vec<crate::ir::Statement> {
+    stmts
+        .iter()
+        .map(|stmt| {
+            let mut remapped = remap_statement(stmt, remap);
+            remapped.inlined = Some(extend_chain(site, &stmt.inlined));
+            remapped
+        })
+        .collect()
 }
 
 /// Full statement remap that, unlike [`remap_statement`], also remaps
@@ -741,7 +796,7 @@ fn remap_statement_full(stmt: &Statement, remap: &impl Fn(Local) -> Local) -> St
     };
     Statement {
         kind,
-        span: stmt.span,
+        span: stmt.span, inlined: stmt.inlined.clone(),
     }
 }
 
@@ -1034,7 +1089,7 @@ pub(crate) fn insert_rc_reuse(body: &mut Body, tcx: &TyCtxt) {
                             args: vec![Operand::Copy(Place::local(s_local))],
                         },
                     },
-                    span,
+                    span, inlined: None,
                 });
                 let StatementKind::Assign {
                     place,
@@ -1054,7 +1109,7 @@ pub(crate) fn insert_rc_reuse(body: &mut Body, tcx: &TyCtxt) {
                             args: new_args,
                         },
                     },
-                    span,
+                    span, inlined: None,
                 });
                 continue;
             }

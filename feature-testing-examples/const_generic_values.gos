@@ -1,0 +1,42 @@
+// A const generic parameter is a value in the body, a repeat count, and
+// a turbofish argument, and a `[T; N]` result is a fixed array at the call.
+
+fn length<const N: usize>(xs: [i64; N]) -> i64 {
+    N as i64
+}
+
+fn zeros<const N: usize>() -> [i64; N] {
+    [0; N]
+}
+
+fn doubled<const N: usize>(xs: [i64; N]) -> [i64; N] {
+    let mut out = [0; N]
+    for i in 0..N as i64 {
+        out[i] = xs[i] * 2
+    }
+    out
+}
+
+fn total<const N: usize>(xs: [i64; N]) -> i64 {
+    let mut acc = 0
+    for x in xs {
+        acc += x
+    }
+    acc
+}
+
+fn forwarded<const M: usize>(xs: [i64; M]) -> i64 {
+    total(xs) + length(xs)
+}
+
+fn main() {
+    println("{}", length([4, 5, 6]))
+    let z: [i64; 4] = zeros::<4>()
+    println("{:?} {}", z, z.len())
+    let d = doubled([1, 2, 3])
+    println("{:?}", d)
+    println("{}", total(d))
+    println("{}", forwarded([10, 20]))
+    let words = ["a", "b"]
+    println("{}", length([7]) + words.len())
+}

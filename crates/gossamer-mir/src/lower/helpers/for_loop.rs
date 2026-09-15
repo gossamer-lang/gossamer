@@ -109,9 +109,13 @@ pub(crate) fn returns_borrowed_pointer(name: &str) -> bool {
             | "gos_rt_map_or_insert_str_i64"
             | "gos_rt_map_or_insert_typed_str_i64"
             | "gos_rt_map_or_insert_i64_i64"
+            | "gos_rt_map_or_insert_skey"
+            | "gos_rt_map_or_insert_ekey"
             | "gos_rt_map_get_or_str_i64"
             | "gos_rt_map_get_or_typed_str_i64"
             | "gos_rt_map_get_or_i64"
+            | "gos_rt_map_get_or_skey"
+            | "gos_rt_map_get_or_ekey"
             // A raw word read through a pointer (closure-env capture
             // unpacks, handle field loads). The pointee's owner keeps the
             // only reference this local sees; a lifted closure freeing an
@@ -149,7 +153,7 @@ pub(crate) fn aggr_size_bytes(tcx: &gossamer_types::TyCtxt, ty: Ty) -> i64 {
                     .sum();
                 total.max(1) * 8
             } else {
-                // Other sentinel Adts (DirInfo, …): single heap-pointer slot.
+                // Other sentinel Adts: single heap-pointer slot.
                 8
             }
         }

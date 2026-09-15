@@ -185,6 +185,9 @@ pub(super) enum PrintKind {
     VecVecI64,
     /// `Vec<Vec<String>>` formatted via `gos_rt_vec_format_vec_string`.
     VecVecString,
+    /// A `Vec` of tuples formatted via `gos_rt_vec_format_tuple`: the
+    /// per-field tag stream each element renders through, and its arity.
+    VecTuple(Vec<u8>, i64),
     /// `[i64; N]` flat-buffer literal (no GosVec header). Formatted
     /// via `gos_rt_arr_format_i64(ptr, len)`.
     ArrI64(i64),
@@ -249,9 +252,12 @@ fn tuple_elem_tag(tcx: &TyCtxt, ty: Ty) -> Option<u8> {
         // A `u64` / `usize` slot spans the whole unsigned range, so it reads
         // as unsigned wherever a tag stream names it.
         TyKind::Int(IntTy::U64 | IntTy::Usize) => Some(1),
-        TyKind::Int(IntTy::I64 | IntTy::Isize) => Some(0),
-        TyKind::Duration | TyKind::Instant => Some(0),
-        TyKind::Float(FloatTy::F64) => Some(2),
+        // Every other integer's slot holds its value widened to a word, sign-
+        // extended when signed and zero-extended when not, so the signed word
+        // is the value itself.
+        TyKind::Int(_) | TyKind::Duration | TyKind::Instant => Some(0),
+        // An `f32` slot holds the double every float slot does.
+        TyKind::Float(_) => Some(2),
         TyKind::Bool => Some(3),
         TyKind::Char => Some(4),
         TyKind::String => Some(5),
@@ -324,12 +330,17 @@ pub(super) fn tuple_tags_for_ty(tcx: &TyCtxt, ty: Ty) -> Option<Vec<u8>> {
 }
 
 /// Every tuple type reachable from `ty`, outermost first. A nested
-/// tuple can be printed on its own (`t.0`), so its stream needs
+/// tuple can be printed on its own (`t.0`), and a sequence of tuples
+/// renders each element through its tuple's stream, so those streams need
 /// interning too.
 pub(super) fn nested_tuple_types(tcx: &TyCtxt, ty: Ty, out: &mut Vec<Ty>) {
     let mut peeled = ty;
     while let TyKind::Ref { inner, .. } = tcx.kind_of(peeled) {
         peeled = *inner;
+    }
+    if let TyKind::Vec(elem) | TyKind::Slice(elem) = tcx.kind_of(peeled) {
+        nested_tuple_types(tcx, *elem, out);
+        return;
     }
     let TyKind::Tuple(elems) = tcx.kind_of(peeled) else {
         return;
@@ -337,6 +348,24 @@ pub(super) fn nested_tuple_types(tcx: &TyCtxt, ty: Ty, out: &mut Vec<Ty>) {
     out.push(peeled);
     for e in elems.clone() {
         nested_tuple_types(tcx, e, out);
+    }
+}
+
+/// The print kind of a sequence whose element is the tuple `elem`: the
+/// per-field tags its renderer walks, or `Unsupported(label)` when a field has
+/// no flat tag.
+fn vec_tuple_kind(tcx: &TyCtxt, elem: Ty, label: &'static str) -> PrintKind {
+    let arity = match tcx.kind_of(peel_refs(tcx, elem)) {
+        TyKind::Tuple(fields) => fields.len(),
+        _ => 0,
+    };
+    match tuple_elem_tags(tcx, elem) {
+        // The element's own stream starts with the nested marker and count;
+        // the renderer takes the per-field tags after them.
+        Some(tags) if arity > 0 && tags.len() > 2 => {
+            PrintKind::VecTuple(tags[2..].to_vec(), i64::try_from(arity).unwrap_or(0))
+        }
+        _ => PrintKind::Unsupported(label),
     }
 }
 
@@ -480,8 +509,16 @@ fn container_handle_print_kind_seen(
             // `gos_rt_set_clone` (neither type carries its own refcount), so
             // the element kind lives on the cloned source handle, not on
             // this call's own operands.
-            if name.as_str() == "gos_rt_set_clone"
-                && let Some(Operand::Copy(src)) = args.first()
+            // Set algebra answers a set of the receiver's element type, so the
+            // answer renders the way its receiver does.
+            if matches!(
+                name.as_str(),
+                "gos_rt_set_clone"
+                    | "gos_rt_set_union"
+                    | "gos_rt_set_intersection"
+                    | "gos_rt_set_difference"
+                    | "gos_rt_set_symmetric_difference"
+            ) && let Some(Operand::Copy(src)) = args.first()
                 && src.projection.is_empty()
                 && let Some(kind) = container_handle_print_kind(body, src.local)
             {
@@ -557,6 +594,27 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
         Operand::Const(ConstValue::Unit) => PrintKind::Int,
         Operand::Copy(place) => {
             let ty = tcx.peel_nominal(resolve_place_ty(tcx, body, place));
+            // A shared reference to a string, sequence, map, tuple, or array
+            // carries the same word as the value it names, so it renders as
+            // that value.
+            let ty = match tcx.kind_of(ty) {
+                TyKind::Ref {
+                    inner,
+                    mutability: gossamer_types::Mutbl::Not,
+                } if matches!(
+                    tcx.kind_of(*inner),
+                    TyKind::String
+                        | TyKind::Vec(_)
+                        | TyKind::Slice(_)
+                        | TyKind::HashMap { .. }
+                        | TyKind::Tuple(_)
+                        | TyKind::Array { .. }
+                ) =>
+                {
+                    tcx.peel_nominal(*inner)
+                }
+                _ => ty,
+            };
             // A container renders through its own runtime shim whether the
             // local carries the container's type or the bare i64 handle the
             // constructor returned.
@@ -641,9 +699,14 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                 // - without this, `let nums = [1, 2, 3]; println!
                 // ("{:?}", nums)` printed `<value>` even though
                 // the array is fully typed and the helper exists.
-                TyKind::Array { elem, len } => {
+                TyKind::Array { elem, len } | TyKind::Simd { elem, lanes: len } => {
                     let n = i64::try_from(len.to_usize()).unwrap_or(0);
                     match tcx.kind_of(*elem) {
+                        // A `u64` / `usize` slot printed as a signed word
+                        // would spell a value at or above `i64::MAX` negative.
+                        TyKind::Int(IntTy::U64 | IntTy::Usize) => {
+                            PrintKind::Unsupported("unsigned array")
+                        }
                         TyKind::Int(_) => PrintKind::ArrI64(n),
                         TyKind::Float(_) => PrintKind::ArrF64(n),
                         TyKind::Bool => PrintKind::ArrBool(n),
@@ -657,6 +720,9 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                         } => {
                             let m = i64::try_from(inner_len.to_usize()).unwrap_or(0);
                             match tcx.kind_of(*inner_elem) {
+                                TyKind::Int(IntTy::U64 | IntTy::Usize) => {
+                                    PrintKind::Unsupported("unsigned nested array")
+                                }
                                 TyKind::Int(_) => PrintKind::ArrArrI64(n, m),
                                 TyKind::Float(_) => PrintKind::ArrArrF64(n, m),
                                 TyKind::Bool => PrintKind::ArrArrBool(n, m),
@@ -677,10 +743,14 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                         TyKind::Bool => PrintKind::VecBool,
                         TyKind::String => PrintKind::VecString,
                         TyKind::Vec(inner) => match tcx.kind_of(*inner) {
+                            TyKind::Int(IntTy::U64 | IntTy::Usize) => {
+                                PrintKind::Unsupported("unsigned nested slice")
+                            }
                             TyKind::Int(_) => PrintKind::VecVecI64,
                             TyKind::String => PrintKind::VecVecString,
                             _ => PrintKind::Unsupported("nested slice"),
                         },
+                        TyKind::Tuple(_) => vec_tuple_kind(tcx, *elem, "slice"),
                         _ => PrintKind::Unsupported("slice"),
                     };
                     match inner {
@@ -695,10 +765,14 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                     TyKind::Bool => PrintKind::VecBool,
                     TyKind::String => PrintKind::VecString,
                     TyKind::Vec(inner) => match tcx.kind_of(*inner) {
+                        TyKind::Int(IntTy::U64 | IntTy::Usize) => {
+                            PrintKind::Unsupported("unsigned nested Vec")
+                        }
                         TyKind::Int(_) => PrintKind::VecVecI64,
                         TyKind::String => PrintKind::VecVecString,
                         _ => PrintKind::Unsupported("nested Vec"),
                     },
+                    TyKind::Tuple(_) => vec_tuple_kind(tcx, *elem, "Vec"),
                     _ => PrintKind::Unsupported("Vec"),
                 },
                 TyKind::Iterator(_) | TyKind::Range(_) => PrintKind::Unsupported("iterator"),

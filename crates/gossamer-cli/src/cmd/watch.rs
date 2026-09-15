@@ -155,11 +155,13 @@ fn validate(entry: &Path, locked: bool, status: &Status) -> Result<BTreeSet<Path
     let unit = crate::paths::read_entry_unit(&source_path)?;
     let user_source = unit.source;
     let source = gossamer_parse::autoderive::augment_source(&user_source);
+    let generated_len = source.len().saturating_sub(user_source.len());
     let source = crate::comptime_fold::fold_comptime(source, &entry.to_string_lossy())?;
     let embedded = comptime_inputs();
     let mut map = gossamer_lex::SourceMap::new();
     let file_id = map.add_file(entry.to_string_lossy().into_owned(), source.clone());
     crate::paths::register_unit_origins(&mut map, file_id, &unit.entry, &unit.origins);
+    crate::paths::register_generated_tail(&mut map, file_id, generated_len);
     let outcome = gossamer_driver::check_frontend(&source, file_id);
     let render_opts = gossamer_diagnostics::RenderOptions {
         colour: stderr_supports_colour(),

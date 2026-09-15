@@ -194,6 +194,7 @@ impl InferCtxt {
                 }
             }
             TyKind::Array { elem, .. }
+            | TyKind::Simd { elem, .. }
             | TyKind::Slice(elem)
             | TyKind::Vec(elem)
             | TyKind::Iterator(elem)
@@ -485,10 +486,16 @@ impl InferCtxt {
         match (lhs_kind, rhs_kind) {
             (TyKind::Tuple(a), TyKind::Tuple(b)) => self.unify_seq(tcx, a, b),
             (TyKind::Array { elem: ae, len: al }, TyKind::Array { elem: be, len: bl })
-                if al == bl =>
-            {
-                self.unify(tcx, *ae, *be)
-            }
+            | (
+                TyKind::Simd {
+                    elem: ae,
+                    lanes: al,
+                },
+                TyKind::Simd {
+                    elem: be,
+                    lanes: bl,
+                },
+            ) if al == bl => self.unify(tcx, *ae, *be),
             (TyKind::Slice(a), TyKind::Slice(b))
             | (TyKind::Vec(a), TyKind::Vec(b))
             | (TyKind::Sender(a), TyKind::Sender(b))
@@ -669,6 +676,7 @@ impl InferCtxt {
         match (a, b) {
             (GenericArg::Type(x), GenericArg::Type(y)) => self.unify(tcx, *x, *y),
             (GenericArg::Const(x), GenericArg::Const(y)) if x == y => Ok(()),
+            (GenericArg::ConstParam(x), GenericArg::ConstParam(y)) if x == y => Ok(()),
             _ => Err(UnifyError::Mismatch),
         }
     }
@@ -722,6 +730,7 @@ fn occurs_in_kind(infer: &InferCtxt, tcx: &TyCtxt, vid: TyVid, kind: &TyKind) ->
     match kind {
         TyKind::Tuple(parts) => parts.iter().any(|t| occurs(infer, tcx, vid, *t)),
         TyKind::Array { elem, .. }
+        | TyKind::Simd { elem, .. }
         | TyKind::Slice(elem)
         | TyKind::Vec(elem)
         | TyKind::Iterator(elem)
@@ -764,7 +773,7 @@ fn occurs_in_kind(infer: &InferCtxt, tcx: &TyCtxt, vid: TyVid, kind: &TyKind) ->
 fn occurs_in_substs(infer: &InferCtxt, tcx: &TyCtxt, vid: TyVid, substs: &Substs) -> bool {
     substs.as_slice().iter().any(|arg| match arg {
         GenericArg::Type(ty) => occurs(infer, tcx, vid, *ty),
-        GenericArg::Const(_) => false,
+        GenericArg::Const(_) | GenericArg::ConstParam(_) => false,
     })
 }
 

@@ -1,0 +1,30 @@
+// A generic struct renders through a formatter made for its own type
+// arguments, whether it is printed directly, nested in another instance, or
+// held by a `Vec`, an `Option`, or a `Map`.
+
+struct Point {
+    x: f64
+    y: f64
+}
+
+#[derive(Debug)]
+struct Wrap<T> {
+    value: T
+    tag: i64
+}
+
+fn main() {
+    let a = Wrap { value: 7, tag: 1 }
+    let b = Wrap { value: Point { x: 1.5, y: -2.0 }, tag: 2 }
+    println("{} | {:?}", a, b)
+    let xs = #[Wrap { value: 1.25, tag: 3 }, Wrap { value: 2.5, tag: 4 }]
+    println("{} | {:?}", xs, xs)
+    let o: Option<Wrap<String>> = Some(Wrap { value: "s", tag: 5 })
+    println("{:?}", o)
+    let nested = Wrap { value: b, tag: 6 }
+    println("{:?}", nested)
+    let mut m = Map::new()
+    m.insert("k", Wrap { value: #[1, 2], tag: 7 })
+    println("{:?}", m)
+    println("{}", a.to_string())
+}

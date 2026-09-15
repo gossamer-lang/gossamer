@@ -61,6 +61,7 @@ pub fn lower_source_file(
         ids: HirIdGenerator::new(),
         recursion_depth: 0,
         current_fn_ret_ty: None,
+        current_generic_names: Vec::new(),
         import_targets: collect_import_targets(&source.uses),
         ctor_arity: collect_ctor_arities(&source.items),
         struct_fields: collect_struct_fields(&source.items),
@@ -585,6 +586,8 @@ enum NominalInto {
     From(String),
 }
 
+mod simd;
+
 struct Lowerer<'a> {
     resolutions: &'a Resolutions,
     table: &'a TypeTable,
@@ -602,6 +605,10 @@ struct Lowerer<'a> {
     /// `?` propagation works across different error types - the
     /// SPEC §4.5 `E: Into<E2>` semantic.
     current_fn_ret_ty: Option<gossamer_types::Ty>,
+    /// The generic parameter names of the function being lowered, at the
+    /// positions the checker numbers them (an impl's first, a lifetime taking a
+    /// position with an empty name), so a `ParamIdx` names its parameter.
+    current_generic_names: Vec<String>,
     /// Per-`use`-declaration map of bound name → full target path,
     /// keyed by the declaration's `NodeId`. Read by `lower_path_expr`
     /// to expand a single-segment imported name to its qualified
@@ -646,6 +653,38 @@ struct Lowerer<'a> {
 impl Lowerer<'_> {
     fn fresh(&mut self) -> HirId {
         self.ids.next()
+    }
+
+    /// Appends the values a call hands its callee's const generic parameters,
+    /// which the callee receives as trailing parameters.
+    fn append_const_generic_args(&mut self, callee: NodeId, args: &mut Vec<HirExpr>, span: Span) {
+        let Some(consts) = self.table.const_generic_args(callee) else {
+            return;
+        };
+        let lowered: Vec<(HirExprKind, gossamer_types::Ty)> = consts
+            .iter()
+            .map(|arg| match arg {
+                gossamer_types::ConstGenericArg::Value { value, ty } => (
+                    HirExprKind::Literal(HirLiteral::Int(value.to_string())),
+                    *ty,
+                ),
+                gossamer_types::ConstGenericArg::Param { name, ty } => (
+                    HirExprKind::Path {
+                        segments: vec![Ident::new(name)],
+                        def: None,
+                    },
+                    *ty,
+                ),
+            })
+            .collect();
+        for (kind, ty) in lowered {
+            args.push(HirExpr {
+                id: self.fresh(),
+                span,
+                ty,
+                kind,
+            });
+        }
     }
 
     /// The `impl` block a method call resolves to, as the checker recorded it.
@@ -927,7 +966,7 @@ impl Lowerer<'_> {
     }
 
     fn lower_fn(&mut self, decl: &AstFnDecl, span: Span) -> HirFn {
-        self.lower_fn_with_self(decl, span, None)
+        self.lower_fn_with_self(decl, span, None, None)
     }
 
     /// Lowers an impl-method body with the impl's `Self` type
@@ -939,6 +978,7 @@ impl Lowerer<'_> {
         decl: &AstFnDecl,
         span: Span,
         self_ty: Option<gossamer_types::Ty>,
+        impl_generics: Option<&gossamer_ast::Generics>,
     ) -> HirFn {
         let mut params = Vec::new();
         let mut has_self = false;
@@ -1007,6 +1047,18 @@ impl Lowerer<'_> {
                 }
             }
         }
+        params.extend(self.const_generic_params(impl_generics, &decl.generics, span));
+        let generic_names = impl_generics
+            .into_iter()
+            .flat_map(|generics| generics.params.iter())
+            .chain(decl.generics.params.iter())
+            .map(|param| match param {
+                gossamer_ast::GenericParam::Type { name, .. }
+                | gossamer_ast::GenericParam::Const { name, .. } => name.name.clone(),
+                gossamer_ast::GenericParam::Lifetime { .. } => String::new(),
+            })
+            .collect();
+        let saved_generic_names = std::mem::replace(&mut self.current_generic_names, generic_names);
         let ret = decl.ret.as_ref().map(|ty| self.ty_of(ty.id));
         let saved_ret = self
             .current_fn_ret_ty
@@ -1022,6 +1074,7 @@ impl Lowerer<'_> {
             HirBody { block }
         });
         self.current_fn_ret_ty = saved_ret;
+        self.current_generic_names = saved_generic_names;
         HirFn {
             name: decl.name.clone(),
             params,
@@ -1032,6 +1085,42 @@ impl Lowerer<'_> {
             has_self,
             origin: FnOrigin::Declared,
         }
+    }
+
+    /// The trailing parameters a function's const generic parameters arrive
+    /// as. A const generic parameter is a value the body reads, so each is a
+    /// parameter of its own name, in declaration order (the impl's first),
+    /// which is the order a call hands the values over in.
+    fn const_generic_params(
+        &mut self,
+        impl_generics: Option<&gossamer_ast::Generics>,
+        generics: &gossamer_ast::Generics,
+        span: Span,
+    ) -> Vec<HirParam> {
+        let mut params = Vec::new();
+        let const_params = impl_generics
+            .into_iter()
+            .flat_map(|generics| generics.params.iter())
+            .chain(generics.params.iter());
+        for param in const_params {
+            if let gossamer_ast::GenericParam::Const { name, ty, .. } = param {
+                let ty = self.ty_of(ty.id);
+                params.push(HirParam {
+                    pattern: HirPat {
+                        id: self.fresh(),
+                        span,
+                        ty,
+                        kind: HirPatKind::Binding {
+                            name: name.clone(),
+                            mutable: false,
+                        },
+                    },
+                    ty,
+                    is_comptime: false,
+                });
+            }
+        }
+        params
     }
 
     /// Demotes a value-producing tail to a statement when the signature
@@ -1228,9 +1317,12 @@ impl Lowerer<'_> {
             .items
             .iter()
             .filter_map(|item| match item {
-                ImplItem::Fn(fn_decl) => {
-                    Some(self.lower_fn_with_self(fn_decl, span, Some(self_ty)))
-                }
+                ImplItem::Fn(fn_decl) => Some(self.lower_fn_with_self(
+                    fn_decl,
+                    span,
+                    Some(self_ty),
+                    Some(&decl.generics),
+                )),
                 // Associated types are already resolved to concrete types
                 // in the type table, and every associated constant is a
                 // top-level constant by the time lowering runs, so neither
@@ -1329,7 +1421,11 @@ impl Lowerer<'_> {
             }
             AstExprKind::Path(path) => self.lower_path_expr(expr.id, path),
             AstExprKind::Call { callee, args } => {
-                if let Some(lowered) = self.lower_sequence_order_call(callee, args, expr.span) {
+                if let Some(lowered) = self.lower_simd_call(expr, callee, args) {
+                    lowered
+                } else if let Some(lowered) =
+                    self.lower_sequence_order_call(callee, args, expr.span)
+                {
                     lowered
                 } else if let Some(lowered) = self.lower_reverse_call(callee, args, expr.span) {
                     lowered
@@ -1337,9 +1433,11 @@ impl Lowerer<'_> {
                 {
                     lowered
                 } else {
+                    let callee_node = callee.id;
                     let callee = Box::new(self.lower_expr(callee));
                     let mut args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
                     self.resolve_format_pad_request(&callee, &mut args);
+                    self.append_const_generic_args(callee_node, &mut args, expr.span);
                     HirExprKind::Call { callee, args }
                 }
             }
@@ -1349,6 +1447,18 @@ impl Lowerer<'_> {
                 args,
                 ..
             } => {
+                if let Some(shape) = self.simd_shape(receiver.id)
+                    && let Some(kind) = self.lower_simd_method(
+                        receiver,
+                        name.name.as_str(),
+                        args,
+                        shape,
+                        expr.id,
+                        expr.span,
+                    )
+                {
+                    return kind;
+                }
                 if let Some(desugared) = self.desugar_or_insert_value(expr) {
                     return desugared.kind;
                 }
@@ -1455,10 +1565,12 @@ impl Lowerer<'_> {
                     };
                 }
                 let owner = self.method_owner_of(expr.id);
+                let mut args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
+                self.append_const_generic_args(expr.id, &mut args, expr.span);
                 HirExprKind::MethodCall {
                     receiver: Box::new(self.lower_expr(receiver)),
                     name: name.clone(),
-                    args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                    args,
                     owner,
                 }
             }
@@ -1467,6 +1579,16 @@ impl Lowerer<'_> {
                 base: Box::new(self.lower_expr(base)),
                 index: Box::new(self.lower_expr(index)),
             },
+            AstExprKind::Unary {
+                op: UnaryOp::Neg,
+                operand,
+            } if self.simd_shape(operand.id).is_some() => {
+                let shape = self.simd_shape(operand.id);
+                match shape {
+                    Some(shape) => self.lower_simd_neg(operand, shape, expr.span),
+                    None => HirExprKind::Placeholder,
+                }
+            }
             AstExprKind::Unary { op, operand } => HirExprKind::Unary {
                 op: lower_unary_op(*op),
                 operand: Box::new(self.lower_expr(operand)),
@@ -1567,6 +1689,14 @@ impl Lowerer<'_> {
         if matches!(op, AstBinOp::PipeGt) {
             return self.lower_pipe(lhs, rhs);
         }
+        if let Some(shape) = self.simd_shape(lhs.id).or_else(|| self.simd_shape(rhs.id))
+            && let Some(kind) = self.lower_simd_binary(op, lhs, rhs, shape, lhs.span)
+        {
+            return kind;
+        }
+        if let Some(method) = wrapping_binary_method(op) {
+            return wrapping_call(method, self.lower_expr(lhs), self.lower_expr(rhs));
+        }
         HirExprKind::Binary {
             op: lower_binary_op(op),
             lhs: Box::new(self.lower_expr(lhs)),
@@ -1647,6 +1777,7 @@ impl Lowerer<'_> {
             AstExprKind::Call { callee, args } => {
                 let mut new_args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
                 new_args.push(piped);
+                self.append_const_generic_args(callee.id, &mut new_args, rhs.span);
                 HirExprKind::Call {
                     callee: Box::new(self.lower_expr(callee)),
                     args: new_args,
@@ -1660,6 +1791,7 @@ impl Lowerer<'_> {
             } => {
                 let mut new_args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
                 new_args.push(piped);
+                self.append_const_generic_args(rhs.id, &mut new_args, rhs.span);
                 let owner = self.method_owner_of(rhs.id);
                 HirExprKind::MethodCall {
                     receiver: Box::new(self.lower_expr(receiver)),
@@ -1671,10 +1803,14 @@ impl Lowerer<'_> {
             AstExprKind::Closure { params, ret, body } if params.len() == 1 => {
                 self.lower_closure_pipe_step(&params[0], ret.as_ref(), body, rhs, piped)
             }
-            AstExprKind::Path(_) | AstExprKind::Closure { .. } => HirExprKind::Call {
-                callee: Box::new(self.lower_expr(rhs)),
-                args: vec![piped],
-            },
+            AstExprKind::Path(_) | AstExprKind::Closure { .. } => {
+                let mut args = vec![piped];
+                self.append_const_generic_args(rhs.id, &mut args, rhs.span);
+                HirExprKind::Call {
+                    callee: Box::new(self.lower_expr(rhs)),
+                    args,
+                }
+            }
             _ => HirExprKind::Placeholder,
         }
     }
@@ -1791,15 +1927,19 @@ impl Lowerer<'_> {
             let source = if matches!(op, AssignOp::Assign) {
                 source
             } else {
-                HirExpr {
-                    id: self.fresh(),
-                    span: target.span,
-                    ty,
-                    kind: HirExprKind::Binary {
+                let kind = match wrapping_assign_method(op) {
+                    Some(method) => wrapping_call(method, lowered_target.clone(), source),
+                    None => HirExprKind::Binary {
                         op: compound_assign_to_binary(op),
                         lhs: Box::new(lowered_target.clone()),
                         rhs: Box::new(source),
                     },
+                };
+                HirExpr {
+                    id: self.fresh(),
+                    span: target.span,
+                    ty,
+                    kind,
                 }
             };
             let write = HirExpr {
@@ -1910,11 +2050,9 @@ impl Lowerer<'_> {
         let bin_op = compound_assign_to_binary(op);
         let place_ty = lowered_place.ty;
         let value_ty = lowered_value.ty;
-        let bin_expr = HirExpr {
-            id: self.fresh(),
-            span: outer.span,
-            ty: place_ty,
-            kind: HirExprKind::Binary {
+        let combined = match wrapping_assign_method(op) {
+            Some(method) => wrapping_call(method, lowered_place.clone(), lowered_value),
+            None => HirExprKind::Binary {
                 op: bin_op,
                 lhs: Box::new(lowered_place.clone()),
                 rhs: Box::new(HirExpr {
@@ -1922,6 +2060,12 @@ impl Lowerer<'_> {
                     ..lowered_value
                 }),
             },
+        };
+        let bin_expr = HirExpr {
+            id: self.fresh(),
+            span: outer.span,
+            ty: place_ty,
+            kind: combined,
         };
         HirExprKind::Assign {
             place: Box::new(lowered_place),
@@ -2041,24 +2185,13 @@ impl Lowerer<'_> {
         // inline shape that those detectors recognise.
         // Lazy iterator state is a cursor: it must be bound once and advanced,
         // since re-evaluating the expression that built it would hand the loop
-        // a fresh cursor on every turn. A syntactic range keeps its counted
-        // inline loop, and a bare `.iter()` keeps the indexed walk over its
-        // source collection - both shapes the fast paths recognise by syntax.
-        // A String cursor is the shape the loop can advance in place: it
-        // yields one scalar at a time from a source it does not have to hold.
-        // Every other pipeline keeps the walk it had, because an adapter
-        // chain has no advancing shim of its own and would spin on a cursor
-        // that never moves.
-        let string_cursor_tail = matches!(
-            &iter_expr.kind,
-            HirExprKind::MethodCall { name, args, .. }
-                if matches!(name.name.as_str(), "chars" | "bytes") && args.is_empty()
-        );
-        let lazy_state_route = string_cursor_tail
-            && matches!(
-                self.tcx.kind(iter_ty),
-                Some(gossamer_types::TyKind::Iterator(elem)) if self.lazy_elem_is_drivable(*elem)
-            );
+        // a fresh cursor on every turn. An adapter chain is observable - its
+        // callbacks run as elements are pulled, and a `break` ends the pulling
+        // - so the loop drives it one element per turn through `next()`. A
+        // syntactic range keeps its counted inline loop, and a bare `.iter()`
+        // over a collection keeps the indexed walk over its source: neither
+        // has an adapter whose work the walk could reorder.
+        let lazy_state_route = self.iter_expr_is_lazy_chain(&iter_expr);
         let needs_state_binding = lazy_state_route
             || self.iter_needs_state_binding(iter_ty)
             || Self::iter_expr_is_temporary_sequence(&iter_expr);
@@ -2284,22 +2417,29 @@ impl Lowerer<'_> {
     /// take the state path; ranges / arrays / vecs / slices /
     /// `HashMap`s stay inline so the MIR fast-paths can recognise
     /// the receiver expression directly.
-    /// Whether the lazy iterator runtime can hand this element out one at a
-    /// time. Only an element it carries in a single 8-byte slot has an
-    /// advancing shim, so binding the cursor is worth it exactly for those;
-    /// every other element reaches the loop through the buffered walk over
-    /// the expression that produced it.
-    fn lazy_elem_is_drivable(&self, elem: gossamer_types::Ty) -> bool {
+    /// Whether a `for` iterable is an `Iterator` built in place by an adapter
+    /// or a cursor-producing call, whose elements have to be pulled one per
+    /// turn. A name already holds state the loop advances where it is, and a
+    /// bare `.iter()` over a collection has no adapter to observe.
+    fn iter_expr_is_lazy_chain(&self, iter_expr: &HirExpr) -> bool {
         use gossamer_types::TyKind;
-        matches!(
-            self.tcx.kind(elem),
-            Some(
-                TyKind::Int(gossamer_types::IntTy::I64)
-                    | TyKind::Char
-                    | TyKind::String
-                    | TyKind::Float(gossamer_types::FloatTy::F64)
-            )
-        )
+        if !matches!(self.tcx.kind(iter_expr.ty), Some(TyKind::Iterator(_))) {
+            return false;
+        }
+        match &iter_expr.kind {
+            HirExprKind::Path { .. } | HirExprKind::Range { .. } | HirExprKind::Unary { .. } => {
+                false
+            }
+            HirExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                ..
+            } if name.name == "iter" && args.is_empty() => {
+                matches!(self.tcx.kind(receiver.ty), Some(TyKind::Iterator(_)))
+            }
+            _ => true,
+        }
     }
 
     fn iter_needs_state_binding(&self, ty: gossamer_types::Ty) -> bool {
@@ -3079,17 +3219,19 @@ impl Lowerer<'_> {
         }
     }
 
-    /// `true` when a map value is a by-value aggregate. Such a value lives in
-    /// the entry array as inline slots rather than as one word, so the literal
-    /// is built by inserting each pair instead of from the array.
-    fn map_value_is_aggregate(&self, map_ty: Ty) -> bool {
+    /// `true` when a map literal is built by inserting each pair instead of
+    /// from the entry array. A by-value aggregate lives in the entry array as
+    /// inline slots rather than as one word, and a callable value takes the
+    /// env-shaped form of the map's value slot, which only an insert into the
+    /// typed map gives it.
+    fn map_literal_inserts(&self, map_ty: Ty) -> bool {
         use gossamer_types::TyKind;
         let Some(TyKind::HashMap { value, .. }) = self.tcx.kind(map_ty) else {
             return false;
         };
         matches!(
             self.tcx.kind(*value),
-            Some(TyKind::Tuple(_) | TyKind::Adt { .. })
+            Some(TyKind::Tuple(_) | TyKind::Adt { .. } | TyKind::FnPtr(_) | TyKind::FnTrait(_))
         )
     }
 
@@ -3273,7 +3415,7 @@ impl Lowerer<'_> {
     fn lower_map_literal(&mut self, entries: &[AstExpr], span: Span, map_ty: Ty) -> HirExprKind {
         use gossamer_types::{ArrayLen, TyKind};
 
-        if !entries.is_empty() && self.map_value_is_aggregate(map_ty) {
+        if !entries.is_empty() && self.map_literal_inserts(map_ty) {
             return self.lower_map_literal_by_insert(entries, span, map_ty);
         }
         let lowered_entries: Vec<HirExpr> = entries.iter().map(|e| self.lower_expr(e)).collect();
@@ -4332,9 +4474,9 @@ fn lower_unary_op(op: UnaryOp) -> HirUnaryOp {
 /// called, so the mapping never sees it.
 fn lower_binary_op(op: AstBinOp) -> HirBinaryOp {
     match op {
-        AstBinOp::Add | AstBinOp::PipeGt => HirBinaryOp::Add,
-        AstBinOp::Sub => HirBinaryOp::Sub,
-        AstBinOp::Mul => HirBinaryOp::Mul,
+        AstBinOp::Add | AstBinOp::PipeGt | AstBinOp::WrappingAdd => HirBinaryOp::Add,
+        AstBinOp::Sub | AstBinOp::WrappingSub => HirBinaryOp::Sub,
+        AstBinOp::Mul | AstBinOp::WrappingMul => HirBinaryOp::Mul,
         AstBinOp::Div => HirBinaryOp::Div,
         AstBinOp::Rem => HirBinaryOp::Rem,
         AstBinOp::BitAnd => HirBinaryOp::BitAnd,
@@ -4353,11 +4495,47 @@ fn lower_binary_op(op: AstBinOp) -> HirBinaryOp {
     }
 }
 
+/// The integer method a wrapping arithmetic operator spells: `a +% b` is
+/// `a.wrapping_add(b)` on every tier, so the operator reaches the one lowering
+/// that already wraps at the operands' declared width. `lower_binary_op` never
+/// sees these operators.
+fn wrapping_binary_method(op: AstBinOp) -> Option<&'static str> {
+    match op {
+        AstBinOp::WrappingAdd => Some("__gos_wrapping_add"),
+        AstBinOp::WrappingSub => Some("__gos_wrapping_sub"),
+        AstBinOp::WrappingMul => Some("__gos_wrapping_mul"),
+        _ => None,
+    }
+}
+
+/// [`wrapping_binary_method`] for the compound forms `+%=`, `-%=`, `*%=`.
+/// `compound_assign_to_binary` never sees these operators.
+fn wrapping_assign_method(op: AssignOp) -> Option<&'static str> {
+    match op {
+        AssignOp::WrappingAddAssign => Some("__gos_wrapping_add"),
+        AssignOp::WrappingSubAssign => Some("__gos_wrapping_sub"),
+        AssignOp::WrappingMulAssign => Some("__gos_wrapping_mul"),
+        _ => None,
+    }
+}
+
+/// The `receiver.method(arg)` call a wrapping arithmetic operator lowers to.
+fn wrapping_call(method: &str, receiver: HirExpr, arg: HirExpr) -> HirExprKind {
+    HirExprKind::MethodCall {
+        receiver: Box::new(receiver),
+        name: Ident {
+            name: method.to_string(),
+        },
+        args: vec![arg],
+        owner: None,
+    }
+}
+
 fn compound_assign_to_binary(op: AssignOp) -> HirBinaryOp {
     match op {
-        AssignOp::Assign | AssignOp::AddAssign => HirBinaryOp::Add,
-        AssignOp::SubAssign => HirBinaryOp::Sub,
-        AssignOp::MulAssign => HirBinaryOp::Mul,
+        AssignOp::Assign | AssignOp::AddAssign | AssignOp::WrappingAddAssign => HirBinaryOp::Add,
+        AssignOp::SubAssign | AssignOp::WrappingSubAssign => HirBinaryOp::Sub,
+        AssignOp::MulAssign | AssignOp::WrappingMulAssign => HirBinaryOp::Mul,
         AssignOp::DivAssign => HirBinaryOp::Div,
         AssignOp::RemAssign => HirBinaryOp::Rem,
         AssignOp::BitAndAssign => HirBinaryOp::BitAnd,

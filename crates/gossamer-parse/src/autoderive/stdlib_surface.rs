@@ -7,13 +7,14 @@ const REWRITTEN_STDLIB_MODULES: &[&str] = &[
     "csrf", "form", "fs", "http", "path", "pem", "sql", "tar", "time", "x509", "zip",
 ];
 
-/// Stdlib modules this compilation unit reached through `use std::...`, under
-/// the name each is spelled by. `use` decls inside `mod` bodies are hoisted to
+/// Stdlib modules this compilation unit reached through `use std::...`, keyed by
+/// the name each is spelled by - its own, or the alias an import gave it - and
+/// answering the module that name reaches. `use` decls inside `mod` bodies are hoisted to
 /// the source file, so a bundle answers for every one of its files.
-fn stdlib_modules_in_scope(sf: &SourceFile) -> std::collections::HashSet<String> {
+fn stdlib_modules_in_scope(sf: &SourceFile) -> std::collections::HashMap<String, String> {
     use gossamer_ast::UseTarget;
 
-    let mut out: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for decl in &sf.uses {
         let UseTarget::Module(path) = &decl.target else {
             continue;
@@ -22,10 +23,23 @@ fn stdlib_modules_in_scope(sf: &SourceFile) -> std::collections::HashSet<String>
             continue;
         }
         if let Some(entries) = &decl.list {
-            out.extend(entries.iter().map(|entry| entry.name.name.clone()));
-        }
-        if let Some(last) = path.segments.last() {
-            out.insert(last.name.clone());
+            for entry in entries {
+                let bound = entry
+                    .alias
+                    .as_ref()
+                    .map_or_else(|| entry.name.name.clone(), |alias| alias.name.clone());
+                out.insert(bound, entry.name.name.clone());
+            }
+            // A list's own path is a module the entries were reached through.
+            if let Some(last) = path.segments.last() {
+                out.insert(last.name.clone(), last.name.clone());
+            }
+        } else if let Some(last) = path.segments.last() {
+            let bound = decl
+                .alias
+                .as_ref()
+                .map_or_else(|| last.name.clone(), |alias| alias.name.clone());
+            out.insert(bound, last.name.clone());
         }
     }
     out
@@ -34,13 +48,16 @@ fn stdlib_modules_in_scope(sf: &SourceFile) -> std::collections::HashSet<String>
 /// The rewrite-table module key `head` names, or `None` where `head` spells a
 /// stdlib module this unit never imported. A path rooted at `std` names the
 /// stdlib outright, whatever is in scope.
-fn stdlib_module_key<'a>(
-    scope: &std::collections::HashSet<String>,
-    head: &'a str,
+fn stdlib_module_key(
+    scope: &std::collections::HashMap<String, String>,
+    head: &str,
     rooted_std: bool,
-) -> Option<&'a str> {
-    if rooted_std || scope.contains(head) || !REWRITTEN_STDLIB_MODULES.contains(&head) {
-        return Some(head);
+) -> Option<String> {
+    if let Some(module) = scope.get(head) {
+        return Some(module.clone());
+    }
+    if rooted_std || !REWRITTEN_STDLIB_MODULES.contains(&head) {
+        return Some(head.to_string());
     }
     None
 }
@@ -126,20 +143,25 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
 
     fn collapse_expr(
         path: &mut gossamer_ast::PathExpr,
-        scope: &std::collections::HashSet<String>,
+        scope: &std::collections::HashMap<String, String>,
     ) {
         let n = path.segments.len();
         if n < 2 {
             return;
         }
-        // A path rooted at `std`, or at a module this unit imported from it,
-        // names the stdlib the whole way down: `archive::tar::read` is the
-        // stdlib's `read` wherever `archive` came from `std`.
+        // A path rooted at a module this unit imported from `std` names the
+        // stdlib the whole way down: `archive::tar::read` is the stdlib's
+        // `read` wherever `archive` came from `std`. A `std::` spelling counts
+        // only for a module the unit imported, so an unimported one is
+        // reported as written.
         let root = path.segments[0].name.name.as_str();
-        let rooted = root == "std" || scope.contains(root);
-        let key = |i: usize| {
-            stdlib_module_key(scope, path.segments[i].name.name.as_str(), rooted).map(str::to_owned)
-        };
+        let rooted = scope.contains_key(root)
+            || (root == "std"
+                && path
+                    .segments
+                    .get(1)
+                    .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
+        let key = |i: usize| stdlib_module_key(scope, path.segments[i].name.name.as_str(), rooted);
         let head3 = if n >= 3 { key(n - 3) } else { None };
         let head2 = key(n - 2);
         let head3 = head3.as_deref();
@@ -220,16 +242,20 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
 
     fn collapse_type(
         path: &mut gossamer_ast::ty::TypePath,
-        scope: &std::collections::HashSet<String>,
+        scope: &std::collections::HashMap<String, String>,
     ) {
         let n = path.segments.len();
         if n < 2 {
             return;
         }
         let root = path.segments[0].name.name.as_str();
-        let rooted = root == "std" || scope.contains(root);
-        let parent =
-            stdlib_module_key(scope, path.segments[n - 2].name.name.as_str(), rooted).map(str::to_owned);
+        let rooted = scope.contains_key(root)
+            || (root == "std"
+                && path
+                    .segments
+                    .get(1)
+                    .is_some_and(|module| scope.contains_key(module.name.name.as_str())));
+        let parent = stdlib_module_key(scope, path.segments[n - 2].name.name.as_str(), rooted);
         let parent = parent.as_deref();
         // `sql::Error` is the standard error type at the language
         // level - redirect to `errors::Error`.
@@ -284,7 +310,7 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
     }
 
     struct Rewriter {
-        scope: std::collections::HashSet<String>,
+        scope: std::collections::HashMap<String, String>,
     }
     impl VisitorMut for Rewriter {
         fn visit_expr(&mut self, expr: &mut Expr) {
@@ -1056,18 +1082,6 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
                 UseTarget::Module(ModulePath::from_names(segs.iter().copied())),
             ));
         }
-    }
-    // The `regex!` validation macro's synthesized `comptime fn` backer
-    // calls `regex::compile`, so the regex module must be in scope.
-    let has_regex_validator = sf.items.iter().any(
-        |item| matches!(&item.kind, ItemKind::Fn(decl) if decl.name.name == "__gos_regex_validate"),
-    );
-    if has_regex_validator && !already_imports(&sf.uses, &["std", "regex"]) {
-        sf.uses.push(UseDecl::simple(
-            NodeId::DUMMY,
-            dummy_span,
-            UseTarget::Module(ModulePath::from_names(["std", "regex"])),
-        ));
     }
     // The `__gos_http_*` request/response-security wrappers compose http,
     // crypto, encoding, bytes, strings, and net::url primitives by their

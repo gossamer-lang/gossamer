@@ -39,7 +39,7 @@ fn rc_arg_names_holder(args: &[Operand], holder: Local) -> bool {
 
 /// `true` when `place` reads or writes through `local` (root or an
 /// `Index` projection local).
-fn place_mentions_local(place: &Place, local: Local) -> bool {
+pub(crate) fn place_mentions_local(place: &Place, local: Local) -> bool {
     place.local == local
         || place
             .projection
@@ -51,7 +51,7 @@ fn operand_mentions_local(op: &Operand, local: Local) -> bool {
     matches!(op, Operand::Copy(p) if place_mentions_local(p, local))
 }
 
-fn rvalue_mentions_local(rv: &Rvalue, local: Local) -> bool {
+pub(crate) fn rvalue_mentions_local(rv: &Rvalue, local: Local) -> bool {
     match rv {
         Rvalue::Use(op)
         | Rvalue::UnaryOp { operand: op, .. }
@@ -69,8 +69,117 @@ fn rvalue_mentions_local(rv: &Rvalue, local: Local) -> bool {
     }
 }
 
+/// Every local `stmt` reads or writes, once each: the locals
+/// [`stmt_mentions_local`] answers true for.
+fn stmt_mentioned_locals(stmt: &Statement) -> Vec<Local> {
+    let mut out = Vec::new();
+    let mut place = |p: &Place, out: &mut Vec<Local>| {
+        out.push(p.local);
+        for projection in &p.projection {
+            if let Projection::Index(index) = projection {
+                out.push(*index);
+            }
+        }
+    };
+    let operand = |op: &Operand, out: &mut Vec<Local>, place: &mut dyn FnMut(&Place, &mut Vec<Local>)| {
+        if let Operand::Copy(p) = op {
+            place(p, out);
+        }
+    };
+    match &stmt.kind {
+        StatementKind::Assign { place: target, rvalue } => {
+            place(target, &mut out);
+            match rvalue {
+                Rvalue::Use(op)
+                | Rvalue::UnaryOp { operand: op, .. }
+                | Rvalue::Cast { operand: op, .. }
+                | Rvalue::Repeat { value: op, .. } => operand(op, &mut out, &mut place),
+                Rvalue::BinaryOp { lhs, rhs, .. } => {
+                    operand(lhs, &mut out, &mut place);
+                    operand(rhs, &mut out, &mut place);
+                }
+                Rvalue::Aggregate { operands: ops, .. }
+                | Rvalue::CallIntrinsic { args: ops, .. } => {
+                    for op in ops {
+                        operand(op, &mut out, &mut place);
+                    }
+                }
+                Rvalue::Len(p) | Rvalue::Ref { place: p, .. } => place(p, &mut out),
+                Rvalue::StaticLoad(_) => {}
+            }
+        }
+        StatementKind::SetDiscriminant { place: target, .. } => place(target, &mut out),
+        StatementKind::StaticStore { value, .. } => operand(value, &mut out, &mut place),
+        StatementKind::IterSource { dst, source, .. } => {
+            place(dst, &mut out);
+            operand(source, &mut out, &mut place);
+        }
+        StatementKind::IterAdapter {
+            dst,
+            upstream,
+            closure_or_arg,
+            ..
+        } => {
+            place(dst, &mut out);
+            place(upstream, &mut out);
+            if let Some(arg) = closure_or_arg {
+                operand(arg, &mut out, &mut place);
+            }
+        }
+        StatementKind::IterNext {
+            dst_option,
+            iter_place,
+            ..
+        } => {
+            place(dst_option, &mut out);
+            place(iter_place, &mut out);
+        }
+        StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => out.push(*l),
+        StatementKind::Nop => {}
+    }
+    out.sort_unstable_by_key(|l| l.0);
+    out.dedup();
+    out
+}
+
+/// Every local `t` reads or writes, once each: the locals
+/// [`term_mentions_local`] answers true for.
+fn term_mentioned_locals(t: &Terminator) -> Vec<Local> {
+    let mut out = Vec::new();
+    let push_operand = |op: &Operand, out: &mut Vec<Local>| {
+        if let Operand::Copy(p) = op {
+            out.push(p.local);
+            for projection in &p.projection {
+                if let Projection::Index(index) = projection {
+                    out.push(*index);
+                }
+            }
+        }
+    };
+    match t {
+        Terminator::SwitchInt { discriminant, .. } => push_operand(discriminant, &mut out),
+        Terminator::Call {
+            callee,
+            args,
+            destination,
+            ..
+        } => {
+            push_operand(callee, &mut out);
+            for arg in args {
+                push_operand(arg, &mut out);
+            }
+            push_operand(&Operand::Copy(destination.clone()), &mut out);
+        }
+        Terminator::Assert { cond, .. } => push_operand(cond, &mut out),
+        _ => {}
+    }
+    out.sort_unstable_by_key(|l| l.0);
+    out.dedup();
+    out
+}
+
 /// `true` when `stmt` reads or writes `local` in any position.
-fn stmt_mentions_local(stmt: &Statement, local: Local) -> bool {
+pub(crate) fn stmt_mentions_local(stmt: &Statement, local: Local) -> bool {
     match &stmt.kind {
         StatementKind::Assign { place, rvalue } => {
             place_mentions_local(place, local) || rvalue_mentions_local(rvalue, local)
@@ -109,7 +218,7 @@ fn stmt_writes_bare(stmt: &Statement, local: Local) -> bool {
         if place.projection.is_empty() && place.local == local)
 }
 
-fn term_mentions_local(t: &Terminator, local: Local) -> bool {
+pub(crate) fn term_mentions_local(t: &Terminator, local: Local) -> bool {
     let m = |op: &Operand| operand_mentions_local(op, local);
     match t {
         Terminator::SwitchInt { discriminant, .. } => m(discriminant),
@@ -435,6 +544,8 @@ fn helper_reads_only(name: &str, index: usize) -> bool {
                 | "gos_rt_result_payload"
                 | "gos_rt_option_unwrap"
                 | "gos_rt_result_unwrap"
+                | "gos_rt_option_unwrap_carrier"
+                | "gos_rt_result_unwrap_carrier"
         ),
         1 => matches!(
             name,
@@ -604,7 +715,11 @@ enum AliasDef {
 fn extracts_carrier_payload(name: &str) -> bool {
     matches!(
         name,
-        "gos_rt_result_payload" | "gos_rt_option_unwrap" | "gos_rt_result_unwrap"
+        "gos_rt_result_payload"
+            | "gos_rt_option_unwrap"
+            | "gos_rt_result_unwrap"
+            | "gos_rt_option_unwrap_carrier"
+            | "gos_rt_result_unwrap_carrier"
     )
 }
 
@@ -1471,8 +1586,8 @@ pub(crate) fn reduce_materialised_counts(body: &mut Body) {
     for (bi, block) in body.blocks.iter().enumerate() {
         for (si, stmt) in block.stmts.iter().enumerate() {
             let StatementKind::Assign { place, rvalue } = &stmt.kind else {
-                for (local, flag) in disqualified.iter_mut().enumerate() {
-                    if stmt_mentions_local(stmt, Local(local as u32)) {
+                for local in stmt_mentioned_locals(stmt) {
+                    if let Some(flag) = disqualified.get_mut(local.0 as usize) {
                         *flag = true;
                     }
                 }
@@ -1501,16 +1616,16 @@ pub(crate) fn reduce_materialised_counts(body: &mut Body) {
                     continue;
                 }
             }
-            for (local, count) in mentions.iter_mut().enumerate() {
-                if local != place.local.0 as usize
-                    && stmt_mentions_local(stmt, Local(local as u32))
+            for local in stmt_mentioned_locals(stmt) {
+                if local != place.local
+                    && let Some(count) = mentions.get_mut(local.0 as usize)
                 {
                     *count += 1;
                 }
             }
         }
-        for (local, flag) in disqualified.iter_mut().enumerate() {
-            if term_mentions_local(&block.terminator, Local(local as u32)) {
+        for local in term_mentioned_locals(&block.terminator) {
+            if let Some(flag) = disqualified.get_mut(local.0 as usize) {
                 *flag = true;
             }
         }
@@ -1590,6 +1705,15 @@ fn move_payload_shares_into_carriers(body: &mut Body, tcx: &TyCtxt) {
                 continue;
             }
             let ty = body.locals[source.0 as usize].ty;
+            // A box owning its payload's children under the structural meta
+            // takes a share of every field, which the source's guarded walk
+            // alone does not give up.
+            if tcx
+                .rc_meta(&format!("gos_rc_meta_boxaggr_{}", ty.as_u32()))
+                .is_some()
+            {
+                continue;
+            }
             let Some(rc) = holder_rc_names(tcx, ty) else {
                 continue;
             };
@@ -1778,37 +1902,79 @@ fn elide_shares_moved_into_aggregates(body: &mut Body, tcx: &TyCtxt) {
     }
 }
 
-/// `true` when `stmt` gives `local` words of its own: a write to it, bare or
-/// projected, or a reference through which one could be written.
-fn stmt_refills(stmt: &Statement, local: Local) -> bool {
-    match &stmt.kind {
-        StatementKind::Assign { place, rvalue } => {
-            if place.local == local {
-                return true;
-            }
-            matches!(rvalue, Rvalue::Ref { place: p, .. } if p.local == local)
+
+/// Which accounting a zeroed-word analysis follows.
+#[derive(Clone, Copy)]
+enum ZeroedWords {
+    /// A guarded aggregate, zeroed by `gos_rt_aggr_zero_guarded` and walked by
+    /// the `gos_rt_aggr_*_children` calls.
+    Guarded,
+    /// An `Option` / `Result` holder, zeroed by the whole-local zero store the
+    /// lowering puts at entry (both carrier words) and read by the
+    /// `gos_rt_option_slot_*` calls, which act only on a copy-blob payload.
+    OptionSlot,
+}
+
+impl ZeroedWords {
+    /// The local `stmt` zeroes under this analysis.
+    fn zero_of(self, stmt: &Statement) -> Option<Local> {
+        match self {
+            Self::Guarded => match guarded_walk_call(stmt) {
+                Some(("gos_rt_aggr_zero_guarded", local, _)) => Some(local),
+                _ => None,
+            },
+            Self::OptionSlot => match &stmt.kind {
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                } if place.projection.is_empty() => Some(place.local),
+                _ => None,
+            },
         }
-        StatementKind::SetDiscriminant { place, .. } => place.local == local,
-        StatementKind::IterSource { dst, .. } => dst.local == local,
-        StatementKind::IterAdapter { dst, .. } => dst.local == local,
-        StatementKind::IterNext { dst_option, .. } => dst_option.local == local,
-        _ => false,
+    }
+
+    /// The accounting call `stmt` makes on a local's words, as `(name, local)`.
+    /// Such a call reads the words and leaves them as it found them.
+    fn accounting_of(self, stmt: &Statement) -> Option<(&str, Local)> {
+        match self {
+            Self::Guarded => guarded_walk_call(stmt).map(|(name, local, _)| (name, local)),
+            Self::OptionSlot => {
+                let StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                    ..
+                } = &stmt.kind
+                else {
+                    return None;
+                };
+                if !matches!(*name, "gos_rt_option_slot_release" | "gos_rt_option_slot_retain") {
+                    return None;
+                }
+                Some((name, rc_bare_local_arg(args)?))
+            }
+        }
+    }
+
+    /// Whether `name` does nothing when the words it reads are zero.
+    fn is_inert_on_zero(self, name: &str) -> bool {
+        match self {
+            Self::Guarded => name == "gos_rt_aggr_release_children",
+            Self::OptionSlot => {
+                matches!(name, "gos_rt_option_slot_release" | "gos_rt_option_slot_retain")
+            }
+        }
     }
 }
 
-fn term_refills(t: &Terminator, local: Local) -> bool {
-    matches!(t, Terminator::Call { destination, .. } if destination.local == local)
-}
-
-/// Removes the guarded walks that read words already known to be zero, and
-/// the zeros whose words nothing reads.
+/// Removes the accounting calls that read words already known to be zero, and
+/// the guarded zeros whose words nothing reads.
 ///
 /// The lowering brackets each guarded local with a zero at entry so the
 /// release standing before its first assignment walks nothing, and with a zero
-/// after a move so every later release walks nothing either. Where the
-/// analysis can see that a release stands on zeroed words the call does
-/// nothing, and where every reader of a zero has gone the zero itself writes
-/// words no one reads.
+/// after a move so every later release walks nothing either. An option holder
+/// gets the same entry zero, and the release before its first assignment reads
+/// the zero payload word the same way. Where the analysis can see that a call
+/// stands on zeroed words the call does nothing, and where every reader of a
+/// guarded zero has gone the zero itself writes words no one reads.
 pub(crate) fn elide_settled_guarded_walks(body: &mut Body) {
     let n_blocks = body.blocks.len();
     let n_locals = body.locals.len();
@@ -1821,53 +1987,24 @@ pub(crate) fn elide_settled_guarded_walks(body: &mut Body) {
         .map(|b| successor_indices(&b.terminator))
         .collect();
 
-    // Must-analysis: a local is zeroed at a point when every path there ends
-    // in a zero with nothing writing the local since. Every block but the
-    // entry starts optimistic and loses bits until the fixpoint; the entry
-    // starts from stack words, which are not zero.
-    let mut entry_state: Vec<Vec<bool>> = vec![vec![true; n_locals]; n_blocks];
-    entry_state[0] = vec![false; n_locals];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for b in 0..n_blocks {
-            let mut out = entry_state[b].clone();
-            zeroed_state_through(&body.blocks[b], &mut out);
-            for &s in &succs[b] {
-                if s == 0 {
-                    continue;
+    for kind in [ZeroedWords::Guarded, ZeroedWords::OptionSlot] {
+        let entry_state = zeroed_entry_states(body, &succs, kind);
+        let mut dead: Vec<(usize, usize)> = Vec::new();
+        for (b, block) in body.blocks.iter().enumerate() {
+            let mut state = entry_state[b].clone();
+            for (si, stmt) in block.stmts.iter().enumerate() {
+                if let Some((name, local)) = kind.accounting_of(stmt)
+                    && kind.is_inert_on_zero(name)
+                    && state[local.0 as usize]
+                {
+                    dead.push((b, si));
                 }
-                let mut next = entry_state[s].clone();
-                let mut lost = false;
-                for (slot, held) in next.iter_mut().zip(out.iter()) {
-                    if *slot && !*held {
-                        *slot = false;
-                        lost = true;
-                    }
-                }
-                if lost {
-                    entry_state[s] = next;
-                    changed = true;
-                }
+                zeroed_state_after(stmt, &mut state, kind);
             }
         }
-    }
-
-    // A release standing on zeroed words does nothing.
-    let mut dead: Vec<(usize, usize)> = Vec::new();
-    for (b, block) in body.blocks.iter().enumerate() {
-        let mut state = entry_state[b].clone();
-        for (si, stmt) in block.stmts.iter().enumerate() {
-            if let Some(("gos_rt_aggr_release_children", local, _)) = guarded_walk_call(stmt)
-                && state[local.0 as usize]
-            {
-                dead.push((b, si));
-            }
-            zeroed_state_after(stmt, &mut state);
+        for &(b, si) in &dead {
+            body.blocks[b].stmts[si].kind = StatementKind::Nop;
         }
-    }
-    for &(b, si) in &dead {
-        body.blocks[b].stmts[si].kind = StatementKind::Nop;
     }
 
     // A zero whose words nothing reads before the local is written again.
@@ -1889,33 +2026,82 @@ pub(crate) fn elide_settled_guarded_walks(body: &mut Body) {
     }
 }
 
-/// Advances the zeroed-word state across one statement.
-fn zeroed_state_after(stmt: &Statement, state: &mut [bool]) {
-    match guarded_walk_call(stmt) {
-        Some(("gos_rt_aggr_zero_guarded", local, _)) => {
-            state[local.0 as usize] = true;
-            return;
+/// Must-analysis: a local is zeroed at a block's entry when every path there
+/// ends in a zero with nothing writing the local since. Every block but the
+/// entry starts optimistic and loses bits until the fixpoint; the entry starts
+/// from stack words, which are not zero.
+fn zeroed_entry_states(body: &Body, succs: &[Vec<usize>], kind: ZeroedWords) -> Vec<Vec<bool>> {
+    let n_blocks = body.blocks.len();
+    let n_locals = body.locals.len();
+    let mut entry_state: Vec<Vec<bool>> = vec![vec![true; n_locals]; n_blocks];
+    entry_state[0] = vec![false; n_locals];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for b in 0..n_blocks {
+            let mut out = entry_state[b].clone();
+            zeroed_state_through(&body.blocks[b], &mut out, kind);
+            for &s in &succs[b] {
+                if s == 0 {
+                    continue;
+                }
+                let mut lost = false;
+                for (slot, held) in entry_state[s].iter_mut().zip(out.iter()) {
+                    if *slot && !*held {
+                        *slot = false;
+                        lost = true;
+                    }
+                }
+                changed |= lost;
+            }
         }
-        // A walk over the words leaves them as it found them.
-        Some(_) => return,
-        None => {}
     }
-    for (i, zeroed) in state.iter_mut().enumerate() {
-        if *zeroed && stmt_refills(stmt, Local(i as u32)) {
-            *zeroed = false;
-        }
+    entry_state
+}
+
+/// Advances the zeroed-word state across one statement.
+fn zeroed_state_after(stmt: &Statement, state: &mut [bool], kind: ZeroedWords) {
+    if let Some(local) = kind.zero_of(stmt) {
+        state[local.0 as usize] = true;
+        return;
+    }
+    // An accounting call reads the words and leaves them as it found them.
+    if kind.accounting_of(stmt).is_some() {
+        return;
+    }
+    for local in refilled_locals(stmt) {
+        state[local.0 as usize] = false;
     }
 }
 
-/// Advances the zeroed-word state across a whole block.
-fn zeroed_state_through(block: &BasicBlock, state: &mut [bool]) {
-    for stmt in &block.stmts {
-        zeroed_state_after(stmt, state);
-    }
-    for (i, zeroed) in state.iter_mut().enumerate() {
-        if *zeroed && term_refills(&block.terminator, Local(i as u32)) {
-            *zeroed = false;
+/// The locals `stmt` writes whole or through a projection, or lends out, which
+/// leaves their words no longer known to be zero.
+fn refilled_locals(stmt: &Statement) -> impl Iterator<Item = Local> {
+    let (first, second) = match &stmt.kind {
+        StatementKind::Assign { place, rvalue } => (
+            Some(place.local),
+            match rvalue {
+                Rvalue::Ref { place: p, .. } => Some(p.local),
+                _ => None,
+            },
+        ),
+        StatementKind::SetDiscriminant { place, .. } => (Some(place.local), None),
+        StatementKind::IterSource { dst, .. } | StatementKind::IterAdapter { dst, .. } => {
+            (Some(dst.local), None)
         }
+        StatementKind::IterNext { dst_option, .. } => (Some(dst_option.local), None),
+        _ => (None, None),
+    };
+    first.into_iter().chain(second)
+}
+
+/// Advances the zeroed-word state across a whole block.
+fn zeroed_state_through(block: &BasicBlock, state: &mut [bool], kind: ZeroedWords) {
+    for stmt in &block.stmts {
+        zeroed_state_after(stmt, state, kind);
+    }
+    if let Terminator::Call { destination, .. } = &block.terminator {
+        state[destination.local.0 as usize] = false;
     }
 }
 

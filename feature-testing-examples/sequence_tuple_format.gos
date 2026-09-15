@@ -1,0 +1,44 @@
+// A sequence of tuples, and a slice parameter of any element, renders the
+// values it holds from a function the JIT compiled, as on every other tier.
+
+fn tuples(xs: [(i64, bool)]) -> String {
+    format("{:?}", xs)
+}
+
+fn words(xs: [i64]) -> String {
+    format("{:?}", xs)
+}
+
+fn names(xs: [String]) -> String {
+    format("{:?}", xs)
+}
+
+fn render(i: i64) -> String {
+    let rows: Vec<(u8, i16, f64)> = #[(i as u8, (i * -3) as i16, i as f64 / 4.0), (255, -32_768, 0.5)]
+    let named = #[("a", 'x', i), ("b", 'y', i + 1)]
+    let nested: Vec<((i64, u32), String)> = #[((i, 4_000_000_000), "deep")]
+    let empty: Vec<(i64, i64)> = #[]
+    let pair = (i, format("p{i}"))
+    format(
+        "{:?} {:?} {:?} {:?} {:?} {} {} {}"
+        rows
+        named
+        nested
+        empty
+        pair
+        tuples(#[(i, i % 2 == 0), (-i, true)])
+        words(#[i, i + 1])
+        names(#["x", format("n{i}")])
+    )
+}
+
+fn main() {
+    let mut last = ""
+    let mut total = 0
+    for i in 0..80 {
+        last = render(i)
+        total += last.len()
+    }
+    println("{}", last)
+    println("total {}", total)
+}

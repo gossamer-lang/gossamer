@@ -13,6 +13,26 @@ use crate::ty::Ty;
 pub struct TypeTable {
     entries: HashMap<NodeId, Ty>,
     method_owners: HashMap<NodeId, String>,
+    const_generic_args: HashMap<NodeId, Vec<ConstGenericArg>>,
+}
+
+/// The value a call hands one const generic parameter of its callee.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ConstGenericArg {
+    /// A value known where the call is written.
+    Value {
+        /// The value.
+        value: i128,
+        /// The parameter's declared type.
+        ty: Ty,
+    },
+    /// The caller's own const generic parameter, forwarded by name.
+    Param {
+        /// The caller's parameter name.
+        name: String,
+        /// The parameter's declared type.
+        ty: Ty,
+    },
 }
 
 impl TypeTable {
@@ -49,6 +69,19 @@ impl TypeTable {
     #[must_use]
     pub fn method_owner(&self, node: NodeId) -> Option<&str> {
         self.method_owners.get(&node).map(String::as_str)
+    }
+
+    /// Records the const generic arguments a call hands its callee, in the
+    /// order the callee declares its const parameters.
+    pub fn insert_const_generic_args(&mut self, callee: NodeId, args: Vec<ConstGenericArg>) {
+        self.const_generic_args.insert(callee, args);
+    }
+
+    /// The const generic arguments recorded for the call whose callee is
+    /// `callee`, if it has any.
+    #[must_use]
+    pub fn const_generic_args(&self, callee: NodeId) -> Option<&[ConstGenericArg]> {
+        self.const_generic_args.get(&callee).map(Vec::as_slice)
     }
 
     /// Returns every `(NodeId, Ty)` pair in ascending node order.

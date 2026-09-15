@@ -894,6 +894,10 @@ impl MapKey {
         match v {
             Value::Bool(b) => Self::Bool(*b),
             Value::Int(n) => Self::Int(*n),
+            // A `u64` keys by its bits, the way the compiled tiers hash the
+            // slot word, so the same key finds the same entry whichever
+            // representation carried it in.
+            Value::Uint(n) => Self::Int(*n as i64),
             Value::Char(c) => Self::Char(*c),
             // Key floats by their bit pattern - matches the compiled tier,
             // which hashes the raw 8 bytes.
@@ -956,6 +960,46 @@ impl MapKey {
             // native) and hashes identically to a boxed one of the same value.
             Value::NativeEnum(owner) => Self::from_value(&native_enum_to_variant(owner)),
             _ => Self::NonHashable,
+        }
+    }
+
+    /// The key a rendered copy stores for `value`: [`Self::from_value`],
+    /// except that an unsigned integer anywhere inside stays
+    /// [`Self::Uint`], so it reads back as the decimal its type spells.
+    /// Only a renderer's private copy holds one.
+    #[must_use]
+    pub(crate) fn rendered(value: &Value) -> Self {
+        match value {
+            Value::Uint(n) => Self::Uint(*n),
+            Value::Tuple(vals) => Self::Agg(Box::new(AggKey {
+                rank: 0,
+                name: intern_type_tag(""),
+                fields: vals.iter().map(Self::rendered).collect(),
+                shape: AggShape::Tuple,
+            })),
+            Value::Array(vals) => Self::Agg(Box::new(AggKey {
+                rank: 0,
+                name: intern_type_tag("[]"),
+                fields: vals.iter().map(Self::rendered).collect(),
+                shape: AggShape::Array,
+            })),
+            Value::Struct(inner) => Self::Agg(Box::new(AggKey {
+                rank: 0,
+                name: inner.name.clone(),
+                fields: inner
+                    .fields
+                    .iter()
+                    .map(|(_, field)| Self::rendered(field))
+                    .collect(),
+                shape: AggShape::Struct(inner.fields.field_names()),
+            })),
+            Value::Variant(inner) => Self::Agg(Box::new(AggKey {
+                rank: crate::builtins::variant_rank_of(inner.name.as_str()).unwrap_or(0),
+                name: inner.name.clone(),
+                fields: inner.fields.iter().map(Self::rendered).collect(),
+                shape: AggShape::Variant,
+            })),
+            other => Self::from_value(other),
         }
     }
 
@@ -1884,6 +1928,28 @@ pub(crate) fn intern_type_name(name: &str) -> &'static str {
         return s;
     }
     let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    guard.insert(leaked);
+    leaked
+}
+
+/// A chunk's inline-site table under one process-wide identity, shared the way
+/// its frame names are, so a call-stack frame can hold it by reference. Equal
+/// tables from recompiling the same function share one entry.
+pub(crate) fn intern_inline_sites(
+    sites: &[crate::bytecode::InlineSite],
+) -> &'static [crate::bytecode::InlineSite] {
+    type Table = rustc_hash::FxHashSet<&'static [crate::bytecode::InlineSite]>;
+    static INTERNED: OnceLock<parking_lot::Mutex<Table>> = OnceLock::new();
+    if sites.is_empty() {
+        return &[];
+    }
+    let set = INTERNED.get_or_init(|| parking_lot::Mutex::new(Table::default()));
+    let mut guard = set.lock();
+    if let Some(&interned) = guard.get(sites) {
+        return interned;
+    }
+    let leaked: &'static [crate::bytecode::InlineSite] =
+        Box::leak(sites.to_vec().into_boxed_slice());
     guard.insert(leaked);
     leaked
 }
@@ -3291,7 +3357,9 @@ pub(crate) mod uint_desc {
     pub(crate) const OPTION: u8 = b'o';
     /// A `Result`; the `Ok` descriptor follows, then the `Err` one.
     pub(crate) const RESULT: u8 = b'r';
-    /// A set whose elements are unsigned.
+    /// A `Set` / `BTreeSet` handle; the element's own descriptor follows.
+    /// The elements live in a runtime registry, so the descriptor rides
+    /// on the handle the renderer copies.
     pub(crate) const SET: u8 = b's';
     /// A `Deque` / `Queue` / `Stack` / heap handle; the element's own
     /// descriptor follows. The elements live in a runtime registry, so
@@ -3303,10 +3371,6 @@ pub(crate) mod uint_desc {
     /// for its type, which describes each field where it formats it.
     pub(crate) const ADT: u8 = b'A';
 }
-
-/// Field a rendered set handle carries to say its elements read as unsigned.
-/// Only [`uint_leaves`] adds it, and only to the copy the renderer sees.
-pub(crate) const SET_UINT_MARKER: &str = "__uint";
 
 /// Name of the one-field wrapper [`uint_leaves`] puts a `Vec` in so the
 /// renderer knows to spell it `#[..]`. A `Vec` and a fixed array share
@@ -3335,7 +3399,11 @@ fn skip_uint_desc(desc: &[u8], cursor: &mut usize) {
     let tag = desc.get(*cursor).copied().unwrap_or(uint_desc::NONE);
     *cursor += 1;
     match tag {
-        uint_desc::SEQ | uint_desc::VEC | uint_desc::OPTION | uint_desc::CONTAINER => {
+        uint_desc::SEQ
+        | uint_desc::VEC
+        | uint_desc::OPTION
+        | uint_desc::CONTAINER
+        | uint_desc::SET => {
             skip_uint_desc(desc, cursor);
         }
         uint_desc::MAP | uint_desc::RESULT => {
@@ -3363,6 +3431,14 @@ fn convert_uint(value: &Value, desc: &[u8], cursor: &mut usize) -> Value {
         },
         uint_desc::SEQ => convert_uint_sequence(value, desc, cursor),
         uint_desc::VEC => {
+            // A value already carrying the `Vec` spelling reaches a second
+            // format site inside the rendering that describes it again.
+            if let Value::Struct(inner) = value
+                && vec_render_items(inner).is_some()
+            {
+                skip_uint_desc(desc, cursor);
+                return value.clone();
+            }
             let converted = convert_uint_sequence(value, desc, cursor);
             Value::struct_(VEC_RENDER_NAME, vec![("items", converted)])
         }
@@ -3405,7 +3481,7 @@ fn convert_uint(value: &Value, desc: &[u8], cursor: &mut usize) -> Value {
         }
         uint_desc::OPTION | uint_desc::RESULT => convert_uint_variant(value, desc, cursor, tag),
         uint_desc::MAP => convert_uint_map(value, desc, cursor),
-        uint_desc::CONTAINER => {
+        uint_desc::CONTAINER | uint_desc::SET => {
             let elem_at = *cursor;
             skip_uint_desc(desc, cursor);
             match value {
@@ -3421,14 +3497,6 @@ fn convert_uint(value: &Value, desc: &[u8], cursor: &mut usize) -> Value {
                 other => other.clone(),
             }
         }
-        uint_desc::SET => match value {
-            Value::Struct(inner) if is_set_struct_name(inner.name.as_str()) => {
-                let mut fields = inner.fields.to_vec();
-                fields.push((SET_UINT_MARKER, Value::Int(1)));
-                Value::struct_(inner.name.as_str(), fields)
-            }
-            other => other.clone(),
-        },
         _ => value.clone(),
     }
 }
@@ -3480,10 +3548,17 @@ fn convert_uint_map(value: &Value, desc: &[u8], cursor: &mut usize) -> Value {
     skip_uint_desc(desc, cursor);
     let val_at = *cursor;
     skip_uint_desc(desc, cursor);
-    let key_is_uint = desc.get(key_at).copied() == Some(uint_desc::UINT);
-    let convert_key = |key: &MapKey| match key {
-        MapKey::Int(n) if key_is_uint => MapKey::Uint(*n as u64),
-        other => other.clone(),
+    let key_described = desc[key_at..val_at].iter().any(|b| *b != uint_desc::NONE);
+    // A key renders from the `MapKey` the copy stores, so a key the type
+    // describes - an unsigned integer, a `Vec`, or an aggregate holding
+    // either - is rebuilt from its described value.
+    let convert_key = |key: &MapKey| {
+        if key_described {
+            let mut key_cursor = key_at;
+            MapKey::rendered(&convert_uint(&key.to_value(), desc, &mut key_cursor))
+        } else {
+            key.clone()
+        }
     };
     let convert_value = |v: &Value| {
         let mut value_cursor = val_at;
@@ -3635,30 +3710,29 @@ fn repr_value(value: &Value) -> String {
 /// elements prints.
 fn repr_set(value: &Value) -> String {
     let values = crate::stdlib_builtins::set::set_display_snapshot(value).unwrap_or_default();
-    // The rendered copy of a set whose elements were declared `u64` / `usize`
-    // carries the marker, so those elements read as unsigned here.
-    let unsigned = matches!(
-        value,
-        Value::Struct(inner)
-            if inner
-                .fields
-                .iter()
-                .any(|(name, _)| *name == SET_UINT_MARKER)
-    );
     // A set renders in its own literal spelling, the same one a program
     // writes to build it, at every depth and on every tier. `Set` and
-    // `BTreeSet` are both written `#{..}`.
-    format!(
-        "#{{{}}}",
-        values
-            .iter()
-            .map(|element| match element {
-                Value::Int(n) if unsigned => format!("{}", *n as u64),
-                other => render_element(other),
-            })
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
+    // `BTreeSet` are both written `#{..}`. The rendered copy of a set whose
+    // element type names an unsigned integer or a `Vec` carries that
+    // element's descriptor, so each element reads the way its type spells it.
+    format!("#{{{}}}", render_elements(value, &values))
+}
+
+/// A set's elements in the order its element type gives them. The snapshot
+/// arrives ordered by stored key, which is the language's order for every
+/// element except one holding a `u64` / `usize`, whose bits order unsigned;
+/// the rendered copy's descriptor names those.
+pub(crate) fn described_set_order(handle: &Value, mut values: Vec<Value>) -> Vec<Value> {
+    let Some(desc) = elem_desc_of(handle).filter(|desc| desc.as_bytes().contains(&uint_desc::UINT))
+    else {
+        return values;
+    };
+    let mut keyed: Vec<(Value, Value)> = values
+        .drain(..)
+        .map(|value| (uint_leaves(&value, desc.as_bytes()), value))
+        .collect();
+    keyed.sort_by(|a, b| crate::stdlib_builtins::iter::compare_values_total(&a.0, &b.0));
+    keyed.into_iter().map(|(_, value)| value).collect()
 }
 
 fn repr_deque(value: &Value, owner: &str) -> String {
@@ -4977,23 +5051,39 @@ fn deep_native_value(v: Value) -> Value {
 // ---------------------------------------------------------------
 
 /// Layout description of a user struct whose values may cross the JIT
-/// boundary. Built once per program load from the HIR. Unlike a heap enum, a struct in the compiled tier is a
-/// flat field-slot block with NO RC header: field `i` lives at byte
-/// offset `i * 8` and `&self` / `&mut self` point at field 0.
+/// boundary. Built once per program load from the HIR. Unlike a heap enum, a
+/// struct in the compiled tier is a flat block of words with NO RC header, and
+/// `&self` / `&mut self` point at its first byte.
 ///
-/// Only all-scalar structs (every field `I64` / `F64` / `Bool` / `Char`,
-/// one 8-byte slot each) are registered: those marshal in O(field count)
-/// with no heap children, so the trampoline can build / write back / free
-/// the block with no reference-counting and no aliasing surface.
+/// Only structs whose fields are scalars or strings are registered: those
+/// marshal in O(field count) with no nested aggregates, so the trampoline can
+/// build / write back / free the block with no reference-counting and no
+/// aliasing surface.
 #[derive(Debug)]
 pub struct NativeStructShape {
     /// Struct name (interned, matches `StructInner::name`).
     pub struct_name: &'static str,
     /// Index of this shape in the program's struct-shape table.
     pub index: u32,
-    /// Field name + scalar kind, in declaration order. Field `i` is at
-    /// byte offset `i * 8` in the native flat block.
+    /// Field name + scalar kind, in declaration order.
     pub fields: Vec<(&'static str, NativeFieldKind)>,
+    /// Where each field sits in the native block, in declaration order.
+    pub placements: Vec<NativeFieldPlacement>,
+    /// Words the native block spans.
+    pub words: usize,
+}
+
+/// The bytes one struct field occupies in the native block: a word for a
+/// struct laid out in words, and its own width for a narrow field of a packed
+/// struct.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeFieldPlacement {
+    /// Byte offset from the start of the block.
+    pub offset: u32,
+    /// Bytes the field occupies: 1, 2, 4, or 8.
+    pub bytes: u8,
+    /// Whether a narrow integer field widens by sign extension.
+    pub signed: bool,
 }
 
 /// Process-global weak compatibility table of registered native struct shapes.
@@ -5287,6 +5377,8 @@ mod native_consume_tests {
                 struct_name: intern_type_name("WeakCompatibilityStruct"),
                 index: base,
                 fields: Vec::new(),
+                placements: Vec::new(),
+                words: 0,
             });
             let weak = Arc::downgrade(&shape);
             (vec![shape], (base, weak))
@@ -5413,6 +5505,21 @@ pub fn render_descriptor(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -
     descriptor_of(tcx, ty, false)
 }
 
+/// The ordering descriptor for `ty`: where the type declared an integer `u64`
+/// / `usize`, whose bits order unsigned, at any depth - sequence elements,
+/// tuple and struct fields, carrier payloads. `None` when it declared none,
+/// so every value of the type orders as the signed words the VM compares.
+///
+/// The shape is the render descriptor's: [`uint_leaves`] walks a value
+/// alongside it, and the re-boxed copy is what an ordering compares.
+#[must_use]
+pub fn ordering_descriptor(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<String> {
+    let mut out = Vec::new();
+    push_render_desc_with(tcx, ty, &mut out, 0, true, &[]);
+    out.contains(&uint_desc::UINT)
+        .then(|| out.iter().map(|b| *b as char).collect())
+}
+
 /// [`render_descriptor`] that also describes a struct's fields, for a
 /// value the REPL renders from the value alone rather than through the
 /// `to_string` a program's format site calls.
@@ -5430,7 +5537,7 @@ fn descriptor_of(
     adts: bool,
 ) -> Option<String> {
     let mut out = Vec::new();
-    push_render_desc_with(tcx, ty, &mut out, 0, adts);
+    push_render_desc_with(tcx, ty, &mut out, 0, adts, &[]);
     out.iter()
         .any(|b| *b == uint_desc::UINT || *b == uint_desc::SET || *b == uint_desc::VEC)
         .then(|| out.iter().map(|b| *b as char).collect())
@@ -5479,7 +5586,7 @@ fn push_render_desc(
     out: &mut Vec<u8>,
     depth: u8,
 ) {
-    push_render_desc_with(tcx, ty, out, depth, false);
+    push_render_desc_with(tcx, ty, out, depth, false, &[]);
 }
 
 fn push_render_desc_with(
@@ -5488,6 +5595,7 @@ fn push_render_desc_with(
     out: &mut Vec<u8>,
     depth: u8,
     adts: bool,
+    params: &[gossamer_types::Ty],
 ) {
     use gossamer_types::TyKind;
     if depth > 8 {
@@ -5500,17 +5608,21 @@ fn push_render_desc_with(
         return;
     }
     match tcx.kind(peeled) {
+        Some(TyKind::Param { idx, .. }) => match params.get(idx.0 as usize) {
+            Some(arg) => push_render_desc_with(tcx, *arg, out, depth + 1, adts, &[]),
+            None => out.push(uint_desc::NONE),
+        },
         // A `Vec` renders in its own spelling; a fixed array and a slice
         // are written in bare brackets and render that way.
         Some(TyKind::Vec(elem)) => {
             let elem = *elem;
             out.push(uint_desc::VEC);
-            push_render_desc_with(tcx, elem, out, depth + 1, adts);
+            push_render_desc_with(tcx, elem, out, depth + 1, adts, params);
         }
         Some(TyKind::Slice(elem) | TyKind::Array { elem, .. }) => {
             let elem = *elem;
             out.push(uint_desc::SEQ);
-            push_render_desc_with(tcx, elem, out, depth + 1, adts);
+            push_render_desc_with(tcx, elem, out, depth + 1, adts, params);
         }
         Some(TyKind::Tuple(elems)) => {
             let elems = elems.clone();
@@ -5521,14 +5633,14 @@ fn push_render_desc_with(
             out.push(uint_desc::TUPLE);
             out.push(arity);
             for elem in elems {
-                push_render_desc_with(tcx, elem, out, depth + 1, adts);
+                push_render_desc_with(tcx, elem, out, depth + 1, adts, params);
             }
         }
         Some(TyKind::HashMap { key, value, .. }) => {
             let (key, value) = (*key, *value);
             out.push(uint_desc::MAP);
-            push_render_desc_with(tcx, key, out, depth + 1, adts);
-            push_render_desc_with(tcx, value, out, depth + 1, adts);
+            push_render_desc_with(tcx, key, out, depth + 1, adts, params);
+            push_render_desc_with(tcx, value, out, depth + 1, adts, params);
         }
         // `Option` and `Result` are the sentinel Adts `u32::MAX - 1` and
         // `u32::MAX`; a `Set` / `BTreeSet` is `u32::MAX - 7` / `- 18`.
@@ -5536,7 +5648,7 @@ fn push_render_desc_with(
             let payload = substs.types().first().copied();
             out.push(uint_desc::OPTION);
             match payload {
-                Some(payload) => push_render_desc_with(tcx, payload, out, depth + 1, adts),
+                Some(payload) => push_render_desc_with(tcx, payload, out, depth + 1, adts, params),
                 None => out.push(uint_desc::NONE),
             }
         }
@@ -5546,7 +5658,7 @@ fn push_render_desc_with(
             out.push(uint_desc::RESULT);
             for arm in [ok, err] {
                 match arm {
-                    Some(arm) => push_render_desc_with(tcx, arm, out, depth + 1, adts),
+                    Some(arm) => push_render_desc_with(tcx, arm, out, depth + 1, adts, params),
                     None => out.push(uint_desc::NONE),
                 }
             }
@@ -5560,7 +5672,7 @@ fn push_render_desc_with(
             let elem = substs.types().first().copied();
             out.push(uint_desc::CONTAINER);
             match elem {
-                Some(elem) => push_render_desc_with(tcx, elem, out, depth + 1, adts),
+                Some(elem) => push_render_desc_with(tcx, elem, out, depth + 1, adts, params),
                 None => out.push(uint_desc::NONE),
             }
         }
@@ -5568,31 +5680,94 @@ fn push_render_desc_with(
             if def.local == u32::MAX - 7 || def.local == u32::MAX - 18 =>
         {
             let elem = substs.types().first().copied();
-            if elem.is_some_and(|elem| is_unsigned64(tcx, elem)) {
-                out.push(uint_desc::SET);
-            } else {
-                out.push(uint_desc::NONE);
-            }
+            push_set_render_desc(tcx, elem, out, depth, adts, params);
         }
-        // A struct's fields are described only for the REPL: a program
-        // renders one through the `to_string` synthesized for its type,
-        // which describes each field at the format site inside it.
-        Some(TyKind::Adt { def, substs }) if adts && def.local < u32::MAX - 16 => {
+        // A program renders a struct through the `to_string` synthesized for
+        // its type, which describes each field at the format site inside it.
+        // A field declared with a type parameter is the exception: that site
+        // sees only the parameter, so the instantiated type is described here,
+        // where the concrete type is known. The REPL describes every field,
+        // since it renders from the value alone.
+        Some(TyKind::Adt { def, substs }) if def.local < u32::MAX - 16 => {
             let (def, substs) = (*def, substs.clone());
-            let Some(fields) = tcx.adt_field_tys(def, &substs).map(<[_]>::to_vec) else {
-                out.push(uint_desc::NONE);
-                return;
-            };
-            let Ok(count) = u8::try_from(fields.len()) else {
-                out.push(uint_desc::NONE);
-                return;
-            };
-            out.push(uint_desc::ADT);
-            out.push(count);
-            for field in fields {
-                push_render_desc_with(tcx, field, out, depth + 1, adts);
-            }
+            push_struct_render_desc(tcx, def, &substs, out, depth, adts, params);
         }
         _ => out.push(uint_desc::NONE),
+    }
+}
+
+/// The descriptor of a `Set` / `BTreeSet` whose element is `elem`: the set tag
+/// and the element's own descriptor when that element describes anything, and
+/// nothing otherwise.
+fn push_set_render_desc(
+    tcx: &gossamer_types::TyCtxt,
+    elem: Option<gossamer_types::Ty>,
+    out: &mut Vec<u8>,
+    depth: u8,
+    adts: bool,
+    params: &[gossamer_types::Ty],
+) {
+    let mut elem_desc = Vec::new();
+    match elem {
+        Some(elem) => push_render_desc_with(tcx, elem, &mut elem_desc, depth + 1, adts, params),
+        None => elem_desc.push(uint_desc::NONE),
+    }
+    if elem_desc.iter().any(|b| *b != uint_desc::NONE) {
+        out.push(uint_desc::SET);
+        out.extend(elem_desc);
+    } else {
+        out.push(uint_desc::NONE);
+    }
+}
+
+/// The descriptor of the user struct `def` instantiated with `substs`: every
+/// field for the REPL, and otherwise only the fields declared with a type
+/// parameter.
+fn push_struct_render_desc(
+    tcx: &gossamer_types::TyCtxt,
+    def: gossamer_resolve::DefId,
+    substs: &gossamer_types::Substs,
+    out: &mut Vec<u8>,
+    depth: u8,
+    adts: bool,
+    params: &[gossamer_types::Ty],
+) {
+    use gossamer_types::TyKind;
+    // A field's declared type names the struct's own parameters, so it reads
+    // them from this instantiation's arguments, each already resolved in the
+    // enclosing one.
+    let args: Vec<gossamer_types::Ty> = substs
+        .types()
+        .iter()
+        .map(|arg| match tcx.kind(*arg) {
+            Some(TyKind::Param { idx, .. }) => params.get(idx.0 as usize).copied().unwrap_or(*arg),
+            _ => *arg,
+        })
+        .collect();
+    let declared = tcx.struct_field_tys(def).map(<[_]>::to_vec);
+    let Some(fields) = tcx.adt_field_tys(def, substs).map(<[_]>::to_vec) else {
+        out.push(uint_desc::NONE);
+        return;
+    };
+    if !adts && substs.is_empty() {
+        out.push(uint_desc::NONE);
+        return;
+    }
+    let Ok(count) = u8::try_from(fields.len()) else {
+        out.push(uint_desc::NONE);
+        return;
+    };
+    out.push(uint_desc::ADT);
+    out.push(count);
+    for (index, field) in fields.into_iter().enumerate() {
+        let generic = declared
+            .as_ref()
+            .and_then(|declared| declared.get(index))
+            .is_some_and(|declared| crate::compile::mentions_param(tcx, *declared));
+        if adts || generic {
+            push_render_desc_with(tcx, field, out, depth + 1, adts, &args);
+        } else {
+            out.push(uint_desc::NONE);
+        }
     }
 }

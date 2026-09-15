@@ -143,6 +143,22 @@ impl<'a> Builder<'a> {
     /// out of a fresh function result allocated a new non-region buffer on
     /// every loop iteration, while the dead temporary's region cleanup could
     /// not release that detached buffer.
+    /// Re-points a fold's accumulator at the binding its result initialises.
+    ///
+    /// The accumulator is a loop-private local that no other name reads, so
+    /// the binding can be that local rather than a copy of it. As a copy it
+    /// would alias the accumulator, and the frame could then free neither the
+    /// values the loop replaced nor the one it kept.
+    fn try_rebind_fold_result(&mut self, value: Local, binding: Local) -> bool {
+        if self.named_locals.contains(&value) || !self.fresh_loop_results.remove(&value) {
+            return false;
+        }
+        for block in &mut self.blocks {
+            rename_local_in_block(block, value, binding);
+        }
+        true
+    }
+
     fn try_rebind_ctor_call(&mut self, value: Local, binding: Local) -> bool {
         let Some(cur) = self.current else {
             return false;
@@ -424,11 +440,9 @@ impl<'a> Builder<'a> {
             let mut place = Place::local(binding);
             let mut valid = true;
             for index in path {
-                field_ty = match self.tcx.kind_of(field_ty) {
+                field_ty = match self.tcx.kind_of(field_ty).clone() {
                     TyKind::Adt { def, substs } => self
-                        .tcx
-                        .adt_field_tys(*def, substs)
-                        .and_then(|fields| fields.get(index as usize).copied())
+                        .instantiated_field_ty(def, &substs, index as usize)
                         .unwrap_or_else(|| {
                             valid = false;
                             field_ty
@@ -439,7 +453,7 @@ impl<'a> Builder<'a> {
                             field_ty
                         })
                     }
-                    TyKind::Array { elem, len } if (index as usize) < len.to_usize() => *elem,
+                    TyKind::Array { elem, len } if (index as usize) < len.to_usize() => elem,
                     _ => {
                         valid = false;
                         field_ty
@@ -767,7 +781,15 @@ impl<'a> Builder<'a> {
                             self.local_define_layout.insert(local, layout);
                         }
                         // Bind fresh call and constructor results directly.
-                        if !self.try_rebind_ctor_call(value, local) {
+                        // A binding holds the same lazy state its initialiser
+                        // built, so it carries the same slot meaning: an
+                        // address-carrying stream stays one under its name.
+                        if self.local_aggr_iter.contains(&value) {
+                            self.local_aggr_iter.insert(local);
+                        }
+                        if !self.try_rebind_fold_result(value, local)
+                            && !self.try_rebind_ctor_call(value, local)
+                        {
                             let init_ty = self.locals[value.0 as usize].ty;
                             let binding_ty = self.locals[local.0 as usize].ty;
                             if gossamer_hir::is_capture_env_load(init) {
@@ -781,6 +803,7 @@ impl<'a> Builder<'a> {
                                 );
                             } else if gossamer_hir::is_capture_env_load(init)
                                 || self.is_fresh_user_call_result(value)
+                                || self.fresh_loop_results.contains(&value)
                                 || self.is_owned_carrier_payload(value)
                                 || self.holds_owned_carrier_payload(value)
                                 // A `.clone()` result already took its deep
@@ -851,7 +874,23 @@ impl<'a> Builder<'a> {
                 }
             }
             HirStmtKind::Expr { expr, .. } => {
-                let _ = self.lower_expr(expr);
+                let lowered = self.lower_expr(expr);
+                // A call lowers to its destination local whatever its type,
+                // unit included, and a diverging one leaves no live block. A
+                // call statement that answers nothing while the block is still
+                // live lost its lowering part way, so refuse it here rather than
+                // hand the backends a body missing the call's effects.
+                assert!(
+                    lowered.is_some()
+                        || self.current.is_none()
+                        || !matches!(
+                            expr.kind,
+                            HirExprKind::Call { .. } | HirExprKind::MethodCall { .. }
+                        ),
+                    "MIR lower: the call statement at {:?} has no lowering; an operand's \
+                     type or place did not reach the builder",
+                    expr.span,
+                );
             }
             HirStmtKind::Defer(expr) => {
                 // Register for block-scoped execution: the expression runs
@@ -906,4 +945,98 @@ fn is_container_ctor(name: &str) -> bool {
             | "gos_rt_map_new_with_capacity"
             | "gos_rt_set_new"
     )
+}
+
+/// Replaces every mention of `from` in `block` with `to`.
+fn rename_local_in_block(block: &mut crate::ir::BasicBlock, from: Local, to: Local) {
+    use crate::ir::{Projection, StatementKind as S};
+    let place = |p: &mut Place| {
+        if p.local == from {
+            p.local = to;
+        }
+        for step in &mut p.projection {
+            if let Projection::Index(l) = step
+                && *l == from
+            {
+                *l = to;
+            }
+        }
+    };
+    let operand = |op: &mut Operand| {
+        if let Operand::Copy(p) = op {
+            place(p);
+        }
+    };
+    for stmt in &mut block.stmts {
+        match &mut stmt.kind {
+            S::Assign { place: dst, rvalue } => {
+                place(dst);
+                match rvalue {
+                    Rvalue::Use(op)
+                    | Rvalue::UnaryOp { operand: op, .. }
+                    | Rvalue::Cast { operand: op, .. }
+                    | Rvalue::Repeat { value: op, .. } => operand(op),
+                    Rvalue::BinaryOp { lhs, rhs, .. } => {
+                        operand(lhs);
+                        operand(rhs);
+                    }
+                    Rvalue::Aggregate { operands, .. } => operands.iter_mut().for_each(operand),
+                    Rvalue::CallIntrinsic { args, .. } => args.iter_mut().for_each(operand),
+                    Rvalue::Len(p) | Rvalue::Ref { place: p, .. } => place(p),
+                    Rvalue::StaticLoad(_) => {}
+                }
+            }
+            S::SetDiscriminant { place: p, .. } => place(p),
+            S::StaticStore { value, .. } => operand(value),
+            S::IterSource { dst, source, .. } => {
+                place(dst);
+                operand(source);
+            }
+            S::IterAdapter {
+                dst,
+                upstream,
+                closure_or_arg,
+                ..
+            } => {
+                place(dst);
+                place(upstream);
+                if let Some(arg) = closure_or_arg {
+                    operand(arg);
+                }
+            }
+            S::IterNext {
+                dst_option,
+                iter_place,
+                ..
+            } => {
+                place(dst_option);
+                place(iter_place);
+            }
+            S::StorageLive(l) | S::StorageDead(l) => {
+                if *l == from {
+                    *l = to;
+                }
+            }
+            S::Nop => {}
+        }
+    }
+    match &mut block.terminator {
+        Terminator::SwitchInt { discriminant, .. } => operand(discriminant),
+        Terminator::Call {
+            callee,
+            args,
+            destination,
+            ..
+        } => {
+            operand(callee);
+            args.iter_mut().for_each(operand);
+            place(destination);
+        }
+        Terminator::Assert { cond, .. } => operand(cond),
+        Terminator::Drop { place: p, .. } => place(p),
+        Terminator::Goto { .. }
+        | Terminator::Return
+        | Terminator::Unreachable
+        | Terminator::Panic { .. } => {}
+    }
 }

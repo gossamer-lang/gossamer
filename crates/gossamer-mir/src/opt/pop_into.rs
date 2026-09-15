@@ -146,8 +146,26 @@ fn carrier_read(stmt: &StatementKind) -> Option<(Local, Local, bool)> {
     let carrier = whole_copy_local(&args[0])?;
     match *name {
         "gos_rt_result_disc" => Some((carrier, place.local, false)),
-        "gos_result_payload_owned" => Some((carrier, place.local, true)),
+        "gos_rt_result_payload" => Some((carrier, place.local, true)),
         _ => None,
+    }
+}
+
+/// Whether a statement only settles the carrier's share: a slot release or
+/// retain, or the zero the carrier starts from. Once no pop writes the carrier
+/// these have nothing to act on.
+fn settles_carrier(stmt: &StatementKind, carrier: Local) -> bool {
+    let StatementKind::Assign { place, rvalue } = stmt else {
+        return false;
+    };
+    match rvalue {
+        Rvalue::CallIntrinsic { name, args } => {
+            matches!(*name, "gos_rt_option_slot_release" | "gos_rt_option_slot_retain")
+                && args.len() == 1
+                && whole_copy_local(&args[0]) == Some(carrier)
+        }
+        Rvalue::Use(Operand::Const(_)) => place.projection.is_empty() && place.local == carrier,
+        _ => false,
     }
 }
 
@@ -162,13 +180,14 @@ struct PopFusion {
 /// Moves a popped all-scalar aggregate straight into the local that binds it.
 ///
 /// A container pop answers `Option<T>` as a two-word carrier whose payload
-/// word, for a multi-slot `T`, is a fresh heap copy of the element that the
-/// owned extract then copies out and frees. Where the carrier is read only by
-/// its discriminant and by one owned extract into a local written nowhere
-/// else, and `T` owns no reference-counted child, the pop writes the element
-/// into that local itself: the `_into` shim takes the local's storage,
-/// answers the discriminant the carrier would have carried, and the extract
-/// has nothing left to do.
+/// word, for a multi-slot `T`, is a counted copy of the element that the
+/// extract copies out and the carrier's release gives back. Where the carrier
+/// is read only by its discriminant, by one extract into a local written
+/// nowhere else, and by the statements settling its share, and `T` owns no
+/// reference-counted child, the pop writes the element into that local
+/// itself: the `_into` shim takes the local's storage, answers the
+/// discriminant the carrier would have carried, and neither the extract nor
+/// the release has anything left to do.
 pub(crate) fn pop_scalar_aggregates_in_place(body: &mut Body, tcx: &TyCtxt) {
     if body.locals.is_empty() || body.blocks.is_empty() {
         return;
@@ -197,6 +216,18 @@ pub(crate) fn pop_scalar_aggregates_in_place(body: &mut Body, tcx: &TyCtxt) {
     }
     for block in &mut body.blocks {
         for stmt in &mut block.stmts {
+            if fusions.keys().any(|carrier| settles_carrier(&stmt.kind, *carrier))
+                && matches!(
+                    stmt.kind,
+                    StatementKind::Assign {
+                        rvalue: Rvalue::CallIntrinsic { .. },
+                        ..
+                    }
+                )
+            {
+                stmt.kind = StatementKind::Nop;
+                continue;
+            }
             let Some((carrier, dest, is_payload)) = carrier_read(&stmt.kind) else {
                 continue;
             };
@@ -253,6 +284,16 @@ fn pop_fusions(
     pops: &HashMap<Local, (usize, &'static str)>,
 ) -> HashMap<Local, PopFusion> {
     let mentions = local_mention_counts(body);
+    let mut settled: HashMap<Local, u32> = HashMap::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            for carrier in pops.keys() {
+                if settles_carrier(&stmt.kind, *carrier) {
+                    *settled.entry(*carrier).or_insert(0) += 1;
+                }
+            }
+        }
+    }
     // carrier -> (disc reads, payload extract destinations)
     let mut reads: HashMap<Local, (u32, Vec<Local>)> = HashMap::new();
     for block in &body.blocks {
@@ -279,9 +320,11 @@ fn pop_fusions(
         let [payload] = payloads.as_slice() else {
             continue;
         };
-        // The pop's own mention, every discriminant read, and the one extract
-        // account for all of the carrier; anything else reads it another way.
-        if mentions[carrier.0 as usize] != 1 + disc_reads + 1 {
+        // The pop's own mention, every discriminant read, the one extract, and
+        // the statements settling its share account for all of the carrier;
+        // anything else reads it another way.
+        let settles = settled.get(carrier).copied().unwrap_or(0);
+        if mentions[carrier.0 as usize] != 1 + disc_reads + 1 + settles {
             continue;
         }
         // The payload local is written by the extract alone, so the pop can

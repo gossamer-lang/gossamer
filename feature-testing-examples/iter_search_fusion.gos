@@ -1,0 +1,53 @@
+// Searching and filtering iterator terminals and stages - `find`, `position`,
+// `min`, `max`, `collect`, `take_while`, `skip_while`, `filter_map` - and a
+// `String`'s `bytes()` run as one fused loop with the runtime iterator's
+// observable behaviour: a search stops at the deciding element, `take_while`
+// stops at the first failing one, `skip_while` stops asking once it passes an
+// element, `min` keeps the first smallest and `max` the last largest.
+
+fn main() {
+    let xs: Vec<i64> = #[3, 8, 1, 9, 4, 7, 2, 9, 1]
+    let mut seen: Vec<i64> = #[]
+    let found = xs.iter().map(|x| {
+        seen.push(x)
+        x * 2
+    }).find(|v| v > 10)
+    println("find {:?} {:?} none {:?}", found, seen, xs.iter().find(|v| v > 100))
+    let mut seen2: Vec<i64> = #[]
+    let at = xs.iter().filter(|v| v % 2 == 1).position(|v| {
+        seen2.push(v)
+        v == 9
+    })
+    println("position {:?} {:?} {:?}", at, seen2, xs.iter().position(|v| v > 100))
+    let mut seen3: Vec<i64> = #[]
+    let tw = xs.iter().take_while(|v| {
+        seen3.push(v)
+        v < 9
+    }).sum()
+    let mut seen4: Vec<i64> = #[]
+    let sw = xs.iter().skip_while(|v| {
+        seen4.push(v)
+        v < 9
+    }).map(|v| v * 10).sum()
+    println("while {} {:?} {} {:?}", tw, seen3, sw, seen4)
+    let mut calls = 0
+    let mut hits: Vec<i64> = #[]
+    let fm = xs.iter().filter_map(|v| {
+        hits.push(v)
+        if v % 2 == 0 { Some(v * 10) } else { None }
+    }).take(2).sum()
+    println("filter_map {} {:?} {}", fm, hits, calls)
+    println("min {:?} max {:?} empty {:?} {:?}", xs.iter().min(), xs.iter().map(|v| v % 5).max(), xs.iter().filter(|v| v > 100).min(), (3..3).max())
+    let bs: Vec<u8> = #[5, 250, 7]
+    println("narrow {:?} {:?}", bs.iter().max(), bs.iter().min())
+    println("collect {:?} {:?} {:?}", xs.iter().map(|v| v + 1).filter(|v| v % 2 == 0).collect(), (0..4).map(|v| v * v).collect(), xs.iter().enumerate().filter(|p| p.1 > 7).collect())
+    let text = "hello, world"
+    println("bytes {} {:?} {:?} {}", text.bytes().map(|b| b as i64).sum(), text.bytes().position(|b| b == 32), text.bytes().rev().take(3).fold(0, |a, b| a * 1000 + b as i64), text.bytes().zip(xs.iter()).filter(|p| p.0 > 108).count())
+    println("chars {} {:?}", text.chars().filter(|c| c == 'o').count(), text.chars().position(|c| c == ' '))
+    let mut order: Vec<i64> = #[]
+    let eager = xs.take_while(|v| {
+        order.push(v)
+        v != 9
+    }).count()
+    println("eager {} {:?}", eager, order)
+}

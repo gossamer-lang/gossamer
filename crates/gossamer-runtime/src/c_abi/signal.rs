@@ -862,15 +862,6 @@ pub unsafe extern "C" fn gos_rt_vec_get_ptr(v: *const GosVec, idx: i64) -> *mut 
         if idx < 0 || idx >= len {
             return std::ptr::null_mut();
         }
-        let elem_kind = unsafe { (*v).elem_kind };
-        if elem_kind == crate::c_abi::vec::vec_elem_kind::PACKED_ROWS {
-            return unsafe { crate::c_abi::vec::packed_row_at(v, idx) };
-        }
-        if elem_kind == crate::c_abi::vec::vec_elem_kind::VEC
-            && unsafe { crate::c_abi::vec::try_pack_primitive_rows(v.cast_mut()) }
-        {
-            return unsafe { crate::c_abi::vec::packed_row_at(v, idx) };
-        }
         let ptr = unsafe { (*v).ptr };
         let elem_bytes = unsafe { (*v).elem_bytes };
         unsafe { ptr.add((idx as usize) * (elem_bytes as usize)) }

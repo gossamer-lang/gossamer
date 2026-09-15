@@ -23,10 +23,15 @@ enum Expect {
 }
 
 /// Runs the authoritative front-end and returns the codes it reported.
+///
+/// `check_frontend` takes augmented source, so the program is augmented first
+/// exactly as `gos check` augments it; the stdlib wrappers a spelling is
+/// rewritten to exist only in the augmented text.
 fn codes(source: &str) -> Vec<String> {
+    let augmented = gossamer_parse::autoderive::augment_source(source);
     let mut map = SourceMap::new();
-    let file = map.add_file("type_system_gate.gos".to_string(), source.to_string());
-    check_frontend(source, file)
+    let file = map.add_file("type_system_gate.gos".to_string(), augmented);
+    check_frontend(map.source(file), file)
         .diagnostics
         .iter()
         .map(|d| d.code.as_str().to_string())
@@ -627,9 +632,10 @@ fn refused_serde_targets_report_without_leaking_a_synthesized_name() {
     ];
     let mut failures = Vec::new();
     for (name, source, expected) in cases {
+        let augmented = gossamer_parse::autoderive::augment_source(source);
         let mut map = SourceMap::new();
-        let file = map.add_file("serde_refusal.gos".to_string(), source.to_string());
-        let result = check_frontend(source, file);
+        let file = map.add_file("serde_refusal.gos".to_string(), augmented);
+        let result = check_frontend(map.source(file), file);
         let codes: Vec<String> = result
             .diagnostics
             .iter()

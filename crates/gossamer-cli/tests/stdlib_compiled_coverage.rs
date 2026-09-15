@@ -39,6 +39,20 @@ const DISPATCH_SOURCES: &[&str] = &[
 /// function must not be added here to silence the gate - wire its MIR
 /// dispatch instead.
 const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
+    // Directory walks and process runs answer real structs, so their spellings
+    // are rewritten to injected Gossamer wrappers (`stdlib_wrappers.rs`) that
+    // fold the `__gos_*_raw` leaf each tier implements, rather than matching a
+    // per-function dispatch pattern.
+    "exec::pipeline_run",
+    "exec::run",
+    "fs::read_dir",
+    "fs::walk_dir",
+    "os::exec::pipeline_run",
+    "os::exec::run",
+    "path::walk",
+    "process::pipeline_run",
+    "process::run",
+    "process::run_in",
     // The middleware wrappers are lowered by `lower_middleware_kind`
     // (`stdlib_free.rs`), which binds the inner handler's serve address into a
     // `GosMiddleware` handle from a name-to-kind table rather than matching a
@@ -80,6 +94,7 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "encoding::json::as_f64",
     "encoding::json::as_i64",
     "encoding::json::as_str",
+    "encoding::json::as_u64",
     "encoding::json::at",
     "encoding::json::decode",
     "encoding::json::encode",
@@ -97,6 +112,7 @@ const COMPILED_VIA_SPECIAL_MECHANISM: &[&str] = &[
     "json::as_f64",
     "json::as_i64",
     "json::as_str",
+    "json::as_u64",
     "json::at",
     "json::decode",
     "json::encode",

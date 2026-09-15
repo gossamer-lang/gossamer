@@ -3,7 +3,7 @@
 fn djb2(text: String) -> u32 {
     let mut hash: u32 = 5381
     for b in text.bytes() {
-        hash = ((hash << 5).wrapping_add(hash)).wrapping_add(b as u32)
+        hash = (hash << 5) +% hash +% b as u32
     }
     hash
 }

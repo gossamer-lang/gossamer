@@ -62,6 +62,7 @@ fn write_kind(tcx: &TyCtxt, kind: &TyKind, out: &mut String) {
         TyKind::Never => out.push('!'),
         TyKind::Tuple(parts) => write_tuple(tcx, parts, out),
         TyKind::Array { elem, len } => write_array(tcx, *elem, *len, out),
+        TyKind::Simd { elem, lanes } => write_simd(tcx, *elem, *lanes, out),
         TyKind::Slice(elem) => write_slice(tcx, *elem, out),
         TyKind::Vec(elem) => write_named(tcx, "Vec", &[*elem], out),
         TyKind::Iterator(elem) => write_named(tcx, "Iterator", &[*elem], out),
@@ -140,6 +141,20 @@ fn write_array(tcx: &TyCtxt, elem: Ty, len: crate::ArrayLen, out: &mut String) {
     }
 }
 
+fn write_simd(tcx: &TyCtxt, elem: Ty, lanes: crate::ArrayLen, out: &mut String) {
+    let count = match lanes {
+        crate::ArrayLen::Concrete(n) => n.to_string(),
+        crate::ArrayLen::Param(idx) => format!("N{}", idx.as_u32()),
+    };
+    if matches!(tcx.kind(elem), Some(TyKind::Bool)) {
+        let _ = write!(out, "Mask<{count}>");
+        return;
+    }
+    out.push_str("Simd<");
+    write_ty(tcx, elem, out);
+    let _ = write!(out, ", {count}>");
+}
+
 fn write_slice(tcx: &TyCtxt, elem: Ty, out: &mut String) {
     out.push('[');
     write_ty(tcx, elem, out);
@@ -197,6 +212,9 @@ fn write_substs(tcx: &TyCtxt, substs: &Substs, out: &mut String) {
             GenericArg::Const(value) => {
                 let _ = write!(out, "{value}");
             }
+            GenericArg::ConstParam(idx) => {
+                let _ = write!(out, "N{}", idx.0);
+            }
         }
     }
     out.push('>');
@@ -206,6 +224,30 @@ fn write_dyn(tcx: &TyCtxt, trait_ref: &TraitRef, out: &mut String) {
     let _ = write!(out, "dyn trait#{}", trait_ref.def.local);
     if !trait_ref.substs.is_empty() {
         write_substs(tcx, &trait_ref.substs, out);
+    }
+}
+
+/// The name an `impl` block for `ty` registers its functions under, which is
+/// what a call resolved through a type parameter has to spell.
+///
+/// A trait is implementable for a primitive as much as for a declared type,
+/// and such an impl keys its functions by the primitive's spelling. A
+/// container or structural type carries the shape its receiver is dispatched
+/// by rather than a spelling of its own: every tuple is reached as a tuple, and
+/// an array shares its representation with a `Vec`.
+#[must_use]
+pub fn impl_owner_name(tcx: &TyCtxt, ty: Ty) -> Option<String> {
+    match tcx.kind_of(ty).clone() {
+        TyKind::Adt { def, .. } => tcx.def_name(def).map(str::to_string),
+        TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char | TyKind::String => {
+            Some(render_ty(tcx, ty))
+        }
+        TyKind::Vec(_) => Some("Vec".to_string()),
+        TyKind::Tuple(_) => structural_impl_owner(tcx, ty),
+        TyKind::HashMap { ordered, .. } => {
+            Some(if ordered { "BTreeMap" } else { "Map" }.to_string())
+        }
+        _ => None,
     }
 }
 

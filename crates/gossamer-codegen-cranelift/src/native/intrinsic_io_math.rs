@@ -143,6 +143,21 @@ use rayon::prelude::*;
 
 use super::*;
 
+/// Appends a rendering a formatter just answered to the concat buffer and gives
+/// it back: the formatter hands this frame the only share, and the buffer keeps
+/// a copy of the bytes it appends.
+fn append_rendered(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    rendered: ir::Value,
+) -> Result<()> {
+    let append = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
+    let append_ref = module.declare_func_in_func(append, builder.func);
+    builder.ins().call(append_ref, &[rendered]);
+    super::print_emit::free_rendered_string(module, builder, intrinsics, rendered)
+}
+
 pub(super) fn lower_intrinsic_call_io_math(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,
@@ -309,9 +324,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                         let spelling = builder.ins().iconst(types::I32, i64::from(bare));
                         let call = builder.ins().call(format_ref, &[value, spelling]);
                         let s = builder.inst_results(call)[0];
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::ArrI64(_)
                     | PrintKind::ArrF64(_)
@@ -334,9 +347,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                         let len_v = builder.ins().iconst(types::I64, len);
                         let call = builder.ins().call(format_ref, &[value, len_v]);
                         let s = builder.inst_results(call)[0];
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::ArrArrI64(..)
                     | PrintKind::ArrArrF64(..)
@@ -358,9 +369,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                         let m_v = builder.ins().iconst(types::I64, m);
                         let call = builder.ins().call(format_ref, &[value, n_v, m_v]);
                         let s = builder.inst_results(call)[0];
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::DynValue => {
                         let render_fn = intrinsics.extern_fn(
@@ -372,9 +381,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                         let render_ref = module.declare_func_in_func(render_fn, builder.func);
                         let call = builder.ins().call(render_ref, &[value]);
                         let s = builder.inst_results(call)[0];
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::JsonValue => {
                         let render_fn = intrinsics.extern_fn(
@@ -386,9 +393,7 @@ pub(super) fn lower_intrinsic_call_io_math(
                         let render_ref = module.declare_func_in_func(render_fn, builder.func);
                         let call = builder.ins().call(render_ref, &[value]);
                         let s = builder.inst_results(call)[0];
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::ErrorMessage => {
                         // `{}` on an error renders the colon-joined cause
@@ -403,46 +408,40 @@ pub(super) fn lower_intrinsic_call_io_math(
                         let err_ref = module.declare_func_in_func(error_msg_fn, builder.func);
                         let call = builder.ins().call(err_ref, &[value]);
                         let s = builder.inst_results(call)[0];
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::Tuple => {
                         let s = emit_tuple_format_value(
                             module, builder, body, tcx, arg, value, intrinsics,
                         )?;
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
+                    }
+                    PrintKind::VecTuple(tags, arity) => {
+                        let s = super::print_emit::emit_vec_tuple_format_value(
+                            module, builder, value, &tags, arity, bare, intrinsics,
+                        )?;
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::Map => {
                         let s = emit_map_format_value(module, builder, value, intrinsics)?;
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::MapTagged(key_tag, val_tag) => {
                         let s = super::print_emit::emit_map_format_tagged_value(
                             module, builder, value, key_tag, val_tag, intrinsics,
                         )?;
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::HandleFormat(symbol) => {
                         let s =
                             emit_handle_format_value(module, builder, value, symbol, intrinsics)?;
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::SetFormat(symbol, ordered) => {
                         let s = emit_set_format_value(
                             module, builder, value, symbol, ordered, intrinsics,
                         )?;
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::Option(payload_kind) => {
                         let s = emit_debug_option_value(
@@ -452,17 +451,13 @@ pub(super) fn lower_intrinsic_call_io_math(
                             payload_kind,
                             intrinsics,
                         )?;
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::Result(ok_kind, err_kind) => {
                         let s = emit_debug_result_value(
                             module, builder, value, ok_kind, err_kind, intrinsics,
                         )?;
-                        let f = intrinsics.extern_fn_by_name(module, "gos_rt_concat_str")?;
-                        let fref = module.declare_func_in_func(f, builder.func);
-                        builder.ins().call(fref, &[s]);
+                        append_rendered(module, builder, intrinsics, s)?;
                     }
                     PrintKind::Unsupported(label) => {
                         // A value this path cannot render is left to the
@@ -1223,21 +1218,108 @@ pub(super) fn lower_intrinsic_call_io_math(
             builder.ins().call(fref, &[m]);
             Ok(true)
         }
+        "gos_rt_option_slot_retain" | "gos_rt_option_slot_release" => {
+            // The helpers read the payload word beside the discriminant, so
+            // they take the carrier's address. A carrier this backend holds by
+            // value is spilled to a slot for the call, and a release reads it
+            // back: the release clears the payload word so a second release of
+            // the same carrier on another path does nothing.
+            let Some(Operand::Copy(place)) = args.first() else {
+                return Ok(true);
+            };
+            let sym: &'static str = if name == "gos_rt_option_slot_retain" {
+                "gos_rt_option_slot_retain"
+            } else {
+                "gos_rt_option_slot_release"
+            };
+            let f = intrinsics.extern_fn(module, sym, &[ptr_ty], &[])?;
+            let fref = module.declare_func_in_func(f, builder.func);
+            let local_ty = body.local_ty(place.local);
+            if let Some((var, addr)) =
+                spill_carrier_local(module, builder, locals, body, tcx, place, intrinsics)
+            {
+                builder.ins().call(fref, &[addr]);
+                if sym == "gos_rt_option_slot_release" {
+                    reload_carrier_local(builder, var, addr);
+                }
+                return Ok(true);
+            }
+            let addr = lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?;
+            let slot = if place.projection.is_empty()
+                && matches!(tcx.kind_of(local_ty), TyKind::Ref { .. })
+            {
+                builder.ins().load(ptr_ty, MemFlagsData::trusted(), addr, 0)
+            } else {
+                addr
+            };
+            builder.ins().call(fref, &[slot]);
+            Ok(true)
+        }
         "gos_rt_aggr_release_children"
         | "gos_rt_aggr_retain_children"
         | "gos_rt_aggr_zero_guarded"
-        | "gos_rt_option_slot_retain"
-        | "gos_rt_option_slot_release"
-        | "gos_rt_vec_set_elem_meta" => {
-            // Guarded copy-blob accounting is emitted by the LLVM
-            // lowering, which compiles every body of both build profiles
-            // (debug is LLVM at -O0); this backend only sees the rare
-            // bodies that fall back when the LLVM lowerer rejects a
-            // construct. Such a body heap-allocates its aggregates at
-            // construction instead of copying them into provenance-set
-            // blobs, so these walks would only ever no-op - escaped
-            // aggregates inside a fallback body degrade to a bounded
-            // leak (never a corruption: every release is set-gated).
+        | "gos_rt_vec_set_elem_meta"
+        | "gos_rt_lazy_iter_set_elem_meta" => {
+            // A walk takes the aggregate's own storage and the static blob
+            // naming its guarded children; a vec or lazy-handle tag takes the
+            // handle.
+            let Some(Operand::Copy(place)) = args.first() else {
+                return Ok(true);
+            };
+            let takes_handle = matches!(
+                name,
+                "gos_rt_vec_set_elem_meta" | "gos_rt_lazy_iter_set_elem_meta"
+            );
+            let spilled = if takes_handle {
+                None
+            } else {
+                spill_carrier_local(module, builder, locals, body, tcx, place, intrinsics)
+            };
+            let target = if let Some((_, addr)) = spilled {
+                addr
+            } else if takes_handle {
+                lower_operand(
+                    module,
+                    builder,
+                    locals,
+                    body,
+                    tcx,
+                    &Operand::Copy(place.clone()),
+                    Some(ptr_ty),
+                    intrinsics,
+                )?
+            } else {
+                lower_place_address(module, builder, locals, body, tcx, place, intrinsics)?
+            };
+            let target = coerce_arg_to(builder, target, ptr_ty).unwrap_or(target);
+            let meta = match args.get(1) {
+                Some(Operand::Const(ConstValue::Str(meta_sym))) if !meta_sym.is_empty() => {
+                    match tcx.rc_meta(meta_sym) {
+                        Some(blob) => {
+                            let data_id = intrinsics.intern_rc_meta(module, meta_sym, blob)?;
+                            let gv = module.declare_data_in_func(data_id, builder.func);
+                            builder.ins().symbol_value(ptr_ty, gv)
+                        }
+                        None => builder.ins().iconst(ptr_ty, 0),
+                    }
+                }
+                _ => builder.ins().iconst(ptr_ty, 0),
+            };
+            let sym: &'static str = match name {
+                "gos_rt_aggr_release_children" => "gos_rt_aggr_release_children",
+                "gos_rt_aggr_retain_children" => "gos_rt_aggr_retain_children",
+                "gos_rt_aggr_zero_guarded" => "gos_rt_aggr_zero_guarded",
+                "gos_rt_lazy_iter_set_elem_meta" => "gos_rt_lazy_iter_set_elem_meta",
+                _ => "gos_rt_vec_set_elem_meta",
+            };
+            let f = intrinsics.extern_fn(module, sym, &[ptr_ty, ptr_ty], &[])?;
+            let fref = module.declare_func_in_func(f, builder.func);
+            builder.ins().call(fref, &[target, meta]);
+            // The guarded zeroing rewrites the words in place, so a spilled
+            // carrier takes them back whichever walk ran.
+            if let Some((var, addr)) = spilled {
+                reload_carrier_local(builder, var, addr);
+            }
             Ok(true)
         }
         "gos_rt_rc_release"
@@ -2276,4 +2358,57 @@ pub(super) fn lower_intrinsic_call_io_math(
         }
         _ => Ok(false),
     }
+}
+
+/// Spills a two-word carrier local this backend holds by value into a fresh
+/// 16-byte slot and answers the local's variable with the slot's address, for
+/// a runtime helper that reads or rewrites the carrier's words in place. A
+/// bare local's "address" is otherwise its value, whose low word is the
+/// discriminant. `None` for any other place.
+fn spill_carrier_local(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    locals: &mut HashMap<Local, Variable>,
+    body: &Body,
+    tcx: &TyCtxt,
+    place: &Place,
+    intrinsics: &mut IntrinsicContext,
+) -> Option<(Variable, ir::Value)> {
+    if !place.projection.is_empty()
+        || matches!(tcx.kind_of(body.local_ty(place.local)), TyKind::Ref { .. })
+    {
+        return None;
+    }
+    let var = ensure_var(
+        builder,
+        locals,
+        body,
+        tcx,
+        module,
+        &intrinsics.body_cl_types,
+        place.local,
+    );
+    let carrier = builder.use_var(var);
+    if value_type(carrier, builder) != types::I128 {
+        return None;
+    }
+    let ptr_ty = module.target_config().pointer_type();
+    let slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+    let addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+    store_i128_words(builder, carrier, addr, 0);
+    Some((var, addr))
+}
+
+/// Reads the carrier words a runtime helper may have rewritten at `addr` back
+/// into the local's variable.
+fn reload_carrier_local(builder: &mut FunctionBuilder<'_>, var: Variable, addr: ir::Value) {
+    let lo = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), addr, 0);
+    let hi = builder
+        .ins()
+        .load(types::I64, MemFlagsData::trusted(), addr, 8);
+    let reloaded = builder.ins().iconcat(lo, hi);
+    builder.def_var(var, reloaded);
 }

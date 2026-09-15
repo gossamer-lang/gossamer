@@ -616,7 +616,7 @@ const HEAP_SWAP_INLINE_BYTES: usize = 64;
 /// leaves. One element move per level, where an exchange per level costs
 /// three.
 struct HeapHole {
-    inline: [u8; HEAP_SWAP_INLINE_BYTES],
+    inline: std::mem::MaybeUninit<[u8; HEAP_SWAP_INLINE_BYTES]>,
     spilled: Vec<u8>,
     stride: usize,
 }
@@ -626,7 +626,7 @@ impl HeapHole {
     unsafe fn lift(v: &GosVec, idx: usize) -> Self {
         let stride = v.elem_bytes as usize;
         let mut hole = Self {
-            inline: [0u8; HEAP_SWAP_INLINE_BYTES],
+            inline: std::mem::MaybeUninit::uninit(),
             spilled: if stride > HEAP_SWAP_INLINE_BYTES {
                 vec![0u8; stride]
             } else {
@@ -644,7 +644,7 @@ impl HeapHole {
         if self.stride > HEAP_SWAP_INLINE_BYTES {
             self.spilled.as_ptr()
         } else {
-            self.inline.as_ptr()
+            self.inline.as_ptr().cast::<u8>()
         }
     }
 
@@ -652,7 +652,7 @@ impl HeapHole {
         if self.stride > HEAP_SWAP_INLINE_BYTES {
             self.spilled.as_mut_ptr()
         } else {
-            self.inline.as_mut_ptr()
+            self.inline.as_mut_ptr().cast::<u8>()
         }
     }
 
@@ -744,6 +744,111 @@ unsafe fn sift_down_by(
     unsafe { hole.settle(v, i) };
 }
 
+/// Orders two elements of `W` signed machine words lexicographically.
+#[inline]
+fn compare_int_words<const W: usize>(a: &[i64; W], b: &[i64; W]) -> i64 {
+    for (&x, &y) in a.iter().zip(b) {
+        if x != y {
+            return if x < y { -1 } else { 1 };
+        }
+    }
+    0
+}
+
+/// [`sift_up_by`] for an element of `W` whole signed words, with the
+/// element width and the heap's direction fixed where the sift is compiled.
+unsafe fn sift_up_int_words<const W: usize, const MAX: bool>(v: &GosVec, start: usize) {
+    let base = v.ptr.as_ptr();
+    let at = |i: usize| unsafe { base.add(i * W * 8) };
+    // SAFETY: every index below `len` addresses one whole element of W words.
+    let held = unsafe { at(start).cast::<[i64; W]>().read_unaligned() };
+    let mut i = start;
+    while i > 0 {
+        let parent = (i - 1) / 2;
+        // SAFETY: `parent` is below `start`, so inside the heap.
+        let above = unsafe { at(parent).cast::<[i64; W]>().read_unaligned() };
+        let ord = compare_int_words(&above, &held);
+        let outranks = if MAX { ord < 0 } else { ord > 0 };
+        if !outranks {
+            break;
+        }
+        // SAFETY: `i` is inside the heap.
+        unsafe { at(i).cast::<[i64; W]>().write_unaligned(above) };
+        i = parent;
+    }
+    // SAFETY: `i` is inside the heap.
+    unsafe { at(i).cast::<[i64; W]>().write_unaligned(held) };
+}
+
+/// [`sift_down_by`] for an element of `W` whole signed words.
+unsafe fn sift_down_int_words<const W: usize, const MAX: bool>(
+    v: &GosVec,
+    len: usize,
+    start: usize,
+) {
+    let base = v.ptr.as_ptr();
+    let at = |i: usize| unsafe { base.add(i * W * 8) };
+    // SAFETY: every index below `len` addresses one whole element of W words.
+    let read = |i: usize| unsafe { at(i).cast::<[i64; W]>().read_unaligned() };
+    let held = read(start);
+    let mut i = start;
+    loop {
+        let left = 2 * i + 1;
+        if left >= len {
+            break;
+        }
+        let right = left + 1;
+        let mut best = left;
+        let mut best_val = read(left);
+        if right < len {
+            let right_val = read(right);
+            let ord = compare_int_words(&best_val, &right_val);
+            let right_outranks = if MAX { ord < 0 } else { ord > 0 };
+            if right_outranks {
+                best = right;
+                best_val = right_val;
+            }
+        }
+        let ord = compare_int_words(&best_val, &held);
+        let outranks = if MAX { ord > 0 } else { ord < 0 };
+        if !outranks {
+            break;
+        }
+        // SAFETY: `i` is inside the heap.
+        unsafe { at(i).cast::<[i64; W]>().write_unaligned(best_val) };
+        i = best;
+    }
+    // SAFETY: `i` is inside the heap.
+    unsafe { at(i).cast::<[i64; W]>().write_unaligned(held) };
+}
+
+/// Runs the word-specialised sift for an element of one to four signed
+/// words whose store stride is exactly those words, answering whether it
+/// applied. Priority queues order integers and tuples of integers far more
+/// often than anything else, and a sift whose width and direction are
+/// compile-time constants moves and compares each element as whole words.
+macro_rules! sift_int_words {
+    ($plan:expr, $v:expr, $max:expr, $sift:ident ( $($arg:expr),* )) => {{
+        use crate::c_abi::desc_cmp::CmpPlan;
+        let words = match $plan {
+            CmpPlan::IntWord => Some(1),
+            CmpPlan::IntTuple(n) => Some(n),
+            _ => None,
+        };
+        match words.filter(|&w| $v.elem_bytes as usize == w * 8) {
+            Some(1) if $max => { unsafe { $sift::<1, true>($v, $($arg),*) }; true }
+            Some(1) => { unsafe { $sift::<1, false>($v, $($arg),*) }; true }
+            Some(2) if $max => { unsafe { $sift::<2, true>($v, $($arg),*) }; true }
+            Some(2) => { unsafe { $sift::<2, false>($v, $($arg),*) }; true }
+            Some(3) if $max => { unsafe { $sift::<3, true>($v, $($arg),*) }; true }
+            Some(3) => { unsafe { $sift::<3, false>($v, $($arg),*) }; true }
+            Some(4) if $max => { unsafe { $sift::<4, true>($v, $($arg),*) }; true }
+            Some(4) => { unsafe { $sift::<4, false>($v, $($arg),*) }; true }
+            _ => false,
+        }
+    }};
+}
+
 /// Runs `sift` with the comparison the element's descriptor settles, decided
 /// once per sift so each level costs the comparison itself rather than a
 /// walk of the descriptor.
@@ -779,11 +884,19 @@ macro_rules! sift_under_plan {
 /// Sifts the element at `start` towards the root while it outranks its
 /// parent. `max` selects which end of the ordering the root holds.
 unsafe fn heap_sift_up_desc(v: &GosVec, start: usize, tags: *const u8, max: bool) {
+    let plan = unsafe { crate::c_abi::desc_cmp::plan_cmp(tags) };
+    if sift_int_words!(plan, v, max, sift_up_int_words(start)) {
+        return;
+    }
     sift_under_plan!(tags, sift_up_by(v, start, max));
 }
 
 /// Sifts the element at `start` down while a child outranks it.
 unsafe fn heap_sift_down_desc(v: &GosVec, len: usize, start: usize, tags: *const u8, max: bool) {
+    let plan = unsafe { crate::c_abi::desc_cmp::plan_cmp(tags) };
+    if sift_int_words!(plan, v, max, sift_down_int_words(len, start)) {
+        return;
+    }
     sift_under_plan!(tags, sift_down_by(v, len, start, max));
 }
 

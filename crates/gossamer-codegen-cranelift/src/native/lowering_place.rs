@@ -242,15 +242,9 @@ pub(super) fn lower_place_address(
                             .ins()
                             .load(ptr_ty, MemFlagsData::trusted(), current, 0)
                     };
-                    let get_ptr = intrinsics.extern_fn(
-                        module,
-                        "gos_rt_vec_get_ptr",
-                        &[ptr_ty, types::I64],
-                        &[ptr_ty],
+                    current = emit_vec_index_address(
+                        module, builder, intrinsics, handle, idx_i64, ptr_ty,
                     )?;
-                    let fref = module.declare_func_in_func(get_ptr, builder.func);
-                    let call = builder.ins().call(fref, &[handle, idx_i64]);
-                    current = builder.inst_results(call)[0];
                     current_is_loaded = false;
                     current_ty = elem;
                     stride_slots = stride_slots_from_ty(tcx, current_ty).unwrap_or(1);
@@ -399,6 +393,18 @@ pub(super) fn lower_place_store(
         store_i128_words(builder, value, addr, 0);
         return Ok(());
     }
+    // A one-word integer stored into a two-word carrier is its discriminant
+    // word with an empty payload, the constant zero-init included, so both
+    // words are written.
+    if leaf_slots == 2
+        && is_inline_two_word_ty(tcx, leaf_place_ty)
+        && value_type(value, builder).is_int()
+    {
+        let word = coerce_arg_to(builder, value, types::I64).unwrap_or(value);
+        let wide = builder.ins().uextend(types::I128, word);
+        store_i128_words(builder, wide, addr, 0);
+        return Ok(());
+    }
     // An inline aggregate leaf is a block of words the value names the
     // address of, so the whole block is what the store replaces. One store
     // would write its first field and leave the rest of the leaf as the
@@ -420,7 +426,9 @@ pub(super) fn lower_place_store(
         return Ok(());
     }
     // Coerce the value to the leaf's cranelift type where possible;
-    // bail loudly when that would be lossy.
+    // bail loudly when that would be lossy. A narrow integer field of a
+    // packed struct is stored at its own width.
+    let leaf_ty = packed_integer_field(tcx, body, place).map_or(leaf_ty, |(storage, _)| storage);
     let coerced = coerce_store_value(builder, value, leaf_ty)?;
     builder
         .ins()
@@ -512,6 +520,14 @@ pub(super) fn lower_place_read(
     // the second store materialised `u` from a fresh load of
     // `arr+hi*8` *after* `arr+hi*8` had been overwritten with `t`,
     // collapsing the swap to a degenerate `arr[lo] = arr[lo]`.
+    if let Some((storage, signed)) = packed_integer_field(tcx, body, place) {
+        let stored = builder.ins().load(storage, MemFlagsData::new(), addr, 0);
+        return Ok(if signed {
+            builder.ins().sextend(types::I64, stored)
+        } else {
+            builder.ins().uextend(types::I64, stored)
+        });
+    }
     Ok(builder.ins().load(leaf_ty, MemFlagsData::new(), addr, 0))
 }
 

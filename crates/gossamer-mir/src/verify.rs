@@ -266,6 +266,8 @@ pub enum VerifyError {
 ///         stmts: Vec::new(),
 ///         terminator: Terminator::Return,
 ///         span,
+///         terminator_span: None,
+///         terminator_inlined: None,
 ///     }],
 ///     span,
 /// };

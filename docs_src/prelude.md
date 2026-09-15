@@ -52,7 +52,7 @@ buffered and flush stdout first, so the two streams keep their order.
 | `unimplemented` | `unimplemented("msg"?) -> !` | Mark an unsupported path and panic if reached. |
 | `unreachable` | `unreachable("msg"?) -> !` | Mark an impossible path and panic if reached. |
 | `dbg` | `dbg(expr) -> T` | Print `expr` with debug formatting, then return it. |
-| `regex::compile` | `regex::compile("pattern") -> regex::Pattern` | Compile a checked regular expression at build time. |
+| `regex::compile` | `regex::compile("pattern") -> regex::Pattern` | Compile a regular expression; a literal pattern is checked while the program is parsed. The `regex` module is imported like any other: `use std::regex`. |
 | `sql::statement` | `sql::statement("query")` | Check a SQL literal at build time when a driver can validate it. |
 | `codegen` | `codegen(...)` | Run the build-time codegen hook. |
 
@@ -132,6 +132,7 @@ compile time.
 | Wrappers | `Option`, `Result`, `Weak` | Sum types, and the non-owning reference into an RC allocation. |
 | Collections | `Vec`, `Map`, `Set`, `BTreeSet`, `BTreeMap`, `Deque`, `Queue`, `Stack`, `MaxHeap`, `MinHeap`, `Range`, `Iterator` | Core collection and sequence types. |
 | Concurrency | `Sender`, `Receiver`, `Mutex`, `WaitGroup`, `JoinHandle` | Channel, lock, wait, and goroutine-handle types. |
+| Lane vectors | `Simd`, `Mask` | Fixed-width vectors of `N` lanes of one scalar type, and their `bool` form; see [lane vectors](language/simd.md). |
 
 `Range` is the type of a `0..n` bound: iterator state over a bounded integer
 sequence, so it answers the same combinator surface `Iterator` does.

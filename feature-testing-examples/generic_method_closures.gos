@@ -1,0 +1,60 @@
+// A closure handed to a generic method takes its parameter types from the
+// method's signature, whichever way the method is reached: as a method call,
+// through its type, on a generic block or a concrete one, or as an associated
+// function whose own type parameter the closure's input names.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+struct Bag {
+    n: i64
+}
+
+impl Bag {
+    fn apply<T, U>(self, xs: Vec<T>, f: Fn(T) -> U) -> Vec<U> {
+        let mut out = #[]
+        for x in xs {
+            out.push(f(x))
+        }
+        out
+    }
+}
+
+struct Wrap<T> {
+    items: Vec<T>
+}
+
+impl<T> Wrap<T> {
+    fn each<U>(self, f: Fn(T) -> U) -> Vec<U> {
+        let mut out = #[]
+        for x in self.items {
+            out.push(f(x))
+        }
+        out
+    }
+
+    fn build<U>(xs: Vec<U>, f: Fn(U) -> T) -> Wrap<T> {
+        let mut items = #[]
+        for x in xs {
+            items.push(f(x))
+        }
+        Wrap { items: items }
+    }
+}
+
+fn main() {
+    let ps = #[Point { x: 1, y: 2 }, Point { x: 5, y: 3 }]
+    let bag = Bag { n: 0 }
+    println("method {}", bag.apply(ps.clone(), |p| p.x * p.y))
+    println("method tuple {}", bag.apply(#[(1, 5)], |t| t.0 + t.1))
+    println("qualified {}", Bag::apply(bag, ps.clone(), |p| p.x - p.y))
+    let w = Wrap { items: ps.clone() }
+    println("generic block {}", w.each(|p| p.x * 10 + p.y))
+    println("through type {}", Wrap::each(w, |p| p.y))
+    let b: Wrap<i64> = Wrap::build(ps, |p| p.x + p.y)
+    println("associated {}", b.items)
+    let floats = Wrap { items: #[1.5, 2.5] }
+    println("float {}", floats.each(|v| v * 2.0))
+}

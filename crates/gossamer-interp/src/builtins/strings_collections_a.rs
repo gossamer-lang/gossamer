@@ -1382,6 +1382,12 @@ fn builtin_map_values(args: &[Value]) -> RuntimeResult<Value> {
 /// For non-map receivers (`Array`, `IntArray`, `FloatVec`, etc.)
 /// returns the receiver unchanged so `arr.iter()` continues to work
 /// as a no-op pass-through to the for-loop.
+/// A map's `iter()` answers iterator state over its sorted entries, so an
+/// adapter downstream runs its callback as each entry is pulled.
+fn map_entries_cursor(entries: Vec<Value>) -> Value {
+    crate::stdlib_builtins::iter::lazy_source(&Value::Array(Arc::new(entries)))
+}
+
 pub(crate) fn builtin_map_iter(args: &[Value]) -> RuntimeResult<Value> {
     // Sort by key on every call so `BTreeMap` users get deterministic
     // iteration order. The VM uses one runtime value shape for both
@@ -1399,7 +1405,7 @@ pub(crate) fn builtin_map_iter(args: &[Value]) -> RuntimeResult<Value> {
                 .into_iter()
                 .map(|(k, v)| Value::Tuple(Arc::from(vec![k.to_value(), v])))
                 .collect();
-            Ok(Value::Array(Arc::new(out)))
+            Ok(map_entries_cursor(out))
         }
         Some(Value::IntMap(map)) => {
             let mut entries: Vec<(i64, i64)> = map.lock().iter().map(|(k, v)| (*k, *v)).collect();
@@ -1408,7 +1414,7 @@ pub(crate) fn builtin_map_iter(args: &[Value]) -> RuntimeResult<Value> {
                 .into_iter()
                 .map(|(k, v)| Value::Tuple(Arc::from(vec![Value::Int(k), Value::Int(v)])))
                 .collect();
-            Ok(Value::Array(Arc::new(out)))
+            Ok(map_entries_cursor(out))
         }
         Some(Value::StrIntMap(map)) => {
             let mut entries: Vec<(SmolStr, i64)> =
@@ -1418,7 +1424,7 @@ pub(crate) fn builtin_map_iter(args: &[Value]) -> RuntimeResult<Value> {
                 .into_iter()
                 .map(|(k, v)| Value::Tuple(Arc::from(vec![Value::String(k), Value::Int(v)])))
                 .collect();
-            Ok(Value::Array(Arc::new(out)))
+            Ok(map_entries_cursor(out))
         }
         // A sequence answers an iterator, so a combinator downstream of
         // `iter()` runs when the pipeline is drained rather than here.

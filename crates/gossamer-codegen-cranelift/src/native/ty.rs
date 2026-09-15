@@ -187,10 +187,10 @@ pub(super) fn cl_type_of(tcx: &TyCtxt, ty: Ty, module: &dyn Module) -> ir::Type 
         // declared width (`sum += b` over `[u8]` gave sum mod 256
         // once the JIT tiered up), diverging from the VM.
         TyKind::Int(_) => types::I64,
-        TyKind::Float(float) => match float {
-            FloatTy::F32 => types::F32,
-            FloatTy::F64 => types::F64,
-        },
+        // Every float is a 64-bit runtime value, matching the VM and the LLVM
+        // tier: an aggregate slot holds an f32 as a double word, and the
+        // declared width rounds only at an explicit `as f32` cast.
+        TyKind::Float(_) => types::F64,
         TyKind::Unit | TyKind::Never => types::I64,
         _ => module.target_config().pointer_type(),
     }

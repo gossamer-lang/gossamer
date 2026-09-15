@@ -2,7 +2,10 @@
 
 use std::env
 use std::fs
+use std::fs as f
+use std::fs::{read_dir}
 use std::path
+use std::process as p
 
 fn main() {
     match env::home_dir() {
@@ -34,6 +37,22 @@ fn main() {
         println("walk_entry={}", entry.name)
         Ok(())
     })
+
+    // A module alias and an item import reach the same functions and types
+    // as the qualified spellings above.
+    let _ = f::write(path::join(dir, "alias.txt"), "via alias")
+    match f::read_to_string(path::join(dir, "alias.txt")) {
+        Ok(text) => println("alias_read={}", text)
+        Err(e) => println("alias_read_err={}", e)
+    }
+    match read_dir(dir) {
+        Ok(entries) => println("imported_read_dir={}", entries.len())
+        Err(e) => println("imported_read_dir_err={}", e)
+    }
+    match p::run("echo", #["aliased process"]) {
+        Ok(out) => print("alias_run={}", out.stdout)
+        Err(e) => println("alias_run_err={}", e)
+    }
 
     let _ = fs::remove_dir_all(dir)
 }

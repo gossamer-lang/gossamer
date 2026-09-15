@@ -134,6 +134,18 @@ impl SourceMap {
         self.files[file.0 as usize].origins = origins;
     }
 
+    /// Records one more region of an assembled `file`, innermost of those
+    /// recorded so far.
+    pub fn add_origin(&mut self, file: FileId, origin: OriginSpan) {
+        self.files[file.0 as usize].origins.push(origin);
+    }
+
+    /// The recorded provenance of `file`'s regions, outermost first.
+    #[must_use]
+    pub fn origins(&self, file: FileId) -> &[OriginSpan] {
+        &self.files[file.0 as usize].origins
+    }
+
     /// Resolves a position in an assembled file to the file its bytes
     /// were read from and the matching position there. Returns `(file,
     /// offset)` unchanged for a file with no recorded provenance, and for

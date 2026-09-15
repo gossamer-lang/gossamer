@@ -202,6 +202,7 @@ fn out_of_range_local_is_detected() {
         Statement {
             kind: StatementKind::StorageLive(Local(n_locals + 7)),
             span: body.span,
+            inlined: None,
         },
     );
     let errors = verify_body(body).expect_err("out-of-range local must fail");
@@ -227,6 +228,7 @@ fn out_of_range_local_in_place_projection_is_detected() {
                 rvalue: gossamer_mir::Rvalue::Use(Operand::Copy(Place::local(Local(n_locals + 3)))),
             },
             span: body.span,
+            inlined: None,
         },
     );
     let errors = verify_body(body).expect_err("out-of-range copy must fail");
@@ -397,6 +399,8 @@ fn drop_of_non_owning_is_detected() {
         stmts: Vec::new(),
         terminator: Terminator::Return,
         span,
+        terminator_span: None,
+        terminator_inlined: None,
     });
     let drop_block_id = BlockId(body.blocks.len() as u32);
     body.blocks.push(gossamer_mir::BasicBlock {
@@ -407,6 +411,8 @@ fn drop_of_non_owning_is_detected() {
             target: new_id,
         },
         span,
+        terminator_span: None,
+        terminator_inlined: None,
     });
     let errors = verify_body_typed(body, &tcx).expect_err("drop of i64 must fail");
     assert!(
@@ -433,6 +439,7 @@ fn unary_neg_i128_min_is_detected() {
                 },
             },
             span,
+            inlined: None,
         },
     );
     let errors = verify_body_typed(body, &tcx).expect_err("neg(i128::MIN) must fail");
@@ -465,6 +472,8 @@ fn call_destination_untyped_is_detected() {
         stmts: Vec::new(),
         terminator: Terminator::Return,
         span,
+        terminator_span: None,
+        terminator_inlined: None,
     });
     let call_id = BlockId(body.blocks.len() as u32);
     body.blocks.push(gossamer_mir::BasicBlock {
@@ -477,6 +486,8 @@ fn call_destination_untyped_is_detected() {
             target: Some(cont_id),
         },
         span,
+        terminator_span: None,
+        terminator_inlined: None,
     });
     let errors = verify_body_typed(body, &tcx).expect_err("untyped call destination must fail");
     assert!(
@@ -516,6 +527,7 @@ fn aggregate_operand_count_is_detected() {
                 },
             },
             span,
+            inlined: None,
         },
     );
     let errors = verify_body_typed(body, &tcx).expect_err("short aggregate must fail");
@@ -547,6 +559,7 @@ fn unknown_intrinsic_is_detected() {
                 },
             },
             span: body.span,
+            inlined: None,
         },
     );
     let errors = verify_body_typed(body, &tcx).expect_err("unknown intrinsic must fail");
@@ -577,6 +590,7 @@ fn intrinsic_arity_mismatch_is_detected() {
                 },
             },
             span: body.span,
+            inlined: None,
         },
     );
     let errors = verify_body_typed(body, &tcx).expect_err("bad intrinsic arity must fail");
@@ -620,6 +634,7 @@ fn typed_iterator_statements_preserve_linear_state_shape() {
                     ownership: IteratorOwnership::Owning,
                 },
                 span,
+                inlined: None,
             },
             Statement {
                 kind: StatementKind::IterAdapter {
@@ -630,6 +645,7 @@ fn typed_iterator_statements_preserve_linear_state_shape() {
                     item_ty: i64_ty,
                 },
                 span,
+                inlined: None,
             },
             Statement {
                 kind: StatementKind::IterNext {
@@ -638,6 +654,7 @@ fn typed_iterator_statements_preserve_linear_state_shape() {
                     item_ty: i64_ty,
                 },
                 span,
+                inlined: None,
             },
         ],
     );
@@ -673,6 +690,7 @@ fn typed_iterator_verifier_rejects_aliased_or_mismatched_states() {
                     ownership: IteratorOwnership::Owning,
                 },
                 span,
+                inlined: None,
             },
             Statement {
                 kind: StatementKind::IterAdapter {
@@ -683,6 +701,7 @@ fn typed_iterator_verifier_rejects_aliased_or_mismatched_states() {
                     item_ty: i64_ty,
                 },
                 span,
+                inlined: None,
             },
             Statement {
                 kind: StatementKind::IterAdapter {
@@ -693,6 +712,7 @@ fn typed_iterator_verifier_rejects_aliased_or_mismatched_states() {
                     item_ty: i64_ty,
                 },
                 span,
+                inlined: None,
             },
         ],
     );

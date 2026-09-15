@@ -222,40 +222,32 @@ pub fn render_ir_to_string(bodies: &[Body], tcx: &TyCtxt, allow_fallback: bool) 
 /// Maximum number of concurrent `opt`+`llc` worker threads.
 const PARALLEL_MAX_THREADS: usize = 8;
 
-/// Minimum bodies per parallel chunk, preserving inlining across small programs.
-///
-/// When a hot helper is compiled in a separate chunk from its caller, opt cannot
-/// inline it across the module boundary. Keeping chunks at >= 10 bodies ensures
-/// small programs stay in one module (full inlining) while large programs still
-/// benefit from parallel codegen.
+/// A program with fewer bodies than this compiles as one module: below it the
+/// cost of starting a second LLVM child outweighs anything a split saves.
 const MIN_BODIES_PER_CHUNK: usize = 10;
 
-/// Ceiling on debug LLVM children. Each one commonly touches 45 to 65 MiB, so
-/// the fan-out buys wall time with resident memory. Eight is where the wall
-/// time stops falling on the build benchmarks - past it the chunk floor in
-/// [`MIN_BODIES_PER_CHUNK`] and the link bound the build - and a 42,000-line
-/// project's process tree stays around 140 MiB there.
-const DEBUG_JOB_CEILING: usize = 8;
+/// Ceiling on concurrent LLVM children. Each one commonly touches 45 to 65 MiB,
+/// so the fan-out buys wall time with resident memory. Eight is where the wall
+/// time stops falling on the build benchmarks, and a 42,000-line project's
+/// process tree stays around 140 MiB there.
+const JOB_CEILING: usize = 8;
 
-/// LLVM process fan-out. A release build stays in one child: a chunk boundary
-/// is an inlining boundary, so splitting the module costs the code quality the
-/// profile exists for. A debug build has no inliner to lose, and its LLVM child
-/// is the longest phase of the build, so it takes one chunk per core up to
-/// [`DEBUG_JOB_CEILING`]. `GOS_LLVM_JOBS` overrides both, for a host where the
-/// memory or the throughput matters more than the default trade.
-fn codegen_job_limit(_body_count: usize) -> usize {
+/// Concurrent LLVM children: one per core up to [`JOB_CEILING`], in both
+/// profiles. A release chunk boundary is not an inlining boundary, because
+/// every chunk carries `available_externally` copies of the callees it reaches
+/// in other chunks (see [`chunk_imports`]). `GOS_LLVM_JOBS` overrides the
+/// default, for a host where the memory or the throughput matters more than
+/// the default trade.
+fn codegen_job_limit() -> usize {
     if let Ok(value) = std::env::var("GOS_LLVM_JOBS")
         && let Ok(jobs) = value.parse::<usize>()
         && jobs > 0
     {
         return jobs.min(PARALLEL_MAX_THREADS);
     }
-    match opt_profile() {
-        OptProfile::Debug => std::thread::available_parallelism()
-            .map_or(1, std::num::NonZero::get)
-            .min(DEBUG_JOB_CEILING),
-        OptProfile::Release => 1,
-    }
+    std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(JOB_CEILING)
 }
 
 /// FNV-1a 64-bit hash - deterministic, no `std` hasher randomisation,
@@ -395,22 +387,17 @@ pub fn codegen_phase_times() -> CodegenPhaseTimes {
     }
 }
 
-/// Stable cache key for one body: mixes the body name, its complete MIR
-/// representation, target triple, profile, and compiler fingerprint. The
-/// result is computed once per body per build and reused for cache lookup and
-/// publication.
-fn body_cache_key(
-    body: &Body,
-    triple: &str,
-    profile: OptProfile,
-    cabi_handler_arity: Option<usize>,
-) -> String {
-    use std::fmt::Write as _;
-
+/// Object-cache key for one rendered chunk module.
+///
+/// The key is the module text itself plus every setting outside it that
+/// changes what `opt` and `llc` make of it. The text is exactly what LLVM
+/// compiles, so two builds share an object only when LLVM would be handed the
+/// same input: source positions, resolver ids and interning order that do not
+/// reach the IR cannot split the cache, and nothing that does reach it -
+/// including an imported callee's body - can be missed.
+fn chunk_cache_key(ir: &str, triple: &str, profile: OptProfile) -> String {
     let started = std::time::Instant::now();
-    let mut digest = DigestWriter::new(b"gossamer-llvm-body-cache-v3\0");
-    digest.update(body.name.as_bytes());
-    digest.update(b"\0");
+    let mut digest = DigestWriter::new(b"gossamer-llvm-chunk-ir-cache-v1\0");
     digest.update(triple.as_bytes());
     digest.update(b"\0");
     digest.update(if matches!(profile, OptProfile::Debug) {
@@ -423,15 +410,7 @@ fn body_cache_key(
     digest.update(b"\0");
     digest.update(codegen_configuration_fingerprint(triple, profile).as_bytes());
     digest.update(b"\0");
-    match cabi_handler_arity {
-        Some(arity) => {
-            digest.update(b"runtime-handler:");
-            digest.update(arity.to_string().as_bytes());
-        }
-        None => digest.update(b"gossamer-call-abi"),
-    }
-    digest.update(b"\0");
-    write!(&mut digest, "{body:?}").expect("hashing MIR through fmt cannot fail");
+    digest.update(ir.as_bytes());
     let key = digest.finish();
     record_phase(&CACHE_KEY_US, started);
     key
@@ -657,23 +636,8 @@ fn module_datalayout(triple: &str) -> Option<String> {
     }
 }
 
-fn chunk_cache_key(chunk_indices: &[usize], body_cache_keys: &[String]) -> String {
-    let mut digest = DigestWriter::new(b"gossamer-llvm-chunk-cache-v2\0");
-    for &idx in chunk_indices {
-        digest.update(body_cache_keys[idx].as_bytes());
-        digest.update(b"\0");
-    }
-    digest.finish()
-}
-
-/// Partitions bodies by call-graph strongly connected component, then balances
-/// whole components across the requested worker count. Recursive cycles stay
-/// in one LLVM module, preserving native inlining and avoiding duplicate
-/// declarations inside the hottest mutually recursive paths.
-fn codegen_chunks(bodies: &[Body], requested_chunks: usize) -> Vec<Vec<usize>> {
-    if requested_chunks <= 1 || bodies.len() <= 1 {
-        return vec![(0..bodies.len()).collect()];
-    }
+/// Direct call edges between bodies, by index, deduplicated and sorted.
+fn call_edges(bodies: &[Body]) -> Vec<Vec<usize>> {
     let by_name: std::collections::HashMap<&str, usize> = bodies
         .iter()
         .enumerate()
@@ -698,6 +662,7 @@ fn codegen_chunks(bodies: &[Body], requested_chunks: usize) -> Vec<Vec<usize>> {
                 _ => None,
             };
             if let Some(target) = target
+                && target != idx
                 && !edges[idx].contains(&target)
             {
                 edges[idx].push(target);
@@ -705,41 +670,164 @@ fn codegen_chunks(bodies: &[Body], requested_chunks: usize) -> Vec<Vec<usize>> {
         }
         edges[idx].sort_unstable();
     }
+    edges
+}
 
+/// The source module a body belongs to: the first segment of its qualified
+/// name, or the entry file (the empty string) for an unqualified one. A
+/// monomorphised instance, a lifted closure and a synthesised helper carry no
+/// module prefix and file under the entry.
+fn body_module(name: &str) -> &str {
+    name.split_once("::").map_or("", |(module, _)| module)
+}
+
+/// Partitions bodies into LLVM modules by the source module that declares
+/// them, so an edit confined to one module leaves every other module's
+/// rendered IR, and therefore its cached object, untouched.
+///
+/// A partition that depended on how many bodies the whole program has - a
+/// balance across workers, say - would move bodies between modules whenever
+/// any function was added or removed anywhere, and every module would miss
+/// the cache. Modules joined by a recursive call cycle share one LLVM module,
+/// so the cycle's members stay inlinable into each other. A program below
+/// twice [`MIN_BODIES_PER_CHUNK`] bodies stays one module.
+fn codegen_chunks(bodies: &[Body]) -> Vec<Vec<usize>> {
+    if bodies.len() < 2 * MIN_BODIES_PER_CHUNK {
+        return vec![(0..bodies.len()).collect()];
+    }
+    let edges = call_edges(bodies);
+    let mut modules: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for body in bodies {
+        let next = modules.len();
+        modules.entry(body_module(&body.name)).or_insert(next);
+    }
+    let module_of: Vec<usize> = bodies
+        .iter()
+        .map(|body| modules[body_module(&body.name)])
+        .collect();
+    let mut parent: Vec<usize> = (0..modules.len()).collect();
+    for component in strongly_connected_components(&edges) {
+        let Some((&first, rest)) = component.split_first() else {
+            continue;
+        };
+        for &member in rest {
+            let a = union_find_root(&mut parent, module_of[first]);
+            let b = union_find_root(&mut parent, module_of[member]);
+            if a != b {
+                parent[a.max(b)] = a.min(b);
+            }
+        }
+    }
+    // A chunk is named, and ordered, by the first module name it holds, which
+    // the modules alone decide.
+    let mut group_name: std::collections::HashMap<usize, &str> = std::collections::HashMap::new();
+    for (name, &id) in &modules {
+        let group = union_find_root(&mut parent, id);
+        group_name.entry(group).or_insert(name);
+    }
+    let mut chunks: std::collections::BTreeMap<&str, Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for (idx, &module) in module_of.iter().enumerate() {
+        let group = union_find_root(&mut parent, module);
+        chunks.entry(group_name[&group]).or_default().push(idx);
+    }
+    chunks.into_values().collect()
+}
+
+/// Bodies each chunk may inline from other chunks, by chunk.
+///
+/// A release chunk carries an `available_externally` definition of every
+/// callee in another chunk that is small enough for `opt` to inline, so a
+/// module boundary costs no inlining: `opt` sees the callee's body exactly as
+/// it would inside one whole-program module, and drops the copy once it has
+/// served. The chunk's cache key covers the copies, so editing a callee
+/// rebuilds every chunk that inlined it. Callees of an imported body are
+/// imported in turn, the way ThinLTO imports a chain, with the size budget
+/// halving at each step. A debug build runs no inliner and imports nothing.
+fn chunk_imports(bodies: &[Body], chunks: &[Vec<usize>], profile: OptProfile) -> Vec<Vec<usize>> {
+    if matches!(profile, OptProfile::Debug) || chunks.len() < 2 {
+        return vec![Vec::new(); chunks.len()];
+    }
+    let edges = call_edges(bodies);
+    let cabi_handlers = collect_cabi_handlers(bodies);
+    let importable: Vec<bool> = bodies
+        .iter()
+        .map(|body| {
+            body.name != "main"
+                && !cabi_handlers.contains_key(&body.name)
+                && !body_has_wide_spawn(body)
+        })
+        .collect();
+    let cost: Vec<usize> = bodies
+        .iter()
+        .map(|body| body.blocks.iter().map(|b| b.stmts.len() + 1).sum())
+        .collect();
+    chunks
+        .iter()
+        .map(|chunk| {
+            let members: std::collections::HashSet<usize> = chunk.iter().copied().collect();
+            let mut imported: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+            let mut frontier: Vec<usize> = chunk.clone();
+            let mut budget = IMPORT_COST_LIMIT;
+            while !frontier.is_empty() && budget > 0 {
+                let mut next = Vec::new();
+                for &caller in &frontier {
+                    for &callee in &edges[caller] {
+                        if members.contains(&callee)
+                            || !importable[callee]
+                            || cost[callee] > budget
+                            || !imported.insert(callee)
+                        {
+                            continue;
+                        }
+                        next.push(callee);
+                    }
+                }
+                frontier = next;
+                budget /= 2;
+            }
+            imported.into_iter().collect()
+        })
+        .collect()
+}
+
+/// Largest callee, in MIR statements plus terminators, a chunk imports from
+/// another chunk. The release MIR inliner has already spliced the smallest
+/// callees into their callers, so what `opt` can still usefully inline across
+/// a module boundary is the band just above that inliner's own limit. On the
+/// LangArena suite a budget of 40 measures the same instruction counts as one
+/// whole-program module and as a budget of 160, and every body imported costs
+/// compile time in each chunk that carries it and widens what an edit to it
+/// rebuilds.
+const IMPORT_COST_LIMIT: usize = 40;
+
+/// The representative of `node`'s set in a union-find forest, halving the
+/// path on the way up.
+fn union_find_root(parent: &mut [usize], mut node: usize) -> usize {
+    while parent[node] != node {
+        parent[node] = parent[parent[node]];
+        node = parent[node];
+    }
+    node
+}
+
+/// Tarjan's strongly connected components over `edges`, each sorted.
+fn strongly_connected_components(edges: &[Vec<usize>]) -> Vec<Vec<usize>> {
     let mut tarjan = Tarjan {
-        edges: &edges,
+        edges,
         next_index: 0,
-        indices: vec![None; bodies.len()],
-        low: vec![0; bodies.len()],
+        indices: vec![None; edges.len()],
+        low: vec![0; edges.len()],
         stack: Vec::new(),
-        on_stack: vec![false; bodies.len()],
+        on_stack: vec![false; edges.len()],
         components: Vec::new(),
     };
-    for node in 0..bodies.len() {
+    for node in 0..edges.len() {
         if tarjan.indices[node].is_none() {
             tarjan.visit(node);
         }
     }
-    tarjan.components.sort_by(|left, right| {
-        right
-            .len()
-            .cmp(&left.len())
-            .then_with(|| left[0].cmp(&right[0]))
-    });
-    let n_chunks = requested_chunks.min(tarjan.components.len()).max(1);
-    let mut chunks = vec![Vec::new(); n_chunks];
-    for component in tarjan.components {
-        let target = chunks
-            .iter()
-            .enumerate()
-            .min_by_key(|(idx, chunk)| (chunk.len(), *idx))
-            .map_or(0, |(idx, _)| idx);
-        chunks[target].extend(component);
-    }
-    for chunk in &mut chunks {
-        chunk.sort_unstable();
-    }
-    chunks
+    tarjan.components
 }
 
 /// RC type-meta blobs in symbol order.
@@ -753,13 +841,31 @@ fn sorted_rc_metas(tcx: &TyCtxt) -> Vec<(&str, &[i64])> {
     metas
 }
 
-/// Renders all bodies in `chunk_indices` as a single LLVM IR module.
-///
-/// Bodies not in the chunk get `declare` stubs; bodies in the chunk get
-/// `define`. Lowering bugs are returned immediately.
-fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<String, BuildError> {
-    let chunk_set: std::collections::HashSet<usize> = chunk_indices.iter().copied().collect();
+/// Adds every quoted global name (`@"name"`) in `text` to `out`.
+fn collect_quoted_symbols<'t>(text: &'t str, out: &mut std::collections::HashSet<&'t str>) {
+    let mut rest = text;
+    while let Some(at) = rest.find("@\"") {
+        let after = &rest[at + 2..];
+        let Some(close) = after.find('"') else {
+            break;
+        };
+        out.insert(&after[..close]);
+        rest = &after[close + 1..];
+    }
+}
 
+/// Renders all bodies in `chunk_indices` as a single LLVM IR module, with an
+/// `available_externally` copy of each body in `imports`.
+///
+/// Only what the rendered bodies name is declared: another body, or an RC
+/// type-meta blob, the chunk never references would put the whole program's
+/// shape into every chunk's text, and every chunk's cache key with it.
+/// Lowering bugs are returned immediately.
+fn render_chunk_module(
+    chunk_indices: &[usize],
+    imports: &[usize],
+    ctx: &ModuleCtx<'_>,
+) -> Result<String, BuildError> {
     let string_pool =
         std::rc::Rc::new(std::cell::RefCell::new(crate::lower::StringPool::default()));
 
@@ -777,9 +883,11 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
     let cabi_handlers = collect_cabi_handlers(ctx.all_bodies);
     let sret_bodies = collect_sret_bodies(ctx.all_bodies, ctx.tcx);
 
-    for &idx in chunk_indices {
+    let defined = chunk_indices.iter().map(|&idx| (idx, false));
+    let copied = imports.iter().map(|&idx| (idx, true));
+    for (idx, available_externally) in defined.chain(copied) {
         let body = &ctx.all_bodies[idx];
-        if body.name == "main" {
+        if body.name == "main" && !available_externally {
             main_idx = Some(idx);
         }
 
@@ -791,18 +899,32 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
         lowerer.cabi_handlers.clone_from(&cabi_handlers);
         lowerer.sret_bodies.clone_from(&sret_bodies);
 
-        match lowerer.lower() {
-            Ok(text) => {
-                globals_raw.extend(lowerer.take_module_globals());
-                collect_thunk_names_in_body(body, &mut thunk_names);
-                body_irs.push(text);
-            }
-            Err(BuildError::InternalLoweringBug(msg)) => {
-                return Err(BuildError::InternalLoweringBug(msg));
-            }
-            Err(e) => return Err(e),
+        let text = lowerer.lower()?;
+        globals_raw.extend(lowerer.take_module_globals());
+        collect_thunk_names_in_body(body, &mut thunk_names);
+        if available_externally {
+            let Some(rest) = text.strip_prefix("define ") else {
+                return Err(BuildError::InternalLoweringBug(
+                    "a lowered body does not open with its `define` line",
+                ));
+            };
+            body_irs.push(format!("define available_externally {rest}"));
+        } else {
+            body_irs.push(text);
         }
     }
+
+    // Every `@"name"` the module's own text mentions. Bodies and metas
+    // outside this set are left out of the module.
+    let mut referenced: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for text in body_irs.iter().chain(globals_raw.iter()) {
+        collect_quoted_symbols(text, &mut referenced);
+    }
+    let local_symbols: std::collections::HashSet<String> = chunk_indices
+        .iter()
+        .chain(imports)
+        .map(|&idx| crate::lower::mangle_fn_name(&ctx.all_bodies[idx].name).into_owned())
+        .collect();
 
     let mut out = String::new();
     writeln!(out, "; ModuleID = \"gossamer\"").unwrap();
@@ -823,9 +945,10 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
     }
     writeln!(out).unwrap();
 
-    // Extern declares for bodies outside the chunk.
-    for (i, body) in ctx.all_bodies.iter().enumerate() {
-        if !chunk_set.contains(&i) {
+    // Extern declares for the bodies in other chunks this module calls.
+    for body in ctx.all_bodies {
+        let symbol = crate::lower::mangle_fn_name(&body.name);
+        if referenced.contains(symbol.as_ref()) && !local_symbols.contains(symbol.as_ref()) {
             let decl = extern_declare_with(body, ctx.tcx, &sret_bodies);
             out.push_str(decl.trim_end());
             writeln!(out).unwrap();
@@ -870,11 +993,13 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
 
     // RC type-meta blobs - one `private constant [N x i64]` per
     // RC-managed allocation shape, referenced by `gos_rc_alloc` sites.
-    // Emitted in every chunk that might reference them; `private` makes
-    // each object file self-contained and unreferenced copies are
-    // stripped by `opt`/the linker.
+    // Emitted in each chunk that references them; `private` makes each
+    // object file self-contained.
     let mut emitted_any_meta = false;
     for (symbol, blob) in sorted_rc_metas(ctx.tcx) {
+        if !referenced.contains(symbol) {
+            continue;
+        }
         let elems: Vec<String> = blob.iter().map(|v| format!("i64 {v}")).collect();
         writeln!(
             out,
@@ -920,7 +1045,7 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
         // treats bare `linkonce_odr` as a duplicate strong symbol error.
         for (name, arity) in &cabi_handlers {
             let handler_idx = ctx.all_bodies.iter().position(|b| b.name == *name);
-            let owns_handler = handler_idx.is_some_and(|i| chunk_set.contains(&i));
+            let owns_handler = handler_idx.is_some_and(|i| chunk_indices.contains(&i));
             if owns_handler {
                 out.push_str(&render_cabi_handler_thunk(name, *arity));
             } else {
@@ -986,28 +1111,22 @@ fn render_chunk_module(chunk_indices: &[usize], ctx: &ModuleCtx<'_>) -> Result<S
     Ok(out)
 }
 
-/// Core of the P2+P3 build path.
+/// Core of the parallel, incremental build path.
 ///
-/// **Phase 1 (incremental - P3):** bodies are partitioned into N chunks
-/// where N is capped by both `PARALLEL_MAX_THREADS` and a minimum
-/// bodies-per-chunk threshold (10). The threshold keeps hot callees in
-/// the same module as their callers so opt can inline across them; a
-/// 3-body program like `spectralnorm` compiles as one module with full
-/// inlining, while a 78-body program like `ironknight` splits into 8
-/// chunks for parallel compilation. Each chunk's cache key mixes the
-/// per-body MIR hashes for all bodies it covers.
+/// **Partition.** Bodies split into LLVM modules by the source module that
+/// declares them ([`codegen_chunks`]), and a release chunk also carries
+/// `available_externally` copies of the callees it reaches in other chunks
+/// ([`chunk_imports`]).
 ///
-/// **Phase 2 (rendering - serial):** cache-miss chunks are lowered to
-/// LLVM IR via [`render_chunk_module`]. Each chunk gets one `.ll` with
-/// all its bodies defined plus extern declares for bodies in other chunks.
-/// Rendering is serial because [`Lowerer`] uses `Rc<RefCell<_>>` state
-/// that is not `Send`; at ~microseconds per body the serial cost is
-/// negligible compared to `opt`+`llc`.
+/// **Render and key (serial).** Every chunk is lowered to IR text, and the
+/// text is the cache identity ([`chunk_cache_key`]): a chunk whose text an
+/// earlier build compiled is served from the object cache, and only the rest
+/// reach LLVM. Rendering is serial because [`Lowerer`] uses `Rc<RefCell<_>>`
+/// state that is not `Send`; it is a small fraction of what `opt` + `llc`
+/// cost.
 ///
-/// **Phase 3 (compilation - parallel - P2):** one `opt`+`llc` process
-/// pair per chunk, all N running concurrently. Process-launch overhead is
-/// bounded to N invocations regardless of program size - for 78 bodies
-/// on 8 threads this is 8 launches instead of 78.
+/// **Compile (parallel).** Cache misses run one `opt` + `llc` pair each on a
+/// pool of [`codegen_job_limit`] workers.
 ///
 /// Returns `(object_paths, triple, fallback_body_names)`.
 fn compile_bodies_parallel_incremental(
@@ -1020,18 +1139,6 @@ fn compile_bodies_parallel_incremental(
     let llvm_triple = llvm_target_triple_for(&triple);
     let profile = opt_profile();
     let dump = std::env::var("GOS_LLVM_DUMP").is_ok();
-    let cabi_handlers = collect_cabi_handlers(bodies);
-    let body_cache_keys: Vec<String> = bodies
-        .iter()
-        .map(|body| {
-            body_cache_key(
-                body,
-                &llvm_triple,
-                profile,
-                cabi_handlers.get(&body.name).copied(),
-            )
-        })
-        .collect();
 
     // Precompute program-wide lookup tables shared across all lowerers.
     let mut fn_name_by_def: std::collections::HashMap<u32, String> =
@@ -1063,79 +1170,56 @@ fn compile_bodies_parallel_incremental(
         triple: &llvm_triple,
     };
 
-    // Partition all bodies into N chunks. Chunk assignment is deterministic
-    // so the cache key is stable across builds with identical bodies.
-    //
-    // Bound fan-out by both available CPUs and the memory-aware LLVM job
-    // policy. The bodies-per-chunk cap still preserves the inlining floor.
-    //
-    // The chunk count decides which bodies share a module, and therefore
-    // the emitted code and its layout. Reproducible mode pins it to one
-    // module so the artifact depends only on the source and the target,
-    // never on the host's CPU count or a job-limit override.
-    let n_chunks = if want_reproducible() {
-        1
+    // Reproducible mode pins the build to one module so the artifact depends
+    // only on the source and the target.
+    let body_chunks = if want_reproducible() {
+        vec![(0..bodies.len()).collect()]
     } else {
-        let available_threads = std::thread::available_parallelism()
-            .map_or(PARALLEL_MAX_THREADS, std::num::NonZero::get);
-        let max_threads = available_threads.min(codegen_job_limit(bodies.len()));
-        let ideal_n_chunks = max_threads.min(bodies.len());
-        ideal_n_chunks
-            .min(bodies.len().div_ceil(MIN_BODIES_PER_CHUNK))
-            .max(1)
+        codegen_chunks(bodies)
     };
-    let body_chunks = codegen_chunks(bodies, n_chunks);
+    let imports = chunk_imports(bodies, &body_chunks, profile);
 
-    // ---------------------------------------------------------------
-    // Phase 1 - chunk-level incremental cache check
-    // ---------------------------------------------------------------
-    let mut result_objects: Vec<(usize, PathBuf)> = Vec::new(); // (chunk_idx, path)
-    // (chunk_idx, body_indices, cache_key, ll_path, obj_path)
-    let mut chunks_to_compile: Vec<(usize, Vec<usize>, String, PathBuf, PathBuf)> = Vec::new();
-    let fallback_bodies: Vec<String> = Vec::new();
-
-    for (chunk_idx, body_indices) in body_chunks.into_iter().enumerate() {
+    // (chunk_idx, cache_key, ll_path, obj_path)
+    let mut chunks_to_compile: Vec<(usize, String, PathBuf, PathBuf)> = Vec::new();
+    let mut result_objects: Vec<(usize, PathBuf)> = Vec::new();
+    for (chunk_idx, body_indices) in body_chunks.iter().enumerate() {
         let obj_path = obj_dir.join(format!("chunk{chunk_idx}.o"));
         let ll_path = obj_dir.join(format!("chunk{chunk_idx}.ll"));
-
-        let key = chunk_cache_key(&body_indices, &body_cache_keys);
-        if let Some(hit) = cache_dir
+        let started = std::time::Instant::now();
+        let ir =
+            render_chunk_module(body_indices, &imports[chunk_idx], &ctx).map_err(|e| match e {
+                BuildError::InternalLoweringBug(msg) => {
+                    anyhow!("llvm backend internal lowering bug: {msg}")
+                }
+                BuildError::Tool(msg) => anyhow!("llvm backend: tool: {msg}"),
+                BuildError::Io(err) => err,
+            })?;
+        record_phase(&RENDER_US, started);
+        let key = chunk_cache_key(&ir, &llvm_triple, profile);
+        let hit = cache_dir
             .as_ref()
             .map(|cd| cd.join(format!("{key}.o")))
             .filter(|p| p.exists())
-        {
-            if std::fs::copy(&hit, &obj_path).is_ok() {
-                result_objects.push((chunk_idx, obj_path));
-                continue;
-            }
+            .is_some_and(|hit| std::fs::copy(&hit, &obj_path).is_ok());
+        if std::env::var_os("GOS_PIPELINE_TRACE").is_some() {
+            eprintln!(
+                "llvm pipeline: chunk{chunk_idx} `{}` {} bodies, {} imported, {} IR bytes, {}",
+                body_indices
+                    .first()
+                    .map_or("", |&idx| body_module(&bodies[idx].name)),
+                body_indices.len(),
+                imports[chunk_idx].len(),
+                ir.len(),
+                if hit { "cached" } else { "compiling" },
+            );
         }
-        chunks_to_compile.push((chunk_idx, body_indices, key, ll_path, obj_path));
-    }
-
-    if chunks_to_compile.is_empty() {
-        result_objects.sort_by_key(|(i, _)| *i);
-        return Ok((
-            result_objects.into_iter().map(|(_, p)| p).collect(),
-            triple,
-            fallback_bodies,
-        ));
-    }
-
-    // ---------------------------------------------------------------
-    // Phase 2 - render chunk .ll files (serial)
-    // ---------------------------------------------------------------
-    for (_, body_indices, _, ll_path, _) in &chunks_to_compile {
-        let started = std::time::Instant::now();
-        let ir = render_chunk_module(body_indices, &ctx).map_err(|e| match e {
-            BuildError::InternalLoweringBug(msg) => {
-                anyhow!("llvm backend internal lowering bug: {msg}")
-            }
-            BuildError::Tool(msg) => anyhow!("llvm backend: tool: {msg}"),
-            BuildError::Io(err) => err,
-        })?;
-        std::fs::write(ll_path, ir.as_bytes())
+        if hit {
+            result_objects.push((chunk_idx, obj_path));
+            continue;
+        }
+        std::fs::write(&ll_path, ir.as_bytes())
             .with_context(|| format!("writing {}", ll_path.display()))?;
-        record_phase(&RENDER_US, started);
+        chunks_to_compile.push((chunk_idx, key, ll_path, obj_path));
     }
 
     // Stitch chunk files into unit.ll for tools / tests that expect
@@ -1144,7 +1228,7 @@ fn compile_bodies_parallel_incremental(
         let dump_path = obj_dir.join("unit.ll");
         if let Ok(mut f) = std::fs::File::create(&dump_path) {
             use std::io::Write as _;
-            for (chunk_idx, _, _, ll_path, _) in &chunks_to_compile {
+            for (chunk_idx, _, ll_path, _) in &chunks_to_compile {
                 if let Ok(text) = std::fs::read_to_string(ll_path) {
                     let _ = write!(f, "; === chunk{chunk_idx} ===\n{text}\n");
                 }
@@ -1153,40 +1237,39 @@ fn compile_bodies_parallel_incremental(
         eprintln!("llvm backend: IR at {}", dump_path.display());
     }
 
-    // ---------------------------------------------------------------
-    // Phase 3 - parallel opt+llc (one process pair per chunk - P2)
-    // ---------------------------------------------------------------
     let err_slot: parking_lot::Mutex<Option<anyhow::Error>> = parking_lot::Mutex::new(None);
     let compiled: parking_lot::Mutex<Vec<(usize, PathBuf)>> = parking_lot::Mutex::new(Vec::new());
-
-    let err_ref = &err_slot;
-    let compiled_ref = &compiled;
-    let triple_ref: &str = &llvm_triple;
-    let cache_ref = &cache_dir;
-
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let workers = codegen_job_limit().min(chunks_to_compile.len());
     std::thread::scope(|scope| {
-        for (chunk_idx, _, cache_key, ll_path, obj_path) in &chunks_to_compile {
-            let chunk_idx = *chunk_idx;
-            let cache_key = cache_key.clone();
-            let ll_path = ll_path.clone();
-            let obj_path = obj_path.clone();
-            scope.spawn(move || {
-                if err_ref.lock().is_some() {
-                    return;
-                }
-                match invoke_llc_pipeline(&ll_path, &obj_path, triple_ref, /*announce=*/ false) {
-                    Ok(()) => {
-                        if !dump {
-                            let _ = std::fs::remove_file(&ll_path);
-                        }
-                        if let Some(cd) = cache_ref {
-                            let _ = std::fs::copy(&obj_path, cd.join(format!("{cache_key}.o")));
-                        }
-                        compiled_ref.lock().push((chunk_idx, obj_path));
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let slot = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((chunk_idx, cache_key, ll_path, obj_path)) =
+                        chunks_to_compile.get(slot)
+                    else {
+                        return;
+                    };
+                    if err_slot.lock().is_some() {
+                        return;
                     }
-                    Err(e) => {
-                        *err_ref.lock() = Some(e);
+                    if let Err(e) = invoke_llc_pipeline(
+                        ll_path,
+                        obj_path,
+                        &llvm_triple,
+                        /*announce=*/ false,
+                    ) {
+                        *err_slot.lock() = Some(e);
+                        return;
                     }
+                    if !dump {
+                        let _ = std::fs::remove_file(ll_path);
+                    }
+                    if let Some(cd) = &cache_dir {
+                        publish_cached_object(obj_path, cd, cache_key);
+                    }
+                    compiled.lock().push((*chunk_idx, obj_path.clone()));
                 }
             });
         }
@@ -1200,8 +1283,20 @@ fn compile_bodies_parallel_incremental(
     Ok((
         result_objects.into_iter().map(|(_, p)| p).collect(),
         triple,
-        fallback_bodies,
+        Vec::new(),
     ))
+}
+
+/// Copies a freshly compiled object into the cache under `key`. The copy is
+/// written beside its final name and renamed into place, so a concurrent
+/// build reading the cache sees either the whole object or none of it.
+fn publish_cached_object(obj_path: &std::path::Path, cache_dir: &std::path::Path, key: &str) {
+    let staged = cache_dir.join(format!("{key}.o.{}.tmp", std::process::id()));
+    if std::fs::copy(obj_path, &staged).is_ok()
+        && std::fs::rename(&staged, cache_dir.join(format!("{key}.o"))).is_err()
+    {
+        let _ = std::fs::remove_file(&staged);
+    }
 }
 
 fn dump_mir(bodies: &[Body], tcx: &TyCtxt) {
@@ -1561,7 +1656,7 @@ fn render_module_to_path(
 static DEBUG_INFO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Unit name and line-start offsets registered by [`set_source_lines`].
-static SOURCE_LINES: std::sync::RwLock<Option<(String, Vec<u32>)>> = std::sync::RwLock::new(None);
+static SOURCE_POSITIONS: std::sync::RwLock<Option<SourcePositions>> = std::sync::RwLock::new(None);
 
 /// Process-wide flag toggled by [`set_reproducible`] requesting
 /// bit-identical builds across runs. Sets `SOURCE_DATE_EPOCH`
@@ -1628,28 +1723,119 @@ pub fn set_debug_info(enabled: bool) {
     DEBUG_INFO.store(enabled, std::sync::atomic::Ordering::Release);
 }
 
-/// Records where each source file's lines begin, so the backend can turn a
-/// MIR span's byte offset into the line a panic report names. The source map
-/// itself does not survive the frontend, so the driver hands over this
-/// compact form before codegen runs.
-pub fn set_source_lines(unit: &str, line_starts: Vec<u32>) {
-    let mut slot = SOURCE_LINES
-        .write()
-        .expect("source-line table lock poisoned");
-    *slot = Some((unit.to_string(), line_starts));
+/// Where each line of a compiled unit begins, and which file each region of
+/// the unit was read from.
+///
+/// A project is compiled as one assembled unit, but a panic report names the
+/// file a function was written in and the line within that file. Resolving
+/// through the region's own file also keeps a module's generated code - and
+/// so its cached object - independent of edits to the files assembled around
+/// it.
+#[derive(Debug, Clone, Default)]
+pub struct SourcePositions {
+    unit: String,
+    unit_lines: Vec<u32>,
+    files: Vec<(String, Vec<u32>)>,
+    regions: Vec<SourceRegion>,
 }
 
-/// The registered file name and the one-based line for `offset`, or `None`
-/// when no table has been registered for this build.
+#[derive(Debug, Clone, Copy)]
+struct SourceRegion {
+    start: u32,
+    end: u32,
+    origin_start: u32,
+    file: usize,
+}
+
+/// The byte offset each line of `text` begins at.
+fn line_starts(text: &str) -> Vec<u32> {
+    std::iter::once(0)
+        .chain(
+            text.bytes()
+                .enumerate()
+                .filter(|&(_, byte)| byte == b'\n')
+                .map(|(offset, _)| u32::try_from(offset + 1).unwrap_or(u32::MAX)),
+        )
+        .collect()
+}
+
+impl SourcePositions {
+    /// A table for the unit named `unit`, whose assembled text is `source`.
+    #[must_use]
+    pub fn new(unit: impl Into<String>, source: &str) -> Self {
+        Self {
+            unit: unit.into(),
+            unit_lines: line_starts(source),
+            files: Vec::new(),
+            regions: Vec::new(),
+        }
+    }
+
+    /// Records that the unit's bytes `start..end` were read from `file`,
+    /// whose text is `file_source`, beginning at `origin_start`. A later
+    /// region covering the same position wins, as a more deeply embedded
+    /// file does in the source map.
+    pub fn add_region(
+        &mut self,
+        start: u32,
+        end: u32,
+        origin_start: u32,
+        file: &str,
+        file_source: &str,
+    ) {
+        let index = if let Some(index) = self.files.iter().position(|(name, _)| name == file) {
+            index
+        } else {
+            self.files
+                .push((file.to_string(), line_starts(file_source)));
+            self.files.len() - 1
+        };
+        self.regions.push(SourceRegion {
+            start,
+            end,
+            origin_start,
+            file: index,
+        });
+    }
+
+    /// The file and one-based line a unit offset was written at.
+    fn position(&self, offset: u32) -> (String, u32) {
+        // `partition_point` gives the count of line starts at or before the
+        // offset, which is exactly the one-based line number.
+        let line_of = |starts: &[u32], at: u32| starts.partition_point(|start| *start <= at).max(1);
+        match self
+            .regions
+            .iter()
+            .rev()
+            .find(|region| offset >= region.start && offset < region.end)
+        {
+            Some(region) => {
+                let (name, starts) = &self.files[region.file];
+                let local = region.origin_start + (offset - region.start);
+                (name.clone(), line_of(starts, local) as u32)
+            }
+            None => (self.unit.clone(), line_of(&self.unit_lines, offset) as u32),
+        }
+    }
+}
+
+/// Registers the position table codegen resolves MIR spans through. The
+/// source map does not survive the frontend, so the driver hands over this
+/// compact form before codegen runs.
+pub fn set_source_positions(positions: SourcePositions) {
+    let mut slot = SOURCE_POSITIONS
+        .write()
+        .expect("source-position table lock poisoned");
+    *slot = Some(positions);
+}
+
+/// The file name and the one-based line for `offset`, or `None` when no
+/// table has been registered for this build.
 pub(crate) fn source_position(offset: u32) -> Option<(String, u32)> {
-    let slot = SOURCE_LINES
+    let slot = SOURCE_POSITIONS
         .read()
-        .expect("source-line table lock poisoned");
-    let (unit, starts) = slot.as_ref()?;
-    // `partition_point` gives the count of line starts at or before the
-    // offset, which is exactly the one-based line number.
-    let line = starts.partition_point(|start| *start <= offset);
-    Some((unit.clone(), line.max(1) as u32))
+        .expect("source-position table lock poisoned");
+    Some(slot.as_ref()?.position(offset))
 }
 
 /// `true` when the build should maintain the runtime call-stack a panic
@@ -2342,8 +2528,18 @@ fn render_shape_thunk_with_linkage(name: &str, linkage: &str) -> Option<String> 
         input_tys.push(shape_char_to_llvm_ty(c)?);
     }
     let unit_ret = ret_char == 'u';
+    // A narrow integer, `bool`, or `char` result is answered as a whole word:
+    // a caller reading the word the runtime's callback types declare would
+    // otherwise see whatever the narrow return left in the upper bits.
+    let widened = shape_char_widens(ret_char);
     let mut out = String::new();
-    let header_ret = if unit_ret { "void" } else { ret_ty };
+    let header_ret = if unit_ret {
+        "void"
+    } else if widened {
+        "i64"
+    } else {
+        ret_ty
+    };
     let mut params = String::from("ptr %env");
     for (i, t) in input_tys.iter().enumerate() {
         let _ = write!(params, ", {t} %a{i}");
@@ -2378,8 +2574,17 @@ fn render_shape_thunk_with_linkage(name: &str, linkage: &str) -> Option<String> 
         writeln!(out, "  ret void").unwrap();
     } else if ret_char == 'b' {
         let _ = writeln!(out, "  %r = call i1 %fn_ptr({call_args})");
-        let _ = writeln!(out, "  %rb = zext i1 %r to i8");
-        let _ = writeln!(out, "  ret i8 %rb");
+        let _ = writeln!(out, "  %rw = zext i1 %r to i64");
+        let _ = writeln!(out, "  ret i64 %rw");
+    } else if widened {
+        let extension = if matches!(ret_char, 'y' | 'k' | 'j') {
+            "sext"
+        } else {
+            "zext"
+        };
+        let _ = writeln!(out, "  %r = call {ret_ty} %fn_ptr({call_args})");
+        let _ = writeln!(out, "  %rw = {extension} {ret_ty} %r to i64");
+        let _ = writeln!(out, "  ret i64 %rw");
     } else {
         let _ = writeln!(out, "  %r = call {ret_ty} %fn_ptr({call_args})");
         let _ = writeln!(out, "  ret {ret_ty} %r");
@@ -2388,15 +2593,21 @@ fn render_shape_thunk_with_linkage(name: &str, linkage: &str) -> Option<String> 
     Some(out)
 }
 
+/// Whether a thunk with this return shape answers a word widened from a
+/// narrower integer.
+fn shape_char_widens(c: char) -> bool {
+    matches!(c, 'b' | 'c' | 'y' | 'Y' | 'k' | 'K' | 'j' | 'J')
+}
+
 /// Maps a shape character produced by
 /// `gossamer_mir::mangle_callable_shape` to its LLVM IR type
 /// name. Mirrors `shape_char_to_cl_type` on the Cranelift side.
 fn shape_char_to_llvm_ty(c: char) -> Option<&'static str> {
     Some(match c {
         'q' => "ptr",
-        'b' | 'y' => "i8",
-        'k' => "i16",
-        'c' | 'j' => "i32",
+        'b' | 'y' | 'Y' => "i8",
+        'k' | 'K' => "i16",
+        'c' | 'j' | 'J' => "i32",
         'i' => "i64",
         'f' => "double",
         'g' => "float",
@@ -2561,7 +2772,7 @@ fn invoke_llc_pipeline(
     // one and the machine passes run. `O0` selects the fast allocator, which
     // keeps every value in memory: it costs the benchmark suite 1.1x to 7x and
     // saves two thirds of the back end's time, which the fan-out across cores
-    // (see [`DEBUG_JOB_CEILING`]) overlaps. `O2` costs more than `O1` and
+    // (see [`JOB_CEILING`]) overlaps. `O2` costs more than `O1` and
     // measures the same, and there is no setting between the two - `-O0
     // -regalloc=greedy` is refused.
     //
@@ -3745,12 +3956,12 @@ mod cabi_thunk_tests {
 
     /// Every runtime shim that invokes a gossamer callback as
     /// `extern "C" fn(..) -> i128` must be collected, so the callback is
-    /// reached through its `<16 x i8>` thunk on Win64. `gos_rt_fs_walk_dir`
+    /// reached through its `<16 x i8>` thunk on Win64. `gos_rt_fs_walk_dir_raw`
     /// takes its visitor as an env blob whose slot 0 holds the callable,
     /// the same shape as the i128 combinators.
     #[test]
     fn walk_dir_visitor_is_collected_as_a_cabi_handler() {
-        let handlers = super::collect_cabi_handlers(&[env_callback_body("gos_rt_fs_walk_dir")]);
+        let handlers = super::collect_cabi_handlers(&[env_callback_body("gos_rt_fs_walk_dir_raw")]);
         assert!(
             handlers.contains_key("visit"),
             "walk_dir visitor must be collected, got: {handlers:?}"
@@ -3800,6 +4011,7 @@ mod cabi_thunk_tests {
                 rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(ret_words))),
             },
             span,
+            inlined: None,
         });
         if let Terminator::Call { args, .. } = &mut block.terminator {
             args.push(Operand::Copy(Place::local(words)));
@@ -3827,6 +4039,7 @@ mod cabi_thunk_tests {
                 rvalue,
             },
             span,
+            inlined: None,
         };
         Body {
             name: "main".to_string(),
@@ -3865,6 +4078,8 @@ mod cabi_thunk_tests {
                     target: None,
                 },
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             }],
             span,
         }
@@ -3873,9 +4088,15 @@ mod cabi_thunk_tests {
 
 #[cfg(test)]
 mod codegen_partition_tests {
-    use super::{OptProfile, body_cache_key, codegen_chunks, codegen_job_limit};
+    use super::{
+        JOB_CEILING, OptProfile, chunk_cache_key, chunk_imports, codegen_chunks, codegen_job_limit,
+        collect_quoted_symbols,
+    };
     use gossamer_lex::{SourceMap, Span};
-    use gossamer_mir::{BasicBlock, BlockId, Body, ConstValue, Local, Operand, Place, Terminator};
+    use gossamer_mir::{
+        BasicBlock, BlockId, Body, ConstValue, Local, Operand, Place, Statement, StatementKind,
+        Terminator,
+    };
 
     fn span() -> Span {
         let mut map = SourceMap::new();
@@ -3883,81 +4104,184 @@ mod codegen_partition_tests {
         Span::new(file, 0, 0)
     }
 
-    fn body(name: &str, callee: Option<&str>) -> Body {
+    fn body_with_cost(name: &str, callees: &[&str], stmts: usize) -> Body {
         let span = span();
+        let mut blocks: Vec<BasicBlock> = callees
+            .iter()
+            .enumerate()
+            .map(|(i, callee)| BasicBlock {
+                id: BlockId(u32::try_from(i).unwrap_or(0)),
+                stmts: Vec::new(),
+                terminator: Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str((*callee).to_string())),
+                    args: Vec::new(),
+                    destination: Place::local(Local(0)),
+                    target: Some(BlockId(u32::try_from(i + 1).unwrap_or(0))),
+                },
+                span,
+                terminator_span: None,
+                terminator_inlined: None,
+            })
+            .collect();
+        blocks.push(BasicBlock {
+            id: BlockId(u32::try_from(callees.len()).unwrap_or(0)),
+            stmts: (0..stmts)
+                .map(|_| Statement {
+                    kind: StatementKind::Nop,
+                    span,
+                    inlined: None,
+                })
+                .collect(),
+            terminator: Terminator::Return,
+            span,
+            terminator_span: None,
+            terminator_inlined: None,
+        });
         Body {
             name: name.to_string(),
             def: None,
             arity: 0,
             locals: Vec::new(),
-            blocks: vec![BasicBlock {
-                id: BlockId(0),
-                stmts: Vec::new(),
-                terminator: callee.map_or(Terminator::Return, |callee| Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str(callee.to_string())),
-                    args: Vec::new(),
-                    destination: Place::local(Local(0)),
-                    target: None,
-                }),
-                span,
-            }],
+            blocks,
             span,
         }
     }
 
+    fn body(name: &str, callees: &[&str]) -> Body {
+        body_with_cost(name, callees, 0)
+    }
+
+    /// A program large enough to be split, with `extra` appended.
+    fn program(extra: Vec<Body>) -> Vec<Body> {
+        let mut bodies = Vec::new();
+        for module in ["alpha", "beta", "gamma"] {
+            for i in 0..8 {
+                bodies.push(body(&format!("{module}::f{i}"), &[]));
+            }
+        }
+        bodies.extend(extra);
+        bodies
+    }
+
+    fn chunk_names(bodies: &[Body], chunks: &[Vec<usize>]) -> Vec<Vec<String>> {
+        chunks
+            .iter()
+            .map(|chunk| chunk.iter().map(|&i| bodies[i].name.clone()).collect())
+            .collect()
+    }
+
     #[test]
-    fn recursive_scc_stays_in_one_codegen_chunk() {
+    fn small_program_compiles_as_one_module() {
         let bodies = vec![
-            body("left", Some("right")),
-            body("right", Some("left")),
-            body("leaf_a", None),
-            body("leaf_b", None),
+            body("alpha::a", &[]),
+            body("beta::b", &[]),
+            body("main", &[]),
         ];
-        let chunks = codegen_chunks(&bodies, 3);
-        let left_chunk = chunks
-            .iter()
-            .position(|chunk| chunk.contains(&0))
-            .expect("left body assigned");
-        let right_chunk = chunks
-            .iter()
-            .position(|chunk| chunk.contains(&1))
-            .expect("right body assigned");
-        assert_eq!(
-            left_chunk, right_chunk,
-            "recursive bodies split: {chunks:?}"
-        );
-        assert_eq!(
-            chunks,
-            codegen_chunks(&bodies, 3),
-            "partition must be stable"
-        );
+        assert_eq!(codegen_chunks(&bodies), vec![vec![0, 1, 2]]);
     }
 
     #[test]
-    fn object_cache_separates_runtime_handler_abi_from_gossamer_call_abi() {
-        let handler = body("App::serve", None);
-        let ordinary = body_cache_key(
-            &handler,
-            "x86_64-unknown-linux-gnu",
-            OptProfile::Debug,
-            None,
-        );
-        let runtime = body_cache_key(
-            &handler,
-            "x86_64-unknown-linux-gnu",
-            OptProfile::Debug,
-            Some(2),
-        );
-        assert_ne!(ordinary, runtime);
+    fn chunks_follow_source_modules() {
+        let bodies = program(vec![body("main", &["alpha::f0"])]);
+        let names = chunk_names(&bodies, &codegen_chunks(&bodies));
+        assert_eq!(names.len(), 4, "{names:?}");
+        assert_eq!(names[0], vec!["main".to_string()]);
+        assert!(names[1].iter().all(|n| n.starts_with("alpha::")));
+        assert!(names[3].iter().all(|n| n.starts_with("gamma::")));
     }
 
     #[test]
-    fn default_codegen_jobs_bound_small_program_memory() {
+    fn adding_a_body_leaves_other_modules_chunks_unchanged() {
+        let before = program(vec![body("main", &[])]);
+        let after = program(vec![body("main", &[]), body("beta::added", &[])]);
+        let before_names = chunk_names(&before, &codegen_chunks(&before));
+        let after_names = chunk_names(&after, &codegen_chunks(&after));
+        assert_eq!(before_names[1], after_names[1], "alpha moved");
+        assert_eq!(before_names[3], after_names[3], "gamma moved");
+        assert_ne!(before_names[2], after_names[2]);
+    }
+
+    #[test]
+    fn recursive_cycle_across_modules_shares_one_chunk() {
+        let bodies = program(vec![
+            body("alpha::left", &["gamma::right"]),
+            body("gamma::right", &["alpha::left"]),
+        ]);
+        let chunks = codegen_chunks(&bodies);
+        let left = bodies.iter().position(|b| b.name == "alpha::left");
+        let right = bodies.iter().position(|b| b.name == "gamma::right");
+        let chunk_of = |idx: Option<usize>| {
+            chunks
+                .iter()
+                .position(|chunk| idx.is_some_and(|i| chunk.contains(&i)))
+        };
+        assert!(chunk_of(left).is_some());
+        assert_eq!(chunk_of(left), chunk_of(right), "{chunks:?}");
+        assert_eq!(chunks, codegen_chunks(&bodies), "partition must be stable");
+    }
+
+    #[test]
+    fn release_imports_small_callees_from_other_chunks_transitively() {
+        let bodies = program(vec![
+            body("main", &["alpha::hot"]),
+            body_with_cost("alpha::hot", &["beta::leaf"], 4),
+            body_with_cost("beta::leaf", &[], 2),
+            body("gamma::caller", &["alpha::huge", "main"]),
+            body_with_cost("alpha::huge", &[], 10_000),
+        ]);
+        let chunks = codegen_chunks(&bodies);
+        let imports = chunk_imports(&bodies, &chunks, OptProfile::Release);
+        let named = |chunk: usize| -> Vec<&str> {
+            imports[chunk]
+                .iter()
+                .map(|&i| bodies[i].name.as_str())
+                .collect()
+        };
+        let chunk_holding = |name: &str| {
+            chunks
+                .iter()
+                .position(|c| c.iter().any(|&i| bodies[i].name == name))
+                .unwrap_or(usize::MAX)
+        };
+        let main_imports = named(chunk_holding("main"));
+        assert!(main_imports.contains(&"alpha::hot"), "{main_imports:?}");
+        assert!(main_imports.contains(&"beta::leaf"), "{main_imports:?}");
+        let gamma_imports = named(chunk_holding("gamma::caller"));
+        assert!(!gamma_imports.contains(&"alpha::huge"), "{gamma_imports:?}");
+        assert!(!gamma_imports.contains(&"main"), "{gamma_imports:?}");
+        let debug = chunk_imports(&bodies, &chunks, OptProfile::Debug);
+        assert!(debug.iter().all(Vec::is_empty));
+    }
+
+    #[test]
+    fn object_cache_key_is_the_module_text_under_its_settings() {
+        let triple = "x86_64-unknown-linux-gnu";
+        let a = chunk_cache_key("define i64 @\"f\"() #0 {}", triple, OptProfile::Release);
+        let same = chunk_cache_key("define i64 @\"f\"() #0 {}", triple, OptProfile::Release);
+        let other_text = chunk_cache_key("define i64 @\"g\"() #0 {}", triple, OptProfile::Release);
+        let other_profile = chunk_cache_key("define i64 @\"f\"() #0 {}", triple, OptProfile::Debug);
+        assert_eq!(a, same);
+        assert_ne!(a, other_text);
+        assert_ne!(a, other_profile);
+    }
+
+    #[test]
+    fn quoted_symbols_are_collected_from_module_text() {
+        let text =
+            "  %1 = call i64 @\"alpha::f\"(ptr @\"gos_rc_meta_x\")\n  call void @gos_rt_x()\n";
+        let mut out = std::collections::HashSet::new();
+        collect_quoted_symbols(text, &mut out);
+        assert!(out.contains("alpha::f"));
+        assert!(out.contains("gos_rc_meta_x"));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn default_codegen_jobs_stay_under_the_ceiling() {
         if std::env::var_os("GOS_LLVM_JOBS").is_some() {
             return;
         }
-        assert_eq!(codegen_job_limit(80), 1);
-        assert_eq!(codegen_job_limit(500), 1);
-        assert_eq!(codegen_job_limit(3_000), 1);
+        let jobs = codegen_job_limit();
+        assert!((1..=JOB_CEILING).contains(&jobs), "{jobs}");
     }
 }

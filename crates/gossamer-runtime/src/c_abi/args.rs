@@ -331,8 +331,8 @@ pub unsafe extern "C" fn gos_rt_os_program_name() -> *const c_char {
 
 /// `env::temp_dir() -> String`. Returns the platform temp directory:
 /// `/tmp` on Linux, `$TMPDIR` on macOS, `%TEMP%`/`%USERPROFILE%\AppData\Local\Temp`
-/// on Windows. Mirrors Rust's `std::env::temp_dir`; the returned
-/// pointer is GC-managed and lives for the process lifetime.
+/// on Windows. Mirrors Rust's `std::env::temp_dir`; the caller owns
+/// the returned String.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_env_temp_dir() -> *const c_char {
     ffi_entry!(std::ptr::null(), {
@@ -560,38 +560,65 @@ fn list_dir_data(path: &str) -> Result<Vec<DirInfoData>, std::io::Error> {
     Ok(entries.into_iter().filter_map(dir_info).collect())
 }
 
-/// Allocates a `fs::DirInfo` blob (7 fields * 8 bytes) for `entry` and
-/// returns its heap address. Routed through the tracing collector so the
-/// blob participates in mark/sweep instead of leaking. Field order matches
-/// the interpreter's `Value::struct_("DirInfo", ...)` layout.
-fn dir_info_blob(entry: &DirInfoData) -> i64 {
-    let name_cs = alloc_cstring(entry.name.as_bytes()) as i64;
-    let path_cs = alloc_cstring(entry.path.as_bytes()) as i64;
-    let blob = super::gc::gos_rt_gc_alloc(56) as *mut i64;
-    if blob.is_null() {
-        return 0;
-    }
-    unsafe {
-        *blob.add(0) = name_cs;
-        *blob.add(1) = path_cs;
-        *blob.add(2) = i64::from(entry.is_file);
-        *blob.add(3) = i64::from(entry.is_dir);
-        *blob.add(4) = i64::from(entry.is_symlink);
-        *blob.add(5) = entry.size;
-        *blob.add(6) = entry.modified_ms;
-    }
-    blob as i64
+/// Slot children of one `(name, path, is_file, is_dir, is_symlink, size,
+/// modified_ms)` entry tuple: the vec owns both strings.
+static DIR_ENTRY_SLOT_CHILDREN: [crate::c_abi::vec::VecSlotChild; 2] = [
+    crate::c_abi::vec::VecSlotChild {
+        gate: -1,
+        disc_word: 0,
+        word: 0,
+        kind: crate::c_abi::vec::vec_elem_kind::STRING,
+    },
+    crate::c_abi::vec::VecSlotChild {
+        gate: -1,
+        disc_word: 0,
+        word: 1,
+        kind: crate::c_abi::vec::vec_elem_kind::STRING,
+    },
+];
+
+/// The seven words of one directory entry tuple, whose two strings are fresh
+/// shares the holder owns.
+fn dir_entry_words(entry: &DirInfoData) -> [i64; 7] {
+    [
+        alloc_cstring(entry.name.as_bytes()) as i64,
+        alloc_cstring(entry.path.as_bytes()) as i64,
+        i64::from(entry.is_file),
+        i64::from(entry.is_dir),
+        i64::from(entry.is_symlink),
+        entry.size,
+        entry.modified_ms,
+    ]
 }
 
-fn dir_infos_result(entries: Vec<DirInfoData>) -> i128 {
-    let out = unsafe { gos_rt_vec_new(8) };
-    for entry in entries {
-        let entry_val = dir_info_blob(&entry);
-        unsafe {
-            gos_rt_vec_push(out, std::ptr::addr_of!(entry_val).cast::<u8>());
+/// `fs::read_dir(path)` leaf -> Result<Vec<(name, path, is_file, is_dir,
+/// is_symlink, size, modified_ms)>, errors::Error>. The injected wrapper folds
+/// each tuple into a `DirInfo` struct.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_fs_read_dir_raw(path: *const c_char) -> i128 {
+    ffi_entry!(0i128, {
+        let p = if path.is_null() {
+            ".".to_string()
+        } else {
+            unsafe { crate::c_abi::gos_str_arg_string(path) }
+        };
+        match list_dir_data(&p) {
+            Ok(entries) => {
+                let out = unsafe { gos_rt_vec_with_capacity(56, entries.len() as i64) };
+                for entry in &entries {
+                    let words = dir_entry_words(entry);
+                    unsafe { gos_rt_vec_push(out, words.as_ptr().cast::<u8>()) };
+                }
+                crate::c_abi::vec::vec_set_slot_children(out, &DIR_ENTRY_SLOT_CHILDREN);
+                unsafe { gos_rt_result_new(0, out as i64) }
+            }
+            Err(e) => {
+                let msg = format!("fs::read_dir({p}): {e}");
+                let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
+                unsafe { gos_rt_result_new(1, err as i64) }
+            }
         }
-    }
-    unsafe { gos_rt_result_new(0, out as i64) }
+    })
 }
 
 /// Depth-first descendant walk of `root`, invoking `visit` for each entry
@@ -622,29 +649,6 @@ fn walk_dir_visit(
     Ok(Ok(()))
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_list_dir(path: *const c_char) -> i128 {
-    ffi_entry!(0i128, {
-        let p = if path.is_null() {
-            ".".to_string()
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_string(path) }
-        };
-        match crate::sched_global::run_blocking("fs-list-dir", move || list_dir_data(&p)) {
-            Ok(Ok(entries)) => dir_infos_result(entries),
-            Ok(Err(e)) => {
-                let msg = format!("list_dir: {e}");
-                let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
-            }
-            Err(e) => {
-                let err = crate::c_abi::errors::error_new_from_bytes(e.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
-            }
-        }
-    })
-}
-
 /// `fs::walk_dir(root, visit) -> Result<(), errors::Error>`. Recursive
 /// descendant walk; `visit`'s function-pointer address lives in `env`'s
 /// first word (the `Fn(...)`-value env layout cranelift / LLVM both use),
@@ -652,8 +656,20 @@ pub unsafe extern "C" fn gos_rt_fs_list_dir(path: *const c_char) -> i128 {
 /// calling thread - not routed through `run_blocking` - because `visit` is
 /// compiled Gossamer code, and only the thread the scheduler already
 /// tracks for this goroutine may run it.
+/// Layout of one `(name, path, is_file, is_dir, is_symlink, size,
+/// modified_ms)` entry tuple handed to a walk visitor: both strings are owned
+/// by the blob.
+static DIR_ENTRY_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_walk_dir(path: *const c_char, env: *const u8) -> i128 {
+pub unsafe extern "C" fn gos_rt_fs_walk_dir_raw(path: *const c_char, env: *const u8) -> i128 {
     ffi_entry!(0i128, {
         let root = if path.is_null() {
             ".".to_string()
@@ -671,8 +687,12 @@ pub unsafe extern "C" fn gos_rt_fs_walk_dir(path: *const c_char, env: *const u8)
         super::fn_registry::verify(fn_addr_raw, super::fn_registry::FnKind::WalkVisit);
         let visit: VisitFn = unsafe { std::mem::transmute(fn_addr_raw) };
         let result = walk_dir_visit(&root, |info| {
-            let blob = dir_info_blob(info);
-            let r = unsafe { visit(env, blob) };
+            // The visitor reads the entry without keeping it, so the blob's
+            // share is given back once it has answered; a field it keeps takes
+            // a share of its own.
+            let blob = crate::c_abi::rc::counted_words(&dir_entry_words(info), &DIR_ENTRY_META);
+            let r = unsafe { visit(env, blob as i64) };
+            unsafe { crate::c_abi::rc::gos_rt_rc_release(blob) };
             if super::vec::result_disc_of(r) == 0 {
                 Ok(())
             } else {
@@ -809,20 +829,21 @@ pub unsafe extern "C" fn gos_rt_fs_metadata_raw(path: *const c_char) -> i128 {
                     .ok()
                     .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                     .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-                let blob = crate::c_abi::gos_rt_gc_alloc(48) as *mut i64;
+                let words = [
+                    i64::try_from(m.len()).unwrap_or(i64::MAX),
+                    i64::from(m.is_file()),
+                    i64::from(m.is_dir()),
+                    i64::from(m.file_type().is_symlink()),
+                    i64::from(m.permissions().readonly()),
+                    modified,
+                ];
+                let blob =
+                    crate::c_abi::rc::counted_words(&words, &crate::c_abi::rc::LEAF_BLOB_META);
                 if blob.is_null() {
                     let err = crate::c_abi::errors::error_new_from_bytes(
                         "fs::metadata: alloc failed".as_bytes(),
                     );
                     return unsafe { gos_rt_result_new(1, err as i64) };
-                }
-                unsafe {
-                    *blob = i64::try_from(m.len()).unwrap_or(i64::MAX);
-                    *blob.add(1) = i64::from(m.is_file());
-                    *blob.add(2) = i64::from(m.is_dir());
-                    *blob.add(3) = i64::from(m.file_type().is_symlink());
-                    *blob.add(4) = i64::from(m.permissions().readonly());
-                    *blob.add(5) = modified;
                 }
                 unsafe { gos_rt_result_new(0, blob as i64) }
             }
@@ -855,8 +876,19 @@ pub unsafe extern "C" fn gos_rt_fs_metadata_raw(path: *const c_char) -> i128 {
 /// either a plain segfault or `memory allocation of <huge> bytes
 /// failed` when the runtime treats the random pointer as a
 /// length-prefixed buffer.
+/// Layout of the `(stdout, stderr, code)` tuple: both strings are owned by the
+/// blob.
+pub(crate) static OUTPUT_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
+
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_exec_run(prog: *const c_char, args: *mut GosVec) -> i128 {
+pub unsafe extern "C" fn gos_rt_exec_run_raw(prog: *const c_char, args: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
         unsafe {
             exec_run_with(
@@ -878,7 +910,7 @@ pub unsafe extern "C" fn gos_rt_exec_run(prog: *const c_char, args: *mut GosVec)
 /// inherited environment rather than replacing it - a harness sets the
 /// two variables it cares about without having to restate `PATH`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_exec_run_in(
+pub unsafe extern "C" fn gos_rt_exec_run_in_raw(
     prog: *const c_char,
     args: *mut GosVec,
     dir: *const c_char,
@@ -953,13 +985,15 @@ unsafe fn exec_run_with(
             let code = i64::from(out.status.code().unwrap_or(-1));
             let stdout_cs = alloc_cstring(stdout_str.as_bytes()) as i64;
             let stderr_cs = alloc_cstring(stderr_str.as_bytes()) as i64;
-            // Output struct laid out as `[stdout: i64, stderr: i64,
-            // code: i64]` (3 x 8 B). Box-allocated so the pointer shares
-            // the global allocator domain with every other
-            // helper-returned aggregate; an arena-backed blob could be
-            // rewound by an LLVM `arena_restore` while the caller still
-            // held it.
-            let blob = Box::into_raw(Box::new([stdout_cs, stderr_cs, code])).cast::<i64>();
+            // The `(stdout, stderr, code)` tuple is a counted blob that owns
+            // both strings, so releasing the carrier gives them back.
+            let blob = crate::c_abi::rc::counted_words(&[stdout_cs, stderr_cs, code], &OUTPUT_META);
+            if blob.is_null() {
+                let err = crate::c_abi::errors::error_new_from_bytes(
+                    format!("{reported}({display_prog}): out of memory").as_bytes(),
+                );
+                return unsafe { gos_rt_result_new(1, err as i64) };
+            }
             unsafe { gos_rt_result_new(0, blob as i64) }
         }
         Ok(Err(e)) => {

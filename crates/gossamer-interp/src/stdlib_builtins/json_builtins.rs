@@ -131,6 +131,7 @@ pub(crate) fn json_std_to_value(v: gossamer_std::json::Value) -> Value {
         // exactly and a float (including integer-valued like `2.0`)
         // round-trips as a float, matching the serde-backed compiled tier.
         JV::Int(n) => Value::Int(n),
+        JV::Uint(n) => Value::Uint(n),
         JV::Number(f) => Value::Float(f),
         JV::String(s) => Value::String(s.into()),
         JV::Array(arr) => Value::Array(Arc::new(arr.into_iter().map(json_std_to_value).collect())),

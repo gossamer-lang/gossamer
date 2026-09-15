@@ -111,6 +111,26 @@ fn three_char_operators_win() {
     );
 }
 
+/// Wrapping arithmetic operators win against `+`, `-`, `*`, and their compound
+/// forms against the two-character operators.
+#[test]
+fn wrapping_arithmetic_operators_win() {
+    let kinds = kinds_of("+% -% *% +%= -%= *%= + %");
+    assert_eq!(
+        kinds,
+        vec![
+            TokenKind::Punct(Punct::PlusPercent),
+            TokenKind::Punct(Punct::MinusPercent),
+            TokenKind::Punct(Punct::StarPercent),
+            TokenKind::Punct(Punct::PlusPercentEq),
+            TokenKind::Punct(Punct::MinusPercentEq),
+            TokenKind::Punct(Punct::StarPercentEq),
+            TokenKind::Punct(Punct::Plus),
+            TokenKind::Punct(Punct::Percent),
+        ],
+    );
+}
+
 /// Integer literals with base prefixes and suffixes.
 #[test]
 fn integer_literals_with_prefixes() {

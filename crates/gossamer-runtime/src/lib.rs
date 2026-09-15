@@ -50,14 +50,27 @@ static GLOBAL_ALLOCATOR: SamplingAllocator = SamplingAllocator;
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 struct SamplingAllocator;
 
+/// Alignment every mimalloc block already has: block sizes are whole words
+/// carved from pages whose first block is aligned wider still. A layout that
+/// asks for no more takes the unaligned entry points, which skip the aligned
+/// path's alignment test and its generic fallback for blocks past the small
+/// size classes.
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+const MI_BLOCK_ALIGN: usize = std::mem::size_of::<usize>();
+
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 // SAFETY: every method forwards to mimalloc, which upholds the
 // `GlobalAlloc` contract; the sampling hook only reads the layout size.
 unsafe impl std::alloc::GlobalAlloc for SamplingAllocator {
     #[inline]
     unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
-        // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract.
-        let ptr = unsafe { mimalloc::MiMalloc.alloc(layout) };
+        let ptr = if layout.align() <= MI_BLOCK_ALIGN {
+            // SAFETY: every mimalloc block satisfies a word alignment.
+            unsafe { libmimalloc_sys::mi_malloc(layout.size()) }.cast::<u8>()
+        } else {
+            // SAFETY: the caller upholds `GlobalAlloc::alloc`'s contract.
+            unsafe { mimalloc::MiMalloc.alloc(layout) }
+        };
         if !ptr.is_null() {
             crate::sampler::record_allocation(layout.size());
         }
@@ -72,8 +85,13 @@ unsafe impl std::alloc::GlobalAlloc for SamplingAllocator {
 
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: std::alloc::Layout) -> *mut u8 {
-        // SAFETY: the caller upholds the contract.
-        let ptr = unsafe { mimalloc::MiMalloc.alloc_zeroed(layout) };
+        let ptr = if layout.align() <= MI_BLOCK_ALIGN {
+            // SAFETY: every mimalloc block satisfies a word alignment.
+            unsafe { libmimalloc_sys::mi_zalloc(layout.size()) }.cast::<u8>()
+        } else {
+            // SAFETY: the caller upholds the contract.
+            unsafe { mimalloc::MiMalloc.alloc_zeroed(layout) }
+        };
         if !ptr.is_null() {
             crate::sampler::record_allocation(layout.size());
         }
@@ -82,8 +100,14 @@ unsafe impl std::alloc::GlobalAlloc for SamplingAllocator {
 
     #[inline]
     unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
-        // SAFETY: the caller upholds the contract.
-        let out = unsafe { mimalloc::MiMalloc.realloc(ptr, layout, new_size) };
+        let out = if layout.align() <= MI_BLOCK_ALIGN {
+            // SAFETY: `ptr` is a live mimalloc block and every block it
+            // hands back satisfies a word alignment.
+            unsafe { libmimalloc_sys::mi_realloc(ptr.cast(), new_size) }.cast::<u8>()
+        } else {
+            // SAFETY: the caller upholds the contract.
+            unsafe { mimalloc::MiMalloc.realloc(ptr, layout, new_size) }
+        };
         if !out.is_null() && new_size > layout.size() {
             crate::sampler::record_allocation(new_size - layout.size());
         }

@@ -16,6 +16,9 @@ gossamer-ast = { workspace = true }
 gossamer-diagnostics = { workspace = true }
 gossamer-lex = { workspace = true }
 thiserror = { workspace = true }
+# The same engine and features `std::regex` compiles with, so a literal
+# pattern is accepted at parse time exactly when it compiles at run time.
+regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 
 [dev-dependencies]
 proptest = "1"

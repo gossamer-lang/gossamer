@@ -1,0 +1,69 @@
+// Const generics in Gossamer.
+//
+// A `const N: usize` parameter is a value inside the item that declares it:
+// a function reads it (`N as i64`), builds a `[T; N]` from it (`[0; N]`), and
+// takes it from an array argument's length or from a turbofish
+// (`zeros::<4>()`). A struct or an enum may take one too, a literal takes it
+// from the array field or payload that names it, and a method reads it.
+//
+// Run with:
+//   gos run examples/const_generics.gos
+//   gos build examples/const_generics.gos
+
+fn sum<const N: usize>(xs: [i64; N]) -> i64 {
+    let mut total = 0
+    for x in xs {
+        total += x
+    }
+    total
+}
+
+fn zeros<const N: usize>() -> [i64; N] {
+    [0; N]
+}
+
+fn describe<const N: usize>(xs: [i64; N]) -> String {
+    format("{} values summing to {}", N as i64, sum(xs))
+}
+
+struct Ring<const N: usize> {
+    items: [i64; N]
+    head: i64
+}
+
+impl<const N: usize> Ring<N> {
+    fn capacity(&self) -> i64 {
+        N as i64
+    }
+
+    fn push(&mut self, value: i64) {
+        self.items[self.head] = value
+        self.head = (self.head + 1) % (N as i64)
+    }
+}
+
+enum Grid<const N: usize> {
+    Filled([i64; N])
+    Empty
+}
+
+fn cells<const N: usize>(grid: Grid<N>) -> i64 {
+    match grid {
+        Grid::Filled(row) => sum(row)
+        Grid::Empty => 0
+    }
+}
+
+fn main() {
+    println("{}", describe([1, 2, 3]))
+    println("{}", describe([10, 20, 30, 40, 50]))
+    let empty_row = zeros::<4>()
+    println("zeros {:?}", empty_row)
+    let mut ring = Ring { items: [0; 3], head: 0 }
+    for value in 1..6 {
+        ring.push(value)
+    }
+    println("ring {:?} capacity {}", ring.items, ring.capacity())
+    let blank: Grid<2> = Grid::Empty
+    println("grid cells {} {}", cells(Grid::Filled([7, 8])), cells(blank))
+}

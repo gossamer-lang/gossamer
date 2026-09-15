@@ -1,5 +1,356 @@
 # Changelog
 
+## 0.61.0 - Wrapping arithmetic, incremental builds, narrow integers keep their width
+
+- Wrapping arithmetic: `a +% b`, `a -% b`, and `a *% b` add, subtract, and
+  multiply with two's-complement wrapping at the operands' declared integer
+  width, on every tier and in every build profile, and `+%=`, `-%=`, `*%=` are
+  their compound forms. A hash step reads `h = (h << 5) +% h +% b as u32` with
+  no mask. Plain `+`, `-`, and `*` keep their overflow check. A float or string
+  operand is GT0003.
+- `x.wrapping_add(y)` and `x.wrapping_mul(y)` are gone: wrapping arithmetic has
+  one spelling, the operator. A call reports GT0087, and `gos check --fix`
+  rewrites it to `x +% y` / `x *% y`.
+- A narrow integer never holds a value outside its range in a release build:
+  `+`, `-`, and `*` on `u8`-`u32` / `i8`-`i32` wrap at the declared width, as do
+  unary `-` and `!`, `<<`, and a signed `MIN / -1`. A float cast to a narrow
+  integer saturates at that type's range (`300.7 as u8 == 255`).
+- A const generic parameter is a value inside the function that declares it:
+  `N as i64` reads it, `[0; N]` builds an array of that length, and
+  `zeros::<4>()` names it with no array argument. A caller's own const
+  parameter can supply a callee's. A call that gives it no value, by turbofish
+  or by an array argument's length, reports GT0088.
+- A struct, a tuple struct, and an enum may take a const generic parameter:
+  `struct Ring<const N: usize>` holds an `items: [i64; N]` field,
+  `Ring { items: [0; 3], head: 0 }` takes `N` from the field's length, and
+  `Grid::Filled([7, 8])` takes it from the payload's. A method in
+  `impl<const N: usize> Ring<N>` reads `N` as a value, called as `r.capacity()`
+  or as `Ring::capacity(r)`, and a function taking a `Grid<N>` takes `N` from
+  its argument's type. A literal or constructor that gives `N` no value reports
+  GT0088.
+- Struct and enum field types are checked inside the declaration's own generic
+  scope, so a field naming a const parameter is accepted where it reported
+  GT0051.
+- A function returning `[T; N]` answers a fixed `[T; k]` at the call, so
+  `let z: [i64; 4] = zeros::<4>()` checks and `{:?}` renders `[0, 0, 0, 0]` on
+  every tier, where the result was typed and rendered as a `Vec`.
+- A function may take and answer `Simd<T, N>` over a const generic `N`:
+  `fn dot<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> f64` takes `N`
+  from its arguments, and its `reduce_*` calls fold in the same pairing order as
+  the same kernel over a literal lane count.
+- `gos run` computes lane-wise `+ - * /` over `Simd<f64, N>` and wrapping
+  `+ - *` and `& | ^` over `Simd<i64, N>` with two-lane vector instructions when
+  it compiles the function, with the same result in every lane.
+- `Simd::load(xs, offset)` reads a window of lanes from a `Vec`, slice, or fixed
+  array, and `v.store(&mut xs, offset)` writes one back. The whole window is
+  checked once, and a window past either end panics with the same message on
+  every tier before any lane moves.
+- A `[T; N]` answered by a const generic function is freed by the caller that
+  receives it, where each call kept the result allocated until the program
+  exited.
+- An `errors::Error` built in a compiled program is freed when its last holder
+  lets go - a binding, a `Result` arm, a struct field, a tuple position, a
+  `Vec`, or an error that wraps it - where every error stayed allocated until
+  the program exited.
+- `result.map(f)`, `and_then(f)`, `map_err(f)`, and `or_else(f)` free the
+  payload they hand `f` in a compiled program, and a `map_err` that changes the
+  error type frees the new payload with the carrier.
+- `map` and `and_then` on a `Result` whose `Ok` arm is a struct no longer crash
+  a compiled program at exit when the receiver is an `Err`.
+- A `Result` read again after `unwrap_or`, `ok()`, `err()`, or `map` in a
+  compiled program keeps its payload for the later reader and frees it once,
+  where it could be freed twice or never; `option::is_some` and `is_none` on an
+  `Option<errors::Error>` no longer leak the error.
+- An iterator of pairs from `enumerate` or `zip` runs through `map`, `filter`,
+  `take`, `skip`, `step_by`, and `any` in a compiled program, where each of
+  those crashed; a `for` loop over a stream of tuples no longer crashes.
+- `unwrap_or(v)` on a `Result<f64, E>` or `Option<f64>` answers `v` for an
+  `Err` or `None` in an LLVM-built program, where it answered `v` truncated
+  to an integer.
+- `result.unwrap_or(v)`, `result.unwrap_or_else(f)`, `result.ok()`, and
+  `result.err()` free the payload they discard in a compiled program, including
+  after `?` relayed it from another function.
+- A function the JIT compiled that returns one of its own `Vec` or `String`
+  parameters to interpreted code frees that value, where every call left one
+  allocated.
+- A `Result` or `Option` held in a struct field or tuple frees its `Err`
+  payload as well as its `Ok` payload, and a carrier copied out of one and
+  returned stays valid in the caller.
+- `{}` of an `errors::Error` read out of a `Vec` prints the error in a compiled
+  program, where it printed a number.
+- An `f32` stored in an array element, a struct field, or a `Vec` element from
+  compiled code in the JIT reads back as the value written, where a store
+  through a computed index or value left a different width than the slot's
+  readers expected and `{:?}` printed values like `5.26e-315`.
+- A struct with an `f32` field decodes through `json::from_json`, `from_toml`,
+  and `from_yaml`, where the derived decoder reported GT0001.
+- `{:?}` of a tuple holding an `f32` builds in a release or debug binary, where
+  the build stopped with an internal lowering error.
+- A struct decoded with `json::from_json(..).unwrap()` keeps its `Vec` fields in
+  a compiled binary, where reading one faulted or ran without end.
+- `regex::compile` is reached through `use std::regex` like any other module
+  function. A literal pattern no longer brings the import in with it.
+- An integer `sum` or `product` overflows where the `+` or `*` it folds with
+  would: the VM, `gos run`, and a debug build report `attempt to add with
+  overflow` / `attempt to multiply with overflow` and exit 101, and a release
+  build wraps. The VM ended in a toolchain crash report and a debug build
+  wrapped silently.
+- `(start..).take(n)` stays an open range that yields `n` values: it no longer
+  computes `start + n`, so a range ending at `i64::MAX` yields its last values
+  in a release build and panics only when asked for a value past the maximum,
+  and its start expression is evaluated once.
+- A statement whose call cannot be lowered stops the build with an internal
+  error naming its location, where the call was left out of the compiled
+  program.
+- An `if / else if` chain with no final `else` whose value is discarded accepts
+  branches of different types, as a lone `if` does. A discarded `Result` in a
+  branch is still reported.
+- An out-of-range outer index into a nested `Vec` reached through a place
+  (`grid.cells[y][x]`) panics with `vec index out of bounds` on the compiled
+  tiers, where it faulted.
+- A panic inside a module assembled into a program names that module's file and
+  the line within it, on the VM and in a debug build, where both named the entry
+  file and a line counted across the whole program. A debug build names the line
+  of a function's tail expression when the panic comes from it, where it named
+  the statement before.
+- A debug `gos build` reuses the cached object of every module an edit does not
+  reach: a comment or a body change in one file recompiles that file's module
+  alone.
+- A literal pattern handed to `regex::compile` that does not compile is
+  reported at the literal as GP0057, and a malformed literal
+  `sql::statement` as GP0058, where both were a compile-time panic naming a
+  line in generated code. Neither check runs the compile-time evaluator.
+- Walking a `Map` whose keys or values are `f64`, `char`, or `bool` on a
+  compiled tier renders the values, where it printed their bit patterns.
+- `gos build --release` compiles each source module to its own cached object,
+  so an edit that leaves a module's generated code unchanged - a comment, or a
+  body another module does not inline - reuses that module's object. Small
+  callees are still inlined across modules.
+- Indexing a `Vec` on the compiled tiers checks bounds inline and calls into
+  the runtime only to report an out-of-range index, including an index into a
+  nested `Vec` reached through a place.
+- `Deque` and `Queue` push and pop of a scalar element run inline on the
+  compiled tiers, with no runtime call.
+- A growing `Vec` doubles its capacity to the next power of two, and an
+  allocation whose alignment is at most a word goes straight to the allocator.
+- A `MaxHeap` or `MinHeap` of integers or integer tuples of up to four words
+  sifts without a comparison call per step.
+- Releasing a structure of reference-counted objects frees each child in the
+  pass that frees its parent, and an object's type metadata is read from a
+  cache beside it.
+- Walking a `Map` in key order collects its entries in one runtime call and
+  sorts integer and string keys by radix, and `split_whitespace` on ASCII text
+  scans bytes rather than characters.
+- `gos build --timings` reports the time between the checked front end and
+  LLVM as HIR lowering, MIR lowering, specialisation, MIR passes, and
+  verification.
+- `gos check --fix` rewrites a chain of wrapping methods in one step: of two
+  rewrites starting at one place, the one covering the whole expression wins.
+- A generic function or method is compiled once per set of types it is called
+  with, from its declaration with those types in place, so a generic body
+  compares, orders, renders, hashes, counts, and sorts the values it receives as
+  the same body written for the concrete type does. On the compiled tiers `==`
+  and `<` on a struct, tuple, `Vec`, or payload enum `T` answered wrongly, `{}`
+  of an aggregate `T` was refused, `m.inc(x)` on a `Map<T, _>` failed to link,
+  `ys.sort()` left a `Vec<Point>` unsorted, and a `[T]` of structs handed to a
+  callable faulted.
+- A closure passed to a generic function or method takes its parameter types
+  from the signature once the other arguments fix the type parameters, so
+  `gmap(points, |p| p.x + p.y)` checks the body against `Point`. This holds for
+  a method call, for `Type::method(value, ..)`, and for a method with type
+  parameters of its own on a generic `impl` block, which now type-checks where
+  its result was left untyped.
+- A reachable generic body that never received concrete types stops the build
+  with an internal error naming it, where it was compiled against opaque slots.
+- `<`, `<=`, `>`, and `>=` on two `Vec`s or slices compare element by element
+  on the compiled tiers, where they compared addresses.
+- Sorting, binary search, `min`, and `max` over sequences whose elements hold
+  sequences, optional sequences, fixed arrays, or unit-only enums order them by
+  value on the compiled tiers, where elements were ordered by address and a
+  tuple's fields could be separated.
+- A panic report on the VM names every function a call was inlined through,
+  with the line of each call, and a panic inside JIT-compiled code names the
+  compiled frames and their lines, read from the machine stack.
+- `unwrap`, `expect`, and `unwrap_or` on an `Option` or `Result` whose payload
+  is itself an `Option` or `Result` answer the inner value on the compiled
+  tiers, as do `m.get(k).unwrap()`, `or_insert`, and `get_or` on a map of such
+  values, where they answered `None`, an empty value, or an address.
+- An `Option` or `Result` nested in another is reclaimed with the value that
+  holds it, where each one stayed allocated.
+- An `Option` or `Result` passed to a function stays the caller's: a function
+  that only reads it no longer holds its `String` or `Vec` payload afterwards,
+  and a function that returns it, relays it to another call, or returns its
+  `unwrap()` from one branch of an `if` hands back a value later allocations
+  cannot overwrite on the compiled tiers.
+- The `Err` payload of a `Result` bound to a name and then matched, and the
+  payload extracted from an `Option` or `Result` copied from another binding,
+  are reclaimed, where they stayed allocated.
+- `json::encode` of a `Map` keyed by an integer, `bool`, or `char` renders its
+  keys as JSON strings on the compiled tiers, where it rendered `null`.
+- A `u64` or `usize` above `i64::MAX` encodes as its unsigned value on every
+  tier, where it rendered negative. `json::as_u64` reads one back, and
+  `to_json` / `from_json` accept `u64` and `usize` struct fields, including a
+  `Map<String, u64>`.
+- A struct with a `Map` field that a function builds and returns, or that a
+  loop binds to a name, frees its table, where each call kept one or two. A
+  struct built from a `Map` parameter takes a table of its own on the compiled
+  tiers, where the caller's table was freed twice and the program faulted.
+- A struct inside an `Option` or `Result` can be taken out more than once - two
+  `if let`s, two `match`es, or two `unwrap`s on one value - on the compiled
+  tiers, where the second read faulted, and a carrier dropped unread, stored in
+  a `Vec`, or relayed through `?` frees the struct's fields, where they stayed
+  allocated.
+- `utf8::decode_rune` and its siblings, `binary::uvarint` / `varint`,
+  `pem::decode`, `ed25519::keypair`, `ecdsa::keypair_pem`, `fs::temp_file`,
+  `fs::metadata`, `x509` certificate parsing, and `time::Location::civil` /
+  `resolve` free the tuple they answer and the strings and vectors inside it on
+  the compiled tiers, where every call kept them.
+- A float `sum()` starts from `0.0` on every tier, so a sum of negative zeros is
+  `0` in a release build as it is under `gos run`.
+- A function, a generic function, or a closure stored in a `Vec`, a tuple, a
+  struct field, an enum payload, or a `Map` value can be called from there on
+  the compiled tiers, where the call faulted or the build failed to link.
+- A program may declare its own type or trait named `Unit` or `Never`.
+- `Self::origin()`, `Self { .. }`, and `Self::Variant(..)` patterns inside an
+  `impl` block name the implementing type, where they reported GR0001.
+- A generic function passes as a callback, `#[1.5, 2.5].map(ident)`, where its
+  type parameter was not instantiated and the call reported GT0001.
+- `Simd<T, N>` is a fixed-width lane vector of `f32`, `f64`, `i32`, `i64`,
+  `u8`, or `u32` with 2, 4, 8, or 16 lanes, and `Mask<N>` its `bool` form:
+  `Simd::splat`, `Simd::from_array`, lane-wise `+ - * /` and `& | ^ << >>`,
+  unary `-`, `min`, `max`, `abs`, `sqrt`, `lanes_eq` / `lanes_lt` /
+  `lanes_le`, `mask.select(a, b)`, `reduce_sum` / `min` / `max` / `and` / `or`,
+  `v[i]`, `to_array`, and `{:?}` as `Simd([..])`. Integer lanes wrap, shift
+  counts wrap at the lane width, `min` / `max` propagate NaN and order `-0.0`
+  below `+0.0`, and a float reduction adds in a fixed balanced tree, so every
+  tier computes the same bits. An unsupported lane type, count, or operation
+  reports GT0089.
+- An iterator method chain over a range or a sequence of numbers, `bool`, or
+  `char` - `xs.iter().map(f).filter(g).sum()`, `(1..n).map(f).count()`,
+  `fold`, `any`, `all`, `for_each`, `find`, `position`, `min`, `max`,
+  `collect`, with `enumerate`, `take`, `skip`, `step_by`, `rev`, `zip`,
+  `take_while`, `skip_while`, and `filter_map` stages, over a `String`'s
+  `bytes()`, and over a `Map`'s `iter()`, `keys()`, or `values()` - compiles to
+  one loop with its closures inlined, on every tier, including inside a generic
+  function over its element type.
+- A generic function that only reads a `Vec`, `Map`, or aggregate parameter
+  shares the caller's value in a compiled program when it is called with copy
+  element types, where every call copied the whole collection first.
+- An eager chain such as `xs.map(f).any(p)` calls `f` for every element before
+  `p` runs, as its eager stages do, where it stopped at the deciding element.
+- `sum`, `product`, `min`, and `max` over a `Vec<u8>` answer the elements' own
+  values on every tier, where a compiled program read garbage and `gos run`
+  answered 0 for `sum`; a sum that leaves `u8` panics or wraps as `+` does.
+- A generic struct holding a `Vec` in a field, such as `Wrap<Vec<i64>>`, is
+  freed with the `Vec` inside it when stored in a `Map` or wrapped in `Some` in a
+  compiled program, where the `Vec` field outlived it.
+- `gos run` no longer faults when it compiles a function that inserts, checks,
+  or removes a `Vec` element of a `Set`, where the element reached the runtime
+  as the vector itself instead of the address of its slot.
+- `remove` and `pop` on a `Map` keyed by a `Vec` no longer fault in a compiled
+  program, where the key reached the runtime as the vector itself instead of the
+  address of its slot.
+- Inserting into a `Map` keyed by a `Vec` built for the call no longer frees the
+  key twice in a compiled program, which corrupted memory once a loop had run a
+  few times.
+- `keys()` on a `Map` keyed by a `Vec` frees each key it hands back in a compiled
+  program, where every snapshot kept its key vectors alive.
+- `unwrap_or` on a `Result` or `Option` holding a struct with string or vector
+  fields answers a value that owns those fields, where a compiled program or a
+  JIT-compiled function released them twice and read freed memory or faulted.
+- A compiled program no longer faults in `iter::max` or `iter::min` over a
+  `Vec<u64>` or `Vec<i64>` after a prelude `min(xs)` / `max(xs)` over the same
+  element type, where an extremal value was read as a heap address.
+- `gos build` after an edit spends far less time lowering the program: the
+  analyses that find already-zeroed ownership words and replace a sequence
+  built only to be counted touch the locals each statement names, where they
+  walked every local of the function per statement.
+- An `Option` of a small struct or tuple of scalars that a compiled function
+  builds and consumes itself no longer allocates a heap cell per `Some`.
+- A lazy chain over a `Map`'s `iter()` calls its closures one entry per pull on
+  the bytecode VM, as the compiled tiers do, where every entry was mapped before
+  a `take` or `find` could stop it.
+- `iter.filter_map(f)` over a lazy iterator calls `f` one element per pull in a
+  compiled program, so a `take` after it stops the calls, where every element
+  was mapped first.
+- `fs::read_dir`, `fs::walk_dir`, `process::run`, `process::run_in`, and
+  `process::pipeline_run` free every entry and output they answer in a compiled
+  program, where each call kept its strings and entry blocks until the program
+  exited.
+- `os::arch`, `os::family`, `env::temp_dir`, `runtime::root`,
+  `runtime::scheduler_stats_json`, and the `http::middleware` configuration
+  constructors free the `String` they answer in a compiled program, where each
+  call kept it until the program exited.
+- A stdlib module imported under an alias (`use std::fs as f`) or an item
+  imported by name (`use std::fs::metadata`) reaches the same functions and
+  types as its qualified spelling, where `f::read_dir` was unbound and a bare
+  `metadata(..)` failed to resolve.
+- `gos run` compiles a function taking or returning an `Option` or `Result`
+  nested in another, and one returning a `Result` whose `Err` is a `String`
+  no longer faults when compiled.
+- A struct whose fields are all scalars stores a `u8`-`u32`, `i8`-`i32`,
+  `bool`, or `char` field at its own width in a compiled program, so a `Vec` of
+  such structs, a map or set keyed by one, a heap, and a channel carrying one
+  hold the bytes the fields need. Reads, writes, `&mut` field borrows, copies,
+  ordering, equality, hashing, rendering, and serialization answer the values
+  stored on every tier. A struct a Rust binding passes by value keeps a word per
+  field.
+- `{:?}` of a tuple, and a `Set`, holding `u8`-`u32` or `i8`-`i32` values build
+  with `gos build`, where the build was refused.
+- `unwrap_or_else` on an `Option<Option<T>>`, or on a `Result` whose `Ok`
+  payload is itself an `Option`, answers the inner carrier in a compiled
+  program, where the JIT and LLVM builds read it as a word and crashed.
+- Reading a struct, tuple, or array element out of a `Vec`, `Deque`, or heap
+  through `pop`, `first`, `last`, `get`, `remove`, `peek`, `peek_front`,
+  `peek_back`, `pop_front`, or `pop_back` frees the copy it answers in a
+  compiled program however the answer is consumed, together with the strings,
+  vectors, maps, and sets that element owns, where every such read left its
+  copy allocated and a popped element's strings were never freed.
+- `{:?}` of a slice parameter (`xs: [i64]`, `xs: [(i64, bool)]`) inside a
+  function `gos run` compiled renders its elements, where it printed a stray
+  byte, and a `Vec` or slice of tuples, including tuples of narrow integers,
+  renders from a compiled function instead of leaving it to the interpreter.
+- A `MinHeap` or `MaxHeap` of `String`, `f64`, `char`, or `Option` values
+  pushed from a function `gos run` compiled holds the values pushed, where the
+  heap stored the wrong bytes and the program crashed on the next comparison.
+- `{:?}` of a set built by `union`, `intersection`, `difference`, or
+  `symmetric_difference` inside a function `gos run` compiled renders the set,
+  where it printed a number.
+- An enum variant with no payload takes its const generic arguments from the
+  type the context expects, so `let blank: Grid<2> = Grid::Empty` and a
+  `-> Grid<2>` tail of `Grid::Empty` check, where they reported a type
+  mismatch against `Grid<_>`. A variant that nothing names a value for reports
+  GT0088, with help naming the type annotation.
+- A method in `impl<const N: usize> Ring<N>` may name `N` in its signature: a
+  `fn snapshot(&self) -> [i64; N]` checks, where it reported GT0051, and its
+  result is a fixed `[i64; k]` for the receiver's `k` on every tier. An
+  associated function with no receiver takes the block's const arguments from
+  the turbofish on the type it is called through, `Ring::<3>::blank()`.
+- `+%`, `-%`, `*%`, `<<`, `>>`, `&`, `|`, and `^` apply to lane vectors whose
+  lanes are unsuffixed integer literals, as in
+  `Simd::from_array([1, 2, 3, 4]) +% ..`, where they reported GT0089.
+- The REPL describes the new surface: `%info Simd` and `%info Mask` list every
+  constructor and method with its signature and documentation, `%explain` on a
+  lane vector shows those methods over the binding's own lane type, and
+  `%info +%` (and `-%`, `*%`, `+%=`, `-%=`, `*%=`) describes each wrapping
+  operator with an example.
+- `%info` on a session struct, enum, trait, or type alias shows its declaration
+  with its generic parameters and an enum's variants, where an enum answered
+  nothing, and `%explain` on a binding of a generic type shows the fields,
+  variants, and methods with the binding's own type arguments substituted.
+- The REPL accepts `impl<T> Wrap<T> { .. }` and `impl<const N: usize> ..`
+  blocks as declarations, where they reported GX0007.
+- A struct taken out of an `Option` or `Result` with `unwrap` keeps its own
+  shares of the children the carrier still holds on the compiled tiers. A
+  struct with an `Option` field of its own type, unwrapped from a carrier a
+  function returned and stored again, lost those children, so a tree built
+  that way read freed nodes and could recurse until the stack ran out.
+- `gos test --tier-parity --report status PATH` keeps the recorded evidence of
+  every fixture outside `PATH`, and each module and language row is rebuilt
+  from all of them. It replaced the report with only the fixtures under
+  `PATH`, so `gos feature-status` showed every other surface with no tier
+  evidence.
+
 ## 0.60.2 - Parsed JSON documents are reclaimed, and aggregates cost less to hold
 
 - A parsed JSON document is reclaimed once nothing views it any more. The
@@ -15,9 +366,8 @@
   a name - `let byte = buf[i]` - still reads the caller's storage rather than a
   copy of the whole sequence. Binding a scalar element used to withdraw the
   parameter, so a helper reading a few bytes of a large buffer copied the
-  buffer once per call. An embedded database answering a row out of a resident
-  file went from thousands of requests a second to hundreds of thousands, and
-  stopped growing under load.
+  buffer once per call. A server answering a row out of a resident file no
+  longer copies that file per request, and stopped growing under load.
 - A diagnostic whose span covers several lines underlines the part of the line
   it prints rather than running past the end of it.
 - The `nested_ternary_if` lint names an `if / else if` chain only when every
@@ -30,7 +380,7 @@
 - A goroutine that reads a collection its closure captured reads the one the
   spawning frame holds. A helper that answers a collection of its own no longer
   disqualifies the ones it only reads, so a parallel matrix product stopped
-  taking one copy of both operands per goroutine, and runs faster for it.
+  taking one copy of both operands per goroutine.
 - A `Map` lookup asked only which arm it answered - `.is_some()`, `.is_none()`,
   `.is_ok()`, `.is_err()` - gives its `String` or `Vec` payload back. A
   lookup-in-a-loop kept one answer per call for the life of the process.
@@ -53,10 +403,8 @@
 
 - `strings::split_whitespace` and `strings::splitn` hand back a vector that
   owns the pieces in it, so a split's words are reclaimed with the vector
-  rather than held for the life of the process. A loop splitting a
-  sixteen-thousand-word text two thousand times held 1.5 GB and now holds
-  3.3 MB. Each piece is also built once, where the result was assembled as
-  one string and then copied into another.
+  rather than held for the life of the process. Each piece is also built once,
+  where the result was assembled as one string and then copied into another.
 - `encoding::yaml::parse_all` hands back a vector that owns its documents, so
   a parsed document is reclaimed with the vector rather than kept alive for
   the life of the process.
@@ -212,16 +560,16 @@
 - `regex::count` reports how many non-overlapping matches a pattern has,
   without building any of them.
 - The regex engine is built with its literal prefilters, lazy DFA and inlining
-  on. Every match ran on the backtracking-free fallback, which scanned a
-  megabyte-scale subject about 150 times slower than the engine's own path.
+  on. Every match ran on the backtracking-free fallback rather than the
+  engine's own path.
 - Encoding a value to JSON frees the `json::Value` boxes it builds on the way,
   which had accumulated for the life of the program: one encode of a large
   aggregate now costs what the text costs rather than the whole tree, and a
   program that encodes in a loop holds a constant amount of memory. The array
   and object constructors take the boxes they are handed rather than copying
   each one, so no level of a nested value is deep-copied on the way out.
-- `#[v; n]` fills its buffer the way a memset does. Each element was written by
-  its own call, which is what a three-megabyte byte array spent its time on.
+- `#[v; n]` fills its buffer the way a memset does, where each element was
+  written by its own call.
 - A heap's sift borrows a stack buffer to swap two elements rather than
   allocating one per swap, and a tuple comparison stops at the first field that
   decides the order.
@@ -326,9 +674,7 @@
   line, which is the line the bytecode VM already named.
 - `gos build` runs the LLVM back end at `O1` rather than `O0`, so a debug
   binary gets the greedy register allocator and the machine passes instead of
-  every value living in memory. It is worth up to 2.4x on the benchmark suite,
-  and the mid-end stays the same short pipeline: a fuller one costs more and
-  measures the same.
+  every value living in memory. The mid-end stays the same short pipeline.
 - Debug codegen takes one chunk per core up to eight, where it took four, which
   is what the back end's extra time overlaps with.
 - A send whose value has been received no longer reports `send on closed
@@ -356,14 +702,13 @@
   `gos build`. The in-process JIT read the element anyway and answered the word
   it found there, and dropped an out-of-range write, so a program that indexed
   past the end printed a value under `gos run` where every other tier stopped.
-- A loop indexes through a `let` binding at the speed of the expression it
-  binds. Proving an index in range looked through the arithmetic but not
-  through the name it was given, so `let i = base + c` left every access in the
-  loop checked.
+- An index written through a `let` binding is proven in range as the
+  expression it binds would be. Proving an index in range looked through the
+  arithmetic but not through the name it was given, so `let i = base + c` left
+  every access in the loop checked.
 - An index shifted a second time is proven in range with the rest. A five-point
   stencil reads `xs[i - 1]` and `xs[i + n]` beside `xs[i]`, and only the
-  unshifted one qualified, so the loop kept its checks and stayed scalar. A
-  1200 by 1200 stencil takes 0.023 s where it took 0.100 s.
+  unshifted one qualified, so the loop kept its checks and stayed scalar.
 - A base a loop computes from values that do not change while it runs is a
   base. `let i = r * n + c` names the same product on every iteration, and the
   proof now rebuilds it once ahead of the loop rather than declining because
@@ -374,17 +719,16 @@
 - `gos build` uses the cores the machine has. Codegen ran in one LLVM child
   whatever the host, on the reasoning that the fan-out costs resident memory; a
   debug build has no inliner to lose at a chunk boundary, so it now takes one
-  chunk per core up to four. A 1,900-line project builds in 0.12 s where it
-  took 0.22 s, and a chess engine in 0.08 s where it took 0.12 s. A release
-  build still takes one chunk, because there a chunk boundary is an inlining
-  boundary. `GOS_LLVM_JOBS` overrides both.
+  chunk per core up to four. A release build still takes one chunk, because
+  there a chunk boundary is an inlining boundary. `GOS_LLVM_JOBS` overrides
+  both.
 
 ## 0.59.0 - Receiver types decide dispatch, and string reads stop squaring
 
 - A generic function called with a concrete type runs a copy specialised for
-  it, so `fn fold<T, A>(xs: [T], init: A, f: Fn(A, T) -> A)` over 20 million
-  integers takes 19 ms under `gos build --release` where it took 40 ms - what
-  the same function written for `i64` costs.
+  it, so `fn fold<T, A>(xs: [T], init: A, f: Fn(A, T) -> A)` over integers
+  compiles under `gos build --release` to what the same function written for
+  `i64` does.
 - A `&self` method on a primitive reads its receiver the same way whichever
   spelling its body uses. A bare `self` handed on the receiver's address, so
   `self.abs()` answered one, `self == 0` compared one, and `self + 1` did not
@@ -407,32 +751,29 @@
   not, and the type answers one it does, on every tier. `gos build --release`
   read the receiver as an address for a name both declared, so
   `impl Display for i64` made `n.to_string()` print a pointer.
-- Reading a character no longer walks the string. Counting the digits in a
-  600 KB string took 4.3 s under `gos run` and now takes 3 ms.
+- Reading a character no longer walks the string, so a scan over a string's
+  characters costs its length rather than its square.
 - `gos build --release` reads a string's characters, bytes, and lengths from
   its header rather than through a call, so a length hoists out of a loop
-  condition. Scanning 24 MB of text is 16 ms by character and 10 ms by byte.
+  condition.
 - `s[i]` outside the content panics, as every other indexed read does. The
   compiled tiers answered a NUL character. `s.byte_at(i)` still answers zero
   there, which is its own contract.
 - A string literal outside ASCII reports the characters it has: `"héllo".len()`
   answers 5 on every tier, where the literal's length had folded to its byte
   count.
-- Loading a program no longer costs the square of its function count. Deciding
-  what to compile natively took 53 ms on a 12,000-line file and now takes
-  0.3 ms, and starting it takes 0.04 s where it took 0.10 s.
-- A program's promotion snapshot holds only the bodies its entry can reach,
-  cutting that file's peak memory about 7%. Each runner states what it enters:
+- Loading a program no longer costs the square of its function count when it
+  decides what to compile natively.
+- A program's promotion snapshot holds only the bodies its entry can reach.
+  Each runner states what it enters:
   `gos run` names `main`, a test run names its tests, a benchmark names the
   function it times. A host that names nothing keeps every body.
-- `gos build` compiles about a third faster. The debug profile ran a full
-  `-O1` optimisation pipeline before a `-O0` backend, for a binary already an
-  order of magnitude behind `--release`; it now runs the smallest pipeline that
-  makes the emitted IR usable. A 1,900-line program builds in 0.27 s where it
-  took 0.38 s.
+- The debug profile of `gos build` runs the smallest optimisation pipeline that
+  makes the emitted IR usable, where it ran a full `-O1` pipeline before a
+  `-O0` backend.
 - A build no longer asks the LLVM tools on the machine what version they are.
-  The two probes ran on every build, cost more than the rest of a small
-  program's bookkeeping together, and answer the same until the binary changes.
+  The two probes ran on every build and answer the same until the binary
+  changes.
 - `gos build --timings` says where codegen went: hashing the identity that
   decides a cache hit, emitting IR, and the LLVM child compiling it.
 
@@ -495,8 +836,7 @@
   `BTreeMap` field through a SECOND by-value call costs the lookups it performs
   rather than a copy of the table they read. The nested frame booked a share of
   every heap field it was handed, and a `GosMap` carries no reference count, so
-  that share copied the whole table on every call - the compiled tiers ran
-  fifteen to thirty times the bytecode VM on a struct whose accessors nest.
+  that share copied the whole table on every call.
   A callee's parameter storage is its own frame's, so handing a by-value
   parameter on to another Gossamer function transfers nothing.
 - A by-value parameter read only for a SCALAR field costs that field, not the
@@ -612,8 +952,7 @@
   rather than the size of what it holds. The drop pass gave every one a share of
   each container field it carries, and a `GosMap` has no reference count, so
   that share copied the whole table: an accessor on a struct with a `Map` field
-  ran the map's length per call, which made a loop over it quadratic and put the
-  compiled tiers hundreds of times behind the bytecode VM.
+  ran the map's length per call, which made a loop over it quadratic.
 - A struct or tuple carrying a `Map` reaches a callee as a value of its own on
   the bytecode VM, matching the compiled tiers. The call-site copy covered a
   bare `Map` argument but not one nested in an aggregate, and the user-function
@@ -754,10 +1093,8 @@
 - `hash::crc32` computes eight bytes per step (slicing-by-eight) on every tier.
 - `crc32::update_window` and `String::push_utf8` read the window they are given
   rather than the buffer it sits in. The interpreter gathered the whole buffer
-  to reach the window, so checking one 45-byte record of a resident 3.8 MB file
-  cost 1.7ms a call where the compiled tiers cost nothing measurable; a server
-  reading rows out of a file it keeps in memory answered 584 requests a second
-  under `gos run` and 280,000 compiled.
+  to reach the window, so checking one record of a file held in memory copied
+  the whole file on every call under `gos run`.
 - A `[T]` slice renders in bare brackets on the compiled tiers, as it already
   did in the interpreter. A slice and a `Vec` share one runtime
   representation, and the formatter was handed only the value, so every
@@ -781,8 +1118,7 @@
   callee writes through one of its other parameters. Whether a value stays
   inside a call is a property of that parameter, and it was answered per
   function: a helper that took a collection and a `&mut` store copied the
-  collection on every call. Forwarding a four-element `Vec<String>` through
-  one call layer cost 118ns and now costs nothing.
+  collection on every call.
 - A field-less struct carries the structural comparison, ordering, rendering,
   and JSON encoding every other struct carries. `struct Marker` reported GT0002
   for a `cmp` the compiler had synthesized a call to and nothing had written, so
@@ -866,14 +1202,12 @@
   keeps every prior one alive.
 - A closure that captures a struct reads the struct the enclosing scope holds
   rather than a copy of it. A capture carrying a `Map` field cloned the whole
-  table on every call, so a handler holding a 50 000-entry index ran three
-  orders of magnitude slower than the same call written out.
+  table on every call, so a handler holding an index copied the whole index
+  per call.
 - A struct or tuple passed by value to a callee that only reads it reaches the
   callee as the caller's own value, so the `Vec`, `Map`, or `Set` fields it
-  carries are no longer copied per call. A 40-column row cost about a
-  microsecond to hand over and now costs what a scalar does; the copy still
-  happens wherever the callee can write the parameter or let it outlive the
-  call.
+  carries are no longer copied per call. The copy still happens wherever the
+  callee can write the parameter or let it outlive the call.
 - `net::TcpStream::read_into(buf, max)` reads one chunk into a buffer the
   caller keeps and answers the byte count, so a connection loop pays no
   allocation per chunk. `Ok(0)` is the peer's clean close.
@@ -890,16 +1224,14 @@
   carrier is two words by value and frees nothing, so a payload nobody named
   outlived every holder: a parser answering a statement node kept the node and
   every heap field it carried, once per call.
-- The HTTP server spends 4.4 us of CPU per request where it spent 6.6, so a
-  handler's own work is a larger share of what a request costs. The peer watch
-  registers a connection once rather than a request, a request opens its
-  context the first time its handler asks for one, and the `Date` header is
-  rendered once a second per connection thread instead of once a response.
+- The HTTP server does less bookkeeping per request. The peer watch registers
+  a connection once rather than a request, a request opens its context the
+  first time its handler asks for one, and the `Date` header is rendered once
+  a second per connection thread instead of once a response.
 - A `String` rebound through a `&mut String` parameter costs no allocation of
   its own. `push_str`, `push`, `push_char`, and `push_byte` published the
   helper's answer into the slot as a second share, so a builder filling a
-  caller's buffer kept one String per append and ran about four times slower
-  than the same appends on a local.
+  caller's buffer kept one String per append.
 - `clear` and `truncate` on a `&mut String` release the text they displace.
   Both answer a fresh string the slot takes, and the one it replaced was left
   behind, once per call.
@@ -952,7 +1284,7 @@
 - A `net::TcpStream` starts with Nagle's algorithm off, as Go leaves a
   `TCPConn`. A request/response protocol writes its reply as a few small
   writes, and coalescing them paired with the peer's delayed acknowledgement to
-  cost about 40 ms per exchange.
+  stall every exchange.
 - `net::TcpStream::set_nodelay(on)` turns coalescing back on for a caller that
   wants it.
 - A `Map` reached through a struct field no longer disturbs the object beside
@@ -1130,8 +1462,7 @@
   it is done with it. Only a sequence and a map reached the per-site
   reclamation path, so every other container took the one reserved for a
   handle that may be aliased - a single free at the return - and a container
-  rebuilt each iteration freed all but the last. A loop building 320k sets
-  held 114 MB and now holds 4 MB.
+  rebuilt each iteration freed all but the last.
 - A binding taken from a `Set`, `Map`, `Deque`, `Queue`, or `Stack` copies its
   storage, and that copy is now reclaimed the way a constructed one is. Only
   the sequence copy was named, so every other container's binding copy was
@@ -1162,8 +1493,7 @@
 - A struct or tuple holding a `Vec` releases that sequence when it dies. The
   construction minted the field's share and the frame's own release was then
   dropped on the theory that the field had taken it, so both accounted for one
-  share and the buffer was never freed. A 200k-iteration loop over a one-field
-  struct held 54 MB under `gos build` and now holds 4 MB.
+  share and the buffer was never freed.
 - A `Map` releases the `Vec` values it holds. Only the string-keyed insert
   minted the map's share, and it minted it beside one the caller had already
   minted, so a map of sequences kept every value it was given. Both spellings
@@ -1314,9 +1644,8 @@
   already did. `xs.iter().chunk_by(..)` over structs printed its groups in an
   order the hash decided, so two runs of one program could disagree.
 - A capturing closure's environment is reclaimed. Every closure that captured
-  something allocated an environment nothing ever freed, so a two-million
-  iteration loop that built one per iteration reached 63 MB of resident memory
-  where the same loop with a non-capturing closure held 1 MB. A callable is
+  something allocated an environment nothing ever freed, so a loop that built
+  one per iteration grew by one environment per iteration. A callable is
   now reference-counted like any other heap value, and a callable handed to
   `spawn` gives the goroutine a share of its own.
 - A `const` naming an integer is an array length. `const N: i64 = 4` then
@@ -1341,10 +1670,8 @@
   not into the signature a callable local carries, and a callable is where a
   float-versus-word decision is made.
 - `gos build --release` no longer compiles the code the program does not
-  reach. A file with 2000 unused functions and a `main` that calls one spent
-  1.13 s in code generation and produced a binary 215 KB larger than the same
-  entry alone; it now spends 0.05 s and produces a binary within 1% of hello
-  world's. `GOS_MIR_NO_DCE=1` lowers everything, and `--timings` reports
+  reach, so a function nothing calls adds nothing to code generation or to the
+  binary. `GOS_MIR_NO_DCE=1` lowers everything, and `--timings` reports
   `pruned_count`.
 - `gos clean` no longer removes a `target/` directory this toolchain did not
   write. It removed `./target` in whatever directory it ran in, so running it
@@ -1465,7 +1792,7 @@
   `gos_rt_vec_get_i64` and `gos_rt_vec_set_i64` with it and the inline path
   was unreachable. Every element crossed a call boundary, which the loop paid
   per iteration and which kept the data pointer and the length out of
-  registers: a 512x512 integer matrix multiply ran 0.63s and now runs 0.17s.
+  registers.
   The LLVM back-end was never affected.
 - A bare `fn` or non-capturing closure passed to a generic callable parameter
   reaches its body with the arguments it was given. The thunk that adapts such
@@ -1497,11 +1824,10 @@
   map's iteration order, which Rust randomises per process, so two builds of
   one unchanged source produced different IR and a per-body object cache keyed
   on it missed.
-- `benchmarks/comptime/` and `benchmarks/combinators/` record what a comptime
-  fold and what the runtime-call boundary cost, with checked-in baselines and
-  a runner that fails on a regression. The fold runs once on the build path,
-  not twice: `--timings` reports the same ~124 ms of `comptime_us` that `gos
-  check` spends on the same file.
+- A comptime fold and the runtime-call boundary each have checked-in baselines
+  and a runner that fails on a regression. The fold runs once on the build
+  path, not twice: `--timings` reports the same `comptime_us` that `gos check`
+  spends on the same file.
 
 ## 0.56.1 - Line-flushed stdout, one HTTP watcher per process, labelled spawns, cancellation-shielded and time-bounded work
 
@@ -1517,12 +1843,10 @@
 - A compiled HTTP server no longer spawns an OS thread per request. The
   peer-disconnect watch took a thread of its own for every request and joined
   it before the response went out; the stack mappings that costs serialise on
-  the address space, so throughput was flat across concurrency and below the
-  bytecode VM's. One process-wide watcher now probes every in-flight request,
-  and a request pays a push onto its list. On this machine the release server
-  went from 13,263 to 282,578 requests a second at 256 connections, and from
-  425 to 58,780 on a single one. Disconnect still cancels the request's
-  context within the probe interval.
+  the address space, so throughput was flat across concurrency. One
+  process-wide watcher now probes every in-flight request, and a request pays a
+  push onto its list. Disconnect still cancels the request's context within the
+  probe interval.
 - `spawn(f, reason: "..")` labels a goroutine, and the cohort's enumeration
   and drain reports name it by that label instead of by its spawn index.
 - `sync::shield(f)` runs a callable in a region cancellation cannot reach
@@ -1548,11 +1872,8 @@
 - A served HTTP request no longer pays the peer-disconnect watch's probe
   interval. The watch runs on its own thread and probes every 20ms; ending a
   request set its stop flag and then joined it, so the request waited out
-  whatever remained of a plain `sleep` - a 20ms tail on a response that took
-  a tenth of a millisecond to produce. The watch now waits on a condvar the
-  request's end signals, so the join returns at once. On a keep-alive
-  loopback benchmark the release server went from 1091 to 21509 requests a
-  second.
+  whatever remained of a plain `sleep`. The watch now waits on a condvar the
+  request's end signals, so the join returns at once.
 - A dependency's tests run once, in its own project. `gos test` discovers
   tests from the assembled unit, which carries each path dependency's source
   inlined, so a library's tests ran again for every project that depended on
@@ -1593,9 +1914,8 @@
   retain/release pair per node, and each of those releases decremented a live
   node to a non-zero count, which is the cycle collector's definition of a
   candidate root - a walk of an acyclic tree filled the candidate buffer with
-  the whole tree. A recursive tree traversal is now 4x faster and holds half
-  the memory, matching what the same code written against a reference did
-  before shared `&T` parameters were removed.
+  the whole tree. A recursive tree traversal now does the work the same code
+  written against a reference did before shared `&T` parameters were removed.
 - The `profile` feature builds again. The bytecode VM's opcode-name table
   still listed the two spawn opcodes the `go` removal deleted.
 - A cohort's isolation setting is `isolation: Isolation::Shared` or
@@ -1628,7 +1948,7 @@
   no place, so the write was accepted and silently discarded.
 - A spawn handle is reclaimed. Its one-shot channel is shared with the child
   that delivers the outcome, and neither party released it, so every `spawn`
-  leaked the channel on the compiled tiers - about 300 bytes each. The
+  leaked the channel on the compiled tiers. The
   channel is reference-counted: the drop the codegen emits at the handle's
   last use releases one share, the child releases its own as it leaves, and
   whichever is last reclaims the storage.
@@ -1681,11 +2001,12 @@
   GP0042 with the rewrite `gos check --fix` applies.
 - A `let` target list has its arity checked. `let a, b, c = pair` bound past
   the end of the value and reported nothing.
-- `gos build` without `--release` is roughly four times faster. A debug build
-  records a call-stack frame per function entry so a panic names the source
-  position, and each frame was copying the function name and file into two
-  fresh heap strings on every call. A frame now holds the program-image
-  pointers the prologue passes and decodes them only when a trace renders.
+- A debug `gos build` binary records its call-stack frames without allocating.
+  A debug build records a call-stack frame per function entry so a panic names
+  the source position, and each frame was copying the function name and file
+  into two fresh heap strings on every call. A frame now holds the
+  program-image pointers the prologue passes and decodes them only when a
+  trace renders.
 - An integer `{:spec}` placeholder carrying a width renders its number on the
   LLVM back-end. The fused render-and-pad call typed its destination as the
   word a string handle fits in rather than as the `String` it answers, so the
@@ -1937,7 +2258,7 @@
 - `quick-check.sh` parses the GitHub workflow files. One that does not parse
   fails a CI run before any job starts, which reports as a workflow file
   issue with no job, no log, and no annotation to read.
-- The repository's own tooling is written in Gossamer: the benchmark-suite
+- The repository's own tooling is written in Gossamer: the benchmark
   runner, the perf-gate parsers, the feature-status diff, the cross-build
   fixture driver, the VM-vs-JIT sweep, the site preview server, the workflow
   check, and the binding, QEMU, idle-CPU, and load harnesses. Building the
@@ -1996,11 +2317,10 @@
 - A sequence built inside a loop body no longer reserves the loop's whole trip
   count. The capacity plan for `let mut v = #[]` followed by a counted push
   loop was applied to any allocation the loop's pushes could be traced back
-  to, including one the body itself performs each iteration, so `for i in
-  0..200000 { let b = #[i]; .. }` asked for a 1.6 MB buffer 200000 times: 1.7
-  GB of resident memory and 11 seconds where the bytecode VM used 17 MB and
-  0.01 s. The reserve now applies only where the allocation runs ahead of the
-  loop.
+  to, including one the body itself performs each iteration, so `for i in 0..n
+  { let b = #[i]; .. }` asked for a buffer sized to the whole loop on every
+  iteration. The reserve now applies only where the allocation runs ahead of
+  the loop.
 - A container built in a loop body and moved into a binding outside it now
   reclaims the buffer it replaces on the compiled tiers. An in-place append
   was counted as a second holder of the container it writes through, which
@@ -3130,8 +3450,7 @@
   other.
 - Keep peak memory flat across builtin callbacks: a program whose closures run
   from `map`, `filter`, `fold`, `for_each`, `sort_by`, or a lazy `iter()`
-  adapter no longer grows by one argument buffer per call (543 MB to 24 MB over
-  12M callbacks), and runs faster for the allocation it no longer makes.
+  adapter no longer grows by one argument buffer per call.
 - Read a `bool` element correctly in a compiled combinator: `bs.map(|b| !b)`,
   `bs.filter(|b| !b)`, and `bs.iter().filter(..).count()` answered every
   element as `true` on native builds.
@@ -3193,13 +3512,12 @@
   changed between runs.
 - Show the call stack that reached a fault raised inside JIT-compiled code.
 - Compile a function that holds a closure or a lazy iterator, which kept every
-  `map` / `filter` / `fold` / `sort_by` body and its callers interpreted: a
-  combinator loop over 100 elements runs 26x faster.
+  `map` / `filter` / `fold` / `sort_by` body and its callers interpreted.
 - Compile a function taking a `&Vec<String>`, returning a `Vec<String>`, or
   returning an `Option<i64 | f64 | bool | char>`, each of which kept its whole
   call chain interpreted.
 - Compile a string-builder loop, which was refused outright; the accumulation
-  is linear and runs 4x faster than the bytecode tier.
+  is linear.
 - Keep every byte of a multibyte string returned from compiled code, which lost
   its tail: the boundary read a character count as a byte length.
 - Compile `xs.map(|x| ...)` over a scalar sequence as the traversal itself when
@@ -3963,10 +4281,9 @@
 
 ## 0.48.1 - Allocation speed, swap contract, float parity
 
-- Restore allocation-bound speed. The heap-profile hook added in front of
-  mimalloc was a real call on every allocation; it now inlines into
-  `__rust_alloc` and costs a predicted branch while disarmed. Allocation-heavy
-  programs were up to 17% slower.
+- Keep the heap-profile hook off the allocation path while disarmed. The hook
+  added in front of mimalloc was a real call on every allocation; it now
+  inlines into `__rust_alloc` and costs a predicted branch while disarmed.
 - `xs.swap(i, j)` returns unit instead of `Result<(), errors::Error>`, so the
   bare call is a complete statement anywhere its value is discarded, including
   a loop body's tail. A negative index, or one at or past the end, is a bounds
@@ -4044,18 +4361,17 @@
   `pprof::heap_profile(millis)` records one stack per 512 KiB allocated,
   from inside the global allocator, using the same allocation-free walk.
   Both are exposed on every tier and restore `/debug/pprof/profile` and
-  `/heap` to the router. Sampling costs nothing until it is asked for;
-  instrumenting every function instead measured 2.7x on call-heavy code.
+  `/heap` to the router. Sampling does no work until it is asked for, where
+  instrumenting every function would run on every call.
 - Write the tour and the examples without the `fn main` wrapper the entry
   file makes optional. Nine examples keep it: seven are nondeterministic
   or embed line numbers in their output, and two carry a statement-level
   `#[lint(allow(..))]`, which at top level parses as an item attribute.
 - Emit frame pointers in generated code. It has to be an IR function
   attribute: `clang -x ir` ignores `-fno-omit-frame-pointer`, which only
-  sets the attribute when clang is the one generating the IR. Measured at
-  no cost on a call-heavy benchmark, and it is what lets a profiler walk
-  out of an arbitrary instruction, where DWARF unwinding is not
-  async-signal-safe.
+  sets the attribute when clang is the one generating the IR. It is what
+  lets a profiler walk out of an arbitrary instruction, where DWARF
+  unwinding is not async-signal-safe.
 - Add `gos test --fuzz`: coverage-guided fuzzing of `#[fuzz]` functions
   over `&[u8]`, using the counters `--coverage` already reports as the
   feedback signal. A crash is minimised by delta debugging and written
@@ -4102,11 +4418,10 @@
   patch, a minor, and an edition may change, and the rule that a change
   requiring hand edits is a defect in the release rather than work for
   the reader.
-- Finish a full parity walk in minutes rather than hours. A fixture the
+- Stop a parity walk from waiting on work no tier is doing. A fixture the
   VM cannot run to completion is no longer charged to the other two
   tiers, and a live process consuming no CPU is recognised as parked
-  instead of waiting out its budget. A server example went from 60s to
-  4s; the `examples/` walk from tens of minutes to three.
+  instead of waiting out its budget.
 - Decide the walk on what a program does, not on the paths it prints or
   the order its goroutines finish. A program printing `argv[0]` reports
   the source path under the VM and the executable's path when compiled;
@@ -4367,11 +4682,10 @@
   `pub` wrapper still calls the private helpers beside it.
 - Keep as many arena slabs warm as a thread's widest region actually used.
   A fixed four-slab cache decommitted the rest at every region close and
-  faulted them back in at the next open, so a region-heavy program paid five
-  times the page faults and three times the system time for memory it
-  immediately reused. Retention now follows the measured width, bounded by a
-  ceiling, and a thread whose regions stay narrow holds fewer slabs than the
-  fixed cache did.
+  faulted them back in at the next open, so a region-heavy program paid page
+  faults and system time for memory it immediately reused. Retention now
+  follows the measured width, bounded by a ceiling, and a thread whose regions
+  stay narrow holds fewer slabs than the fixed cache did.
 - Allocate goroutine ids from one counter. The diagnostic registry and the
   scheduler each handed out ids into the same process-wide table, so a
   finishing goroutine could remove a live goroutine's entry from a stack dump.
@@ -4382,8 +4696,7 @@
   ownership of the accumulator and hand it back, but only some of them were
   treated that way, so `s += "text"` released the buffer the call had just
   returned and every later append read freed memory. Building a string in a
-  loop was quadratic as a result: four million appends now take less time than
-  eighty thousand did.
+  loop was quadratic as a result.
 - Refuse a goroutine the host cannot give a stack, instead of aborting. A
   stack costs two mappings, so a process reaches `vm.max_map_count` at roughly
   32 thousand live goroutines; that now surfaces as a declined spawn.
@@ -4393,8 +4706,7 @@
   the poller's whole token table to find the entry to drop.
 - Compile a function that builds a map. Holding a `Map` local kept a function
   on the interpreter however hot it became; one that keys and values by
-  integers, `bool`, `char`, or `String` now compiles, running a map-building
-  loop about 2.4 times faster.
+  integers, `bool`, `char`, or `String` now compiles.
 - Compile a map literal. `{"k": v}` had no native lowering, so a function
   using one fell back to the interpreter even when it was otherwise eligible.
 - Drop an unreachable check from every reference-count retain. The path tested
@@ -4405,8 +4717,7 @@
   element at a time.
 - Index an ASCII string without building an index. Every allocation and every
   append that grew a string walked its contents to record character offsets,
-  which for ASCII are the byte offsets; building a string is about 2.8 times
-  faster. Text outside ASCII keeps the full index.
+  which for ASCII are the byte offsets. Text outside ASCII keeps the full index.
 - Stop serializing string work across goroutines. Appending to a string took a
   process-global lock to identify the accumulator, and allocating or releasing
   any heap string took the same lock, so concurrent string building on
@@ -4418,7 +4729,7 @@
   with the square of the output size.
 - Store an integer `Set` as integers. `Set<i64>` and `BTreeSet<i64>` kept every
   element as decimal text, so each insert, lookup, and removal formatted a
-  string and allocated, and a live element cost roughly twice the memory.
+  string and allocated, and a live element was held as text.
 - Drain goroutines when `main` returns nothing. A native build of a program
   whose `main` has no return value exited without waiting for goroutines still
   running, losing their output; the bytecode VM and the JIT both waited.
@@ -5152,8 +5463,7 @@
 - Match Rust-style checked integer overflow for debug VM, JIT, and native builds,
   while optimized release keeps width-correct wrapping for `+`, `-`, and `*`.
 - Lower explicit `wrapping_add` and `wrapping_mul` to MIR wrapping ops instead
-  of runtime calls. This restores automatic arena regions and `ast-rewrite`
-  release performance and memory use.
+  of runtime calls, so a loop using them keeps its automatic arena region.
 - Format multiline match arms correctly around optional commas and line or block
   comments, and keep multiline generic parameters aligned.
 - Make fallible collection operations return `Option` or `Result` instead of
@@ -5201,7 +5511,7 @@
   in the VM, forced JIT, and optimized LLVM output.
 - Fix Cranelift inline Option and Result field assignment, owned constructor
   binding, shallow managed-field copies from fresh function results, and the
-  struct/Vec stress RSS regression.
+  struct/Vec memory regression.
 - Lower simple Option/Result carrier construction and payload/discriminant
   reads inline in Cranelift, avoiding the Win64 `i128` runtime-call boundary
   that made the Windows `vm_jit` promotion test fail.
@@ -5385,9 +5695,8 @@
 - Persist every binding from semicolon-separated `let` statements entered on
   one REPL line.
 - Preserve packed VM storage for fixed arrays of all-`f64` structs when their
-  elements come from constructor helpers or other expressions, restoring
-  n-body performance after named struct initializers replaced positional
-  literals.
+  elements come from constructor helpers or other expressions, including named
+  struct initializers.
 - Extend Unicode character-position indexes incrementally when appending to
   VM and native strings instead of rescanning the entire accumulated string,
   restoring linear JSON builders and improving byte-oriented native workloads.
@@ -5615,9 +5924,8 @@
 
 - Add `gos cache --clear` to remove every known Gossamer cache class without
   removing project build outputs or vendored dependencies.
-- Recover native edit-distance throughput by limiting release loop-versioning
-  clones that bloat dense dynamic-programming loops; retain aggressive
-  versioning for JIT promotion.
+- Limit release loop-versioning clones that bloat dense dynamic-programming
+  loops; retain aggressive versioning for JIT promotion.
 - Reduce baseline JIT memory when no body can promote by discarding retained
   preparation state, and admit lowerable internal arrays, vectors, tuples,
   structs, recursive enums, and by-value results to Cranelift JIT.
@@ -5640,8 +5948,8 @@
   bloat, streamline CI, and align shared dependency versions.
 - Make explicit `&mut` call arguments consistently write through, including
   fixed arrays.
-- Restore release benchmark throughput by using host `-mcpu=native` for native
-  builds and extending loop bounds versioning to invariant indices.
+- Use host `-mcpu=native` for native builds and extend loop bounds versioning
+  to invariant indices.
 
 ## 0.32.3 - LSP diagnostics and quick fixes, type info, and mutable-reference fixes
 
@@ -5711,8 +6019,7 @@
   dominance checks, eliminating cooperative preemption polls on ordinary
   backward control-flow joins.
 - Charge compiled loop safepoints by estimated natural-loop work with a bounded
-  16,384-unit budget. Native edit distance now runs at Go parity in the scaled
-  benchmark while preserving cooperative scheduler polling.
+  16,384-unit budget, preserving cooperative scheduler polling.
 - Add opt-in `GOS_PREEMPT_REMARKS`, `GOS_PREEMPT_STATS`, and
   `GOS_BOUNDS_REMARKS` diagnostics for loop polling and bounds fast paths.
 - Elide checked vector access for non-negative queue indices advanced by one
@@ -5876,8 +6183,7 @@
 ### Performance and build tooling
 
 - Expanded `gos bench` with allocation, requested-byte, ARC, JIT tier-up,
-  compile-time, code-size, RSS, and trampoline-copy telemetry, plus matched
-  Gossamer/Go benchmarks and checked-in evidence.
+  compile-time, code-size, RSS, and trampoline-copy telemetry.
 - Reduced VM/JIT overhead through typed positional struct construction, raw
   heap-backed String and numeric storage, thread-confined write-back cells,
   flat-struct JIT sret, loop-entry tiering, scalar aggregate replacement, and
@@ -6227,8 +6533,7 @@ and thread-admission failures return `503`.
 
 ## 0.24.0 - Performance, correctness, ergonomics (syntax, gos mcp)
 
-A broad performance, correctness, and hardening release driven by a
-benchmark audit against Go, Rust, C++, and the JVM/CLR languages.
+A broad performance, correctness, and hardening release.
 Every change works identically across the three tiers
 (bytecode VM, in-process Cranelift JIT, LLVM AOT) and is covered by a
 tier-parity fixture.
@@ -6264,8 +6569,7 @@ tier-parity fixture.
   correctly (they previously fell back to bytecode silently).
 - **Interpreter memory.** Push-built homogeneous `[i64]` / `[f64]`
   vectors use a packed 8-byte-per-element representation instead of a
-  boxed value array, cutting interpreter RSS on integer/float-vector
-  workloads.
+  boxed value array.
 - **Fewer bytecode dispatches in loops.** Loop back-edges now re-enter
   the body directly (the fused increment-and-test already proved the
   bound, so the header check runs only on loop entry), and `for x in
@@ -6501,8 +6805,7 @@ external SDKs).
 
 ### Compiled-tier optimizations
 
-Narrowing the gap to Go on the stress-test microbenchmarks (`edit-distance` now
-beats Go, `radix-sort` matches it).
+What tight loops compile to on the compiled tiers.
 
 - **Inlined scalar `min` / `max`.** `min(a, b)` / `max(a, b)` on `i64` lower to
   a branchless `icmp`+`select` instead of a `gos_rt_min_i64` call, removing a
@@ -6809,8 +7112,8 @@ bytecode tier now executes as native code.
 bytecode instruction instead of a general method call, skipping the
 argument-materialisation, inline-cache probe, and builtin dispatch that a
 method call carries. Byte-scanning loops - hand-written lexers, parsers, and
-UTF-8 walks that index a string a byte at a time - run noticeably faster in
-the interpreter. The fast path applies only when the receiver's type is known
+UTF-8 walks that index a string a byte at a time - take the direct op in the
+interpreter. The fast path applies only when the receiver's type is known
 to be `String`, so a user type with its own `byte_at` keeps its method; the
 result is identical on every tier.
 
@@ -7089,20 +7392,18 @@ Memory and GC:
   observationally transparent and bit-identical across tiers (the bytecode VM
   does not reuse); `GOS_RC_NO_REUSE` disables it.
 - **`[u8]` / `Vec<u8>` are byte-packed (stride 1).** A byte buffer now costs one
-  byte per element like Go's `[]byte`, not an 8-byte word per byte. A
-  never-evicted `HashMap<i64, [u8]>` cache dropped from ~328 to ~114 bytes per
-  entry (2.85x), matching Go and best among the compared languages. Reads
+  byte per element like Go's `[]byte`, not an 8-byte word per byte. Reads
   zero-extend, so values above 127 round-trip exactly; bit-identical across the
-  bytecode VM, JIT, and native tiers (new `byte_vec_packed` fixture). Helps all
-  binary / IO / network buffers.
+  bytecode VM, JIT, and native tiers (new `byte_vec_packed` fixture). It
+  applies to every binary, IO, and network buffer.
 - **Cyclic garbage collection is incremental.** The automatic cycle collector
   processes a bounded slice of candidate roots per run (with buffer
   reconciliation) and adapts its trigger threshold to how much it reclaims, so a
   churn of live shared graphs no longer pays a full scan and one collection can
   never stall the goroutine on an unbounded sweep. Explicit
   `runtime::collect_cycles()` still fully drains.
-- **Faster region allocation.** The arena-region bump path takes a single
-  thread-local probe instead of two; allocation-heavy region code.
+- **Region allocation takes one probe.** The arena-region bump path takes a
+  single thread-local probe instead of two.
 - **Deep structures tear down without overflowing the stack** on the
   interpreter tier: dropping a million-deep list / tree / graph is iterative
   past a depth threshold, matching the native tier's robustness.
@@ -7224,13 +7525,11 @@ The bytecode VM now compiles to WebAssembly and runs Gossamer in the browser.
   bulk-freed instead of torn down node by node - now applies to `for` loops
   (`for i in a..b`, `for x in xs`, `for (i, x) in xs.enumerate()`), not only
   `while`. Allocation-churn code written the idiomatic way
-  (`for _ in 0..n { let t = build(); use(&t) }`) gets the same speedup the
-  `while` form already had: a balanced-tree build-and-discard loop runs ~3-4x
-  faster on the compiled tiers, with output bit-identical across every tier.
+  (`for _ in 0..n { let t = build(); use(&t) }`) gets the same bulk free the
+  `while` form already had, with output bit-identical across every tier.
   The eligibility check is unchanged and conservative - when it cannot prove
   every allocation stays inside the iteration, the loop keeps the ordinary
-  reference-counted path, so the change can only speed code up, never alter a
-  result.
+  reference-counted path, so the change never alters a result.
 - The same regioning now also covers `for (k, v) in m.iter()` over `HashMap`
   and `BTreeMap` (including struct- and tuple-keyed maps) and bare `loop { }`
   bodies, so every loop form an allocation-churn body might use takes the
@@ -7246,7 +7545,7 @@ The bytecode VM now compiles to WebAssembly and runs Gossamer in the browser.
 
 - A `[bool]` element reads and writes through a constant 1-byte stride instead
   of loading the element width from the vector header and branching on it at
-  every access. Random-access bool work (visited-sets, bitmaps) gets faster.
+  every access.
 - A bounds check uses one unsigned comparison (`index >= len` catches both a
   negative and an over-length index) in place of two signed comparisons, for
   every checked vector and fixed-array access.
@@ -7272,20 +7571,19 @@ AOT tier.
   word loads/stores) instead of calling libc `memcpy`, and string allocations
   zero only their trailing NUL rather than memset-ing the whole buffer. The
   static-musl `--release` link resolves `memcpy` / `memset` to musl's scalar
-  routines, whose per-call overhead dominated the small per-k-mer copies; the
+  routines, whose per-call overhead dominated small copies; the
   inline path removes it without giving up the portable static binary.
 - `m.iter()` on a `&HashMap` parameter peels past `&` before dispatch, so a
   borrowed map yields real entries instead of a garbage-length vec / hang.
 - The LLVM backend and Cranelift JIT inline word-stride `Vec<f64>` (and nested
   `Vec`) get/set off the GosVec header, not just integer elements, so `opt -O3`
-  can hoist them (spectral-norm `Vec<f64>` drops an order of magnitude).
+  can hoist them.
 - The VM's typed flat-local reads (`IntArrayGetI64`, `FloatVecGetF64`) return
   the lenient zero on an out-of-range index, matching the compiled tiers.
 - The bytecode VM gains fused super-instructions for `String.substring` and
   `m.inc` (the sliding-window counter pattern), bypassing the per-call
   method-dispatch + receiver clone + map lock-handle round-trip; `substring`
   also builds its result inline with no intermediate owned `String`.
-  k-nucleotide `gos` drops ~50% (5.28s -> 2.66s, matching CPython).
 - Building from source / CI retries a transient crates.io index resolution
   failure up to 10 times (`net.retry` in `.cargo/config.toml`) instead of the
   default 3, riding out brief registry DNS / timeout blips on slow runners.
@@ -7323,7 +7621,7 @@ A stability sweep that closes the programs which still passed `gos check` on 0.1
 - **Method calls are arity-checked and typo-checked.** A method called with the wrong number of arguments (`GT0018`, the compiled tier zero-filled the missing one) and a method that no type declares (`GT0002`, the compiled build failed on an undefined symbol) are now rejected. A piped `x |> recv.m(a)` correctly counts the implicit argument.
 - **A `match` that slips past exhaustiveness panics cleanly instead of corrupting memory.** The compiled tiers lowered a non-matched `match` to `unreachable` (undefined behaviour - a segfault on LLVM, a trap on Cranelift); both the switch default and the guarded fall-through now emit a clean panic, so an exhaustiveness blind spot can never be memory-unsafe.
 - **Use-after-free fixed: the weak-reference count now saturates** instead of wrapping at 256. 256 live `Weak`s to one object wrapped the `u8` count to zero and freed a block still observed by weaks; the count now pins at its maximum (leak-rather-than-corrupt), matching the strong-count policy.
-- **Memory leak fixed: a `String` / RC field nested inside a by-value sub-struct is now released** when the outer struct dies. The per-field RC teardown walked only the outer struct's direct fields, so `Outer { inner: Inner { s: String } }` leaked `inner.s` every iteration (RSS grew to ~128 MB at 2M iterations, now bounded at ~4 MB). The teardown now recurses through by-value sub-structs and tuples, with matching recursive retains at every site that shares a nested pointer - whole-struct copy, aggregate operand, functional record update (`Type { ..base }`), and sub-struct field extraction - so a nested share is freed exactly once and never double-freed.
+- **Memory leak fixed: a `String` / RC field nested inside a by-value sub-struct is now released** when the outer struct dies. The per-field RC teardown walked only the outer struct's direct fields, so `Outer { inner: Inner { s: String } }` leaked `inner.s` every iteration. The teardown now recurses through by-value sub-structs and tuples, with matching recursive retains at every site that shares a nested pointer - whole-struct copy, aggregate operand, functional record update (`Type { ..base }`), and sub-struct field extraction - so a nested share is freed exactly once and never double-freed.
 - **VM handle registries shared across goroutines no longer lose state.** `HashSet`, `VecDeque`, the HTTP router table and its handlers, compiled-regex handles, and the TCP / TLS / UDP / Unix socket registries were stored per-thread, so a handle created before a `go` / channel hand-off vanished when the goroutine resumed on another worker. They now use a process-global registry. Sockets additionally hold each connection behind its own `Arc<Mutex<_>>` and clone it out under a brief registry lock, so blocking I/O never holds the registry lock - a global socket registry would otherwise deadlock when the scheduler parks a goroutine mid-read.
 - **`for (_, v) in m.iter()` over a map with struct values is fixed on the compiled tiers.** A `_` wildcard in the for-loop tuple-destructure dropped out of the optimised map-iteration path, so the struct value was read as a raw pointer (garbage, or an earlier `gos build` ICE) while the VM ran it correctly. The wildcard now takes the same path as `(k, v)`, binding the value as a box reference; `(_, v)`, `(k, _)`, and `(_, _)` over any key/value type match the VM bit-for-bit.
 - **Returning a const-generic array no longer corrupts memory.** A `fn f<const N: usize>(xs: [T; N]) -> [T; N]` that returned its argument produced garbage and then a use-after-free segfault on the compiled tier: the value was carried as a runtime sequence everywhere except the return path, which read the heap pointer as the first element. The `[T; N]` return now takes the same `Vec` representation as the parameter across the checker, the callee's return slot, and the call-site type.
@@ -7337,7 +7635,7 @@ A stability sweep that closes the programs which still passed `gos check` on 0.1
 - **Struct field names are interned, not heap-allocated per instance.** `Value::Struct` stored every field name as an owned `String` (one heap allocation per field per value); names are now `&'static str` interned once at program load, so construction copies cached pointers with no per-value allocation or lock. Struct-heavy interpreted workloads shed RAM.
 - **Scalar- and string-keyed `HashMap` entries are 24 bytes smaller.** The rarely-used aggregate-key arm of `MapKey` widened every key to 40 bytes; it is now boxed, returning int- and string-keyed maps to a 16-byte key.
 - **Tight loops drop a dead per-iteration unit load.** A loop body whose last line was a discarded expression (an assignment, an in-place mutation) emitted a boxed unit `LoadConst` that nothing read, every iteration.
-- **`&mut self` method calls mutate in place instead of deep-cloning.** A `&mut self` call on a local receiver wrapped it in a write-back cell whose refcount inflation forced the first field write to copy-on-write the whole struct. The receiver is now moved through the cell (refcount stays one), so the mutation lands in place; an aliased copy still triggers the copy, preserving value semantics. faster on method-dispatch-heavy loops, bit-identical across tiers.
+- **`&mut self` method calls mutate in place instead of deep-cloning.** A `&mut self` call on a local receiver wrapped it in a write-back cell whose refcount inflation forced the first field write to copy-on-write the whole struct. The receiver is now moved through the cell (refcount stays one), so the mutation lands in place; an aliased copy still triggers the copy, preserving value semantics. Bit-identical across tiers.
 
 ### Documentation
 
@@ -7432,7 +7730,7 @@ Closes the gap between `gos check` and what runs: a program that type-checks now
 ### Optimization
 
 - **Building a Vec with `Vec::new()` + a `push` loop is amortized O(n) on the VM.** `push` / `pop` / `insert` / `remove` now mutate the backing storage in place instead of deep-copying the whole Vec per operation, so the idiomatic `let mut v = Vec::new(); for ... { v.push(x) }` accumulation runs in amortized O(n) rather than O(n^2). Output is unchanged and identical across the VM, Cranelift, and LLVM tiers. Fixture: `vec_inplace_growth.gos`.
-- **Numeric Vecs and ranges use flat 8-byte storage on the VM.** A `Vec<i64>` / `Vec<f64>` and an integer range now store one 8-byte element per slot (`IntArray` / `FloatVec`) instead of a boxed 16-byte element, halving the per-element footprint of numeric collections on the bytecode VM. A perf-only change; output is identical across every tier. Fixture: `vec_inplace_growth.gos`.
+- **Numeric Vecs and ranges use flat 8-byte storage on the VM.** A `Vec<i64>` / `Vec<f64>` and an integer range now store one 8-byte element per slot (`IntArray` / `FloatVec`) instead of a boxed 16-byte element on the bytecode VM. Output is identical across every tier. Fixture: `vec_inplace_growth.gos`.
 
 ## 0.16.0 - Tier parity, aggregate formatting, optimizations, and language features
 
@@ -7496,7 +7794,7 @@ Closes the gap between `gos check` and what runs: a program that type-checks now
 
 - **String-append fusion through a `&mut String`.** A string-literal fragment appended onto a `*out` accumulator lowers to `gos_rt_str_append_bytes` (length-counted, no per-call `strlen`), which the LLVM tier inlines to a capacity check + `memcpy` + length bump - no FFI call on the in-place path; `*out += format!("{}", n)` fuses to `gos_rt_str_append_i64` / `_f64` written straight into the pointed-to string, eliminating the per-value intermediate allocation. The three append shims (`gos_rt_str_concat_drop_a`, `_append_i64`, `_append_f64`) drop their `catch_unwind` (`ffi_entry!`) wrapper - they are panic-free across the boundary - and the append result stays on the self-consuming copy-back path (no spurious retain/release), so the builder's refcount stays 1 and appends remain in place rather than degrading to copy-on-write reallocation. Fixtures: `string_append_realloc.gos`, `deref_string_concat.gos`.
 - **Array indexing inside small inlined callees uses the right index.** `inline_small_callees` remapped a spliced callee's place root but not its `Projection::Index` local, so a small callee like `fn at(a: &[T; N], i) -> a[i]`, once inlined, read the index through a colliding caller local - a latent miscompile that surfaced as an out-of-bounds panic (garbage index) in iron_knight's `gen_pawn_moves` (`pos.boards[us][PAWN]`). The index local is now remapped like the place root. The VM was correct; this closes a compiled-tier divergence. Fixture: `inline_index_remap.gos`.
-- **`[bool]` element stride is now 1 byte.** Bool arrays previously used 8-byte element stride, making a 1M-element `[bool]` consume 8 MB instead of 1 MB. Random-access workloads (BFS `visited` arrays, presence tracking) were spending most of their time in DRAM rather than L3. With 1-byte stride, the visited array for a 1M-node graph-BFS fits in L2 cache. The push/get/set inline paths in the LLVM codegen have a corresponding byte-stride fast path.
+- **`[bool]` element stride is now 1 byte.** Bool arrays previously used an 8-byte element stride, one word per `bool`. The push/get/set inline paths in the LLVM codegen have a corresponding byte-stride fast path.
 - **`HashSet` operations no longer allocate per lookup.** `contains`, `insert`, and `remove` were allocating a `String` for each operation by converting the raw key to an owned string before hashing. The backing `HashSet` now uses hashbrown's borrowed-key API so lookups hash and compare the raw bytes directly.
 - **`PRIMITIVE` vec free skips lock acquisition.** `vec_elem_meta_remove` was acquiring `VEC_ELEM_METAS` and `VEC_SLOT_CHILDREN` locks unconditionally even for primitive-element vecs with no entries in either table. A PRIMITIVE early exit avoids both mutex acquires for the common case.
 - **Inliner cost limit raised from 24 to 40; constant-argument promotion added.** The recursive-descent JSON parser's `parse_val`, `parse_str`, and `parse_num` helpers were previously too large to inline. With the raised limit and a constant-argument promotion path (callees over the limit are inlined when at least one argument is a compile-time constant, since `const_fold` immediately collapses branches and reduces effective post-inline size), the full parser inlines into the dispatch loop and LLVM can optimize the parse-then-access pattern end to end.
@@ -7549,7 +7847,7 @@ Closes the gap between `gos check` and what runs: a program that type-checks now
 - **Bytecode-VM numeric loop dispatch.** Reading or writing a float field of a fixed-size struct array through an integer loop index (`bodies[i].vx`) now sources the index straight from the integer register file via dedicated `FlatGetF64I` / `FlatSetF64I` ops, dropping the per-access box of the index into a value register that every flat field access previously emitted. Separately, a bare assignment statement no longer materializes the unused `()` value it evaluates to (a `LoadConst(Unit)` per statement) - the store is compiled directly when its result is discarded, while assignment-as-expression positions still produce the unit. Both cut the instruction count of tight numeric and mutation-heavy loops on `gos`.
 - **In-place string accumulation for `acc += format!(...)`.** The accumulation now appends each interpolated piece directly onto the accumulator - one copy into the growing buffer - instead of assembling the fragment in a scratch buffer, allocating a result string, and copying that into the accumulator (three copies of every character). Integer and float interpolations format their digits straight into the destination via new in-place `gos_rt_str_append_*` shims, with no throwaway string per value. A compiled-tier lowering; the produced text is bit-identical to the buffered concat path.
 - **Goroutine-shared reference counts are atomic on the compiled tiers (atomic-on-escape).** A heap-RC object (recursive enum / boxed payload) shared between goroutines - captured by a `spawn` closure, passed to `go f(...)`, or sent on a channel - was retained/released with non-atomic counts under the multi-threaded scheduler, so two workers releasing it concurrently could tear the count into a use-after-free or a leak. Objects now switch to atomic reference counting when they escape to another goroutine (a `SHARED_BIT` set transitively at the escape point) and are excluded from the per-thread cycle collector (their cycles leak like Rust's `Arc` - break with weak refs). Thread-local objects keep the cheap non-atomic path, so single-goroutine RC performance is unchanged.
-- **A `Vec` of by-value aggregates owns its elements' RC children on the compiled tiers.** A `Vec<T>` whose element `T` is a struct/tuple carrying an unconditional RC field - a heap user enum, `String`, or nested vec (e.g. `Vec<Projection>` where `Projection { expr: Expr, alias: String }`) - was shallow-freed while the source temporary's fields were released at scope end, so a vec built in one function and returned (it outlives the temp) left dangling pointers, and walking it after the return was a use-after-free (it corrupted the `atlas_db` SQL benchmark's query planner). The vec is now tagged `AGGR_OWNED` with a slot-children layout (`gos_rt_vec_set_slot_children`): push retains each element's RC children and free deep-frees them, so a pushed element dropped at its source scope - or carried out inside the returned vec - is reclaimed exactly once. A `for x in &v` loop variable bound to a borrowed element is no longer treated as an owning aggregate, so it no longer double-releases the element's fields.
+- **A `Vec` of by-value aggregates owns its elements' RC children on the compiled tiers.** A `Vec<T>` whose element `T` is a struct/tuple carrying an unconditional RC field - a heap user enum, `String`, or nested vec (e.g. `Vec<Projection>` where `Projection { expr: Expr, alias: String }`) - was shallow-freed while the source temporary's fields were released at scope end, so a vec built in one function and returned (it outlives the temp) left dangling pointers, and walking it after the return was a use-after-free. The vec is now tagged `AGGR_OWNED` with a slot-children layout (`gos_rt_vec_set_slot_children`): push retains each element's RC children and free deep-frees them, so a pushed element dropped at its source scope - or carried out inside the returned vec - is reclaimed exactly once. A `for x in &v` loop variable bound to a borrowed element is no longer treated as an owning aggregate, so it no longer double-releases the element's fields.
 - **The loop-carried-release hoist no longer frees a value still live on a sibling branch.** The hoist relocated a string's release to its last mention along a single back-edge path, but a `for` loop with one branch reading the value and another pushing it (a group-by accumulation: `for k in &keys { if k == key … }` then `keys.push(key)`) left the value live past that mention; nulling it there collapsed every later group key to empty on the compiled tiers. The hoist now runs a forward-liveness check from the insertion point and skips the relocation when the value is read before being rewritten on any path.
 - **`assert(cond[, msg])` and `assert_eq(a, b[, msg])` are implemented on every tier.** Both were reserved prelude names with no implementation, so a call raised `error[GX0002]: name 'assert' is not bound` even though the skill card and test examples use them. They now panic on a false condition (the supplied message verbatim, else "assertion failed") via a `builtin_assert` in the interpreter and a conditional-`panic` MIR lowering for the compiled tiers; a passing `assert` is counted in the test tally.
 - **`gos test` links sibling modules into the test compilation.** A `#[test]` calling a sibling module (`super::helper::triple` where `src/helper.gos` is declared `mod helper;`) failed with `GX0002` because the per-file test build read the entry source without the sibling auto-bundle that `gos` / `gos build` apply. Tests now bundle siblings the same way; test-name collection stays unbundled so a sibling's own tests are not double-counted.
@@ -7610,9 +7908,9 @@ Many modules and methods had an interpreter implementation but no compiled-tier 
 
 - **Miri runs the `gossamer-runtime` crate clean.** The `mimalloc` global allocator and the RC pool's direct `mi_*` calls fall back to the system allocator under Miri (as they already do under ThreadSanitizer), so Miri models every allocation instead of aborting on the first foreign call. The strict-provenance defects it then surfaced are fixed at the root: the closure-env and flat-slot ABIs recover a pointer's exposed provenance (`with_exposed_provenance`) rather than `transmute`-ing an integer, and the `Vec` element buffer is word-aligned (its `i64` / pointer slots were being read through a 1-aligned `Vec<u8>`). Socket round-trip tests are skipped under Miri (no sockets there), and the million-node release stress shrinks under Miri while the native run is unchanged.
 - **The weekly fuzz job survives the full hour.** The process-global symbol interner is now resettable (`reset_interner`) and the fuzz harnesses clear it per input, so a long run no longer accumulates every identifier ever interned - the same unbounded growth the long-lived LSP shared. The fuzz binary falls back to the system allocator (a `--cfg fuzzing` gate) so ASan / LeakSanitizer instrument the heap, and the weekly targets run in libFuzzer fork mode (`-fork=1`) so a child that trips the RSS cap is recorded and replaced instead of killing the parent.
-- **Bytecode-VM user-function inliner.** `gos` re-compiles a small non-recursive single-expression helper directly at its call sites instead of emitting a per-call frame, keeping the result in its native (`i64` / `f64` / value) register bank. A function that calls `panic` / `assert` stays a real frame so panic and failed-test tracebacks are unchanged, and `gos test` disables inlining to preserve the full call chain. Spectral-norm runs ~4.8× faster interpreted; `GOSSAMER_INLINE=0` turns it off for differential checks.
-- **Tuple-extracted RC values are released, and destructuring loops auto-region.** A value bound out of a tuple (`let (tree, _) = build()`) is now retained at the extract and released with its owner, and a loop body that only produces and consumes fresh per-iteration values is bump-allocated and freed wholesale. The ast-rewrite cross-round leak is gone (≈487 MB → ≈49 MB at depth 20) with no speed cost.
-- **`&mut String` write-back works on every tier.** `*s = v` (release-old) and `*s += v` (self-consuming append) through a `&mut String` parameter now persist - the VM via its cell protocol, the compiled tiers via a by-slot-address `Rvalue::Ref` plus a post-call reload - enabling the idiomatic `serialize_into(&mut buf)` accumulator that the JSON benchmark now uses.
+- **Bytecode-VM user-function inliner.** `gos` re-compiles a small non-recursive single-expression helper directly at its call sites instead of emitting a per-call frame, keeping the result in its native (`i64` / `f64` / value) register bank. A function that calls `panic` / `assert` stays a real frame so panic and failed-test tracebacks are unchanged, and `gos test` disables inlining to preserve the full call chain. `GOSSAMER_INLINE=0` turns it off for differential checks.
+- **Tuple-extracted RC values are released, and destructuring loops auto-region.** A value bound out of a tuple (`let (tree, _) = build()`) is now retained at the extract and released with its owner, and a loop body that only produces and consumes fresh per-iteration values is bump-allocated and freed wholesale. A tree rebuilt across rounds no longer leaks the previous round's tree.
+- **`&mut String` write-back works on every tier.** `*s = v` (release-old) and `*s += v` (self-consuming append) through a `&mut String` parameter now persist - the VM via its cell protocol, the compiled tiers via a by-slot-address `Rvalue::Ref` plus a post-call reload - enabling the idiomatic `serialize_into(&mut buf)` accumulator.
 - **Counted-loop `[i64]` reads skip the bounds check on the LLVM tier.** `for x in vec` over a primitive-element vector lowers to a branch-free unchecked element read, since the induction index is provably within `[0, len)`.
 - **Cleanup.** Removed the dead heap-`GosResult` exit-code fallback (Result/Option are by-value `i128`), fixed broken rustdoc intra-doc links so `cargo doc -D rustdoc::broken_intra_doc_links` passes, and the `crypto::hmac::sha256_mac` lowering test now passes byte slices (`.as_bytes()`) like the other byte-input crypto helpers instead of a `String` (which the compiled shim read as a byte vector).
 
@@ -7668,7 +7966,7 @@ The remaining Rust-façade-only pieces now work from Gossamer source, verified b
 - **Migrations relocated to `gossamer-runtime::sql_migrate`** (std façade delegates) and exposed as `sql::migrate::up(&mut conn, dir) -> i64`. The `schema_migrations` bookkeeping column is now `BIGINT` - PostgreSQL's `INTEGER` is 32-bit and epoch milliseconds overflowed it (SQLite reads both as i64).
 - **`Select` builder in pure injected Gossamer** - fluent `sql::Select::new(t).columns(&[…]).where_eq(col, v).order_by(col, asc).limit(n).offset(n)` rendering `$N` placeholders via `render()` + `params()`; methods return a fresh builder (functional style - correct under both copy and share field semantics).
 - **Method-call typing fixes surfaced by the above** (general, not SQL-specific): array/tuple-literal arguments re-type against method and variant-constructor parameters with multi-candidate disambiguation (same name + arity coerce only when exactly one candidate is container-shaped); non-generic impl methods record their declared return type keyed by `(self type, name, arity)` so chained results (`sel.params()`) reach codegen typed; the LLVM call emitter passes one-slot enum arguments by slot address when inference left the call-site local untyped (the callee memcpys from the address - passing the loaded tagged-pointer value made it dereference tag bits).
-- **RC accounting no longer depends on item order** (soundness, compiled tiers). `register_rc_managed_ty` only fired at enum-constructor lowering sites, so any body lowered *before* an enum's first constructor treated that enum's locals as non-RC and skipped every retain/release - a by-value enum argument stored into a container inside such a body (the SELECT builder's `where_eq` pushing a `Value`) was freed by the caller's ctor-temp release while the container still referenced it. Symptom: intermittent (allocator-reuse-dependent) garbage discriminants / segfaults in `gos build [--release]` binaries, ~50% crash rate on the pgooseql full example. Payload-bearing enum defs are now registered eagerly during typechecking (`register_rc_managed_enum_def`, def-based so every instantiation of a generic enum is covered); all-unit enums stay excluded (they lower as bare `i64` discriminants). Regression-gated by `feature-testing-examples/enum_param_rc_repro.gos` in tier parity.
+- **RC accounting no longer depends on item order** (soundness, compiled tiers). `register_rc_managed_ty` only fired at enum-constructor lowering sites, so any body lowered *before* an enum's first constructor treated that enum's locals as non-RC and skipped every retain/release - a by-value enum argument stored into a container inside such a body (the SELECT builder's `where_eq` pushing a `Value`) was freed by the caller's ctor-temp release while the container still referenced it. Symptom: intermittent (allocator-reuse-dependent) garbage discriminants / segfaults in `gos build [--release]` binaries, intermittently on the pgooseql full example. Payload-bearing enum defs are now registered eagerly during typechecking (`register_rc_managed_enum_def`, def-based so every instantiation of a generic enum is covered); all-unit enums stay excluded (they lower as bare `i64` discriminants). Regression-gated by `feature-testing-examples/enum_param_rc_repro.gos` in tier parity.
 - **23 new `gos_rt_sql_*` shims** with ABI-registry entries, JIT symbol-table entries, interpreter builtins over the same safe core, and MIR dispatch arms; driverless tier-parity fixture extended to the Select builder and pool error paths.
 
 ### `std::http` - proxy-grade client and server on every tier
@@ -7713,24 +8011,24 @@ The HTTP stack was the largest remaining VM-only / tier-divergent surface; it is
 
 ## 0.12.0 - Arenas, compact enums, panic ergonomics, predictable memory, deep optimizations.
 
-- **`arena { }` blocks (inspired by Zig).** Everything allocated in the block is bump-allocated and freed wholesale on every exit path (desugars to a block-scoped `defer`). Arenas nest, slabs recycle, and retain/release are no-ops for arena values via a range check against one reserved virtual range. Statement-position only; contract documented in the memory-model chapter. binary-trees with arenas: 0.36 s / 18 MB.
+- **`arena { }` blocks (inspired by Zig).** Everything allocated in the block is bump-allocated and freed wholesale on every exit path (desugars to a block-scoped `defer`). Arenas nest, slabs recycle, and retain/release are no-ops for arena values via a range check against one reserved virtual range. Statement-position only; contract documented in the memory-model chapter.
 - **Compact heap enums.** The discriminant left the payload: enums with more than 4 variants keep it in a spare header byte; enums with at most 4 carry it in pointer tag bits, so match dispatch reads no memory. The RC header also shrank 16 to 8 bytes (size field deleted - `mi_free` needs only the pointer; meta pointer interned to a 16-bit id). Net: a two-pointer tree node went 48 to 24 bytes (16 inside an arena). Enums are capped at 256 variants (`GT0012`).
-- **Loop-carried values release at last use in the iteration.** The old value of a reassigned local was released at the reassignment - after the next structure was already built, doubling transient peaks. A hoisting pass releases at the last mention instead (original site stays as a null-safe backstop). With everything above, binary-trees peak RSS: 165 MB in 0.11.0 to 33 MB - below the Rust and Go ports; ast-rewrite 0.59 s / 163 MB to 0.16 s / 49 MB.
+- **Loop-carried values release at last use in the iteration.** The old value of a reassigned local was released at the reassignment - after the next structure was already built, doubling transient peaks. A hoisting pass releases at the last mention instead (original site stays as a null-safe backstop).
 - **Owned heap values release at last use, not function return** (liveness pass with null-out + return backstop; `Weak`-creating functions keep return placement).
 - **Escaped struct values reclaim deterministically (the `cycles` leak),** via reference-counted copy blobs with guarded child metas, provenance-set gated so foreign pointers can be leaked but never corrupted. Uniform holder accounting covers overwrite-of-`Some`, `Err`-side payloads, and field aliases.
 - **Container-stored aggregates reclaim.** Vec elements with guarded children retain on push/clone/slice and release on free; map blob values release on insert-overwrite/remove/free and the `_opt` getters hand out owned shares (previously they stole the map's).
 - **Unit-variant singletons are process-immortal** - fixes the pin being stripped by `let x = Enum::Unit` bindings and a count overflow on arena workloads; also removes two header writes per leaf. Tuple-variant payload detection now comes from the declaration, so matching a unit-variant binding no longer dereferences a bare tag.
 - **Strings owned by enum payloads free correctly** - the release walk no longer feeds tag-headered string children into the refcount machinery (was a crash or a leak).
 - **Panic ergonomics.** An unobserved `go` panic prints one clean `error[GX0005]` line plus user frames (raw Rust panic line and trampoline frames gone). `runtime::set_panic_hook(f: fn(String))` replaces the default report on every tier. Main-goroutine panics exit 101 (Rust parity, pinned by test) instead of dumping core, and a CI guard rejects `panic = "abort"` in any profile (unwinding is load-bearing for isolation).
-- **Process exit no longer boots the scheduler** (~150 ms saved on `Result`-returning `main`); exit waits on the idle condvar, bounded at 5 s.
-- **Hot-loop Vec codegen (LLVM):** inline `len`, constant-8 stride scaling, no-grow `push` fast path - 25-40% off pointer-chasing loops.
+- **Process exit no longer boots the scheduler** on a `Result`-returning `main`; exit waits on the idle condvar, bounded at 5 s.
+- **Hot-loop Vec codegen (LLVM):** inline `len`, constant-8 stride scaling, no-grow `push` fast path.
 - **THP RSS inflation fixed:** `allow_thp = 0` set from `.init_array` before the first arena maps.
 - **`i128` gets a truthful 8-byte ABI alignment** in emitted modules (16-byte assumption produced faulting vector copies at odd struct offsets).
 - **`Vec<bool>` element-stride corruption fixed** (uniform 8-byte slots).
-- **RC blocks allocate via `mi_zalloc` directly** - the aligned-entry facade padded every block (~25% RAM tax); and RC metas now emit on the streaming single-unit LLVM path (was an undefined-symbol build error).
-- **The bytecode VM JIT-compiles enum-heavy functions.** Heap-enum parameters and returns cross the JIT boundary as native tagged pointers (`Value::NativeEnum` owns the reference; shapes built from the HIR drive VM-side match/field access on handles), so hot recursive-enum code runs at compiled-tier speed under `gos`: binary-trees 44 s to 1.2 s (Go's compiled binary runs 1.1 s), gc-trees to 0.6 s. Mixed-phase calls stay sound - a boxed value falls back to bytecode. Bodies with struct locals or inline-Option i128 locals are declined (bytecode), and one uncompilable body no longer disables the whole JIT module.
-- **VM shape tests compare interned pointers.** `VariantIs`/`StructIs` operands moved to an interned-name table; one pointer compare replaces string equality per match arm (13% off enum-heavy VM workloads).
-- **VM enum/struct values fused to one allocation + buffer.** `VariantInner`/`StructInner` carry fields inline instead of behind a second `Arc` (VM RSS on tree workloads −19%).
+- **RC blocks allocate via `mi_zalloc` directly** - the aligned-entry facade padded every block; and RC metas now emit on the streaming single-unit LLVM path (was an undefined-symbol build error).
+- **The bytecode VM JIT-compiles enum-heavy functions.** Heap-enum parameters and returns cross the JIT boundary as native tagged pointers (`Value::NativeEnum` owns the reference; shapes built from the HIR drive VM-side match/field access on handles), so hot recursive-enum code runs as native code under `gos`. Mixed-phase calls stay sound - a boxed value falls back to bytecode. Bodies with struct locals or inline-Option i128 locals are declined (bytecode), and one uncompilable body no longer disables the whole JIT module.
+- **VM shape tests compare interned pointers.** `VariantIs`/`StructIs` operands moved to an interned-name table; one pointer compare replaces string equality per match arm.
+- **VM enum/struct values fused to one allocation + buffer.** `VariantInner`/`StructInner` carry fields inline instead of behind a second `Arc`.
 - **`use std::...` paths are validated: a module path that does not exist is an error (`GR0005`).** Imports bind by tail name, so alias spellings (`std::json` for `std::encoding::json`) and outright typos (`std::nonsense`) were silently accepted and only failed at member lookup, or never. Resolution now checks the path against the canonical module table (drift-tested against the std manifest); item imports through a valid parent module (`use std::sync::channel`) are unaffected. The autoderive injection also switched to the canonical `std::encoding::json`.
 - **The LSP runs the autoderive step.** Editor diagnostics previously reported every synthesized name (`from_json::<T>` and friends) as unresolved because the LSP parsed raw source while the driver augments it first; the LSP now mirrors the driver pipeline, filters diagnostics pointing into the synthesized tail, and no longer emits duplicate-import noise for the injected `use` lines.
 - **`std::option` and `std::result` registered as manifest modules** (they were resolvable but missing from the canonical module table, so `use std::option` wrongly failed the new path validation); examples migrated off the removed `std::exec` / `std::url` alias spellings to `std::os::exec` / `std::net::url`.
@@ -7738,7 +8036,7 @@ The HTTP stack was the largest remaining VM-only / tier-divergent surface; it is
 - **The tree-walker matches JIT-produced native enum values** (they previously fell through every match arm to unit).
 - **Examples and fixtures brought up to current idiom**: compound assignment, no `.to_string()` on literals, no `as usize` on indices, direct `for x in xs` iteration, bare integer literals.
 - **Arena slab offsets round to the host page size.** The reserve-range allocator rounded oversized slabs to 4 KiB, so on 16 KiB-page systems (macOS arm64) a following slab started page-misaligned, `mprotect` rejected the commit, and the allocation returned null - a crash the macOS ASan job caught. The page size is queried once (`sysconf` / `GetSystemInfo`).
-- **Parsed JSON documents are reclaimed.** `json::parse` / `json::get` handles were leaked boxes (the note said "the GC reclaims them" - the tracing GC is gone), so every parse in a loop leaked the whole document tree. A drop-pass rule frees provably single-owner `json::Value` locals (handle moves through `?` included) via the new `gos_rt_json_free`; aliased or escaping handles keep the old behaviour. `from_json::<T>` loops: 173 MB at 200k iterations to flat.
+- **Parsed JSON documents are reclaimed.** `json::parse` / `json::get` handles were leaked boxes (the note said "the GC reclaims them" - the tracing GC is gone), so every parse in a loop leaked the whole document tree. A drop-pass rule frees provably single-owner `json::Value` locals (handle moves through `?` included) via the new `gos_rt_json_free`; aliased or escaping handles keep the old behaviour. A `from_json::<T>` loop holds a constant amount of memory.
 - **`result_new` destinations with copy-blob payloads are option holders even when the typer left the temp unresolved** - the payload blob no longer leaves a helper one count high, pinned in the collector buffer.
 - **By-value `Result<Struct, E>` payloads no longer double-free or dangle.** Three coordinated root fixes: `result_payload` extractions are borrows (the per-field release walk no longer fires for locals that never retained); option-slot releases are not early-relocated for Results whose payload is extracted (the borrow's lifetime is invisible to the liveness pass - Results never extracted-from keep early placement); and `option_slot_release` nulls the payload word so a second slot release is structurally a no-op.
 - **Opaque runtime handles excluded from per-field stack accounting.** `http::Response` (and the other sentinel stdlib structs) lower as one-slot handles, but the field walk used their declared field lists - releasing words past the alloca and corrupting the stack. Any `http::get(..)?` in a `Result`-returning helper crashed.
@@ -7776,7 +8074,7 @@ A panic in a spawned goroutine now terminates only that goroutine: the process k
 
 - **Windows: user functions returning `Result`/`Option`/inline-enum no longer miscompile.** The Win64 `<16 x i8>` fat-return ABI was applied to user-function calls, not just runtime shims; it is now gated to the ABI registry, with both LLVM call emitters routed through one `needs_win64_fat_ret` decision.
 - **`gos build` works from a released install.** Every release artifact (tarball, zip, deb, rpm, Inno Setup, Docker) now ships `libgossamer_runtime.a` / `gossamer_runtime.lib`; the installer places it where `gos build` resolves it, and the cross-compiled Linux-aarch64 / macOS-x86_64 jobs build the runtime for their target.
-- **mimalloc is the process allocator** on every platform and binary (toolchain and compiled programs), replacing the platform default - notably musl `malloc` on the static-musl release path. Its page-purge delay is set to zero so freed memory returns to the OS promptly: a phase-structured program (build a large map, drop it, build the next) keeps a flat footprint instead of holding every phase's pages until exit (peak RSS roughly halved on such workloads), at unchanged throughput.
+- **mimalloc is the process allocator** on every platform and binary (toolchain and compiled programs), replacing the platform default - notably musl `malloc` on the static-musl release path. Its page-purge delay is set to zero so freed memory returns to the OS promptly: a phase-structured program (build a large map, drop it, build the next) keeps a flat footprint instead of holding every phase's pages until exit.
 - **Owner-only-DACL modules build on Windows.** The credential and multipart-upload files carry a `#[cfg(windows)]` Win32 ACL block; their module lint moved from `#![forbid(unsafe_code)]` to `#![deny(...)]` so that one audited block compiles under a local `#[allow]` (`forbid` cannot be locally overridden).
 - **Windows credential and multipart-upload files get an owner-only DACL**, the analogue of the POSIX `0o600` they already set; the write fails closed rather than leaving a world-readable file.
 - **`pid_alive` is accurate on macOS and Windows** (`kill(pid, 0)` / `OpenProcess` + `GetExitCodeProcess`), so a stale build lock from a crashed `gos` is reclaimed instead of waiting out the deadline.
@@ -7806,7 +8104,7 @@ The compiled tiers (Cranelift JIT, LLVM AOT) now manage recursive heap-enum life
 
 - **Intrusive RC runtime** (`gos_rt_rc_alloc` / `_retain` / `_release`, `c_abi/rc.rs`): every heap object carries a strong count plus a flat `[i64]` child-layout descriptor; release is iterative so deep structures cannot overflow the runtime stack. User enum constructors allocate through it, and a per-variant descriptor is emitted once as a module constant in both backends.
 - **Balanced retain/release insertion** (`gossamer-mir`): retain on every aliasing copy / field store / aggregate / container insert, release every owned local at scope exit, with move elision so the construct-and-return pattern costs zero refcount traffic. Interior borrows (match bindings, accessor results) are never released.
-- **Per-call tracing-GC instrumentation removed.** The shadow-stack save/push/restore and safepoint hooks previously emitted on every function call are gone (the collector they fed is superseded by RC). Hot leaf-math loops return to native parity after a large release-mode regression, and recursive-enum allocation workloads run several times faster.
+- **Per-call tracing-GC instrumentation removed.** The shadow-stack save/push/restore and safepoint hooks previously emitted on every function call are gone (the collector they fed is superseded by RC), so a function no longer calls into the runtime on entry and exit for them.
 - **Two latent optimizer miscompiles fixed** (`gossamer-mir::opt`): `const_value_of` and `copy_propagate` both treated a local's first constant assignment as its value, ignoring a later reassignment - a use after the reassignment could fold a live heap pointer to null.
 - **Incremental object cache now keyed by compiler fingerprint.** The per-body LLVM object cache hashed only the MIR, target, and opt profile - so a rebuilt compiler that emits different IR for identical MIR (e.g. after the tracing-GC removal) silently reused stale objects, surfacing as link failures against removed runtime symbols or as "fixed-but-still-slow" binaries. The key now mixes the package version and the compiler executable's size + mtime.
 - **Dead tracing-GC machinery removed.** The raw-pointer collector, shadow-stack roots, safepoint/write-barrier shims, allocation registry, and per-call instrumentation are deleted from the runtime, ABI registry, and codegen; the aggregate allocators (`gos_rt_aggr_alloc`/`_free`) and the deterministic drop pass remain. `std::runtime::gc_collect()` is retained as a no-op (RC reclaims automatically). A `--release` performance canary (`tests/perf_canary.rs`) guards against per-call-overhead regressions in the hot scalar path.
@@ -7830,7 +8128,7 @@ Four drop-pass / RC bugs that corrupted or miscompiled recursive enums carrying 
 
 ### `for x in vec` single-slot element read
 
-A `for`-loop over a `Vec` of single-slot, non-float elements (i64 / bool / `String` / handle) reads each element with one `gos_rt_vec_get_i64` instead of `gos_rt_vec_get_ptr` + `gos_load` (two runtime calls), halving the per-element call overhead on adjacency-style iteration (graph-bfs).
+A `for`-loop over a `Vec` of single-slot, non-float elements (i64 / bool / `String` / handle) reads each element with one `gos_rt_vec_get_i64` instead of `gos_rt_vec_get_ptr` + `gos_load` (two runtime calls).
 
 ### HTTP server: per-request memory leak fixed
 
@@ -7846,10 +8144,10 @@ Every `gos_rt_*` LLVM declaration now carries `nounwind` (correct: an `extern "C
 
 ### Reference-counting memory-footprint fixes
 
-Three coordinated fixes cut compiled-tier RAM on heap-heavy workloads. A named local bound to a recursive heap value and rebuilt each loop iteration was leaking every iteration's value until the function returned; a pathological loop that should hold ~11 MB held 863 MB. Covered by a new named-binding-loop RSS regression test (the prior test only exercised the temporary shape, which already released).
+Three coordinated fixes reclaim compiled-tier memory on heap-heavy workloads. A named local bound to a recursive heap value and rebuilt each loop iteration was leaking every iteration's value until the function returned. Covered by a new named-binding-loop RSS regression test (the prior test only exercised the temporary shape, which already released).
 
 - **Release before reassignment, not only at return.** Owned reference-counted locals are now released before *any* reassignment (including the loop back-edge), not just before a fresh allocation. A `let t = build(d)` rebuilt each iteration frees the previous tree instead of accumulating all of them. The entry zero-init keeps the first release null-safe.
-- **16-byte object header.** `RcHeader` shrank from 24 to 16 bytes (`strong` and `size` are now `u32` - 4 billion live refs / 4 GiB objects are unreachable ceilings), so a `Node(i64, Box, Box)` is 40 bytes instead of 48.
+- **16-byte object header.** `RcHeader` shrank from 24 to 16 bytes (`strong` and `size` are now `u32` - 4 billion live refs / 4 GiB objects are unreachable ceilings), so every object carries the smaller header.
 - **Byte-budgeted recycling pool.** The thread-local free-list is now capped by a 4 MiB-per-class byte budget instead of a flat 65k-block count, so a large size class can no longer pin tens of MiB of cached blocks.
 
 ### Container element ownership + per-iteration `Vec` reclaim
@@ -7859,7 +8157,7 @@ A string or nested container stored in a `Vec` no longer leaks, and a `Vec` rebu
 - **No per-push element clone.** `gos_rt_vec_push` copied each STRING element into a vec-owned buffer (a value-semantics relic), while the drop pass separately retained the caller's original - so that original leaked once per push. Elements are now held by reference: the compile-time RC (retain at insert, `elem_kind` deep-free at container drop) owns each exactly once, the same model as struct fields. `string_in_vec` / `nested_vec_string` drop from O(n) live strings to O(1).
 - **Loop-local `Vec` freed per iteration.** A `Vec` constructed in a loop body was freed only at function return, leaking every prior iteration's container and its elements. The drop pass now frees the previous value before each constructor reassignment (null-safe via an entry zero-init) and at each return, conservatively skipping any container that escapes into another container or the return value. A deterministic per-family allocation ledger (`c_abi/ledger.rs`, `GOS_LEAK_LEDGER`, unix) backs the leak-shape gate.
 - **`HashMap` insert releases its inbound strings.** `gos_rt_map_insert_str_*` / `_i64_str` copy the key/value bytes into the map's own storage, so the consuming-call contract leaves the caller's `format!(...)` key/value as a leaked temporary. The runtime now releases each inbound gos-string after copying (rc-aware + tag-checked, so a moved temp is freed, a shared string is only decremented, and a literal is skipped).
-- **Fresh string producers are owned.** `str_repeat` / `slice` / `substring` / `trim*` / `replace*` / `pad_*` / `to_upper`/`to_lower`/`to_title` return a freshly allocated owned `String`, so a standalone transient (`let big = strings::repeat(…); use(&big)`) is released at scope instead of leaking. A returned producer result is exempted (it flows to the caller). The substring-retention leak benchmark goes from ~290 MB to flat ~0.6 MB. Deliberately excludes `concat` (in-place-aliasing in `s += …`) and `Result`/`Option` payload extraction.
+- **Fresh string producers are owned.** `str_repeat` / `slice` / `substring` / `trim*` / `replace*` / `pad_*` / `to_upper`/`to_lower`/`to_title` return a freshly allocated owned `String`, so a standalone transient (`let big = strings::repeat(…); use(&big)`) is released at scope instead of leaking. A returned producer result is exempted (it flows to the caller). Deliberately excludes `concat` (in-place-aliasing in `s += …`) and `Result`/`Option` payload extraction.
 
 - **Loop-local `HashMap` / `HashSet` reclaimed.** `let m = HashMap::new()` lowered to `tmp = map_new(); m = Copy(tmp)`; the copy pinned the constructor result as aliased, so the reuse pass never reclaimed a loop-local map. Container constructors (and `Some` / `Ok` / `Err`) now write the binding directly - no copy, no alias - so a loop-local map / set is freed per iteration like a `Vec`. A map passed to a user function stays safe via the existing escape disqualification.
 - **By-value enum payload extraction is a move.** A `String` moved out of a consumed `Result` / `Option` (`let s = f()?`, `r.unwrap()`, `match o { Some(s) => … }`) transfers the enum's single owning reference to the binding instead of retaining a second, so the binding releases it exactly once. When the extracted value is instead stored into an aggregate - the synthesized `from_json` parses a field `String` and places it in the result struct through copy temporaries - the retain is load-bearing and kept, detected by propagating "stored into an aggregate" transitively backward through copy edges. An aliased enum (`let o2 = o; match o2; match o`) is conservatively not owned (leak-not-double-free), and autoderive `from_json` / `to_json` round-trips clean under `MALLOC_CHECK_=3`.
@@ -7873,7 +8171,7 @@ A string or nested container stored in a `Vec` no longer leaks, and a `Vec` rebu
 
 ### Length-carrying strings - O(1) `len`/`slice`
 
-Compiled-tier strings now store their byte length in the allocation header, so length and slicing are O(1) instead of `strlen`-per-call. A recursive-descent parser that slices a large input at growing offsets was O(n^2); **json-serde drops from 167s to 0.54s at N=50000** (now linear, output bit-identical to the Rust reference).
+Compiled-tier strings now store their byte length in the allocation header, so length and slicing are O(1) instead of `strlen`-per-call. A recursive-descent parser that slices a large input at growing offsets was O(n^2) and is now linear, with output unchanged.
 
 - Heap strings (`format!`, `slice`, file reads, every `alloc_cstring` caller) use the length-carrying builder layout, so `gos_rt_str_len` reads the stored length at `ptr[-5]`; foreign pointers fall back to `strlen`.
 - `gos_rt_str_slice` bounds-checks against the O(1) length and copies the range directly - the safe out-of-bounds `Err` contract is preserved (no UB fast path).
@@ -7890,7 +8188,7 @@ skipped.
 
 ### Recycling RC allocator (thread-local slab)
 
-`gos_rt_rc_alloc` / release now route small RC objects through a per-thread, lock-free size-class free-list that recycles freed blocks instead of round-tripping through libc `malloc`/`free` on every node. Allocation-heavy workloads (recursive-enum trees) roughly halve: the gc-trees stress test drops from ~20s to ~12s. The pool returns surplus blocks to the OS at a per-class cap and frees its cache on thread exit (so the HTTP server's per-connection threads don't leak); `GOS_RC_NO_POOL=1` disables it so `MALLOC_CHECK_` retains full double-free detection in the soundness tests.
+`gos_rt_rc_alloc` / release now route small RC objects through a per-thread, lock-free size-class free-list that recycles freed blocks instead of round-tripping through libc `malloc`/`free` on every node. The pool returns surplus blocks to the OS at a per-class cap and frees its cache on thread exit (so the HTTP server's per-connection threads don't leak); `GOS_RC_NO_POOL=1` disables it so `MALLOC_CHECK_` retains full double-free detection in the soundness tests.
 
 ### `String::byte_at` interpreter binding
 
@@ -7910,7 +8208,7 @@ The bytecode VM (`gos`) now lowers `match` expressions to a native test-and-bran
 
 - **Three new opcodes** - `VariantIs` (enum/tuple-struct name + arity test), `VariantField` (positional payload extract), and `StructIs` (struct-name test) - back the pattern tests; literals compare via `Eq`, ranges via `Ge`/`Le`/`Lt`, tuple/struct fields project via the existing `TupleIndex` / `FieldGet` ops.
 - **`compile_match` + `emit_pattern_test`** lower every native-expressible pattern shape: wildcard, binding, literal, range, enum variant (with nested payload patterns), tuple (including a `..` rest), struct (with field-shorthand binding), `&`-ref, `@`-binding, and or-patterns of non-binding alternatives. Guards compile inline after the pattern test.
-- **Fallback preserved** - an or-pattern that introduces bindings still routes the whole `match` through the walker, so semantics stay correct while the common 95% runs natively. (Closures, `go`, and `select` remain walker-evaluated; the walker is not yet deleted.)
+- **Fallback preserved** - an or-pattern that introduces bindings still routes the whole `match` through the walker, so semantics stay correct while the common case runs natively. (Closures, `go`, and `select` remain walker-evaluated; the walker is not yet deleted.)
 - **`get()` bare-name router** - exercising `match` scrutinees natively exposed a latent dispatch collision: `install_module("json", …)` registered `("get", builtin_json_get)` after the HashMap getter, so a natively-evaluated `m.get(&k)` returned `None` and `match m.get(&k) { Some(v) => … }` always took the `None` arm. A receiver-dispatching `builtin_get_router` (mirroring the `keys`/`values` routers) sends `Map`/`IntMap` receivers to the map getter and struct/json receivers to the json getter.
 - **Compiled-tier tuple-match binding** - `match` on a tuple whose element types inference left loose (`let pair = (10, "hi")`) bound each element through a pointer-shaped local, so the `println!` arg dispatcher routed the `i64` element through `gos_rt_concat_str` and strlen'd the integer → segfault. The MIR tuple-pattern lowering now recovers each element type from the sub-pattern when the tuple's recorded type is unresolved.
 
@@ -7993,7 +8291,7 @@ Three coordinated fixes close a class of LLVM AOT segfaults / silent miscompiles
 
 ### Multi-dim fixed-array indexing
 
-- **`lower_place_address` advances `current_ty` after every `Index` step** - when projecting `arr[i][j]` over `[[T; A]; B]`, the LLVM lowerer previously left `current_ty` pinned at the outer array type and reset `stride_slots` to 1 after the first index. The second index then used the outer array's bounds (panic with `len is 2 but index is 2` after a clean exit from a `while s < 2` loop), and the stride was wrong for the element width - corrupting the data. The Index arm now matches the Field arm and walks into the element type, recomputing `stride_slots = elem_slots(elem_ty)`. The chess-engine `make_zobrist`-style writes over `[[[i64; 64]; 6]; 2]` round-trip cleanly across all tiers.
+- **`lower_place_address` advances `current_ty` after every `Index` step** - when projecting `arr[i][j]` over `[[T; A]; B]`, the LLVM lowerer previously left `current_ty` pinned at the outer array type and reset `stride_slots` to 1 after the first index. The second index then used the outer array's bounds (panic with `len is 2 but index is 2` after a clean exit from a `while s < 2` loop), and the stride was wrong for the element width - corrupting the data. The Index arm now matches the Field arm and walks into the element type, recomputing `stride_slots = elem_slots(elem_ty)`. Writes over a `[[[i64; 64]; 6]; 2]` round-trip cleanly across all tiers.
 
 ### `env::args()` empty-iteration safety
 
@@ -8034,7 +8332,7 @@ Three coordinated fixes close a class of LLVM AOT segfaults / silent miscompiles
 
 Two coordinated fixes close a class of multi-slot-element corruption under `gos build --release`.
 
-- **`bodies[i].field` over a `Vec<Struct>` routes through `gos_rt_vec_get_ptr`** - the place-expression Index arm previously appended a flat `Projection::Index`, which the LLVM lowerer strode off the `*mut GosVec` *header* rather than the data buffer. Element 0 happened to alias the header's first field, so reads/writes past index 0 hit garbage (the chess / nbody struct-array corruption). The Index arm now detects a Vec / Slice base with multi-slot elements (consulting the base local's MIR-resolved type so promoted bindings are seen), materialises the element address via `gos_rt_vec_get_ptr`, and binds it to a `&elem`-typed local; the appended `Field` projection auto-derefs that pointer so both reads and writes land inside the Vec's storage.
+- **`bodies[i].field` over a `Vec<Struct>` routes through `gos_rt_vec_get_ptr`** - the place-expression Index arm previously appended a flat `Projection::Index`, which the LLVM lowerer strode off the `*mut GosVec` *header* rather than the data buffer. Element 0 happened to alias the header's first field, so reads/writes past index 0 hit garbage. The Index arm now detects a Vec / Slice base with multi-slot elements (consulting the base local's MIR-resolved type so promoted bindings are seen), materialises the element address via `gos_rt_vec_get_ptr`, and binds it to a `&elem`-typed local; the appended `Field` projection auto-derefs that pointer so both reads and writes land inside the Vec's storage.
 - **`let mut [T; N]` promotion to `Vec` is gated on actual growth** - a `mut` array-literal binding was unconditionally rewritten to a heap `Vec`, even for an explicitly-sized `[Body; 5]` that is only indexed, field-mutated, or passed to a `[T; N]`-typed parameter. The promotion desynchronised the element stride at call boundaries (`energy(&bodies)` declared `&[Body; 5]` strode the GosVec header as inline data → NaN). The MIR builder now pre-scans the function body for growth / reshape receivers (`push`, `pop`, `insert`, `remove`, `extend`, `truncate`, `clear`, `retain`, `append`, `resize`, `drain`, `split_off`, `sort`, `sort_by`) and promotes a `let mut [literal]` only when its binding is grown somewhere; otherwise it keeps the inline fixed-array layout that matches every use site. `let mut xs = [3, 1, 2]; xs.push(4); xs.sort()` still promotes; `let mut bodies: [Body; 5]` passed to a `[Body; 5]` parameter no longer does.
 
 ### `sort_by` comparator over aggregate elements
@@ -8095,7 +8393,7 @@ Two coordinated fixes close a class of multi-slot-element corruption under `gos 
 - **`WorkerHandleGuard`** - RAII over `WorkerSlot::thread_handle`. On panic-unwind, swap-to-0 and call `preempt::release_thread_handle`. Closes a long-running Windows-service handle leak.
 - **Typed function-pointer registry** - `c_abi::fn_registry` with `FnKind` enum (I64ArgsToI64, EnvI64ArgsToI64, HttpHandlerBare/Env, SortCmp/SortCmpAggr, UnaryI64ToI64, BinaryI64ToI64, PredI64, JitEntry, GoSpawnEntry, CtxCancelI64, Generic). `verify` runs at every `gos_rt_fn_tramp_N` / `gos_rt_go_spawn_call_N` site; registered-with-different-kind aborts. `parking_lot::RwLock<HashMap>` keeps the read path uncontended.
 - **`GosMutex` owner tracking** - `owner: AtomicI64`; cross-goroutine unlock aborts with a diagnostic rather than corrupting lock state.
-- **`parking_lot::Mutex` everywhere** - every internal `std::sync::Mutex` migrated. No poisoning, smaller footprint, faster uncontended path. `.lock().unwrap_or_else(PoisonError::into_inner)` collapses to `.lock()`.
+- **`parking_lot::Mutex` everywhere** - every internal `std::sync::Mutex` migrated. No poisoning. `.lock().unwrap_or_else(PoisonError::into_inner)` collapses to `.lock()`.
 - **`tests/audit_unsafe.rs`** - CI gate asserts every `unsafe { ... }` block in `gossamer-runtime/src/` (excluding the FFI surface in `c_abi/` + `ffi.rs`) carries a `// SAFETY:` comment within 8 lines above. Backfills `http2_server.rs` + `stack_guard.rs`.
 - **`gossamer-runtime::replay`** - deterministic record + replay modes via `GOS_TRACE` / `GOS_REPLAY`. Length-prefixed binary records cover channel send/recv, goroutine spawn/yield, RNG seed draws.
 
@@ -8295,7 +8593,7 @@ The hand-rolled ASCII / BMP-range stubs are gone; every predicate answers agains
 ### Fixes
 
 - LLVM tier silent miscompile when `if let Some(p) = m.get(&k); p.field` was used for `HashMap<_, Struct>`: the dispatcher pinned the call's return type to bare `i64`, so the match arm couldn't recover `&V` from `Option<V>` and field projection fell through to `ptr`. New `gos_rt_map_get_i64_opt` / `gos_rt_map_get_str_opt` return `Option<V>` as a `*mut GosResult`, with `pinned_ret` synthesised from the receiver's HashMap value Ty. Side effect: `m.get(missing)` for `HashMap<_, i64>` now correctly returns `None` (previously the no-Adt happy-path encoded missing keys as `Some(0)`).
-- LLVM tier stack-pointer bug on `HashMap.insert` with struct values: the inserted value was the stack address of the literal alloca, so subsequent reads in any other frame saw stale data. `maybe_heap_copy_aggregate` heap-copies the struct via `gos_rt_aggr_alloc` before passing to `gos_rt_map_insert_i64_i64` and `_str_i64`. The wrapper is marked `#[inline(never)]` plus a `#[used]` static anchor (`GOS_RT_AGGR_ALLOC_KEEP`) so neither the rustc inliner nor the linker's dead-strip collapses it back into `gos_rt_gc_alloc` - that collapse silently elides the heap copy and reintroduces the stack-pointer regression. Cross-tier parity verified by `feature-testing-examples/hashmap_get_some_field.gos` and the aether_ecs build benchmark, which now matches the interp tier bit-for-bit (`pos_x_sum=9990959.95`).
+- LLVM tier stack-pointer bug on `HashMap.insert` with struct values: the inserted value was the stack address of the literal alloca, so subsequent reads in any other frame saw stale data. `maybe_heap_copy_aggregate` heap-copies the struct via `gos_rt_aggr_alloc` before passing to `gos_rt_map_insert_i64_i64` and `_str_i64`. The wrapper is marked `#[inline(never)]` plus a `#[used]` static anchor (`GOS_RT_AGGR_ALLOC_KEEP`) so neither the rustc inliner nor the linker's dead-strip collapses it back into `gos_rt_gc_alloc` - that collapse silently elides the heap copy and reintroduces the stack-pointer regression. Cross-tier parity verified by `feature-testing-examples/hashmap_get_some_field.gos`.
 - LLVM tier GC blindness through `HashMap` values: `GosMap` allocations live outside the GC registry (`Box::into_raw` in `gos_rt_map_new`), and the conservative payload scan can't walk the Rust-side bucket allocator, so heap-allocated struct values stored as i64 entries were unreachable from the tracing collector and reclaimed mid-program. `gos_map_register` / `gos_map_deregister` track every live `GosMap` in a dedicated registry; `gos_rt_gc_collect` now adds a second mark drain that walks every registered map's storage and emits each value as a candidate pointer for the registry-presence check. The conservative trace tolerates raw i64 values in primitive maps (`HashMap<_, i64>`) - they don't match registered allocations so they don't over-mark.
 
 ### Tooling
@@ -8317,8 +8615,8 @@ The hand-rolled ASCII / BMP-range stubs are gone; every predicate answers agains
 
 ### Build
 
-- Debug builds use a minimal opt pass set (`mem2reg`, `instcombine`, `simplifycfg`) instead of `-O1`; cuts `gos build` wall-clock time by 100-200 ms on typical programs.
-- Release builds parallelize per-body `opt`+`llc` across up to 8 threads; wall-clock time falls roughly `(N-1)/N` on N-body programs.
+- Debug builds use a minimal opt pass set (`mem2reg`, `instcombine`, `simplifycfg`) instead of `-O1`.
+- Release builds parallelize per-body `opt`+`llc` across up to 8 threads.
 - Incremental object cache under `~/.cache/gossamer/ir-cache` (or `GOS_BUILD_CACHE`); repeat builds reuse unchanged bodies. Disable with `GOS_NO_CACHE=1`.
 
 ### Performance
@@ -8457,7 +8755,7 @@ The compiled tier now has an active tracing collector.
 - Raw-pointer aggregate registry (`gos_rt_gc_alloc` /
   `gos_rt_aggr_alloc`) backed by a `HashMap<usize, AllocEntry>`
   carrying `(size, mark, generation)`. Tracking is on by default;
-  `GOS_GC=leak` opts out for benchmarks measuring raw-allocator cost.
+  `GOS_GC=leak` opts out.
 - Stop-the-world conservative mark + sweep (`gos_rt_gc_collect`).
   Mark phase snapshots every thread's raw-pointer shadow stack and
   transitively traces each marked allocation's payload with
@@ -8483,8 +8781,8 @@ The compiled tier now has an active tracing collector.
 - Cycle reclamation proven by a runtime unit test plus two
   cross-tier stress regressions (10 000-iteration aggregate loops
   under `GOS_GC_THRESHOLD=4096` across VM, debug LLVM, and release
-  LLVM). Spectral-norm at `N=5500` produces the bit-exact reference
-  value `1.274224153` with the collector firing throughout.
+  LLVM). A numeric program produces its bit-exact reference value with
+  the collector firing throughout.
 
 ### Tracing GC hardening
 
@@ -8571,9 +8869,8 @@ The compiled tier now has an active tracing collector.
   `gos_rt_gc_safepoint` call at every function prologue and every
   loop back-edge plus a `gos_rt_gc_root_save`/`_restore` pair around
   every function. The runtime calls are opaque to `opt -O3` and
-  block inner-loop vectorisation; pure leaf math helpers (called
-  > 10⁹ times in spectral-norm / n-body) paid the FFI cost on
-  every invocation. The codegen now elides the prologue safepoint
+  block inner-loop vectorisation; pure leaf math helpers paid the FFI
+  cost on every invocation. The codegen now elides the prologue safepoint
   + shadow-stack save/restore when the body cannot allocate (new
   `gossamer_mir::body_might_allocate` helper) and drops the
   loop-back-edge safepoint outright - allocation routines update
@@ -9073,10 +9370,9 @@ both tiers, byte-identical across `gos` and `gos build`.
 ### Netpoller latency
 
 - Tightened the `globals().poller.lock()` hold during
-  `mio::Poll::poll()` so registering goroutines no longer wait up
-  to 50 ms per IO op. New `mio::Waker` interrupts in-flight polls
+  `mio::Poll::poll()` so registering goroutines no longer wait out
+  a poll cycle per IO op. New `mio::Waker` interrupts in-flight polls
   when `with_poller` mutates state; poll cycle dropped to 1 ms.
-  Multiplexed h2c: 3.7 ms/req, was 100 ms.
 
 ### Networking
 
@@ -9190,8 +9486,7 @@ table is gone; consumers depend on the crate plain. 58
   `gos_rt_*_free` calls. Changes include: per-block liveness-based drop
   placement, copy-alias chain tracking, inter-procedural escape analysis
   (`CaptureSummary`), a sentinel-pointer skiplist for globally-owned
-  buffers, and `gos_rt_str_free` for owning strings. Effect on benchmarks
-  (source unchanged): k-nucleotide −33% peak RSS, spectral-norm −8%.
+  buffers, and `gos_rt_str_free` for owning strings.
 - **`gos test` parallel by default.** Defaults to
   `available_parallelism()` workers. `--serial` (alias `--parallel 1`)
   opts back to sequential execution.
@@ -9232,12 +9527,12 @@ table is gone; consumers depend on the crate plain. 58
     a BFS from JIT-promotable roots (functions with scalar-only
     param/return types) collects their transitive user-function callees.
     Bodies that can never be promoted (aggregate params/returns) are
-    skipped entirely, cutting JIT compile time proportionally.
+    skipped entirely.
 - **HIR and type-context dropped before `vm.call()`.** The CLI's `gos`
   path now explicitly drops the `HirProgram` and `TyCtxt` before entering
   the main call, then releases the MIR/TyCtxt JIT prelude after `vm.call()`
   returns and before goroutine-join. Frees the per-program compilation data
-  while goroutines are still running, reducing peak RSS for large programs.
+  while goroutines are still running.
 
 ### Architecture
 
@@ -9283,8 +9578,7 @@ table is gone; consumers depend on the crate plain. 58
 - **Binary size reduction for `gos build`.**
   Release builds now strip all symbols and dead sections (`-Wl,--gc-sections`
   on Linux, `-dead_strip` on macOS). Debug builds without `-g` strip only
-  debug sections, keeping symbol names for crash reports. Brings the
-  Cranelift-generated binary floor down ~75%.
+  debug sections, keeping symbol names for crash reports.
 - Github Actions tests do not fail fast.
 ## 0.1.8
 

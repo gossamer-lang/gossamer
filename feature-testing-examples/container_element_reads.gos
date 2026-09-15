@@ -1,0 +1,154 @@
+// Reading a struct, tuple, or array element out of a vector, deque, or heap
+// through an `Option` or `Result` answers a value of its own, whatever the
+// element owns and however the answer is consumed, on every tier.
+
+use std::errors
+
+struct Point {
+    x: i64
+    y: i64
+    z: i64
+}
+
+struct Named {
+    label: String
+    tags: Vec<i64>
+    weight: i64
+}
+
+struct Indexed {
+    by_key: Map<String, i64>
+    seen: Set<i64>
+    id: i64
+}
+
+fn point(i: i64) -> Point {
+    Point { x: i, y: i * 2, z: i * 3 }
+}
+
+fn named(i: i64) -> Named {
+    Named { label: format("n{i}"), tags: #[i, i + 1], weight: i * 10 }
+}
+
+fn indexed(i: i64) -> Indexed {
+    let mut by_key = Map::new()
+    by_key.insert(format("k{i}"), i)
+    Indexed { by_key: by_key, seen: #{ i, i + 7 }, id: i }
+}
+
+fn describe(n: Named) -> String {
+    format("{}:{}:{}", n.label, n.tags.len(), n.weight)
+}
+
+fn vec_reads(i: i64) -> String {
+    let mut points = #[point(i), point(i + 1), point(i + 2)]
+    let mut names = #[named(i), named(i + 1), named(i + 2)]
+    let first = points.first().unwrap_or(point(0))
+    let last = names.last().unwrap_or(named(0))
+    let got = names.get(1).unwrap_or(named(0))
+    let missing = names.get(9).is_some()
+    let popped = names.pop()
+    let removed = match names.remove(0) {
+        Ok(n) => describe(n)
+        Err(e) => e.message()
+    }
+    let out_of_range = match points.remove(9) {
+        Ok(p) => p.x
+        Err(_) => -1
+    }
+    let taken = points.pop().unwrap()
+    let unused = points.last()
+    format(
+        "{} {} {} {} {} {} {} {} {} {}"
+        first.z
+        describe(last)
+        describe(got)
+        missing
+        popped.is_some()
+        removed
+        out_of_range
+        taken.y
+        unused.is_some()
+        names.len()
+    )
+}
+
+fn deque_reads(i: i64) -> String {
+    let mut queue: Deque<Named> = Deque::new()
+    queue.push_back(named(i))
+    queue.push_back(named(i + 1))
+    queue.push_back(named(i + 2))
+    let front = queue.peek_front().unwrap_or(named(0))
+    let back = queue.peek_back()
+    let popped = match queue.pop_front() {
+        Some(n) => describe(n)
+        None => "none"
+    }
+    let tail = queue.pop_back().unwrap_or(named(0))
+    format("{} {} {} {} {}", describe(front), back.is_some(), popped, describe(tail), queue.len())
+}
+
+fn heap_reads(i: i64) -> String {
+    let mut heap: MaxHeap<(i64, i64)> = MaxHeap::new()
+    let mut points: MaxHeap<Point> = MaxHeap::new()
+    for k in 0..6 {
+        heap.push((k * 7 % 5, k + i))
+        points.push(point((k * 3 + i) % 11))
+    }
+    let peeked = heap.peek().unwrap_or((0, 0))
+    let top = heap.pop().unwrap_or((0, 0))
+    let best = match points.pop() {
+        Some(p) => p.x
+        None => -1
+    }
+    let ignored = points.pop()
+    format("{:?} {:?} {} {} {}", peeked, top, best, ignored.is_some(), heap.len())
+}
+
+fn owned_tables(i: i64) -> String {
+    let mut rows = #[indexed(i), indexed(i + 1)]
+    let copy = rows.first().unwrap_or(indexed(0))
+    let row = rows.pop().unwrap_or(indexed(0))
+    let bare = rows.last()
+    format("{} {} {} {} {}", copy.by_key.len(), copy.seen.len(), row.id, row.seen.contains(i + 8), bare.is_some())
+}
+
+fn arrays(i: i64) -> String {
+    let mut grid: Vec<[i64; 3]> = #[[i, i + 1, i + 2], [i * 2, i * 3, i * 4]]
+    let row = grid.get(1).unwrap_or([0, 0, 0])
+    let gone = grid.pop().unwrap_or([0, 0, 0])
+    format("{} {}", row[2], gone[0])
+}
+
+fn fallible(i: i64) -> Result<i64, errors::Error> {
+    let mut names = #[named(i), named(i + 1)]
+    let n = names.remove(1)?
+    Ok(n.weight + names.len())
+}
+
+fn main() {
+    let mut total = 0
+    for i in 0..40 {
+        let line = vec_reads(i) + " " + deque_reads(i) + " " + heap_reads(i) + " " + owned_tables(i) + " " + arrays(i)
+        total += line.len()
+        if i % 13 == 0 {
+            println("{}", line)
+        }
+    }
+    let mut drained = 0
+    let mut names = #[]
+    for i in 0..30 {
+        names.push(named(i))
+    }
+    while let Some(n) = names.pop() {
+        drained += n.weight + n.tags.len()
+    }
+    let mut local_total = 0
+    for i in 0..30 {
+        let mut scratch = #[named(i), named(i + 1)]
+        let n = scratch.pop()
+        let p = scratch.first().unwrap_or(named(0))
+        local_total += p.weight + if n.is_some() { 1 } else { 0 }
+    }
+    println("total {} drained {} local {} fallible {}", total, drained, local_total, fallible(4).unwrap_or(-1))
+}

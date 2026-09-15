@@ -1,0 +1,86 @@
+// A struct, a tuple struct, and an enum with a const generic parameter each
+// hold an array of that length, and a method in `impl<const N: usize> Ring<N>`
+// reads `N` as a value whether it is called on a receiver or through its type.
+
+struct Ring<const N: usize> {
+    items: [i64; N]
+    head: i64
+    len: i64
+}
+
+impl<const N: usize> Ring<N> {
+    fn capacity(&self) -> i64 {
+        N as i64
+    }
+
+    fn push(&mut self, value: i64) {
+        let slot = (self.head + self.len) % (N as i64)
+        self.items[slot] = value
+        if self.len < N as i64 {
+            self.len += 1
+        } else {
+            self.head = (self.head + 1) % (N as i64)
+        }
+    }
+
+    fn total(&self) -> i64 {
+        let mut acc = 0
+        for i in 0..self.len {
+            acc += self.items[(self.head + i) % (N as i64)]
+        }
+        acc
+    }
+
+    fn snapshot(&self) -> [i64; N] {
+        self.items
+    }
+
+    fn blank() -> [i64; N] {
+        [0; N]
+    }
+}
+
+fn filled<const N: usize>(value: i64) -> Ring<N> {
+    Ring { items: [value; N], head: 0, len: N as i64 }
+}
+
+struct Vector<const N: usize>([f64; N])
+
+impl<const N: usize> Vector<N> {
+    fn dim(&self) -> i64 {
+        N as i64
+    }
+}
+
+enum Grid<const N: usize> {
+    Filled([i64; N])
+    Empty
+}
+
+fn describe<const N: usize>(grid: Grid<N>) -> String {
+    match grid {
+        Grid::Filled(cells) => format("{:?}", cells)
+        Grid::Empty => "empty"
+    }
+}
+
+fn main() {
+    let mut r: Ring<3> = Ring { items: [0; 3], head: 0, len: 0 }
+    println("{}", r.capacity())
+    r.push(1)
+    r.push(2)
+    r.push(3)
+    r.push(4)
+    println("{} {:?}", r.total(), r.items)
+    println("snapshot {:?}", r.snapshot())
+    println("blank {:?} {:?}", Ring::<2>::blank(), Ring::<4>::blank())
+    let f: Ring<2> = filled::<2>(5)
+    println("{} {}", f.capacity(), f.total())
+    println("{}", Ring::capacity(r))
+    let v = Vector([1.0, 2.0, 3.0])
+    println("{} {:?}", v.dim(), v.0)
+    let g: Grid<2> = Grid::Filled([7, 8])
+    println("{}", describe(g))
+    let blank: Grid<2> = Grid::Empty
+    println("{}", describe(blank))
+}

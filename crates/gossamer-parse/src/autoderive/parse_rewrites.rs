@@ -74,85 +74,6 @@ pub fn migrate_braced_struct_constructors(
     Ok(source.to_string())
 }
 
-/// Rewrites `open_range.take(n)` into an equivalent finite range. The runtime
-/// currently materializes range values eagerly, so retaining an unbounded end
-/// would either allocate forever or silently collapse to an empty array. This
-/// preserves lazy-looking bounded consumption without changing the range ABI.
-pub fn rewrite_open_range_take(sf: &mut SourceFile) {
-    use gossamer_ast::VisitorMut;
-    OpenRangeTakeRewriter.visit_source_file(sf);
-}
-
-struct OpenRangeTakeRewriter;
-
-impl gossamer_ast::VisitorMut for OpenRangeTakeRewriter {
-    fn visit_expr(&mut self, expr: &mut gossamer_ast::expr::Expr) {
-        use gossamer_ast::common::BinaryOp;
-        use gossamer_ast::expr::{Expr, ExprKind, Literal};
-        use gossamer_ast::NodeId;
-
-        gossamer_ast::visitor::walk_expr_mut(self, expr);
-        let span = expr.span;
-        let ExprKind::MethodCall {
-            receiver,
-            name,
-            args,
-            ..
-        } = &expr.kind
-        else {
-            return;
-        };
-        if name.name != "take" || args.len() != 1 {
-            return;
-        }
-        let ExprKind::Range {
-            start,
-            end: None,
-            kind,
-        } = &receiver.kind
-        else {
-            return;
-        };
-
-        let start = start.as_deref().cloned().unwrap_or_else(|| Expr {
-            id: NodeId::DUMMY,
-            span,
-            kind: ExprKind::Literal(Literal::Int("0".to_string())),
-        });
-        let plus_count = Expr {
-            id: NodeId::DUMMY,
-            span,
-            kind: ExprKind::Binary {
-                op: BinaryOp::Add,
-                lhs: Box::new(start.clone()),
-                rhs: Box::new(args[0].clone()),
-            },
-        };
-        let end = if *kind == gossamer_ast::RangeKind::Inclusive {
-            Expr {
-                id: NodeId::DUMMY,
-                span,
-                kind: ExprKind::Binary {
-                    op: BinaryOp::Sub,
-                    lhs: Box::new(plus_count),
-                    rhs: Box::new(Expr {
-                        id: NodeId::DUMMY,
-                        span,
-                        kind: ExprKind::Literal(Literal::Int("1".to_string())),
-                    }),
-                },
-            }
-        } else {
-            plus_count
-        };
-        expr.kind = ExprKind::Range {
-            start: Some(Box::new(start)),
-            end: Some(Box::new(end)),
-            kind: *kind,
-        };
-    }
-}
-
 struct TupleCtorRewriter<'a> {
     arity: &'a HashMap<String, usize>,
     constructors: &'a HashMap<String, Vec<String>>,
@@ -276,10 +197,12 @@ pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<Par
     rewrite_tuple_struct_ctors(&mut sf);
     materialize_trait_defaults(&mut sf);
     initialize_heap_mut_statics(&mut sf);
-    rewrite_open_range_take(&mut sf);
     infer_serde_turbofish(&mut sf);
     desugar_sort_by_key(&mut sf);
     hoist_associated_consts(&mut sf);
+    // After the associated-constant reads are hoisted, the `Self` heads left in
+    // an impl name the implementing type.
+    rewrite_self_paths(&mut sf);
     // Runs on the un-mangled AST: `rewrite_serde_generic_calls` below turns a
     // serde turbofish into a bare mangled name, erasing the type argument the
     // check keys on.
@@ -497,119 +420,137 @@ fn collect_serde_turbofish_calls(sf: &SourceFile) -> Vec<(String, String, Span)>
     collector.calls
 }
 
-/// Maps a stdlib `module::item` (matched on the last two segment
-/// names) to the mangled name of the injected wrapper / struct, so
-/// both `encoding::pem::decode` and the bare `pem::decode` map.
+/// Each stdlib `module::item` (matched on the last two segment names) and the
+/// mangled name of the injected wrapper or struct it reaches, so both
+/// `encoding::pem::decode` and the bare `pem::decode` map.
+const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
+    ("pem", "decode", "__gos_pem_decode"),
+    ("pem", "decode_all", "__gos_pem_decode_all"),
+    ("pem", "encode", "__gos_pem_encode"),
+    ("pem", "Block", "__gos_pem_Block"),
+    ("x509", "parse_pem", "__gos_x509_parse_pem"),
+    ("x509", "CertInfo", "__gos_x509_CertInfo"),
+    ("fs", "metadata", "__gos_fs_metadata"),
+    ("fs", "Metadata", "__gos_fs_Metadata"),
+    ("fs", "read_dir", "__gos_fs_read_dir"),
+    ("fs", "DirInfo", "__gos_fs_DirInfo"),
+    ("fs", "walk_dir", "__gos_fs_walk_dir"),
+    ("path", "walk", "__gos_fs_walk_dir"),
+    ("process", "run", "__gos_process_run"),
+    ("process", "run_in", "__gos_process_run_in"),
+    ("process", "Output", "__gos_process_Output"),
+    ("process", "pipeline_run", "__gos_process_pipeline_run"),
+    ("exec", "run", "__gos_process_run"),
+    ("exec", "run_in", "__gos_process_run_in"),
+    ("exec", "pipeline_run", "__gos_process_pipeline_run"),
+    ("exec", "Output", "__gos_process_Output"),
+    ("path", "Path", "__gos_path_Path"),
+    ("http", "Http2Config", "__gos_http_Http2Config"),
+    ("Http2Config", "default", "__gos_http_Http2Config_default"),
+    ("time", "Location", "__gos_time_Location"),
+    ("time", "CivilTime", "__gos_time_CivilTime"),
+    ("time", "CivilResolution", "__gos_time_CivilResolution"),
+    ("time", "format_in", "__gos_time_format_in"),
+    ("time", "add_date", "__gos_time_add_date"),
+    // tar/zip `read` route through the struct wrapper; `write`
+    // lowers directly (no struct), so it is NOT rewritten.
+    ("tar", "read", "__gos_tar_read"),
+    ("tar", "TarEntry", "__gos_tar_TarEntry"),
+    ("zip", "read", "__gos_zip_read"),
+    ("zip", "ZipEntry", "__gos_zip_ZipEntry"),
+    ("sql", "open", "__gos_sql_open"),
+    ("sql", "drivers", "__gos_sql_drivers"),
+    ("sql", "Conn", "__gos_sql_Conn"),
+    ("sql", "Rows", "__gos_sql_Rows"),
+    ("sql", "Row", "__gos_sql_Row"),
+    ("sql", "Tx", "__gos_sql_Tx"),
+    ("sql", "Value", "__gos_sql_Value"),
+    ("sql", "IsolationLevel", "__gos_sql_IsolationLevel"),
+    ("sql", "Stmt", "__gos_sql_Stmt"),
+    ("sql", "Pool", "__gos_sql_Pool"),
+    ("sql", "Notification", "__gos_sql_Notification"),
+    ("sql", "Select", "__gos_sql_Select"),
+    ("sql", "pool_open", "__gos_sql_pool_open"),
+    ("sql", "pool_open_with", "__gos_sql_pool_open_with"),
+    ("sql", "migrate_up", "__gos_sql_migrate_up"),
+    // Gossamer-native driver dispatch: `register_native` captures
+    // the driver's env + dispatch fn-address (custom MIR lowering,
+    // hooked on the mangled leaf name); the `native_*` /
+    // `value_*` helpers are the side-channel a `.gos` driver reads
+    // and writes through.
+    ("sql", "register_native", "__gos_sql_register_native"),
+    ("sql", "native_url", "__gos_sql_native_url"),
+    ("sql", "native_sql", "__gos_sql_native_sql"),
+    ("sql", "native_parent", "__gos_sql_native_parent"),
+    ("sql", "native_out_handle", "__gos_sql_native_out_handle"),
+    ("sql", "native_iso", "__gos_sql_native_iso"),
+    ("sql", "native_timeout", "__gos_sql_native_timeout"),
+    ("sql", "native_channel", "__gos_sql_native_channel"),
+    ("sql", "native_param_count", "__gos_sql_native_param_count"),
+    ("sql", "native_param", "__gos_sql_native_param"),
+    ("sql", "native_data", "__gos_sql_native_data"),
+    ("sql", "native_push_column", "__gos_sql_native_push_column"),
+    ("sql", "native_push_value", "__gos_sql_native_push_value"),
+    ("sql", "native_row_ready", "__gos_sql_native_row_ready"),
+    ("sql", "native_set_error", "__gos_sql_native_set_error"),
+    ("sql", "native_emit_bytes", "__gos_sql_native_emit_bytes"),
+    ("sql", "native_set_notification", "__gos_sql_native_set_notification"),
+    ("sql", "native_set_handle", "__gos_sql_native_set_handle"),
+    ("sql", "native_handle", "__gos_sql_native_handle"),
+    ("sql", "value_null", "__gos_sql_native_value_null"),
+    ("sql", "value_bool", "__gos_sql_native_value_bool"),
+    ("sql", "value_int", "__gos_sql_native_value_int"),
+    ("sql", "value_float", "__gos_sql_native_value_float"),
+    ("sql", "value_text", "__gos_sql_native_value_text"),
+    ("sql", "value_blob", "__gos_sql_native_value_blob"),
+    ("sql", "value_kind", "__gos_sql_native_value_kind"),
+    ("sql", "value_int_of", "__gos_sql_native_value_int_of"),
+    ("sql", "value_float_of", "__gos_sql_native_value_float_of"),
+    ("sql", "value_text_of", "__gos_sql_native_value_text_of"),
+    ("sql", "value_blob_of", "__gos_sql_native_value_blob_of"),
+    // Channel-returning timer: `time::after(d)` fires on a goroutine that
+    // sleeps then sends, so the result is usable in `select` / `while let`.
+    ("time", "after", "__gos_time_after"),
+    // Cancellation-shielded and time-bounded work, written with
+    // `cohort` + `spawn` because that is what the two primitives
+    // already express (SPEC 8.6's addition test).
+    ("sync", "shield", "__gos_sync_shield"),
+    ("sync", "with_timeout", "__gos_sync_with_timeout"),
+    // std::http::csrf request/response-integrated surface.
+    ("csrf", "Config", "__gos_http_csrf_Config"),
+    ("csrf", "config", "__gos_http_csrf_config"),
+    ("csrf", "RouteAuth", "__gos_http_csrf_RouteAuth"),
+    ("csrf", "extract_token", "__gos_http_csrf_extract_token"),
+    ("csrf", "origin_allowed", "__gos_http_csrf_origin_allowed"),
+    ("csrf", "check", "__gos_http_csrf_check"),
+    ("csrf", "attach_cookie", "__gos_http_csrf_attach_cookie"),
+    // std::http::session signed + AES-GCM store surface.
+    ("session", "Store", "__gos_http_session_Store"),
+    ("session", "signed", "__gos_http_session_signed"),
+    ("session", "encrypted", "__gos_http_session_encrypted"),
+    ("session", "save", "__gos_http_session_save"),
+    ("session", "load", "__gos_http_session_load"),
+    ("session", "with_session", "__gos_http_session_with_session"),
+    // std::http::form url-encoded parser.
+    ("form", "Form", "__gos_http_form_Form"),
+    ("form", "parse", "__gos_http_form_parse"),
+    ("form", "get", "__gos_http_form_get"),
+    ("form", "get_all", "__gos_http_form_get_all"),
+    ("form", "has", "__gos_http_form_has"),
+    ("form", "count", "__gos_http_form_count"),
+    // std::http::multipart (multipart/form-data) parser.
+    ("multipart", "Part", "__gos_http_multipart_Part"),
+    ("multipart", "parse", "__gos_http_multipart_parse"),
+    ("multipart", "boundary", "__gos_http_multipart_boundary"),
+];
+
+/// The mangled name of the injected wrapper or struct a stdlib `parent::item`
+/// reaches, if any. See [`MANGLED_STDLIB_NAMES`].
 fn mangled_stdlib_name(parent: &str, item: &str) -> Option<&'static str> {
-    match (parent, item) {
-        ("pem", "decode") => Some("__gos_pem_decode"),
-        ("pem", "decode_all") => Some("__gos_pem_decode_all"),
-        ("pem", "encode") => Some("__gos_pem_encode"),
-        ("pem", "Block") => Some("__gos_pem_Block"),
-        ("x509", "parse_pem") => Some("__gos_x509_parse_pem"),
-        ("x509", "CertInfo") => Some("__gos_x509_CertInfo"),
-        ("fs", "metadata") => Some("__gos_fs_metadata"),
-        ("fs", "Metadata") => Some("__gos_fs_Metadata"),
-        ("path", "Path") => Some("__gos_path_Path"),
-        ("http", "Http2Config") => Some("__gos_http_Http2Config"),
-        ("Http2Config", "default") => Some("__gos_http_Http2Config_default"),
-        ("time", "Location") => Some("__gos_time_Location"),
-        ("time", "CivilTime") => Some("__gos_time_CivilTime"),
-        ("time", "CivilResolution") => Some("__gos_time_CivilResolution"),
-        ("time", "format_in") => Some("__gos_time_format_in"),
-        ("time", "add_date") => Some("__gos_time_add_date"),
-        // tar/zip `read` route through the struct wrapper; `write`
-        // lowers directly (no struct), so it is NOT rewritten.
-        ("tar", "read") => Some("__gos_tar_read"),
-        ("tar", "TarEntry") => Some("__gos_tar_TarEntry"),
-        ("zip", "read") => Some("__gos_zip_read"),
-        ("zip", "ZipEntry") => Some("__gos_zip_ZipEntry"),
-        ("sql", "open") => Some("__gos_sql_open"),
-        ("sql", "drivers") => Some("__gos_sql_drivers"),
-        ("sql", "Conn") => Some("__gos_sql_Conn"),
-        ("sql", "Rows") => Some("__gos_sql_Rows"),
-        ("sql", "Row") => Some("__gos_sql_Row"),
-        ("sql", "Tx") => Some("__gos_sql_Tx"),
-        ("sql", "Value") => Some("__gos_sql_Value"),
-        ("sql", "IsolationLevel") => Some("__gos_sql_IsolationLevel"),
-        ("sql", "Stmt") => Some("__gos_sql_Stmt"),
-        ("sql", "Pool") => Some("__gos_sql_Pool"),
-        ("sql", "Notification") => Some("__gos_sql_Notification"),
-        ("sql", "Select") => Some("__gos_sql_Select"),
-        ("sql", "pool_open") => Some("__gos_sql_pool_open"),
-        ("sql", "pool_open_with") => Some("__gos_sql_pool_open_with"),
-        ("sql", "migrate_up") => Some("__gos_sql_migrate_up"),
-        // Gossamer-native driver dispatch: `register_native` captures
-        // the driver's env + dispatch fn-address (custom MIR lowering,
-        // hooked on the mangled leaf name); the `native_*` /
-        // `value_*` helpers are the side-channel a `.gos` driver reads
-        // and writes through.
-        ("sql", "register_native") => Some("__gos_sql_register_native"),
-        ("sql", "native_url") => Some("__gos_sql_native_url"),
-        ("sql", "native_sql") => Some("__gos_sql_native_sql"),
-        ("sql", "native_parent") => Some("__gos_sql_native_parent"),
-        ("sql", "native_out_handle") => Some("__gos_sql_native_out_handle"),
-        ("sql", "native_iso") => Some("__gos_sql_native_iso"),
-        ("sql", "native_timeout") => Some("__gos_sql_native_timeout"),
-        ("sql", "native_channel") => Some("__gos_sql_native_channel"),
-        ("sql", "native_param_count") => Some("__gos_sql_native_param_count"),
-        ("sql", "native_param") => Some("__gos_sql_native_param"),
-        ("sql", "native_data") => Some("__gos_sql_native_data"),
-        ("sql", "native_push_column") => Some("__gos_sql_native_push_column"),
-        ("sql", "native_push_value") => Some("__gos_sql_native_push_value"),
-        ("sql", "native_row_ready") => Some("__gos_sql_native_row_ready"),
-        ("sql", "native_set_error") => Some("__gos_sql_native_set_error"),
-        ("sql", "native_emit_bytes") => Some("__gos_sql_native_emit_bytes"),
-        ("sql", "native_set_notification") => Some("__gos_sql_native_set_notification"),
-        ("sql", "native_set_handle") => Some("__gos_sql_native_set_handle"),
-        ("sql", "native_handle") => Some("__gos_sql_native_handle"),
-        ("sql", "value_null") => Some("__gos_sql_native_value_null"),
-        ("sql", "value_bool") => Some("__gos_sql_native_value_bool"),
-        ("sql", "value_int") => Some("__gos_sql_native_value_int"),
-        ("sql", "value_float") => Some("__gos_sql_native_value_float"),
-        ("sql", "value_text") => Some("__gos_sql_native_value_text"),
-        ("sql", "value_blob") => Some("__gos_sql_native_value_blob"),
-        ("sql", "value_kind") => Some("__gos_sql_native_value_kind"),
-        ("sql", "value_int_of") => Some("__gos_sql_native_value_int_of"),
-        ("sql", "value_float_of") => Some("__gos_sql_native_value_float_of"),
-        ("sql", "value_text_of") => Some("__gos_sql_native_value_text_of"),
-        ("sql", "value_blob_of") => Some("__gos_sql_native_value_blob_of"),
-        // Channel-returning timer: `time::after(d)` fires on a goroutine that
-        // sleeps then sends, so the result is usable in `select` / `while let`.
-        ("time", "after") => Some("__gos_time_after"),
-        // Cancellation-shielded and time-bounded work, written with
-        // `cohort` + `spawn` because that is what the two primitives
-        // already express (SPEC 8.6's addition test).
-        ("sync", "shield") => Some("__gos_sync_shield"),
-        ("sync", "with_timeout") => Some("__gos_sync_with_timeout"),
-        // std::http::csrf request/response-integrated surface.
-        ("csrf", "Config") => Some("__gos_http_csrf_Config"),
-        ("csrf", "config") => Some("__gos_http_csrf_config"),
-        ("csrf", "RouteAuth") => Some("__gos_http_csrf_RouteAuth"),
-        ("csrf", "extract_token") => Some("__gos_http_csrf_extract_token"),
-        ("csrf", "origin_allowed") => Some("__gos_http_csrf_origin_allowed"),
-        ("csrf", "check") => Some("__gos_http_csrf_check"),
-        ("csrf", "attach_cookie") => Some("__gos_http_csrf_attach_cookie"),
-        // std::http::session signed + AES-GCM store surface.
-        ("session", "Store") => Some("__gos_http_session_Store"),
-        ("session", "signed") => Some("__gos_http_session_signed"),
-        ("session", "encrypted") => Some("__gos_http_session_encrypted"),
-        ("session", "save") => Some("__gos_http_session_save"),
-        ("session", "load") => Some("__gos_http_session_load"),
-        ("session", "with_session") => Some("__gos_http_session_with_session"),
-        // std::http::form url-encoded parser.
-        ("form", "Form") => Some("__gos_http_form_Form"),
-        ("form", "parse") => Some("__gos_http_form_parse"),
-        ("form", "get") => Some("__gos_http_form_get"),
-        ("form", "get_all") => Some("__gos_http_form_get_all"),
-        ("form", "has") => Some("__gos_http_form_has"),
-        ("form", "count") => Some("__gos_http_form_count"),
-        // std::http::multipart (multipart/form-data) parser.
-        ("multipart", "Part") => Some("__gos_http_multipart_Part"),
-        ("multipart", "parse") => Some("__gos_http_multipart_parse"),
-        ("multipart", "boundary") => Some("__gos_http_multipart_boundary"),
-        _ => None,
-    }
+    MANGLED_STDLIB_NAMES
+        .iter()
+        .find(|(p, i, _)| *p == parent && *i == item)
+        .map(|(_, _, name)| *name)
 }
 
 /// Collapses the `csrf::RouteAuth::X` enum-variant and the

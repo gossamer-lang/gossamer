@@ -192,9 +192,6 @@ pub static VEC_OWNER_ALLOCS: AtomicU64 = AtomicU64::new(0);
 pub static VEC_REGION_ALLOCS: AtomicU64 = AtomicU64::new(0);
 pub static VEC_REQUESTED_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static VEC_USABLE_BYTES: AtomicU64 = AtomicU64::new(0);
-pub static VEC_PACKED_CONVERSIONS: AtomicU64 = AtomicU64::new(0);
-pub static VEC_PACKED_ROWS: AtomicU64 = AtomicU64::new(0);
-pub static VEC_PACKED_BYTES: AtomicU64 = AtomicU64::new(0);
 
 // RC allocation-shape counters.  `payload_bytes` deliberately excludes the
 // fixed eight-byte RcHeader, while `usable_bytes` is the allocator capacity
@@ -264,16 +261,13 @@ extern "C" fn report() {
     }
     if std::env::var("GOS_VEC_ALLOC_STATS").is_ok() {
         eprintln!(
-            "VEC ALLOC STATS: inline={} split={} owner={} region={} requested_bytes={} usable_bytes={} packed_conversions={} packed_rows={} packed_bytes={}",
+            "VEC ALLOC STATS: inline={} split={} owner={} region={} requested_bytes={} usable_bytes={}",
             VEC_INLINE_ALLOCS.load(Ordering::Relaxed),
             VEC_SPLIT_ALLOCS.load(Ordering::Relaxed),
             VEC_OWNER_ALLOCS.load(Ordering::Relaxed),
             VEC_REGION_ALLOCS.load(Ordering::Relaxed),
             VEC_REQUESTED_BYTES.load(Ordering::Relaxed),
             VEC_USABLE_BYTES.load(Ordering::Relaxed),
-            VEC_PACKED_CONVERSIONS.load(Ordering::Relaxed),
-            VEC_PACKED_ROWS.load(Ordering::Relaxed),
-            VEC_PACKED_BYTES.load(Ordering::Relaxed),
         );
     }
     if std::env::var("GOS_RC_ALLOC_STATS").is_ok() {
@@ -461,26 +455,6 @@ fn vec_region_alloc_slow(requested: usize) {
     // Region slabs are suballocated. Attribute their requested payload but do
     // not pretend the slab's allocator capacity belongs to one Vec.
     record_vec_bytes(requested, requested);
-}
-
-#[inline]
-pub fn vec_packed_conversion(rows: usize, bytes: usize) {
-    if !instrumentation_armed() {
-        return;
-    }
-    vec_packed_conversion_slow(rows, bytes);
-}
-
-#[cold]
-#[inline(never)]
-fn vec_packed_conversion_slow(rows: usize, bytes: usize) {
-    if !vec_alloc_stats_enabled() {
-        return;
-    }
-    arm();
-    VEC_PACKED_CONVERSIONS.fetch_add(1, Ordering::Relaxed);
-    VEC_PACKED_ROWS.fetch_add(rows as u64, Ordering::Relaxed);
-    VEC_PACKED_BYTES.fetch_add(bytes as u64, Ordering::Relaxed);
 }
 
 /// Record an RC allocation's user payload and allocator footprint.

@@ -7,6 +7,7 @@ include!("autoderive/augment_entry.rs");
 include!("autoderive/stdlib_wrappers.rs");
 include!("autoderive/assoc_consts.rs");
 include!("autoderive/trait_defaults.rs");
+include!("autoderive/self_paths.rs");
 include!("autoderive/static_init.rs");
 include!("autoderive/parse_rewrites.rs");
 include!("autoderive/stdlib_surface.rs");

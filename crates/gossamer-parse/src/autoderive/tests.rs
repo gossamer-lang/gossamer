@@ -134,10 +134,8 @@ mod autoderive_tests {
     }
 
     #[test]
-    fn validator_only_source_still_augments_without_type_declarations() {
-        let src = "fn main() { let _ = regex!(\"^[a]+$\") }\n";
-        let augmented = super::augment_source(src);
-        assert!(augmented.contains("__gos_regex_validate"));
-        assert!(augmented.starts_with(src));
+    fn a_literal_regex_needs_no_synthesized_code() {
+        let src = "use std::regex\nfn main() { let _ = regex::compile(\"^[a]+$\") }\n";
+        assert_eq!(super::augment_source(src), src);
     }
 }

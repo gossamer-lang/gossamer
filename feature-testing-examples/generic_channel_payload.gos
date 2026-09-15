@@ -1,0 +1,34 @@
+// A generic function over a channel endpoint sends and receives the payload
+// type its instantiation names, so an `f64` crosses the channel as a float
+// and not as the integer its bits spell.
+
+use std::sync::channel
+
+fn put<T>(tx: Sender<T>, v: T) {
+    tx.send(v)
+    tx.close()
+}
+
+fn drain<T>(rx: Receiver<T>, d: T) -> T {
+    let mut last = d
+    while let Some(got) = rx.recv() {
+        last = got
+    }
+    last
+}
+
+fn endpoints<T>(pair: (Sender<T>, Receiver<T>)) -> (Sender<T>, Receiver<T>) {
+    pair
+}
+
+fn main() {
+    let tx, rx = endpoints(channel())
+    spawn(|| put(tx, 2.5))
+    println("{}", drain(rx, 0.0))
+    let btx, brx = channel()
+    spawn(|| put(btx, true))
+    println("{}", drain(brx, false))
+    let ctx, crx = channel()
+    spawn(|| put(ctx, 'z'))
+    println("{}", drain(crx, 'a'))
+}

@@ -253,3 +253,130 @@ fn unmodelled_entries_are_all_still_present() {
         );
     }
 }
+
+/// Registry symbols whose `c_char` pointer answer the caller does not
+/// take a fresh reference to, each with the reason.
+const UNOWNED_STRING_RETURNS: &[(&str, &str)] = &[
+    (
+        "gos_rt_flag_cell_load_str",
+        "reads the String a flag cell holds",
+    ),
+    (
+        "gos_rt_os_program_name",
+        "answers the process-lifetime argv[0] copy",
+    ),
+    (
+        "gos_rt_str_append_bytes",
+        "answers its accumulator, grown in place",
+    ),
+    (
+        "gos_rt_str_append_f64",
+        "answers its accumulator, grown in place",
+    ),
+    (
+        "gos_rt_str_append_i64",
+        "answers its accumulator, grown in place",
+    ),
+    (
+        "gos_rt_str_clone",
+        "answers its argument with the retain already taken",
+    ),
+    (
+        "gos_rt_str_concat_drop_a",
+        "answers its accumulator, grown in place",
+    ),
+    (
+        "gos_rt_str_push_byte",
+        "answers its accumulator, grown in place",
+    ),
+    (
+        "gos_rt_str_push_char",
+        "answers its accumulator, grown in place",
+    ),
+];
+
+/// The Rust return type spelled by each `gos_rt_*` definition.
+fn return_spellings(src: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for marker in ["extern \"C\" fn ", "extern \"C-unwind\" fn "] {
+        let mut cursor = 0;
+        while let Some(idx) = src[cursor..].find(marker) {
+            let start = cursor + idx + marker.len();
+            cursor = start;
+            let decl = &src[start..];
+            let Some(open) = decl.find('(') else { break };
+            let name = decl[..open].trim();
+            if !name.starts_with("gos_rt_") {
+                continue;
+            }
+            let mut depth = 0i32;
+            let Some(close) = decl[open..].char_indices().find_map(|(i, c)| {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(open + i)
+            }) else {
+                break;
+            };
+            let tail = &decl[close + 1..];
+            let Some(brace_at) = tail.find('{') else {
+                break;
+            };
+            let ret = tail[..brace_at].trim().trim_start_matches("->").trim();
+            out.insert(
+                name.to_string(),
+                ret.split_whitespace().collect::<Vec<_>>().join(" "),
+            );
+        }
+    }
+    out
+}
+
+/// A shim answering a single `c_char` pointer answers a `String`, and the
+/// drop pass releases a call's result only when the registry says the
+/// caller owns it. An undeclared minting shim leaks one String per call
+/// on the compiled tiers; a borrowed answer declared owned is freed
+/// under its holder.
+#[test]
+fn every_string_return_declares_its_ownership() {
+    let rets = return_spellings(&runtime_source());
+    let mut problems = Vec::new();
+    for entry in REGISTRY {
+        let Some(ret) = rets.get(entry.name) else {
+            continue;
+        };
+        let answers_string = ret.ends_with("c_char") && ret.matches('*').count() == 1;
+        let unowned = UNOWNED_STRING_RETURNS
+            .iter()
+            .any(|(name, _)| *name == entry.name);
+        if answers_string && !unowned && !entry.mints_string {
+            problems.push(format!(
+                "{}: answers `{ret}` but is declared with `rt!`; declare it `rt_str!` if the \
+                 caller owns the String, or list it in UNOWNED_STRING_RETURNS with the reason",
+                entry.name,
+            ));
+        }
+        if unowned && entry.mints_string {
+            problems.push(format!(
+                "{}: listed in UNOWNED_STRING_RETURNS but declared `rt_str!`",
+                entry.name,
+            ));
+        }
+        if entry.mints_string && !answers_string {
+            problems.push(format!(
+                "{}: declared `rt_str!` but answers `{ret}`, not a String",
+                entry.name,
+            ));
+        }
+    }
+    for (name, _) in UNOWNED_STRING_RETURNS {
+        if !rets.contains_key(*name) {
+            problems.push(format!(
+                "{name}: listed in UNOWNED_STRING_RETURNS but not defined"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}

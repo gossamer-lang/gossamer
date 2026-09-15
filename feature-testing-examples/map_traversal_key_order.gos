@@ -1,0 +1,99 @@
+// A traversal of a map walks its entries in ascending key order on every tier,
+// so an extremum that ties keeps the entry whose key sorts first, and a fold
+// that depends on order answers the same number everywhere. Splitting on
+// whitespace answers the same pieces for ASCII and non-ASCII input alike.
+use std::collections::Map
+
+fn show_split(label: String, text: String) {
+    let pieces = text.split_whitespace()
+    println("{label}: {} {:?}", pieces.len(), pieces)
+}
+
+fn main() {
+    let mut counts: Map<String, i64> = Map::new()
+    for w in "pear fig apple kiwi date banana cherry fig apple kiwi zz aa".split_whitespace() {
+        counts.inc(w)
+    }
+    println("{:?}", counts.max_by_key(|e| e.1))
+    println("{:?}", counts.min_by_key(|e| e.1))
+    println("{:?}", counts.iter().max_by_key(|e| e.1))
+    println("{}", counts.fold(0, |acc, e| acc * 3 + e.1))
+    println("{}", counts.count(|e| e.1 > 1))
+    println("{} {}", counts.any(|e| e.0 == "fig"), counts.all(|e| e.1 > 0))
+    let names: Vec<String> = counts.iter().map(|e| e.0).collect()
+    println("{:?}", names)
+    for (k, v) in counts.iter() { print("{}={} ", k, v) }
+    println("")
+
+    let mut by_id: Map<i64, String> = Map::new()
+    by_id.insert(30, "c")
+    by_id.insert(-5, "a")
+    by_id.insert(10, "b")
+    println("{:?}", by_id.max_by_key(|e| e.1.len()))
+    println("{:?}", by_id.iter().collect())
+
+    // Keys sharing a long prefix, the empty key, and a non-ASCII key.
+    let mut labels: Map<String, String> = Map::new()
+    labels.insert("abcdefghij", "1")
+    labels.insert("abcdefgh", "2")
+    labels.insert("abcdefghi", "3")
+    labels.insert("abcdefgi", "7")
+    labels.insert("ab", "4")
+    labels.insert("", "5")
+    labels.insert("héllo", "6")
+    println("{:?}", labels.iter().collect())
+    println("{:?}", labels.keys())
+    println("{:?}", labels.values())
+
+    let mut ties: Map<i64, i64> = Map::new()
+    println("{:?} {}", ties.max_by_key(|x| x.1), ties.count(|x| x.1 > 0))
+    ties.insert(2, 7)
+    ties.insert(1, 7)
+    ties.insert(3, 7)
+    println("{:?} {:?}", ties.max_by_key(|x| x.1), ties.min_by_key(|x| x.1))
+    println("{:?}", ties.max_by_key(|x| if x.0 > 1 { x.1 } else { 0 }))
+
+    // Keys computed from the value, from the key, as floats, and by a
+    // callback whose every call is visible in the output.
+    println("{:?}", counts.max_by_key(|e| e.0.len()))
+    println("{:?}", counts.min_by_key(|e| -(e.1 as f64) * 0.5))
+    println("{:?}", counts.max_by_key(|e| {
+        let doubled = e.1 * 2
+        if doubled > 2 { doubled } else { 0 }
+    }))
+    println("{:?}", counts.max_by_key(|e| {
+        print("{} ", e.0)
+        e.1
+    }))
+    let mut weights: Map<String, f64> = Map::new()
+    weights.insert("b", 1.5)
+    weights.insert("a", 1.5)
+    weights.insert("c", -2.0)
+    println("{:?} {:?}", weights.max_by_key(|e| e.1), weights.min_by_key(|e| e.1))
+
+    // A scalar key or value that is not an integer is walked as itself.
+    for (k, v) in weights.iter() { print("{}={} ", k, v) }
+    for v in weights.values() { print("{} ", v) }
+    println("{:?}", weights.iter().collect())
+    let mut flags: Map<char, bool> = Map::new()
+    flags.insert('z', true)
+    flags.insert('a', false)
+    for (k, v) in flags.iter() { print("{}={} ", k, v) }
+    for k in flags.keys() { print("{} ", k) }
+    println("{:?} {:?}", flags.iter().collect(), flags.min_by_key(|e| e.0 as i64))
+
+    // A walked string value can be kept past the walk that produced it.
+    let mut kept: Vec<String> = #[]
+    for (k, v) in labels.iter() {
+        kept.push(v)
+        if k == "abcdefghi" { break }
+    }
+    println("{:?}", kept)
+
+    show_split("empty", "")
+    show_split("blank", " \t\n ")
+    show_split("edges", "  lead and trail  ")
+    show_split("controls", "a\tb\nc\rd\u{000B}e\u{000C}f")
+    show_split("unicode", "α β\u{00A0}γ\u{2003}δ\u{3000}ε")
+    show_split("separators", "x\u{001C}y\u{0085}z")
+}

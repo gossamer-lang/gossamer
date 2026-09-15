@@ -28,15 +28,82 @@ use super::*;
 // `None`.
 // ---------------------------------------------------------------
 
+/// The payload of a reference-counted error cell. The cell owns its message,
+/// a share of its cause, and its boxed fields, and the release of its last
+/// share frees all three through [`ERROR_META`].
 #[repr(C)]
 pub struct GosError {
-    /// Heap-leaked, nul-terminated UTF-8 message.
+    /// Runtime string holding the UTF-8 message.
     pub message: SyncRawPtr<c_char>,
-    /// Cause pointer. NULL when the error has no cause.
+    /// A share of the cause error. NULL when the error has no cause.
     pub cause: SyncRawPtr<GosError>,
-    /// Structured diagnostic fields in insertion order. Only Rust reads
-    /// this tail; the compiled tiers carry the whole error as a pointer.
-    pub fields: Vec<(String, String)>,
+    /// Structured diagnostic fields in insertion order, or NULL when there
+    /// are none. Only Rust reads them.
+    pub fields: SyncRawPtr<ErrorFields>,
+}
+
+/// The structured diagnostic fields an error carries.
+pub type ErrorFields = Vec<(String, String)>;
+
+/// Child layout of an error cell: the message and the cause are counted
+/// children, and the fields box goes with the cell.
+static ERROR_META: [i64; 7] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    3,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+    (gossamer_abi::rc::RC_CHILD_ERROR_FIELDS << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 2,
+];
+
+/// Allocates an error cell owning `message`, the share of `cause` the caller
+/// hands over, and `fields`. The cell lives outside any region, since an
+/// error routinely outlives the loop iteration that raised it.
+pub(crate) fn error_alloc(
+    message: *mut c_char,
+    cause: *mut GosError,
+    fields: ErrorFields,
+) -> *mut GosError {
+    let size = std::mem::size_of::<GosError>() as u64;
+    // SAFETY: `ERROR_META` is a static child layout matching `GosError`.
+    let cell =
+        unsafe { crate::c_abi::rc::rc_alloc_global(size, ERROR_META.as_ptr()) }.cast::<GosError>();
+    if cell.is_null() {
+        return cell;
+    }
+    let fields = if fields.is_empty() {
+        SyncRawPtr::NULL
+    } else {
+        SyncRawPtr::new(Box::into_raw(Box::new(fields)))
+    };
+    // SAFETY: `cell` is a fresh allocation of `size_of::<GosError>()` bytes.
+    unsafe {
+        cell.write(GosError {
+            message: SyncRawPtr::new(message),
+            cause: SyncRawPtr::new(cause),
+            fields,
+        });
+    }
+    cell
+}
+
+/// The fields `err` carries, empty when it carries none.
+fn error_fields(err: &GosError) -> &[(String, String)] {
+    if err.fields.is_null() {
+        &[]
+    } else {
+        // SAFETY: a non-null fields word is the box `error_alloc` stored.
+        unsafe { &*err.fields.as_ptr() }
+    }
+}
+
+/// Takes a share of `err` for a holder that keeps it. Null-safe.
+fn retain_error(err: *mut GosError) {
+    if !err.is_null() {
+        // SAFETY: a non-null error is a live error cell.
+        unsafe { crate::c_abi::rc::gos_rt_rc_retain(err.cast()) };
+    }
 }
 
 /// Builds a causeless error carrying `text` as its message.
@@ -45,12 +112,7 @@ pub struct GosError {
 /// error this way rather than through a host C string, which the string ABI
 /// would have to measure with `strlen`.
 pub(crate) fn error_new_from_bytes(text: &[u8]) -> *mut GosError {
-    let leaked = alloc_cstring(text);
-    Box::into_raw(Box::new(GosError {
-        message: SyncRawPtr::new(leaked),
-        cause: SyncRawPtr::NULL,
-        fields: Vec::new(),
-    }))
+    error_alloc(alloc_cstring(text), std::ptr::null_mut(), Vec::new())
 }
 
 #[unsafe(no_mangle)]
@@ -81,12 +143,7 @@ pub unsafe extern "C" fn gos_rt_error_from(value: *const c_char) -> *mut GosErro
         } else {
             unsafe { crate::c_abi::gos_str_arg_bytes(value) }.to_vec()
         };
-        let leaked = alloc_cstring(&text);
-        Box::into_raw(Box::new(GosError {
-            message: SyncRawPtr::new(leaked),
-            cause: SyncRawPtr::NULL,
-            fields: Vec::new(),
-        }))
+        error_alloc(alloc_cstring(&text), std::ptr::null_mut(), Vec::new())
     })
 }
 
@@ -101,12 +158,8 @@ pub unsafe extern "C" fn gos_rt_error_wrap(
         } else {
             unsafe { crate::c_abi::gos_str_arg_bytes(msg) }.to_vec()
         };
-        let leaked = alloc_cstring(&text);
-        Box::into_raw(Box::new(GosError {
-            message: SyncRawPtr::new(leaked),
-            cause: SyncRawPtr::new(cause),
-            fields: Vec::new(),
-        }))
+        retain_error(cause);
+        error_alloc(alloc_cstring(&text), cause, Vec::new())
     })
 }
 
@@ -211,17 +264,14 @@ pub unsafe extern "C" fn gos_rt_error_with_field(
             } else {
                 unsafe { crate::c_abi::gos_str_arg_bytes(e.message.as_ptr()) }.to_vec()
             };
-            (msg, e.cause.as_ptr(), e.fields.clone())
+            (msg, e.cause.as_ptr(), error_fields(e).to_vec())
         };
         match fields.iter_mut().find(|(name, _)| *name == key) {
             Some((_, current)) => *current = value,
             None => fields.push((key, value)),
         }
-        Box::into_raw(Box::new(GosError {
-            message: SyncRawPtr::new(alloc_cstring(&message)),
-            cause: SyncRawPtr::new(cause),
-            fields,
-        }))
+        retain_error(cause);
+        error_alloc(alloc_cstring(&message), cause, fields)
     })
 }
 
@@ -234,7 +284,10 @@ pub unsafe extern "C" fn gos_rt_error_field(err: *const GosError, key: *const c_
             return unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) };
         }
         let key = unsafe { cstr_owned(key) };
-        match unsafe { &*err }.fields.iter().find(|(n, _)| *n == key) {
+        match error_fields(unsafe { &*err })
+            .iter()
+            .find(|(n, _)| *n == key)
+        {
             Some((_, value)) => unsafe {
                 crate::c_abi::vec::gos_rt_result_new(0, alloc_cstring(value.as_bytes()) as i64)
             },
@@ -250,7 +303,7 @@ pub unsafe extern "C" fn gos_rt_error_fields(err: *const GosError) -> *mut GosVe
     ffi_entry!(std::ptr::null_mut(), {
         let out = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(16, 0) };
         if !err.is_null() {
-            for (key, value) in &unsafe { &*err }.fields {
+            for (key, value) in error_fields(unsafe { &*err }) {
                 let pair: [i64; 2] = [
                     alloc_cstring(key.as_bytes()) as i64,
                     alloc_cstring(value.as_bytes()) as i64,
@@ -268,9 +321,14 @@ pub unsafe extern "C" fn gos_rt_error_fields(err: *const GosError) -> *mut GosVe
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_chain(err: *const GosError) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(8, 0) };
+        // Each element is a share of its own, so the vector's teardown gives
+        // every link back.
+        let out = unsafe {
+            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::ERROR)
+        };
         let mut cur = err;
         while !cur.is_null() {
+            retain_error(cur.cast_mut());
             let slot = cur as i64;
             unsafe {
                 crate::c_abi::vec::gos_rt_vec_push(out, std::ptr::addr_of!(slot).cast::<u8>());

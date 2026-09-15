@@ -182,8 +182,11 @@ pub struct NativeObject {
     pub bytes: Vec<u8>,
 }
 
+/// The host ISA. `unwind_info` records each function's frame layout, which an
+/// in-process artifact registers so a stack walk can pass through its frames.
 pub(crate) fn build_native_isa(
     pic: bool,
+    unwind_info: bool,
 ) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>> {
     // COFF (Windows) has no GOT. Under `is_pic` cranelift emits
     // `movq sym@GOTPCREL(%rip)` (a load *through* a GOT slot) for
@@ -207,7 +210,7 @@ pub(crate) fn build_native_isa(
         .set("use_colocated_libcalls", "false")
         .map_err(|e| anyhow!("flag use_colocated_libcalls: {e}"))?;
     flag_builder
-        .set("unwind_info", "false")
+        .set("unwind_info", if unwind_info { "true" } else { "false" })
         .map_err(|e| anyhow!("flag unwind_info: {e}"))?;
     // Cranelift's IR verifier stays on (its default) in every profile. A
     // lowering defect it catches is reported as a failed body, which drops
@@ -257,7 +260,7 @@ pub fn compile_to_object_with_options(
     tcx: &TyCtxt,
     options: CompileOptions,
 ) -> Result<NativeObject> {
-    let isa = build_native_isa(true)?;
+    let isa = build_native_isa(true, false)?;
     let triple = isa.triple().to_string();
 
     let builder = ObjectBuilder::new(
@@ -309,7 +312,7 @@ pub fn compile_to_object_at_path_with_options(
     obj_out: &std::path::Path,
     options: CompileOptions,
 ) -> Result<String> {
-    let isa = build_native_isa(true)?;
+    let isa = build_native_isa(true, false)?;
     let triple = isa.triple().to_string();
 
     let builder = ObjectBuilder::new(
@@ -744,6 +747,26 @@ pub(crate) fn lower_program_full(
             intrinsics.cabi_callbacks.insert(name, thunk_id);
         }
     }
+    // A callable is entered with its logical parameters and answers an
+    // aggregate as the address of its storage, on every target: that is how
+    // the shape thunk and the runtime combinators read it. A body that returns
+    // an aggregate through a caller-supplied result slot is therefore handed
+    // out as a wrapper that supplies the slot and answers its address.
+    let mut sret_callbacks: Vec<String> = collect_fn_addr_targets(bodies)
+        .into_iter()
+        .filter(|name| intrinsics.sret_slots_by_name.contains_key(name))
+        .collect();
+    sret_callbacks.sort();
+    for name in sret_callbacks {
+        let (Some(&id), Some(&slots)) = (
+            function_ids_by_name.get(&name),
+            intrinsics.sret_slots_by_name.get(&name),
+        ) else {
+            continue;
+        };
+        let thunk_id = emit_sret_address_thunk(module, &mut intrinsics, id, &name, slots)?;
+        intrinsics.cabi_callbacks.insert(name, thunk_id);
+    }
 
     for body in bodies {
         for s in collect_body_str_consts(body) {
@@ -760,6 +783,14 @@ pub(crate) fn lower_program_full(
                     intrinsics.intern_rc_meta(module, &s, blob)?;
                 }
                 intrinsics.intern_string(module, &s)?;
+            }
+        }
+        // A carrier over an aggregate payload copies it into a counted blob
+        // described by the payload type's copy meta, which the carrier
+        // lowering resolves while bodies compile in parallel.
+        for sym in carrier_payload_copy_metas(body, tcx) {
+            if let Some(blob) = tcx.rc_meta(&sym) {
+                intrinsics.intern_rc_meta(module, &sym, blob)?;
             }
         }
         // Pre-intern the body's name so the call-stack-push prologue
@@ -921,6 +952,11 @@ pub(crate) fn lower_program_full(
     // happens here too, but the IR construction above (the expensive
     // allocation-heavy work) ran in parallel.
     let mut emitted_code_bytes = 0u64;
+    let bodies_by_name: HashMap<&str, &Body> = bodies
+        .iter()
+        .map(|body| (body.name.as_str(), body))
+        .collect();
+    let mut frames = Vec::with_capacity(ir_pairs.len());
     for (id, name, func) in ir_pairs {
         if dump_clif {
             eprintln!("=== CLIF {name} ===\n{}", func.display());
@@ -934,20 +970,37 @@ pub(crate) fn lower_program_full(
             };
             anyhow!("define {name}: {detail}").context(FailedBody(name.clone()))
         })?;
-        let code_bytes = ctx
-            .compiled_code()
-            .map(|code| u64::from(code.code_info().total_size))
-            .ok_or_else(|| {
+        let Some(code) = ctx.compiled_code() else {
+            return Err(
                 anyhow!("define {name}: Cranelift returned no compiled code")
-                    .context(FailedBody(name.clone()))
-            })?;
-        emitted_code_bytes = emitted_code_bytes.saturating_add(code_bytes);
+                    .context(FailedBody(name.clone())),
+            );
+        };
+        let code_len = code.code_info().total_size;
+        emitted_code_bytes = emitted_code_bytes.saturating_add(u64::from(code_len));
+        if let Some(body) = bodies_by_name.get(name.as_str()) {
+            frames.push(crate::jit_frames::FunctionFrames {
+                id,
+                name: std::sync::Arc::from(name.as_str()),
+                code_len,
+                unwind: code.create_unwind_info(module.isa()).ok().flatten(),
+                positions: code
+                    .buffer
+                    .get_srclocs_sorted()
+                    .iter()
+                    .filter(|loc| !loc.loc.is_default())
+                    .map(|loc| (loc.start, loc.end, loc.loc.bits()))
+                    .collect(),
+                spans: super::lowering_body::source_spans(body),
+            });
+        }
     }
 
     Ok(LoweredProgram {
         function_ids_by_name,
         emitted_code_bytes,
         function_ids_by_def,
+        frames,
     })
 }
 
@@ -983,6 +1036,59 @@ pub(super) fn capture_clif<T>(lower: impl FnOnce() -> T) -> (T, HashMap<String, 
         .with(|sink| sink.borrow_mut().take())
         .unwrap_or_default();
     (value, entries.into_iter().collect())
+}
+
+/// The copy-blob meta symbols of the aggregate payloads `body` wraps in a
+/// `Result` / `Option` carrier.
+fn carrier_payload_copy_metas(body: &Body, tcx: &TyCtxt) -> Vec<String> {
+    let payload_meta = |args: &[gossamer_mir::Operand]| {
+        let gossamer_mir::Operand::Copy(place) = args.get(1)? else {
+            return None;
+        };
+        if !place.projection.is_empty() {
+            return None;
+        }
+        // A carrier payload is boxed under its structural meta when one is
+        // registered, the way the constructor lowering picks it.
+        let ty = body.local_ty(place.local);
+        let structural = format!("gos_rc_meta_boxaggr_{}", ty.as_u32());
+        let carrier_box = format!("gos_rc_meta_carrierbox_{}", ty.as_u32());
+        tcx.rc_meta(&structural)
+            .map(|_| structural)
+            .or_else(|| tcx.rc_meta(&carrier_box).map(|_| carrier_box))
+            .or_else(|| {
+                tcx.aggr_copy_meta(ty)
+                    .filter(|sym| !sym.is_empty())
+                    .map(str::to_owned)
+            })
+    };
+    let is_carrier_ctor =
+        |name: &str| matches!(name, "gos_rt_result_new" | "gos_rt_result_new_owned");
+    let mut metas = Vec::new();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let gossamer_mir::StatementKind::Assign {
+                rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, args },
+                ..
+            } = &stmt.kind
+                && is_carrier_ctor(name)
+                && let Some(sym) = payload_meta(args)
+            {
+                metas.push(sym);
+            }
+        }
+        if let gossamer_mir::Terminator::Call {
+            callee: gossamer_mir::Operand::Const(gossamer_mir::ConstValue::Str(name)),
+            args,
+            ..
+        } = &block.terminator
+            && is_carrier_ctor(name)
+            && let Some(sym) = payload_meta(args)
+        {
+            metas.push(sym);
+        }
+    }
+    metas
 }
 
 #[cfg(test)]
@@ -1068,7 +1174,11 @@ mod win64_abi_tests {
             mutable: false,
             region: false,
         };
-        let stmt = |kind| Statement { kind, span };
+        let stmt = |kind| Statement {
+            kind,
+            span,
+            inlined: None,
+        };
         Body {
             name: "main".to_string(),
             def: None,
@@ -1100,6 +1210,8 @@ mod win64_abi_tests {
                 ],
                 terminator: Terminator::Return,
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             }],
             span,
         }
@@ -1128,6 +1240,7 @@ mod win64_abi_tests {
                 rvalue: Rvalue::Use(Operand::Copy(Place::local(Local(src)))),
             },
             span,
+            inlined: None,
         };
         let body = Body {
             name: "main".to_string(),
@@ -1144,6 +1257,8 @@ mod win64_abi_tests {
                 ],
                 terminator: Terminator::Return,
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             }],
             span,
         };
@@ -1196,6 +1311,7 @@ mod win64_abi_tests {
                             },
                         },
                         span,
+                        inlined: None,
                     }],
                     terminator: Terminator::Call {
                         callee: Operand::Const(ConstValue::Str(
@@ -1209,12 +1325,16 @@ mod win64_abi_tests {
                         target: Some(BlockId(1)),
                     },
                     span,
+                    terminator_span: None,
+                    terminator_inlined: None,
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: Vec::new(),
                     terminator: Terminator::Return,
                     span,
+                    terminator_span: None,
+                    terminator_inlined: None,
                 },
             ],
             span,
@@ -1295,7 +1415,11 @@ mod win64_abi_tests {
             mutable: false,
             region: false,
         };
-        let stmt = |kind| Statement { kind, span };
+        let stmt = |kind| Statement {
+            kind,
+            span,
+            inlined: None,
+        };
         let callback = Body {
             name: "__closure_0".to_string(),
             def: None,
@@ -1315,6 +1439,8 @@ mod win64_abi_tests {
                 })],
                 terminator: Terminator::Return,
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             }],
             span,
         };
@@ -1384,12 +1510,16 @@ mod win64_abi_tests {
                         target: Some(BlockId(1)),
                     },
                     span,
+                    terminator_span: None,
+                    terminator_inlined: None,
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: Vec::new(),
                     terminator: Terminator::Return,
                     span,
+                    terminator_span: None,
+                    terminator_inlined: None,
                 },
             ],
             span,
@@ -1419,7 +1549,11 @@ mod win64_abi_tests {
             mutable: false,
             region: false,
         };
-        let stmt = |kind| Statement { kind, span };
+        let stmt = |kind| Statement {
+            kind,
+            span,
+            inlined: None,
+        };
         Body {
             name: "main".to_string(),
             def: None,
@@ -1442,12 +1576,16 @@ mod win64_abi_tests {
                         target: Some(BlockId(1)),
                     },
                     span,
+                    terminator_span: None,
+                    terminator_inlined: None,
                 },
                 BasicBlock {
                     id: BlockId(1),
                     stmts: Vec::new(),
                     terminator: Terminator::Return,
                     span,
+                    terminator_span: None,
+                    terminator_inlined: None,
                 },
             ],
             span,

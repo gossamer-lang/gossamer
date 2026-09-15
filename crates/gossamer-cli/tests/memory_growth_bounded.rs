@@ -649,6 +649,88 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A value handed to a counted box - a generic struct wrapped in `Some` or
+/// stored as a `Map` value - and a `Vec` key rebuilt for a `keys()` snapshot
+/// are each owned by something that frees them. A heap field the box's layout
+/// does not name, or a key vec the snapshot does not record, survives its
+/// owner, so the live-Vec count tracks the iteration count.
+#[test]
+fn boxed_generic_fields_and_vec_key_snapshots_leave_no_live_vec_per_call() {
+    let dir = env::temp_dir().join(format!("gos-box-fields-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("box_fields.gos");
+    std::fs::write(
+        &source,
+        "
+use std::env
+
+struct Wrap<T> { value: T, tag: i64 }
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut total = 0
+    for i in 0..n {
+        let boxed = Some(Wrap { value: #[i, i + 1], tag: i })
+        if let Some(w) = boxed { total += w.value.len() + w.tag }
+        let mut held = Map::new()
+        held.insert(\"k\", Wrap { value: #[i], tag: 1 })
+        total += held.len()
+        let mut by_path = Map::new()
+        by_path.insert(#[i, 2], 3)
+        total += by_path.keys().len()
+    }
+    println(\"{}\", total)
+}
+",
+    )
+    .unwrap();
+    for release in [false, true] {
+        let mut cmd = Command::new(gos_bin());
+        cmd.arg("build");
+        if release {
+            cmd.arg("--release");
+        }
+        let build = cmd
+            .arg("--out-dir")
+            .arg(&dir)
+            .arg(&source)
+            .output()
+            .expect("gos build");
+        assert!(
+            build.status.success(),
+            "build failed (release={release}): {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let binary = dir.join(format!("box_fields{}", std::env::consts::EXE_SUFFIX));
+        let live = |iterations: &str| -> usize {
+            let out = Command::new(&binary)
+                .arg(iterations)
+                .env("GOS_LEAK_LEDGER", "1")
+                .output()
+                .expect("run with the allocation ledger");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            stderr
+                .split("vec=")
+                .nth(1)
+                .and_then(|tail| tail.split_whitespace().next())
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or_else(|| panic!("ledger must report a live Vec count: {stderr}"))
+        };
+        let small = live("64");
+        let large = live("4096");
+        assert_eq!(
+            small, large,
+            "live Vec count tracks the iteration count (release={release}): {small} at 64, \
+             {large} at 4096"
+        );
+        assert!(
+            large <= 4,
+            "the loop should end holding no per-iteration buffer, not {large} (release={release})"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Gates reclamation of a capturing closure's environment on the compiled
 /// tiers.
 ///
@@ -1033,6 +1115,376 @@ fn main() {
     assert_eq!(
         lines[0], lines[1],
         "the receiver copies hold a number of values that tracks the call count"
+    );
+}
+
+/// A carrier handed to a Gossamer function stays the caller's.
+///
+/// The caller gives its share of the payload back itself, so a callee that
+/// only reads the carrier holds nothing afterwards, and one that hands the
+/// payload on - returned, relayed, or unwrapped - takes a share for it. An
+/// extraction out of a copied carrier reads the payload the carrier still
+/// owns. A share held or dropped per call moves the live count with the call
+/// count.
+#[test]
+fn lent_carrier_arguments_hold_a_constant_number_of_values() {
+    let lines = ledger_at(
+        "lentcarrier",
+        "
+use std::env
+
+fn maybe(i: i64) -> Option<String> {
+    if i % 3 == 0 { None } else { Some(\"m\" + i.to_string()) }
+}
+
+fn risky(i: i64) -> Result<i64, String> {
+    if i % 4 == 0 { Err(\"e\" + i.to_string()) } else { Ok(i) }
+}
+
+fn width(r: Result<i64, String>) -> i64 {
+    match r {
+        Ok(n) => n,
+        Err(e) => e.len()
+    }
+}
+
+fn direct_opt(o: Option<String>) -> Option<String> {
+    o
+}
+
+fn relay(o: Option<String>) -> Option<String> {
+    direct_opt(o)
+}
+
+fn take(o: Option<String>) -> String {
+    if o.is_some() { o.unwrap() } else { \"none\" }
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut total = 0
+    let mut kept: Vec<String> = #[]
+    for i in 0..n {
+        total += width(risky(i))
+        let r = risky(i + 1)
+        match r {
+            Ok(v) => total += v,
+            Err(e) => total += e.len()
+        }
+        if let Some(s) = relay(maybe(i)) {
+            total += s.len()
+        }
+        let a = maybe(i + 1)
+        let b = a
+        if let Some(s) = b {
+            total += s.len()
+        }
+        let t = take(maybe(i + 2))
+        if i < 8 {
+            kept.push(t)
+        }
+    }
+    println(\"{} {}\", total, kept.len())
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "lent carriers hold a number of values that tracks the call count"
+    );
+}
+
+/// A carrier nested in a carrier is reclaimed with the carrier that boxes it.
+///
+/// The box owns the inner payload, and each reader of the inner carrier takes
+/// a share of its own, so building, reading, and dropping nested carriers per
+/// turn of a loop ends every run holding the same values.
+#[test]
+fn nested_carrier_boxes_hold_a_constant_number_of_values() {
+    let lines = ledger_at(
+        "nestedcarrier",
+        "
+use std::env
+
+fn inner(i: i64) -> Option<String> {
+    if i % 3 == 0 { None } else { Some(\"in\" + i.to_string()) }
+}
+
+fn wrap(i: i64) -> Option<Option<String>> {
+    if i % 2 == 0 { None } else { Some(inner(i)) }
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut total = 0
+    let mut kept: Vec<Option<Option<String>>> = #[]
+    for i in 0..n {
+        let w = wrap(i)
+        if let Some(Some(s)) = w {
+            total += s.len()
+        }
+        let e = Some(inner(i + 1)).unwrap()
+        if let Some(s) = e {
+            total += s.len()
+        }
+        let f = wrap(i + 1).unwrap_or(Some(\"fb\"))
+        if let Some(s) = f {
+            total += s.len()
+        }
+        if i < 8 {
+            kept.push(w)
+        }
+    }
+    println(\"{} {}\", total, kept.len())
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "nested carriers hold a number of values that tracks the loop count"
+    );
+}
+
+/// A `Map` carries no reference count, so each struct field holding one owns
+/// its table outright: a struct built from a map the function created and
+/// returned, one built from a `Map` parameter, and one bound inside a loop
+/// each free exactly the tables they hold. A lent carrier parameter pushed
+/// into a `Vec` gives the vector a share of its own.
+#[test]
+fn map_fields_and_lent_carrier_pushes_hold_a_constant_number_of_values() {
+    let lines = ledger_at(
+        "mapfields",
+        "
+use std::env
+
+struct Tags {
+    name: String,
+    tags: Map<String, i64>,
+    ids: Vec<i64>
+}
+
+fn build(i: i64) -> Tags {
+    let mut m: Map<String, i64> = Map::new()
+    m.insert(\"k\" + i.to_string(), i)
+    Tags { name: \"t\" + i.to_string(), tags: m, ids: #[i, i + 1] }
+}
+
+fn wrap(m: Map<String, i64>) -> Tags {
+    Tags { name: \"w\", tags: m, ids: #[] }
+}
+
+fn keep(o: Option<Option<String>>) -> Vec<Option<Option<String>>> {
+    let mut v: Vec<Option<Option<String>>> = #[]
+    v.push(o)
+    v
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut total = 0
+    let mut lens: Vec<i64> = #[]
+    for i in 0..n {
+        let t = build(i)
+        lens.push(t.tags.len())
+        let mut m: Map<String, i64> = Map::new()
+        m.insert(\"a\", i)
+        let w = wrap(m)
+        m.insert(\"b\", i)
+        total += w.tags.len() + m.len()
+        let kept = keep(Some(Some(\"in\" + i.to_string())))
+        for k in kept {
+            if let Some(Some(s)) = k {
+                total += s.len()
+            }
+        }
+    }
+    println(\"{} {}\", total, lens.len())
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "map fields and lent carrier pushes hold a number of values that tracks the loop count"
+    );
+}
+
+/// A struct payload is owned by its carrier's box, so dropping a carrier,
+/// extracting from one twice, storing one in a `Vec`, and relaying one through
+/// `?` each end every turn of a loop holding the same values.
+#[test]
+fn struct_payloads_in_carriers_hold_a_constant_number_of_values() {
+    let lines = ledger_at(
+        "structpayload",
+        "
+use std::env
+
+struct Tags {
+    name: String,
+    tags: Map<String, i64>,
+    ids: Vec<i64>
+}
+
+fn build(i: i64) -> Result<Tags, i64> {
+    if i % 3 == 0 {
+        return Err(i)
+    }
+    let mut m: Map<String, i64> = Map::new()
+    m.insert(\"k\" + i.to_string(), i)
+    Ok(Tags { name: \"t\" + i.to_string(), tags: m, ids: #[i, i + 1] })
+}
+
+fn relay(r: Result<Tags, i64>) -> Result<i64, i64> {
+    let t = r?
+    Ok(t.name.len() + t.tags.len())
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut total = 0
+    let mut names: Vec<String> = #[]
+    for i in 0..n {
+        let r = build(i)
+        if let Ok(t) = r {
+            names.push(t.name)
+        }
+        if let Ok(u) = r {
+            total += u.ids.len() + u.tags.len()
+        }
+        let dropped = build(i + 1)
+        let stored = #[build(i + 2)]
+        for s in stored {
+            if let Ok(t) = s {
+                total += t.ids.len()
+            }
+        }
+        total += relay(build(i)).unwrap_or(0)
+    }
+    println(\"{} {}\", total, names.len())
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "struct payloads in carriers hold a number of values that tracks the loop count"
+    );
+}
+
+/// An error is reclaimed from each place that holds one - a binding, a cause,
+/// a `Result` arm handed through `map_err`, `map`, `and_then`, `or_else`, and
+/// `?`, a struct field, a tuple position - so every turn of a loop ends holding
+/// the same values.
+#[test]
+fn errors_in_every_holder_hold_a_constant_number_of_values() {
+    let lines = ledger_at(
+        "errorcells",
+        "
+use std::{env, errors, option, result}
+
+struct Failure {
+    code: i64,
+    err: errors::Error
+}
+
+struct Point {
+    x: i64,
+    y: i64
+}
+
+fn located(i: i64) -> Result<Point, errors::Error> {
+    if i % 2 == 0 {
+        return Err(errors::new(\"unplaced\"))
+    }
+    Ok(Point { x: i, y: 1 })
+}
+
+fn check(i: i64) -> Result<i64, errors::Error> {
+    if i % 2 == 0 {
+        return Err(errors::new(\"even\"))
+    }
+    Ok(i)
+}
+
+fn layered(i: i64) -> Result<i64, errors::Error> {
+    let v = check(i).map_err(|e| errors::wrap(e, \"layer\"))?
+    Ok(v + 1)
+}
+
+fn pair(i: i64) -> (Result<String, errors::Error>, i64) {
+    if i % 3 == 0 {
+        (Err(errors::new(\"third\")), i)
+    } else {
+        (Ok(\"node-\" + i.to_string()), i)
+    }
+}
+
+fn kept(i: i64) -> Result<String, errors::Error> {
+    let r, _n = pair(i)
+    r
+}
+
+fn measured(reply: Result<String, errors::Error>) -> i64 {
+    reply.unwrap_or(\"none\").len()
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut total = 0
+    for i in 0..n {
+        match layered(i) {
+            Ok(v) => total += v,
+            Err(e) => total += e.to_string().len(),
+        }
+        let f = Failure { code: i, err: errors::new(\"f\") }
+        total += f.code + f.err.message().len()
+        match check(i).map_err(|e| e.to_string()) {
+            Ok(v) => total += v,
+            Err(s) => total += s.len(),
+        }
+        match kept(i) {
+            Ok(s) => total += s.len(),
+            Err(e) => total += e.message().len(),
+        }
+        let chained = errors::wrap(errors::wrap(errors::new(\"root\"), \"mid\"), \"top\")
+        total += chained.chain().len()
+        let reply = kept(i)
+        if reply.is_ok() {
+            total += 1
+        }
+        total += measured(reply) + reply.unwrap_or(\"fallback\").len()
+        if check(i) |> result::err |> option::is_some {
+            total += 1
+        }
+        let spot = located(i)
+        match spot |> |v| result::map(v, |p: Point| p.x) {
+            Ok(v) => total += v,
+            Err(e) => total += e.message().len(),
+        }
+        match spot.and_then(|p| Ok(p.y)) {
+            Ok(v) => total += v,
+            Err(e) => total += e.to_string().len(),
+        }
+        match spot |> |v| result::or_else(v, |_e: errors::Error| Ok(Point { x: 2, y: 2 })) {
+            Ok(p) => total += p.x,
+            Err(_) => total += 9,
+        }
+    }
+    println(\"{}\", total)
+}
+",
+        "64",
+        "4096",
+    );
+    assert_eq!(
+        lines[0], lines[1],
+        "errors in every holder hold a number of values that tracks the loop count"
     );
 }
 

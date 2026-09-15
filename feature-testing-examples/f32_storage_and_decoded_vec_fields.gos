@@ -1,0 +1,59 @@
+// An `f32` is carried at double width in every slot that holds one - an array
+// element, a struct field, a tuple position, a `Vec` element - and takes its
+// declared precision only at `as f32`. A struct decoded from JSON keeps the
+// `Vec` fields it was given after the decoder's result is unwrapped.
+
+use std::encoding::json
+
+struct Reading {
+    level: f32
+    total: f64
+    tags: Vec<f32>
+    counts: Vec<i64>
+    names: Vec<String>
+}
+
+struct Point {
+    x: f32
+    y: i64
+}
+
+fn scale(x: f32, k: f32) -> f32 {
+    x * k
+}
+
+fn scaled_total(rounds: i64) -> f32 {
+    let mut total: f32 = 0.0
+    let mut round = 0
+    while round < rounds {
+        total = total + scale(0.1, round as f32)
+        round += 1
+    }
+    total
+}
+
+fn main() {
+    let mut lanes: [f32; 4] = [0.0; 4]
+    let mut i = 0
+    while i < 4 {
+        lanes[i] = 0.25 * (i as f32)
+        i += 1
+    }
+    println("{:?} {}", lanes, lanes[1] + lanes[2])
+
+    let k = 3
+    let mut p = Point { x: 1.5, y: 2 }
+    p.x = k as f32
+    let pair: (f32, i64) = (p.x, 7)
+    let mut v: Vec<f32> = #[1.0, 2.0]
+    v[1] = k as f32
+    println("{:?} {:?} {:?} {}", p, pair, v, v[1])
+
+    let third = (1.0 / 3.0) as f32
+    println("{} {} {} {}", third, third + 0.0000001, scale(0.1, 7.0), scaled_total(200))
+
+    let text = "{\"level\": 0.1, \"total\": 2.5, \"tags\": [0.5, 1.25], \"counts\": [5, 6], \"names\": [\"a\", \"b\"]}"
+    let r = json::from_json::<Reading>(text).unwrap()
+    println("{:?}", r)
+    println("{} {} {} {}", r.tags.len(), r.counts[1], r.names[0], r.level + r.total as f32)
+}

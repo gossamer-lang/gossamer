@@ -195,3 +195,5 @@ pub use lowered_program::*;
 
 mod vec_elem_kind;
 pub use vec_elem_kind::*;
+
+mod simd_lanes;

@@ -120,6 +120,11 @@ pub struct CallStackFrame {
 pub(crate) struct VmCallStackFrame {
     pub(crate) function: &'static str,
     pub(crate) location: Option<crate::bytecode::SourceLocation>,
+    /// The frame's chunk's inlined calls, which `inline_site` indexes.
+    pub(crate) inline_sites: &'static [crate::bytecode::InlineSite],
+    /// The inlined call the frame stands in, when its position is inside an
+    /// inlined body.
+    pub(crate) inline_site: Option<u32>,
 }
 
 impl VmCallStackFrame {
@@ -127,6 +132,8 @@ impl VmCallStackFrame {
         Self {
             function,
             location: None,
+            inline_sites: &[],
+            inline_site: None,
         }
     }
 }
@@ -161,6 +168,9 @@ pub struct Vm {
     /// free function, which is the only thing an unqualified call can
     /// mean.
     pub(crate) free_fn_names: Arc<rustc_hash::FxHashSet<String>>,
+    /// Per-instantiation dispatch for the loaded program; see
+    /// [`crate::compile::ParamDispatch`].
+    pub(crate) param_dispatch: Arc<crate::compile::ParamDispatch>,
     /// Module depth of the function that claimed each bare name. A bare call
     /// names the nearest declaration - the entry file's own item before a
     /// sibling module's - which is what the compiled tiers resolve it to.
@@ -184,6 +194,11 @@ pub struct Vm {
     /// instant `compile_to_jit` finishes (see [`Self::jit_droppable`])
     /// rather than holding them through the whole run.
     pub(crate) mir_bodies: RefCell<Option<Arc<Vec<Body>>>>,
+    /// Where each source position the JIT's bodies carry sits, resolved while
+    /// the source map was still held, so a JIT frame in a panic report names
+    /// its line after the map is released.
+    pub(crate) jit_source_locations:
+        RefCell<Option<Arc<HashMap<gossamer_lex::Span, crate::bytecode::SourceLocation>>>>,
     /// DefId.local -> native shape index for heap enums whose values
     /// may cross the JIT boundary as raw pointers.
     pub(crate) enum_shape_defs: RefCell<Option<Arc<std::collections::HashMap<u32, u32>>>>,
@@ -1810,7 +1825,9 @@ fn neg(v: &Value) -> RuntimeResult<Value> {
 fn not(v: &Value) -> RuntimeResult<Value> {
     match v {
         Value::Bool(b) => Ok(Value::Bool(!b)),
-        _ => Err(RuntimeError::Type("not on non-bool".to_string())),
+        // `!` on an integer is the bitwise complement.
+        Value::Int(i) => Ok(Value::Int(!i)),
+        _ => Err(RuntimeError::Type("not on bool or integer".to_string())),
     }
 }
 
@@ -2177,6 +2194,9 @@ pub(crate) fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Unit, Value::Unit) => true,
         (Value::Bool(x), Value::Bool(y)) => x == y,
         (Value::Int(x), Value::Int(y)) => x == y,
+        // A `u64` compares by its bits whichever representation carried it.
+        (Value::Uint(x), Value::Uint(y)) => x == y,
+        (Value::Uint(x), Value::Int(y)) | (Value::Int(y), Value::Uint(x)) => *x == *y as u64,
         (Value::Float(x), Value::Float(y)) => x == y,
         (Value::Char(x), Value::Char(y)) => x == y,
         (Value::String(x), Value::String(y)) => x == y,
@@ -2308,6 +2328,12 @@ pub(crate) fn value_ordering(a: &Value, b: &Value) -> RuntimeResult<std::cmp::Or
     let b_ref = b_deref.as_ref().unwrap_or(b);
     match (a_ref, b_ref) {
         (Value::Int(x), Value::Int(y)) => Ok(x.cmp(y)),
+        // A `Uint` is a `u64` whose bits reach past `i64::MAX`, so it orders
+        // unsigned; an `Int` beside it holds the same type's bits, since the
+        // two only meet where one static type produced both.
+        (Value::Uint(x), Value::Uint(y)) => Ok(x.cmp(y)),
+        (Value::Uint(x), Value::Int(y)) => Ok(x.cmp(&(*y as u64))),
+        (Value::Int(x), Value::Uint(y)) => Ok((*x as u64).cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Ok(x.cmp(y)),
         (Value::Float(x), Value::Float(y)) => x
             .partial_cmp(y)
@@ -2468,6 +2494,7 @@ mod tests {
             int_count: 0,
             instrs: Vec::new(),
             instruction_locations: Vec::new(),
+            inline_sites: &[],
             wide_ops: Vec::new(),
             consts: vec![Value::Int(0)],
             f64_consts: Vec::new(),

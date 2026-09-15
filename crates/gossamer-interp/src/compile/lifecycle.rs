@@ -20,6 +20,8 @@ impl<'tcx> FnBuilder<'tcx> {
         Self {
             name,
             tcx,
+            dispatch: None,
+            dispatch_key: "",
             layouts,
             wrappers,
             inline_fns,
@@ -48,6 +50,8 @@ impl<'tcx> FnBuilder<'tcx> {
             duration_cell_locals: std::collections::HashSet::new(),
             instrs: Vec::new(),
             instruction_locations: Vec::new(),
+            inline_sites: Vec::new(),
+            current_inline_site: None,
             consts: Vec::new(),
             const_cache: HashMap::new(),
             f64_consts: Vec::new(),
@@ -97,6 +101,7 @@ impl<'tcx> FnBuilder<'tcx> {
             optimize_tail_call_argument_moves(&mut self.instrs, &self.mut_ref_params);
         }
         let instruction_locations = encode_instruction_locations(&self.instruction_locations);
+        let inline_sites = crate::value::intern_inline_sites(&self.inline_sites);
         let mut chunk = FnChunk {
             name: self.name,
             arity,
@@ -105,6 +110,7 @@ impl<'tcx> FnBuilder<'tcx> {
             int_count: self.max_int_reg.max(self.next_int_reg),
             instrs: self.instrs,
             instruction_locations,
+            inline_sites,
             consts: self.consts,
             f64_consts: self.f64_consts,
             i64_consts: self.i64_consts,
@@ -185,10 +191,7 @@ fn optimize_tail_call_argument_moves(instrs: &mut [Op], mut_ref_params: &[Reg]) 
     }
 }
 
-fn optimize_i64_to_f64_divs(
-    instrs: &mut Vec<Op>,
-    locations: &mut Vec<Option<crate::bytecode::SourceLocation>>,
-) {
+fn optimize_i64_to_f64_divs(instrs: &mut Vec<Op>, locations: &mut Vec<super::InstrSource>) {
     if instrs.len() < 2 {
         return;
     }
@@ -235,10 +238,7 @@ fn optimize_i64_to_f64_divs(
     }
 }
 
-fn optimize_float_accumulator_moves(
-    instrs: &mut Vec<Op>,
-    locations: &mut Vec<Option<crate::bytecode::SourceLocation>>,
-) {
+fn optimize_float_accumulator_moves(instrs: &mut Vec<Op>, locations: &mut Vec<super::InstrSource>) {
     if instrs.len() < 2 {
         return;
     }
@@ -425,11 +425,7 @@ fn branch_targets(instrs: &[Op]) -> Vec<bool> {
     targets
 }
 
-fn compact_instrs(
-    instrs: &mut Vec<Op>,
-    locations: &mut Vec<Option<crate::bytecode::SourceLocation>>,
-    remove: &[bool],
-) {
+fn compact_instrs(instrs: &mut Vec<Op>, locations: &mut Vec<super::InstrSource>, remove: &[bool]) {
     debug_assert_eq!(instrs.len(), locations.len());
     debug_assert_eq!(instrs.len(), remove.len());
     let mut remap = vec![0u32; instrs.len() + 1];
@@ -455,20 +451,24 @@ fn compact_instrs(
 }
 
 fn encode_instruction_locations(
-    locations: &[Option<crate::bytecode::SourceLocation>],
+    sources: &[super::InstrSource],
 ) -> Vec<crate::bytecode::InstructionLocation> {
-    if locations.iter().all(Option::is_none) {
+    if sources
+        .iter()
+        .all(|source| source.location.is_none() && source.inline_site.is_none())
+    {
         return Vec::new();
     }
     let mut encoded = Vec::new();
     let mut previous = None;
-    for (idx, location) in locations.iter().copied().enumerate() {
-        if idx == 0 || location != previous {
+    for (idx, source) in sources.iter().copied().enumerate() {
+        if previous != Some(source) {
             encoded.push(crate::bytecode::InstructionLocation {
                 instruction: u32::try_from(idx).expect("instruction overflow"),
-                location,
+                location: source.location,
+                inline_site: source.inline_site,
             });
-            previous = location;
+            previous = Some(source);
         }
     }
     encoded

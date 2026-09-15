@@ -543,188 +543,8 @@ impl<'a> Builder<'a> {
         // The element slot address - needed only by the tuple-destructure body
         // below, which reads each field via `gos_load(slot, i*8)`. Set on the
         // `gos_rt_vec_get_ptr` path; `None` for the by-value `i128` path.
-        let mut tuple_slot_ptr: Option<Local> = None;
-        // A by-value `Result`/`Option` element is a 16-byte `i128` read
-        // directly into the loop var - not via `gos_rt_vec_get_ptr` (which
-        // would bind the slot address and let `match` decode garbage) nor the
-        // 8-byte `gos_load` (which drops the payload).
-        let elem_local = if yields_mut_refs {
-            let ref_ty = self.tcx.intern(gossamer_types::TyKind::Ref {
-                mutability: gossamer_types::Mutbl::Mut,
-                inner: elem_ty,
-            });
-            let ptr_local = self.fresh(ref_ty);
-            let after_ptr = self.new_block(span);
-            self.terminate(Terminator::Call {
-                callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_ptr".to_string())),
-                args: vec![
-                    Operand::Copy(Place::local(iter_local)),
-                    Operand::Copy(Place::local(counter)),
-                ],
-                destination: Place::local(ptr_local),
-                target: Some(after_ptr),
-            });
-            self.set_current(after_ptr);
-            // A heap-container element's slot holds a pointer, so a method
-            // call on this binding has to load it; an assignment through the
-            // binding still writes the slot. Scalar and inline-aggregate
-            // elements are addressed directly and need no such load.
-            if matches!(
-                self.tcx.kind_of(elem_ty),
-                gossamer_types::TyKind::Vec(_)
-                    | gossamer_types::TyKind::Slice(_)
-                    | gossamer_types::TyKind::HashMap { .. }
-            ) {
-                self.slot_ref_locals.insert(ptr_local);
-            }
-            ptr_local
-        } else if matches!(
-            self.tcx.kind_of(elem_ty),
-            gossamer_types::TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1
-        ) {
-            let l = self.fresh(elem_ty);
-            let after = self.new_block(span);
-            self.terminate(Terminator::Call {
-                callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_i128".to_string())),
-                args: vec![
-                    Operand::Copy(Place::local(iter_local)),
-                    Operand::Copy(Place::local(counter)),
-                ],
-                destination: Place::local(l),
-                target: Some(after),
-            });
-            self.set_current(after);
-            l
-        } else {
-            let elem_is_aggregate = matches!(
-                self.tcx.kind_of(elem_ty),
-                gossamer_types::TyKind::Tuple(_)
-                    | gossamer_types::TyKind::Adt { .. }
-                    | gossamer_types::TyKind::Array { .. }
-            );
-            // A user struct stored inline in a vec is address-is-value: its
-            // field projections deref off the slot pointer. This holds at any
-            // width - a single-field struct occupies one 8-byte slot yet is
-            // still address-is-value, so it must bind the slot pointer rather
-            // than read the slot's bytes as a scalar. The opaque heap-blob
-            // stdlib structs (`fs::DirInfo` and friends, `def.local` in the
-            // `u32::MAX - 16 ..= u32::MAX` sentinel range) are `Box` handles
-            // whose slot holds a pointer, so they stay on the by-value scalar
-            // read; only genuine user structs take the slot-address path.
-            let elem_is_struct_adt = matches!(
-                self.tcx.kind_of(elem_ty),
-                gossamer_types::TyKind::Adt { def, .. }
-                    if def.local < u32::MAX - 16 && self.tcx.struct_field_tys(*def).is_some()
-            );
-            let elem_is_multislot = (elem_is_aggregate
-                && self.tcx.elem_is_addressed_aggregate(elem_ty))
-                || elem_is_struct_adt;
-            // `f64` elements must be read as a float bit-pattern; everything
-            // else single-slot (i64 / bool / char / String / heap-handle ptr)
-            // reads through one `gos_rt_vec_get_i64`.
-            let elem_is_float =
-                matches!(self.tcx.kind_of(elem_ty), gossamer_types::TyKind::Float(_));
-            if !elem_is_multislot && !elem_is_float {
-                // Single-slot scalar: ONE `gos_rt_vec_get_i64` reads the 8-byte
-                // slot directly, halving the per-element runtime calls vs
-                // `gos_rt_vec_get_ptr` + `gos_load` (the hot path for
-                // `for x in vec_of_scalars`, e.g. BFS adjacency iteration).
-                //
-                // The counter is a fresh `0..len` induction with `len =
-                // gos_rt_vec_len(vec)` of this same iterated vec, and the
-                // header only branches into the body while `counter < len`,
-                // so the index is provably in `[0, len)` and the receiver
-                // non-null at the read. For primitive non-pointer elements
-                // (int/bool/char) that proof lets us emit the bounds-free
-                // `gos_rt_vec_get_i64_unchecked`, which the LLVM tier inlines
-                // branch-free. String / heap-handle-ptr elements keep the
-                // checked reader: they carry RC/borrow semantics and the
-                // unchecked variant is restricted to leave those paths alone.
-                let elem_is_unchecked_scalar = matches!(
-                    self.tcx.kind_of(elem_ty),
-                    gossamer_types::TyKind::Int(_)
-                        | gossamer_types::TyKind::Bool
-                        | gossamer_types::TyKind::Char
-                );
-                let callee_name = if elem_is_unchecked_scalar {
-                    "gos_rt_vec_get_i64_unchecked"
-                } else {
-                    "gos_rt_vec_get_i64"
-                };
-                let l = self.fresh(elem_ty);
-                let after = self.new_block(span);
-                self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str(callee_name.to_string())),
-                    args: vec![
-                        Operand::Copy(Place::local(iter_local)),
-                        Operand::Copy(Place::local(counter)),
-                    ],
-                    destination: Place::local(l),
-                    target: Some(after),
-                });
-                self.set_current(after);
-                l
-            } else {
-                // ptr = gos_rt_vec_get_ptr(vec, counter); elem = *ptr.
-                // Multi-slot inline aggregates bind the slot address (the body
-                // walks fields via Field / TupleIndex projections); `f64`
-                // single-slots load the float bit-pattern.
-                let ptr_local = self.fresh(i64_ty);
-                let after_ptr = self.new_block(span);
-                self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_ptr".to_string())),
-                    args: vec![
-                        Operand::Copy(Place::local(iter_local)),
-                        Operand::Copy(Place::local(counter)),
-                    ],
-                    destination: Place::local(ptr_local),
-                    target: Some(after_ptr),
-                });
-                self.set_current(after_ptr);
-                tuple_slot_ptr = Some(ptr_local);
-                if elem_is_multislot {
-                    let l = self.fresh(elem_ty);
-                    self.emit_assign(
-                        Place::local(l),
-                        Rvalue::Use(Operand::Copy(Place::local(ptr_local))),
-                        span,
-                    );
-                    l
-                } else {
-                    let l = self.fresh(elem_ty);
-                    let after_load = self.new_block(span);
-                    let zero_off = self.fresh(i64_ty);
-                    self.emit_assign(
-                        Place::local(zero_off),
-                        Rvalue::Use(Operand::Const(ConstValue::Int(0))),
-                        span,
-                    );
-                    self.terminate(Terminator::Call {
-                        callee: Operand::Const(ConstValue::Str("gos_load".to_string())),
-                        args: vec![
-                            Operand::Copy(Place::local(ptr_local)),
-                            Operand::Copy(Place::local(zero_off)),
-                        ],
-                        destination: Place::local(l),
-                        target: Some(after_load),
-                    });
-                    self.set_current(after_load);
-                    l
-                }
-            }
-        };
-        // Carry an opaque stdlib blob element tag (`fs::DirInfo` from `walk_dir`
-        // / `list_dir`) onto the loop binding so `e.field` resolves to a
-        // `gos_load(handle, idx * 8)` against the registered shape instead of
-        // falling through to `gos_rt_json_get` (which reads the blob as a JSON
-        // value and yields garbage natively). Restricted to the known blob
-        // handles: tagging a plain user-struct / tuple / String loop var would
-        // reroute its field access and its drop classification.
-        if let Some(en) = self.local_elem_struct.get(&iter_local).cloned()
-            && matches!(en.as_str(), "DirInfo" | "DirEntry")
-        {
-            self.local_struct.entry(elem_local).or_insert(en);
-        }
+        let (elem_local, tuple_slot_ptr) =
+            self.load_vec_element(iter_local, counter, elem_ty, yields_mut_refs, span);
         match &loop_pat.kind {
             HirPatKind::Binding { name, .. } => {
                 self.bind_local(&name.name, elem_local);
@@ -870,6 +690,193 @@ impl<'a> Builder<'a> {
 
         self.set_current(exit);
         Some(self.lower_unit(span))
+    }
+
+    /// Reads element `index` of the `GosVec` in `vec` as a local of `elem_ty`,
+    /// in the shape a loop body binds it: a scalar or handle as its word, a
+    /// by-value `Option`/`Result` as its two words, an inline aggregate as the
+    /// address of its slots, and a `&mut` element as the slot address. The
+    /// second value is the slot address when the read went through one.
+    pub(crate) fn load_vec_element(
+        &mut self,
+        iter_local: Local,
+        counter: Local,
+        elem_ty: Ty,
+        yields_mut_refs: bool,
+        span: Span,
+    ) -> (Local, Option<Local>) {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let mut tuple_slot_ptr: Option<Local> = None;
+        // A by-value `Result`/`Option` element is a 16-byte `i128` read
+        // directly into the loop var - not via `gos_rt_vec_get_ptr` (which
+        // would bind the slot address and let `match` decode garbage) nor the
+        // 8-byte `gos_load` (which drops the payload).
+        let elem_local = if yields_mut_refs {
+            let ref_ty = self.tcx.intern(gossamer_types::TyKind::Ref {
+                mutability: gossamer_types::Mutbl::Mut,
+                inner: elem_ty,
+            });
+            let ptr_local = self.fresh(ref_ty);
+            let after_ptr = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_ptr".to_string())),
+                args: vec![
+                    Operand::Copy(Place::local(iter_local)),
+                    Operand::Copy(Place::local(counter)),
+                ],
+                destination: Place::local(ptr_local),
+                target: Some(after_ptr),
+            });
+            self.set_current(after_ptr);
+            // A heap-container element's slot holds a pointer, so a method
+            // call on this binding has to load it; an assignment through the
+            // binding still writes the slot. Scalar and inline-aggregate
+            // elements are addressed directly and need no such load.
+            if matches!(
+                self.tcx.kind_of(elem_ty),
+                gossamer_types::TyKind::Vec(_)
+                    | gossamer_types::TyKind::Slice(_)
+                    | gossamer_types::TyKind::HashMap { .. }
+            ) {
+                self.slot_ref_locals.insert(ptr_local);
+            }
+            ptr_local
+        } else if matches!(
+            self.tcx.kind_of(elem_ty),
+            gossamer_types::TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1
+        ) {
+            let l = self.fresh(elem_ty);
+            let after = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_i128".to_string())),
+                args: vec![
+                    Operand::Copy(Place::local(iter_local)),
+                    Operand::Copy(Place::local(counter)),
+                ],
+                destination: Place::local(l),
+                target: Some(after),
+            });
+            self.set_current(after);
+            l
+        } else {
+            let elem_is_aggregate = matches!(
+                self.tcx.kind_of(elem_ty),
+                gossamer_types::TyKind::Tuple(_)
+                    | gossamer_types::TyKind::Adt { .. }
+                    | gossamer_types::TyKind::Array { .. }
+            );
+            // A user struct stored inline in a vec is address-is-value: its
+            // field projections deref off the slot pointer. This holds at any
+            // width - a single-field struct occupies one 8-byte slot yet is
+            // still address-is-value, so it must bind the slot pointer rather
+            // than read the slot's bytes as a scalar. The opaque heap-blob
+            // stdlib structs (`def.local` in the
+            // `u32::MAX - 16 ..= u32::MAX` sentinel range) are `Box` handles
+            // whose slot holds a pointer, so they stay on the by-value scalar
+            // read; only genuine user structs take the slot-address path.
+            let elem_is_struct_adt = matches!(
+                self.tcx.kind_of(elem_ty),
+                gossamer_types::TyKind::Adt { def, .. }
+                    if def.local < u32::MAX - 16 && self.tcx.struct_field_tys(*def).is_some()
+            );
+            let elem_is_multislot = (elem_is_aggregate
+                && self.tcx.elem_is_addressed_aggregate(elem_ty))
+                || elem_is_struct_adt;
+            // `f64` elements must be read as a float bit-pattern; everything
+            // else single-slot (i64 / bool / char / String / heap-handle ptr)
+            // reads through one `gos_rt_vec_get_i64`.
+            let elem_is_float =
+                matches!(self.tcx.kind_of(elem_ty), gossamer_types::TyKind::Float(_));
+            if !elem_is_multislot && !elem_is_float {
+                // Single-slot scalar: ONE `gos_rt_vec_get_i64` reads the 8-byte
+                // slot directly, halving the per-element runtime calls vs
+                // `gos_rt_vec_get_ptr` + `gos_load` (the hot path for
+                // `for x in vec_of_scalars`, e.g. BFS adjacency iteration).
+                //
+                // The counter is a fresh `0..len` induction with `len =
+                // gos_rt_vec_len(vec)` of this same iterated vec, and the
+                // header only branches into the body while `counter < len`,
+                // so the index is provably in `[0, len)` and the receiver
+                // non-null at the read. For primitive non-pointer elements
+                // (int/bool/char) that proof lets us emit the bounds-free
+                // `gos_rt_vec_get_i64_unchecked`, which the LLVM tier inlines
+                // branch-free. String / heap-handle-ptr elements keep the
+                // checked reader: they carry RC/borrow semantics and the
+                // unchecked variant is restricted to leave those paths alone.
+                let elem_is_unchecked_scalar = matches!(
+                    self.tcx.kind_of(elem_ty),
+                    gossamer_types::TyKind::Int(_)
+                        | gossamer_types::TyKind::Bool
+                        | gossamer_types::TyKind::Char
+                );
+                let callee_name = if elem_is_unchecked_scalar {
+                    "gos_rt_vec_get_i64_unchecked"
+                } else {
+                    "gos_rt_vec_get_i64"
+                };
+                let l = self.fresh(elem_ty);
+                let after = self.new_block(span);
+                self.terminate(Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(callee_name.to_string())),
+                    args: vec![
+                        Operand::Copy(Place::local(iter_local)),
+                        Operand::Copy(Place::local(counter)),
+                    ],
+                    destination: Place::local(l),
+                    target: Some(after),
+                });
+                self.set_current(after);
+                l
+            } else {
+                // ptr = gos_rt_vec_get_ptr(vec, counter); elem = *ptr.
+                // Multi-slot inline aggregates bind the slot address (the body
+                // walks fields via Field / TupleIndex projections); `f64`
+                // single-slots load the float bit-pattern.
+                let ptr_local = self.fresh(i64_ty);
+                let after_ptr = self.new_block(span);
+                self.terminate(Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_ptr".to_string())),
+                    args: vec![
+                        Operand::Copy(Place::local(iter_local)),
+                        Operand::Copy(Place::local(counter)),
+                    ],
+                    destination: Place::local(ptr_local),
+                    target: Some(after_ptr),
+                });
+                self.set_current(after_ptr);
+                tuple_slot_ptr = Some(ptr_local);
+                if elem_is_multislot {
+                    let l = self.fresh(elem_ty);
+                    self.emit_assign(
+                        Place::local(l),
+                        Rvalue::Use(Operand::Copy(Place::local(ptr_local))),
+                        span,
+                    );
+                    l
+                } else {
+                    let l = self.fresh(elem_ty);
+                    let after_load = self.new_block(span);
+                    let zero_off = self.fresh(i64_ty);
+                    self.emit_assign(
+                        Place::local(zero_off),
+                        Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                        span,
+                    );
+                    self.terminate(Terminator::Call {
+                        callee: Operand::Const(ConstValue::Str("gos_load".to_string())),
+                        args: vec![
+                            Operand::Copy(Place::local(ptr_local)),
+                            Operand::Copy(Place::local(zero_off)),
+                        ],
+                        destination: Place::local(l),
+                        target: Some(after_load),
+                    });
+                    self.set_current(after_load);
+                    l
+                }
+            }
+        };
+        (elem_local, tuple_slot_ptr)
     }
 
     /// `for x in set` over a bare `HashSet`: snapshot the set to a sorted

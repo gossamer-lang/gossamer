@@ -23,8 +23,9 @@ fn kind_is_emittable(kind: &FieldKind, emittable: &HashSet<String>) -> bool {
         }
         FieldKind::Tuple(elems) => elems.iter().all(|e| kind_is_emittable(e, emittable)),
         FieldKind::Int(_)
+        | FieldKind::U64(_)
         | FieldKind::I64
-        | FieldKind::F64
+        | FieldKind::Float(_)
         | FieldKind::Bool
         | FieldKind::String
         | FieldKind::Json => true,

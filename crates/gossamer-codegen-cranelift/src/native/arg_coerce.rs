@@ -289,7 +289,9 @@ pub(super) fn coerce_store_value(
 
 pub(super) fn callee_prelude_name(operand: &Operand) -> Option<String> {
     match operand {
-        Operand::Const(ConstValue::Str(s)) => Some(s.clone()),
+        Operand::Const(ConstValue::Str(s)) => Some(
+            gossamer_abi::checked_integer_entry(s).map_or_else(|| s.clone(), ToString::to_string),
+        ),
         _ => None,
     }
 }

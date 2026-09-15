@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0058]: A string literal handed to `sql::statement` is not a well-formed - here
+--- framed ---
+error[GP0058]: A string literal handed to `sql::statement` is not a well-formed
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

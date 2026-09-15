@@ -380,7 +380,7 @@ pub(super) fn lower_rvalue_into(
             )?;
             let src_ty = builder.func.dfg.value_type(src_v);
             let dst_ty = cl_type_of(tcx, *target, module);
-            match (src_ty, dst_ty) {
+            let converted = match (src_ty, dst_ty) {
                 // Same cranelift type. Under the i64 runtime model a
                 // narrow declared target still masks: the cast is the
                 // language's single truncation point (VM parity:
@@ -514,17 +514,17 @@ pub(super) fn lower_rvalue_into(
                         _ => converted,
                     }
                 }
-                // Float width adjustments (f32 ↔ f64).
-                (s, d) if s.is_float() && d.is_float() => {
-                    if d.bits() > s.bits() {
-                        builder.ins().fpromote(d, src_v)
-                    } else if d.bits() < s.bits() {
-                        builder.ins().fdemote(d, src_v)
-                    } else {
-                        src_v
-                    }
-                }
                 _ => src_v,
+            };
+            // An f32 is carried at double width, so `as f32` is where the
+            // value takes the declared precision.
+            if matches!(tcx.kind_of(*target), TyKind::Float(FloatTy::F32))
+                && value_type(converted, builder) == types::F64
+            {
+                let narrow = builder.ins().fdemote(types::F32, converted);
+                builder.ins().fpromote(types::F64, narrow)
+            } else {
+                converted
             }
         }
         Rvalue::Aggregate { kind, operands } => {
@@ -617,9 +617,25 @@ pub(super) fn lower_rvalue_into(
                     .collect(),
                 gossamer_mir::AggregateKind::Array => Vec::new(),
             };
-            let total_slots: u32 = match kind {
-                gossamer_mir::AggregateKind::Array => (operands.len() as u32) * elem_slots,
-                _ => operand_slot_widths.iter().copied().sum::<u32>().max(1),
+            // A packed struct places each field at its own offset and width.
+            // The destination's type names the struct, since a struct literal
+            // is also built under the tuple kind.
+            let packed_def = match kind {
+                gossamer_mir::AggregateKind::Adt { def, .. } => Some(*def),
+                gossamer_mir::AggregateKind::Tuple => {
+                    dest_ty.and_then(|ty| match tcx.kind_of(ty) {
+                        TyKind::Adt { def, .. } => Some(*def),
+                        _ => None,
+                    })
+                }
+                gossamer_mir::AggregateKind::Array => None,
+            };
+            let packed = packed_def
+                .and_then(|def| tcx.packed_struct_layout(def).map(|layout| (def, layout)));
+            let total_slots: u32 = match (&packed, kind) {
+                (Some((_, layout)), _) => layout.size / 8,
+                (None, gossamer_mir::AggregateKind::Array) => (operands.len() as u32) * elem_slots,
+                (None, _) => operand_slot_widths.iter().copied().sum::<u32>().max(1),
             };
             let size = total_slots * 8;
             let ptr_ty = module.target_config().pointer_type();
@@ -640,6 +656,20 @@ pub(super) fn lower_rvalue_into(
                 let alloc_call = builder.ins().call(alloc_ref, &[size_val]);
                 builder.inst_results(alloc_call)[0]
             };
+            // Padding between a packed struct's narrow fields is part of the
+            // value's words, so it starts zeroed and equal values have equal
+            // bytes.
+            if let Some((_, layout)) = &packed {
+                for word_idx in 0..layout.size / 8 {
+                    let zero = builder.ins().iconst(types::I64, 0);
+                    builder.ins().store(
+                        MemFlagsData::trusted(),
+                        zero,
+                        base,
+                        ir::immediates::Offset32::new((word_idx * 8) as i32),
+                    );
+                }
+            }
             // Running destination offset (in bytes) for ADT/Tuple
             // aggregates so each prior nested struct's full slot
             // span shifts subsequent fields past its layout.
@@ -660,9 +690,10 @@ pub(super) fn lower_rvalue_into(
                 // fallback used for the array stride above.
                 let operand_aggregate_slots: Option<u32> =
                     operand_elem_slots(&intrinsics.local_slots, tcx, body, operand);
-                let dst_off = match kind {
-                    gossamer_mir::AggregateKind::Array => (i as u32) * elem_slots * 8,
-                    _ => running_dst_off,
+                let dst_off = match (&packed, kind) {
+                    (Some((_, layout)), _) => layout.field_offsets.get(i).copied().unwrap_or(0),
+                    (None, gossamer_mir::AggregateKind::Array) => (i as u32) * elem_slots * 8,
+                    (None, _) => running_dst_off,
                 };
                 if !matches!(kind, gossamer_mir::AggregateKind::Array) {
                     let width = operand_slot_widths.get(i).copied().unwrap_or(1).max(1);
@@ -700,10 +731,19 @@ pub(super) fn lower_rvalue_into(
                     let value = lower_operand(
                         module, builder, locals, body, tcx, operand, None, intrinsics,
                     )?;
-                    let word = widen_to_slot_word(builder, tcx, body, operand, value);
+                    let stored = match &packed {
+                        Some((def, _)) => {
+                            let storage = tcx
+                                .struct_field_tys(*def)
+                                .and_then(|fields| fields.get(i).copied())
+                                .map_or(types::I64, |field| packed_scalar_storage(tcx, field));
+                            coerce_store_value(builder, value, storage)?
+                        }
+                        None => widen_to_slot_word(builder, tcx, body, operand, value),
+                    };
                     builder.ins().store(
                         MemFlagsData::trusted(),
-                        word,
+                        stored,
                         base,
                         ir::immediates::Offset32::new(dst_off as i32),
                     );
@@ -1184,15 +1224,7 @@ pub(super) fn lower_const(
             let data_id = intrinsics.intern_string(module, text)?;
             intrinsics.static_string_body_ptr(module, builder, data_id)
         }
-        ConstValue::Float(bits) => {
-            let ty = hint.filter(|t| t.is_float()).unwrap_or(types::F64);
-            let val = f64::from_bits(*bits);
-            if ty == types::F32 {
-                builder.ins().f32const(val as f32)
-            } else {
-                builder.ins().f64const(val)
-            }
-        }
+        ConstValue::Float(bits) => builder.ins().f64const(f64::from_bits(*bits)),
     })
 }
 
@@ -1310,6 +1342,7 @@ pub(super) fn lower_binop(
             // Bitwise on float is a typecheck error; reaching
             // here is a compiler bug.
             BinOp::WrappingAdd
+            | BinOp::WrappingSub
             | BinOp::WrappingMul
             | BinOp::BitAnd
             | BinOp::BitOr
@@ -1320,9 +1353,13 @@ pub(super) fn lower_binop(
             }
         });
     }
-    if matches!(op, BinOp::WrappingAdd | BinOp::WrappingMul) {
+    if matches!(
+        op,
+        BinOp::WrappingAdd | BinOp::WrappingSub | BinOp::WrappingMul
+    ) {
         return Ok(match op {
             BinOp::WrappingAdd => builder.ins().iadd(a, b),
+            BinOp::WrappingSub => builder.ins().isub(a, b),
             BinOp::WrappingMul => builder.ins().imul(a, b),
             _ => unreachable!(),
         });
@@ -1384,7 +1421,12 @@ pub(super) fn lower_binop(
         return Ok(value);
     }
     Ok(match op {
-        BinOp::Add | BinOp::WrappingAdd | BinOp::Sub | BinOp::Mul | BinOp::WrappingMul => {
+        BinOp::Add
+        | BinOp::WrappingAdd
+        | BinOp::Sub
+        | BinOp::WrappingSub
+        | BinOp::Mul
+        | BinOp::WrappingMul => {
             unreachable!()
         }
         BinOp::Div => {

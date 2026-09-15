@@ -170,6 +170,19 @@ fn builtin_json_as_i64(args: &[Value]) -> RuntimeResult<Value> {
     Ok(none_variant())
 }
 
+/// `json::as_u64(value)` → `Option<u64>`: the integer when it is non-negative
+/// and fits a `u64`.
+fn builtin_json_as_u64(args: &[Value]) -> RuntimeResult<Value> {
+    let n = match args.first() {
+        Some(Value::Json(value)) => json_std::as_u64(value.as_value()),
+        Some(Value::Uint(n)) => Some(*n),
+        Some(Value::Int(n)) => u64::try_from(*n).ok(),
+        Some(Value::Float(f)) => json_std::as_u64(&json_std::Value::Number(*f)),
+        _ => None,
+    };
+    Ok(n.map_or_else(none_variant, |n| some_variant(Value::Uint(n))))
+}
+
 /// `json::as_f64(value)` → `Option<f64>`.
 fn builtin_json_as_f64(args: &[Value]) -> RuntimeResult<Value> {
     if let Some(Value::Json(value)) = args.first() {
@@ -447,7 +460,9 @@ fn describe_json_value(value: &json_std::Value) -> &'static str {
     match value {
         json_std::Value::Null => "null",
         json_std::Value::Bool(_) => "bool",
-        json_std::Value::Int(_) | json_std::Value::Number(_) => "number",
+        json_std::Value::Int(_) | json_std::Value::Uint(_) | json_std::Value::Number(_) => {
+            "number"
+        }
         json_std::Value::String(_) => "string",
         json_std::Value::Array(_) => "array",
         json_std::Value::Object(_) => "object",
@@ -463,6 +478,7 @@ fn json_value_to_gossamer(value: &json_std::Value) -> Value {
         // `2.0`) round-trips as a float, matching the serde-backed
         // compiled tier.
         json_std::Value::Int(n) => Value::Int(*n),
+        json_std::Value::Uint(n) => Value::Uint(*n),
         json_std::Value::Number(n) => Value::Float(*n),
         json_std::Value::String(s) => Value::String(SmolStr::from(s.clone())),
         json_std::Value::Array(items) => {
@@ -488,6 +504,7 @@ fn json_value_to_lazy_value(value: &json_std::Value) -> Value {
         json_std::Value::Null => json_null(),
         json_std::Value::Bool(b) => Value::Bool(*b),
         json_std::Value::Int(n) => Value::Int(*n),
+        json_std::Value::Uint(n) => Value::Uint(*n),
         json_std::Value::Number(n) => Value::Float(*n),
         json_std::Value::String(text) => Value::String(SmolStr::from(text.as_str())),
         json_std::Value::Array(_) | json_std::Value::Object(_) => {
@@ -501,6 +518,7 @@ fn json_child_to_lazy_value(parent: &JsonInner, child: &json_std::Value) -> Valu
         json_std::Value::Null => Value::Json(Arc::new(parent.child(child))),
         json_std::Value::Bool(b) => Value::Bool(*b),
         json_std::Value::Int(n) => Value::Int(*n),
+        json_std::Value::Uint(n) => Value::Uint(*n),
         json_std::Value::Number(n) => Value::Float(*n),
         json_std::Value::String(text) => Value::String(SmolStr::from(text.as_str())),
         json_std::Value::Array(_) | json_std::Value::Object(_) => {
@@ -533,6 +551,11 @@ pub(crate) fn gossamer_to_json_value(value: &Value) -> json_std::Value {
         }
         Value::Array(parts) => {
             json_std::Value::Array(parts.iter().map(gossamer_to_json_value).collect())
+        }
+        // A `Vec` carries its spelling on a rendering copy; JSON has one
+        // array form, so the elements are what encode.
+        Value::Struct(inner) if crate::value::vec_render_items(inner).is_some() => {
+            crate::value::vec_render_items(inner).map_or(json_std::Value::Null, gossamer_to_json_value)
         }
         Value::Struct(inner) => {
             let mut map = std::collections::BTreeMap::new();
@@ -623,9 +646,6 @@ pub(crate) fn gossamer_to_json_value(value: &Value) -> json_std::Value {
             }
             json_std::Value::Object(out)
         }
-        // An unsigned word past `i64::MAX` has no exact integer rendering,
-        // so only a value the signed form holds keeps its digits.
-        Value::Uint(n) => i64::try_from(*n)
-            .map_or_else(|_| json_std::Value::Number(*n as f64), json_std::Value::Int),
+        Value::Uint(n) => json_std::from_u64(*n),
     }
 }

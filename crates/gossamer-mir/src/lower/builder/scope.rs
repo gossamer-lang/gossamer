@@ -56,6 +56,14 @@ impl<'a> Builder<'a> {
         // them as an `i64`, so locals never carry those kinds.
         let ty = if matches!(self.tcx.kind_of(ty), TyKind::Duration | TyKind::Instant) {
             self.tcx.int_ty(IntTy::I64)
+        } else if let Some(carrier) =
+            crate::lower::helpers::const_generic_array_as_vec(self.tcx, ty)
+            && !matches!(self.tcx.kind_of(ty), TyKind::Ref { .. })
+        {
+            // An array whose length is a const generic parameter has no
+            // length until the call supplies one, so the body holds it as a
+            // runtime-length sequence, as its parameters and return do.
+            carrier
         } else {
             ty
         };
@@ -169,6 +177,8 @@ impl<'a> Builder<'a> {
             stmts: Vec::new(),
             terminator: Terminator::Unreachable,
             span,
+            terminator_span: None,
+            terminator_inlined: None,
         });
         id
     }
@@ -189,6 +199,7 @@ impl<'a> Builder<'a> {
         let stmt = Statement {
             kind: StatementKind::Assign { place, rvalue },
             span,
+            inlined: None,
         };
         self.current_block().stmts.push(stmt);
     }
@@ -207,6 +218,7 @@ impl<'a> Builder<'a> {
         let stmt = Statement {
             kind: StatementKind::StaticStore { target, value },
             span,
+            inlined: None,
         };
         self.current_block().stmts.push(stmt);
     }
@@ -296,8 +308,10 @@ impl<'a> Builder<'a> {
                 },
                 _ => None,
             };
+            let terminator_span = self.expr_span;
             let block = self.current_block();
             block.terminator = terminator;
+            block.terminator_span = Some(terminator_span);
             let _ = span;
             if let Some((target, dest, ref_local)) = reload {
                 let stmt = crate::ir::Statement {
@@ -309,6 +323,7 @@ impl<'a> Builder<'a> {
                         })),
                     },
                     span,
+                    inlined: None,
                 };
                 self.blocks[target.0 as usize].stmts.insert(0, stmt);
             }

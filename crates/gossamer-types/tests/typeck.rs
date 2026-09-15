@@ -4306,7 +4306,6 @@ fn the_numeric_literal_surface_still_resolves() {
         "fn main() { let _ = 3.max(4) }\n",
         "fn main() { let _ = 5.to_string() }\n",
         "fn main() { let _ = 12.clone() }\n",
-        "fn main() { let _ = 12.wrapping_add(1) }\n",
     ] {
         let d = diagnostics_for(source);
         assert!(d.is_empty(), "{source}: {d:?}");
@@ -4550,10 +4549,8 @@ fn derived_trait_methods_on_a_scalar_are_rejected() {
 
 #[test]
 fn conversions_on_a_scalar_are_accepted() {
-    let d = diagnostics_for(
-        "fn main() { let a = 3\n let _ = a.clone()\n let _ = a.to_string()\n \
-         let _ = a.wrapping_add(1) }\n",
-    );
+    let d =
+        diagnostics_for("fn main() { let a = 3\n let _ = a.clone()\n let _ = a.to_string() }\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
@@ -4618,5 +4615,178 @@ fn a_rejected_sort_names_a_free_call_that_exists() {
     assert!(
         rendered.contains("iter::sort_by_key"),
         "the help names the free call that sorts a sequence: {rendered}"
+    );
+}
+
+/// An `else if` chain with no final `else` answers no value, so its branches
+/// keep their own types the way an else-less `if` does.
+#[test]
+fn an_else_if_chain_without_a_final_else_discards_branch_values() {
+    let diagnostics = diagnostics_for(
+        "fn main() {\n    let mut m: Map<String, i64> = Map::new()\n    for i in 0..3 {\n        if i == 0 {\n            m.insert(\"a\", i)\n        } else if i == 1 {\n            m.insert(\"b\", i)\n        }\n    }\n    let _ = m\n}\n",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// A loop body discards its tail, so an `if` chain there may end its
+/// branches in values of different types.
+#[test]
+fn a_loop_body_tail_chain_may_answer_different_branch_types() {
+    let diagnostics = diagnostics_for(
+        "fn main() {\n    let mut m: Map<String, i64> = Map::new()\n    let mut s: Set<i64> = #{}\n    for i in 0..3 {\n        if i == 0 {\n            m.insert(\"a\", i)\n        } else {\n            s.insert(i)\n        }\n    }\n    let _ = m\n    let _ = s\n}\n",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// A chain with no final `else` has no value to bind, so asking for one is
+/// still a type mismatch.
+#[test]
+fn an_else_if_chain_without_a_final_else_has_no_value_to_bind() {
+    let diagnostics = diagnostics_for(
+        "fn pick(i: i64) -> i64 {\n    let v: i64 = if i == 0 { 1 } else if i == 1 { 2 }\n    v\n}\nfn main() { let _ = pick(0) }\n",
+    );
+    assert!(
+        diagnostics.iter().any(|d| d.error.code() == "GT0001"),
+        "{diagnostics:?}"
+    );
+}
+
+/// Discarding a chain's branch value still reports a discarded `Result`.
+#[test]
+fn an_else_if_chain_still_reports_a_discarded_result() {
+    let diagnostics = diagnostics_for(
+        "fn fallible(i: i64) -> Result<i64, String> { Ok(i) }\nfn main() {\n    for i in 0..3 {\n        if i == 0 {\n            fallible(i)\n        } else if i == 1 {\n            fallible(i)\n        }\n    }\n}\n",
+    );
+    assert!(
+        diagnostics.iter().any(|d| d.error.code() == "GT0007"),
+        "{diagnostics:?}"
+    );
+}
+
+/// Wrapping arithmetic keeps the integer type its operands share.
+#[test]
+fn wrapping_arithmetic_keeps_the_operand_integer_type() {
+    let diagnostics = diagnostics_for(
+        "struct Acc { total: u16 }\nfn step(h: u32, b: u8) -> u32 { (h << 5) +% h +% b as u32 }\nfn main() {\n    let mut acc = Acc { total: 1 }\n    acc.total +%= 7\n    acc.total *%= 3\n    let x: u8 = 250\n    let y: u8 = x -% b'z'\n    let _ = step(y as u32, x)\n}\n",
+    );
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}
+
+/// Wrapping names a width, so a float or string operand is GT0003.
+#[test]
+fn wrapping_arithmetic_rejects_operands_without_a_width() {
+    let floats = diagnostics_for("fn main() { let _ = 1.5 +% 2.0 }\n");
+    assert!(has_code(&floats, "GT0003"), "{floats:?}");
+    let strings = diagnostics_for("fn main() {\n    let mut s = \"a\"\n    s +%= \"b\"\n}\n");
+    assert!(has_code(&strings, "GT0003"), "{strings:?}");
+}
+
+/// Wrapping arithmetic has one spelling: the method forms report GT0087.
+#[test]
+fn wrapping_arithmetic_methods_point_to_the_operator() {
+    for call in [
+        "a.wrapping_add(1)",
+        "a.wrapping_mul(2)",
+        "a.wrapping_sub(3)",
+        "12.wrapping_add(1)",
+    ] {
+        let source = format!("fn main() {{ let a: u32 = 3\n let _ = {call} }}\n");
+        let d = diagnostics_for(&source);
+        assert!(has_code(&d, "GT0087"), "{call}: {d:?}");
+    }
+}
+
+#[test]
+fn a_struct_with_a_const_generic_length_checks_its_literal_and_methods() {
+    let source = "struct Ring<const N: usize> {\n    items: [i64; N],\n    head: i64,\n}\n\
+        impl<const N: usize> Ring<N> {\n    fn capacity(&self) -> i64 { N as i64 }\n    \
+        fn first(&self) -> i64 { self.items[0] }\n}\n\
+        fn main() {\n    let r: Ring<3> = Ring { items: [0; 3], head: 0 }\n    \
+        let c: i64 = r.capacity()\n    let f: i64 = r.first()\n    let _ = c + f\n}\n";
+    let d = diagnostics_for(source);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_const_generic_fn_takes_its_value_from_a_generic_type_argument() {
+    let source = "enum Grid<const N: usize> {\n    Filled([i64; N]),\n    Empty,\n}\n\
+        fn size<const N: usize>(grid: Grid<N>) -> i64 {\n    N as i64\n}\n\
+        fn main() {\n    let g: Grid<2> = Grid::Filled([7, 8])\n    let n: i64 = size(g)\n    let _ = n\n}\n";
+    let d = diagnostics_for(source);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_struct_literal_that_never_names_its_const_generic_reports_gt0088() {
+    let source = "struct Tag<const N: usize> {\n    id: i64,\n}\n\
+        fn main() {\n    let t = Tag { id: 1 }\n    let _ = t.id\n}\n";
+    let d = diagnostics_for(source);
+    assert!(has_code(&d, "GT0088"), "{d:?}");
+}
+
+#[test]
+fn a_simd_lane_type_outside_the_supported_set_reports_gt0089() {
+    let source = "fn main() {\n    let v: Simd<i16, 4> = Simd::splat(1)\n    let _ = v\n}\n";
+    let d = diagnostics_for(source);
+    assert!(has_code(&d, "GT0089"), "{d:?}");
+}
+
+#[test]
+fn a_simd_lane_count_outside_the_supported_set_reports_gt0089() {
+    let d = diagnostics_for(
+        "fn main() {\n    let v: Simd<f64, 3> = Simd::splat(1.0)\n    let _ = v\n}\n",
+    );
+    assert!(has_code(&d, "GT0089"), "{d:?}");
+    let d = diagnostics_for(
+        "fn main() {\n    let v: Simd<f64, 16> = Simd::splat(1.0)\n    let _ = v\n}\n",
+    );
+    assert!(has_code(&d, "GT0089"), "{d:?}");
+}
+
+#[test]
+fn simd_splat_without_an_annotated_lane_count_reports_gt0089() {
+    let d = diagnostics_for("fn main() {\n    let v = Simd::splat(1.0)\n    let _ = v\n}\n");
+    assert!(has_code(&d, "GT0089"), "{d:?}");
+}
+
+#[test]
+fn simd_lane_arithmetic_and_methods_check() {
+    let source = "fn main() {\n    let a = Simd::from_array([1.0, 2.0, 3.0, 4.0])\n    \
+        let b: Simd<f64, 4> = Simd::splat(0.5)\n    let s: f64 = (a * b + a).reduce_sum()\n    \
+        let m: Mask<4> = a.lanes_lt(b)\n    let c: Simd<f64, 4> = m.select(a, b)\n    \
+        let x: f64 = c[2]\n    let _ = s + x\n}\n";
+    let d = diagnostics_for(source);
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_simd_operation_its_lanes_do_not_define_reports_gt0089() {
+    let d = diagnostics_for(
+        "fn main() {\n    let a: Simd<f64, 4> = Simd::splat(1.0)\n    let b = a << a\n    let _ = b\n}\n",
+    );
+    assert!(has_code(&d, "GT0089"), "{d:?}");
+}
+
+#[test]
+fn a_struct_literal_mismatching_its_annotated_const_generic_is_rejected() {
+    let source = "struct Ring<const N: usize> {\n    items: [i64; N],\n}\n\
+        fn main() {\n    let r: Ring<2> = Ring { items: [0; 3] }\n    let _ = r.items\n}\n";
+    let d = diagnostics_for(source);
+    assert!(has_code(&d, "GT0001"), "{d:?}");
+}
+
+#[test]
+fn a_wrapping_method_chain_is_rewritten_whole_by_its_outermost_call() {
+    let source = "fn main() { let a: u64 = 3\n let _ = a.wrapping_mul(5).wrapping_add(7) }\n";
+    let replacements: Vec<String> = diagnostics_for(source)
+        .into_iter()
+        .filter_map(|d| match d.error {
+            gossamer_types::TypeError::WrappingMethodRetired { replacement, .. } => replacement,
+            _ => None,
+        })
+        .collect();
+    assert!(
+        replacements.iter().any(|r| r == "((a *% 5) +% 7)"),
+        "{replacements:?}"
     );
 }

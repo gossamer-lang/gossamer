@@ -336,7 +336,50 @@ fn lower_inline_result_carrier_call(
                     let slots = operand_aggregate_slots(body, tcx, arg).unwrap_or(1);
                     let addr =
                         lower_operand(module, builder, locals, body, tcx, arg, None, intrinsics)?;
-                    heap_copy_aggregate(module, builder, intrinsics, addr, slots)?
+                    // The box owns the payload's heap children under the
+                    // structural meta when one is registered, as on LLVM.
+                    let copy_meta = match arg {
+                        Operand::Copy(place) if place.projection.is_empty() => {
+                            let ty = body.local_ty(place.local);
+                            let structural = format!("gos_rc_meta_boxaggr_{}", ty.as_u32());
+                            tcx.rc_meta(&structural).map(|_| structural).or_else(|| {
+                                tcx.aggr_copy_meta(ty)
+                                    .filter(|sym| !sym.is_empty())
+                                    .map(str::to_owned)
+                            })
+                        }
+                        _ => None,
+                    };
+                    match copy_meta.and_then(|sym| tcx.rc_meta(&sym).map(|blob| (sym, blob))) {
+                        // A payload type with a copy meta travels as a counted
+                        // blob holding its own shares of the children, the
+                        // shape the carrier's release gives back.
+                        Some((sym, blob)) => {
+                            let ptr_ty = module.target_config().pointer_type();
+                            let data_id = intrinsics.intern_rc_meta(module, &sym, blob)?;
+                            let gv = module.declare_data_in_func(data_id, builder.func);
+                            let meta = builder.ins().symbol_value(ptr_ty, gv);
+                            let allocator = if name == "gos_rt_result_new_owned" {
+                                "gos_rt_rc_alloc_move"
+                            } else {
+                                "gos_rt_rc_alloc_copy"
+                            };
+                            let alloc_fn = intrinsics.extern_fn(
+                                module,
+                                allocator,
+                                &[types::I64, ptr_ty, ptr_ty],
+                                &[ptr_ty],
+                            )?;
+                            let alloc_ref = module.declare_func_in_func(alloc_fn, builder.func);
+                            let bytes = builder
+                                .ins()
+                                .iconst(types::I64, i64::from(slots.max(1)) * 8);
+                            let src = coerce_arg_to(builder, addr, ptr_ty)?;
+                            let call = builder.ins().call(alloc_ref, &[bytes, meta, src]);
+                            builder.inst_results(call)[0]
+                        }
+                        None => heap_copy_aggregate(module, builder, intrinsics, addr, slots)?,
+                    }
                 }
                 Some(arg) => {
                     let raw =
@@ -347,8 +390,63 @@ fn lower_inline_result_carrier_call(
                         // enum) outlives the constructing frame, so the
                         // carrier holds the address of a heap copy. The
                         // `gos_rt_result_payload_i128` extractor reads the
-                        // two words back from that address.
-                        heap_copy_carrier(module, builder, intrinsics, raw)?
+                        // two words back from that address. A carrier whose
+                        // box meta is registered is a counted blob holding its
+                        // own share of the payload, as on the LLVM tier.
+                        let carrier_meta = match arg {
+                            Operand::Copy(place) if place.projection.is_empty() => {
+                                let ty = body.local_ty(place.local);
+                                let is_carrier = matches!(
+                                    tcx.kind_of(ty),
+                                    TyKind::Adt { def, .. }
+                                        if def.local == u32::MAX || def.local == u32::MAX - 1
+                                );
+                                let structural = format!("gos_rc_meta_boxaggr_{}", ty.as_u32());
+                                let carrier_box = format!("gos_rc_meta_carrierbox_{}", ty.as_u32());
+                                is_carrier
+                                    .then(|| {
+                                        tcx.rc_meta(&structural)
+                                            .map(|_| structural)
+                                            .or_else(|| {
+                                                tcx.rc_meta(&carrier_box).map(|_| carrier_box)
+                                            })
+                                            .or_else(|| {
+                                                tcx.aggr_copy_meta(ty)
+                                                    .filter(|sym| !sym.is_empty())
+                                                    .map(str::to_owned)
+                                            })
+                                    })
+                                    .flatten()
+                            }
+                            _ => None,
+                        };
+                        match carrier_meta.and_then(|sym| tcx.rc_meta(&sym).map(|blob| (sym, blob)))
+                        {
+                            Some((sym, blob)) => {
+                                let ptr_ty = module.target_config().pointer_type();
+                                let data_id = intrinsics.intern_rc_meta(module, &sym, blob)?;
+                                let gv = module.declare_data_in_func(data_id, builder.func);
+                                let meta = builder.ins().symbol_value(ptr_ty, gv);
+                                let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                    StackSlotKind::ExplicitSlot,
+                                    16,
+                                    4,
+                                ));
+                                builder.ins().stack_store(ptr_ty, raw, slot, 0);
+                                let src = builder.ins().stack_addr(ptr_ty, slot, 0);
+                                let alloc_fn = intrinsics.extern_fn(
+                                    module,
+                                    "gos_rt_rc_alloc_copy",
+                                    &[types::I64, ptr_ty, ptr_ty],
+                                    &[ptr_ty],
+                                )?;
+                                let alloc_ref = module.declare_func_in_func(alloc_fn, builder.func);
+                                let bytes = builder.ins().iconst(types::I64, 16);
+                                let call = builder.ins().call(alloc_ref, &[bytes, meta, src]);
+                                builder.inst_results(call)[0]
+                            }
+                            None => heap_copy_carrier(module, builder, intrinsics, raw)?,
+                        }
                     } else {
                         coerce_arg_to(builder, raw, types::I64)?
                     }
@@ -406,7 +504,7 @@ fn lower_inline_result_carrier_call(
             let carrier = coerce_arg_to(builder, carrier, types::I128)?;
             builder.ins().ireduce(types::I64, carrier)
         }
-        "gos_rt_result_payload" | "gos_result_payload_owned" | "gos_rt_weak_opt_payload" => {
+        "gos_rt_result_payload" | "gos_rt_weak_opt_payload" => {
             let carrier = match args.first() {
                 Some(arg) => lower_operand(
                     module,
@@ -422,6 +520,42 @@ fn lower_inline_result_carrier_call(
             };
             let carrier = coerce_arg_to(builder, carrier, types::I128)?;
             let (_disc, payload) = builder.ins().isplit(carrier);
+            // A payload read out of a carrier's box takes the words into its
+            // own slot: the destination holds shares of its own and gives them
+            // back on its next overwrite, which may come after the box is gone,
+            // and the map-field helpers must reach the copy rather than the box.
+            if name == "gos_rt_result_payload"
+                && destination.projection.is_empty()
+                && intrinsics.stack_slotted.contains(&destination.local)
+                && !super::lowering_stmt_term::local_flows_to_return(body, destination.local)
+                && super::lowering_stmt_term::payload_takes_own_storage(
+                    tcx,
+                    body,
+                    destination.local,
+                )
+            {
+                let ptr_ty = module.target_config().pointer_type();
+                let slots =
+                    super::ty_layout::type_slot_count(tcx, body.local_ty(destination.local)).max(1);
+                let dst_var = locals
+                    .get(&destination.local)
+                    .copied()
+                    .ok_or_else(|| anyhow!("payload destination has no slot"))?;
+                let dst_raw = builder.use_var(dst_var);
+                let dst_ptr = coerce_arg_to(builder, dst_raw, ptr_ty)?;
+                let src_ptr = coerce_arg_to(builder, payload, ptr_ty)?;
+                for slot_idx in 0..slots {
+                    let off = ir::immediates::Offset32::new((slot_idx as i32) * 8);
+                    let word =
+                        builder
+                            .ins()
+                            .load(types::I64, MemFlagsData::trusted(), src_ptr, off);
+                    builder
+                        .ins()
+                        .store(MemFlagsData::trusted(), word, dst_ptr, off);
+                }
+                return Ok(true);
+            }
             payload
         }
         "gos_rt_result_payload_f64" => {
@@ -454,6 +588,106 @@ fn lower_inline_result_carrier_call(
         value,
     );
     Ok(true)
+}
+
+/// The address a content-keyed entry point reads its key's slots through.
+/// MIR already hands an aggregate key over as the address of its storage, so
+/// that operand crosses as it is. A key whose type is itself a handle word - a
+/// `Vec`, a slice, or a `String` - or a two-word `Option` / `Result` carrier is
+/// a value, so it is spilled into a slot of its own and that slot's address
+/// crosses instead.
+pub(super) fn lower_key_by_address(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    locals: &mut HashMap<Local, Variable>,
+    body: &Body,
+    tcx: &TyCtxt,
+    op: &Operand,
+    intrinsics: &mut IntrinsicContext,
+) -> Result<ir::Value> {
+    let ptr_ty = module.target_config().pointer_type();
+    let key_ty = match op {
+        Operand::Copy(place) => Some(resolve_place_ty(tcx, body, place)),
+        _ => None,
+    };
+    let spill_bytes = key_ty.and_then(|ty| {
+        if is_carrier_ty(tcx, ty) {
+            Some(16)
+        } else if matches!(
+            tcx.kind_of(ty),
+            TyKind::Vec(_) | TyKind::Slice(_) | TyKind::String
+        ) {
+            Some(8)
+        } else {
+            None
+        }
+    });
+    let Some(bytes) = spill_bytes else {
+        let address = lower_operand(
+            module,
+            builder,
+            locals,
+            body,
+            tcx,
+            op,
+            Some(ptr_ty),
+            intrinsics,
+        )?;
+        return coerce_arg_to(builder, address, ptr_ty);
+    };
+    let value = lower_operand(module, builder, locals, body, tcx, op, None, intrinsics)?;
+    let slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, bytes, 3));
+    builder.ins().stack_store(ptr_ty, value, slot, 0);
+    Ok(builder.ins().stack_addr(ptr_ty, slot, 0))
+}
+
+/// The address an ordered container's push reads its element's slots through.
+/// MIR hands an addressed aggregate over as the address of its storage, so
+/// that operand crosses as it is; a two-word carrier or a one-word value is
+/// spilled into a slot of its own and that slot's address crosses instead.
+pub(super) fn lower_elem_by_address(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    locals: &mut HashMap<Local, Variable>,
+    body: &Body,
+    tcx: &TyCtxt,
+    op: &Operand,
+    intrinsics: &mut IntrinsicContext,
+) -> Result<ir::Value> {
+    let ptr_ty = module.target_config().pointer_type();
+    if let Operand::Copy(place) = op {
+        let ty = resolve_place_ty(tcx, body, place);
+        if !is_carrier_ty(tcx, ty) && tcx.elem_is_addressed_aggregate(ty) {
+            let address = lower_operand(
+                module,
+                builder,
+                locals,
+                body,
+                tcx,
+                op,
+                Some(ptr_ty),
+                intrinsics,
+            )?;
+            return coerce_arg_to(builder, address, ptr_ty);
+        }
+    }
+    let value = lower_operand(module, builder, locals, body, tcx, op, None, intrinsics)?;
+    if value_type(value, builder) == types::I128 {
+        let slot =
+            builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 16, 3));
+        let slot_addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+        store_i128_words(builder, value, slot_addr, 0);
+        return Ok(slot_addr);
+    }
+    let word = coerce_arg_to(builder, value, types::I64)?;
+    let slot =
+        builder.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
+    let slot_addr = builder.ins().stack_addr(ptr_ty, slot, 0);
+    builder
+        .ins()
+        .store(MemFlagsData::trusted(), word, slot_addr, 0);
+    Ok(slot_addr)
 }
 
 pub(super) fn lower_generic_rt_call(
@@ -502,6 +736,12 @@ pub(super) fn lower_generic_rt_call(
     let mut arg_values = Vec::with_capacity(params.len());
     for (i, param_ty) in params.iter().enumerate() {
         let v = match args.get(i) {
+            Some(a) if i == 1 && gossamer_abi::takes_elem_by_address(name) => {
+                lower_elem_by_address(module, builder, locals, body, tcx, a, intrinsics)?
+            }
+            Some(a) if i == 1 && gossamer_abi::takes_key_by_address(name) => {
+                lower_key_by_address(module, builder, locals, body, tcx, a, intrinsics)?
+            }
             Some(a) => {
                 let hint = if *param_ty == ptr_ty {
                     Some(ptr_ty)
@@ -522,6 +762,51 @@ pub(super) fn lower_generic_rt_call(
         arg_values.push(coerced);
     }
     let result = emit_win64_rt_call(module, builder, intrinsics, name, params, ret, &arg_values)?;
+    if let Some(value) = result
+        && gossamer_abi::returns_fresh_aggregate(name)
+    {
+        return store_runtime_call_result(
+            module,
+            builder,
+            locals,
+            body,
+            tcx,
+            destination,
+            value,
+            intrinsics,
+            name,
+        );
+    }
+    // An `unwrap` answers the address of the payload words a carrier's box
+    // keeps. The destination holds shares of its own and gives them back on
+    // its next overwrite, which may come after the box is gone, so it copies
+    // the words into its own slot rather than naming the box.
+    if let Some(src) = result
+        && matches!(name, "gos_rt_result_unwrap" | "gos_rt_option_unwrap")
+        && destination.projection.is_empty()
+        && intrinsics.stack_slotted.contains(&destination.local)
+        && !super::lowering_stmt_term::local_flows_to_return(body, destination.local)
+        && super::lowering_stmt_term::payload_takes_own_storage(tcx, body, destination.local)
+    {
+        let slots = super::ty_layout::type_slot_count(tcx, body.local_ty(destination.local)).max(1);
+        let dst_var = locals
+            .get(&destination.local)
+            .copied()
+            .ok_or_else(|| anyhow!("unwrap destination has no slot"))?;
+        let dst_raw = builder.use_var(dst_var);
+        let dst_ptr = coerce_arg_to(builder, dst_raw, ptr_ty)?;
+        let src_ptr = coerce_arg_to(builder, src, ptr_ty)?;
+        for slot_idx in 0..slots {
+            let off = ir::immediates::Offset32::new((slot_idx as i32) * 8);
+            let word = builder
+                .ins()
+                .load(types::I64, MemFlagsData::trusted(), src_ptr, off);
+            builder
+                .ins()
+                .store(MemFlagsData::trusted(), word, dst_ptr, off);
+        }
+        return Ok(());
+    }
     let stored = match result {
         Some(v) => v,
         None => builder.ins().iconst(types::I64, 0),

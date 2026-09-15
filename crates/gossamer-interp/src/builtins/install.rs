@@ -105,28 +105,39 @@ fn install_math_builtins(globals: &mut Vec<(&'static str, Value)>) {
         ("f64::from_bits", builtin_f64_from_bits as BuiltinFn),
         ("f32::to_bits", builtin_f32_to_bits as BuiltinFn),
         ("f32::from_bits", builtin_f32_from_bits as BuiltinFn),
-        ("wrapping_add", builtin_i64_wrapping_add as BuiltinFn),
-        ("wrapping_mul", builtin_i64_wrapping_mul as BuiltinFn),
-        ("i8::wrapping_add", builtin_i8_wrapping_add as BuiltinFn),
-        ("i8::wrapping_mul", builtin_i8_wrapping_mul as BuiltinFn),
-        ("i16::wrapping_add", builtin_i16_wrapping_add as BuiltinFn),
-        ("i16::wrapping_mul", builtin_i16_wrapping_mul as BuiltinFn),
-        ("i32::wrapping_add", builtin_i32_wrapping_add as BuiltinFn),
-        ("i32::wrapping_mul", builtin_i32_wrapping_mul as BuiltinFn),
-        ("i64::wrapping_add", builtin_i64_wrapping_add as BuiltinFn),
-        ("i64::wrapping_mul", builtin_i64_wrapping_mul as BuiltinFn),
-        ("isize::wrapping_add", builtin_i64_wrapping_add as BuiltinFn),
-        ("isize::wrapping_mul", builtin_i64_wrapping_mul as BuiltinFn),
-        ("u8::wrapping_add", builtin_u8_wrapping_add as BuiltinFn),
-        ("u8::wrapping_mul", builtin_u8_wrapping_mul as BuiltinFn),
-        ("u16::wrapping_add", builtin_u16_wrapping_add as BuiltinFn),
-        ("u16::wrapping_mul", builtin_u16_wrapping_mul as BuiltinFn),
-        ("u32::wrapping_add", builtin_u32_wrapping_add as BuiltinFn),
-        ("u32::wrapping_mul", builtin_u32_wrapping_mul as BuiltinFn),
-        ("u64::wrapping_add", builtin_u64_wrapping_add as BuiltinFn),
-        ("u64::wrapping_mul", builtin_u64_wrapping_mul as BuiltinFn),
-        ("usize::wrapping_add", builtin_u64_wrapping_add as BuiltinFn),
-        ("usize::wrapping_mul", builtin_u64_wrapping_mul as BuiltinFn),
+        ("__gos_wrapping_add", builtin_i64_wrapping_add as BuiltinFn),
+        ("__gos_wrapping_sub", builtin_i64_wrapping_sub as BuiltinFn),
+        ("__gos_wrapping_mul", builtin_i64_wrapping_mul as BuiltinFn),
+        ("i8::__gos_wrapping_add", builtin_i8_wrapping_add as BuiltinFn),
+        ("i8::__gos_wrapping_sub", builtin_i8_wrapping_sub as BuiltinFn),
+        ("i8::__gos_wrapping_mul", builtin_i8_wrapping_mul as BuiltinFn),
+        ("i16::__gos_wrapping_add", builtin_i16_wrapping_add as BuiltinFn),
+        ("i16::__gos_wrapping_sub", builtin_i16_wrapping_sub as BuiltinFn),
+        ("i16::__gos_wrapping_mul", builtin_i16_wrapping_mul as BuiltinFn),
+        ("i32::__gos_wrapping_add", builtin_i32_wrapping_add as BuiltinFn),
+        ("i32::__gos_wrapping_sub", builtin_i32_wrapping_sub as BuiltinFn),
+        ("i32::__gos_wrapping_mul", builtin_i32_wrapping_mul as BuiltinFn),
+        ("i64::__gos_wrapping_add", builtin_i64_wrapping_add as BuiltinFn),
+        ("i64::__gos_wrapping_sub", builtin_i64_wrapping_sub as BuiltinFn),
+        ("i64::__gos_wrapping_mul", builtin_i64_wrapping_mul as BuiltinFn),
+        ("isize::__gos_wrapping_add", builtin_i64_wrapping_add as BuiltinFn),
+        ("isize::__gos_wrapping_sub", builtin_i64_wrapping_sub as BuiltinFn),
+        ("isize::__gos_wrapping_mul", builtin_i64_wrapping_mul as BuiltinFn),
+        ("u8::__gos_wrapping_add", builtin_u8_wrapping_add as BuiltinFn),
+        ("u8::__gos_wrapping_sub", builtin_u8_wrapping_sub as BuiltinFn),
+        ("u8::__gos_wrapping_mul", builtin_u8_wrapping_mul as BuiltinFn),
+        ("u16::__gos_wrapping_add", builtin_u16_wrapping_add as BuiltinFn),
+        ("u16::__gos_wrapping_sub", builtin_u16_wrapping_sub as BuiltinFn),
+        ("u16::__gos_wrapping_mul", builtin_u16_wrapping_mul as BuiltinFn),
+        ("u32::__gos_wrapping_add", builtin_u32_wrapping_add as BuiltinFn),
+        ("u32::__gos_wrapping_sub", builtin_u32_wrapping_sub as BuiltinFn),
+        ("u32::__gos_wrapping_mul", builtin_u32_wrapping_mul as BuiltinFn),
+        ("u64::__gos_wrapping_add", builtin_u64_wrapping_add as BuiltinFn),
+        ("u64::__gos_wrapping_sub", builtin_u64_wrapping_sub as BuiltinFn),
+        ("u64::__gos_wrapping_mul", builtin_u64_wrapping_mul as BuiltinFn),
+        ("usize::__gos_wrapping_add", builtin_u64_wrapping_add as BuiltinFn),
+        ("usize::__gos_wrapping_sub", builtin_u64_wrapping_sub as BuiltinFn),
+        ("usize::__gos_wrapping_mul", builtin_u64_wrapping_mul as BuiltinFn),
     ] {
         globals.push((name, builtin(name, function)));
     }
@@ -621,6 +632,21 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
     ));
     globals.push(("walk_dir", native("walk_dir", native_fs_walk_dir)));
     globals.push(("fs::walk_dir", native("fs::walk_dir", native_fs_walk_dir)));
+    // Leaf intrinsics the injected `DirInfo` and `Output` wrappers fold.
+    globals.push(("__gos_fs_read_dir_raw", builtin("__gos_fs_read_dir_raw", builtin_fs_read_dir_raw)));
+    globals.push((
+        "__gos_fs_walk_dir_raw",
+        native("__gos_fs_walk_dir_raw", native_fs_walk_dir_raw),
+    ));
+    globals.push(("__gos_process_run_raw", builtin("__gos_process_run_raw", builtin_process_run_raw)));
+    globals.push((
+        "__gos_process_run_in_raw",
+        builtin("__gos_process_run_in_raw", builtin_process_run_in_raw),
+    ));
+    globals.push((
+        "__gos_process_pipeline_run_raw",
+        builtin("__gos_process_pipeline_run_raw", builtin_process_pipeline_run_raw),
+    ));
     install_module(
         "fs",
         &[
@@ -814,6 +840,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("is_null", builtin_json_is_null),
             ("as_str", builtin_json_as_str),
             ("as_i64", builtin_json_as_i64),
+            ("as_u64", builtin_json_as_u64),
             ("as_f64", builtin_json_as_f64),
             ("as_bool", builtin_json_as_bool),
             ("as_array", builtin_json_as_array),
@@ -835,6 +862,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("is_null", builtin_json_is_null),
             ("as_str", builtin_json_as_str),
             ("as_i64", builtin_json_as_i64),
+            ("as_u64", builtin_json_as_u64),
             ("as_f64", builtin_json_as_f64),
             ("as_bool", builtin_json_as_bool),
             ("as_array", builtin_json_as_array),
@@ -1216,6 +1244,56 @@ fn install_method_helpers(globals: &mut Vec<(&'static str, Value)>) {
     ));
     globals.push(("capacity", builtin("capacity", builtin_vec_capacity)));
     globals.push(("sort", builtin("sort", builtin_sort)));
+    // The compiler routes an ordering over a type declaring `u64` / `usize`
+    // here, with the type's ordering descriptor as the trailing argument.
+    for (name, call) in [
+        (
+            "__ord_sort",
+            crate::stdlib_builtins::sort::builtin_described_sort as fn(&[Value]) -> _,
+        ),
+        (
+            "__ord_binary_search",
+            crate::stdlib_builtins::sort::builtin_described_binary_search,
+        ),
+        (
+            "__ord_sort_stable",
+            crate::stdlib_builtins::sort::builtin_described_sort_stable,
+        ),
+        (
+            "__ord_search",
+            crate::stdlib_builtins::sort::builtin_described_search,
+        ),
+        (
+            "__ord_partition_point",
+            crate::stdlib_builtins::sort::builtin_described_partition_point,
+        ),
+        (
+            "__ord_min2",
+            crate::stdlib_builtins::sort::builtin_described_min2,
+        ),
+        (
+            "__ord_max2",
+            crate::stdlib_builtins::sort::builtin_described_max2,
+        ),
+        (
+            "__ord_clamp",
+            crate::stdlib_builtins::sort::builtin_described_clamp,
+        ),
+        (
+            "__ord_compare",
+            crate::stdlib_builtins::sort::builtin_described_compare,
+        ),
+    ] {
+        globals.push((name, builtin(name, call)));
+    }
+    globals.push((
+        "__ord_min",
+        native("__ord_min", crate::stdlib_builtins::sort::native_described_min),
+    ));
+    globals.push((
+        "__ord_max",
+        native("__ord_max", crate::stdlib_builtins::sort::native_described_max),
+    ));
     globals.push(("sort_by", native("sort_by", native_sort_by)));
     globals.push((
         "__join_rendered",

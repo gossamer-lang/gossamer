@@ -638,6 +638,9 @@ fn spaced_after(kind: TokenKind) -> bool {
             Punct::Plus
                 | Punct::Slash
                 | Punct::Percent
+                | Punct::PlusPercent
+                | Punct::MinusPercent
+                | Punct::StarPercent
                 | Punct::Caret
                 | Punct::AmpAmp
                 | Punct::PipePipe
@@ -652,6 +655,9 @@ fn spaced_after(kind: TokenKind) -> bool {
                 | Punct::StarEq
                 | Punct::SlashEq
                 | Punct::PercentEq
+                | Punct::PlusPercentEq
+                | Punct::MinusPercentEq
+                | Punct::StarPercentEq
                 | Punct::AmpEq
                 | Punct::PipeEq
                 | Punct::CaretEq
@@ -675,6 +681,9 @@ fn spaced_before(kind: TokenKind) -> bool {
             Punct::Plus
                 | Punct::Slash
                 | Punct::Percent
+                | Punct::PlusPercent
+                | Punct::MinusPercent
+                | Punct::StarPercent
                 | Punct::Caret
                 | Punct::AmpAmp
                 | Punct::PipePipe
@@ -689,6 +698,9 @@ fn spaced_before(kind: TokenKind) -> bool {
                 | Punct::StarEq
                 | Punct::SlashEq
                 | Punct::PercentEq
+                | Punct::PlusPercentEq
+                | Punct::MinusPercentEq
+                | Punct::StarPercentEq
                 | Punct::AmpEq
                 | Punct::PipeEq
                 | Punct::CaretEq
@@ -915,6 +927,9 @@ fn trailing_continuation(kind: TokenKind) -> bool {
                 | Punct::StarEq
                 | Punct::SlashEq
                 | Punct::PercentEq
+                | Punct::PlusPercentEq
+                | Punct::MinusPercentEq
+                | Punct::StarPercentEq
                 | Punct::AmpEq
                 | Punct::PipeEq
                 | Punct::CaretEq
@@ -925,6 +940,9 @@ fn trailing_continuation(kind: TokenKind) -> bool {
                 | Punct::Star
                 | Punct::Slash
                 | Punct::Percent
+                | Punct::PlusPercent
+                | Punct::MinusPercent
+                | Punct::StarPercent
                 | Punct::Amp
                 | Punct::Caret
                 | Punct::AmpAmp

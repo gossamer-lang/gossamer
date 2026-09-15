@@ -1,0 +1,55 @@
+// `Simd::load(xs, offset)` reads a window of lanes out of a `Vec`, slice, or
+// fixed array, and `v.store(&mut xs, offset)` writes one back. Each checks the
+// whole window once, and a lane count held by a const generic parameter sizes
+// the window as a literal one does.
+
+fn saxpy(xs: Vec<f64>, mut ys: Vec<f64>, k: f64) -> Vec<f64> {
+    let scale: Simd<f64, 4> = Simd::splat(k)
+    let mut i = 0
+    while i + 4 <= xs.len() {
+        let x: Simd<f64, 4> = Simd::load(xs, i)
+        let y: Simd<f64, 4> = Simd::load(ys, i)
+        (x * scale + y).store(&mut ys, i)
+        i += 4
+    }
+    ys
+}
+
+fn peak<const N: usize>(bytes: [u8], at: i64) -> u8 {
+    let lanes: Simd<u8, N> = Simd::load(bytes, at)
+    lanes.reduce_max()
+}
+
+fn fill<const N: usize>(out: &mut Vec<i32>, value: i32) {
+    let lanes: Simd<i32, N> = Simd::splat(value)
+    lanes.store(out, 0)
+}
+
+fn main() {
+    let xs = #[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    let ys = #[0.5; 8]
+    let mut checksum = 0.0
+    let mut round = 0
+    while round < 100 {
+        checksum += saxpy(xs, ys, round as f64)[7]
+        round += 1
+    }
+    println("{:?} {:?} {}", saxpy(xs, ys, 2.0), ys, checksum)
+
+    let bytes: Vec<u8> = #[1, 9, 3, 7, 2, 8, 4, 6]
+    let four: Simd<u8, 4> = Simd::load(bytes, 4)
+    println("{:?} {} {}", four, peak::<8>(bytes, 0), peak::<2>(bytes, 6))
+
+    let mut out = #[0; 6]
+    let ints: Simd<i64, 2> = Simd::from_array([11, 22])
+    ints.store(&mut out, 4)
+    println("{:?}", out)
+
+    let mut wide: Vec<i32> = #[0; 10]
+    fill::<8>(&mut wide, -3)
+    println("{:?}", wide)
+
+    let fixed: [f32; 4] = [0.25, 0.5, 0.75, 1.0]
+    let quarter: Simd<f32, 4> = Simd::load(fixed, 0)
+    println("{:?} {}", quarter, quarter.reduce_sum())
+}

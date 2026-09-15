@@ -2776,6 +2776,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-encoding-json-as-u64",
+      "name": "std::encoding::json::as_u64",
+      "kind": "function",
+      "signature": "fn as_u64(value: json::Value) -> Option<u64>",
+      "description": "Reads a dynamic Value as Option<u64>, for a non-negative integer up to u64::MAX.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdencodingjson",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-encoding-json-at",
       "name": "std::encoding::json::at",
       "kind": "function",

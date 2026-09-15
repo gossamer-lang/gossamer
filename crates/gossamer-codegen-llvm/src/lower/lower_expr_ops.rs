@@ -250,7 +250,12 @@ impl<'a> Lowerer<'a> {
         let mut operand_llvm = render_ty(self.tcx, operand_ty);
         if matches!(
             op,
-            BinOp::Add | BinOp::WrappingAdd | BinOp::Sub | BinOp::Mul | BinOp::WrappingMul
+            BinOp::Add
+                | BinOp::WrappingAdd
+                | BinOp::Sub
+                | BinOp::WrappingSub
+                | BinOp::Mul
+                | BinOp::WrappingMul
         ) && let NumericKind::Int(dest_int_ty) =
             numeric_kind(self.tcx, self.body.local_ty(dest_local))
         {
@@ -373,6 +378,7 @@ impl<'a> Lowerer<'a> {
                 BinOp::Add
                     | BinOp::WrappingAdd
                     | BinOp::Sub
+                    | BinOp::WrappingSub
                     | BinOp::Mul
                     | BinOp::WrappingMul
                     | BinOp::Div
@@ -608,7 +614,7 @@ impl<'a> Lowerer<'a> {
             (BinOp::Add | BinOp::WrappingAdd, NumericKind::Int(_)) => {
                 format!("add {operand_llvm}")
             }
-            (BinOp::Sub, NumericKind::Int(_)) => format!("sub {operand_llvm}"),
+            (BinOp::Sub | BinOp::WrappingSub, NumericKind::Int(_)) => format!("sub {operand_llvm}"),
             (BinOp::Mul | BinOp::WrappingMul, NumericKind::Int(_)) => {
                 format!("mul {operand_llvm}")
             }
@@ -649,6 +655,14 @@ impl<'a> Lowerer<'a> {
             (cmp, NumericKind::Float(_)) if is_cmp(cmp) => {
                 let pred = float_cmp_pred(cmp);
                 format!("fcmp {pred} {operand_llvm}")
+            }
+            (cmp, NumericKind::Other)
+                if is_cmp(cmp) && matches!(operand_llvm.as_str(), "i1" | "i8") =>
+            {
+                // `bool` orders `false` before `true`, so its `0` and `1`
+                // compare unsigned.
+                let pred = int_cmp_pred(cmp, false);
+                format!("icmp {pred} {operand_llvm}")
             }
             (cmp, NumericKind::Other)
                 if is_cmp(cmp) && (operand_llvm == "i32" || operand_llvm == "i64") =>
@@ -697,6 +711,20 @@ impl<'a> Lowerer<'a> {
         if !checked_integer {
             writeln!(self.out, "  {tmp} = {instr} {lhs_v}, {rhs_v}").unwrap();
         }
+        // Unchecked arithmetic wraps at the declared width. The op ran at
+        // the operand's i64 width, so a narrower type takes its value back
+        // from the wide result, the way a checked op's extension does above.
+        let tmp = match kind {
+            NumericKind::Int(int_ty)
+                if !checked_integer
+                    && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+                    && operand_llvm == "i64"
+                    && int_width(int_ty) < 64 =>
+            {
+                self.mask_to_int_width(&tmp, int_ty)
+            }
+            _ => tmp,
+        };
         // Coerce the result back to the destination type.
         //
         // * Comparison ops (Eq/Ne/Lt/Le/Gt/Ge): result is

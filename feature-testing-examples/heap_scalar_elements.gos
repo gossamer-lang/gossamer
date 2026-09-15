@@ -1,0 +1,43 @@
+// A heap of strings, floats, chars, options, or tuples pushed from a function
+// the JIT compiled holds the values pushed, and pops them in order.
+
+struct Job {
+    rank: i64
+    name: String
+}
+
+fn run(i: i64) -> String {
+    let mut words: MinHeap<String> = MinHeap::new()
+    let mut floats: MaxHeap<f64> = MaxHeap::new()
+    let mut letters: MinHeap<char> = MinHeap::new()
+    let mut maybe: MaxHeap<Option<i64>> = MaxHeap::new()
+    let mut jobs: MinHeap<(i64, String)> = MinHeap::new()
+    for k in 0..6 {
+        words.push(format("w{}", (k * 7 + i) % 10))
+        floats.push((k * 3 + i) as f64 / 2.0)
+        letters.push(if k % 2 == 0 { 'q' } else { 'b' })
+        maybe.push(if k % 3 == 0 { None } else { Some(k + i) })
+        jobs.push((k % 3, format("j{k}")))
+    }
+    let mut order = #[]
+    while let Some(w) = words.pop() {
+        order.push(w)
+    }
+    let job = Job { rank: jobs.len(), name: jobs.pop().unwrap_or((0, "none")).1 }
+    let top = floats.pop().unwrap_or(-1.0)
+    let first = letters.pop().unwrap_or(' ')
+    let most = match maybe.pop() {
+        Some(Some(v)) => v
+        Some(None) => -1
+        None => -2
+    }
+    format("{:?} {} {} {} {} {}", order, top, first, most, job.rank, job.name)
+}
+
+fn main() {
+    let mut last = ""
+    for i in 0..40 {
+        last = run(i)
+    }
+    println("{}", last)
+}

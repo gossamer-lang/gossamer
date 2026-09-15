@@ -261,10 +261,10 @@ unsafe fn deque_push_front_slot(d: *mut GosDeque, elem: *const u8) {
 }
 
 /// The element at `idx` of the live range as the `Option` payload word the
-/// caller owns: the value itself for a one-word element, a copy of the slot
-/// block for a wider one. The value a `pop` or a `peek` answers is the
-/// caller's, so it stays readable however the container is used next.
-unsafe fn deque_payload_at(d: *const GosDeque, idx: i64) -> Option<i64> {
+/// caller owns: the value itself for a one-word element, a counted copy of the
+/// slot block for a wider one, readable however the container is used next. A
+/// `shared` read leaves the deque its element.
+unsafe fn deque_payload_at(d: *const GosDeque, idx: i64, shared: bool) -> Option<i64> {
     if d.is_null() {
         return None;
     }
@@ -277,7 +277,11 @@ unsafe fn deque_payload_at(d: *const GosDeque, idx: i64) -> Option<i64> {
     if at < 0 || at >= vec.len {
         return None;
     }
-    Some(unsafe { crate::c_abi::vec::vec_elem_owned_payload_word(vec, at) })
+    Some(if shared {
+        unsafe { crate::c_abi::vec::vec_elem_shared_payload_word(vec, at) }
+    } else {
+        unsafe { crate::c_abi::vec::vec_elem_owned_payload_word(vec, at) }
+    })
 }
 
 /// Removes and returns the front element as `Option<T>` packed into i128
@@ -292,7 +296,7 @@ pub unsafe extern "C" fn gos_rt_deque_pop_front(d: *mut GosDeque) -> i128 {
         // element then moves at most once per halving, which is what makes a
         // drain cost its own length rather than its length squared.
         unsafe { deque_compact_dead_prefix(d) };
-        match unsafe { deque_payload_at(d, 0) } {
+        match unsafe { deque_payload_at(d, 0, false) } {
             Some(word) => {
                 unsafe { &mut *d }.head += 1;
                 unsafe { gos_rt_result_new(0, word) }
@@ -310,7 +314,7 @@ pub unsafe extern "C" fn gos_rt_deque_pop_back(d: *mut GosDeque) -> i128 {
         if len <= 0 {
             return unsafe { gos_rt_result_new(1, 0) };
         }
-        match unsafe { deque_payload_at(d, len - 1) } {
+        match unsafe { deque_payload_at(d, len - 1, false) } {
             Some(word) => {
                 let vec = unsafe { &mut *(*d).vec };
                 vec.len -= 1;
@@ -385,7 +389,7 @@ pub unsafe extern "C" fn gos_rt_deque_pop_back_into(d: *mut GosDeque, out: *mut 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_deque_peek_front(d: *const GosDeque) -> i128 {
     ffi_entry!(0i128, {
-        match unsafe { deque_payload_at(d, 0) } {
+        match unsafe { deque_payload_at(d, 0, true) } {
             Some(word) => unsafe { gos_rt_result_new(0, word) },
             None => unsafe { gos_rt_result_new(1, 0) },
         }
@@ -400,7 +404,7 @@ pub unsafe extern "C" fn gos_rt_deque_peek_back(d: *const GosDeque) -> i128 {
         if len <= 0 {
             return unsafe { gos_rt_result_new(1, 0) };
         }
-        match unsafe { deque_payload_at(d, len - 1) } {
+        match unsafe { deque_payload_at(d, len - 1, true) } {
             Some(word) => unsafe { gos_rt_result_new(0, word) },
             None => unsafe { gos_rt_result_new(1, 0) },
         }

@@ -2976,7 +2976,7 @@ mod tests {
             .unwrap()
             .to_string();
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
-        drop(unsafe { Box::from_raw(err) });
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
         assert_eq!(msg, "http::request: unknown method `BREW`");
     }
 
@@ -2998,7 +2998,7 @@ mod tests {
             .unwrap()
             .to_string();
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
-        drop(unsafe { Box::from_raw(err) });
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
         drop(unsafe { Box::from_raw(client) });
         // Same message class + prefix the interp tier renders via
         // `ClientError::Transport`'s Display.
@@ -3163,7 +3163,7 @@ mod tests {
             .unwrap()
             .to_string();
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
-        drop(unsafe { Box::from_raw(err) });
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
         assert_eq!(msg, "Client::request: unknown method `BREW`");
 
         let packed = unsafe {
@@ -3183,7 +3183,7 @@ mod tests {
             .unwrap()
             .to_string();
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
-        drop(unsafe { Box::from_raw(err) });
+        unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
         drop(unsafe { Box::from_raw(client) });
         assert_eq!(msg, "Client::request_bytes: unknown method `BREW`");
     }

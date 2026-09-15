@@ -620,6 +620,7 @@ fn handler_env_wrap_body(
                         rvalue: Rvalue::Use(Operand::Copy(Place::local(Local(2)))),
                     },
                     span,
+                    inlined: None,
                 }],
                 terminator: Terminator::Call {
                     callee: Operand::Const(ConstValue::Str(inner_name)),
@@ -628,12 +629,16 @@ fn handler_env_wrap_body(
                     target: Some(BlockId(1)),
                 },
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             },
             BasicBlock {
                 id: BlockId(1),
                 stmts: Vec::new(),
                 terminator: Terminator::Return,
                 span,
+                terminator_span: None,
+                terminator_inlined: None,
             },
         ],
         span,
@@ -700,6 +705,8 @@ fn handler_ok_wrap_body(
             target: Some(BlockId(1)),
         },
         span,
+        terminator_span: None,
+        terminator_inlined: None,
     };
     let pack_block = BasicBlock {
         id: BlockId(1),
@@ -715,9 +722,12 @@ fn handler_ok_wrap_body(
                 },
             },
             span,
+            inlined: None,
         }],
         terminator: Terminator::Return,
         span,
+        terminator_span: None,
+        terminator_inlined: None,
     };
     Body {
         name: handler_ok_wrap_name(wrapped_name),
@@ -786,7 +796,7 @@ pub(crate) fn collect_struct_fields(
     // Mirror the typechecker's sentinel-DefId minting for stdlib
     // structs (see `gossamer-types::checker::stdlib_struct_layout`).
     // Keeps `Adt { def, .. }`-shaped receivers from stdlib paths
-    // (e.g. `&fs::DirInfo`) routable through `struct_defs[def] →
+    // (e.g. `http::Response`) routable through `struct_defs[def] →
     // struct_name → field-name table`.
     for (name, offset) in stdlib_struct_def_offsets() {
         by_def.insert(
@@ -798,39 +808,13 @@ pub(crate) fn collect_struct_fields(
 }
 
 pub(crate) fn stdlib_struct_def_offsets() -> &'static [(&'static str, u32)] {
-    &[
-        ("DirInfo", 2),
-        ("Output", 3),
-        ("ResponseStream", 4),
-        ("Response", 5),
-        ("Reverse", 29),
-    ]
+    &[("ResponseStream", 4), ("Response", 5), ("Reverse", 29)]
 }
 
 pub(crate) fn stdlib_struct_shapes() -> &'static [(&'static str, &'static [&'static str])] {
     &[
         ("Reverse", &["0"]),
-        ("Output", &["stdout", "stderr", "code"]),
         ("ExitStatus", &["code"]),
-        (
-            "DirEntry",
-            &["path", "name", "is_dir", "is_file", "is_symlink"],
-        ),
-        // `fs::list_dir` returns these - same field order as the
-        // interp builtin's `Value::struct_("DirInfo", ...)` and
-        // the runtime's `gos_rt_fs_list_dir` blob layout.
-        (
-            "DirInfo",
-            &[
-                "name",
-                "path",
-                "is_file",
-                "is_dir",
-                "is_symlink",
-                "size",
-                "modified_ms",
-            ],
-        ),
         (
             "Civil",
             &[
@@ -871,7 +855,7 @@ pub(crate) fn stdlib_struct_shapes() -> &'static [(&'static str, &'static [&'sta
     ]
 }
 
-pub(crate) fn collect_enum_variants(program: &HirProgram) -> EnumIndex {
+pub(crate) fn collect_enum_variants(program: &HirProgram, tcx: &mut TyCtxt) -> EnumIndex {
     let mut by_enum: HashMap<String, Vec<String>> = HashMap::new();
     let mut variant_index: HashMap<String, (String, usize)> = HashMap::new();
     let mut variant_fields: HashMap<String, Vec<String>> = HashMap::new();
@@ -894,6 +878,14 @@ pub(crate) fn collect_enum_variants(program: &HirProgram) -> EnumIndex {
                         variant_fields.insert(v.name.name.clone(), field_names);
                     }
                     if let Some(tys) = &v.struct_field_tys {
+                        // A payload whose length is a const parameter is held
+                        // as the runtime-length carrier, so the constructor
+                        // sizes, converts, and a match binds that storage.
+                        let tys: Vec<Ty> = tys
+                            .iter()
+                            .map(|t| const_generic_array_as_vec(tcx, *t).unwrap_or(*t))
+                            .collect();
+                        let tys = &tys;
                         // Both named and tuple payloads carry their field
                         // types here, so the declaration alone decides the
                         // payload question - the body scan below only
@@ -1100,6 +1092,114 @@ pub(crate) fn collect_enum_variants(program: &HirProgram) -> EnumIndex {
     }
 }
 
+/// Lifted one-parameter closures whose body has no effect a caller could
+/// observe - no call beyond a pure length or magnitude read, no write, no
+/// indexing, no control transfer - so the order they run in over a collection
+/// cannot change what a program does. Each is valued by whether the body reads
+/// the parameter's first tuple field or the parameter as a whole.
+pub(crate) fn collect_effect_free_pair_keys(program: &HirProgram) -> HashMap<String, bool> {
+    let mut out = HashMap::new();
+    for item in &program.items {
+        let HirItemKind::Fn(decl) = &item.kind else {
+            continue;
+        };
+        if !matches!(decl.origin, gossamer_hir::FnOrigin::LiftedClosure) || decl.params.len() != 1 {
+            continue;
+        }
+        let HirPatKind::Binding { name, .. } = &decl.params[0].pattern.kind else {
+            continue;
+        };
+        let Some(body) = &decl.body else {
+            continue;
+        };
+        let mut walk = PairKeyWalk {
+            param: &name.name,
+            reads_first: false,
+        };
+        if walk.block(&body.block) {
+            out.insert(decl.name.name.clone(), walk.reads_first);
+        }
+    }
+    out
+}
+
+/// Walks a closure body for [`collect_effect_free_pair_keys`].
+struct PairKeyWalk<'a> {
+    param: &'a str,
+    reads_first: bool,
+}
+
+impl PairKeyWalk<'_> {
+    fn names_param(&self, expr: &HirExpr) -> bool {
+        matches!(&expr.kind, HirExprKind::Path { segments, .. }
+            if segments.len() == 1 && segments[0].name == self.param)
+    }
+
+    fn block(&mut self, block: &HirBlock) -> bool {
+        block.stmts.iter().all(|stmt| match &stmt.kind {
+            HirStmtKind::Let { init, .. } => init.as_ref().is_none_or(|e| self.expr(e)),
+            HirStmtKind::Expr { expr, .. } => self.expr(expr),
+            HirStmtKind::Defer(_) | HirStmtKind::Item(_) => false,
+        }) && block.tail.as_ref().is_none_or(|e| self.expr(e))
+    }
+
+    fn expr(&mut self, expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Literal(_) => true,
+            HirExprKind::Path { .. } => {
+                if self.names_param(expr) {
+                    self.reads_first = true;
+                }
+                true
+            }
+            HirExprKind::TupleIndex { receiver, index } => {
+                if self.names_param(receiver) {
+                    if *index != 1 {
+                        self.reads_first = true;
+                    }
+                    true
+                } else {
+                    self.expr(receiver)
+                }
+            }
+            HirExprKind::Field { receiver, .. } => self.expr(receiver),
+            HirExprKind::Unary { op, operand } => {
+                !matches!(op, HirUnaryOp::RefMut) && self.expr(operand)
+            }
+            HirExprKind::Binary { lhs, rhs, .. } => self.expr(lhs) && self.expr(rhs),
+            HirExprKind::Cast { value, .. } => self.expr(value),
+            HirExprKind::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                self.expr(condition)
+                    && self.expr(then_branch)
+                    && else_branch.as_ref().is_none_or(|e| self.expr(e))
+            }
+            HirExprKind::Match { scrutinee, arms } => {
+                self.expr(scrutinee)
+                    && arms.iter().all(|arm| {
+                        arm.guard.as_ref().is_none_or(|g| self.expr(g)) && self.expr(&arm.body)
+                    })
+            }
+            HirExprKind::Block(block) => self.block(block),
+            HirExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                owner,
+            } => {
+                owner.is_none()
+                    && args.is_empty()
+                    && matches!(name.name.as_str(), "len" | "is_empty" | "abs")
+                    && self.expr(receiver)
+            }
+            _ => false,
+        }
+    }
+}
+
 pub(crate) fn collect_item(
     item: &HirItem,
     tcx: &mut TyCtxt,
@@ -1112,11 +1212,15 @@ pub(crate) fn collect_item(
     fn_ret_names: &HashMap<String, Ty>,
     fn_returns: &HashMap<gossamer_resolve::DefId, Ty>,
     fn_inputs: &HashMap<gossamer_resolve::DefId, Vec<Ty>>,
-    fn_param_shareable: &HashMap<gossamer_resolve::DefId, Vec<bool>>,
+    fn_param_shareable: &HashMap<
+        gossamer_resolve::DefId,
+        Vec<crate::lower::helpers::escape::ParamShare>,
+    >,
     consts: &HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: &HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: &HashMap<gossamer_resolve::DefId, HirExpr>,
     region_unsafe: &std::collections::HashSet<gossamer_resolve::DefId>,
+    effect_free_pair_keys: &HashMap<String, bool>,
     out: &mut Vec<Body>,
 ) {
     match &item.kind {
@@ -1158,6 +1262,7 @@ pub(crate) fn collect_item(
                 mut_statics,
                 const_inits,
                 region_unsafe,
+                effect_free_pair_keys,
             ) {
                 out.push(body);
                 maybe_push_handler_ok_wrap(&mangled, 1, tcx, item.span, out);
@@ -1208,6 +1313,7 @@ pub(crate) fn collect_item(
                     mut_statics,
                     const_inits,
                     region_unsafe,
+                    effect_free_pair_keys,
                 ) {
                     out.push(body);
                     if method.name.name == "serve" {
@@ -1238,6 +1344,7 @@ pub(crate) fn collect_item(
                         mut_statics,
                         const_inits,
                         region_unsafe,
+                        effect_free_pair_keys,
                     ) {
                         out.push(body);
                     }
@@ -1266,11 +1373,15 @@ pub(crate) fn lower_fn(
     fn_ret_names: &HashMap<String, Ty>,
     fn_returns: &HashMap<gossamer_resolve::DefId, Ty>,
     fn_inputs: &HashMap<gossamer_resolve::DefId, Vec<Ty>>,
-    fn_param_shareable: &HashMap<gossamer_resolve::DefId, Vec<bool>>,
+    fn_param_shareable: &HashMap<
+        gossamer_resolve::DefId,
+        Vec<crate::lower::helpers::escape::ParamShare>,
+    >,
     consts: &HashMap<gossamer_resolve::DefId, ConstValue>,
     mut_statics: &HashMap<gossamer_resolve::DefId, crate::ir::StaticRef>,
     const_inits: &HashMap<gossamer_resolve::DefId, HirExpr>,
     region_unsafe: &std::collections::HashSet<gossamer_resolve::DefId>,
+    effect_free_pair_keys: &HashMap<String, bool>,
 ) -> Option<Body> {
     let body = decl.body.as_ref()?;
     let mut builder = Builder::new(
@@ -1291,6 +1402,7 @@ pub(crate) fn lower_fn(
         mut_statics,
         const_inits,
         region_unsafe,
+        effect_free_pair_keys,
     );
     // A const generic array return (`-> [T; N]`) is carried as a runtime
     // GosVec exactly like the `[T; N]` parameter it is derived from, so the
@@ -1475,9 +1587,10 @@ pub(crate) fn lower_fn(
     Some(body)
 }
 
-/// Returns `Vec<T>` for a const generic array parameter `[T; N]`
-/// (peeling any leading reference), or `None` for every other type.
-/// The body then treats the parameter as a runtime-length sequence.
+/// Returns `[T]` for a const generic array `[T; N]` (peeling any leading
+/// reference), or `None` for every other type. The body holds it as a
+/// runtime-length sequence: a slice shares a `Vec`'s runtime object and
+/// ownership, and keeps the fixed array's `[..]` spelling on every tier.
 pub(crate) fn const_generic_array_as_vec(tcx: &mut TyCtxt, ty: Ty) -> Option<Ty> {
     use gossamer_types::{ArrayLen, TyKind};
     let mut peeled = ty;
@@ -1490,7 +1603,7 @@ pub(crate) fn const_generic_array_as_vec(tcx: &mut TyCtxt, ty: Ty) -> Option<Ty>
     } = tcx.kind_of(peeled)
     {
         let elem = *elem;
-        return Some(tcx.intern(TyKind::Vec(elem)));
+        return Some(tcx.intern(TyKind::Slice(elem)));
     }
     None
 }

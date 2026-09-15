@@ -169,7 +169,7 @@ impl<'a> Builder<'a> {
                     .iter()
                     .map(|a| match a {
                         GenericArg::Type(t) => GenericArg::Type(self.subst_params_with(*t, subst)),
-                        GenericArg::Const(c) => GenericArg::Const(*c),
+                        other @ (GenericArg::Const(_) | GenericArg::ConstParam(_)) => other.clone(),
                     })
                     .collect();
                 self.tcx.intern(TyKind::Adt {
@@ -910,6 +910,19 @@ impl<'a> Builder<'a> {
             ty
         };
         let callee_operand = match &callee.kind {
+            // `T::name(..)` names a trait function through a type parameter.
+            // Which impl it reaches depends on the instantiation, so the
+            // callee records the parameter's position and monomorphisation
+            // resolves it in each specialised copy.
+            HirExprKind::Path {
+                def: Some(def),
+                segments,
+            } if segments.len() == 2 && self.tcx.type_param_of_def(*def).is_some() => {
+                let name = self.tcx.type_param_of_def(*def).and_then(|param| {
+                    crate::monomorph::param_assoc_callee(self.tcx, param, &segments[1].name)
+                })?;
+                Operand::Const(ConstValue::Str(name))
+            }
             HirExprKind::Path { def: Some(def), .. }
                 if joined_path
                     .as_ref()
@@ -989,14 +1002,32 @@ impl<'a> Builder<'a> {
         // Which parameters the callee only reads, and lets nothing outlive
         // the call through. A callee that is not a resolved name states
         // nothing, so none of its parameters is assumed read-only.
+        // A generic callee's answer is read against this call's own type
+        // arguments.
         let callee_param_shareable: Option<Vec<bool>> = match &callee.kind {
-            HirExprKind::Path { def: Some(def), .. } => self.fn_param_shareable.get(def).cloned(),
+            HirExprKind::Path { def: Some(def), .. } => {
+                self.fn_param_shareable.get(def).map(|shares| {
+                    let type_args =
+                        crate::monomorph::subst_type_arguments(&self.substs_of(callee.ty));
+                    shares
+                        .iter()
+                        .map(|share| share.holds(self.tcx, &type_args))
+                        .collect()
+                })
+            }
             _ => None,
         };
         let callee_param_tys: Option<Vec<Ty>> = match &callee.kind {
             HirExprKind::Path { def: Some(def), .. } => self.fn_inputs.get(def).cloned(),
             _ => None,
         }
+        // A method reached through its type (`Type::method(value, ..)`) states
+        // its parameters, receiver first, under the name its body carries.
+        .or_else(|| {
+            joined_path
+                .as_ref()
+                .and_then(|name| self.impl_method_inputs.get(name).cloned())
+        })
         // A callee that is not a resolved name - a closure, an `Fn`
         // parameter, a local holding a function value - states its
         // parameters in its own type. Without them every per-argument
@@ -1095,6 +1126,10 @@ impl<'a> Builder<'a> {
                         // through the environment uses the instantiated
                         // signature, so the thunk has to as well.
                         let expected = self.instantiate_param_ty(callee.ty, expected);
+                        // A callee named without its instantiation (a method
+                        // reached through its type) is instantiated by the
+                        // argument itself.
+                        let expected = self.instantiate_param_ty_from_arg(expected, arg.ty);
                         self.coerce_to_fn_trait_if_needed(local, expected, span)
                     } else {
                         local
@@ -1292,7 +1327,35 @@ impl<'a> Builder<'a> {
                 ty
             }
         };
-        let dest = self.fresh(ty);
+        // A const generic function returns its `[T; N]` as the runtime-length
+        // sequence its body holds. The call site knows `N`, so the fixed
+        // array the caller's type names is rebuilt from that sequence.
+        let carrier_array = match (&callee.kind, self.tcx.kind_of(ty)) {
+            (
+                HirExprKind::Path { def: Some(def), .. },
+                TyKind::Array {
+                    elem,
+                    len: gossamer_types::ArrayLen::Concrete(len),
+                },
+            ) if self.fn_returns.get(def).is_some_and(|ret| {
+                matches!(self.tcx.kind_of(*ret), TyKind::Vec(_) | TyKind::Slice(_))
+            }) =>
+            {
+                Some((*elem, *len))
+            }
+            // An impl's function named by path answers the same carrier.
+            (HirExprKind::Path { .. }, _) => joined_path
+                .as_deref()
+                .and_then(|name| self.const_array_method_result(name, ty)),
+            _ => None,
+        };
+        let dest = match carrier_array {
+            Some((elem, _)) => {
+                let carrier_ty = self.tcx.intern(TyKind::Slice(elem));
+                self.fresh(carrier_ty)
+            }
+            None => self.fresh(ty),
+        };
         // Pre-register the destination's struct name so subsequent
         // `dest.field` projections resolve to a concrete struct
         // even when the type checker leaves the call's HIR type
@@ -1318,7 +1381,60 @@ impl<'a> Builder<'a> {
                 span,
             );
         }
+        if let Some((elem, len)) = carrier_array {
+            return self.array_from_const_generic_carrier(dest, elem, len, ty, callee);
+        }
         Some(dest)
+    }
+
+    /// The fixed `[elem; len]` array a const generic call answers, read out
+    /// of the runtime-length sequence the callee returned. Each element is
+    /// read the way an indexed read of that sequence is, so an element that
+    /// holds a reference count takes its share for the array.
+    pub(crate) fn array_from_const_generic_carrier(
+        &mut self,
+        carrier: Local,
+        elem: Ty,
+        len: usize,
+        ty: Ty,
+        call: &HirExpr,
+    ) -> Option<Local> {
+        let name = format!("__gos_const_array_{}", carrier.0);
+        self.bind_local(&name, carrier);
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let carrier_ty = self.locals[carrier.0 as usize].ty;
+        let (id, span) = (call.id, call.span);
+        let elements = (0..len)
+            .map(|index| HirExpr {
+                id,
+                span,
+                ty: elem,
+                kind: HirExprKind::Index {
+                    base: Box::new(HirExpr {
+                        id,
+                        span,
+                        ty: carrier_ty,
+                        kind: HirExprKind::Path {
+                            segments: vec![Ident::new(name.clone())],
+                            def: None,
+                        },
+                    }),
+                    index: Box::new(HirExpr {
+                        id,
+                        span,
+                        ty: i64_ty,
+                        kind: HirExprKind::Literal(HirLiteral::Int(index.to_string())),
+                    }),
+                },
+            })
+            .collect();
+        let array = HirExpr {
+            id,
+            span,
+            ty,
+            kind: HirExprKind::Array(gossamer_hir::HirArrayExpr::List(elements)),
+        };
+        self.lower_expr(&array)
     }
 
     /// For a `&mut <bare local>` argument of a writeback type (scalar /

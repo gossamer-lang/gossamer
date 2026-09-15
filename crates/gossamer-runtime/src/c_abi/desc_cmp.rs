@@ -83,6 +83,12 @@ unsafe fn desc_span_walk(tags: *const u8, cursor: &mut usize) -> usize {
             1
         }
         gossamer_abi::DESC_SELF => 1,
+        gossamer_abi::DESC_PACKED => {
+            let words = unsafe { *tags.add(*cursor) } as usize;
+            let leaves = unsafe { *tags.add(*cursor + 1) } as usize;
+            *cursor += 2 + leaves * 3;
+            words
+        }
         _ => 1,
     }
 }
@@ -110,6 +116,10 @@ pub(crate) unsafe fn skip_cmp_desc(tags: *const u8, cursor: &mut usize) {
             skip_cmp_desc(tags, cursor);
             skip_cmp_desc(tags, cursor);
         },
+        gossamer_abi::DESC_PACKED => {
+            let leaves = unsafe { *tags.add(*cursor + 1) } as usize;
+            *cursor += 2 + leaves * 3;
+        }
         gossamer_abi::DESC_ENUM => {
             *cursor += 1;
             let variants = unsafe { *tags.add(*cursor) } as usize;
@@ -138,6 +148,7 @@ const fn desc_tag_is_flat(tag: u8) -> bool {
             | gossamer_abi::DESC_ENUM
             | gossamer_abi::DESC_VEC
             | gossamer_abi::DESC_SELF
+            | gossamer_abi::DESC_PACKED
     )
 }
 
@@ -164,6 +175,63 @@ pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
             ord_code(unsafe { crate::c_abi::gos_rt_str_compare(sa, sb) }.cmp(&0))
         }
         _ => ord_code(wa.cmp(&wb)),
+    }
+}
+
+/// Orders two leaves of a packed struct, each stored as `kind` names.
+///
+/// # Safety
+/// `a` and `b` address a leaf of that kind's width.
+unsafe fn compare_packed_leaf(kind: u8, a: *const u8, b: *const u8) -> i64 {
+    use gossamer_abi::packed_leaf;
+    // SAFETY: the caller hands two addresses of a leaf of this kind's width.
+    unsafe {
+        match kind {
+            packed_leaf::I8 => ord_code(
+                a.cast::<i8>()
+                    .read_unaligned()
+                    .cmp(&b.cast::<i8>().read_unaligned()),
+            ),
+            packed_leaf::U8 | packed_leaf::BOOL => {
+                ord_code(a.read_unaligned().cmp(&b.read_unaligned()))
+            }
+            packed_leaf::I16 => ord_code(
+                a.cast::<i16>()
+                    .read_unaligned()
+                    .cmp(&b.cast::<i16>().read_unaligned()),
+            ),
+            packed_leaf::U16 => ord_code(
+                a.cast::<u16>()
+                    .read_unaligned()
+                    .cmp(&b.cast::<u16>().read_unaligned()),
+            ),
+            packed_leaf::I32 => ord_code(
+                a.cast::<i32>()
+                    .read_unaligned()
+                    .cmp(&b.cast::<i32>().read_unaligned()),
+            ),
+            packed_leaf::U32 | packed_leaf::CHAR => ord_code(
+                a.cast::<u32>()
+                    .read_unaligned()
+                    .cmp(&b.cast::<u32>().read_unaligned()),
+            ),
+            packed_leaf::U64 => ord_code(
+                a.cast::<u64>()
+                    .read_unaligned()
+                    .cmp(&b.cast::<u64>().read_unaligned()),
+            ),
+            packed_leaf::FLOAT => ord_code(
+                a.cast::<f64>()
+                    .read_unaligned()
+                    .partial_cmp(&b.cast::<f64>().read_unaligned())
+                    .unwrap_or(Ordering::Equal),
+            ),
+            _ => ord_code(
+                a.cast::<i64>()
+                    .read_unaligned()
+                    .cmp(&b.cast::<i64>().read_unaligned()),
+            ),
+        }
     }
 }
 
@@ -378,6 +446,25 @@ pub(crate) unsafe fn compare_desc(
                 }
             }
             result
+        }
+        gossamer_abi::DESC_PACKED => {
+            let leaves = unsafe { *tags.add(*cursor + 2) } as usize;
+            let first = *cursor + 3;
+            *cursor = first + leaves * 3;
+            let (base_a, base_b) = unsafe { inline_bases(a, b, storage) };
+            for leaf in 0..leaves {
+                let at = first + leaf * 3;
+                let offset = usize::from(u16::from_le_bytes([unsafe { *tags.add(at) }, unsafe {
+                    *tags.add(at + 1)
+                }]));
+                let kind = unsafe { *tags.add(at + 2) };
+                let ord =
+                    unsafe { compare_packed_leaf(kind, base_a.add(offset), base_b.add(offset)) };
+                if ord != 0 {
+                    return ord;
+                }
+            }
+            0
         }
         gossamer_abi::DESC_SELF => {
             *cursor += 1;
@@ -598,5 +685,26 @@ pub unsafe extern "C" fn gos_rt_desc_cmp(a: *const u8, b: *const u8, tags: *cons
         }
         let mut cursor = 0usize;
         unsafe { compare_desc(a, b, tags, &mut cursor, CmpStorage::Inline, None) }
+    })
+}
+
+/// Orders two sequences lexicographically, each element through
+/// `elem_tags`, answering `-1` / `0` / `1`. A null handle is an empty
+/// sequence.
+///
+/// # Safety
+/// `a` and `b` are null or `GosVec` handles whose elements `elem_tags`
+/// describes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_desc_cmp(
+    a: *const GosVec,
+    b: *const GosVec,
+    elem_tags: *const u8,
+) -> i64 {
+    ffi_entry!(0, {
+        if elem_tags.is_null() {
+            return 0;
+        }
+        unsafe { compare_vec(a, b, elem_tags, 0, None) }
     })
 }

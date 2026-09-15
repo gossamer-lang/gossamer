@@ -1,0 +1,226 @@
+// Structs whose fields are narrower than a word answer the values a program
+// stored through every read, write, copy, container, key, ordering, and
+// rendering, on every tier.
+
+use std::sync::channel
+
+struct Pixel {
+    r: u8
+    g: u8
+    b: u16
+    a: f32
+}
+
+struct Mixed {
+    flag: bool
+    small: i8
+    mid: i16
+    wide: i32
+    big: i64
+    ratio: f32
+    exact: f64
+    letter: char
+    count: u32
+}
+
+struct Framed {
+    tag: u8
+    pixel: Pixel
+    depth: u16
+}
+
+struct Wire {
+    flag: bool
+    small: i8
+    mid: i16
+    wide: i32
+    count: u32
+    ratio: f32
+}
+
+struct Borrowed {
+    small: u8
+    other: u16
+}
+
+fn pixel(i: i64) -> Pixel {
+    Pixel { r: (i % 256) as u8, g: (i * 7 % 256) as u8, b: (i * 131 % 65_536) as u16, a: (i % 10) as f32 / 3.0 }
+}
+
+fn mixed(i: i64) -> Mixed {
+    Mixed {
+        flag: i % 2 == 0
+        small: (i % 100 - 50) as i8
+        mid: (i * 37 % 60_000 - 30_000) as i16
+        wide: (i * 100_003 % 2_000_000_000 - 1_000_000_000) as i32
+        big: i * -987_654_321
+        ratio: i as f32 / 3.0
+        exact: i as f64 / 7.0
+        letter: if i % 3 == 0 { 'x' } else { 'é' }
+        count: (i * 2_654_435_761 % 4_294_967_296) as u32
+    }
+}
+
+fn update(mut p: Pixel) -> Pixel {
+    p.r = p.r +% 200
+    p.g -%= 9
+    p.b = p.b *% 3
+    p.a = p.a * 2.0
+    p
+}
+
+fn bump(v: &mut Mixed) {
+    v.small = v.small -% 100
+    v.count = v.count +% 4_000_000_000
+    v.flag = !v.flag
+    v.letter = 'z'
+    v.mid += 1
+}
+
+fn reframe(f: &mut Framed) {
+    f.pixel.g = f.depth as u8
+    f.depth = 65_535
+    f.tag = f.tag +% 1
+}
+
+fn poke(x: &mut u8) {
+    *x = *x +% 250
+}
+
+fn borrowed_field() -> String {
+    let mut b = Borrowed { small: 10, other: 65_000 }
+    poke(&mut b.small)
+    format("{} {}", b.small, b.other)
+}
+
+fn vec_ops() -> String {
+    let mut xs: Vec<Pixel> = #[]
+    for i in 0..40 {
+        xs.push(pixel(i * 13))
+    }
+    xs[3] = update(xs[3])
+    xs[5].b = 7
+    let total = xs.iter().map(|p| p.r as i64 + p.g as i64 + p.b as i64).sum()
+    let mut sorted = xs.clone()
+    sorted.sort()
+    let found = xs.contains(pixel(26))
+    let biggest = xs.iter().max_by_key(|p| p.b).unwrap_or(pixel(0))
+    let high = xs.iter().filter(|p| p.r > 128).count()
+    format("{} {:?} {:?} {} {:?} {}", total, sorted[0], sorted[39], found, biggest, high)
+}
+
+fn map_ops() -> String {
+    let mut by_id: Map<i64, Mixed> = Map::new()
+    let mut counts: Map<Pixel, i64> = Map::new()
+    let mut seen: Set<Pixel> = #{}
+    for i in 0..30 {
+        by_id.insert(i, mixed(i))
+        counts.inc(pixel(i % 7))
+        seen.insert(pixel(i % 5))
+    }
+    let m = by_id.get(17).unwrap_or(mixed(0))
+    let mut keys = counts.keys()
+    keys.sort()
+    format("{:?} {} {} {:?} {}", m, counts.get(pixel(3)).unwrap_or(0), seen.len(), keys[0], seen.contains(pixel(4)))
+}
+
+fn ordered_ops() -> String {
+    let mut tree: BTreeMap<Pixel, String> = BTreeMap::new()
+    let mut heap: MaxHeap<Pixel> = MaxHeap::new()
+    for i in 0..12 {
+        tree.insert(pixel(i * 29), format("v{i}"))
+        heap.push(pixel(i * 17))
+    }
+    let first = tree.keys()[0]
+    let top = heap.pop().unwrap_or(pixel(0))
+    format("{:?} {:?} {}", first, top, pixel(3) < pixel(4))
+}
+
+fn carrier_ops(i: i64) -> String {
+    let some = if i > 0 { Some(mixed(i)) } else { None }
+    let got = some.unwrap_or(mixed(99))
+    let res: Result<Framed, String> = Ok(Framed { tag: 7, pixel: pixel(i), depth: 300 })
+    let framed = match res {
+        Ok(f) => f
+        Err(_) => Framed { tag: 0, pixel: pixel(0), depth: 0 }
+    }
+    format("{:?} {:?}", got, framed)
+}
+
+fn aggregate_ops() -> String {
+    let mut row = [pixel(1), pixel(2), pixel(3)]
+    row[1].r = 99
+    let pair = (7 as u8, pixel(9), -3 as i16)
+    let mut frame = Framed { tag: 250, pixel: pixel(5), depth: 1234 }
+    reframe(&mut frame)
+    let mut m = mixed(11)
+    bump(&mut m)
+    format("{:?} {:?} {:?} {:?}", row, pair, frame, m)
+}
+
+fn closure_ops() -> String {
+    let base = pixel(77)
+    let shade = |k: u8| Pixel { r: base.r +% k, g: base.g, b: base.b, a: base.a }
+    let lighter = shade(100)
+    let mut all: Vec<Mixed> = #[]
+    let push_one = |i: i64| all.push(mixed(i))
+    push_one(3)
+    push_one(4)
+    format("{:?} {} {}", lighter, all.len(), all[1].wide)
+}
+
+fn largest<T: Ord>(xs: Vec<T>, fallback: T) -> T {
+    xs.iter().max().unwrap_or(fallback)
+}
+
+fn channel_ops() -> String {
+    let tx, rx = channel()
+    let mut got: Vec<Pixel> = #[]
+    let _ = cohort {
+        spawn(|| {
+            for i in 0..5 {
+                tx.send(pixel(i * 41))
+            }
+            tx.close()
+        })
+        while let Some(p) = rx.recv() {
+            got.push(p)
+        }
+    }
+    format("{:?}", got)
+}
+
+fn wire(i: i64) -> Wire {
+    let m = mixed(i)
+    Wire { flag: m.flag, small: m.small, mid: m.mid, wide: m.wide, count: m.count, ratio: m.ratio }
+}
+
+fn json_ops() -> String {
+    let w = wire(21)
+    let text = to_json::<Wire>(w).unwrap_or("ERR")
+    let back = from_json::<Wire>(text).unwrap_or(wire(0))
+    format("{} {}", text, back == w)
+}
+
+fn main() {
+    println("{}", borrowed_field())
+    println("{}", vec_ops())
+    println("{}", map_ops())
+    println("{}", ordered_ops())
+    println("{}", carrier_ops(5))
+    println("{}", carrier_ops(0))
+    println("{}", aggregate_ops())
+    println("{}", closure_ops())
+    println("{:?}", largest(#[pixel(4), pixel(250), pixel(90)], pixel(0)))
+    println("{}", channel_ops())
+    println("{}", json_ops())
+    let mut checksum = 0
+    for round in 0..300 {
+        let p = update(pixel(round))
+        let mut m = mixed(round)
+        bump(&mut m)
+        checksum += p.r as i64 + p.b as i64 + m.small as i64 + m.count as i64 + m.mid as i64
+    }
+    println("checksum {}", checksum)
+    println("{} {}", mixed(8), pixel(8) == pixel(8))
+}

@@ -1,0 +1,53 @@
+// A tuple holding integers narrower than a word renders them as the values
+// they hold, alone and inside a sequence, an option, a set, and a map.
+
+fn pair() -> (u8, i16) {
+    (200 as u8, -3 as i16)
+}
+
+fn rows() -> Vec<(u8, u16)> {
+    #[(1, 60_000), (255, 7)]
+}
+
+fn maybe(flag: bool) -> Option<(i8, u32)> {
+    if flag { Some((-5, 4_000_000_000)) } else { None }
+}
+
+fn small_set() -> Set<u8> {
+    #{ 3, 1, 2 }
+}
+
+fn small_map() -> Map<u8, i16> {
+    let mut m: Map<u8, i16> = Map::new()
+    m.insert(4, -9)
+    m.insert(250, 32_000)
+    m
+}
+
+fn ordered() -> BTreeSet<u16> {
+    #{ 9, 65_000, 1 }
+}
+
+fn nested() -> ((i8, u8), (i32, u32)) {
+    ((-128 as i8, 255 as u8), (-2_000_000_000, 3_000_000_000))
+}
+
+fn render(round: i64) -> String {
+    let wide = (round as u8, (round * 1000) as i16, round as u32)
+    format("{:?} {:?} {:?} {}", pair(), rows(), wide, 7 as u8)
+}
+
+fn main() {
+    println("{:?}", pair())
+    println("{:?}", rows())
+    println("{:?} {:?}", maybe(true), maybe(false))
+    println("{:?}", small_set())
+    println("{:?}", small_map())
+    println("{:?}", ordered())
+    println("{:?}", nested())
+    let mut last = ""
+    for round in 0..40 {
+        last = render(round * 97)
+    }
+    println("{} {:?}", last, maybe(false))
+}

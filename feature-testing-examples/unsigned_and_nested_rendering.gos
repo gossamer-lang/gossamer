@@ -1,0 +1,134 @@
+// Unsigned 64-bit integers order and render as unsigned wherever they sit, and
+// a Vec renders as `#[..]` at every depth. Covers sort, binary search, `<`,
+// and min/max/clamp over u64 scalars, tuples, nested Vecs, fixed arrays, and
+// Option payloads; u64 values inside nested Vecs, tuples, structs, Options,
+// Map values, and a Deque; prelude `min(xs)` / `max(xs)` over Vec elements;
+// Vec elements of a Set and BTreeSet and Vec keys of a Map; u64 elements and
+// keys of a BTreeSet and a BTreeMap, rendered and walked in unsigned order;
+// Option and Result ordering; and a Vec or a u64 reached through a type
+// parameter - a generic struct field rendered by its derived Debug, a generic
+// function's format site, a Map value, a Vec element, and an Option payload.
+use std::{iter, sort}
+use std::collections::Deque
+
+struct Account { id: u64, history: Vec<u64> }
+
+#[derive(Debug)]
+struct Wrap<T> { value: T, tag: i64 }
+
+fn show<T>(v: T) -> String { format("{:?}", v) }
+
+fn main() {
+    let big: u64 = 18446744073709551615
+    let mid: u64 = 9223372036854775808
+    let one: u64 = 1
+
+    let mut words = #[big, one, mid]
+    words.sort()
+    println("sort {:?}", words)
+    let mut cast = #[18446744073709551615 as u64, 1 as u64]
+    cast.sort()
+    println("cast sort {:?}", cast)
+    println("binary_search {:?} {:?}", words.binary_search(big), words.binary_search(5 as u64))
+    println("sort::binary_search {:?} partition_point {}", sort::binary_search(words, mid), sort::partition_point(words, mid))
+    println("sort_stable {:?}", sort::sort_stable(#[big, one]))
+
+    let mut pairs = #[(big, 1), (one, 2), (mid, 3)]
+    pairs.sort()
+    println("pairs {:?}", pairs)
+
+    let mut nested = #[#[big], #[one], #[mid, one]]
+    nested.sort()
+    println("nested {:?}", nested)
+
+    let mut fixed = [big, one, mid]
+    fixed.sort()
+    println("fixed {:?}", fixed)
+
+    let mut optional = #[Some(big), None, Some(one)]
+    optional.sort()
+    println("optional {:?}", optional)
+
+    let mut keyed = #[("x", big), ("y", one)]
+    keyed.sort_by_key(|p| p.1)
+    println("sort_by_key {:?}", keyed)
+
+    println("lt tuple {} vec {} scalar {}", (one, 0) < (big, 0), #[one] < #[big], one < big)
+    println("min {:?} max {:?}", min(words), max(words))
+    println("iter::min {:?} iter::max {:?}", iter::min(words), iter::max(words))
+    println("method min {:?} max {:?}", words.min(), words.max())
+    println("lazy min {:?} max {:?}", words.iter().min(), words.iter().max())
+    println("scalar min {} max {} clamp {} {}", min(big, one), max(big, one), one.clamp(one, big), clamp(big, one, mid))
+
+    let grid: Vec<Vec<u64>> = #[#[1], #[big]]
+    println("grid {:?}", grid)
+    let square = [[big, one], [one, big]]
+    println("square {:?}", square)
+    let tagged = #[(big, #[big])]
+    println("tagged {:?}", tagged)
+    let account = Account { id: big, history: #[mid, big] }
+    println("account {} {:?}", account.id, account.history)
+    let maybe: Option<Vec<u64>> = Some(#[big])
+    println("maybe {:?}", maybe)
+    let ledger: Map<String, Vec<u64>> = { "k": #[big] }
+    println("ledger {:?}", ledger)
+    let mut queue: Deque<u64> = Deque::new()
+    queue.push_back(big)
+    println("queue {:?}", queue)
+    let mut counts = Map::new()
+    counts.insert(5 as u64, 1)
+    counts.insert(6 as u64, 2)
+    println("counts {} {:?}", counts.len(), counts.get(6 as u64))
+
+    let rows = #[#[3, 1], #[2]]
+    let lowest = min(rows)
+    println("prelude min {:?} max {:?}", lowest, max(rows))
+    println("prelude min display {}", min(rows).unwrap())
+
+    let mut ordered: BTreeSet<Vec<i64>> = BTreeSet::new()
+    ordered.insert(#[3])
+    ordered.insert(#[1, 2])
+    ordered.insert(#[1])
+    println("btreeset {:?}", ordered)
+    let mut plain: Set<Vec<i64>> = Set::new()
+    plain.insert(#[4, 5])
+    println("set {:?}", plain)
+    let mut by_path = Map::new()
+    by_path.insert(#[1, 2], 3)
+    println("vec keys {:?} {:?}", by_path, by_path.keys())
+
+    let mut sorted_words: BTreeSet<u64> = BTreeSet::new()
+    sorted_words.insert(big)
+    sorted_words.insert(one)
+    sorted_words.insert(mid)
+    println("btreeset u64 {:?} nested {:?} to_vec {:?}", sorted_words, (sorted_words, 1), sorted_words.to_vec())
+    for word in sorted_words {
+        println("btreeset walk {}", word)
+    }
+    let mut by_word: BTreeMap<u64, i64> = BTreeMap::new()
+    by_word.insert(big, 1)
+    by_word.insert(one, 2)
+    by_word.insert(mid, 3)
+    println("btreemap u64 {:?} nested {:?}", by_word, Some(by_word))
+    println("btreemap keys {:?} values {:?}", by_word.keys(), by_word.values())
+    for (word, count) in by_word {
+        println("btreemap walk {} {}", word, count)
+    }
+
+    let present: Option<i64> = Some(5)
+    let absent: Option<i64> = None
+    let done: Result<i64, String> = Ok(3)
+    let failed: Result<i64, String> = Err("x")
+    println("carriers {} {} {} {} {}", present > Some(1), absent > present, Some(big) > Some(one), done < failed, failed > done)
+
+    let wrapped = Wrap { value: #[1, 2], tag: 7 }
+    println("generic field {:?}", wrapped)
+    let items = #[3, 4]
+    println("generic arg {:?} {}", Wrap { value: items, tag: 8 }, show(#[5, 6]))
+    println("generic array {} unsigned {} {:?}", show([7, 8]), show(big), Wrap { value: big, tag: 1 })
+    let mut boxes = Map::new()
+    boxes.insert("k", Wrap { value: #[1, 2], tag: 7 })
+    println("generic map value {:?}", boxes)
+    let listed = #[Wrap { value: #[3], tag: 1 }]
+    println("generic vec element {:?} option payload {:?}", listed, Some(Wrap { value: #[4], tag: 2 }))
+}

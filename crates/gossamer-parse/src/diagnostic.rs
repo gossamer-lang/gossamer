@@ -144,6 +144,18 @@ pub enum ParseError {
     /// A build-time validated call handed something other than a literal.
     #[error("`sql::statement` takes a literal")]
     ValidatedCallNeedsLiteral,
+    /// A literal handed to `regex::compile` is not a pattern it compiles.
+    #[error("invalid regex: {reason}")]
+    InvalidRegexLiteral {
+        /// The regex engine's reason.
+        reason: String,
+    },
+    /// A literal handed to `sql::statement` is not a well-formed statement.
+    #[error("invalid SQL statement: {reason}")]
+    InvalidSqlStatement {
+        /// What is wrong with the statement.
+        reason: String,
+    },
     /// An `enum Name : R` named something that is not an unsigned width.
     #[error("an enum representation is an unsigned width, not `{written}`")]
     EnumReprWidth {
@@ -751,6 +763,25 @@ impl ParseError {
                     "the statement is checked while the program is compiled, so it has to \
                      be there to check; a statement built at run time is an ordinary \
                      `String` and needs no wrapper"
+                        .to_string(),
+                ),
+            ),
+            ParseError::InvalidRegexLiteral { reason } => (
+                "GP0057",
+                format!("invalid regex: {reason}"),
+                Some(
+                    "a literal pattern is compiled while the program is parsed, with the \
+                     engine `regex::compile` uses at run time, so a pattern that would \
+                     answer `Err` there is reported here"
+                        .to_string(),
+                ),
+            ),
+            ParseError::InvalidSqlStatement { reason } => (
+                "GP0058",
+                format!("invalid SQL statement: {reason}"),
+                Some(
+                    "a statement is checked while the program is parsed: it must not be \
+                     empty and its parentheses must balance"
                         .to_string(),
                 ),
             ),

@@ -364,6 +364,7 @@ pub fn compile_fn(
     mut_statics: &MutStatics,
     source_map: Option<&gossamer_lex::SourceMap>,
     cov: Option<&gossamer_lex::SourceMap>,
+    dispatch: Option<(&ParamDispatch, &str)>,
 ) -> RuntimeResult<FnChunk> {
     let name = crate::value::intern_type_name(&decl.name.name);
     let Some(body) = decl.body.as_ref() else {
@@ -375,6 +376,7 @@ pub fn compile_fn(
             int_count: 0,
             instrs: Vec::new(),
             instruction_locations: Vec::new(),
+            inline_sites: &[],
             consts: Vec::new(),
             f64_consts: Vec::new(),
             i64_consts: Vec::new(),
@@ -405,6 +407,10 @@ pub fn compile_fn(
         source_map,
         cov,
     );
+    if let Some((table, key)) = dispatch {
+        builder.dispatch = Some(table);
+        builder.dispatch_key = key;
+    }
     builder.consumable = consume::consumable_locals(decl);
     let (captured_locals, mutated_locals) =
         consume::closure_captured_locals(&decl.params, &body.block);
@@ -563,6 +569,11 @@ pub(crate) enum BlockResult {
 pub(crate) struct FnBuilder<'tcx> {
     pub(crate) name: &'static str,
     pub(crate) tcx: &'tcx TyCtxt,
+    /// Per-instantiation dispatch targets, and the key this chunk reads them
+    /// under: empty for a chunk compiled once, the instance's global name for
+    /// a chunk compiled per instantiation. See [`ParamDispatch`].
+    pub(crate) dispatch: Option<&'tcx ParamDispatch>,
+    pub(crate) dispatch_key: &'tcx str,
     pub(crate) layouts: &'tcx StructLayouts,
     pub(crate) wrappers: &'tcx InlinableWrappers,
     /// User functions eligible for call-site inlining (see
@@ -734,7 +745,11 @@ pub(crate) struct FnBuilder<'tcx> {
     pub(crate) cov: Option<&'tcx gossamer_lex::SourceMap>,
     /// Source position for each emitted instruction while the chunk is being
     /// built. [`Self::finish`](FnBuilder::finish) run-length encodes it.
-    pub(crate) instruction_locations: Vec<Option<crate::bytecode::SourceLocation>>,
+    pub(crate) instruction_locations: Vec<InstrSource>,
+    /// Every call inlined into this builder so far.
+    pub(crate) inline_sites: Vec<crate::bytecode::InlineSite>,
+    /// The inlined call whose body is being compiled, if any.
+    pub(crate) current_inline_site: Option<u32>,
     /// Local names this function may consume (move) at their single
     /// use - see [`consume::consumable_locals`]. Read at the
     /// consuming sites to emit `*Consume` ops in place of the cloning
@@ -742,6 +757,28 @@ pub(crate) struct FnBuilder<'tcx> {
     /// closure-body sub-builders and during call inlining, so those
     /// contexts never consume.
     pub(crate) consumable: std::collections::HashSet<String>,
+}
+
+/// Where `span` starts in the source a traceback names.
+pub(crate) fn resolve_source_location(
+    map: &gossamer_lex::SourceMap,
+    span: gossamer_lex::Span,
+) -> crate::bytecode::SourceLocation {
+    // A position in an assembled unit names the file its bytes came from.
+    let (file, offset) = map.origin_of(span.file, span.start);
+    let line_col = map.line_col(file, offset);
+    crate::bytecode::SourceLocation {
+        file: crate::value::intern_type_name(map.file_name(file)),
+        line: line_col.line,
+        column: line_col.column,
+    }
+}
+
+/// Where one instruction under construction came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct InstrSource {
+    pub(crate) location: Option<crate::bytecode::SourceLocation>,
+    pub(crate) inline_site: Option<u32>,
 }
 
 #[derive(Debug, Default)]
@@ -798,6 +835,8 @@ pub(crate) enum ConstKey {
 mod block;
 mod call_expr;
 mod closure;
+mod param_dispatch;
+pub(crate) use param_dispatch::{Callable, ParamDispatch, mentions_param};
 mod compile_expr;
 mod consume;
 mod control_flow;

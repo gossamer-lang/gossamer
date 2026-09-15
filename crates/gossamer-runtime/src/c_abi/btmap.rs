@@ -259,6 +259,8 @@ pub unsafe extern "C" fn gos_rt_vec_format_map(v: *const GosVec, bare: i32) -> *
                 unsafe { crate::c_abi::gos_rt_map_format(std::ptr::with_exposed_provenance(word)) };
             if !rendered.is_null() {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                // The formatter answered a fresh rendering whose bytes are now copied.
+                unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         out.push(']');
@@ -369,6 +371,8 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_i64(v: *const GosVec, bare: i32) 
                     out.push_str("#[]");
                 } else {
                     out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                    // The formatter answered a fresh rendering whose bytes are now copied.
+                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
                 }
             }
         }
@@ -405,6 +409,8 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_f64(v: *const GosVec, bare: i32) 
                     out.push_str("#[]");
                 } else {
                     out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                    // The formatter answered a fresh rendering whose bytes are now copied.
+                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
                 }
             }
         }
@@ -442,6 +448,8 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_string(v: *const GosVec, bare: i3
                     out.push_str("#[]");
                 } else {
                     out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
+                    // The formatter answered a fresh rendering whose bytes are now copied.
+                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
                 }
             }
         }

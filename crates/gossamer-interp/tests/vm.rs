@@ -72,7 +72,7 @@ fn main() {
     let mut i: i64 = 0
     let mut checksum: i64 = 0
     while i < text.len() {
-        checksum = checksum.wrapping_add(text.byte_at(i))
+        checksum = checksum +% text.byte_at(i)
         i += 1
     }
     println("{} {} {}", text.byte_at(-1), checksum, text.byte_at(text.len()))

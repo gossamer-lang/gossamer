@@ -3,7 +3,8 @@
 // payloads that carry structs. map/and_then/filter/or/or_else/
 // unwrap_or/unwrap_or_else/zip/flatten/is_some/is_none and result
 // map/map_err/and_then/or_else/unwrap_or/unwrap_or_else/ok/err/is_ok/
-// is_err. Bit-identical VM vs compiled.
+// is_err, with float payloads falling back to the value written.
+// Bit-identical VM vs compiled.
 
 use std::option
 use std::result
@@ -65,6 +66,11 @@ fn main() {
         ok |> result::ok |> option::is_some, bad |> result::err |> option::is_some)
     bad |> |v| result::map_err(v, |e: errors::Error| errors::wrap(e, "ctx"))
         |> |v| result::unwrap_or_else(v, |e: errors::Error| println("r unwrap_or_else {}", e))
+
+    // ---- Float payloads fall back to the value written ----
+    let fbad: Result<f64, errors::Error> = Err(errors::new("nan"))
+    let fnone: Option<f64> = None
+    println("f unwrap_or {} {} {}", fbad.unwrap_or(0.25), fnone.unwrap_or(1.75), fbad |> |v| result::unwrap_or(v, 2.5))
 
     // ---- Result, struct payloads ----
     let rsp: Result<Point, errors::Error> = Ok(Point { x: 5, y: 6 })

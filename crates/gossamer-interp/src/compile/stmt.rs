@@ -11,8 +11,9 @@ impl<'tcx> FnBuilder<'tcx> {
         let Some(map) = self.cov else {
             return;
         };
-        let line = map.line_col(span.file, span.start).line;
-        let file = map.file_name(span.file);
+        let (origin, offset) = map.origin_of(span.file, span.start);
+        let line = map.line_col(origin, offset).line;
+        let file = map.file_name(origin);
         let slot = gossamer_runtime::coverage::register(file, line, 0);
         let slot = u32::try_from(slot).unwrap_or(u32::MAX);
         self.emit(Op::CovHit { slot });
@@ -207,6 +208,11 @@ impl<'tcx> FnBuilder<'tcx> {
                         };
                         self.record_flag_init(init, typed.reg);
                         self.record_vec_init(init, typed.reg);
+                        // The tag says what this binding holds. A register a
+                        // scope gave back is bound again by the next local, so
+                        // a binding that is not iterator state clears it: a
+                        // loop over a stale tag drives a sequence through a
+                        // `next()` it does not answer.
                         if matches!(
                             self.tcx.kind(self.unwrap_ref(pattern.ty)),
                             Some(TyKind::Iterator(_))
@@ -215,6 +221,8 @@ impl<'tcx> FnBuilder<'tcx> {
                             Some(TyKind::Iterator(_))
                         ) {
                             self.lazy_iterator_locals.insert(typed.reg);
+                        } else {
+                            self.lazy_iterator_locals.remove(&typed.reg);
                         }
                         self.record_uint_display_init(init, typed.reg);
                         self.bind_local(&name.name, typed);

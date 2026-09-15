@@ -1,0 +1,47 @@
+// `Simd<T, N>` lane vectors compute the same bits on every tier: float lanes
+// follow IEEE arithmetic with no contraction, integer lanes wrap, shift counts
+// wrap at the lane width, `min` / `max` propagate NaN and order `-0.0` below
+// `+0.0`, and a float reduction adds in a fixed balanced tree.
+
+fn dot(a: Simd<f64, 4>, b: Simd<f64, 4>) -> f64 {
+    (a * b).reduce_sum()
+}
+
+fn main() {
+    let a = Simd::from_array([1.5, 2.25, -3.0, 4.0])
+    let b: Simd<f64, 4> = Simd::splat(0.5)
+    println("{:?}", a + b)
+    println("{:?} {:?}", a * b, a / b)
+    println("{:?}", -a)
+    println("dot {} sum {}", dot(a, b), a.reduce_sum())
+    println("min {:?} max {:?}", a.min(b), a.max(b))
+    println("abs {:?} sqrt {:?}", a.abs(), b.sqrt())
+    println("lanes {} {}", a[0], a[3])
+
+    let nan = 0.0 / 0.0
+    let z = Simd::from_array([nan, -0.0, 0.0, 1.0])
+    let w = Simd::from_array([1.0, 0.0, -0.0, nan])
+    println("nan {:?} {:?}", z.min(w), z.max(w))
+
+    let i = Simd::from_array([2147483647, -2147483648, 7, -9])
+    let one: Simd<i64, 4> = Simd::splat(1)
+    let big: Simd<i32, 4> = Simd::from_array([2147483647, 1, -2, 3])
+    println("wrap {:?} {:?}", i + one, big * big)
+    let literal = Simd::from_array([1, 2, 3, 4]) +% Simd::from_array([9_223_372_036_854_775_807, 0, 0, -5])
+    println("literal lanes {:?}", literal)
+
+    let bytes: Simd<u8, 8> = Simd::from_array([250, 1, 2, 3, 4, 5, 6, 7])
+    let seven: Simd<u8, 8> = Simd::splat(7)
+    let nine: Simd<u8, 8> = Simd::splat(9)
+    println("bytes {:?} {:?}", bytes + seven, bytes << nine)
+    println("bits {:?} {:?}", bytes & seven, bytes ^ nine)
+
+    let mask = a.lanes_lt(b)
+    println("mask {:?} {:?}", mask, mask.select(a, b))
+    println("reduce {} {} {}", a.reduce_min(), a.reduce_max(), bytes.reduce_sum())
+
+    let wide: Simd<f32, 8> = Simd::from_array([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8])
+    println("f32 {}", wide.reduce_sum())
+    println("eq {} {}", a == a, a == b)
+    println("array {:?}", a.to_array())
+}

@@ -416,6 +416,16 @@ pub unsafe extern "C" fn gos_rt_json_value_array_owned(vec: *mut GosVec) -> *mut
 /// consumes. The name slots are borrowed C strings; only the values move.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_object_owned(vec: *mut GosVec) -> *mut GosJson {
+    unsafe { gos_rt_json_value_object_owned_keyed(vec, 0) }
+}
+
+/// [`gos_rt_json_value_object_owned`] over pairs whose key words are of the
+/// kind [`object_member_name`] names.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_value_object_owned_keyed(
+    vec: *mut GosVec,
+    key_kind: i64,
+) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
         let mut out = serde_json::Map::new();
         if !vec.is_null() {
@@ -434,13 +444,8 @@ pub unsafe extern "C" fn gos_rt_json_value_object_owned(vec: *mut GosVec) -> *mu
                     std::slice::from_raw_parts(header.ptr.cast::<[i64; 2]>(), tuple_count)
                 };
                 for pair in pairs {
-                    let key_ptr = pair[0] as *const c_char;
                     let val_ptr = pair[1] as *mut GosJson;
-                    let key = if key_ptr.is_null() {
-                        String::new()
-                    } else {
-                        unsafe { crate::c_abi::gos_str_arg_string(key_ptr) }
-                    };
+                    let key = unsafe { object_member_name(pair[0], key_kind) };
                     out.insert(key, unsafe { take_json_value(val_ptr) });
                 }
             }
@@ -1000,6 +1005,26 @@ pub unsafe extern "C" fn gos_rt_json_as_i64_opt(j: *const GosJson) -> i128 {
     })
 }
 
+/// `json::as_u64(value) -> Option<u64>`: the integer when it is non-negative
+/// and fits a `u64`, the payload word holding its bits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
+    ffi_entry!(0i128, {
+        let n = match unsafe { json_borrow(j) } {
+            Some(serde_json::Value::Number(n)) => n.as_u64().or_else(|| {
+                n.as_f64()
+                    .filter(|f| f.fract() == 0.0 && *f >= 0.0 && *f <= u64::MAX as f64)
+                    .map(|f| f as u64)
+            }),
+            _ => None,
+        };
+        match n {
+            Some(n) => unsafe { gos_rt_result_new(0, n as i64) },
+            None => unsafe { gos_rt_result_new(1, 0) },
+        }
+    })
+}
+
 /// `value.as_f64() -> Option<f64>` - `Some` for any JSON number,
 /// `None` otherwise.
 #[unsafe(no_mangle)]
@@ -1192,6 +1217,15 @@ pub unsafe extern "C" fn gos_rt_json_value_int(n: i64) -> *mut GosJson {
     })
 }
 
+/// `json::Value` integer constructor for a word declared `u64` / `usize`,
+/// which reads as unsigned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_value_uint(n: i64) -> *mut GosJson {
+    ffi_entry!(std::ptr::null_mut(), {
+        GosJson::into_raw(serde_json::Value::Number((n as u64).into()))
+    })
+}
+
 /// `json::Value::Bool(b)` constructor.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_bool(b: i32) -> *mut GosJson {
@@ -1252,7 +1286,7 @@ pub unsafe extern "C" fn gos_rt_json_value_array(vec: *const GosVec) -> *mut Gos
 /// Builds a `json::Value::Array` from a Gossamer `Vec` of scalar
 /// elements. `kind` selects how each 8-byte slot is read:
 /// 0 = i64, 1 = f64 (bit pattern), 2 = String (`*const c_char`),
-/// 3 = bool. Used by `json::encode([…])` on a scalar array, where
+/// 3 = bool, 4 = an integer declared `u64` / `usize`. Used by `json::encode([…])` on a scalar array, where
 /// the MIR has a typed scalar `*GosVec` rather than a Vec of
 /// pre-boxed `*GosJson` pointers (the shape `gos_rt_json_value_array`
 /// expects).
@@ -1284,6 +1318,7 @@ pub unsafe extern "C" fn gos_rt_json_array_from_scalar_vec(
                             }
                         }
                         3 => serde_json::Value::Bool(w != 0),
+                        4 => serde_json::Value::Number((w as u64).into()),
                         _ => serde_json::Value::Number(w.into()),
                     };
                     out.push(v);
@@ -1336,6 +1371,42 @@ pub unsafe extern "C" fn gos_rt_json_value_object_n(n: i64, pairs: *const i64) -
 /// for the array-literal-of-pairs shape.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_object(vec: *const GosVec) -> *mut GosJson {
+    unsafe { gos_rt_json_value_object_keyed(vec, 0) }
+}
+
+/// Spells a builder pair's key word as an object member name, the way a map
+/// of that key type renders its keys: `0` a borrowed C string, `1` an `i64`,
+/// `2` a word declared `u64` / `usize`, `3` a `bool`, `4` a `char`.
+///
+/// # Safety
+/// For kind `0`, `word` must be null or a live NUL-terminated string.
+unsafe fn object_member_name(word: i64, key_kind: i64) -> String {
+    match key_kind {
+        1 => word.to_string(),
+        2 => (word as u64).to_string(),
+        3 => (word != 0).to_string(),
+        4 => u32::try_from(word)
+            .ok()
+            .and_then(char::from_u32)
+            .map_or_else(String::new, String::from),
+        _ => {
+            let key_ptr = word as *const c_char;
+            if key_ptr.is_null() {
+                String::new()
+            } else {
+                unsafe { crate::c_abi::gos_str_arg_string(key_ptr) }
+            }
+        }
+    }
+}
+
+/// [`gos_rt_json_value_object`] over pairs whose key words are of the kind
+/// [`object_member_name`] names.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_value_object_keyed(
+    vec: *const GosVec,
+    key_kind: i64,
+) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
         let mut out = serde_json::Map::new();
         if !vec.is_null() {
@@ -1368,13 +1439,8 @@ pub unsafe extern "C" fn gos_rt_json_value_object(vec: *const GosVec) -> *mut Go
                     std::slice::from_raw_parts(header.ptr.cast::<[i64; 2]>(), tuple_count)
                 };
                 for pair in pairs {
-                    let key_ptr = pair[0] as *const c_char;
                     let val_ptr = pair[1] as *mut GosJson;
-                    let key = if key_ptr.is_null() {
-                        String::new()
-                    } else {
-                        unsafe { crate::c_abi::gos_str_arg_string(key_ptr) }
-                    };
+                    let key = unsafe { object_member_name(pair[0], key_kind) };
                     let v = if let Some(v) = unsafe { json_borrow(val_ptr) } {
                         v.clone()
                     } else {
@@ -1601,6 +1667,17 @@ pub unsafe extern "C" fn gos_rt_json_writer_i64(w: *mut JsonTokenWriter, n: i64)
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             let _ = serde_json::to_writer(&mut writer.sink, &n);
+        }
+    });
+}
+
+/// Writes an integer declared `u64` / `usize`, whose word reads as unsigned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_u64(w: *mut JsonTokenWriter, n: i64) {
+    ffi_entry!((), {
+        if let Some(writer) = unsafe { token_writer(w) } {
+            writer.begin_value();
+            let _ = serde_json::to_writer(&mut writer.sink, &(n as u64));
         }
     });
 }

@@ -2570,6 +2570,7 @@ mod tests {
             int_count: 1,
             instrs: Vec::new(),
             instruction_locations: Vec::new(),
+            inline_sites: &[],
             wide_ops: Vec::new(),
             consts: vec![Value::Int(0)],
             f64_consts: vec![0.0],

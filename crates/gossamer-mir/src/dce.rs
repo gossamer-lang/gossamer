@@ -168,7 +168,10 @@ fn reachable(bodies: &[Body], roots: &[String], scope: Scope) -> HashSet<String>
 /// way. There is no edge to follow, and pruning one turns a rendering
 /// the program does perform into a build failure.
 fn is_rendering(name: &str) -> bool {
-    name.ends_with("::fmt") || name.ends_with("::to_string")
+    // A formatter reaches an instantiation of a rendering method by the name
+    // monomorphisation gave it, so the instantiation is a root as well.
+    let base = name.split("$mono$").next().unwrap_or(name);
+    base.ends_with("::fmt") || base.ends_with("::to_string")
 }
 
 /// Calls `f` on every operand `body` names.
@@ -252,9 +255,12 @@ mod tests {
                         rvalue: Rvalue::Use(Operand::Const(ConstValue::Str((*callee).to_string()))),
                     },
                     span: gossamer_lex::Span::default(),
+                    inlined: None,
                 })
                 .collect(),
             terminator: Terminator::Return,
+            terminator_span: None,
+            terminator_inlined: None,
         }];
         Body {
             name: name.to_string(),

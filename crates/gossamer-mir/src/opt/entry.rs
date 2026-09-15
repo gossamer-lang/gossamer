@@ -91,6 +91,8 @@ fn optimise_with_bounds_limit(
     crate::verify::debug_verify_body(body);
     copy_propagate(body, tcx);
     crate::verify::debug_verify_body(body);
+    unbox_local_carriers(body, tcx);
+    crate::verify::debug_verify_body(body);
     scalar_replace_short_lived_aggregates(body);
     crate::verify::debug_verify_body(body);
     const_branch_elim(body);

@@ -26,6 +26,16 @@ fn is_prelude_binding(b: &Binding) -> bool {
     )
 }
 
+/// `true` for the primitive type names that are not part of the language's
+/// written type vocabulary (`Unit`, `Never`): a program's own item of that
+/// name takes the slot, the way it takes a prelude name's.
+fn is_shadowable_primitive(b: &Binding) -> bool {
+    matches!(
+        b.resolution,
+        Resolution::Primitive(PrimitiveTy::Unit | PrimitiveTy::Never)
+    )
+}
+
 /// `true` when `b` came from a `use`. A definition collected afterwards
 /// takes the slot: the import names that very item, so the definition is
 /// what the name should resolve to.
@@ -85,7 +95,10 @@ impl Scope {
     /// (e.g. `fn clamp(...)` overriding the new prelude `clamp`).
     pub(crate) fn insert_type(&mut self, name: &str, binding: Binding) -> bool {
         if let Some(existing) = self.types.get(name) {
-            if !is_prelude_binding(existing) && !is_import_binding(existing) {
+            if !is_prelude_binding(existing)
+                && !is_import_binding(existing)
+                && !is_shadowable_primitive(existing)
+            {
                 return false;
             }
         }
@@ -235,6 +248,8 @@ pub(crate) const PRELUDE_TYPES: &[&str] = &[
     // with `DynValue::int(..)` and reads it back by kind and arm name - so
     // the prelude is where its name lives.
     "DynValue",
+    // Fixed-width lane vectors and their `bool` masks, typed by the checker.
+    "Simd", "Mask",
 ];
 
 const PRELUDE_VALUES: &[&str] = &[
@@ -299,6 +314,11 @@ const PRELUDE_VALUES: &[&str] = &[
     "__gos_pem_encode_raw",
     "__gos_x509_parse_pem_raw",
     "__gos_fs_metadata_raw",
+    "__gos_fs_read_dir_raw",
+    "__gos_fs_walk_dir_raw",
+    "__gos_process_run_raw",
+    "__gos_process_run_in_raw",
+    "__gos_process_pipeline_run_raw",
     "__gos_time_location_raw",
     "__gos_time_fixed_location_raw",
     "__gos_time_civil_raw",

@@ -1,0 +1,135 @@
+// A `for` loop over a lazy adapter chain pulls one element per turn: each
+// adapter's callback runs just before the body that receives its element, and
+// a `break` stops the pulling. Covers map, take, filter, enumerate, an open
+// range, break, skip, step_by, zip, chain, rev, continue, nested loops, chains
+// yielding String, f64, and a struct, and a chain over a Map iterator.
+
+struct Point {
+    x: i64
+    y: i64
+}
+
+fn noisy(x: i64) -> i64 {
+    println("map {}", x)
+    x * 10
+}
+
+fn main() {
+    let xs = #[1, 2, 3, 4]
+    for v in xs.iter().map(noisy).take(2) {
+        println("body {}", v)
+    }
+    println("--bound")
+    let it = xs.iter().map(noisy).take(2)
+    for v in it {
+        println("body {}", v)
+    }
+    println("--filter")
+    for v in xs.iter().filter(|x| {
+        println("test {}", x)
+        x % 2 == 0
+    }) {
+        println("body {}", v)
+    }
+    println("--enumerate")
+    for (i, v) in xs.iter().map(noisy).enumerate() {
+        println("body {} {}", i, v)
+        if i == 1 {
+            break
+        }
+    }
+    println("--infinite")
+    for v in (1..).map(noisy).take(2) {
+        println("body {}", v)
+    }
+    println("--break")
+    for v in xs.iter().map(noisy) {
+        println("body {}", v)
+        if v == 20 {
+            break
+        }
+    }
+    println("--skip")
+    for v in xs.iter().map(noisy).skip(2) {
+        println("body {}", v)
+    }
+    println("--step_by")
+    for v in xs.iter().map(noisy).step_by(2) {
+        println("body {}", v)
+    }
+    println("--zip")
+    let ys = #[5, 6, 7]
+    for (a, b) in xs.iter().map(noisy).zip(ys.iter()) {
+        println("body {} {}", a, b)
+    }
+    println("--chain")
+    for v in xs.iter().take(1).chain(ys.iter().map(noisy)) {
+        println("body {}", v)
+    }
+    println("--rev")
+    for v in xs.iter().rev().map(noisy).take(2) {
+        println("body {}", v)
+    }
+    println("--continue")
+    for v in xs.iter().map(noisy) {
+        if v == 20 {
+            continue
+        }
+        println("body {}", v)
+    }
+    println("--nested")
+    for a in xs.iter().map(noisy).take(2) {
+        for b in ys.iter().filter(|y| {
+            println("inner test {}", y)
+            y % 2 == 1
+        }) {
+            println("body {} {}", a, b)
+        }
+    }
+    println("--string")
+    let words = #["alpha", "beta", "gamma"]
+    for w in words.iter().map(|w| {
+        println("upper {}", w)
+        w.to_uppercase()
+    }) {
+        println("body {}", w)
+        if w == "BETA" {
+            break
+        }
+    }
+    println("--float")
+    let fs = #[1.5, 2.5, 3.5]
+    for f in fs.iter().map(|f| {
+        println("half {}", f)
+        f / 2.0
+    }) {
+        println("body {}", f)
+    }
+    println("--struct")
+    for p in xs.iter().map(|x| {
+        println("point {}", x)
+        Point { x: x, y: x * x }
+    }).take(2) {
+        println("body {} {}", p.x, p.y)
+    }
+    let points = xs.map(|x| Point { x: x, y: x * x })
+    let mut total = 0
+    for p in points {
+        total += p.y
+    }
+    println("eager struct total {}", total)
+    println("--map")
+    let scores = { "ada": 36 }
+    for (name, score) in scores.iter().filter(|e| {
+        println("test {}", e.0)
+        e.1 > 10
+    }) {
+        println("body {} {}", name, score)
+    }
+    let mut seen = #[]
+    for (name, score) in { "x": 1, "y": 2, "z": 3 }.iter().filter(|e| e.1 != 2) {
+        seen.push(format("{}={}", name, score))
+    }
+    seen.sort()
+    println("seen {}", seen)
+}

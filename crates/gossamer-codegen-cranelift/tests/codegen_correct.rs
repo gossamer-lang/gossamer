@@ -45,7 +45,14 @@ fn correct_dir() -> PathBuf {
 fn gos_binary() -> PathBuf {
     // The release binary is what `gos` / `gos build` reach.
     // Built once by the workspace, shared across tests.
-    let mut p = workspace_root().join("target").join("release").join("gos");
+    // The test executable sits at `<target>/<profile>/deps/<name>`, so its
+    // ancestors name the target directory cargo is building into, which is
+    // where `ensure_gos_built` places the binary too.
+    let target = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.parent()?.to_path_buf()))
+        .unwrap_or_else(|| workspace_root().join("target"));
+    let mut p = target.join("release").join("gos");
     if !std::env::consts::EXE_EXTENSION.is_empty() {
         p.set_extension(std::env::consts::EXE_EXTENSION);
     }

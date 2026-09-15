@@ -1,0 +1,5 @@
+3 values summing to 6
+5 values summing to 150
+zeros [0, 0, 0, 0]
+ring [4, 5, 3] capacity 3
+grid cells 15 0

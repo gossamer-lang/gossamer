@@ -917,26 +917,30 @@ fn uvarint_decode(buf: &[u8]) -> Result<(u64, usize), String> {
     Err("varint: buffer too small".to_string())
 }
 
-/// Packs `Ok((a, b))` as a GosResult whose payload points to a
-/// GC-allocated 2-slot tuple.
-fn ok_pair(a: i64, b: i64) -> i128 {
-    let p = crate::c_abi::gos_rt_gc_alloc(16);
-    if !p.is_null() {
-        let slots = p.cast::<i64>();
-        unsafe {
-            *slots = a;
-            *slots.add(1) = b;
-        }
-    }
-    unsafe { super::vec::gos_rt_result_new(0, p as i64) }
+/// Packs `Ok((a, b))` as a GosResult whose payload is a counted 2-slot blob
+/// laid out by `meta`, which owns whatever children the words name.
+fn ok_pair(a: i64, b: i64, meta: &'static [i64]) -> i128 {
+    let blob = crate::c_abi::rc::counted_words(&[a, b], meta);
+    unsafe { super::vec::gos_rt_result_new(0, blob as i64) }
 }
+
+/// Layout of the `(String, [u8])` pem pair: the label string and the body
+/// byte vector, both owned by the blob.
+static PEM_PAIR_META: [i64; 6] = [
+    gossamer_abi::rc::RC_KIND_STRUCT,
+    1,
+    0,
+    2,
+    gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT,
+    (gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | 1,
+];
 
 /// `encoding::binary::uvarint(bytes) -> Result<(i64, i64), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bin_uvarint(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
         match uvarint_decode(&unsafe { gosvec_u8(data) }) {
-            Ok((v, n)) => ok_pair(v as i64, n as i64),
+            Ok((v, n)) => ok_pair(v as i64, n as i64, &crate::c_abi::rc::LEAF_BLOB_META),
             Err(e) => err_result(&e),
         }
     })
@@ -954,7 +958,7 @@ pub unsafe extern "C" fn gos_rt_bin_varint(data: *const super::vec::GosVec) -> i
                 } else {
                     !((ux >> 1) as i64)
                 };
-                ok_pair(x, n as i64)
+                ok_pair(x, n as i64, &crate::c_abi::rc::LEAF_BLOB_META)
             }
             Err(e) => err_result(&e),
         }
@@ -1034,7 +1038,7 @@ pub unsafe extern "C" fn gos_rt_pem_decode_raw(s: *const c_char) -> i128 {
             Ok((label, bytes)) => {
                 let t = alloc_cstring(label.as_bytes()) as i64;
                 let b = bytes_to_gosvec(&bytes) as i64;
-                ok_pair(t, b)
+                ok_pair(t, b, &PEM_PAIR_META)
             }
             Err(e) => err_result(&e),
         }

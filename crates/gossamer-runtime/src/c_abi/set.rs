@@ -38,7 +38,7 @@ type AggregateTable = IndexMap<Box<[u8]>, Box<[u8]>, FxBuildHasher>;
 // rely on it. A `BTreeSet` sorts, and carries `ordered` to say so.
 // ---------------------------------------------------------------
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct GosSet {
     inner: SetTable<String>,
     /// Integer elements keep their numeric representation: a decimal-text
@@ -48,6 +48,8 @@ pub struct GosSet {
     /// Aggregate elements are keyed by their canonical slot bytes and retain
     /// an owned copy of those slots for `iter()` / set algebra.
     struct_inner: AggregateTable,
+    /// Each aggregate element is one enum node, held in its single slot.
+    node_elements: bool,
     /// The slot descriptor the aggregate elements were keyed under, kept so a
     /// sorted read orders them by field value rather than by the bytes their
     /// canonical encoding happens to spell.
@@ -58,7 +60,121 @@ pub struct GosSet {
     ordered: bool,
 }
 
+/// How a counted word inside an aggregate element's slots takes and gives back
+/// a share.
+#[derive(Clone, Copy)]
+enum CountedWord {
+    /// A `String` or an enum node: reference counted.
+    Rc,
+    /// A `Vec`: its own share count.
+    Vec,
+}
+
+impl Clone for GosSet {
+    fn clone(&self) -> Self {
+        let copy = Self {
+            inner: self.inner.clone(),
+            i64_inner: self.i64_inner.clone(),
+            struct_inner: self.struct_inner.clone(),
+            node_elements: self.node_elements,
+            skey_desc: self.skey_desc.clone(),
+            ordered: self.ordered,
+        };
+        copy.retain_all_elements();
+        copy
+    }
+}
+
+impl Drop for GosSet {
+    fn drop(&mut self) {
+        for slots in self.struct_inner.values() {
+            // SAFETY: every stored element holds a share of each counted word.
+            unsafe { self.release_element(slots) };
+        }
+    }
+}
+
 impl GosSet {
+    /// The counted words an aggregate element's slots hold: the node of an
+    /// enum element, or each `String` and `Vec` field the descriptor names.
+    fn counted_words(&self, slots: &[u8]) -> Vec<(*mut u8, CountedWord)> {
+        let word_at = |index: usize| -> *mut u8 {
+            let bytes = slots
+                .get(index * 8..index * 8 + 8)
+                .and_then(|b| <[u8; 8]>::try_from(b).ok())
+                .unwrap_or_default();
+            std::ptr::with_exposed_provenance_mut(usize::from_le_bytes(bytes))
+        };
+        if self.node_elements {
+            return vec![(word_at(0), CountedWord::Rc)];
+        }
+        let Some(desc) = &self.skey_desc else {
+            return Vec::new();
+        };
+        desc.iter()
+            .enumerate()
+            .filter_map(|(index, kind)| match kind {
+                b'S' => Some((word_at(index), CountedWord::Rc)),
+                b'V' => Some((word_at(index), CountedWord::Vec)),
+                _ => None,
+            })
+            .filter(|(word, _)| !word.is_null())
+            .collect()
+    }
+
+    /// Takes a share of every counted word `slots` holds.
+    unsafe fn retain_element(&self, slots: &[u8]) {
+        for (word, kind) in self.counted_words(slots) {
+            match kind {
+                CountedWord::Rc => unsafe { crate::c_abi::rc::gos_rt_rc_retain(word) },
+                CountedWord::Vec => unsafe { crate::c_abi::gos_rt_vec_retain(word.cast()) },
+            }
+        }
+    }
+
+    /// Gives back a share of every counted word `slots` holds.
+    unsafe fn release_element(&self, slots: &[u8]) {
+        for (word, kind) in self.counted_words(slots) {
+            match kind {
+                CountedWord::Rc => unsafe { crate::c_abi::rc::gos_rt_rc_release(word) },
+                CountedWord::Vec => unsafe { crate::c_abi::map::gos_rt_vec_free(word.cast()) },
+            }
+        }
+    }
+
+    /// Takes a share of every counted word of every aggregate element, for a
+    /// table whose slots were copied from another set.
+    fn retain_all_elements(&self) {
+        for slots in self.struct_inner.values() {
+            // SAFETY: the copied slots name words the source set keeps alive.
+            unsafe { self.retain_element(slots) };
+        }
+    }
+
+    /// The layout a vec of this set's aggregate elements owns.
+    fn element_slot_children(&self) -> Box<[crate::c_abi::vec::VecSlotChild]> {
+        use crate::c_abi::vec::{VecSlotChild, vec_elem_kind};
+        let Some(desc) = &self.skey_desc else {
+            return Box::new([]);
+        };
+        desc.iter()
+            .enumerate()
+            .filter_map(|(word, kind)| {
+                let kind = match kind {
+                    b'S' => vec_elem_kind::STRING,
+                    b'V' => vec_elem_kind::VEC,
+                    _ => return None,
+                };
+                Some(VecSlotChild {
+                    gate: -1,
+                    disc_word: 0,
+                    word,
+                    kind,
+                })
+            })
+            .collect()
+    }
+
     /// Orders the aggregate table's keys the way their fields compare, which
     /// is the order the interpreter reads the same elements in.
     fn sorted_aggregate_keys(&self) -> Vec<&[u8]> {
@@ -108,10 +224,9 @@ pub unsafe extern "C" fn gos_rt_set_new() -> *mut GosSet {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_btree_set_new() -> *mut GosSet {
     ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosSet {
-            ordered: true,
-            ..GosSet::default()
-        }))
+        let mut set = GosSet::default();
+        set.ordered = true;
+        Box::into_raw(Box::new(set))
     })
 }
 
@@ -542,6 +657,24 @@ pub unsafe extern "C" fn gos_rt_set_to_vec(s: *const GosSet) -> *mut crate::c_ab
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_to_vec_i64(s: *const GosSet) -> *mut crate::c_abi::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        unsafe { set_to_vec_ordered(s, crate::c_abi::map::KeyOrder::Signed) }
+    })
+}
+
+/// [`gos_rt_set_to_vec_i64`] for a set whose elements were declared `u64` /
+/// `usize`: a `BTreeSet` of them reads in unsigned order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_to_vec_u64(s: *const GosSet) -> *mut crate::c_abi::vec::GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe { set_to_vec_ordered(s, crate::c_abi::map::KeyOrder::Unsigned) }
+    })
+}
+
+unsafe fn set_to_vec_ordered(
+    s: *const GosSet,
+    order: crate::c_abi::map::KeyOrder,
+) -> *mut crate::c_abi::vec::GosVec {
+    {
         let out = unsafe {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::PRIMITIVE)
         };
@@ -551,13 +684,13 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_i64(s: *const GosSet) -> *mut crate::
         let s = unsafe { &*s };
         let mut keys: Vec<i64> = s.i64_inner.iter().copied().collect();
         if s.ordered {
-            keys.sort_unstable();
+            keys.sort_unstable_by_key(|key| order.rank(*key));
         }
         for k in keys {
             unsafe { crate::c_abi::vec::gos_rt_vec_push_i64(out, k) };
         }
         out
-    })
+    }
 }
 
 /// Snapshots the intersection of two string sets without first allocating a
@@ -615,6 +748,10 @@ pub unsafe extern "C" fn gos_rt_set_clear(s: *mut GosSet) -> *mut GosSet {
             let s = unsafe { &mut *s };
             s.inner.clear();
             s.i64_inner.clear();
+            for slots in s.struct_inner.values() {
+                // SAFETY: every stored element holds a share of each counted word.
+                unsafe { s.release_element(slots) };
+            }
             s.struct_inner.clear();
         }
         s
@@ -642,17 +779,21 @@ unsafe fn set_combine(
     aggregates: impl Fn(&AggregateTable, &AggregateTable) -> AggregateTable,
 ) -> *mut GosSet {
     let (a, b) = unsafe { set_refs(a, b) };
-    Box::into_raw(Box::new(GosSet {
+    let combined = GosSet {
         inner: text(&a.inner, &b.inner),
         i64_inner: ints(&a.i64_inner, &b.i64_inner),
         struct_inner: aggregates(&a.struct_inner, &b.struct_inner),
+        node_elements: a.node_elements || b.node_elements,
         // Both operands hold one element type, so either side's descriptor
         // describes the result's elements.
         skey_desc: a.skey_desc.clone().or_else(|| b.skey_desc.clone()),
         // The result is read the way the receiver is: `a.union(b)` on a
         // `BTreeSet` answers a `BTreeSet`.
         ordered: a.ordered,
-    }))
+    };
+    // The combined table copied its elements' slots out of the operands.
+    combined.retain_all_elements();
+    Box::into_raw(Box::new(combined))
 }
 
 /// True when `pred` holds for every element family of the two operands.
@@ -717,11 +858,15 @@ pub unsafe extern "C" fn gos_rt_set_insert_skey(
         if s.skey_desc.is_none() {
             s.skey_desc = Some(unsafe { crate::c_abi::gos_str_arg_bytes(desc) }.into());
         }
-        i64::from(
-            s.struct_inner
-                .insert(canonical.into_boxed_slice(), slots)
-                .is_none(),
-        )
+        // The inserted key arrives holding shares of its counted words. A new
+        // element keeps them; an equal element already present stays, and the
+        // moved key's shares go back.
+        if s.struct_inner.contains_key(canonical.as_slice()) {
+            unsafe { s.release_element(&slots) };
+            return 0;
+        }
+        s.struct_inner.insert(canonical.into_boxed_slice(), slots);
+        1
     })
 }
 
@@ -757,7 +902,13 @@ pub unsafe extern "C" fn gos_rt_set_remove_skey(
             return 0;
         }
         let s = unsafe { &mut *s };
-        i64::from(s.struct_inner.shift_remove(canonical.as_slice()).is_some())
+        match s.struct_inner.shift_remove(canonical.as_slice()) {
+            Some(slots) => {
+                unsafe { s.release_element(&slots) };
+                1
+            }
+            None => 0,
+        }
     })
 }
 
@@ -781,6 +932,8 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_skey(
             return out;
         }
         let s = unsafe { &*s };
+        // Each pushed element takes the vec's own share of its counted words.
+        crate::c_abi::vec::vec_own_slot_children(out, s.element_slot_children());
         let entries: Vec<&[u8]> = if s.ordered {
             s.sorted_aggregate_keys()
                 .into_iter()
@@ -820,6 +973,8 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec_skey(
             return out;
         }
         let (a, b) = unsafe { (&*a, &*b) };
+        // Each pushed element takes the vec's own share of its counted words.
+        crate::c_abi::vec::vec_own_slot_children(out, a.element_slot_children());
         let mut entries: Vec<_> = a
             .struct_inner
             .iter()
@@ -997,11 +1152,16 @@ pub unsafe extern "C" fn gos_rt_set_insert_ekey(
         }
         let slots = (node as usize as i64).to_le_bytes().to_vec();
         let s = unsafe { &mut *s };
-        i64::from(
-            s.struct_inner
-                .insert(key.into_boxed_slice(), slots.into_boxed_slice())
-                .is_none(),
-        )
+        s.node_elements = true;
+        // The node arrives as a moved share: a new element keeps it, and an
+        // equal element already present stays while the moved share goes back.
+        if s.struct_inner.contains_key(key.as_slice()) {
+            unsafe { s.release_element(&slots) };
+            return 0;
+        }
+        s.struct_inner
+            .insert(key.into_boxed_slice(), slots.into_boxed_slice());
+        1
     })
 }
 
@@ -1043,12 +1203,14 @@ pub unsafe extern "C" fn gos_rt_set_remove_ekey(
         if s.is_null() {
             return 0;
         }
-        i64::from(
-            unsafe { &mut *s }
-                .struct_inner
-                .shift_remove(key.as_slice())
-                .is_some(),
-        )
+        let s = unsafe { &mut *s };
+        match s.struct_inner.shift_remove(key.as_slice()) {
+            Some(slots) => {
+                unsafe { s.release_element(&slots) };
+                1
+            }
+            None => 0,
+        }
     })
 }
 
@@ -1062,7 +1224,7 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_ekey(
 ) -> *mut crate::c_abi::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         let out = unsafe {
-            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::PRIMITIVE)
+            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::RC_ENUM)
         };
         if s.is_null() {
             return out;
@@ -1073,6 +1235,8 @@ pub unsafe extern "C" fn gos_rt_set_to_vec_ekey(
             entries.sort_unstable_by_key(|(key, _)| *key);
         }
         for (_, slots) in entries {
+            // The vec holds its own share of each node, given back at its free.
+            unsafe { s.retain_element(slots) };
             unsafe { crate::c_abi::vec::gos_rt_vec_push(out, slots.as_ptr()) };
         }
         out

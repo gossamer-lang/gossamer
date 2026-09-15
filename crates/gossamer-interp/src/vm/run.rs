@@ -231,6 +231,7 @@ struct TracebackLocationGuard<'a> {
     /// drops, so updating `last_mut()` would overwrite the callee's location.
     frame_index: usize,
     locations: &'a [crate::bytecode::InstructionLocation],
+    inline_sites: &'static [crate::bytecode::InlineSite],
     /// Address of the dispatch loop's program counter. `pc` is declared
     /// before this guard and therefore outlives it. Every opcode increments
     /// `pc` before execution, so `pc - 1` is the failing or suspending opcode.
@@ -243,16 +244,16 @@ impl Drop for TracebackLocationGuard<'_> {
         // That local is declared before this guard, so Rust drops the guard
         // first. The VM is single-threaded and reads it only during Drop.
         let next_instruction = unsafe { *self.next_instruction };
-        let location = next_instruction.checked_sub(1).and_then(|instruction| {
+        let entry = next_instruction.checked_sub(1).and_then(|instruction| {
             let after = self
                 .locations
                 .partition_point(|entry| entry.instruction <= instruction);
-            after
-                .checked_sub(1)
-                .and_then(|idx| self.locations[idx].location)
+            after.checked_sub(1).map(|idx| self.locations[idx])
         });
         if let Some(frame) = self.call_stack.borrow_mut().get_mut(self.frame_index) {
-            frame.location = location;
+            frame.location = entry.and_then(|entry| entry.location);
+            frame.inline_site = entry.and_then(|entry| entry.inline_site);
+            frame.inline_sites = self.inline_sites;
         }
     }
 }
@@ -459,6 +460,7 @@ impl Vm {
             call_stack: &self.call_stack,
             frame_index: self.call_stack.borrow().len().saturating_sub(1),
             locations: &chunk.instruction_locations,
+            inline_sites: chunk.inline_sites,
             next_instruction: std::ptr::addr_of!(pc),
         };
         let mut preempt_countdown = VM_PREEMPT_INTERVAL;

@@ -186,6 +186,13 @@ impl<'a> Lowerer<'a> {
             let tmp = self.fresh();
             writeln!(self.out, "  {tmp} = zext i8 {byte} to i64").unwrap();
             tmp
+        } else if let Some((storage, signed)) = self.packed_integer_field(place) {
+            let stored = self.fresh();
+            writeln!(self.out, "  {stored} = load {storage}, ptr {addr}{tbaa}").unwrap();
+            let tmp = self.fresh();
+            let widen = if signed { "sext" } else { "zext" };
+            writeln!(self.out, "  {tmp} = {widen} {storage} {stored} to i64").unwrap();
+            tmp
         } else {
             let tmp = self.fresh();
             writeln!(self.out, "  {tmp} = load {leaf_llvm}, ptr {addr}{tbaa}").unwrap();
@@ -216,6 +223,14 @@ impl<'a> Lowerer<'a> {
             let byte = self.fresh();
             writeln!(self.out, "  {byte} = trunc {llvm_ty} {value} to i8").unwrap();
             writeln!(self.out, "  store i8 {byte}, ptr {addr}{tbaa}").unwrap();
+        } else if let Some((storage, _)) = self.packed_integer_field(place) {
+            let narrow = self.fresh();
+            writeln!(
+                self.out,
+                "  {narrow} = trunc {llvm_ty} {value} to {storage}"
+            )
+            .unwrap();
+            writeln!(self.out, "  store {storage} {narrow}, ptr {addr}{tbaa}").unwrap();
         } else {
             writeln!(self.out, "  store {llvm_ty} {value}, ptr {addr}{tbaa}").unwrap();
         }
@@ -283,13 +298,27 @@ impl<'a> Lowerer<'a> {
                     // type is opaque (sentinel Adt, references) -
                     // in those cases each field is exactly one
                     // slot and `idx == slot_offset`.
-                    let slot_offset = field_slot_offset(self.tcx, current_ty, *idx);
                     let next = self.fresh();
-                    writeln!(
-                        self.out,
-                        "  {next} = getelementptr i64, ptr {current}, i64 {slot_offset}"
-                    )
-                    .unwrap();
+                    // A packed struct places its fields at byte offsets.
+                    if let Some(layout) = self.tcx.packed_layout(current_ty) {
+                        let byte = layout
+                            .field_offsets
+                            .get(*idx as usize)
+                            .copied()
+                            .unwrap_or(0);
+                        writeln!(
+                            self.out,
+                            "  {next} = getelementptr i8, ptr {current}, i64 {byte}"
+                        )
+                        .unwrap();
+                    } else {
+                        let slot_offset = field_slot_offset(self.tcx, current_ty, *idx);
+                        writeln!(
+                            self.out,
+                            "  {next} = getelementptr i64, ptr {current}, i64 {slot_offset}"
+                        )
+                        .unwrap();
+                    }
                     current = next;
                     current_is_loaded = false;
                     // Advance current_ty so the next projection's
@@ -340,117 +369,105 @@ impl<'a> Lowerer<'a> {
                             writeln!(self.out, "  {loaded} = load ptr, ptr {current}").unwrap();
                             loaded
                         };
-                        declare_rt(&mut self.runtime_refs, "gos_rt_vec_get_ptr");
-                        // The helper answers `data + idx * stride` for every
-                        // receiver but one: a vector of scalar rows, which it
-                        // may pack into a row descriptor on the way, after
-                        // which the slots hold no addresses. Every other
-                        // element type gets the address math inline, with the
-                        // call kept for a null receiver and an index past the
-                        // end, which reach it exactly as before.
                         let elem_ty = match self.tcx.kind(current_ty) {
                             Some(TyKind::Vec(elem) | TyKind::Slice(elem)) => Some(*elem),
                             _ => None,
                         };
-                        let rows_may_pack = elem_ty.is_some_and(|elem| {
-                            matches!(
-                                self.tcx.kind(elem),
-                                Some(TyKind::Vec(inner) | TyKind::Slice(inner))
-                                    if matches!(
-                                        self.tcx.kind(*inner),
-                                        Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char)
-                                    )
-                            )
-                        });
-                        if rows_may_pack {
-                            writeln!(
-                                self.out,
-                                "  {next} = call ptr @gos_rt_vec_get_ptr(ptr {handle}, i64 {idx_raw})"
-                            )
+                        // A null handle is an empty Vec. Both out-of-range
+                        // shapes leave through a cold panic that does not
+                        // return, so the in-range path is the only edge that
+                        // continues and the header reads stay loop-invariant.
+                        let s = self.next_ssa;
+                        self.next_ssa += 1;
+                        let (check, fast, null_oob, oob) = (
+                            format!("ix_check_{s}"),
+                            format!("ix_fast_{s}"),
+                            format!("ix_null_{s}"),
+                            format!("ix_oob_{s}"),
+                        );
+                        declare_rt(&mut self.runtime_refs, "gos_rt_panic_oob");
+                        let (label, _) = self.strings.borrow_mut().intern("vec index");
+                        let isnull = self.fresh();
+                        writeln!(self.out, "  {isnull} = icmp eq ptr {handle}, null").unwrap();
+                        writeln!(
+                            self.out,
+                            "  br i1 {isnull}, label %{null_oob}, label %{check}"
+                        )
+                        .unwrap();
+                        let cold_start = self.out.len();
+                        writeln!(self.out, "{null_oob}:").unwrap();
+                        self.emit_panic_site_line();
+                        writeln!(
+                            self.out,
+                            "  call void @gos_rt_panic_oob(ptr {label}, i64 {idx_raw}, i64 0)"
+                        )
+                        .unwrap();
+                        writeln!(self.out, "  unreachable").unwrap();
+                        self.mark_cold(cold_start);
+                        writeln!(self.out, "{check}:").unwrap();
+                        let len = self.fresh();
+                        writeln!(self.out, "  {len} = load i64, ptr {handle}{TBAA_HEADER}")
                             .unwrap();
-                        } else {
-                            let s = self.next_ssa;
-                            self.next_ssa += 1;
-                            let (check, fast, slow, cont) = (
-                                format!("ix_check_{s}"),
-                                format!("ix_fast_{s}"),
-                                format!("ix_slow_{s}"),
-                                format!("ix_cont_{s}"),
-                            );
-                            let isnull = self.fresh();
-                            writeln!(self.out, "  {isnull} = icmp eq ptr {handle}, null").unwrap();
-                            writeln!(self.out, "  br i1 {isnull}, label %{slow}, label %{check}")
-                                .unwrap();
-                            writeln!(self.out, "{check}:").unwrap();
-                            let len = self.fresh();
-                            writeln!(self.out, "  {len} = load i64, ptr {handle}{TBAA_HEADER}")
-                                .unwrap();
-                            // One unsigned compare catches a negative index
-                            // and one past the end.
-                            let bad = self.fresh();
-                            writeln!(self.out, "  {bad} = icmp uge i64 {idx_raw}, {len}").unwrap();
-                            writeln!(self.out, "  br i1 {bad}, label %{slow}, label %{fast}")
-                                .unwrap();
-                            writeln!(self.out, "{fast}:").unwrap();
-                            let off = self.fresh();
-                            match elem_ty
-                                .and_then(|elem| crate::lower::settled_elem_bytes(self.tcx, elem))
-                            {
-                                Some(bytes) => {
-                                    writeln!(self.out, "  {off} = mul i64 {idx_raw}, {bytes}")
-                                        .unwrap();
-                                }
-                                None => {
-                                    let stride_addr = self.fresh();
-                                    writeln!(
-                                        self.out,
-                                        "  {stride_addr} = getelementptr i8, ptr {handle}, i64 16"
-                                    )
-                                    .unwrap();
-                                    let stride32 = self.fresh();
-                                    writeln!(
-                                        self.out,
-                                        "  {stride32} = load i32, ptr {stride_addr}{TBAA_HEADER}"
-                                    )
-                                    .unwrap();
-                                    let stride = self.fresh();
-                                    writeln!(self.out, "  {stride} = zext i32 {stride32} to i64")
-                                        .unwrap();
-                                    writeln!(self.out, "  {off} = mul i64 {idx_raw}, {stride}")
-                                        .unwrap();
-                                }
+                        // One unsigned compare catches a negative index and
+                        // one past the end.
+                        let bad = self.fresh();
+                        writeln!(self.out, "  {bad} = icmp uge i64 {idx_raw}, {len}").unwrap();
+                        writeln!(self.out, "  br i1 {bad}, label %{oob}, label %{fast}").unwrap();
+                        let cold_start = self.out.len();
+                        writeln!(self.out, "{oob}:").unwrap();
+                        self.emit_panic_site_line();
+                        writeln!(
+                            self.out,
+                            "  call void @gos_rt_panic_oob(ptr {label}, i64 {idx_raw}, i64 {len})"
+                        )
+                        .unwrap();
+                        writeln!(self.out, "  unreachable").unwrap();
+                        self.mark_cold(cold_start);
+                        writeln!(self.out, "{fast}:").unwrap();
+                        let off = self.fresh();
+                        match elem_ty
+                            .and_then(|elem| crate::lower::settled_elem_bytes(self.tcx, elem))
+                        {
+                            Some(bytes) => {
+                                writeln!(self.out, "  {off} = mul i64 {idx_raw}, {bytes}").unwrap();
                             }
-                            let data_addr = self.fresh();
-                            writeln!(
-                                self.out,
-                                "  {data_addr} = getelementptr i8, ptr {handle}, i64 24"
-                            )
-                            .unwrap();
-                            let data = self.fresh();
-                            writeln!(
-                                self.out,
-                                "  {data} = load ptr, ptr {data_addr}{TBAA_HEADER}"
-                            )
-                            .unwrap();
-                            let ea = self.fresh();
-                            writeln!(self.out, "  {ea} = getelementptr i8, ptr {data}, i64 {off}")
+                            None => {
+                                let stride_addr = self.fresh();
+                                writeln!(
+                                    self.out,
+                                    "  {stride_addr} = getelementptr i8, ptr {handle}, i64 16"
+                                )
                                 .unwrap();
-                            writeln!(self.out, "  br label %{cont}").unwrap();
-                            writeln!(self.out, "{slow}:").unwrap();
-                            let called = self.fresh();
-                            writeln!(
-                                self.out,
-                                "  {called} = call ptr @gos_rt_vec_get_ptr(ptr {handle}, i64 {idx_raw})"
-                            )
-                            .unwrap();
-                            writeln!(self.out, "  br label %{cont}").unwrap();
-                            writeln!(self.out, "{cont}:").unwrap();
-                            writeln!(
-                                self.out,
-                                "  {next} = phi ptr [ {ea}, %{fast} ], [ {called}, %{slow} ]"
-                            )
-                            .unwrap();
+                                let stride32 = self.fresh();
+                                writeln!(
+                                    self.out,
+                                    "  {stride32} = load i32, ptr {stride_addr}{TBAA_HEADER}"
+                                )
+                                .unwrap();
+                                let stride = self.fresh();
+                                writeln!(self.out, "  {stride} = zext i32 {stride32} to i64")
+                                    .unwrap();
+                                writeln!(self.out, "  {off} = mul i64 {idx_raw}, {stride}")
+                                    .unwrap();
+                            }
                         }
+                        let data_addr = self.fresh();
+                        writeln!(
+                            self.out,
+                            "  {data_addr} = getelementptr i8, ptr {handle}, i64 24"
+                        )
+                        .unwrap();
+                        let data = self.fresh();
+                        writeln!(
+                            self.out,
+                            "  {data} = load ptr, ptr {data_addr}{TBAA_HEADER}"
+                        )
+                        .unwrap();
+                        writeln!(
+                            self.out,
+                            "  {next} = getelementptr i8, ptr {data}, i64 {off}"
+                        )
+                        .unwrap();
                         current = next;
                         current_is_loaded = false;
                         current_ty = match self.tcx.kind(current_ty) {
@@ -608,6 +625,38 @@ impl<'a> Lowerer<'a> {
         } else {
             ""
         }
+    }
+
+    /// The narrow storage type and signedness of a place whose leaf is an
+    /// integer field of a packed struct narrower than a word, or `None` when
+    /// the leaf is stored at the type its value has. The value stays an
+    /// `i64`, so a read widens and a store truncates at the field.
+    pub(crate) fn packed_integer_field(&self, place: &Place) -> Option<(&'static str, bool)> {
+        let (Projection::Field(idx), prefix) = place.projection.split_last()? else {
+            return None;
+        };
+        let parent = Place {
+            local: place.local,
+            projection: prefix.to_vec().into(),
+        };
+        let parent_ty = self.unwrap_ref(self.place_leaf_ty(&parent));
+        self.tcx.packed_layout(parent_ty)?;
+        let field = match self.tcx.kind(parent_ty) {
+            Some(TyKind::Adt { def, substs }) => {
+                *self.tcx.adt_field_tys(*def, substs)?.get(*idx as usize)?
+            }
+            _ => return None,
+        };
+        let (storage, signed) = match self.tcx.kind(field)? {
+            TyKind::Int(IntTy::I8) => ("i8", true),
+            TyKind::Int(IntTy::U8) => ("i8", false),
+            TyKind::Int(IntTy::I16) => ("i16", true),
+            TyKind::Int(IntTy::U16) => ("i16", false),
+            TyKind::Int(IntTy::I32) => ("i32", true),
+            TyKind::Int(IntTy::U32) => ("i32", false),
+            _ => return None,
+        };
+        Some((storage, signed))
     }
 
     pub(crate) fn place_is_packed_byte_element(&self, place: &Place) -> bool {

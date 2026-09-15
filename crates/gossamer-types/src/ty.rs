@@ -244,6 +244,17 @@ pub enum TyKind {
         /// Element count - concrete, or a const generic parameter.
         len: ArrayLen,
     },
+    /// `Simd<T, N>` - a fixed-width vector of `N` lanes of `T` with lane-wise
+    /// operations; `Mask<N>` is its `bool`-laned form. The checker keeps the
+    /// kind so operators and methods resolve against it;
+    /// [`crate::normalize_for_lowering`] erases it to the `[T; N]` it is laid
+    /// out as, so no backend observes it.
+    Simd {
+        /// Lane type.
+        elem: Ty,
+        /// Lane count - concrete, or a const generic parameter.
+        lanes: ArrayLen,
+    },
     /// Unsized slice `[T]`, always seen through a reference at runtime.
     Slice(Ty),
     /// `Vec<T>` - built-in growable sequence.

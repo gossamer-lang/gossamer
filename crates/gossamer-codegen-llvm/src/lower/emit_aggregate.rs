@@ -139,6 +139,9 @@ impl<'a> Lowerer<'a> {
         let place_ty = self.place_leaf_ty(place);
         let packed_bytes = packed_byte_array_len(self.tcx, place_ty).is_some();
         let tbaa = self.aggregate_dest_tbaa(place);
+        if let Some(layout) = self.tcx.packed_layout(place_ty) {
+            return self.emit_packed_struct_store(&base, place_ty, &layout, operands, tbaa);
+        }
         let mut slot_idx = 0u32;
         for operand in operands {
             let op_ty = self.operand_ty(operand);
@@ -267,6 +270,77 @@ impl<'a> Lowerer<'a> {
                 .unwrap();
             }
             slot_idx += op_slots;
+        }
+        Ok(())
+    }
+
+    /// Stores a packed struct literal: every word zeroed, so padding between
+    /// narrow fields is part of an equal value's bytes, then each field at its
+    /// own offset and width, and a nested struct copied as its bytes.
+    fn emit_packed_struct_store(
+        &mut self,
+        base: &str,
+        place_ty: Ty,
+        layout: &gossamer_types::PackedLayout,
+        operands: &[Operand],
+        tbaa: &str,
+    ) -> Result<(), BuildError> {
+        for word in 0..layout.size / 8 {
+            let dst = self.fresh();
+            writeln!(
+                self.out,
+                "  {dst} = getelementptr i64, ptr {base}, i64 {word}"
+            )
+            .unwrap();
+            writeln!(self.out, "  store i64 0, ptr {dst}{tbaa}").unwrap();
+        }
+        let field_tys: Vec<Ty> = match self.tcx.kind(place_ty) {
+            Some(TyKind::Adt { def, substs }) => self
+                .tcx
+                .adt_field_tys(*def, substs)
+                .map(<[Ty]>::to_vec)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        for (index, operand) in operands.iter().enumerate() {
+            let offset = layout.field_offsets.get(index).copied().unwrap_or(0);
+            let bytes = layout.field_bytes.get(index).copied().unwrap_or(8);
+            let dst = self.fresh();
+            writeln!(
+                self.out,
+                "  {dst} = getelementptr i8, ptr {base}, i64 {offset}"
+            )
+            .unwrap();
+            let op_ty = self.operand_ty(operand);
+            if let Operand::Copy(src_place) = operand
+                && is_aggregate(self.tcx, op_ty)
+            {
+                let src = self.lower_place_address(src_place);
+                writeln!(
+                    self.out,
+                    "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {src}, i64 {bytes}, i1 false)"
+                )
+                .unwrap();
+                continue;
+            }
+            let value = self.lower_operand(operand)?;
+            let op_llvm = self.operand_llvm_ty(operand);
+            let narrow = match field_tys.get(index).and_then(|ty| self.tcx.kind(*ty)) {
+                Some(TyKind::Int(IntTy::I8 | IntTy::U8)) => Some("i8"),
+                Some(TyKind::Int(IntTy::I16 | IntTy::U16)) => Some("i16"),
+                Some(TyKind::Int(IntTy::I32 | IntTy::U32)) => Some("i32"),
+                _ => None,
+            };
+            match narrow {
+                Some(storage) if op_llvm == "i64" => {
+                    let cut = self.fresh();
+                    writeln!(self.out, "  {cut} = trunc i64 {value} to {storage}").unwrap();
+                    writeln!(self.out, "  store {storage} {cut}, ptr {dst}{tbaa}").unwrap();
+                }
+                _ => {
+                    writeln!(self.out, "  store {op_llvm} {value}, ptr {dst}{tbaa}").unwrap();
+                }
+            }
         }
         Ok(())
     }
