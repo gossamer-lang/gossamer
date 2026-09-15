@@ -843,6 +843,122 @@ fn def_edges(body: &Body) -> Vec<DefEdges> {
     out
 }
 
+/// A field path step that names storage inside an element or a payload, where
+/// no field index says which part of it is reached.
+const INSIDE_FIELD: u32 = u32::MAX;
+
+/// The field indices a place's projection walks, ending in [`INSIDE_FIELD`]
+/// once a step is anything but a field. A dereference of the place's own local
+/// comes first when the local is a reference and changes no field.
+fn projection_field_path(projection: &[Projection]) -> Vec<u32> {
+    let mut path = Vec::with_capacity(projection.len());
+    for (i, step) in projection.iter().enumerate() {
+        match step {
+            Projection::Field(field) => path.push(*field),
+            Projection::Deref if i == 0 => {}
+            _ => {
+                path.push(INSIDE_FIELD);
+                break;
+            }
+        }
+    }
+    path
+}
+
+/// Each local's field path from its alias root: a copy through field
+/// projections appends those fields, an element address or a payload read
+/// appends [`INSIDE_FIELD`], and a local with any other or more than one
+/// definition has none.
+fn alias_field_paths(body: &Body, roots: &[Local]) -> Vec<Option<Vec<u32>>> {
+    let n = body.locals.len();
+    let mut step: Vec<Option<(Local, Vec<u32>)>> = vec![None; n];
+    let mut defined = vec![false; n];
+    let mut note = |local: Local, next: Option<(Local, Vec<u32>)>| {
+        let i = local.0 as usize;
+        step[i] = if std::mem::replace(&mut defined[i], true) { None } else { next };
+    };
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            if let StatementKind::Assign { place, rvalue } = &stmt.kind
+                && place.projection.is_empty()
+            {
+                match rvalue {
+                    Rvalue::Use(Operand::Const(_)) => {}
+                    Rvalue::Use(Operand::Copy(src)) if src.local != place.local => {
+                        note(place.local, Some((src.local, projection_field_path(&src.projection))));
+                    }
+                    Rvalue::CallIntrinsic { name, args } if extracts_carrier_payload(name) => {
+                        note(place.local, rc_bare_local_arg(args).map(|c| (c, vec![INSIDE_FIELD])));
+                    }
+                    _ => note(place.local, None),
+                }
+            }
+        }
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = &block.terminator
+            && destination.projection.is_empty()
+        {
+            let next = match args.first() {
+                Some(Operand::Copy(src))
+                    if src.projection.is_empty()
+                        && (name == "gos_rt_vec_get_ptr" || extracts_carrier_payload(name)) =>
+                {
+                    Some((src.local, vec![INSIDE_FIELD]))
+                }
+                _ => None,
+            };
+            note(destination.local, next);
+        }
+    }
+    (0..n)
+        .map(|i| {
+            let mut path: Vec<u32> = Vec::new();
+            let mut current = Local(u32::try_from(i).unwrap_or(0));
+            for _ in 0..=n {
+                if roots[current.0 as usize] == current {
+                    path.reverse();
+                    return Some(path);
+                }
+                let (src, fields) = step[current.0 as usize].as_ref()?;
+                path.extend(fields.iter().rev());
+                current = *src;
+            }
+            None
+        })
+        .collect()
+}
+
+/// `true` when `place` provably names storage apart from the holder's: both
+/// field paths are known and they part at a field index before either enters
+/// an element or a payload.
+fn place_outside_holder(
+    paths: &[Option<Vec<u32>>],
+    holder: Option<&[u32]>,
+    place: &Place,
+) -> bool {
+    let Some(holder) = holder else {
+        return false;
+    };
+    let Some(Some(base)) = paths.get(place.local.0 as usize) else {
+        return false;
+    };
+    let mut full = base.clone();
+    full.extend(projection_field_path(&place.projection));
+    for (a, b) in full.iter().zip(holder) {
+        if *a == INSIDE_FIELD || *b == INSIDE_FIELD {
+            return false;
+        }
+        if a != b {
+            return true;
+        }
+    }
+    false
+}
+
 /// The local whose value `local` is an alias of: the origin of its chain of
 /// copies and element addresses, or `local` itself.
 fn alias_root(defs: &[AliasDef], local: Local) -> Local {
@@ -920,26 +1036,28 @@ fn stmt_disturbs_chain(
     chain: &[bool],
     root: Local,
     is_member: &[bool],
+    outside: &dyn Fn(&Place) -> bool,
 ) -> bool {
     let in_chain = |l: Local| chain[l.0 as usize];
+    let reaches = |p: &Place| in_chain(p.local) && !outside(p);
     match &stmt.kind {
         StatementKind::Assign { place, rvalue } => {
-            if in_chain(place.local) && (place.local == root || !place.projection.is_empty()) {
+            if reaches(place) && (place.local == root || !place.projection.is_empty()) {
                 return true;
             }
             match rvalue {
-                Rvalue::Ref { place: p, .. } => in_chain(p.local),
+                Rvalue::Ref { place: p, .. } => reaches(p),
                 Rvalue::CallIntrinsic { name, args } => {
                     if is_rc_retain_name(name) {
                         false
                     } else if is_rc_release_name(name) {
                         args.iter().any(|a| match a {
-                            Operand::Copy(p) => in_chain(p.local) && !is_member[p.local.0 as usize],
+                            Operand::Copy(p) => reaches(p) && !is_member[p.local.0 as usize],
                             _ => false,
                         })
                     } else {
                         args.iter().enumerate().any(|(i, a)| {
-                            operand_in_chain(a, chain) && !helper_reads_only(name, i)
+                            matches!(a, Operand::Copy(p) if reaches(p)) && !helper_reads_only(name, i)
                         })
                     }
                 }
@@ -972,8 +1090,16 @@ fn stmt_disturbs_chain(
     }
 }
 
-fn term_disturbs_chain(body: &Body, tcx: &TyCtxt, t: &Terminator, chain: &[bool], root: Local) -> bool {
+fn term_disturbs_chain(
+    body: &Body,
+    tcx: &TyCtxt,
+    t: &Terminator,
+    chain: &[bool],
+    root: Local,
+    outside: &dyn Fn(&Place) -> bool,
+) -> bool {
     let in_chain = |l: Local| chain[l.0 as usize];
+    let reaches = |p: &Place| in_chain(p.local) && !outside(p);
     match t {
         Terminator::Call {
             callee,
@@ -981,7 +1107,7 @@ fn term_disturbs_chain(body: &Body, tcx: &TyCtxt, t: &Terminator, chain: &[bool]
             destination,
             ..
         } => {
-            if in_chain(destination.local)
+            if reaches(destination)
                 && (destination.local == root || !destination.projection.is_empty())
             {
                 return true;
@@ -991,7 +1117,7 @@ fn term_disturbs_chain(body: &Body, tcx: &TyCtxt, t: &Terminator, chain: &[bool]
                 return true;
             }
             args.iter().enumerate().any(|(i, a)| match a {
-                Operand::Copy(p) if in_chain(p.local) => call_arg_may_write(body, tcx, &kind, i, p),
+                Operand::Copy(p) if reaches(p) => call_arg_may_write(body, tcx, &kind, i, p),
                 _ => false,
             })
         }
@@ -1117,6 +1243,8 @@ struct Class {
     rcs: Vec<Option<HolderRc>>,
     root: Local,
     chain: Vec<bool>,
+    /// Each local's field path from its alias root, where one is known.
+    paths: std::rc::Rc<Vec<Option<Vec<u32>>>>,
 }
 
 impl Class {
@@ -1147,6 +1275,8 @@ fn holder_window_is_clean(
 ) -> bool {
     let root = class.root;
     let chain = &class.chain[..];
+    let holder_path = class.paths.get(holder.0 as usize).cloned().flatten();
+    let outside = |p: &Place| place_outside_holder(&class.paths, holder_path.as_deref(), p);
     let n = body.blocks.len();
     let mut visited = vec![[false; 2]; n];
     // A terminator definition is the last thing in its block, so the window
@@ -1174,7 +1304,7 @@ fn holder_window_is_clean(
             if stmt_mentions_local(stmt, holder) && dirty {
                 return false;
             }
-            if stmt_disturbs_chain(stmt, chain, root, &class.is_member) {
+            if stmt_disturbs_chain(stmt, chain, root, &class.is_member, &outside) {
                 dirty = true;
             }
         }
@@ -1188,7 +1318,7 @@ fn holder_window_is_clean(
         if term_writes_bare(t, holder) {
             continue;
         }
-        if term_disturbs_chain(body, tcx, t, chain, root) {
+        if term_disturbs_chain(body, tcx, t, chain, root, &outside) {
             dirty = true;
         }
         for &s in &succs[b] {
@@ -1667,6 +1797,37 @@ pub(crate) fn reduce_materialised_counts(body: &mut Body) {
     }
 }
 
+/// Whether a structural box meta names exactly the carrier-blob children a
+/// guarded copy-blob meta walks, so a share moving between a holder of one and
+/// a holder of the other is every share either accounts for.
+fn structural_children_are_guarded_blobs(structural: &[i64], guarded: &[i64]) -> bool {
+    use gossamer_abi::rc::{
+        RC_CHILD_KIND_SHIFT, RC_KIND_STRUCT, RC_KIND_STRUCT_GUARDED, rc_child_blob_kind,
+    };
+    let [kind, variants, _, count, entries @ ..] = structural else {
+        return false;
+    };
+    let [guarded_kind, pairs, triples @ ..] = guarded else {
+        return false;
+    };
+    if *kind != RC_KIND_STRUCT
+        || *variants != 1
+        || *guarded_kind != RC_KIND_STRUCT_GUARDED
+        || usize::try_from(*count).ok() != Some(entries.len())
+        || usize::try_from(*pairs).ok().map(|n| n * 3) != Some(triples.len())
+    {
+        return false;
+    }
+    let mut named: Vec<i64> = entries.to_vec();
+    let mut walked: Vec<i64> = triples
+        .chunks_exact(3)
+        .map(|triple| (rc_child_blob_kind(triple[0]) << RC_CHILD_KIND_SHIFT) | triple[2])
+        .collect();
+    named.sort_unstable();
+    walked.sort_unstable();
+    named == walked
+}
+
 /// Hands an `Option` / `Result` carrier the share its payload was holding.
 ///
 /// Boxing a guarded aggregate into a carrier copies its words and gives the
@@ -1705,21 +1866,23 @@ fn move_payload_shares_into_carriers(body: &mut Body, tcx: &TyCtxt) {
                 continue;
             }
             let ty = body.locals[source.0 as usize].ty;
-            // A box owning its payload's children under the structural meta
-            // takes a share of every field, which the source's guarded walk
-            // alone does not give up.
-            if tcx
-                .rc_meta(&format!("gos_rc_meta_boxaggr_{}", ty.as_u32()))
-                .is_some()
-            {
-                continue;
-            }
             let Some(rc) = holder_rc_names(tcx, ty) else {
                 continue;
             };
             let Some(meta) = rc.meta.clone() else {
                 continue;
             };
+            // A box owning its payload's children under the structural meta
+            // takes a share of every child it names. The source's guarded walk
+            // gives up the same shares only when those children are exactly the
+            // carrier blobs the walk releases.
+            if let Some(structural) = tcx.rc_meta(&format!("gos_rc_meta_boxaggr_{}", ty.as_u32()))
+                && !tcx
+                    .rc_meta(&meta)
+                    .is_some_and(|guarded| structural_children_are_guarded_blobs(structural, guarded))
+            {
+                continue;
+            }
             let Some(ri) = next_live_stmt(&block.stmts, si + 1) else {
                 continue;
             };
@@ -2198,6 +2361,7 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt) {
     let roots: Vec<Local> = (0..n_locals)
         .map(|i| alias_root(&defs, Local(i as u32)))
         .collect();
+    let paths = std::rc::Rc::new(alias_field_paths(body, &roots));
     let edges = def_edges(body);
     let rcs: Vec<Option<HolderRc>> = body
         .locals
@@ -2226,7 +2390,7 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt) {
         if seen[i] || !eligible[i] {
             continue;
         }
-        let Some(class) = build_class(&edges, &eligible, &rcs, &roots, Local(i as u32)) else {
+        let Some(class) = build_class(&edges, &eligible, &rcs, &roots, &paths, Local(i as u32)) else {
             seen[i] = true;
             continue;
         };
@@ -2242,7 +2406,7 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt) {
         // pass cannot follow. Each is retried alone.
         if class.members.len() > 1 {
             for &member in &class.members {
-                let Some(single) = singleton_class(&rcs, &roots, member) else {
+                let Some(single) = singleton_class(&rcs, &roots, &paths, member) else {
                     continue;
                 };
                 if try_elide_class(body, tcx, &succs, &share, &eligible, &single) {
@@ -2312,7 +2476,12 @@ fn try_elide_class(
 }
 
 /// The one-member class a local forms with the origin of its chain of copies.
-fn singleton_class(rcs: &[Option<HolderRc>], roots: &[Local], member: Local) -> Option<Class> {
+fn singleton_class(
+    rcs: &[Option<HolderRc>],
+    roots: &[Local],
+    paths: &std::rc::Rc<Vec<Option<Vec<u32>>>>,
+    member: Local,
+) -> Option<Class> {
     let root = roots[member.0 as usize];
     if root == member {
         return None;
@@ -2329,6 +2498,7 @@ fn singleton_class(rcs: &[Option<HolderRc>], roots: &[Local], member: Local) -> 
         rcs: rcs.to_vec(),
         root,
         chain,
+        paths: paths.clone(),
     })
 }
 
@@ -2343,6 +2513,7 @@ fn build_class(
     eligible: &[bool],
     rcs: &[Option<HolderRc>],
     roots: &[Local],
+    paths: &std::rc::Rc<Vec<Option<Vec<u32>>>>,
     seed: Local,
 ) -> Option<Class> {
     let n = edges.len();
@@ -2384,5 +2555,6 @@ fn build_class(
         rcs: rcs.to_vec(),
         root,
         chain,
+        paths: paths.clone(),
     })
 }

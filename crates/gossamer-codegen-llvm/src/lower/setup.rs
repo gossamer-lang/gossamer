@@ -90,6 +90,7 @@ impl<'a> Lowerer<'a> {
             frame_globals: None,
             fn_name_by_def: std::collections::HashMap::new(),
             param_tys_by_name: std::collections::HashMap::new(),
+            payload_views: std::collections::HashMap::new(),
             strings: std::rc::Rc::new(std::cell::RefCell::new(StringPool::default())),
             current_block: None,
             preempt_seq: 0,
@@ -154,6 +155,7 @@ impl<'a> Lowerer<'a> {
         // `local_slot`. MIR reserves `_1..=_arity` as
         // parameter locals.
         self.emit_param_stores();
+        self.plan_payload_views();
         // Where the call-scoped temporaries the blocks ask for are spliced
         // back in: they belong to the entry block, and the blocks that need
         // them have not been lowered yet.

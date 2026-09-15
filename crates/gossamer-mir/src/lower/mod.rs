@@ -592,6 +592,8 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         rewrite_str_concat_consuming(body);
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
         crate::opt::reserve_vecs_for_counted_push_loops(body);
+        // After the reservation, so a vector sized for the loop keeps that size.
+        crate::opt::fuse_byte_append_loops(body, tcx);
         crate::opt::reserve_hashmaps_for_counted_insert_loops(body, tcx);
         // Fuse `seq.substring(i, i+k)` + `m.inc(kmer)` into the borrowed-slice
         // probe before the RC passes, so the eliminated scratch String gets no
@@ -628,6 +630,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
         crate::opt::elide_vec_clone_of_fresh_temporary(body, tcx);
         crate::opt::elide_vec_clone_of_dead_aggregate_source(body, &user_fn_names);
+        crate::opt::share_read_only_vec_bindings(body, tcx);
         // Follows the drop passes, so the carrier releases they place are part
         // of what it accounts for.
         crate::opt::pop_scalar_aggregates_in_place(body, tcx);

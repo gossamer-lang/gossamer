@@ -82,6 +82,7 @@ feature-testing-examples/callback_shorthands.gos	callable local
 feature-testing-examples/capture_by_reference.gos	string append
 feature-testing-examples/carrier_at_odd_slot_offset.gos	unsupported-boundary: a struct carrying two-word Option/Result fields crosses the function boundary, which the trampoline cannot marshal - the shape the fixture exists to pin
 feature-testing-examples/carrier_payload_debug_shapes.gos	aggregate print
+feature-testing-examples/carrier_payload_views.gos	unsupported-boundary: a struct carrying two-word Option fields crosses the function boundary, which the trampoline cannot marshal - the recursive walk the fixture pins
 feature-testing-examples/carrier_unwrap_or_else.gos	admission gate
 feature-testing-examples/chan_carrier_elements.gos	cross-goroutine
 feature-testing-examples/chan_select_struct_payload.gos	bytecode-only local

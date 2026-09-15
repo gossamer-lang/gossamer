@@ -670,9 +670,21 @@ impl<'a> Lowerer<'a> {
             && (is_inline_vec_scalar_llvm(&render_ty(
                 self.tcx,
                 self.body.local_ty(destination.local),
-            )) || self.vec_operand_elem_is_vec(&args[0]))
+            )) || self.vec_operand_elem_is_vec(&args[0])
+                || self.vec_operand_elem_is_counted_handle(&args[0]))
         {
             self.lower_vec_get_i64_inline(args, destination, target)?;
+            return Ok(());
+        }
+        // `unwrap` as a call terminator: the discriminant test and payload word
+        // the statement form inlines, stored the way the call path stores the
+        // shim's answer.
+        if matches!(
+            name.as_str(),
+            "gos_rt_option_unwrap" | "gos_rt_result_unwrap"
+        ) && args.len() == 1
+        {
+            self.lower_carrier_unwrap_terminator(&name, args, destination, target)?;
             return Ok(());
         }
         // The MIR emits this only for the counted-loop element read of a
@@ -1508,11 +1520,88 @@ impl<'a> Lowerer<'a> {
     /// C function pointer, a C-ABI handler, and a direct call all receive a
     /// parameter in the same shape, which is what lets one predicate
     /// (`param_is_by_pointer`) bind every callee.
+    /// Chooses the carrier payload bindings to read in place.
+    ///
+    /// A binding qualifies when the MIR says nothing runs between its
+    /// definition and the calls reading it, and every one of those calls
+    /// takes it by shared reference to its own type: the callee then only
+    /// reads the words, which the payload block holds unchanged until the
+    /// call returns. Each gets a `ptr` slot that starts at the binding's own
+    /// storage, so a read the definition has not reached sees that storage.
+    pub(crate) fn plan_payload_views(&mut self) {
+        for local in gossamer_mir::carrier_payload_views(self.body) {
+            let ty = self.body.local_ty(local);
+            if !is_aggregate(self.tcx, ty)
+                || !slot_count(self.tcx, ty).is_some_and(|n| n >= 2)
+                || !self.payload_view_callees_borrow(local, ty)
+            {
+                continue;
+            }
+            let view = self.entry_alloca("ptr");
+            self.entry_allocas
+                .push(format!("  store ptr {}, ptr {view}\n", local_slot(local)));
+            self.payload_views.insert(local, view);
+        }
+    }
+
+    /// `true` when every call passing `local` names a Gossamer function whose
+    /// parameter at each of those positions is `&ty`.
+    fn payload_view_callees_borrow(&self, local: gossamer_mir::Local, ty: Ty) -> bool {
+        self.body.blocks.iter().all(|block| {
+            let gossamer_mir::Terminator::Call { callee, args, .. } = &block.terminator else {
+                return true;
+            };
+            let positions: Vec<usize> = args
+                .iter()
+                .enumerate()
+                .filter(|(_, arg)| matches!(arg, Operand::Copy(p) if p.local == local))
+                .map(|(i, _)| i)
+                .collect();
+            if positions.is_empty() {
+                return true;
+            }
+            let name = match callee {
+                Operand::FnRef { def, .. } => self.fn_name_by_def.get(&def.local).cloned(),
+                Operand::Const(ConstValue::Str(name)) => Some(name.clone()),
+                _ => None,
+            };
+            let Some(name) = name else {
+                return false;
+            };
+            if resolve_external_binding_symbol(&name, args.len()).is_some()
+                || map_prelude_symbol(&name) != name.as_str()
+            {
+                return false;
+            }
+            let symbol = mangle_fn_name(&name);
+            let Some(params) = self.param_tys_by_name.get(symbol.as_ref()) else {
+                return false;
+            };
+            positions.iter().all(|&i| {
+                params.get(i).is_some_and(|param| {
+                    matches!(
+                        self.tcx.kind(*param),
+                        Some(TyKind::Ref { mutability: gossamer_types::Mutbl::Not, inner })
+                            if *inner == ty
+                    )
+                })
+            })
+        })
+    }
+
     pub(crate) fn lower_call_arg(
         &mut self,
         op: &Operand,
         expected: Option<Ty>,
     ) -> Result<(String, String), BuildError> {
+        if let Operand::Copy(place) = op
+            && place.projection.is_empty()
+            && let Some(view) = self.payload_views.get(&place.local).cloned()
+        {
+            let addr = self.fresh();
+            writeln!(self.out, "  {addr} = load ptr, ptr {view}").unwrap();
+            return Ok((addr, "ptr".to_string()));
+        }
         if let Some(want) = expected
             && let Operand::Copy(place) = op
             && place.projection.is_empty()

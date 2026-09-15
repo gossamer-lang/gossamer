@@ -703,6 +703,51 @@ fn kept_count(i: i64) -> i64 {
 }
 
 #[test]
+fn a_row_nothing_writes_shares_its_container_and_a_written_one_is_copied() {
+    let source = r"
+fn dot(a: Vec<Vec<f64>>, b: Vec<Vec<f64>>) -> f64 {
+    let mut total = 0.0
+    for i in 0..a.len() {
+        let a_row = a[i]
+        let b_row = b[i]
+        for k in 0..a_row.len() { total += a_row[k] * b_row[k] }
+    }
+    total
+}
+
+fn written(a: Vec<Vec<i64>>) -> i64 {
+    let mut row = a[0]
+    row.push(1)
+    row.len()
+}
+
+fn container_written(mut a: Vec<Vec<i64>>) -> i64 {
+    let row = a[0]
+    a[0].push(1)
+    row.len()
+}
+";
+    let (bodies, _tcx) = build(source);
+    let clones = |name: &str| {
+        let body = bodies
+            .iter()
+            .find(|body| body.name == name)
+            .unwrap_or_else(|| panic!("{name} body"));
+        call_symbol_names(body)
+            .iter()
+            .filter(|symbol| symbol.as_str() == "gos_rt_vec_clone")
+            .count()
+    };
+    assert_eq!(clones("dot"), 0, "read-only rows share their container");
+    assert_eq!(clones("written"), 1, "a row written through keeps its own copy");
+    assert_eq!(
+        clones("container_written"),
+        1,
+        "a row whose container is written keeps its own copy"
+    );
+}
+
+#[test]
 fn map_insert_registers_structural_children_for_aggregate_values() {
     let source = r#"
 use std::collections::Map
@@ -1803,5 +1848,72 @@ fn main() {
     assert_eq!(
         unchecked, 0,
         "a division panics on a zero divisor, so its value is not hoisted ahead of the guard"
+    );
+}
+
+#[test]
+fn a_payload_binding_is_read_in_place_only_when_nothing_runs_before_the_call() {
+    let source = r"
+struct Node { value: i64, left: Option<Node>, right: Option<Node> }
+
+impl Node {
+    fn sum(&self) -> i64 {
+        let mut total = self.value
+        if let Some(left) = self.left { total += left.sum() }
+        if let Some(right) = self.right { total += right.sum() }
+        total
+    }
+
+    fn counted(&self) -> i64 {
+        let mut total = self.value
+        if let Some(left) = self.left {
+            total += 1
+            total += left.counted()
+        }
+        total
+    }
+}
+";
+    let (bodies, _tcx) = build(source);
+    let views = |name: &str| {
+        let body = bodies
+            .iter()
+            .find(|body| body.name == name)
+            .unwrap_or_else(|| panic!("{name} body"));
+        gossamer_mir::carrier_payload_views(body).len()
+    };
+    assert_eq!(views("Node::sum"), 2);
+    assert_eq!(views("Node::counted"), 0);
+}
+
+#[test]
+fn a_byte_append_loop_becomes_one_append_and_a_changed_byte_stays_a_loop() {
+    let source = r"
+fn copied(out: &mut Vec<u8>, s: String) {
+    for b in s.bytes() { out.push(b) }
+}
+
+fn shifted(out: &mut Vec<u8>, s: String) {
+    for b in s.bytes() { out.push(b +% 1) }
+}
+";
+    let (bodies, _) = build(source);
+    let names = |name: &str| {
+        call_symbol_names(
+            bodies
+                .iter()
+                .find(|body| body.name == name)
+                .unwrap_or_else(|| panic!("{name} body")),
+        )
+    };
+    let copied = names("copied");
+    assert!(
+        copied.iter().any(|n| n == "gos_rt_vec_extend_str_bytes"),
+        "{copied:?}"
+    );
+    let shifted = names("shifted");
+    assert!(
+        !shifted.iter().any(|n| n == "gos_rt_vec_extend_str_bytes"),
+        "{shifted:?}"
     );
 }

@@ -399,6 +399,69 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Lowers `destination = unwrap(carrier)` reached as a call terminator.
+    ///
+    /// The payload word is produced inline; the destination is then filled the
+    /// way the call path fills it from the shim's answer: a multi-slot
+    /// aggregate copies its slots out of the payload's address, an aggregate
+    /// held as one handle stores the handle, and anything else takes the word
+    /// at the destination's type.
+    pub(crate) fn lower_carrier_unwrap_terminator(
+        &mut self,
+        name: &str,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        let r_ty = self.operand_llvm_ty(&args[0]);
+        let r_raw = self.lower_operand(&args[0])?;
+        let r = if r_ty == "i128" {
+            r_raw
+        } else {
+            self.coerce_llvm_value(&r_raw, &r_ty, "i128")
+        };
+        let message = if name == "gos_rt_option_unwrap" {
+            "called `Option::unwrap()` on a `None` value"
+        } else {
+            "called `Result::unwrap()` on an `Err` value"
+        };
+        let word = self.emit_carrier_unwrap(&r, message);
+        let dest_ty_mir = self.place_leaf_ty(destination);
+        let dest_ty = render_ty(self.tcx, dest_ty_mir);
+        if is_unit(self.tcx, dest_ty_mir) || dest_ty == "void" {
+            // Nothing to store.
+        } else if is_aggregate(self.tcx, dest_ty_mir) {
+            let as_ptr = self.fresh();
+            writeln!(self.out, "  {as_ptr} = inttoptr i64 {word} to ptr").unwrap();
+            if let Some(slots) = slot_count(self.tcx, dest_ty_mir) {
+                let slot = if destination.projection.is_empty() {
+                    local_slot(destination.local)
+                } else {
+                    self.lower_place_address(destination)
+                };
+                let bytes = u64::from(slots.max(1)) * 8;
+                writeln!(
+                    self.out,
+                    "  call void @llvm.memcpy.p0.p0.i64(ptr {slot}, ptr {as_ptr}, i64 {bytes}, i1 false)"
+                )
+                .unwrap();
+            } else {
+                self.store_value_to_place(destination, "ptr", &as_ptr);
+            }
+        } else if dest_ty == "double" || dest_ty == "float" {
+            let bits = self.fresh();
+            writeln!(self.out, "  {bits} = bitcast i64 {word} to {dest_ty}").unwrap();
+            self.store_value_to_place(destination, &dest_ty, &bits);
+        } else if dest_ty == "i64" {
+            self.store_value_to_place(destination, "i64", &word);
+        } else {
+            let coerced = self.coerce_llvm_value(&word, "i64", &dest_ty);
+            self.store_value_to_place(destination, &dest_ty, &coerced);
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
     /// Emits the payload of a carrier that must hold one, panicking with
     /// `message` on the empty arm exactly as the shim does.
     fn emit_carrier_unwrap(&mut self, carrier: &str, message: &str) -> String {

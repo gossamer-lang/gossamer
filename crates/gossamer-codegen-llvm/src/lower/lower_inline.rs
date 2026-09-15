@@ -523,6 +523,28 @@ impl<'a> Lowerer<'a> {
         matches!(self.tcx.kind(elem), Some(TyKind::Vec(_) | TyKind::Slice(_)))
     }
 
+    /// True when the operand is a `Vec`/`[T]` whose element is one counted
+    /// handle word - a recursive enum node or an RC struct pointer - rather
+    /// than an addressed aggregate or a two-word carrier. Reading one answers
+    /// the word itself, which the inline load produces bit for bit.
+    pub(crate) fn vec_operand_elem_is_counted_handle(&self, op: &Operand) -> bool {
+        let Operand::Copy(pl) = op else {
+            return false;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let elem = match self.tcx.kind(ty) {
+            Some(TyKind::Vec(e) | TyKind::Slice(e)) => *e,
+            _ => return false,
+        };
+        self.tcx.is_rc_managed(elem)
+            && !self.tcx.is_inline_enum_ty(elem)
+            && !self.tcx.elem_is_addressed_aggregate(elem)
+            && self.tcx.slot_bytes(elem) == 8
+    }
+
     /// Byte offset of element `idx` in the vector `op` names.
     ///
     /// The stride is the element type's own slot width wherever the type
@@ -1294,6 +1316,11 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  {j_bad} = icmp uge i64 {j}, {len}").unwrap();
         writeln!(self.out, "  br i1 {j_bad}, label %{invalid}, label %{swap}").unwrap();
 
+        // The runtime helper panics for a null receiver and for an index
+        // outside the length, which is the only way to reach this block, so
+        // it does not rejoin the loop: nothing after the call can observe a
+        // header the call might have changed.
+        let cold_start = self.out.len();
         writeln!(self.out, "{invalid}:").unwrap();
         declare_rt(&mut self.runtime_refs, "gos_rt_vec_swap_safe");
         writeln!(
@@ -1301,7 +1328,8 @@ impl<'a> Lowerer<'a> {
             "  call void @gos_rt_vec_swap_safe(ptr {vec_ptr}, i64 {i}, i64 {j})"
         )
         .unwrap();
-        writeln!(self.out, "  br label %{join}").unwrap();
+        writeln!(self.out, "  unreachable").unwrap();
+        self.mark_cold(cold_start);
 
         writeln!(self.out, "{swap}:").unwrap();
         if word_elem {

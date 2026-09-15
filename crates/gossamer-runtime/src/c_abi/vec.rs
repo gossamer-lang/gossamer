@@ -2076,6 +2076,59 @@ pub unsafe extern "C" fn gos_rt_vec_reserve_exact(v: *mut GosVec, cap: i64) {
     });
 }
 
+/// Appends every byte of the string `s` to the byte vector `v`, leaving the
+/// vector exactly as one [`gos_rt_vec_push`] per byte would: the same bytes in
+/// order, the capacity that growth one element at a time reaches, and the
+/// mutation count advanced once per byte.
+///
+/// # Safety
+///
+/// `v` is null or a live `GosVec` of unsigned bytes; `s` is null or a
+/// Gossamer string body.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_extend_str_bytes(
+    v: *mut GosVec,
+    s: *const std::os::raw::c_char,
+) {
+    ffi_entry!((), {
+        if v.is_null() || s.is_null() {
+            return;
+        }
+        let bytes: &[u8] = unsafe { crate::c_abi::string::gos_str_arg_bytes(s) };
+        if bytes.is_empty() {
+            return;
+        }
+        let vec = unsafe { &mut *v };
+        let added = bytes.len() as i64;
+        vec.mutation_generation = vec.mutation_generation.wrapping_add(bytes.len() as u64);
+        let need = vec.len.saturating_add(added);
+        if need > vec.cap {
+            let mut cap = vec.cap;
+            while cap < need {
+                cap = next_geometric_cap(cap, cap.saturating_add(1));
+            }
+            unsafe { vec_reserve_to(vec, cap, true) };
+        }
+        let stride = vec.elem_bytes as usize;
+        let base = unsafe { vec.ptr.add((vec.len as usize) * stride) };
+        if stride == 1 {
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base, bytes.len()) };
+        } else {
+            for (i, &b) in bytes.iter().enumerate() {
+                let word = u64::from(b).to_le_bytes();
+                unsafe {
+                    crate::c_abi::string::copy_small_bytes(
+                        word.as_ptr(),
+                        base.add(i * stride),
+                        stride.min(8),
+                    );
+                }
+            }
+        }
+        vec.len = need;
+    });
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
     ffi_entry!((), {
@@ -3351,5 +3404,39 @@ mod unwrap_or_vec_tests {
         assert_eq!(shares(fallback), before);
         unsafe { crate::c_abi::map::gos_rt_vec_free(fallback) };
         unsafe { crate::c_abi::map::gos_rt_vec_free(payload) };
+    }
+}
+
+#[cfg(test)]
+mod extend_str_bytes_tests {
+    use super::*;
+
+    /// A bulk append leaves the vector one push per byte would: the same
+    /// bytes, length, capacity, and mutation count, across growth.
+    #[test]
+    fn a_bulk_append_matches_one_push_per_byte() {
+        let text =
+            crate::c_abi::string::alloc_cstring_from_slices(&["ab\u{e9}cdefghij".as_bytes()]);
+        unsafe {
+            let bulk = gos_rt_vec_new_typed(1, vec_elem_kind::PRIMITIVE);
+            let pushed = gos_rt_vec_new_typed(1, vec_elem_kind::PRIMITIVE);
+            for _ in 0..5 {
+                gos_rt_vec_extend_str_bytes(bulk, text);
+                for &b in crate::c_abi::string::gos_str_arg_bytes(text) {
+                    gos_rt_vec_push(pushed, &raw const b);
+                }
+                assert_eq!((*bulk).len, (*pushed).len);
+                assert_eq!((*bulk).cap, (*pushed).cap);
+                assert_eq!((*bulk).mutation_generation, (*pushed).mutation_generation);
+            }
+            let len = (*bulk).len as usize;
+            assert_eq!(
+                std::slice::from_raw_parts((*bulk).ptr.as_ptr(), len),
+                std::slice::from_raw_parts((*pushed).ptr.as_ptr(), len)
+            );
+            crate::c_abi::map::gos_rt_vec_free(bulk);
+            crate::c_abi::map::gos_rt_vec_free(pushed);
+            crate::c_abi::string::gos_rt_str_free(text);
+        }
     }
 }

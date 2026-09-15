@@ -1,0 +1,68 @@
+// A vector of recursive enum nodes is walked by index and by iteration, a node
+// read out of it is matched and its nested vector walked in turn, and a tree of
+// optional children is descended by unwrapping each child.
+
+enum Step {
+    Add(i64)
+    Scale(i64)
+    Repeat(i64, Vec<Step>)
+}
+
+fn run(steps: Vec<Step>, start: i64) -> i64 {
+    let mut acc = start
+    for step in steps {
+        match step {
+            Step::Add(n) => acc = acc +% n
+            Step::Scale(n) => acc = acc *% n
+            Step::Repeat(times, inner) => {
+                for _ in 0..times { acc = run(inner, acc) }
+            }
+        }
+    }
+    acc
+}
+
+fn indexed(steps: Vec<Step>) -> i64 {
+    let mut adds = 0
+    for i in 0..steps.len() {
+        let step = steps[i]
+        if let Step::Add(n) = step { adds += n }
+    }
+    adds
+}
+
+struct Branch {
+    value: i64
+    left: Option<Branch>
+    right: Option<Branch>
+}
+
+fn grow(depth: i64, value: i64) -> Branch {
+    if depth == 0 {
+        return Branch { value: value, left: None, right: None }
+    }
+    Branch { value: value, left: Some(grow(depth - 1, value * 2)), right: Some(grow(depth - 1, value * 2 + 1)) }
+}
+
+fn descend(root: Branch, path: i64, depth: i64) -> i64 {
+    let mut node = root
+    let mut bits = path
+    for _ in 0..depth {
+        node = if bits % 2 == 1 { node.right.unwrap() } else { node.left.unwrap() }
+        bits = bits / 2
+    }
+    node.value
+}
+
+fn main() {
+    let inner = #[Step::Add(3), Step::Scale(2)]
+    let steps = #[Step::Add(1), Step::Repeat(4, inner), Step::Add(-5), Step::Scale(3)]
+    let mut total = 0
+    for i in 0..20000 { total = total +% run(steps, i) }
+    println("run {}", total)
+    println("indexed {}", indexed(steps))
+    let tree = grow(10, 1)
+    let mut sum = 0
+    for p in 0..3000 { sum += descend(tree, p, 10) }
+    println("descend {}", sum)
+}

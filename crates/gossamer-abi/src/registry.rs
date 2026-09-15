@@ -1948,6 +1948,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_vec_desc_cmp", (Ptr, Ptr, Ptr) -> I64, Both, "Lexicographically compare two sequences, each element through its ordering descriptor: -1, 0, or 1."),
     rt!("gos_rt_vec_eq", (Ptr, Ptr, I8) -> I8, Cranelift, "Structural equality of two Vec/array values, per an element-kind tag; returns 1 if equal."),
     rt!("gos_rt_vec_extend", (Ptr, Ptr) -> Void, Cranelift, "Extend one GosVec from another GosVec with matching element layout."),
+    rt!("gos_rt_vec_extend_str_bytes", (Ptr, Ptr) -> Void, Both, "Append every byte of a string to a byte vector, leaving the vector one push per byte would."),
     rt!("gos_rt_vec_first", (Ptr) -> I128, Cranelift, "Return Option<T> of the first element of a Vec."),
     rt_str!("gos_rt_vec_format_adt", (Ptr, Ptr, I32, I32) -> Ptr, Llvm, "Format a GosVec of aggregates as a debug string by calling the element type's derived fmt on each element."),
     rt_str!("gos_rt_vec_format_bool", (Ptr, I32) -> Ptr, Cranelift, "Format a GosVec<bool> as a debug string."),

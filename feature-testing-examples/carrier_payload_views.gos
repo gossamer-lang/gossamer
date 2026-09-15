@@ -1,0 +1,65 @@
+// A tree walk reads each child out of the carrier that holds it: through a
+// method taking the node by shared reference, a function taking it by value, a
+// `Result` payload, and a binding whose holder is cleared before it is read.
+
+struct Node {
+    value: i64
+    left: Option<Node>
+    right: Option<Node>
+}
+
+impl Node {
+    fn sum(&self) -> i64 {
+        let mut total = self.value
+        if let Some(left) = self.left { total += left.sum() }
+        if let Some(right) = self.right { total += right.sum() }
+        total
+    }
+
+    fn depth(&self) -> i64 {
+        let mut deepest = 0
+        if let Some(left) = self.left { deepest = max(deepest, left.depth()) }
+        if let Some(right) = self.right {
+            let d = right.depth()
+            if d > deepest { deepest = d }
+        }
+        deepest + 1
+    }
+}
+
+fn leftmost(node: Node) -> i64 {
+    if let Some(left) = node.left { return leftmost(left) }
+    node.value
+}
+
+fn grow(depth: i64, value: i64) -> Node {
+    if depth == 0 { return Node { value: value, left: None, right: None } }
+    Node {
+        value: value
+        left: Some(grow(depth - 1, value * 2))
+        right: Some(grow(depth - 1, value * 2 + 1))
+    }
+}
+
+fn checked(n: i64) -> Result<Node, String> {
+    if n < 0 { return Err("negative") }
+    Ok(grow(n, 1))
+}
+
+fn main() {
+    let tree = grow(12, 1)
+    println("sum {}", tree.sum())
+    println("depth {}", tree.depth())
+    println("leftmost {}", leftmost(tree))
+    match checked(5) {
+        Ok(t) => println("ok {} {}", t.sum(), t.depth())
+        Err(e) => println("err {}", e)
+    }
+    if let Ok(t) = checked(3) { println("again {}", t.sum()) }
+    if let Err(e) = checked(-1) { println("err {}", e) }
+    let mut replaced = grow(4, 1)
+    if let Some(left) = replaced.left {
+        replaced.left = None
+        println("detached {} {}", left.sum(), replaced.sum())
+    }
+}

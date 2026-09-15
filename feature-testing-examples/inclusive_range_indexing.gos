@@ -1,0 +1,57 @@
+// Inclusive ranges index up to and including their end: the last element is
+// read, an empty range reads nothing, and a window clamped to the vector reads
+// exactly the elements inside it.
+
+fn sum_through(xs: Vec<i64>, end: i64) -> i64 {
+    let mut total = 0
+    for i in 0..=end { total += xs[i] }
+    total
+}
+
+fn window_hits(a: Vec<i64>, b: Vec<i64>, reach: i64) -> i64 {
+    let mut hit: Vec<bool> = #[false; b.len()]
+    let mut hits = 0
+    for i in 0..a.len() {
+        let start = if i > reach { i - reach } else { 0 }
+        let end = if b.len() - 1 < i + reach { b.len() - 1 } else { i + reach }
+        for j in start..=end {
+            if !hit[j] && a[i] == b[j] {
+                hit[j] = true
+                hits += 1
+                break
+            }
+        }
+    }
+    hits
+}
+
+fn countdown_pairs(xs: Vec<i64>) -> i64 {
+    let n = xs.len()
+    let mut acc = 0
+    for i in 1..=n - 1 { acc = acc *% 31 +% (xs[i] - xs[i - 1]) }
+    acc
+}
+
+fn main() {
+    let mut xs: Vec<i64> = #[]
+    for i in 0..500 { xs.push(i * 7 % 13) }
+    let mut total = 0
+    for _ in 0..2000 {
+        total += sum_through(xs, xs.len() - 1)
+        total += sum_through(xs, 0)
+        total += sum_through(xs, -1)
+    }
+    println("through {}", total)
+
+    let mut a: Vec<i64> = #[]
+    let mut b: Vec<i64> = #[]
+    for i in 0..300 {
+        a.push(i * 5 % 17)
+        b.push(i * 3 % 17)
+    }
+    let mut hits = 0
+    for _ in 0..200 { hits += window_hits(a, b, 9) }
+    println("window {}", hits)
+    println("single {}", window_hits(#[4], #[4], 0))
+    println("pairs {}", countdown_pairs(xs))
+}

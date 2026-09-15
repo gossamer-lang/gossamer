@@ -1,0 +1,71 @@
+// Bytes of a string appended one push at a time: into a local vector, through
+// a `&mut` parameter onto a vector that already holds bytes and has to grow,
+// from an empty string, from multi-byte text, with the byte changed, and in a
+// hot function the JIT compiles.
+
+fn append(out: &mut Vec<u8>, s: String) {
+    for b in s.bytes() { out.push(b) }
+}
+
+fn shifted(out: &mut Vec<u8>, s: String) {
+    for b in s.bytes() { out.push(b +% 1) }
+}
+
+fn appended(s: String, times: i64) -> i64 {
+    let mut out: Vec<u8> = #[]
+    let mut round = 0
+    while round < times {
+        for b in s.bytes() { out.push(b) }
+        round += 1
+    }
+    let mut h = 17
+    for b in out { h = h *% 31 +% b as i64 }
+    h +% out.len()
+}
+
+fn checksum(bytes: Vec<u8>) -> i64 {
+    let mut h = 17
+    for b in bytes { h = h *% 31 +% b as i64 }
+    h
+}
+
+fn main() {
+    let mut hot = 0
+    for i in 0..50 { hot = hot +% appended(format("row-{}-\u{e9}", i), i) }
+    println("hot {}", hot)
+
+    let plain = "plain ascii"
+    let mut out: Vec<u8> = #[]
+    for b in plain.bytes() { out.push(b) }
+    println("local {} {} {}", out.len(), out.capacity() >= out.len(), checksum(out))
+
+    let mut grown: Vec<u8> = #[1, 2, 3]
+    let mut i = 0
+    while i < 200 {
+        append(&mut grown, format("chunk-{}-\u{e9}-", i))
+        i += 1
+    }
+    println("grown {} {} {}", grown.len(), grown.capacity() >= grown.len(), checksum(grown))
+
+    let mut empty_case: Vec<u8> = #[7]
+    append(&mut empty_case, "")
+    println("empty {} {}", empty_case.len(), checksum(empty_case))
+
+    let mut changed: Vec<u8> = #[]
+    shifted(&mut changed, "abc")
+    println("shifted {:?}", changed)
+
+    let text = "h\u{e9}llo w\u{f6}rld"
+    let mut decoded: Vec<u8> = #[]
+    for b in text.bytes() { decoded.push(b) }
+    println("utf8 {} {:?}", decoded.len(), decoded)
+
+    let mut dict: Vec<String> = #[]
+    for c in 0..26 { dict.push(format("{}{}", (97 + c) as u8 as char, c)) }
+    let mut lzw: Vec<u8> = #[]
+    for k in 0..500 {
+        let word = dict[(k * 7) % 26]
+        for b in word.bytes() { lzw.push(b) }
+    }
+    println("dict {} {}", lzw.len(), checksum(lzw))
+}

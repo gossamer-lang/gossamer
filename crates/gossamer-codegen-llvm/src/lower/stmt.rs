@@ -298,6 +298,31 @@ impl<'a> Lowerer<'a> {
         place: &Place,
         rvalue: &Rvalue,
     ) -> Result<(), BuildError> {
+        if place.projection.is_empty()
+            && let Some(view) = self.payload_views.get(&place.local).cloned()
+            && let Rvalue::CallIntrinsic {
+                name: "gos_rt_result_payload",
+                args,
+            } = rvalue
+        {
+            // The binding keeps the payload block's address; its callees read
+            // the words there.
+            let r_ty = self.operand_llvm_ty(&args[0]);
+            let r_raw = self.lower_operand(&args[0])?;
+            let r = if r_ty == "i128" {
+                r_raw
+            } else {
+                self.coerce_llvm_value(&r_raw, &r_ty, "i128")
+            };
+            let hi = self.fresh();
+            writeln!(self.out, "  {hi} = lshr i128 {r}, 64").unwrap();
+            let word = self.fresh();
+            writeln!(self.out, "  {word} = trunc i128 {hi} to i64").unwrap();
+            let addr = self.fresh();
+            writeln!(self.out, "  {addr} = inttoptr i64 {word} to ptr").unwrap();
+            writeln!(self.out, "  store ptr {addr}, ptr {view}").unwrap();
+            return Ok(());
+        }
         let dest_ty_mir = self.body.local_ty(place.local);
         if is_unit(self.tcx, dest_ty_mir) {
             // Even when the destination's MIR type is unit, the

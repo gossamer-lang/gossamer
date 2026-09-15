@@ -143,6 +143,10 @@ pub(crate) struct Lowerer<'a> {
     /// (e.g. load the heap pointer from a slot when the param
     /// is `&Adt` rather than passing the slot address).
     pub(crate) param_tys_by_name: std::collections::HashMap<String, Vec<Ty>>,
+    /// Payload bindings every call reads in place, each mapped to the `ptr`
+    /// slot holding its payload block's address. Planned by
+    /// [`Lowerer::plan_payload_views`].
+    pub(crate) payload_views: std::collections::HashMap<gossamer_mir::Local, String>,
     /// String-constant pool - the emitter materialises each
     /// entry as a `@.str_N = private unnamed_addr constant
     /// [len x i8] c"..."` module-level global so

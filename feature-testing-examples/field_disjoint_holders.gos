@@ -1,0 +1,63 @@
+// A value copied out of one field of `self` stays readable while the loop
+// writes another field, and a write to the same field is seen by the next read.
+
+struct Link {
+    weight: f64
+    source: i64
+}
+
+struct Layer {
+    outputs: Vec<f64>
+    links: Vec<Link>
+    order: Vec<i64>
+}
+
+impl Layer {
+    fn blend(&mut self, rate: f64) -> f64 {
+        let mut total = 0.0
+        for idx in self.order {
+            let out = self.outputs[self.links[idx].source]
+            self.links[idx].weight = self.links[idx].weight * rate + out
+            total += self.links[idx].weight
+        }
+        total
+    }
+
+    fn rewrite_outputs(&mut self) -> f64 {
+        let mut total = 0.0
+        for i in 0..self.outputs.len() {
+            let before = self.outputs[i]
+            self.outputs[i] = before * 2.0 + 1.0
+            total += self.outputs[i] - before
+        }
+        total
+    }
+
+    fn grow_while_reading(&mut self) -> i64 {
+        let mut seen = 0
+        for idx in self.order {
+            seen += self.links[idx].source
+            self.order.push(idx)
+            if self.order.len() > 40 { break }
+        }
+        seen + self.order.len()
+    }
+}
+
+fn main() {
+    let mut layer = Layer { outputs: #[], links: #[], order: #[] }
+    for i in 0..6 { layer.outputs.push(i as f64 * 0.5) }
+    for i in 0..12 {
+        layer.links.push(Link { weight: 0.1 * i as f64, source: i % 6 })
+        layer.order.push((i * 5) % 12)
+    }
+    let mut acc = 0.0
+    for _ in 0..3000 {
+        acc += layer.blend(0.5)
+    }
+    println("blend {}", acc)
+    println("rewrite {}", layer.rewrite_outputs())
+    println("outputs {:?}", layer.outputs)
+    println("grow {}", layer.grow_while_reading())
+    println("order {}", layer.order.len())
+}

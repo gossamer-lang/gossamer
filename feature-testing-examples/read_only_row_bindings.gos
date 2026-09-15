@@ -1,0 +1,68 @@
+// A row bound from a nested vector and only read shares the row; a row that is
+// written, or whose container is written while the binding lives, keeps a copy
+// of its own, so every read below sees the value the binding took.
+
+fn dot_rows(a: Vec<Vec<f64>>, b: Vec<Vec<f64>>) -> f64 {
+    let n = a.len()
+    let mut total = 0.0
+    for i in 0..n {
+        let a_row = a[i]
+        for j in 0..n {
+            let b_row = b[j]
+            let mut s = 0.0
+            for k in 0..n { s += a_row[k] * b_row[k] }
+            total += s
+        }
+    }
+    total
+}
+
+fn written_row(a: Vec<Vec<i64>>) -> i64 {
+    let mut row = a[0]
+    row.push(99)
+    row[0] = -1
+    row.len() * 1000 + row[0] + a[0][0] + a[0].len()
+}
+
+fn container_written_while_bound(mut a: Vec<Vec<i64>>) -> i64 {
+    let row = a[1]
+    a[1][0] = 555
+    a[1].push(7)
+    row[0] * 10 + row.len() + a[1][0] + a[1].len()
+}
+
+fn row_escapes(a: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
+    let mut kept: Vec<Vec<i64>> = #[]
+    for i in 0..a.len() {
+        let row = a[i]
+        kept.push(row)
+    }
+    kept[0].push(42)
+    kept
+}
+
+fn main() {
+    let mut a: Vec<Vec<f64>> = #[]
+    let mut b: Vec<Vec<f64>> = #[]
+    for i in 0..60 {
+        let mut ra: Vec<f64> = #[]
+        let mut rb: Vec<f64> = #[]
+        for j in 0..60 {
+            ra.push((i * 7 + j) as f64 * 0.5)
+            rb.push((j * 3 - i) as f64 * 0.25)
+        }
+        a.push(ra)
+        b.push(rb)
+    }
+    let mut dot = 0.0
+    for _ in 0..30 { dot += dot_rows(a, b) }
+    println("dot {}", dot)
+
+    let ints: Vec<Vec<i64>> = #[#[1, 2, 3], #[4, 5, 6]]
+    println("written {}", written_row(ints))
+    println("ints after {:?}", ints)
+    println("container {}", container_written_while_bound(ints))
+    println("ints after {:?}", ints)
+    let kept = row_escapes(ints)
+    println("kept {:?} ints {:?}", kept, ints)
+}

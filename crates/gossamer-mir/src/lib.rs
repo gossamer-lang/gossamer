@@ -39,7 +39,7 @@ pub use monomorph::{
     subst_param_ty,
 };
 pub use opt::{
-    const_branch_elim, const_fold, const_value_of, copy_propagate, dead_block_sweep,
-    dead_store_elim, inline_general, inline_small_callees, inline_trivial_wrappers, optimise,
-    optimise_debug, optimise_for_jit, statement_count,
+    carrier_payload_views, const_branch_elim, const_fold, const_value_of, copy_propagate,
+    dead_block_sweep, dead_store_elim, inline_general, inline_small_callees,
+    inline_trivial_wrappers, optimise, optimise_debug, optimise_for_jit, statement_count,
 };

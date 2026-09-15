@@ -1113,6 +1113,290 @@ fn block_reads_vec_local(
     }
 }
 
+/// Shares a vector bound out of a container instead of copying it, when neither
+/// the binding nor the container it came from is written.
+///
+/// `let row = rows[i]` gives `row` a value of its own, so a write through either
+/// cannot reach the other. When nothing writes through `row`, through `rows`,
+/// or through any vector read out of `rows`, and none of them is referenced,
+/// stored, captured, returned, or handed to a call that could keep or change
+/// it, the copy and the vector it was taken from hold the same elements for as
+/// long as the binding lives. The copy is then a retained alias:
+///
+/// ```text
+/// row = gos_rt_vec_clone(elem)      gos_rt_vec_retain(elem)
+///                               ->  row = elem
+/// ```
+///
+/// The binding keeps its share, so the releases the drop schedule placed for it
+/// stay balanced.
+pub(crate) fn share_read_only_vec_bindings(body: &mut Body, tcx: &TyCtxt) {
+    if body.locals.is_empty() || body.blocks.is_empty() {
+        return;
+    }
+    let defs = ElementDefs::compute(body);
+    let reads = ReadOnlyUses::compute(body);
+    let rewrites = collect_read_only_vec_shares(body, tcx, &defs, &reads);
+    let unit_ty = tcx
+        .unit_interned()
+        .unwrap_or_else(|| body.locals.first().expect("body has return local").ty);
+    apply_fresh_vec_clone_rewrites(body, unit_ty, rewrites);
+}
+
+/// How each local is defined: the element read that answered it, and whether
+/// anything other than that read, a clone, a constant zero, or its own
+/// accounting also writes it.
+struct ElementDefs {
+    element_of: Vec<Option<Local>>,
+    other_def: Vec<bool>,
+}
+
+impl ElementDefs {
+    fn compute(body: &Body) -> Self {
+        let n = body.locals.len();
+        let mut element_of: Vec<Option<Local>> = vec![None; n];
+        let mut other_def = vec![false; n];
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                    continue;
+                };
+                let settles = match rvalue {
+                    Rvalue::CallIntrinsic { name, .. } => is_vec_accounting_call(name),
+                    Rvalue::Use(Operand::Const(_)) => place.projection.is_empty(),
+                    _ => false,
+                };
+                if !settles && let Some(flag) = other_def.get_mut(place.local.0 as usize) {
+                    *flag = true;
+                }
+            }
+            let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                destination,
+                ..
+            } = &block.terminator
+            else {
+                continue;
+            };
+            let i = destination.local.0 as usize;
+            if i >= n {
+                continue;
+            }
+            match (name.as_str(), args.first()) {
+                ("gos_rt_vec_get_i64" | "gos_rt_vec_get_i64_unchecked", Some(Operand::Copy(base)))
+                    if base.projection.is_empty() && destination.projection.is_empty() =>
+                {
+                    if element_of[i].is_some_and(|b| b != base.local) {
+                        other_def[i] = true;
+                    }
+                    element_of[i] = Some(base.local);
+                }
+                ("gos_rt_vec_clone", _) if destination.projection.is_empty() => {}
+                _ => other_def[i] = true,
+            }
+        }
+        Self {
+            element_of,
+            other_def,
+        }
+    }
+
+    /// The container `local` was read out of, followed back through element
+    /// reads to the first local that is not one.
+    fn root_of(&self, mut local: Local) -> Local {
+        for _ in 0..self.element_of.len() {
+            let i = local.0 as usize;
+            match self.element_of[i] {
+                Some(base) if !self.other_def[i] => local = base,
+                _ => break,
+            }
+        }
+        local
+    }
+}
+
+/// Which locals are only ever read - the receiver of a helper that reads it, a
+/// clone's source, or their own accounting - and how many clones define each.
+struct ReadOnlyUses {
+    only_read: Vec<bool>,
+    clone_defs: Vec<u32>,
+}
+
+impl ReadOnlyUses {
+    fn compute(body: &Body) -> Self {
+        let n = body.locals.len();
+        let mut uses = Self {
+            only_read: vec![true; n],
+            clone_defs: vec![0; n],
+        };
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let StatementKind::Assign { place, rvalue } = &stmt.kind {
+                    if !place.projection.is_empty() {
+                        uses.disqualify_local(place.local);
+                    }
+                    uses.judge_rvalue(rvalue);
+                }
+            }
+            uses.judge_terminator(&block.terminator);
+        }
+        uses
+    }
+
+    fn disqualify_local(&mut self, local: Local) {
+        if let Some(flag) = self.only_read.get_mut(local.0 as usize) {
+            *flag = false;
+        }
+    }
+
+    fn disqualify(&mut self, op: &Operand) {
+        if let Operand::Copy(place) = op {
+            self.disqualify_local(place.local);
+        }
+    }
+
+    fn judge_call_args(&mut self, name: &str, args: &[Operand]) {
+        for (index, arg) in args.iter().enumerate() {
+            let read = matches!(arg, Operand::Copy(place) if place.projection.is_empty())
+                && (helper_reads_only(name, index) || (name == "gos_rt_vec_clone" && index == 0));
+            if !read {
+                self.disqualify(arg);
+            }
+        }
+    }
+
+    fn judge_rvalue(&mut self, rvalue: &Rvalue) {
+        match rvalue {
+            Rvalue::CallIntrinsic { name, args } if is_vec_accounting_call(name) => {
+                for arg in args.iter().skip(1) {
+                    self.disqualify(arg);
+                }
+            }
+            Rvalue::CallIntrinsic { name, args } => self.judge_call_args(name, args),
+            Rvalue::Use(op)
+            | Rvalue::UnaryOp { operand: op, .. }
+            | Rvalue::Cast { operand: op, .. }
+            | Rvalue::Repeat { value: op, .. } => self.disqualify(op),
+            Rvalue::BinaryOp { lhs, rhs, .. } => {
+                self.disqualify(lhs);
+                self.disqualify(rhs);
+            }
+            Rvalue::Aggregate { operands, .. } => {
+                for op in operands {
+                    self.disqualify(op);
+                }
+            }
+            Rvalue::Len(place) | Rvalue::Ref { place, .. } => self.disqualify_local(place.local),
+            Rvalue::StaticLoad(_) => {}
+        }
+    }
+
+    fn judge_terminator(&mut self, terminator: &Terminator) {
+        match terminator {
+            Terminator::Call {
+                callee,
+                args,
+                destination,
+                ..
+            } => {
+                self.disqualify(callee);
+                let name = match callee {
+                    Operand::Const(ConstValue::Str(name)) => name.as_str(),
+                    _ => "",
+                };
+                if name == "gos_rt_vec_clone"
+                    && destination.projection.is_empty()
+                    && let Some(count) = self.clone_defs.get_mut(destination.local.0 as usize)
+                {
+                    *count += 1;
+                }
+                self.judge_call_args(name, args);
+                if !destination.projection.is_empty() {
+                    self.disqualify_local(destination.local);
+                }
+            }
+            Terminator::SwitchInt { discriminant, .. } => self.disqualify(discriminant),
+            Terminator::Assert { cond, .. } => self.disqualify(cond),
+            _ => {}
+        }
+    }
+}
+
+/// The clones [`share_read_only_vec_bindings`] turns into retained aliases.
+fn collect_read_only_vec_shares(
+    body: &Body,
+    tcx: &TyCtxt,
+    defs: &ElementDefs,
+    reads: &ReadOnlyUses,
+) -> Vec<VecCloneRewrite> {
+    let n_locals = body.locals.len();
+    let arity = body.arity as usize;
+    let share = crate::ownership::ShareFacts::compute(body);
+    let is_vec = |l: Local| {
+        body.locals
+            .get(l.0 as usize)
+            .is_some_and(|decl| matches!(tcx.kind_of(decl.ty), gossamer_types::TyKind::Vec(_)))
+    };
+    let local_ok = |l: Local| {
+        let i = l.0 as usize;
+        i < n_locals && !body.locals[i].region && !share.is_goroutine_shared(l)
+    };
+    // A container is written through when any vector read out of it is.
+    let mut family_written = vec![false; n_locals];
+    for (i, element) in defs.element_of.iter().enumerate() {
+        if element.is_some() && !reads.only_read[i] {
+            let root = defs.root_of(Local(u32::try_from(i).unwrap_or(0)));
+            family_written[root.0 as usize] = true;
+        }
+    }
+    let mut rewrites = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            target: Some(target),
+        } = &block.terminator
+        else {
+            continue;
+        };
+        let [Operand::Copy(source)] = args.as_slice() else {
+            continue;
+        };
+        if name != "gos_rt_vec_clone" || !destination.projection.is_empty() || !source.projection.is_empty() {
+            continue;
+        }
+        let (dst, src) = (destination.local, source.local);
+        let root = defs.root_of(src);
+        let (di, ri) = (dst.0 as usize, root.0 as usize);
+        let binding_reads_only = di > arity
+            && dst != src
+            && is_vec(dst)
+            && is_vec(src)
+            && local_ok(dst)
+            && !defs.other_def[di]
+            && reads.clone_defs[di] > 0
+            && reads.only_read[di];
+        let container_untouched = defs.element_of[src.0 as usize].is_some()
+            && local_ok(src)
+            && local_ok(root)
+            && reads.only_read[ri]
+            && !family_written[ri]
+            && (ri <= arity || !defs.other_def[ri]);
+        if binding_reads_only && container_untouched {
+            rewrites.push(VecCloneRewrite {
+                block: bi,
+                source: src,
+                destination: destination.clone(),
+                target: *target,
+                span: block.span,
+            });
+        }
+    }
+    rewrites
+}
+
 /// Drops the deep copy a struct binding takes of a vector field when the
 /// vector the field was built from is never named again.
 ///

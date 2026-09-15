@@ -9,12 +9,15 @@ struct CountedHeader {
     bound: Local,
     body_entry: usize,
     exit: usize,
+    /// `counter <= bound` rather than `counter < bound`: the last index the
+    /// body reaches is `bound` itself.
+    inclusive: bool,
 }
 
-/// Matches the `for i in 0..bound` header shape produced by the lowerer:
-/// a final `cmp = Lt(Copy(counter), Copy(bound))` statement followed by
-/// `SwitchInt(cmp, arms:[(0, exit)], default: body)`. Inclusive (`Le`)
-/// comparisons and any other arm layout are rejected.
+/// Matches the `for i in lo..bound` and `for i in lo..=bound` header shapes
+/// produced by the lowerer: a final `cmp = Lt(Copy(counter), Copy(bound))` or
+/// `Le(..)` statement followed by `SwitchInt(cmp, arms:[(0, exit)], default:
+/// body)`. Any other comparison or arm layout is rejected.
 fn recognise_counted_header(block: &BasicBlock) -> Option<CountedHeader> {
     let Terminator::SwitchInt {
         discriminant: Operand::Copy(disc),
@@ -40,7 +43,7 @@ fn recognise_counted_header(block: &BasicBlock) -> Option<CountedHeader> {
         place,
         rvalue:
             Rvalue::BinaryOp {
-                op: BinOp::Lt,
+                op: op @ (BinOp::Lt | BinOp::Le),
                 lhs: Operand::Copy(lhs),
                 rhs: Operand::Copy(rhs),
             },
@@ -56,6 +59,7 @@ fn recognise_counted_header(block: &BasicBlock) -> Option<CountedHeader> {
         return None;
     }
     Some(CountedHeader {
+        inclusive: *op == BinOp::Le,
         counter: lhs.local,
         bound: rhs.local,
         body_entry,
@@ -65,9 +69,14 @@ fn recognise_counted_header(block: &BasicBlock) -> Option<CountedHeader> {
 
 /// Computes the loop body region for a header. Returns the set of body
 /// block indices (excluding the header and the exit) and the single
-/// latch block whose terminator jumps back to the header. Bails (`None`)
-/// on any irregular shape: more than one back edge to the header, or a
-/// region block that escapes to a block other than the header or exit.
+/// latch block whose terminator jumps back to the header.
+///
+/// The region is the natural loop: every block reachable from the body entry
+/// without passing the header that can itself reach the back edge. A block of
+/// the region may leave it for any other block - the header's exit, or the
+/// target of a `break` - since the versioned clone keeps those edges. Bails
+/// (`None`) on more than one back edge, or a latch that is not an
+/// unconditional jump to the header.
 fn counted_loop_region(
     body: &Body,
     succs: &[Vec<usize>],
@@ -79,52 +88,57 @@ fn counted_loop_region(
         return None;
     }
     let n = body.blocks.len();
-    let mut in_region = vec![false; n];
+    // Forward: everything the body entry reaches before coming back round.
+    let mut forward = vec![false; n];
     let mut stack = vec![body_entry];
-    in_region[body_entry] = true;
-    let mut order = Vec::new();
+    forward[body_entry] = true;
     while let Some(b) = stack.pop() {
-        order.push(b);
         for &s in &succs[b] {
-            if s == header || s == exit {
-                continue;
-            }
             if s >= n {
                 return None;
             }
-            if !in_region[s] {
-                in_region[s] = true;
+            if s != header && s != exit && !forward[s] {
+                forward[s] = true;
                 stack.push(s);
             }
         }
     }
-    // Closed-loop check + locate the single latch (back edge to header).
-    let mut latch: Option<usize> = None;
-    for &b in &order {
-        let mut targets_header = false;
-        for &s in &succs[b] {
-            if s == header {
-                targets_header = true;
-            } else if s == exit {
-                // a `break`-style early exit is fine
-            } else if !in_region.get(s).copied().unwrap_or(false) {
-                // escapes the loop to a third block - not a clean loop.
-                return None;
-            }
-        }
-        if targets_header {
-            if latch.is_some() {
-                return None;
-            }
-            latch = Some(b);
-        }
-    }
-    let latch = latch?;
-    // The latch must jump unconditionally back to the header.
+    // The back edges: forward blocks that jump to the header.
+    let latches: Vec<usize> = (0..n)
+        .filter(|&b| forward[b] && succs[b].contains(&header))
+        .collect();
+    let [latch] = latches.as_slice() else {
+        return None;
+    };
+    let latch = *latch;
     if !matches!(&body.blocks[latch].terminator, Terminator::Goto { target } if target.0 as usize == header)
     {
         return None;
     }
+    // Backward from the latch, within the forward set: the natural loop.
+    let mut preds: Vec<Vec<usize>> = vec![Vec::new(); n];
+    for b in (0..n).filter(|&b| forward[b]) {
+        for &s in &succs[b] {
+            if s < n && forward[s] {
+                preds[s].push(b);
+            }
+        }
+    }
+    let mut in_region = vec![false; n];
+    in_region[latch] = true;
+    let mut stack = vec![latch];
+    while let Some(b) = stack.pop() {
+        for &p in &preds[b] {
+            if !in_region[p] {
+                in_region[p] = true;
+                stack.push(p);
+            }
+        }
+    }
+    if !in_region[body_entry] {
+        return None;
+    }
+    let order: Vec<usize> = (0..n).filter(|&b| in_region[b]).collect();
     Some((order, latch))
 }
 
@@ -135,16 +149,18 @@ fn block_writes_local(block: &BasicBlock, local: Local) -> bool {
         || term_writes_bare(&block.terminator, local)
 }
 
-/// Verifies the counter is a monotone non-negative induction variable:
-/// its only in-loop write is one `counter = counter + positive_const`
-/// in the latch, and every definition outside the loop traces to a
-/// non-negative value (so the monotone counter stays in `[0, bound)`).
+/// Verifies the counter is a monotone induction variable: its only in-loop
+/// write is one `counter = counter + positive_const` in the latch. With
+/// `nonneg_start`, every definition outside the loop must also trace to a
+/// non-negative value, so the counter stays in `[0, bound)` with no runtime
+/// check; the versioner checks the start at loop entry instead.
 fn verify_counter(
     body: &Body,
     region: &[usize],
     header: usize,
     latch: usize,
     counter: Local,
+    nonneg_start: bool,
 ) -> bool {
     let in_loop = |b: usize| b == header || region.contains(&b);
     let mut latch_increment = false;
@@ -182,7 +198,7 @@ fn verify_counter(
                 latch_increment = true;
             } else {
                 // Pre-loop initialisation must be provably non-negative.
-                if !value_traces_nonneg(body, &in_loop, place.local, &mut Vec::new()) {
+                if nonneg_start && !value_traces_nonneg(body, &in_loop, place.local, &mut Vec::new()) {
                     return false;
                 }
                 saw_outside_init = true;
@@ -470,7 +486,8 @@ pub(crate) fn bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
     // (block_index, new_callee_name) for each rewritable get/set.
     let mut rewrites: Vec<(usize, &'static str)> = Vec::new();
     for h in 0..n_blocks {
-        let Some(header) = recognise_counted_header(&body.blocks[h]) else {
+        let Some(header) = recognise_counted_header(&body.blocks[h]).filter(|hd| !hd.inclusive)
+        else {
             continue;
         };
         let Some((region, latch)) =
@@ -478,7 +495,7 @@ pub(crate) fn bounds_check_elim(body: &mut Body, tcx: &TyCtxt) {
         else {
             continue;
         };
-        if !verify_counter(body, &region, h, latch, header.counter) {
+        if !verify_counter(body, &region, h, latch, header.counter, true) {
             continue;
         }
         let Some(xs) = bound_traces_to_len(body, &region, h, header.bound) else {
@@ -1172,11 +1189,14 @@ fn try_version_loop(
     else {
         return;
     };
-    if !verify_counter(body, &region, h, latch, header.counter) {
+    // The preheader checks `base >= -counter` against the counter's value at
+    // entry, so the start need not be provably non-negative here.
+    if !verify_counter(body, &region, h, latch, header.counter, false) {
         return;
     }
     let counter = header.counter;
     let bound = header.bound;
+    let inclusive = header.inclusive;
     if !local_is_loop_invariant(body, h, &region, counter, bound) {
         return;
     }
@@ -1199,7 +1219,7 @@ fn try_version_loop(
     {
         return;
     }
-    emit_loop_version(body, h, counter, bound, &loop_blocks, &cands);
+    emit_loop_version(body, h, VersionLoopLocals { counter, bound, inclusive }, &loop_blocks, &cands);
 }
 
 /// Collects every scalar vec access `xs[base + counter]` in the loop with a
@@ -1527,6 +1547,9 @@ struct VersionPreheader<'a> {
 struct VersionLoopLocals {
     counter: Local,
     bound: Local,
+    /// The header compares `counter <= bound`, so the largest index the body
+    /// reads is `base + bound` and must lie strictly below the length.
+    inclusive: bool,
 }
 
 impl VersionPreheader<'_> {
@@ -1576,7 +1599,7 @@ impl VersionPreheader<'_> {
                 arith_lhs: Operand::Copy(Place::local(self.len_of[&x])),
                 arith_rhs: Operand::Copy(Place::local(locals.bound)),
                 base: base.clone(),
-                cmp: BinOp::Le,
+                cmp: if locals.inclusive { BinOp::Lt } else { BinOp::Le },
             },
         );
         *p += 1;
@@ -1667,11 +1690,11 @@ fn emit_version_preheader(
 fn emit_loop_version(
     body: &mut Body,
     h: usize,
-    counter: Local,
-    bound: Local,
+    locals: VersionLoopLocals,
     loop_blocks: &[usize],
     cands: &[VersionedAccess],
 ) {
+    let counter = locals.counter;
     let (checks, xs_list) = collect_version_checks(cands);
     let ctx = PreheaderCtx {
         i64t: body.local_ty(counter),
@@ -1698,7 +1721,7 @@ fn emit_loop_version(
         unchecked_header,
         &checks,
         &xs_list,
-        VersionLoopLocals { counter, bound },
+        locals,
     );
 
     body.blocks.extend(clone_blocks);

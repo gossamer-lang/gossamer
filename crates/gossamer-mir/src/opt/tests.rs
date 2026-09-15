@@ -9,7 +9,7 @@ mod elision_tests {
         elide_vec_clone_of_fresh_temporary,
         fuse_slice_parse_ranges, local_branch_bounds_check_elim, loop_body_has_exactly_one_vec_push,
         reserve_bound_available_at_entry, reserve_vecs_for_counted_push_loops,
-        scalar_replace_short_lived_aggregates,
+        scalar_replace_short_lived_aggregates, structural_children_are_guarded_blobs,
     };
     use crate::ir::{
         BasicBlock, BinOp, BlockId, Body, ConstValue, Local, LocalDecl, Operand, Place, Projection,
@@ -678,6 +678,27 @@ mod elision_tests {
             ],
             span: span(),
         }
+    }
+
+    #[test]
+    fn a_structural_box_takes_a_moved_share_only_when_it_names_the_guarded_blobs() {
+        use gossamer_abi::rc::{
+            RC_CHILD_BLOB_ANY, RC_CHILD_BLOB_OK, RC_CHILD_KIND_SHIFT, RC_CHILD_RC,
+            RC_KIND_STRUCT, RC_KIND_STRUCT_GUARDED,
+        };
+        let blob = |kind: i64, word: i64| (kind << RC_CHILD_KIND_SHIFT) | word;
+        // `struct Tree { item: i64, left: Option<Tree>, right: Option<Tree> }`
+        let tree_box = [RC_KIND_STRUCT, 1, 0, 2, blob(RC_CHILD_BLOB_OK, 2), blob(RC_CHILD_BLOB_OK, 4)];
+        let tree_walk = [RC_KIND_STRUCT_GUARDED, 2, 0, 1, 2, 0, 3, 4];
+        assert!(structural_children_are_guarded_blobs(&tree_box, &tree_walk));
+        // A `String` field is a child the box owns that the guarded walk never releases.
+        let named_box = [RC_KIND_STRUCT, 1, 0, 2, blob(RC_CHILD_RC, 0), blob(RC_CHILD_BLOB_OK, 2)];
+        let named_walk = [RC_KIND_STRUCT_GUARDED, 1, 0, 1, 2];
+        assert!(!structural_children_are_guarded_blobs(&named_box, &named_walk));
+        // The same payload word under a different arm gate is a different child.
+        let any_box = [RC_KIND_STRUCT, 1, 0, 1, blob(RC_CHILD_BLOB_ANY, 2)];
+        let ok_walk = [RC_KIND_STRUCT_GUARDED, 1, 0, 1, 2];
+        assert!(!structural_children_are_guarded_blobs(&any_box, &ok_walk));
     }
 
     #[test]

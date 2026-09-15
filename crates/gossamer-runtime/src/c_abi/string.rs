@@ -587,6 +587,18 @@ unsafe fn typed_str_cap(s: *const c_char) -> Option<usize> {
     Some(u32::from_le_bytes(unsafe { [*p, *p.add(1), *p.add(2), *p.add(3)] }) as usize)
 }
 
+/// Whether `s` carries a character index that records its content as ASCII.
+///
+/// SAFETY: `s` is null or a Gossamer string body.
+#[inline]
+unsafe fn typed_str_is_ascii(s: *const c_char) -> bool {
+    let Some(cap) = (unsafe { typed_str_cap(s) }) else {
+        return false;
+    };
+    let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+    (unsafe { footer.read_unaligned() }) == STR_INDEX_ASCII
+}
+
 #[inline]
 fn is_managed_string(s: *const c_char) -> bool {
     managed_string_owner(s).is_some() && unsafe { *s.cast::<u8>().sub(1) == STR_BUILDER_TAG }
@@ -1551,6 +1563,10 @@ pub unsafe extern "C" fn gos_rt_str_substring(
         let lo_byte = unsafe { typed_str_next_char_boundary(s, lo) }.unwrap_or(byte_len);
         let hi_byte = unsafe { typed_str_next_char_boundary(s, hi) }.unwrap_or(byte_len);
         let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), byte_len) };
+        // Every slice of ASCII content is ASCII.
+        if unsafe { typed_str_is_ascii(s) } {
+            return alloc_ascii_cstring(&bytes[lo_byte..hi_byte]);
+        }
         alloc_cstring_from_slices(&[&bytes[lo_byte..hi_byte]])
     })
 }
@@ -1567,6 +1583,17 @@ pub unsafe extern "C" fn gos_rt_str_concat(a: *const c_char, b: *const c_char) -
         let b_bytes: &[u8] = unsafe { gos_str_arg_bytes(b) };
         let force_heap = crate::c_abi::rc::in_region_arena(a.cast())
             || crate::c_abi::rc::in_region_arena(b.cast());
+        // Two ASCII operands concatenate to ASCII, so the index is written
+        // without reading the copied bytes again.
+        if unsafe { typed_str_is_ascii(a) && typed_str_is_ascii(b) } {
+            let len = a_bytes.len() + b_bytes.len();
+            return alloc_growable_filled(len, len, force_heap, true, |out| unsafe {
+                // SAFETY: the allocation passes `len` writable content bytes,
+                // and the two parts fill them exactly once, in order.
+                copy_builder_part(a_bytes.as_ptr(), out, a_bytes.len());
+                copy_builder_part(b_bytes.as_ptr(), out.add(a_bytes.len()), b_bytes.len());
+            });
+        }
         alloc_growable_forced(
             &[a_bytes, b_bytes],
             a_bytes.len() + b_bytes.len(),
@@ -4116,5 +4143,40 @@ mod byte_compare_tests {
         assert!(bytes_eq(b"", b""));
         assert!(!bytes_eq(b"", b"a"));
         assert!(!bytes_eq(b"a", b""));
+    }
+}
+
+#[cfg(test)]
+mod ascii_index_tests {
+    use super::{
+        alloc_cstring_from_slices, gos_rt_str_concat, gos_rt_str_free, gos_rt_str_substring,
+        typed_str_char_len, typed_str_is_ascii,
+    };
+
+    /// Concatenation and slicing of ASCII strings record the result as ASCII,
+    /// and any non-ASCII operand leaves an index that counts characters.
+    #[test]
+    fn ascii_operands_keep_an_ascii_index_and_others_count_characters() {
+        let a = alloc_cstring_from_slices(&[b"abc"]);
+        let b = alloc_cstring_from_slices(&[b"de"]);
+        let wide = alloc_cstring_from_slices(&["\u{e9}t\u{e9}".as_bytes()]);
+        unsafe {
+            assert!(typed_str_is_ascii(a) && typed_str_is_ascii(b));
+            let ab = gos_rt_str_concat(a, b);
+            assert!(typed_str_is_ascii(ab));
+            assert_eq!(typed_str_char_len(ab), 5);
+            let slice = gos_rt_str_substring(ab, 1, 4);
+            assert!(typed_str_is_ascii(slice));
+            assert_eq!(super::typed_str_bytes(slice), b"bcd");
+            let mixed = gos_rt_str_concat(a, wide);
+            assert!(!typed_str_is_ascii(mixed));
+            assert_eq!(typed_str_char_len(mixed), 6);
+            let wide_slice = gos_rt_str_substring(wide, 0, 3);
+            assert!(!typed_str_is_ascii(wide_slice));
+            assert_eq!(typed_str_char_len(wide_slice), 2);
+            for s in [a, b, wide, ab, slice, mixed, wide_slice] {
+                gos_rt_str_free(s);
+            }
+        }
     }
 }
