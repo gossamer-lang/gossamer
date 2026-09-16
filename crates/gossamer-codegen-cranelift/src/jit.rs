@@ -129,6 +129,11 @@ pub enum JitKind {
     /// tuple layout). The trampoline builds the vector from the VM tuples
     /// and frees it after the call. Integer register class.
     NativeVecTupleIF,
+    /// A `Vec<u8>` crossing as a native `*mut GosVec` with one-byte
+    /// primitive slots, the packed layout the compiled tiers index. The
+    /// trampoline builds it from the VM's byte storage and reads the bytes
+    /// back. Integer register class.
+    NativeVecU8,
     /// A `Vec<Vec<i64>>` (`[[i64]]`) crossing as a native outer `*mut GosVec`
     /// tagged `vec_elem_kind::VEC` (8-byte pointer slots), each slot a pointer
     /// to an inner `*mut GosVec` of i64 - the AOT-tier `[[i64]]` layout the
@@ -766,7 +771,7 @@ pub fn jit_entry_body_names(
     struct_shapes: &HashMap<u32, u32>,
 ) -> std::collections::HashSet<String> {
     let admitted = jit_compile_body_names(bodies, tcx, enum_shapes, struct_shapes);
-    jit_entry_body_names_with_admitted(bodies, &admitted)
+    jit_entry_body_names_with_admitted(bodies, tcx, &admitted)
 }
 
 /// [`jit_entry_body_names`] for a caller that already computed the admitted
@@ -779,6 +784,7 @@ pub fn jit_entry_body_names(
 #[must_use]
 pub fn jit_entry_body_names_with_admitted(
     bodies: &[Body],
+    tcx: &TyCtxt,
     admitted: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
     let all_names: std::collections::HashSet<&str> =
@@ -831,7 +837,8 @@ pub fn jit_entry_body_names_with_admitted(
     bodies
         .iter()
         .filter(|body| {
-            let entry_compatible = admitted.contains(body.name.as_str());
+            let entry_compatible =
+                admitted.contains(body.name.as_str()) && !entry_copies_a_sequence(body, tcx);
             entry_compatible
                 && (body_has_loop(body)
                     || recursive(body.name.as_str())
@@ -1570,14 +1577,36 @@ fn ty_carries_payload_enum_vec(tcx: &TyCtxt, ty: Ty) -> bool {
     walk(tcx, ty, &mut Vec::new())
 }
 
+/// Whether entering `body` from the VM copies a whole vector across the
+/// boundary for a call whose own work need not be proportional to it.
+///
+/// A `&mut` sequence is built from the caller's binding and read back into it,
+/// and a `Vec<u8>` is repacked from the VM's byte storage, so each entry costs
+/// the vector's length however little the body reads or writes. A bytecode
+/// loop calling such a helper would pay that per call, where the bytecode
+/// callee pays only for what it touches. A compiled caller hands the vector
+/// over as the handle it already holds, so the body is still compiled for it.
+fn entry_copies_a_sequence(body: &Body, tcx: &TyCtxt) -> bool {
+    (1..=body.arity).any(|pidx| {
+        let ty = body.local_ty(gossamer_mir::Local(pidx));
+        let mut_seq = matches!(
+            tcx.kind_of(ty),
+            TyKind::Ref { mutability: gossamer_types::Mutbl::Mut, inner }
+                if matches!(tcx.kind_of(*inner), TyKind::Vec(_) | TyKind::Slice(_))
+        );
+        mut_seq
+            || matches!(
+                ty_to_kind(tcx, ty, &HashMap::new(), &HashMap::new()),
+                Some(JitKind::NativeVecU8)
+            )
+    })
+}
+
 /// Returns `true` when `body` uses a construct the JIT lowers incorrectly,
 /// so the VM must keep it on the bytecode interpreter:
 ///
-/// - A `&mut` parameter. The dispatch trampoline marshals aggregate
-///   arguments (`String`, `Vec<i64>`, ...) by value - a fresh runtime
-///   object reclaimed after the call - so a write through the reference
-///   never reaches the caller, and the copy-back of an in-place
-///   `String`/`Vec` append corrupts the heap (a segfault).
+/// - A `&mut` parameter over a sequence whose elements the trampoline cannot
+///   build and read back (`Vec<String>`, `Vec<Vec<i64>>`, a `HashMap`).
 /// - A goroutine-spawn site or a cross-goroutine sync primitive
 ///   (channel / `WaitGroup` / Mutex / Atomic / ... - see
 ///   [`is_cross_goroutine_rt`]). Under `gos` the spawned side runs
@@ -1634,24 +1663,33 @@ fn body_jit_unsupported(body: &Body, tcx: &TyCtxt) -> bool {
             return true;
         }
     }
-    // A `&mut Vec` / `&mut Slice` / `&mut HashMap` parameter. The trampoline
-    // marshals aggregates by value (the content pointer), but such a body
-    // expects a pointer to the caller's slot to write through; the
-    // value-marshalled pointer is the wrong shape and the in-place append
-    // corrupts the heap. Keep these on bytecode. `&mut String` is the one
-    // write-through shape the trampoline does handle (a pointer-to-slot cell
-    // read back after the call - see `invoke_prepared_native`), so it is
-    // admitted.
+    // A `&mut` sequence parameter crosses as the vector handle itself, which
+    // the body mutates in place; the trampoline builds that vector from the
+    // caller's binding and reads it back afterwards. Only the element layouts
+    // it can build and read back are admitted: a vector of `String`s or of
+    // vectors owns its elements, and a `HashMap` has no native marshalling.
     for pidx in 1..=body.arity {
-        if let TyKind::Ref {
+        let TyKind::Ref {
             mutability: Mutbl::Mut,
             inner,
         } = tcx.kind_of(body.local_ty(gossamer_mir::Local(pidx)))
-            && matches!(
-                tcx.kind_of(*inner),
-                TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. }
-            )
-        {
+        else {
+            continue;
+        };
+        let written_back = match tcx.kind_of(*inner) {
+            TyKind::Vec(_) | TyKind::Slice(_) => matches!(
+                ty_to_kind(tcx, *inner, &HashMap::new(), &HashMap::new()),
+                Some(
+                    JitKind::NativeVecI64
+                        | JitKind::NativeVecF64
+                        | JitKind::NativeVecTupleIF
+                        | JitKind::NativeVecU8
+                )
+            ),
+            TyKind::HashMap { .. } => false,
+            _ => true,
+        };
+        if !written_back {
             if std::env::var("GOS_JIT_TRACE").is_ok() {
                 eprintln!(
                     "jit: unsupported {} param#{pidx} mutable aggregate ref",
@@ -2604,6 +2642,11 @@ fn ty_to_kind(
         TyKind::Vec(elem) | TyKind::Slice(elem) if is_i64_f64_tuple(tcx, *elem) => {
             Some(JitKind::NativeVecTupleIF)
         }
+        TyKind::Vec(elem) | TyKind::Slice(elem)
+            if matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8)) =>
+        {
+            Some(JitKind::NativeVecU8)
+        }
         // `&Vec<String>` / `&[String]`: a `STRING`-kind `GosVec` whose slots
         // hold owned cstrings, which is the layout both compiled tiers build.
         // Borrowed only - the trampoline owns the vec it builds and deep-frees
@@ -3236,6 +3279,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_vec_set_slot_children" => rt::gos_rt_vec_set_slot_children,
         "gos_rt_vec_mark_rc_elems"   => rt::gos_rt_vec_mark_rc_elems,
         "gos_rt_vec_compact_elems"   => rt::gos_rt_vec_compact_elems,
+        "gos_rt_vec_header_table"    => rt::gos_rt_vec_header_table,
         "gos_rt_vec_mark_vec_elems"  => rt::gos_rt_vec_mark_vec_elems,
         "gos_rt_map_inc_str_i64"        => rt::gos_rt_map_inc_str_i64,
         "gos_rt_map_inc_typed_str_i64"  => rt::gos_rt_map_inc_typed_str_i64,
@@ -3486,6 +3530,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_vec_reserve_at_least" => rt::gos_rt_vec_reserve_at_least,
         "gos_rt_vec_reserve_exact"   => rt::gos_rt_vec_reserve_exact,
         "gos_rt_vec_get_ptr"         => rt::gos_rt_vec_get_ptr,
+        "gos_rt_vec_get_ptr_unchecked" => rt::gos_rt_vec_get_ptr_unchecked,
         "gos_rt_vec_pop"             => rt::gos_rt_vec_pop,
         "gos_rt_vec_pop_opt"         => rt::gos_rt_vec_pop_opt,
         "gos_rt_vec_pop_into"        => rt::gos_rt_vec_pop_into,
@@ -3722,6 +3767,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_binding_tuple_from_slots" => rt::gos_rt_binding_tuple_from_slots,
         "gos_rt_binding_tuple_to_slots" => rt::gos_rt_binding_tuple_to_slots,
         "gos_rt_panic_oob"           => rt::gos_rt_panic_oob,
+        "gos_rt_panic_vec_index"     => rt::gos_rt_panic_vec_index,
         "gos_rt_gc_deregister"       => rt::gos_rt_gc_deregister,
         "gos_rt_gc_collect"          => rt::gos_rt_gc_collect,
         "gos_rt_gc_alloc_count"      => rt::gos_rt_gc_alloc_count,
@@ -3777,6 +3823,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_ws_frame_text"        => rt::gos_rt_ws_frame_text,
         "gos_rt_panic"               => rt::gos_rt_panic,
         "gos_rt_panic_oob"           => rt::gos_rt_panic_oob,
+        "gos_rt_panic_vec_index"     => rt::gos_rt_panic_vec_index,
         "gos_rt_stack_push"          => rt::gos_rt_stack_push,
         "gos_rt_stack_pop"           => rt::gos_rt_stack_pop,
         "gos_rt_stack_set_line"      => rt::gos_rt_stack_set_line,
@@ -4011,6 +4058,51 @@ mod promotion_report_tests {
             }],
             span,
         }
+    }
+
+    /// A looping body over one `&mut` parameter of `elem`'s vector.
+    fn mut_vec_body(tcx: &mut TyCtxt, elem: gossamer_types::Ty) -> Body {
+        let unit = tcx.intern(TyKind::Unit);
+        let vec_ty = tcx.intern(TyKind::Vec(elem));
+        let param = tcx.intern(TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner: vec_ty,
+        });
+        let mut b = body("flip", unit, true);
+        b.arity = 1;
+        b.locals.push(LocalDecl {
+            ty: param,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        b
+    }
+
+    /// A `&mut` vector is marshalled by copy in both directions, so its body is
+    /// compiled for compiled callers but never entered from the VM, where a
+    /// bytecode loop would pay the copy on every call.
+    #[test]
+    fn a_mut_vector_body_compiles_without_becoming_a_vm_entry() {
+        let mut tcx = TyCtxt::new();
+        let i64_ty = tcx.intern(TyKind::Int(IntTy::I64));
+        let u8_ty = tcx.intern(TyKind::Int(IntTy::U8));
+        for elem in [i64_ty, u8_ty] {
+            let bodies = vec![mut_vec_body(&mut tcx, elem)];
+            let admitted = jit_compile_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
+            assert!(admitted.contains("flip"), "{admitted:?}");
+            let entries = jit_entry_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
+            assert!(entries.is_empty(), "{entries:?}");
+        }
+    }
+
+    #[test]
+    fn a_mut_vector_of_strings_stays_on_bytecode() {
+        let mut tcx = TyCtxt::new();
+        let string_ty = tcx.intern(TyKind::String);
+        let bodies = vec![mut_vec_body(&mut tcx, string_ty)];
+        let admitted = jit_compile_body_names(&bodies, &tcx, &HashMap::new(), &HashMap::new());
+        assert!(admitted.is_empty(), "{admitted:?}");
     }
 
     #[test]

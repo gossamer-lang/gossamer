@@ -1,0 +1,89 @@
+// Writes through a reference to a field reach the field: an index store, a
+// push, a scalar store through `*`, in a loop, after a read, through a local
+// struct, and the same shapes with the reference written in place.
+
+struct Grid { data: Vec<i64>, w: i64 }
+
+fn via_param(g: &mut Grid) {
+    let data = &mut g.data
+    data[1] = 99
+}
+
+fn via_param_push(g: &mut Grid) {
+    let data = &mut g.data
+    data.push(7)
+}
+
+fn via_param_scalar(g: &mut Grid) {
+    let w = &mut g.w
+    *w = 42
+}
+
+fn in_loop(g: &mut Grid) {
+    let data = &mut g.data
+    for x in 0..2 { data[x] = 5 }
+}
+
+fn read_then_write(g: &mut Grid) {
+    let data = &mut g.data
+    let s = data[0]
+    data[2] = s + 1
+}
+
+fn main() {
+    let mut a = Grid { data: #[1, 2, 3], w: 1 }
+    via_param(&mut a)
+    println("param index {:?}", a.data)
+    via_param_push(&mut a)
+    println("param push {:?}", a.data)
+    via_param_scalar(&mut a)
+    println("param scalar {}", a.w)
+    in_loop(&mut a)
+    println("param loop {:?}", a.data)
+    read_then_write(&mut a)
+    println("param read write {:?}", a.data)
+    let mut b = Grid { data: #[1, 2, 3], w: 1 }
+    {
+        let d = &mut b.data
+        d[0] = 50
+    }
+    println("local index {:?}", b.data)
+    let mut v: Vec<i64> = #[1, 2]
+    {
+        let r = &mut v
+        r[0] = 9
+    }
+    println("vec {:?}", v)
+    let mut c = Grid { data: #[1, 2, 3], w: 1 }
+    in_place(&mut c)
+    println("in place {:?} {}", c.data, c.w)
+    let mut r = Rows { rows: #[#[1], #[2]] }
+    bump_rows(&mut r)
+    bump_rows_alias(&mut r)
+    println("rows {:?}", r.rows)
+    let mut local_rows = #[#[1]]
+    for row in &mut local_rows { row.push(5) }
+    println("local rows {:?}", local_rows)
+    println("len {}", (&mut c.data).len())
+}
+
+struct Rows { rows: Vec<Vec<i64>> }
+
+fn bump_rows(r: &mut Rows) {
+    for row in &mut r.rows { row.push(5) }
+}
+
+fn bump_rows_alias(r: &mut Rows) {
+    let rows = &mut r.rows
+    for row in rows { row.push(6) }
+}
+
+fn push_it(v: &mut Vec<i64>) { v.push(8) }
+fn in_place(g: &mut Grid) {
+    (&mut g.data)[1] = 99
+    (&mut g.data).push(7)
+    *(&mut g.w) = 42
+    push_it(&mut g.data)
+    let s = (&mut g.data)[0]
+    (&mut g.data)[2] = s + 1
+}

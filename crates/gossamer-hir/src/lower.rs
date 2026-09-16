@@ -85,6 +85,7 @@ pub fn lower_source_file(
     // next) sees the same fused HIR. Runs before closure lifting, so
     // stage/terminal closures are still inline and can be spliced in.
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
+    crate::place_refs::inline_place_references(&mut program);
     program
 }
 

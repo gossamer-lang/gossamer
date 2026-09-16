@@ -480,7 +480,9 @@ fn terminator_mentions(terminator: &Terminator, locals: &HashSet<Local>) -> bool
                 || args.iter().any(|operand| operand_mentions(operand, locals))
                 || place_mentions(destination, locals)
         }
-        Terminator::Assert { cond, .. } => operand_mentions(cond, locals),
+        Terminator::Assert { cond, msg, .. } => {
+            operand_mentions(cond, locals) || msg.operands().any(|op| operand_mentions(op, locals))
+        }
         Terminator::Drop { place, .. } => place_mentions(place, locals),
         Terminator::Goto { .. }
         | Terminator::Return

@@ -101,6 +101,10 @@ fn optimise_with_bounds_limit(
     crate::verify::debug_verify_body(body);
     dead_store_elim(body, tcx);
     crate::verify::debug_verify_body(body);
+    hoist_loop_invariant_field_reads(body, tcx);
+    crate::verify::debug_verify_body(body);
+    tabulate_nested_row_reads(body, tcx);
+    crate::verify::debug_verify_body(body);
     let bounds_before = bounds_access_counts(body);
     bounds_check_elim(body, tcx);
     let after_counted = bounds_access_counts(body);
@@ -383,8 +387,12 @@ fn scalar_replacement_operand_mentions_local(operand: &Operand, local: Local) ->
 fn terminator_mentions_local(terminator: &Terminator, local: Local) -> bool {
     match terminator {
         Terminator::Goto { .. } | Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => false,
-        Terminator::SwitchInt { discriminant, .. } | Terminator::Assert { cond: discriminant, .. } => {
+        Terminator::SwitchInt { discriminant, .. } => {
             scalar_replacement_operand_mentions_local(discriminant, local)
+        }
+        Terminator::Assert { cond, msg, .. } => {
+            scalar_replacement_operand_mentions_local(cond, local)
+                || msg.operands().any(|op| scalar_replacement_operand_mentions_local(op, local))
         }
         Terminator::Call {
             callee,

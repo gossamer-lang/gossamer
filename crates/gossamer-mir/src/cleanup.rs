@@ -458,7 +458,10 @@ fn terminator_reads_local(t: &Terminator, local: Local) -> bool {
     match t {
         Terminator::SwitchInt { discriminant, .. } => operand_reads_local(discriminant, local),
         Terminator::Call { args, .. } => args.iter().any(|a| operand_reads_local(a, local)),
-        Terminator::Assert { cond, .. } => operand_reads_local(cond, local),
+        Terminator::Assert { cond, msg, .. } => {
+            operand_reads_local(cond, local)
+                || msg.operands().any(|op| operand_reads_local(op, local))
+        }
         Terminator::Drop { place, .. } => place_reads_local(place, local),
         _ => false,
     }

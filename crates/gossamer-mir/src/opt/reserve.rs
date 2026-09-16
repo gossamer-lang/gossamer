@@ -531,7 +531,10 @@ fn terminator_mentions_local_forbidden(term: &Terminator, local: Local) -> bool 
             operand_mentions_local(callee, local)
         }
         Terminator::SwitchInt { discriminant, .. } => operand_mentions_local(discriminant, local),
-        Terminator::Assert { cond, .. } => operand_mentions_local(cond, local),
+        Terminator::Assert { cond, msg, .. } => {
+            operand_mentions_local(cond, local)
+                || msg.operands().any(|op| operand_mentions_local(op, local))
+        }
         Terminator::Drop { place, .. } => place_mentions_local(place, local),
         Terminator::Goto { .. }
         | Terminator::Return
@@ -1317,7 +1320,12 @@ impl ReadOnlyUses {
                 }
             }
             Terminator::SwitchInt { discriminant, .. } => self.disqualify(discriminant),
-            Terminator::Assert { cond, .. } => self.disqualify(cond),
+            Terminator::Assert { cond, msg, .. } => {
+                self.disqualify(cond);
+                for op in msg.operands() {
+                    self.disqualify(op);
+                }
+            }
             _ => {}
         }
     }
@@ -1395,6 +1403,217 @@ fn collect_read_only_vec_shares(
         }
     }
     rewrites
+}
+
+/// Moves a vector into the binding that copies it when the vector copied from
+/// is its own storage and is never read again.
+///
+/// `let mut b = a` gives `b` a value of its own, which the lowering spells as a
+/// deep copy. When `a` was built in this body, never lent to anything that
+/// could keep it, and has no reader after the copy, no program can tell the
+/// copy from `a` itself, and the copy is work over every element whose result
+/// is indistinguishable from the storage it walked. The copy becomes a handoff:
+///
+/// ```text
+/// b = gos_rt_vec_clone(a)      b = a
+///                          ->  a = 0
+/// ```
+///
+/// `b` owns the share `a` held, and every release of `a` that follows reads a
+/// null handle.
+pub(crate) fn move_vec_clone_of_dead_local(
+    body: &mut Body,
+    tcx: &TyCtxt,
+    user_fns: &HashSet<String>,
+) {
+    let n_blocks = body.blocks.len();
+    if n_blocks == 0 {
+        return;
+    }
+    let share = crate::ownership::ShareFacts::compute(body);
+    let mut rewrites: Vec<(usize, Local, Local, BlockId)> = Vec::new();
+    for bi in 0..n_blocks {
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            target: Some(target),
+        } = &body.blocks[bi].terminator
+        else {
+            continue;
+        };
+        if name != "gos_rt_vec_clone" || !destination.projection.is_empty() {
+            continue;
+        }
+        let [Operand::Copy(src)] = args.as_slice() else {
+            continue;
+        };
+        if !src.projection.is_empty() {
+            continue;
+        }
+        let (src, dst) = (src.local, destination.local);
+        let si = src.0 as usize;
+        if src == dst
+            || si <= body.arity as usize
+            || si >= body.locals.len()
+            || body.locals[si].region
+            || !matches!(tcx.kind_of(body.locals[si].ty), TyKind::Vec(_))
+            || share.is_goroutine_shared(src)
+            || !vec_local_owns_its_storage(body, src, bi, user_fns)
+        {
+            continue;
+        }
+        let reachable = blocks_reachable_from(body, bi);
+        let read_later = body
+            .blocks
+            .iter()
+            .enumerate()
+            .any(|(idx, b)| reachable[idx] && block_reads_vec_local(b, idx, src, 0, &[]));
+        if read_later {
+            continue;
+        }
+        rewrites.push((bi, src, dst, *target));
+    }
+    for (bi, src, dst, target) in rewrites {
+        let span = body.blocks[bi].span;
+        body.blocks[bi].terminator = Terminator::Goto { target };
+        body.blocks[bi].stmts.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(dst),
+                rvalue: Rvalue::Use(Operand::Copy(Place::local(src))),
+            },
+            span,
+            inlined: None,
+        });
+        body.blocks[bi].stmts.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(src),
+                rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            },
+            span,
+            inlined: None,
+        });
+    }
+}
+
+/// Whether `local` holds a vector no other name can reach: every value it is
+/// given is freshly built or answered by a user function, and every other
+/// mention reads or changes its elements in place without keeping the handle.
+/// The clone at `clone_block` is the one copy allowed.
+fn vec_local_owns_its_storage(
+    body: &Body,
+    local: Local,
+    clone_block: usize,
+    user_fns: &HashSet<String>,
+) -> bool {
+    let names = |op: &Operand| matches!(op, Operand::Copy(p) if p.local == local);
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for stmt in &block.stmts {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if place.local == local {
+                if !place.projection.is_empty()
+                    || !matches!(rvalue, Rvalue::Use(Operand::Const(ConstValue::Int(0))))
+                {
+                    return false;
+                }
+                continue;
+            }
+            let reads = match rvalue {
+                Rvalue::CallIntrinsic { name, args } => {
+                    if *name == "gos_rt_vec_free" {
+                        false
+                    } else {
+                        args.iter().enumerate().any(|(i, a)| {
+                            names(a) && !(i == 0 && vec_call_keeps_no_handle(name))
+                        })
+                    }
+                }
+                Rvalue::Use(op) | Rvalue::UnaryOp { operand: op, .. } | Rvalue::Cast { operand: op, .. } => {
+                    names(op)
+                }
+                Rvalue::BinaryOp { lhs, rhs, .. } => names(lhs) || names(rhs),
+                Rvalue::Aggregate { operands, .. } => operands.iter().any(names),
+                Rvalue::Repeat { value, .. } => names(value),
+                Rvalue::Ref { place: p, .. } | Rvalue::Len(p) => p.local == local,
+                Rvalue::StaticLoad(_) => false,
+            };
+            if reads {
+                return false;
+            }
+        }
+        match &block.terminator {
+            Terminator::Call {
+                callee,
+                args,
+                destination,
+                ..
+            } => {
+                if destination.local == local {
+                    let fresh = match callee {
+                        Operand::Const(ConstValue::Str(name)) => {
+                            matches!(
+                                name.as_str(),
+                                "gos_rt_vec_with_capacity"
+                                    | "gos_rt_vec_new"
+                                    | "gos_rt_vec_new_typed"
+                                    | "gos_rt_vec_from_arr"
+                                    | "gos_rt_vec_from_packed_arr"
+                                    | "gos_rt_vec_repeat_primitive"
+                                    | "gos_rt_vec_clone"
+                            ) || user_fns.contains(name)
+                        }
+                        Operand::FnRef { .. } => true,
+                        _ => false,
+                    };
+                    if !destination.projection.is_empty() || !fresh {
+                        return false;
+                    }
+                }
+                if bi == clone_block {
+                    continue;
+                }
+                let name = match callee {
+                    Operand::Const(ConstValue::Str(name)) => name.as_str(),
+                    _ => "",
+                };
+                if args
+                    .iter()
+                    .enumerate()
+                    .any(|(i, a)| names(a) && !(i == 0 && vec_call_keeps_no_handle(name)))
+                {
+                    return false;
+                }
+            }
+            Terminator::SwitchInt { discriminant, .. } if names(discriminant) => return false,
+            _ => {}
+        }
+    }
+    true
+}
+
+/// The runtime vector calls that read or change the elements of their receiver
+/// in place and keep no handle to it.
+fn vec_call_keeps_no_handle(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_vec_len"
+            | "gos_rt_len"
+            | "gos_rt_vec_capacity"
+            | "gos_rt_vec_is_empty"
+            | "gos_rt_vec_push"
+            | "gos_rt_vec_push_i64"
+            | "gos_rt_vec_pop"
+            | "gos_rt_vec_reserve"
+            | "gos_rt_vec_get_i64"
+            | "gos_rt_vec_get_i64_unchecked"
+            | "gos_rt_vec_set_i64"
+            | "gos_rt_vec_set_i64_unchecked"
+            | "gos_rt_vec_get_ptr"
+            | "gos_rt_vec_swap_safe"
+            | "gos_rt_vec_swap_unchecked"
+    )
 }
 
 /// Drops the deep copy a struct binding takes of a vector field when the

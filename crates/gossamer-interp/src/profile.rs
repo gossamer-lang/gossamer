@@ -576,8 +576,12 @@ fn op_label(tag: usize) -> &'static str {
                 "BuildIntArray",
             ),
             (
-                O::CheckNonNegativeCapacity { capacity_i: 0 },
-                "CheckNonNegativeCapacity",
+                O::BuildVecWithCapacity {
+                    dst_v: 0,
+                    capacity_i: 0,
+                    storage: crate::bytecode::FlatVecStorage::I64,
+                },
+                "BuildVecWithCapacity",
             ),
             (
                 O::BuildTuple {

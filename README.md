@@ -169,6 +169,12 @@ is to use the dedicated ones.
 | Stack | Stack::new() | Stack::from([1,2,3]) |
 | Deque | Deque::new() | Deque::from([1,2,3]) |
 
+**Wrapping arithmetic operators**
+
+`a +% b`, `a -% b`, and `a *% b` add, subtract, and multiply.
+
+`+%=`, `-%=`, `*%=` for compounding.
+
 ## Details
 
 - Language spec: [`SPEC.md`](SPEC.md)

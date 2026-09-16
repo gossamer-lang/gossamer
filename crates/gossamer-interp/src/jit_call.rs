@@ -66,6 +66,7 @@ fn build_native_arg(kind: JitKind, value: &Value) -> Option<i64> {
         JitKind::NativeVecStr => build_native_vec_str(value),
         JitKind::NativeVecF64 => build_native_vec_f64(value),
         JitKind::NativeVecTupleIF => build_native_vec_tuple_if(value),
+        JitKind::NativeVecU8 => build_native_vec_u8(value),
         JitKind::NativeStr => build_native_str(value),
         JitKind::U8VecHandle => build_native_u8vec(value),
         _ => None,
@@ -81,6 +82,7 @@ fn build_native_arg(kind: JitKind, value: &Value) -> Option<i64> {
             }
             (JitKind::NativeVecF64, Value::Array(values)) => values.len().saturating_mul(8),
             (JitKind::NativeVecTupleIF, Value::Array(values)) => values.len().saturating_mul(16),
+            (JitKind::NativeVecU8, _) => value.byte_slice().map_or(0, |bytes| bytes.len()),
             (JitKind::NativeStr, Value::String(value)) => value.len(),
             (JitKind::U8VecHandle, _) => {
                 crate::builtins::u8vec_snapshot_bytes(value).map_or(0, |bytes| bytes.len())
@@ -336,6 +338,20 @@ fn build_native_vec_i64(value: &Value) -> Option<i64> {
         }
         Some(v as i64)
     }
+}
+
+/// Builds an owned `*mut GosVec` of one-byte slots from a VM byte vector in
+/// any of its representations. Returns the pointer as `i64` (trampoline-owned).
+fn build_native_vec_u8(value: &Value) -> Option<i64> {
+    if matches!(value, Value::String(_)) {
+        return None;
+    }
+    let bytes = value.byte_slice()?;
+    let len = i64::try_from(bytes.len()).ok()?;
+    // SAFETY: `bytes` is `len` initialised bytes, copied into the fresh
+    // vector before this borrow ends.
+    let v = unsafe { rt::gos_rt_vec_from_packed_arr(1, bytes.as_ptr(), len) };
+    (!v.is_null()).then_some(v as i64)
 }
 
 /// Builds an owned `*mut c_char` cstring from a VM string. Returns the
@@ -1370,6 +1386,12 @@ fn native_ptr_to_value(kind: JitKind, ptr: i64) -> Value {
             }
             Value::IntArray(Arc::new(out))
         }
+        JitKind::NativeVecU8 => {
+            // SAFETY: `ptr` is null or a live `GosVec` (a param we built or the
+            // body's owned return); its bytes are copied out here.
+            let bytes = unsafe { rt::vec::vec_bytes(ptr as *const rt::vec::GosVec) };
+            Value::ByteVec(Arc::new(bytes))
+        }
         JitKind::NativeVecF64 => {
             if ptr == 0 {
                 return Value::Array(Arc::new(Vec::new()));
@@ -1518,6 +1540,7 @@ unsafe fn free_native(kind: JitKind, ptr: i64) {
         | JitKind::NativeVecF64
         | JitKind::NativeVecStr
         | JitKind::NativeVecTupleIF
+        | JitKind::NativeVecU8
         | JitKind::NativeVecVecI64 => unsafe {
             rt::gos_rt_vec_free(ptr as *mut rt::vec::GosVec);
         },
@@ -1564,6 +1587,7 @@ fn free_natives(natives: &[NativeArg], ret: Option<(JitKind, i64)>) {
                 | JitKind::NativeVecF64
                 | JitKind::NativeVecStr
                 | JitKind::NativeVecTupleIF
+                | JitKind::NativeVecU8
                 | JitKind::NativeStr
         );
         if counted_return && ptr != 0 {
@@ -1913,6 +1937,7 @@ macro_rules! call_through {
             | JitKind::NativeVecF64
             | JitKind::NativeVecStr
             | JitKind::NativeVecTupleIF
+            | JitKind::NativeVecU8
             | JitKind::NativeVecVecI64
             | JitKind::U8VecHandle => {
                 unreachable!("native aggregate returns are canonicalized to I64")
@@ -3345,7 +3370,8 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
         | JitKind::NativeVecI64
         | JitKind::NativeVecF64
         | JitKind::NativeVecStr
-        | JitKind::NativeVecTupleIF) => (JitKind::I64, None, Some(k), None),
+        | JitKind::NativeVecTupleIF
+        | JitKind::NativeVecU8) => (JitKind::I64, None, Some(k), None),
         // A `U8Vec` return would need re-registering the native buffer into
         // the VM registry; not supported, so keep such bodies on bytecode.
         JitKind::U8VecHandle => {
@@ -3404,6 +3430,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
                     | JitKind::NativeVecF64
                     | JitKind::NativeVecStr
                     | JitKind::NativeVecTupleIF
+                    | JitKind::NativeVecU8
                     | JitKind::NativeVecVecI64
                     | JitKind::U8VecHandle
                     | JitKind::StructPtr(_)
@@ -3533,6 +3560,7 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
                 | JitKind::NativeVecF64
                 | JitKind::NativeVecStr
                 | JitKind::NativeVecTupleIF
+                | JitKind::NativeVecU8
                 | JitKind::NativeVecVecI64
                 | JitKind::U8VecHandle
                 | JitKind::StructPtr(_)
@@ -3674,7 +3702,8 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
             JitKind::NativeVecI64
             | JitKind::NativeVecF64
             | JitKind::NativeVecStr
-            | JitKind::NativeVecTupleIF => {
+            | JitKind::NativeVecTupleIF
+            | JitKind::NativeVecU8 => {
                 // Unwrap a `&mut` write-back cell so we marshal its inner
                 // aggregate; record the cell so mutations flow back.
                 let (inner, cell) = match value {

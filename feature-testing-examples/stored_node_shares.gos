@@ -1,0 +1,113 @@
+// A child a constructor stores gives its binding's share to the new node:
+// rebuilt trees, arms that return one child and drop the other, a binding
+// that keeps its own value on another path into the same return, and a
+// loop that folds nodes into an accumulator.
+
+enum Expr {
+    Lit(i64)
+    Add(Expr, Expr)
+    Mul(Expr, Expr)
+    Neg(Expr)
+}
+
+fn build(depth: i64, seed: i64) -> Expr {
+    if depth == 0 {
+        return Expr::Lit(seed % 3)
+    }
+    let l = build(depth - 1, seed * 7 + 1)
+    let r = build(depth - 1, seed * 5 + 2)
+    match seed % 4 {
+        0 => Expr::Mul(l, r)
+        1 => Expr::Neg(l)
+        _ => Expr::Add(l, r)
+    }
+}
+
+fn simplify(e: Expr) -> Expr {
+    match e {
+        Expr::Lit(v) => Expr::Lit(v)
+        Expr::Add(a, b) => {
+            let sa = simplify(a)
+            let sb = simplify(b)
+            if let Expr::Lit(0) = sa {
+                return sb
+            }
+            if let Expr::Lit(0) = sb {
+                return sa
+            }
+            Expr::Add(sa, sb)
+        }
+        Expr::Mul(a, b) => {
+            let sa = simplify(a)
+            let sb = simplify(b)
+            if let Expr::Lit(0) = sa {
+                return Expr::Lit(0)
+            }
+            if let Expr::Lit(1) = sb {
+                return sa
+            }
+            Expr::Mul(sa, sb)
+        }
+        Expr::Neg(a) => {
+            let sa = simplify(a)
+            if let Expr::Neg(inner) = sa {
+                return inner
+            }
+            Expr::Neg(sa)
+        }
+    }
+}
+
+// `kept` holds a value it owns on the `flag` path and is moved into a node on
+// the other, and both paths leave through the same return.
+fn wrap_or_keep(flag: bool, seed: i64) -> Expr {
+    let mut kept = Expr::Lit(seed)
+    if flag {
+        kept = build(2, seed)
+    } else {
+        let child = build(1, seed)
+        kept = Expr::Neg(child)
+    }
+    kept
+}
+
+fn eval(e: Expr) -> i64 {
+    match e {
+        Expr::Lit(v) => *v
+        Expr::Add(a, b) => eval(a) +% eval(b)
+        Expr::Mul(a, b) => eval(a) *% eval(b)
+        Expr::Neg(a) => 0 -% eval(a)
+    }
+}
+
+fn size(e: Expr) -> i64 {
+    match e {
+        Expr::Lit(_) => 1
+        Expr::Add(a, b) => 1 + size(a) + size(b)
+        Expr::Mul(a, b) => 1 + size(a) + size(b)
+        Expr::Neg(a) => 1 + size(a)
+    }
+}
+
+fn main() {
+    let mut total = 0
+    let mut nodes = 0
+    for round in 0..6 {
+        let tree = build(8, round)
+        let s = simplify(tree)
+        total = total +% eval(s)
+        nodes += size(s)
+    }
+    println("simplified {} {}", nodes, total)
+
+    let mut acc = Expr::Lit(1)
+    for i in 0..200 {
+        let leaf = Expr::Lit(i % 5)
+        acc = if i % 3 == 0 { Expr::Mul(acc, leaf) } else { Expr::Add(acc, leaf) }
+    }
+    println("folded {} {}", size(acc), eval(acc))
+
+    let a = wrap_or_keep(true, 3)
+    let b = wrap_or_keep(false, 4)
+    println("kept {} {} {} {}", size(a), eval(a), size(b), eval(b))
+}

@@ -177,6 +177,7 @@ fn parse_sig(params: &str, ret: &str) -> ParsedSig {
 /// spelling does not say.
 const UNMODELLED: &[&str] = &[
     "gos_rt_panic_oob",
+    "gos_rt_panic_vec_index",
     "gos_rt_exit",
     "gos_rt_process_abort",
     "gos_rt_callback_register",

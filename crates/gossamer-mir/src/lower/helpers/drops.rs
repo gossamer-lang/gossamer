@@ -1993,7 +1993,12 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     bump(&mut total_reads, op);
                 }
             }
-            Terminator::Assert { cond, .. } => bump(&mut total_reads, cond),
+            Terminator::Assert { cond, msg, .. } => {
+                bump(&mut total_reads, cond);
+                for op in msg.operands() {
+                    bump(&mut total_reads, op);
+                }
+            }
             _ => {}
         }
     }
@@ -2158,7 +2163,12 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                     assigned_in_loop[destination.local.0 as usize] = true;
                 }
             }
-            Terminator::Assert { cond, .. } => mark_copy(cond, &mut read_in_loop),
+            Terminator::Assert { cond, msg, .. } => {
+                mark_copy(cond, &mut read_in_loop);
+                for op in msg.operands() {
+                    mark_copy(op, &mut read_in_loop);
+                }
+            }
             _ => {}
         }
     }
@@ -5935,8 +5945,11 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 Terminator::SwitchInt { discriminant, .. } => {
                     locals_in_operand(discriminant, &mut ls);
                 }
-                Terminator::Assert { cond, .. } => {
+                Terminator::Assert { cond, msg, .. } => {
                     locals_in_operand(cond, &mut ls);
+                    for op in msg.operands() {
+                        locals_in_operand(op, &mut ls);
+                    }
                 }
                 Terminator::Drop { place, .. } => {
                     ls.push(place.local);
@@ -7369,11 +7382,13 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                     withdrawn[p.local.0 as usize] = true;
                 }
             }
-            Terminator::Assert { cond, .. } => {
-                if let Operand::Copy(p) = cond
-                    && (p.local.0 as usize) < n_locals
-                {
-                    withdrawn[p.local.0 as usize] = true;
+            Terminator::Assert { cond, msg, .. } => {
+                for op in std::iter::once(cond).chain(msg.operands()) {
+                    if let Operand::Copy(p) = op
+                        && (p.local.0 as usize) < n_locals
+                    {
+                        withdrawn[p.local.0 as usize] = true;
+                    }
                 }
             }
             Terminator::Drop { place, .. } => {
@@ -8174,7 +8189,9 @@ pub(crate) fn free_overwritten_ctor_values(
                 mentions(callee, local) || args.iter().any(|op| mentions(op, local))
             }
             Terminator::SwitchInt { discriminant, .. } => mentions(discriminant, local),
-            Terminator::Assert { cond, .. } => mentions(cond, local),
+            Terminator::Assert { cond, msg, .. } => {
+                mentions(cond, local) || msg.operands().any(|op| mentions(op, local))
+            }
             Terminator::Drop { place, .. } => place.local.0 == local,
             _ => false,
         }
@@ -9140,7 +9157,12 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                         bump_op_read(&mut consume_reads, op);
                     }
                 }
-                Terminator::Assert { cond, .. } => bump_op_read(&mut consume_reads, cond),
+                Terminator::Assert { cond, msg, .. } => {
+                    bump_op_read(&mut consume_reads, cond);
+                    for op in msg.operands() {
+                        bump_op_read(&mut consume_reads, op);
+                    }
+                }
                 Terminator::Drop { place, .. } => bump_place_read(&mut consume_reads, place),
                 _ => {}
             }
@@ -10318,7 +10340,12 @@ fn collect_local_read_counts(body: &Body) -> HashMap<u32, usize> {
                 }
                 read_store_dest(destination, &mut counts);
             }
-            Terminator::Assert { cond, .. } => read_operand(cond, &mut counts),
+            Terminator::Assert { cond, msg, .. } => {
+                read_operand(cond, &mut counts);
+                for op in msg.operands() {
+                    read_operand(op, &mut counts);
+                }
+            }
             Terminator::Drop { place, .. } => read_place(place, &mut counts),
             Terminator::Goto { .. }
             | Terminator::Return
@@ -10944,7 +10971,7 @@ pub(crate) fn hoist_loop_carried_releases(body: &mut Body, tcx: &gossamer_types:
                     || args.iter().any(in_op)
                     || (!destination.projection.is_empty() && destination.local == x)
             }
-            Terminator::Assert { cond, .. } => in_op(cond),
+            Terminator::Assert { cond, msg, .. } => in_op(cond) || msg.operands().any(in_op),
             _ => false,
         }
     };

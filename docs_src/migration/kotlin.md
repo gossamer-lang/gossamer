@@ -288,6 +288,49 @@ impl Connection {
 const DEFAULT_PORT: i64 = 5432
 ```
 
+## Integer Overflow And Wrapping Arithmetic
+
+Kotlin's `Int` and `Long` arithmetic wraps silently on overflow, and
+`Math.addExact` / `Math.multiplyExact` throw instead. Gossamer's plain `+`,
+`-`, and `*` behave like the `Exact` forms under `gos run`, the JIT, and
+`gos build` - an overflow panics - and wrap only under
+`gos build --release`. Code that relies on the JVM's wrapping (hashes,
+`hashCode` combinations, pseudo-random generators) ports to the wrapping
+operators, which wrap at the declared width on every tier and in every
+profile.
+
+| Kotlin | Gossamer |
+| --- | --- |
+| `a + b`, `a - b`, `a * b` (wrapping) | `a +% b`, `a -% b`, `a *% b` |
+| `Math.addExact(a, b)` | `a + b` (panics on overflow outside release builds) |
+| `h = 31 * h + x` | `h = 31 *% h +% x` |
+| `Int`, `Long` | `i32`, `i64` |
+
+```kotlin
+fun nextSeed(seed: Long): Long = seed * 6364136223846793005L + 1442695040888963407L
+
+fun stringHash(bytes: ByteArray): Int {
+    var h = 0
+    for (b in bytes) h = 31 * h + b
+    return h
+}
+```
+
+```gos
+fn next_seed(seed: i64) -> i64 {
+    seed *% 6364136223846793005 +% 1442695040888963407
+}
+
+fn string_hash(text: String) -> i32 {
+    let mut h: i32 = 0
+    for b in text.bytes() { h = 31 *% h +% b as i32 }
+    h
+}
+```
+
+A Kotlin `Byte` is signed while `text.bytes()` yields `u8`, so the two hashes
+agree for ASCII text. Compound forms `+%=`, `-%=`, and `*%=` exist as well.
+
 ## Visibility
 
 Gossamer has three visibilities, and they are declared per item, per method,

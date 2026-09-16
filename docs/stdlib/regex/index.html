@@ -2183,6 +2183,11 @@ underlying Rust regex API, while the matched text remains valid UTF-8.</p>
 <td>Parses a pattern into a reusable <code>Pattern</code> or returns an <code>Err</code>.</td>
 </tr>
 <tr>
+<td><a href="https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/regex.rs"><code>count</code></a></td>
+<td><code>fn count(pattern: regex::Pattern, text: String) -&gt; i64</code></td>
+<td>Counts the non-overlapping matches without building them.</td>
+</tr>
+<tr>
 <td><a href="https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/regex.rs"><code>find</code></a></td>
 <td><code>fn find(pattern: regex::Pattern, text: String) -&gt; Option&lt;(i64, i64, String)&gt;</code></td>
 <td>Returns the first match as <code>(start, end, text)</code>, or <code>None</code>.</td>

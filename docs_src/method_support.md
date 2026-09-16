@@ -77,7 +77,7 @@ The literal spelling of each container is in
 | Method | Returns | Notes |
 |---|---|---|
 | `Vec::new()` | `Vec<T>` | Associated function; empty vector. |
-| `Vec::with_capacity(n)` | `Vec<T>` | Associated function; preallocates in compiled tiers, accepted as an advisory hint in the VM. |
+| `Vec::with_capacity(n)` | `Vec<T>` | Associated function; empty vector whose `capacity()` is at least `n`. |
 | `v.push(item)` | `()` | Amortised O(1). |
 | `v.pop()` | `Option<T>` | |
 | `v.clear()` | `()` | Removes all elements. |

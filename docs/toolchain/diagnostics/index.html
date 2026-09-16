@@ -1928,6 +1928,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gt0086" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0086
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gp0052" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -1939,10 +1950,65 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gt0087" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0087
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0088" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0088
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0089" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0089
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gp0056" class="md-nav__link">
     <span class="md-ellipsis">
 
         GP0056
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gp0057" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GP0057
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gp0058" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GP0058
 
     </span>
   </a>
@@ -3649,6 +3715,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gt0086" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0086
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gp0052" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -3660,10 +3737,65 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gt0087" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0087
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0088" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0088
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0089" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0089
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gp0056" class="md-nav__link">
     <span class="md-ellipsis">
 
         GP0056
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gp0057" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GP0057
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gp0058" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GP0058
 
     </span>
   </a>
@@ -4229,14 +4361,44 @@ version. This page is auto-generated from the catalogue in
 <td>ordered container over a type that writes its own <code>cmp</code></td>
 </tr>
 <tr>
+<td><a href="#gt0086"><code>GT0086</code></a></td>
+<td>Types</td>
+<td><code>spawn</code> outside a <code>cohort</code> block</td>
+</tr>
+<tr>
 <td><a href="#gp0052"><code>GP0052</code></a></td>
 <td>Parser</td>
 <td>build-time validated call without a literal</td>
 </tr>
 <tr>
+<td><a href="#gt0087"><code>GT0087</code></a></td>
+<td>Types</td>
+<td>wrapping arithmetic written as a method</td>
+</tr>
+<tr>
+<td><a href="#gt0088"><code>GT0088</code></a></td>
+<td>Types</td>
+<td>const generic argument not inferred</td>
+</tr>
+<tr>
+<td><a href="#gt0089"><code>GT0089</code></a></td>
+<td>Types</td>
+<td>unsupported vector type or operation</td>
+</tr>
+<tr>
 <td><a href="#gp0056"><code>GP0056</code></a></td>
 <td>Parser</td>
 <td>retired cohort isolation spelling</td>
+</tr>
+<tr>
+<td><a href="#gp0057"><code>GP0057</code></a></td>
+<td>Parser</td>
+<td>literal regex pattern that does not compile</td>
+</tr>
+<tr>
+<td><a href="#gp0058"><code>GP0058</code></a></td>
+<td>Parser</td>
+<td>malformed literal SQL statement</td>
 </tr>
 <tr>
 <td><a href="#gp0053"><code>GP0053</code></a></td>
@@ -4487,7 +4649,7 @@ version. This page is auto-generated from the catalogue in
 <p><code>new</code> reads as allocation to a reader arriving from any other language. Write <code>newtype X = T</code>.</p>
 <h2 id="gp0048"><code>GP0048</code> <a id="gp0048"></a><a class="headerlink" href="#gp0048" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - <code>go</code> is retired</p>
-<p>Every goroutine is a <code>spawn</code> attached to the enclosing cohort, and <code>main</code> is an implicit root cohort. <code>go</code> evaluated its operands at the spawn site, so <code>--fix</code> hoists a computed operand into a temporary.</p>
+<p>Every goroutine is a <code>spawn</code> attached to the <code>cohort { }</code> it is written inside, which every <code>spawn</code> outside <code>main</code> must have (GT0086). <code>go</code> evaluated its operands at the spawn site, so <code>--fix</code> hoists a computed operand into a temporary.</p>
 <h2 id="gp0049"><code>GP0049</code> <a id="gp0049"></a><a class="headerlink" href="#gp0049" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - compiler-known call written with a <code>!</code></p>
 <p>The set of compiler-known names is closed and recognised at the <code>(</code>, so there is nothing a sigil disambiguates. Write <code>println(..)</code>, <code>format(..)</code>, <code>matches(..)</code>.</p>
@@ -4518,12 +4680,30 @@ version. This page is auto-generated from the catalogue in
 <h2 id="gt0085"><code>GT0085</code> <a id="gt0085"></a><a class="headerlink" href="#gt0085" title="Permanent link">&para;</a></h2>
 <p><strong>Types</strong> - ordered container over a type that writes its own <code>cmp</code></p>
 <p>A heap, a <code>BTreeSet</code>, or a <code>BTreeMap</code> keeps its elements in the order they went in and reads them back with no comparator to call, so an element or key whose type writes its own <code>cmp</code> would silently not be ordered by it. A sequence orders on demand and does route through the type's <code>cmp</code>: sort a <code>Vec&lt;T&gt;</code>, or key the container on a value that carries the order.</p>
+<h2 id="gt0086"><code>GT0086</code> <a id="gt0086"></a><a class="headerlink" href="#gt0086" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - <code>spawn</code> outside a <code>cohort</code> block</p>
+<p>A <code>spawn</code> must be written lexically inside a <code>cohort { }</code> in its own function body; <code>main</code> is the one exemption, since the root cohort's extent is main's own. Elsewhere the child attaches to whatever cohort the caller happens to be inside, which neither the callee's signature nor the call site says, and to the root cohort - whose extent is the process - when the program has none. Open a block around the spawns and the code that collects from them.</p>
 <h2 id="gp0052"><code>GP0052</code> <a id="gp0052"></a><a class="headerlink" href="#gp0052" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - build-time validated call without a literal</p>
 <p><code>sql::statement</code> was handed something other than a literal. The statement is checked while the program is compiled, so it has to be there to check; a statement built at run time is an ordinary <code>String</code> and needs no wrapper.</p>
+<h2 id="gt0087"><code>GT0087</code> <a id="gt0087"></a><a class="headerlink" href="#gt0087" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - wrapping arithmetic written as a method</p>
+<p>Wrapping arithmetic has one spelling, the operator: <code>x +% y</code>, <code>x -% y</code>, and <code>x *% y</code> wrap at the operands' declared width on every tier. <code>x.wrapping_add(y)</code> and <code>x.wrapping_mul(y)</code> are not integer methods; <code>gos check --fix</code> rewrites them.</p>
+<h2 id="gt0088"><code>GT0088</code> <a id="gt0088"></a><a class="headerlink" href="#gt0088" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - const generic argument not inferred</p>
+<p>A call to a function with a const generic parameter gave it no value. A const parameter takes its value from the call: an explicit <code>f::&lt;4&gt;(..)</code> argument, or the length of an array argument whose type names it. Name the value with a turbofish.</p>
+<h2 id="gt0089"><code>GT0089</code> <a id="gt0089"></a><a class="headerlink" href="#gt0089" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - unsupported vector type or operation</p>
+<p>A <code>Simd</code> or <code>Mask</code> vector named an element type, a lane count, or an operation the vector type does not support. <code>Simd&lt;T, N&gt;</code> takes <code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, or <code>u32</code> lanes and <code>N</code> of 2, 4, 8, or 16 (16 for <code>u8</code>, <code>i32</code>, and <code>u32</code>); <code>Simd::splat</code> takes its lane count from the annotated type.</p>
 <h2 id="gp0056"><code>GP0056</code> <a id="gp0056"></a><a class="headerlink" href="#gp0056" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - retired cohort isolation spelling</p>
 <p><code>context::Context</code> is the cancellation type a cohort may one day inherit; this setting decides whether a child gets an OS thread of its own, so it is <code>isolation: Isolation::Shared</code> or <code>isolation: Isolation::Thread</code>. <code>--fix</code> rewrites it.</p>
+<h2 id="gp0057"><code>GP0057</code> <a id="gp0057"></a><a class="headerlink" href="#gp0057" title="Permanent link">&para;</a></h2>
+<p><strong>Parser</strong> - literal regex pattern that does not compile</p>
+<p>A string literal handed to <code>regex::compile</code> is not a pattern the regex engine compiles. The literal is compiled while the program is parsed, with the engine and settings <code>regex::compile</code> uses at run time, so the call would only ever answer <code>Err</code>.</p>
+<h2 id="gp0058"><code>GP0058</code> <a id="gp0058"></a><a class="headerlink" href="#gp0058" title="Permanent link">&para;</a></h2>
+<p><strong>Parser</strong> - malformed literal SQL statement</p>
+<p>A string literal handed to <code>sql::statement</code> is not a well-formed statement: it is empty, or its parentheses do not balance. The statement is checked while the program is parsed.</p>
 <h2 id="gp0053"><code>GP0053</code> <a id="gp0053"></a><a class="headerlink" href="#gp0053" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - <code>Display</code> rendering declared as <code>to_string</code></p>
 <p>Both rendering contracts declare one method that answers a <code>String</code>, so both are written <code>fn fmt</code>; the <code>impl</code> header is what decides which channel a value reaches, <code>{}</code> taking <code>Display</code> and <code>{:?}</code> taking <code>Debug</code>. <code>x.to_string()</code> still renders through <code>Display</code>.</p>

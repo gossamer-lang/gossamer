@@ -5,7 +5,7 @@ mod elision_tests {
 
     use super::{
         bounds_check_elim, elide_borrowed_holder_rc, elide_moved_aggregate_shares,
-        elide_redundant_rc_pairs, elide_settled_guarded_walks,
+        elide_redundant_rc_pairs, elide_settled_guarded_walks, move_stored_rc_shares, move_vec_clone_of_dead_local,
         elide_vec_clone_of_fresh_temporary,
         fuse_slice_parse_ranges, local_branch_bounds_check_elim, loop_body_has_exactly_one_vec_push,
         reserve_bound_available_at_entry, reserve_vecs_for_counted_push_loops,
@@ -2393,4 +2393,255 @@ mod elision_tests {
         ));
         assert!(!reserve_bound_available_at_entry(&body, &bound, BlockId(1)));
     }
+    /// `x = 0; branch`. One arm defines `x` by a call, stores it into a fresh
+    /// node and retains it; the other arm writes `<other>` and joins the first
+    /// at a block that runs `<join>` and releases `x`.
+    fn stored_share_body(tcx: &mut TyCtxt, other: Vec<Statement>, join: Vec<Statement>) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let node = tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(91),
+            substs: gossamer_types::Substs::new(),
+        });
+        tcx.register_rc_managed_enum_def(91);
+        let locals = vec![
+            decl(node),   // L0 return
+            decl(node),   // L1 x
+            decl(node),   // L2 the node x is stored into
+            decl(unit),   // L3 store dest
+            decl(unit),   // L4 retain dest
+            decl(unit),   // L5 release dest
+            decl(i64_ty), // L6 branch condition / scratch
+        ];
+        let call = |target: u32| Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("make".into())),
+            args: vec![],
+            destination: Place::local(Local(1)),
+            target: Some(BlockId(target)),
+        };
+        let mut join_stmts = join;
+        join_stmts.push(rc_call(5, "gos_rt_rc_release", Place::local(Local(1))));
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 0,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    stmts: vec![
+                        assign(Place::local(Local(1)), Rvalue::Use(Operand::Const(ConstValue::Int(0)))),
+                        assign(Place::local(Local(6)), Rvalue::Use(Operand::Const(ConstValue::Int(1)))),
+                    ],
+                    terminator: Terminator::SwitchInt {
+                        discriminant: Operand::Copy(Place::local(Local(6))),
+                        arms: vec![(0, BlockId(2))],
+                        default: BlockId(1),
+                    },
+                    ..block_at(span())
+                },
+                BasicBlock { id: BlockId(1), terminator: call(3), ..block_at(span()) },
+                BasicBlock {
+                    id: BlockId(2),
+                    stmts: other,
+                    terminator: Terminator::Goto { target: BlockId(4) },
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(3),
+                    stmts: vec![
+                        assign(
+                            Place::local(Local(2)),
+                            Rvalue::CallIntrinsic {
+                                name: "gos_rc_alloc_tagged",
+                                args: vec![
+                                    Operand::Const(ConstValue::Int(16)),
+                                    Operand::Const(ConstValue::Str("m".into())),
+                                ],
+                            },
+                        ),
+                        assign(
+                            Place::local(Local(3)),
+                            Rvalue::CallIntrinsic {
+                                name: "gos_store",
+                                args: vec![
+                                    Operand::Copy(Place::local(Local(2))),
+                                    Operand::Const(ConstValue::Int(0)),
+                                    Operand::Copy(Place::local(Local(1))),
+                                ],
+                            },
+                        ),
+                        rc_call(4, "gos_rt_rc_retain", Place::local(Local(1))),
+                        copy(0, 2),
+                    ],
+                    terminator: Terminator::Goto { target: BlockId(4) },
+                    ..block_at(span())
+                },
+                BasicBlock { id: BlockId(4), stmts: join_stmts, ..block_at(span()) },
+            ],
+            span: span(),
+        }
+    }
+
+    fn run_move_passes(body: &mut Body, tcx: &TyCtxt) {
+        move_stored_rc_shares(body, tcx);
+        elide_settled_guarded_walks(body);
+    }
+
+    #[test]
+    fn a_share_stored_into_a_node_moves_and_its_join_release_goes() {
+        let mut tcx = TyCtxt::new();
+        let mut body = stored_share_body(&mut tcx, vec![], vec![]);
+        run_move_passes(&mut body, &tcx);
+        assert!(
+            matches!(
+                &body.blocks[3].stmts[2].kind,
+                StatementKind::Assign { place, rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))) }
+                    if place.local == Local(1)
+            ),
+            "the retain becomes a zero of the moved local: {:?}",
+            body.blocks[3].stmts[2].kind
+        );
+        assert!(
+            is_nop(&body.blocks[4].stmts[0]),
+            "every path reaches the release with a zero word: {:?}",
+            body.blocks[4].stmts[0].kind
+        );
+    }
+
+    #[test]
+    fn a_join_release_stays_when_another_path_holds_a_share() {
+        let mut tcx = TyCtxt::new();
+        // The other arm leaves `x` holding a value it owns, so the release at
+        // the join still has a share to give back on that path.
+        let mut body = stored_share_body(&mut tcx, vec![copy(1, 0)], vec![]);
+        run_move_passes(&mut body, &tcx);
+        assert_eq!(intrinsic_name(&body.blocks[4].stmts[0]), Some("gos_rt_rc_release"));
+    }
+
+    #[test]
+    fn a_stored_share_stays_when_the_local_is_read_afterwards() {
+        let mut tcx = TyCtxt::new();
+        let read = assign(
+            Place::local(Local(6)),
+            Rvalue::CallIntrinsic {
+                name: "gos_enum_disc_tag",
+                args: vec![Operand::Copy(Place::local(Local(1)))],
+            },
+        );
+        let mut body = stored_share_body(&mut tcx, vec![], vec![read]);
+        run_move_passes(&mut body, &tcx);
+        assert_eq!(intrinsic_name(&body.blocks[3].stmts[2]), Some("gos_rt_rc_retain"));
+        assert_eq!(intrinsic_name(&body.blocks[4].stmts[1]), Some("gos_rt_rc_release"));
+    }
+
+    #[test]
+    fn a_stored_share_stays_when_a_path_never_releases_the_local() {
+        let mut tcx = TyCtxt::new();
+        let mut body = stored_share_body(&mut tcx, vec![], vec![]);
+        // Without a release the local's word was lent, not owned.
+        body.blocks[4].stmts.clear();
+        run_move_passes(&mut body, &tcx);
+        assert_eq!(intrinsic_name(&body.blocks[3].stmts[2]), Some("gos_rt_rc_retain"));
+    }
+
+    /// `L1 = gos_rt_vec_with_capacity(..)` then `L2 = gos_rt_vec_clone(L1)`
+    /// followed by `<after>` and a return sweep freeing both vectors.
+    fn vec_clone_body(tcx: &mut TyCtxt, before: Vec<Statement>, after: Vec<Statement>) -> Body {
+        let unit = tcx.unit();
+        let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+        let vec_ty = tcx.intern(gossamer_types::TyKind::Vec(i64_ty));
+        let locals = vec![
+            decl(unit),   // L0 return
+            decl(vec_ty), // L1 source
+            decl(vec_ty), // L2 copy
+            decl(i64_ty), // L3 capacity / scratch
+            decl(unit),   // L4 free dest
+            decl(unit),   // L5 free dest
+            decl(vec_ty), // L6 another vector
+        ];
+        let mut tail = after;
+        tail.push(rc_call(4, "gos_rt_vec_free", Place::local(Local(1))));
+        tail.push(rc_call(5, "gos_rt_vec_free", Place::local(Local(2))));
+        let call = |name: &str, args: Vec<Operand>, dst: u32, target: u32| Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name.into())),
+            args,
+            destination: Place::local(Local(dst)),
+            target: Some(BlockId(target)),
+        };
+        Body {
+            name: "t".into(),
+            def: None,
+            arity: 0,
+            locals,
+            blocks: vec![
+                BasicBlock {
+                    id: BlockId(0),
+                    terminator: call(
+                        "gos_rt_vec_with_capacity",
+                        vec![Operand::Const(ConstValue::Int(8)), Operand::Const(ConstValue::Int(8))],
+                        1,
+                        1,
+                    ),
+                    ..block_at(span())
+                },
+                BasicBlock {
+                    id: BlockId(1),
+                    stmts: before,
+                    terminator: call(
+                        "gos_rt_vec_clone",
+                        vec![Operand::Copy(Place::local(Local(1)))],
+                        2,
+                        2,
+                    ),
+                    ..block_at(span())
+                },
+                BasicBlock { id: BlockId(2), stmts: tail, ..block_at(span()) },
+            ],
+            span: span(),
+        }
+    }
+
+    fn is_goto(t: &Terminator) -> bool {
+        matches!(t, Terminator::Goto { .. })
+    }
+
+    #[test]
+    fn a_copy_of_a_vector_never_read_again_becomes_a_move() {
+        let mut tcx = TyCtxt::new();
+        let mut body = vec_clone_body(&mut tcx, vec![], vec![]);
+        move_vec_clone_of_dead_local(&mut body, &tcx, &std::collections::HashSet::new());
+        assert!(is_goto(&body.blocks[1].terminator), "{:?}", body.blocks[1].terminator);
+        assert!(matches!(
+            &body.blocks[1].stmts[..],
+            [a, b] if matches!(&a.kind, StatementKind::Assign { place, rvalue: Rvalue::Use(Operand::Copy(src)) }
+                    if place.local == Local(2) && src.local == Local(1))
+                && matches!(&b.kind, StatementKind::Assign { place, rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))) }
+                    if place.local == Local(1))
+        ));
+    }
+
+    #[test]
+    fn a_copy_stays_when_the_source_is_read_afterwards() {
+        let mut tcx = TyCtxt::new();
+        let read = assign(
+            Place::local(Local(3)),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_len",
+                args: vec![Operand::Copy(Place::local(Local(1)))],
+            },
+        );
+        let mut body = vec_clone_body(&mut tcx, vec![], vec![read]);
+        move_vec_clone_of_dead_local(&mut body, &tcx, &std::collections::HashSet::new());
+        assert!(!is_goto(&body.blocks[1].terminator));
+    }
+
+    #[test]
+    fn a_copy_stays_when_the_source_was_shared_with_another_name() {
+        let mut tcx = TyCtxt::new();
+        let mut body = vec_clone_body(&mut tcx, vec![copy(6, 1)], vec![]);
+        move_vec_clone_of_dead_local(&mut body, &tcx, &std::collections::HashSet::new());
+        assert!(!is_goto(&body.blocks[1].terminator));
+    }
+
 }

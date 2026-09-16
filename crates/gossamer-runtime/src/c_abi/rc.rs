@@ -2707,25 +2707,101 @@ unsafe fn release_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
 
 #[inline(never)]
 unsafe fn release_structural_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
-    use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_VEC};
-    unsafe {
-        visit_entries(payload, |kind, child| match kind {
-            RC_CHILD_RC => {
-                let c = untag_rc(child);
-                if crate::c_abi::string::is_gos_string(c.cast()) {
-                    crate::c_abi::string::gos_rt_str_free(c.cast());
+    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_RC, RC_CHILD_WORD_MASK};
+    let meta = unsafe { meta_of(header_ptr(payload)) };
+    if meta.is_null() {
+        return;
+    }
+    let kind = unsafe { *meta };
+    if kind != RC_KIND_ENUM && kind != RC_KIND_STRUCT {
+        unsafe {
+            visit_entry_slots(payload, |child_kind, _slot, child| {
+                release_child_of_kind(child_kind, child, worklist);
+            });
+        }
+        return;
+    }
+    // The meta walk of `visit_entry_slots`, written out so each counted child
+    // joins the worklist in the loop that finds it: a teardown reads every
+    // node's children once, and a callback per child is most of that read.
+    let variant_count = unsafe { *meta.add(1) };
+    let target_disc = if kind == RC_KIND_ENUM {
+        i64::from(unsafe { (*header_ptr(payload)).disc })
+    } else {
+        0
+    };
+    let mut idx: usize = 2;
+    for _ in 0..variant_count.max(0) {
+        let disc = unsafe { *meta.add(idx) };
+        let child_count = usize::try_from(unsafe { *meta.add(idx + 1) }).unwrap_or(0);
+        if kind == RC_KIND_STRUCT || disc == target_disc {
+            for j in 0..child_count {
+                let entry = unsafe { *meta.add(idx + 2 + j) };
+                let child_kind = entry >> RC_CHILD_KIND_SHIFT;
+                let word = usize::try_from(entry & RC_CHILD_WORD_MASK).unwrap_or(0);
+                let slot = unsafe { payload.add(word * 8) };
+                let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
+                if child.is_null() {
+                    continue;
+                }
+                if child_kind == RC_CHILD_RC {
+                    let c = untag_rc(child);
+                    if unsafe { crate::c_abi::string::is_gos_string(c.cast()) } {
+                        unsafe { crate::c_abi::string::gos_rt_str_free(c.cast()) };
+                    } else {
+                        worklist.push(c);
+                    }
                 } else {
-                    worklist.push(c);
+                    unsafe { release_gated_child(child_kind, slot, child, worklist) };
                 }
             }
-            RC_CHILD_VEC => queue_vec_child(child),
-            RC_CHILD_MAP => queue_map_child(child),
-            gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
-            gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => drop(Box::from_raw(
-                child.cast::<crate::c_abi::errors::ErrorFields>(),
-            )),
-            _ => {}
-        });
+            return;
+        }
+        idx += 2 + child_count;
+    }
+}
+
+/// Releases a structural child that is not a plain counted pointer: a carrier
+/// payload word gated on its discriminant, or an owned container.
+#[cold]
+unsafe fn release_gated_child(
+    child_kind: i64,
+    slot: *mut u8,
+    child: *mut u8,
+    worklist: &mut Vec<*mut u8>,
+) {
+    match gossamer_abi::rc::rc_child_blob_gate(child_kind) {
+        Some(gate) => {
+            let disc = unsafe { slot.cast::<i64>().sub(1).read_unaligned() };
+            if (gate < 0 || disc == gate) && unsafe { is_copy_blob(child) } {
+                unsafe { release_child_of_kind(gossamer_abi::rc::RC_CHILD_RC, child, worklist) };
+            }
+        }
+        None => unsafe { release_child_of_kind(child_kind, child, worklist) },
+    }
+}
+
+/// Hands one child of a dead node to its release: a string is freed, a counted
+/// node joins the worklist, and a container is queued for the outermost
+/// teardown exit.
+unsafe fn release_child_of_kind(kind: i64, child: *mut u8, worklist: &mut Vec<*mut u8>) {
+    use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_VEC};
+    match kind {
+        RC_CHILD_RC => {
+            let c = untag_rc(child);
+            if unsafe { crate::c_abi::string::is_gos_string(c.cast()) } {
+                unsafe { crate::c_abi::string::gos_rt_str_free(c.cast()) };
+            } else {
+                worklist.push(c);
+            }
+        }
+        RC_CHILD_VEC => queue_vec_child(child),
+        RC_CHILD_MAP => queue_map_child(child),
+        gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
+        gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => {
+            drop(unsafe { Box::from_raw(child.cast::<crate::c_abi::errors::ErrorFields>()) });
+        }
+        _ => {}
     }
 }
 

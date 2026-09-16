@@ -773,16 +773,10 @@ fn builtin_vec_from(args: &[Value]) -> RuntimeResult<Value> {
         .ok_or_else(|| RuntimeError::Type("Vec::from: missing array".to_string()))
 }
 
-/// `Vec::with_capacity(n)` - an empty growable array. The capacity is a
-/// preallocation hint; the VM's array grows on demand, so it maps to the
-/// same empty value as `Vec::new()` (len 0), leaving the compiled tiers to
-/// honour the reservation via `gos_rt_vec_with_capacity`.
+/// `Vec::with_capacity(n)` - an empty growable array with room for `n` elements.
 fn builtin_vec_with_capacity(args: &[Value]) -> RuntimeResult<Value> {
-    let capacity = non_negative_arg(args, 0, 0, "Vec::with_capacity: capacity")?;
-    if capacity > (isize::MAX as usize) / std::mem::size_of::<Value>() {
-        return Err(RuntimeError::Panic("capacity overflow".to_string()));
-    }
-    Ok(Value::empty_array())
+    let storage = crate::value::vec_with_capacity(arg_int(args, 0).unwrap_or(0))?;
+    Ok(Value::Array(Arc::new(storage)))
 }
 
 /// `buf.to_string(len)` - freezes the first `len` bytes of a

@@ -19,6 +19,7 @@ concurrency, and which Rust features are intentionally absent.
 | `async fn` and `.await` | Use `spawn(|| expr)` plus channels or blocking calls. |
 | `std::thread::spawn` | `spawn(|| { ... })` |
 | `dyn Trait` | Prefer generics or an enum. |
+| `x.wrapping_add(y)`, `x.wrapping_mul(y)` | `x +% y`, `x *% y` |
 | `cargo build` | `gos build` |
 | `cargo test` | `gos test` |
 | `cargo fmt` | `gos fmt` |
@@ -256,6 +257,52 @@ let total = xs
 
 Mutating collection helpers such as `push`, `sort`, `insert`, and
 `remove` stay as methods.
+
+## Integer Overflow And Wrapping Arithmetic
+
+Plain `+`, `-`, and `*` follow Rust's profile rules at the declared width:
+they panic on overflow under `gos run`, the JIT, and `gos build`, and wrap
+under `gos build --release`. Where wrapping is the intent - hashes,
+checksums, pseudo-random generators - say so with an operator. The
+`wrapping_*` methods do not exist: a call reports GT0087, and
+`gos check --fix` rewrites it to the operator.
+
+| Rust | Gossamer |
+| --- | --- |
+| `a.wrapping_add(b)` | `a +% b` |
+| `a.wrapping_sub(b)` | `a -% b` |
+| `a.wrapping_mul(b)` | `a *% b` |
+| `a = a.wrapping_mul(b)` | `a *%= b` (also `+%=`, `-%=`) |
+| `Wrapping<u32>` | a plain `u32` combined with `+%`, `-%`, `*%` |
+| `checked_*`, `overflowing_*`, `saturating_*` | Not available; compare against the type's bounds first. |
+
+```rust
+fn fnv1a(data: &[u8]) -> u32 {
+    let mut hash: u32 = 2166136261;
+    for &b in data {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(16777619);
+    }
+    hash
+}
+```
+
+```gos
+fn fnv1a(data: String) -> u32 {
+    let mut hash: u32 = 2166136261
+    for b in data.bytes() {
+        hash ^= b as u32
+        hash *%= 16777619
+    }
+    hash
+}
+```
+
+The operators wrap at the operands' declared width on every tier and in
+every profile, so `gos run` and a release binary produce the same hash.
+They bind like the operators they wrap: `a *% b +% c` is `(a *% b) +% c`.
+Unary `-`, `!`, `<<`, and a signed `MIN / -1` already wrap at the declared
+width without a separate spelling.
 
 ## Visibility
 

@@ -275,6 +275,48 @@ fn add(x: i64, y: i64) -> i64 { x + y }
 let add5 = |y: i64| add(5, y)
 ```
 
+## Integer Overflow And Wrapping Arithmetic
+
+F# arithmetic is unchecked by default and wraps on overflow, unless a scope
+opens `Checked`. Gossamer's plain `+`, `-`, and `*` behave like `Checked`
+under `gos run`, the JIT, and `gos build` - an overflow panics - and wrap
+only under `gos build --release`. Code that relies on wrapping (hashes,
+checksums, pseudo-random generators) ports to the wrapping operators, which
+wrap at the declared width on every tier and in every profile.
+
+| F# | Gossamer |
+| --- | --- |
+| `a + b`, `a - b`, `a * b` (unchecked) | `a +% b`, `a -% b`, `a *% b` |
+| `Checked.(+)` / `open Checked` | `a + b` (panics on overflow outside release builds) |
+| `hash <- hash * 16777619u` | `hash *%= 16777619` |
+| `^^^`, `<<<`, `>>>` | `^`, `<<`, `>>` |
+| `uint32 b`, `2166136261u` | `b as u32`, a `u32` binding |
+
+```fsharp
+let fnv1a (data: byte[]) =
+    let mutable hash = 2166136261u
+    for b in data do
+        hash <- (hash ^^^ uint32 b) * 16777619u
+    hash
+
+let nextSeed (seed: int64) = seed * 6364136223846793005L + 1442695040888963407L
+```
+
+```gos
+fn fnv1a(data: String) -> u32 {
+    let mut hash: u32 = 2166136261
+    for b in data.bytes() {
+        hash ^= b as u32
+        hash *%= 16777619
+    }
+    hash
+}
+
+fn next_seed(seed: i64) -> i64 {
+    seed *% 6364136223846793005 +% 1442695040888963407
+}
+```
+
 ## Visibility
 
 Gossamer has three visibilities, and they are declared per item, per method,

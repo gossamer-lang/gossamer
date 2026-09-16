@@ -243,7 +243,12 @@ fn visit_terminator_operands(
 ) {
     match terminator {
         Terminator::SwitchInt { discriminant, .. } => replace_operand(discriminant, f),
-        Terminator::Assert { cond, .. } => replace_operand(cond, f),
+        Terminator::Assert { cond, msg, .. } => {
+            replace_operand(cond, f);
+            for op in msg.operands_mut() {
+                replace_operand(op, f);
+            }
+        }
         Terminator::Call { callee, args, .. } => {
             // A callee that declares a reference receiver is asking for the
             // reference this body holds, not for the value behind it.

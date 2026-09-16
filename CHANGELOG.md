@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.61.1 - Faster teardown and indexed loops
+
+- A value a variant or struct constructor stores moves its share into the new
+  node rather than taking a second one that a later release gives back. Code
+  that rebuilds a tree - `Add(simplify(l), simplify(r))` - no longer hands the
+  cycle collector every node it builds, which had made such rewrites slower
+  than in 0.60.
+- Tearing down a tree of enum or struct nodes reads each node's children in one
+  pass over its layout rather than through a callback per child.
+- `s.to_i64()` parses the string's bytes directly, and a string reserved with
+  `String::with_capacity(n)` starts with its character index already known.
+- `let mut b = a` moves a `Vec` that is never read again instead of copying
+  every element, so `b` also keeps the capacity `a` was built with.
+- A loop that reads fields of a struct it does not change reads them once
+  before the loop, so `for x in 0..g.w { g.data[y * g.w + x] = v }` has its
+  index proven in range and runs without a bounds check per element.
+- A nest of counted loops that reads the rows of a nested vector
+  (`grid[ny][nx]`) and resizes none of them reads each row's length and
+  elements from a table of row headers built when the nest is entered, rather
+  than loading the row's header on every access.
+- The JIT compiles a function taking `&mut Vec<i64>`, `&mut Vec<f64>`,
+  `&mut Vec<(i64, f64)>`, `&mut Vec<u8>`, or a `Vec<u8>`, for calls from other
+  compiled functions. Such a function is not entered from the bytecode tier,
+  where each call would copy the vector in and out.
+- `Vec::with_capacity(n)` answers a capacity of at least `n` under `gos run`
+  for every element type, where it answered 0 until the first push and 4 after
+  it, and push, pop, and insert keep that capacity.
+- A write through a reference to a field reaches the field under `gos run`:
+  `let d = &mut g.data` followed by `d[1] = v`, `d.push(x)`, or a loop over `d`,
+  and `let w = &mut g.w` followed by `*w = 42`. The same writes spelled in place
+  (`(&mut g.data)[1] = v`) compile under `gos run`, and `*(&mut g.w) = 42`
+  writes the field on the compiled tiers, where it was ignored.
+- An out-of-range index panics with `vec index out of bounds: the len is N but
+  the index is I` on the compiled tiers, as it does under `gos run`, where an
+  element read through a bounds check reported only `index out of bounds`.
+- The guides for coming from Rust, Go, F#, Kotlin, and Python cover integer
+  overflow and the wrapping operators, with a hash ported from each language.
+
 ## 0.61.0 - Const generics and lane vectors, wrapping arithmetic, narrow integers keep their width, incremental builds
 
 - Wrapping arithmetic: `a +% b`, `a -% b`, and `a *% b` add, subtract, and

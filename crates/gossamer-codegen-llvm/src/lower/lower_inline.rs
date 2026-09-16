@@ -375,7 +375,7 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Coerce a GosVec operand to an LLVM `ptr` value.
-    fn vec_operand_ptr(&mut self, op: &Operand) -> Result<String, BuildError> {
+    pub(crate) fn vec_operand_ptr(&mut self, op: &Operand) -> Result<String, BuildError> {
         let v = self.lower_operand(op)?;
         let ty = self.operand_llvm_ty(op);
         if ty == "ptr" {
@@ -1558,6 +1558,49 @@ impl<'a> Lowerer<'a> {
         }
         writeln!(self.out, "  br label %{cont}").unwrap();
         writeln!(self.out, "{cont}:").unwrap();
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
+    /// Inline `gos_rt_vec_get_ptr_unchecked(vec, idx)`: the element address with
+    /// no null or bounds branch. MIR emits it only for an index it proved in
+    /// `[0, len)`, so the vector is non-empty and its data pointer non-null,
+    /// which the load states. The header loads then stand unconditionally in
+    /// the block, where a loop that does not change the vector hoists them.
+    pub(crate) fn lower_vec_get_ptr_unchecked_inline(
+        &mut self,
+        args: &[Operand],
+        destination: &Place,
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        let vec_ptr = self.vec_operand_ptr(&args[0])?;
+        let idx = self.lower_operand(&args[1])?;
+        let idx = self.widen_to_i64(&args[1], &idx);
+        let (off, _) = self.vec_elem_offset(&vec_ptr, &idx, &args[0]);
+        let dptr_addr = self.fresh();
+        writeln!(
+            self.out,
+            "  {dptr_addr} = getelementptr i8, ptr {vec_ptr}, i64 24"
+        )
+        .unwrap();
+        let data = self.fresh();
+        writeln!(
+            self.out,
+            "  {data} = load ptr, ptr {dptr_addr}{TBAA_HEADER}, !nonnull !{{}}"
+        )
+        .unwrap();
+        let ea = self.fresh();
+        writeln!(
+            self.out,
+            "  {ea} = getelementptr inbounds i8, ptr {data}, i64 {off}"
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  store ptr {ea}, ptr {}",
+            local_slot(destination.local)
+        )
+        .unwrap();
         emit_terminator_branch(&mut self.out, target);
         Ok(())
     }

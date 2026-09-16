@@ -2776,6 +2776,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-encoding-json-as-u64",
+      "name": "std::encoding::json::as_u64",
+      "kind": "function",
+      "signature": "fn as_u64(value: json::Value) -> Option<u64>",
+      "description": "Reads a dynamic Value as Option<u64>, for a non-negative integer up to u64::MAX.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdencodingjson",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-encoding-json-at",
       "name": "std::encoding::json::at",
       "kind": "function",
@@ -13288,6 +13307,25 @@
       "kind": "function",
       "signature": "fn compile(pattern: String) -> Result<regex::Pattern, errors::Error>",
       "description": "Parses a pattern into a reusable `Pattern` or returns an `Err`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdregex",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-regex-count",
+      "name": "std::regex::count",
+      "kind": "function",
+      "signature": "fn count(pattern: regex::Pattern, text: String) -> i64",
+      "description": "Counts the non-overlapping matches without building them.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

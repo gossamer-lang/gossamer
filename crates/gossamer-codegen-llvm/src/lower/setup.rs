@@ -86,6 +86,7 @@ impl<'a> Lowerer<'a> {
             last_frame_line: None,
             pending_frame_line: None,
             cold_spans: Vec::new(),
+            bounds_fail_edges: Vec::new(),
             frame_observed: false,
             frame_globals: None,
             fn_name_by_def: std::collections::HashMap::new(),
@@ -166,6 +167,7 @@ impl<'a> Lowerer<'a> {
         for block in &self.body.blocks {
             self.lower_block(block)?;
         }
+        self.emit_shared_bounds_fail();
         writeln!(self.out, "}}").unwrap();
         if !self.entry_allocas.is_empty() {
             let hoisted = std::mem::take(&mut self.entry_allocas).concat();

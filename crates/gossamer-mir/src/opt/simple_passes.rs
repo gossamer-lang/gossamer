@@ -784,7 +784,12 @@ fn count_terminator_reads(terminator: &Terminator, uses: &mut HashMap<Local, usi
                 count_place_reads(destination, uses);
             }
         }
-        Terminator::Assert { cond, .. } => count_operand_reads(cond, uses),
+        Terminator::Assert { cond, msg, .. } => {
+            count_operand_reads(cond, uses);
+            for op in msg.operands() {
+                count_operand_reads(op, uses);
+            }
+        }
         _ => {}
     }
 }

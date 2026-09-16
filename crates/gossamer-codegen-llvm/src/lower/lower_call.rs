@@ -790,6 +790,14 @@ impl<'a> Lowerer<'a> {
             self.lower_vec_get_ptr_inline(args, destination, target)?;
             return Ok(());
         }
+        if name == "gos_rt_vec_get_ptr_unchecked"
+            && args.len() == 2
+            && destination.projection.is_empty()
+            && render_ty(self.tcx, self.body.local_ty(destination.local)) == "ptr"
+        {
+            self.lower_vec_get_ptr_unchecked_inline(args, destination, target)?;
+            return Ok(());
+        }
         // A walk over a sequence of aggregates binds the element's address as
         // an integer word and copies the element out of it. The address is
         // the same header read and multiply; only the slot it lands in

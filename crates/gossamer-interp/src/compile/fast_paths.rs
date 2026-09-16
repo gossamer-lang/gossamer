@@ -1093,11 +1093,10 @@ impl<'tcx> FnBuilder<'tcx> {
     }
 
     /// Lowers a numeric `Vec::new()` or `Vec::with_capacity(n)` to a flat empty `IntArray` /
-    /// `FloatVec` (8 bytes per element) instead of the boxed
+    /// `ByteArray` / `FloatVec` (8 bytes per element) instead of the boxed
     /// `Value::Array` the generic `Vec::new` builtin returns. The local
     /// is tagged flat so a following `push` loop grows the flat backing
-    /// store in place. The VM has historically treated capacity as a hint,
-    /// but still evaluates the capacity expression exactly once.
+    /// store in place. `with_capacity` reserves room for `n` elements up front.
     pub(crate) fn try_build_empty_typed_vec(
         &mut self,
         callee: &HirExpr,
@@ -1111,48 +1110,55 @@ impl<'tcx> FnBuilder<'tcx> {
         if n < 2 || segments[n - 2].name.as_str() != "Vec" {
             return Ok(None);
         }
-        let constructor = segments[n - 1].name.as_str();
-        if !((constructor == "new" && args.is_empty())
-            || (constructor == "with_capacity" && args.len() == 1))
-        {
-            return Ok(None);
-        }
+        let with_capacity = match (segments[n - 1].name.as_str(), args) {
+            ("new", []) => false,
+            ("with_capacity", [_]) => true,
+            _ => return Ok(None),
+        };
         let Some(elem) = self.array_elem_ty(result_ty) else {
             return Ok(None);
         };
-        if constructor == "with_capacity" {
+        let storage = match self.tcx.kind(elem) {
+            Some(TyKind::Int(IntTy::U8)) => FlatVecStorage::U8,
+            Some(TyKind::Int(IntTy::I64 | IntTy::Isize | IntTy::Usize)) => FlatVecStorage::I64,
+            Some(TyKind::Float(FloatTy::F64)) => FlatVecStorage::F64,
+            _ => return Ok(None),
+        };
+        let dst = if with_capacity {
             let capacity = self.compile_expr_ex(&args[0])?;
             let capacity_i = self.as_i64(capacity);
-            self.emit(Op::CheckNonNegativeCapacity { capacity_i });
-        }
-        let dst = self.alloc_reg();
-        match self.tcx.kind(elem) {
-            Some(TyKind::Int(IntTy::U8)) => {
-                self.emit(Op::BuildByteArray {
+            let dst = self.alloc_reg();
+            self.emit(Op::BuildVecWithCapacity {
+                dst_v: dst,
+                capacity_i,
+                storage,
+            });
+            dst
+        } else {
+            let dst = self.alloc_reg();
+            match storage {
+                FlatVecStorage::U8 => self.emit(Op::BuildByteArray {
                     dst_v: dst,
                     first_i: 0,
                     count: 0,
-                });
-                self.flat_int_locals.insert(dst);
-            }
-            Some(TyKind::Int(IntTy::I64 | IntTy::Isize | IntTy::Usize)) => {
-                self.emit(Op::BuildIntArray {
+                }),
+                FlatVecStorage::I64 => self.emit(Op::BuildIntArray {
                     dst_v: dst,
                     first_i: 0,
                     count: 0,
-                });
-                self.flat_int_locals.insert(dst);
-            }
-            Some(TyKind::Float(FloatTy::F64)) => {
-                self.emit(Op::BuildFloatVec {
+                }),
+                FlatVecStorage::F64 => self.emit(Op::BuildFloatVec {
                     dst_v: dst,
                     first_f: 0,
                     count: 0,
-                });
-                self.flat_float_locals.insert(dst);
-            }
-            _ => return Ok(None),
-        }
+                }),
+            };
+            dst
+        };
+        match storage {
+            FlatVecStorage::U8 | FlatVecStorage::I64 => self.flat_int_locals.insert(dst),
+            FlatVecStorage::F64 => self.flat_float_locals.insert(dst),
+        };
         Ok(Some(TypedReg {
             reg: dst,
             kind: RegKind::Value,

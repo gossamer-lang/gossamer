@@ -2210,7 +2210,15 @@
 </tr>
 <tr>
 <td><a href="generics/"><code>lang::generics</code></a></td>
-<td>Type parameters on functions / impls / structs.</td>
+<td>Type and const parameters on functions, impls, structs, and enums. A const parameter is a value inside the item that declares it (<code>N as i64</code>, <code>[0; N]</code>), taken from an array argument's length, a turbofish, an array field or payload, or the type the context expects.</td>
+</tr>
+<tr>
+<td><a href="wrapping_arithmetic/"><code>lang::wrapping_arithmetic</code></a></td>
+<td>Wrapping arithmetic operators <code>+%</code>, <code>-%</code>, <code>*%</code> and their compound forms <code>+%=</code>, <code>-%=</code>, <code>*%=</code>: two's-complement wrapping at the operands' declared integer width, on every tier and in every build profile. Plain <code>+</code>, <code>-</code>, and <code>*</code> keep their overflow check, and <code>wrapping_add</code> / <code>wrapping_mul</code> are not methods (GT0087).</td>
+</tr>
+<tr>
+<td><a href="simd/"><code>lang::simd</code></a></td>
+<td>Fixed-width lane vectors: <code>Simd&lt;T, N&gt;</code> over <code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, or <code>u32</code> and its <code>bool</code> form <code>Mask&lt;N&gt;</code>. Lane-wise arithmetic and bitwise operators, lane comparisons, <code>select</code>, reductions, and <code>Simd::load</code> / <code>store</code> over a window checked once, with the same bits on every tier (GT0089).</td>
 </tr>
 <tr>
 <td><a href="cohort/"><code>lang::cohort</code></a></td>
@@ -2234,7 +2242,7 @@
 </tr>
 <tr>
 <td><a href="spawn/"><code>lang::spawn</code></a></td>
-<td>Goroutine spawn: <code>spawn(f)</code> -&gt; <code>JoinHandle&lt;T&gt;</code>, <code>.join()</code> -&gt; <code>Result&lt;T, String&gt;</code>. The child attaches to the enclosing cohort, so nothing is detached.</td>
+<td>Goroutine spawn: <code>spawn(f)</code> -&gt; <code>JoinHandle&lt;T&gt;</code>, <code>.join()</code> -&gt; <code>Result&lt;T, String&gt;</code>. The child attaches to the <code>cohort { }</code> the call is written inside, which every <code>spawn</code> outside <code>main</code> must have (GT0086), so nothing is detached and nothing is attached by accident.</td>
 </tr>
 <tr>
 <td><a href="builtin_calls/"><code>lang::builtin_calls</code></a></td>

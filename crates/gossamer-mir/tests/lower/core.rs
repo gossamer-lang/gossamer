@@ -1955,3 +1955,120 @@ fn main() { let mut w: Vec<i64> = #[1, 2, 3]; scatter(&mut w, 1, 0); println("{}
         "a product index is not affine in the counter: {names:?}"
     );
 }
+
+#[test]
+fn a_loop_indexing_a_field_of_a_struct_it_only_reads_versions_unchecked() {
+    let body = optimised_fn(
+        r#"
+struct Grid { data: Vec<i64>, w: i64 }
+fn row(g: &mut Grid, y: i64) {
+    for x in 0..g.w { g.data[y * g.w + x] = x + y }
+}
+fn main() { let mut g = Grid { data: #[0; 4], w: 2 }; row(&mut g, 1); println("{}", g.data[3]) }
+"#,
+        "row",
+    );
+    let names = call_symbol_names(&body);
+    assert!(
+        names.iter().any(|n| n == "gos_rt_vec_set_i64_unchecked"),
+        "the field reads stand outside the loop, so the store is proven: {names:?}"
+    );
+
+    let rebinding = optimised_fn(
+        r#"
+struct Grid { data: Vec<i64>, w: i64 }
+fn row(g: &mut Grid, y: i64) {
+    for x in 0..4 {
+        g.data[y * g.w + x] = x
+        g.w = x + 1
+    }
+}
+fn main() { let mut g = Grid { data: #[0; 16], w: 2 }; row(&mut g, 1); println("{}", g.data[3]) }
+"#,
+        "row",
+    );
+    let names = call_symbol_names(&rebinding);
+    assert!(
+        !names.iter().any(|n| n == "gos_rt_vec_set_i64_unchecked"),
+        "a loop that writes the struct re-reads its field: {names:?}"
+    );
+}
+
+#[test]
+fn a_loop_nest_reading_rows_it_never_resizes_reads_them_through_a_header_table() {
+    let body = optimised_fn(
+        r#"
+fn count(grid: Vec<Vec<i64>>, links: Vec<i64>) -> i64 {
+    let mut n = 0
+    for y in 0..2 {
+        for x in 0..2 {
+            let ny = links[x]
+            n += grid[ny][y]
+        }
+    }
+    n
+}
+fn main() { println("{}", count(#[#[1, 2], #[3, 4]], #[1, 0])) }
+"#,
+        "count",
+    );
+    let names = call_symbol_names(&body);
+    assert!(
+        names.iter().any(|n| n == "gos_rt_vec_header_table"),
+        "the nest reads rows from a table built on entry: {names:?}"
+    );
+
+    let helper = optimised_fn(
+        r#"
+fn touch(grid: &mut Vec<Vec<i64>>) { grid[0].push(1) }
+fn count(grid: &mut Vec<Vec<i64>>) -> i64 {
+    let mut n = 0
+    for y in 0..2 {
+        for x in 0..2 {
+            n += grid[y % 2].len() + x
+            touch(grid)
+        }
+    }
+    n
+}
+fn main() { let mut g = #[#[1], #[2]]; println("{}", count(&mut g)) }
+"#,
+        "count",
+    );
+    let names = call_symbol_names(&helper);
+    assert!(
+        !names.iter().any(|n| n == "gos_rt_vec_header_table"),
+        "a call handed the grid inside the nest can resize a row: {names:?}"
+    );
+}
+
+#[test]
+fn a_loop_nest_reading_struct_rows_reads_them_through_a_header_table() {
+    let body = optimised_fn(
+        r#"
+struct Cell { alive: bool, n: i64 }
+struct World { cells: Vec<Vec<Cell>>, h: i64, w: i64 }
+fn count(world: &mut World, links: Vec<i64>) -> i64 {
+    let mut n = 0
+    for y in 0..world.h {
+        for x in 0..world.w {
+            let ny = links[x]
+            if world.cells[ny][x].alive { n += 1 }
+            world.cells[y][x].n = n
+        }
+    }
+    n
+}
+fn main() {
+    let mut w = World { cells: #[#[Cell { alive: true, n: 0 }]], h: 1, w: 1 }
+    println("{}", count(&mut w, #[0]))
+}
+"#,
+        "count",
+    );
+    let names = call_symbol_names(&body);
+    assert!(
+        names.iter().any(|n| n == "gos_rt_vec_header_table"),
+        "rows of structs read and written in place come from the table: {names:?}"
+    );
+}

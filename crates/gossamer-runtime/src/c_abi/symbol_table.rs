@@ -4116,6 +4116,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::gos_rt_panic_oob as *const u8,
         ),
         (
+            "gos_rt_panic_vec_index",
+            crate::c_abi::gos_rt_panic_vec_index as *const u8,
+        ),
+        (
             "gos_rt_parse_f64",
             crate::c_abi::gos_rt_parse_f64 as *const u8,
         ),
@@ -4327,6 +4331,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
         (
             "gos_rt_vec_compact_elems",
             crate::c_abi::vec::gos_rt_vec_compact_elems as *const u8,
+        ),
+        (
+            "gos_rt_vec_header_table",
+            crate::c_abi::vec::gos_rt_vec_header_table as *const u8,
         ),
         (
             "gos_rt_vec_mark_vec_elems",
@@ -6982,6 +6990,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
         (
             "gos_rt_vec_get_i64_unchecked",
             crate::c_abi::gos_rt_vec_get_i64_unchecked as *const u8,
+        ),
+        (
+            "gos_rt_vec_get_ptr_unchecked",
+            crate::c_abi::gos_rt_vec_get_ptr_unchecked as *const u8,
         ),
         (
             "gos_rt_vec_get_ptr",

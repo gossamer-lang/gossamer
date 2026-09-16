@@ -1916,6 +1916,17 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#the-llvm-object-cache" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        The LLVM object cache
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -2262,6 +2273,17 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#the-llvm-object-cache" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        The LLVM object cache
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -2373,8 +2395,27 @@ contents are disposable, so a corrupt entry costs one recompile.</p>
 <p>Comptime folding (<code>gos check</code> and <code>gos build</code> evaluate <code>comptime</code> regions on
 the bytecode VM before the gate) runs the gate itself and so benefits from
 the cache, but the fold's own output is not separately cached. Lints,
-HIR/MIR lowering, and native code generation have their own caches or none;
-the LLVM backend keeps a per-body object cache under <code>ir-cache</code>.</p>
+HIR/MIR lowering, and native code generation have their own caches or none.</p>
+<h2 id="the-llvm-object-cache">The LLVM object cache<a class="headerlink" href="#the-llvm-object-cache" title="Permanent link">&para;</a></h2>
+<p>The LLVM backend splits a program into one LLVM module per source module
+(modules joined by a recursive call cycle share one) and keeps one object per
+module under <code>ir-cache</code>. A module's cache key is its rendered IR text, plus the
+target triple, the profile, the compiler build, and the <code>opt</code> / <code>llc</code> / <code>clang</code>
+identities and code-generation settings. The text is what LLVM compiles, so an
+edit that leaves a module's IR unchanged - a comment, a function moved within
+its file, a body edited in another module that this one does not inline - is
+served from the cache, and an edit that reaches the IR is recompiled.</p>
+<p>A release module carries an <code>available_externally</code> copy of each small callee it
+reaches in another module, so <code>opt</code> inlines across the module boundary as it
+would inside one whole-program module. The copies are part of the module's
+text, and therefore of its key: editing a callee recompiles every module that
+inlined it. A module declares only the functions and RC type metadata its own
+text names, so adding a function elsewhere does not change it.</p>
+<p>Cache misses compile in parallel, one <code>opt</code> + <code>llc</code> pair per module, on up to
+eight workers (<code>GOS_LLVM_JOBS</code> overrides the count). A finished object is
+copied to a temporary name and renamed into the cache. <code>--reproducible</code> builds
+the program as one module. <code>GOS_PIPELINE_TRACE=1</code> names each module, its body
+and import counts, and whether it was cached or compiled.</p>
 
 
 

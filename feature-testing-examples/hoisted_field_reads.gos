@@ -1,0 +1,88 @@
+// Loops that read a struct's fields: a read-only loop reads each field once,
+// and every route that changes the struct inside the loop - a field write, a
+// push through the field, a `&mut self` call, a rebinding of the whole struct,
+// a write through a second name - is seen by the reads that follow it.
+
+struct Grid {
+    data: Vec<i64>
+    w: i64
+}
+
+impl Grid {
+    fn widen(&mut self) { self.w += 1 }
+}
+
+fn fill_row(g: &mut Grid, y: i64) {
+    for x in 0..g.w { g.data[y * g.w + x] = x + y * 10 }
+}
+
+fn sum_row(g: Grid, y: i64) -> i64 {
+    let mut s = 0
+    for x in 0..g.w { s += g.data[y * g.w + x] }
+    s
+}
+
+fn write_width_inside(g: &mut Grid) -> i64 {
+    let mut s = 0
+    for x in 0..3 {
+        s += g.data[g.w + x]
+        g.w = x + 1
+    }
+    s
+}
+
+fn push_inside(g: &mut Grid) -> i64 {
+    let mut s = 0
+    for x in 0..3 {
+        g.data.push(x * 100)
+        s += g.data[g.data.len() - 1] + g.data.len()
+    }
+    s
+}
+
+fn method_inside(g: &mut Grid) -> i64 {
+    let mut s = 0
+    for x in 0..3 {
+        s += g.data[g.w + x]
+        g.widen()
+    }
+    s
+}
+
+fn rebind_inside() -> i64 {
+    let mut g = Grid { data: #[1, 2, 3, 4, 5, 6, 7, 8], w: 1 }
+    let mut s = 0
+    for x in 0..3 {
+        s += g.data[g.w + x]
+        g = Grid { data: #[10, 20, 30, 40, 50, 60, 70, 80], w: 2 }
+    }
+    s
+}
+
+fn second_name_inside(g: &mut Grid) -> i64 {
+    let mut s = 0
+    let width = g.w
+    let data = &mut g.data
+    for x in 0..3 {
+        s += data[x]
+        data[x + 1] = s
+    }
+    s + width
+}
+
+fn main() {
+    let mut g = Grid { data: #[0; 64], w: 8 }
+    for y in 0..8 { fill_row(&mut g, y) }
+    let mut total = 0
+    for y in 0..8 { total += sum_row(g, y) }
+    println("rows {} {}", total, g.data[63])
+
+    let mut h = Grid { data: #[1, 2, 3, 4, 5, 6, 7, 8], w: 2 }
+    println("width {} {}", write_width_inside(&mut h), h.w)
+    println("push {} {}", push_inside(&mut h), h.data.len())
+    let mut m = Grid { data: #[1, 2, 3, 4, 5, 6, 7, 8], w: 1 }
+    println("method {} {}", method_inside(&mut m), m.w)
+    println("rebind {}", rebind_inside())
+    let mut n = Grid { data: #[1, 2, 3, 4, 5], w: 7 }
+    println("alias {} {:?}", second_name_inside(&mut n), n.data)
+}

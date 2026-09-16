@@ -3654,7 +3654,10 @@ impl<'a> Builder<'a> {
         self.terminate(Terminator::Assert {
             cond: Operand::Copy(Place::local(in_bounds)),
             expected: true,
-            msg: AssertMessage::BoundsCheck,
+            msg: AssertMessage::BoundsCheck {
+                index: Operand::Copy(Place::local(index_local)),
+                seq: Operand::Copy(Place::local(vec_local)),
+            },
             target: ok,
         });
         self.set_current(ok);

@@ -2310,6 +2310,18 @@ pipe form below is a stylistic choice, not the only spelling.)</p>
   parameters). Each construction site is a separate monomorphisation;
   parameters are inferred from the field values at the call site.
   Runs under <code>gos</code> and <code>gos build</code>.</li>
+<li><strong><code>const_generics.gos</code></strong> - a <code>const N: usize</code> parameter as a value:
+  <code>N as i64</code>, <code>[0; N]</code>, a turbofish (<code>zeros::&lt;4&gt;()</code>), a <code>Ring&lt;const N: usize&gt;</code>
+  struct whose methods read <code>N</code>, and a <code>Grid&lt;const N: usize&gt;</code> enum whose payload
+  names it. Identical output on every tier.</li>
+<li><strong><code>wrapping_hash.gos</code></strong> - wrapping arithmetic with <code>+%</code>, <code>-%</code>, <code>*%</code> and
+  their compound forms: a djb2 and an FNV-1a string hash over <code>u32</code>, a <code>u8</code>
+  countdown past zero, and an <code>i32</code> total past its maximum. Identical output on
+  every tier and in every build profile.</li>
+<li><strong><code>simd_lanes.gos</code></strong> - lane vectors: <code>Simd::from_array</code>, <code>Simd::splat</code>,
+  lane-wise arithmetic, a <code>dot</code> generic over its lane count, a <code>Mask</code> from
+  <code>lanes_lt</code> feeding <code>select</code>, integer <code>abs</code> and <code>reduce_max</code>, wrapping lanes,
+  and <code>Simd::load</code> / <code>store</code> over a <code>Vec</code>. Identical output on every tier.</li>
 <li><strong><code>trait_bounds.gos</code></strong> - generic functions with trait bounds dispatched
   statically. One <code>report&lt;T: Shape&gt;(s: &amp;T)</code> serves every type that
   implements <code>Shape</code>; the bound is enforced at compile time and each

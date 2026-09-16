@@ -953,7 +953,9 @@ where
             // cleared once at its full size and again as it fills.
             *content.add(content_len) = 0;
         }
-        if known_ascii {
+        // Empty content is ASCII, which is the index a reserved builder starts
+        // from before its first append.
+        if known_ascii || content_len == 0 {
             content
                 .add(cap + 1)
                 .cast::<u32>()
@@ -2002,12 +2004,42 @@ pub unsafe extern "C" fn gos_rt_str_to_i64_opt(s: *const c_char) -> i128 {
         if s.is_null() {
             return unsafe { gos_rt_result_new(1, 0) };
         }
-        let text = unsafe { gos_str_arg_lossy(s) };
-        match text.parse::<i64>() {
-            Ok(n) => unsafe { gos_rt_result_new(0, n) },
-            Err(_) => unsafe { gos_rt_result_new(1, 0) },
+        match parse_i64_bytes(unsafe { gos_str_arg_bytes(s) }) {
+            Some(n) => unsafe { gos_rt_result_new(0, n) },
+            None => unsafe { gos_rt_result_new(1, 0) },
         }
     })
+}
+
+/// `str::parse::<i64>` over raw bytes: an optional `+` or `-`, then one or more
+/// ASCII digits, with `None` on anything else or on overflow.
+///
+/// Every byte an integer accepts is ASCII, so the text needs no UTF-8 decoding
+/// first: a byte outside ASCII fails the digit test exactly as its decoded
+/// character fails `parse`.
+fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
+    let (negative, digits) = match bytes {
+        [b'-', rest @ ..] => (true, rest),
+        [b'+', rest @ ..] => (false, rest),
+        _ => (false, bytes),
+    };
+    if digits.is_empty() {
+        return None;
+    }
+    let mut n: i64 = 0;
+    for &b in digits {
+        let d = i64::from(b.wrapping_sub(b'0'));
+        if d > 9 {
+            return None;
+        }
+        n = n.checked_mul(10)?;
+        n = if negative {
+            n.checked_sub(d)?
+        } else {
+            n.checked_add(d)?
+        };
+    }
+    Some(n)
 }
 
 /// `s.to_f64() -> Option<f64>`: the Some payload carries the value's
@@ -4178,5 +4210,46 @@ mod ascii_index_tests {
                 gos_rt_str_free(s);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod parse_i64_bytes_tests {
+    use super::parse_i64_bytes;
+
+    #[test]
+    fn byte_parse_answers_what_str_parse_answers() {
+        let cases = [
+            "",
+            "0",
+            "7",
+            "-0",
+            "+0",
+            "+",
+            "-",
+            "--1",
+            "+-1",
+            "12a",
+            " 12",
+            "12 ",
+            "00042",
+            "9223372036854775807",
+            "9223372036854775808",
+            "-9223372036854775808",
+            "-9223372036854775809",
+            "99999999999999999999",
+            "1_000",
+            "\u{0661}",
+            "é1",
+            "٣",
+        ];
+        for case in cases {
+            assert_eq!(
+                parse_i64_bytes(case.as_bytes()),
+                case.parse::<i64>().ok(),
+                "{case:?}"
+            );
+        }
+        assert_eq!(parse_i64_bytes(&[b'1', 0xff]), None);
     }
 }

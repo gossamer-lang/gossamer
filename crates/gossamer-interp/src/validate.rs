@@ -677,7 +677,10 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 check_i(op_idx, value_i)?;
                 check_v(op_idx, count_v)?;
             }
-            Op::CheckNonNegativeCapacity { capacity_i } => {
+            Op::BuildVecWithCapacity {
+                dst_v, capacity_i, ..
+            } => {
+                check_v(op_idx, dst_v)?;
                 check_i(op_idx, capacity_i)?;
             }
             Op::BuildTuple { dst, first, count } => {
@@ -1882,6 +1885,7 @@ pub(crate) fn register_effects(
         Op::BuildIntArray { dst_v, .. }
         | Op::BuildByteArray { dst_v, .. }
         | Op::BuildByteArrayRepeat { dst_v, .. }
+        | Op::BuildVecWithCapacity { dst_v, .. }
         | Op::BuildFloatVec { dst_v, .. }
         | Op::BuildIntMap { dst_v }
         | Op::BuildStrIntMap { dst_v }
@@ -2163,7 +2167,7 @@ pub(crate) fn register_effects(
             effect.i_reads.push(value_i);
             effect.v_reads.push(count_v);
         }
-        Op::CheckNonNegativeCapacity { capacity_i } => effect.i_reads.push(capacity_i),
+        Op::BuildVecWithCapacity { capacity_i, .. } => effect.i_reads.push(capacity_i),
         Op::BuildFloatVec { first_f, count, .. } => {
             add_f_span(&mut effect.f_reads, first_f, u32::from(count));
         }

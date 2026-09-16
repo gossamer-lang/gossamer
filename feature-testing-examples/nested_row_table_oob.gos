@@ -1,0 +1,14 @@
+// A row index read inside a loop nest that reads its rows from a header table
+// panics with the vector's length and the index, as the indexed read does.
+
+fn out_of_range(table: Vec<Vec<i64>>, keys: Vec<i64>) -> i64 {
+    let mut s = 0
+    for round in 0..2 {
+        for i in 0..keys.len() { s += table[keys[i]][0] + round }
+    }
+    s
+}
+
+fn main() {
+    println("{}", out_of_range(#[#[1], #[2]], #[1, 0, 5]))
+}

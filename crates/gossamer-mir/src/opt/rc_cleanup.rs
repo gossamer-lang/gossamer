@@ -170,7 +170,12 @@ fn term_mentioned_locals(t: &Terminator) -> Vec<Local> {
             }
             push_operand(&Operand::Copy(destination.clone()), &mut out);
         }
-        Terminator::Assert { cond, .. } => push_operand(cond, &mut out),
+        Terminator::Assert { cond, msg, .. } => {
+            push_operand(cond, &mut out);
+            for op in msg.operands() {
+                push_operand(op, &mut out);
+            }
+        }
         _ => {}
     }
     out.sort_unstable_by_key(|l| l.0);
@@ -228,7 +233,7 @@ pub(crate) fn term_mentions_local(t: &Terminator, local: Local) -> bool {
             destination,
             ..
         } => m(callee) || args.iter().any(m) || place_mentions_local(destination, local),
-        Terminator::Assert { cond, .. } => m(cond),
+        Terminator::Assert { cond, msg, .. } => m(cond) || msg.operands().any(m),
         _ => false,
     }
 }
@@ -1221,7 +1226,7 @@ fn term_use_is_borrow(t: &Terminator, holder: Local, _is_member: &[bool]) -> boo
             })
         }
         Terminator::SwitchInt { discriminant, .. } => !bare(discriminant),
-        Terminator::Assert { cond, .. } => !bare(cond),
+        Terminator::Assert { cond, msg, .. } => !bare(cond) || msg.operands().any(|op| !bare(op)),
         Terminator::Drop { place, .. } => place.local != holder,
         Terminator::Goto { .. }
         | Terminator::Return
@@ -2066,6 +2071,91 @@ fn elide_shares_moved_into_aggregates(body: &mut Body, tcx: &TyCtxt) {
 }
 
 
+/// Turns the share a heap store takes of a counted local into a move when the
+/// local's own share is given back and nothing else reads it.
+///
+/// `gos_store(node, off, x)` followed by `retain(x)` books a second share for
+/// the node while `x` keeps its own until a later release. Where every path
+/// from the retain reaches a release of `x` and mentions `x` in no other way,
+/// the two are one share changing holders. Zeroing `x` in place of the retain
+/// hands the node that share and leaves every later release of `x` reading a
+/// null word, which the zeroed-word analysis then removes. A release that
+/// lands on a still-live count is what buffers an object for the cycle
+/// collector, so a construction that pairs the two would feed it every node.
+///
+/// The zero is written where the retain stood, so no path reaches a release of
+/// `x` still holding its share, including a release in a block other paths
+/// also reach. `x` must be a local of this body that owns a share: a
+/// parameter is lent, a region local is a view, and a goroutine-shared value
+/// is counted under the atomic protocol.
+pub(crate) fn move_stored_rc_shares(body: &mut Body, tcx: &TyCtxt) {
+    let n_locals = body.locals.len();
+    let arity = body.arity as usize;
+    let succs: Vec<Vec<usize>> = body
+        .blocks
+        .iter()
+        .map(|b| successor_indices(&b.terminator))
+        .collect();
+    let share = crate::ownership::ShareFacts::compute(body);
+    let release = HolderRc {
+        retains: &["gos_rt_rc_retain"],
+        releases: &["gos_rt_rc_release"],
+        meta: None,
+    };
+    let mut moves: Vec<(usize, usize, Local)> = Vec::new();
+    for (bi, block) in body.blocks.iter().enumerate() {
+        for (ri, stmt) in block.stmts.iter().enumerate() {
+            let StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name: "gos_rt_rc_retain", args },
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            let Some(x) = rc_bare_local_arg(args) else {
+                continue;
+            };
+            let i = x.0 as usize;
+            if i <= arity
+                || i >= n_locals
+                || body.locals[i].region
+                || !matches!(tcx.kind_of(body.locals[i].ty), TyKind::Adt { .. })
+                || !tcx.is_rc_managed(body.locals[i].ty)
+                || share.is_goroutine_shared(x)
+            {
+                continue;
+            }
+            let Some(si) = (0..ri)
+                .rev()
+                .find(|&k| !matches!(block.stmts[k].kind, StatementKind::Nop))
+            else {
+                continue;
+            };
+            let stored = matches!(
+                &block.stmts[si].kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name: "gos_store", args },
+                    ..
+                } if matches!(args.as_slice(), [holder, _, Operand::Copy(v)]
+                    if v.projection.is_empty() && v.local == x
+                        && !operand_mentions_local(holder, x))
+            );
+            if !stored {
+                continue;
+            }
+            if operand_share_moves_out(body, &succs, (bi, ri), x, &release).is_some() {
+                moves.push((bi, ri, x));
+            }
+        }
+    }
+    for (bi, ri, x) in moves {
+        body.blocks[bi].stmts[ri].kind = StatementKind::Assign {
+            place: Place::local(x),
+            rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+        };
+    }
+}
+
 /// Which accounting a zeroed-word analysis follows.
 #[derive(Clone, Copy)]
 enum ZeroedWords {
@@ -2076,6 +2166,11 @@ enum ZeroedWords {
     /// lowering puts at entry (both carrier words) and read by the
     /// `gos_rt_option_slot_*` calls, which act only on a copy-blob payload.
     OptionSlot,
+    /// A counted pointer local, zeroed by a whole-local zero store at entry or
+    /// where its share moved to another holder, and released by
+    /// `gos_rt_rc_release` or `gos_rt_vec_free`, which do nothing with a null
+    /// pointer.
+    Counted,
 }
 
 impl ZeroedWords {
@@ -2086,7 +2181,7 @@ impl ZeroedWords {
                 Some(("gos_rt_aggr_zero_guarded", local, _)) => Some(local),
                 _ => None,
             },
-            Self::OptionSlot => match &stmt.kind {
+            Self::OptionSlot | Self::Counted => match &stmt.kind {
                 StatementKind::Assign {
                     place,
                     rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
@@ -2114,6 +2209,19 @@ impl ZeroedWords {
                 }
                 Some((name, rc_bare_local_arg(args)?))
             }
+            Self::Counted => {
+                let StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                    ..
+                } = &stmt.kind
+                else {
+                    return None;
+                };
+                if !matches!(*name, "gos_rt_rc_release" | "gos_rt_rc_retain" | "gos_rt_vec_free") {
+                    return None;
+                }
+                Some((name, rc_bare_local_arg(args)?))
+            }
         }
     }
 
@@ -2123,6 +2231,9 @@ impl ZeroedWords {
             Self::Guarded => name == "gos_rt_aggr_release_children",
             Self::OptionSlot => {
                 matches!(name, "gos_rt_option_slot_release" | "gos_rt_option_slot_retain")
+            }
+            Self::Counted => {
+                matches!(name, "gos_rt_rc_release" | "gos_rt_rc_retain" | "gos_rt_vec_free")
             }
         }
     }
@@ -2150,7 +2261,7 @@ pub(crate) fn elide_settled_guarded_walks(body: &mut Body) {
         .map(|b| successor_indices(&b.terminator))
         .collect();
 
-    for kind in [ZeroedWords::Guarded, ZeroedWords::OptionSlot] {
+    for kind in [ZeroedWords::Guarded, ZeroedWords::OptionSlot, ZeroedWords::Counted] {
         let entry_state = zeroed_entry_states(body, &succs, kind);
         let mut dead: Vec<(usize, usize)> = Vec::new();
         for (b, block) in body.blocks.iter().enumerate() {

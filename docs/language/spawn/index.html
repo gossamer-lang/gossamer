@@ -2109,7 +2109,7 @@
 
 
 <h1 id="langspawn"><code>lang::spawn</code><a class="headerlink" href="#langspawn" title="Permanent link">&para;</a></h1>
-<p>Goroutine spawn: <code>spawn(f)</code> -&gt; <code>JoinHandle&lt;T&gt;</code>, <code>.join()</code> -&gt; <code>Result&lt;T, String&gt;</code>. The child attaches to the enclosing cohort, so nothing is detached.</p>
+<p>Goroutine spawn: <code>spawn(f)</code> -&gt; <code>JoinHandle&lt;T&gt;</code>, <code>.join()</code> -&gt; <code>Result&lt;T, String&gt;</code>. The child attaches to the <code>cohort { }</code> the call is written inside, which every <code>spawn</code> outside <code>main</code> must have (GT0086), so nothing is detached and nothing is attached by accident.</p>
 
 
 

@@ -783,14 +783,18 @@ fn builtin_push(args: &[Value]) -> RuntimeResult<Value> {
             // routing as `Op::VecPush`.
             match extra {
                 Some(Value::Int(n)) if parts.is_empty() => {
-                    return Ok(Value::IntArray(Arc::new(vec![*n])));
+                    let mut data = Vec::with_capacity(parts.capacity().max(1));
+                    data.push(*n);
+                    return Ok(Value::IntArray(Arc::new(data)));
                 }
                 Some(Value::Float(f)) if parts.is_empty() => {
-                    return Ok(Value::FloatVec(Arc::new(vec![*f])));
+                    let mut data = Vec::with_capacity(parts.capacity().max(1));
+                    data.push(*f);
+                    return Ok(Value::FloatVec(Arc::new(data)));
                 }
                 _ => {}
             }
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             if let Some(extra) = extra {
                 owned.push(extra.clone());
             }
@@ -800,11 +804,12 @@ fn builtin_push(args: &[Value]) -> RuntimeResult<Value> {
             // A float push means the receiver is an `[f64]` whose elements
             // so far were integer-valued: widen to flat float storage.
             if let Some(Value::Float(f)) = extra {
-                let mut wide: Vec<f64> = parts.iter().map(|n| *n as f64).collect();
+                let mut wide = Vec::with_capacity(parts.capacity().max(parts.len() + 1));
+                wide.extend(parts.iter().map(|n| *n as f64));
                 wide.push(*f);
                 return Ok(Value::FloatVec(Arc::new(wide)));
             }
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             if let Some(Value::Int(n)) = extra {
                 owned.push(*n);
             }
@@ -825,14 +830,14 @@ fn builtin_push(args: &[Value]) -> RuntimeResult<Value> {
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::ByteVec(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             if let Some(Value::Int(n)) = extra {
                 owned.push(*n as u8);
             }
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::FloatVec(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             if let Some(Value::Float(f)) = args.get(1) {
                 owned.push(*f);
             }
@@ -845,7 +850,7 @@ fn builtin_push(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_pop(args: &[Value]) -> RuntimeResult<Value> {
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.pop();
             Ok(Value::Array(Arc::new(owned)))
         }
@@ -856,12 +861,12 @@ fn builtin_pop(args: &[Value]) -> RuntimeResult<Value> {
             // returned `Value::empty_array()`, which the bytecode
             // VM's writeback then moved into `xs` - clobbering
             // every element instead of shortening by one.
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.pop();
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.pop();
             Ok(Value::FloatVec(Arc::new(owned)))
         }
@@ -1537,7 +1542,7 @@ fn builtin_insert(args: &[Value]) -> RuntimeResult<Value> {
                     "insert: index {idx} out of bounds for length {len}"
                 )));
             }
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.insert(idx as usize, value);
             Ok(Value::Array(Arc::new(owned)))
         }
@@ -1548,7 +1553,7 @@ fn builtin_insert(args: &[Value]) -> RuntimeResult<Value> {
                     "insert: index {idx} out of bounds for length {len}"
                 )));
             }
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             if let Value::Int(n) = value {
                 owned.insert(idx as usize, n);
             }
@@ -1561,7 +1566,7 @@ fn builtin_insert(args: &[Value]) -> RuntimeResult<Value> {
                     "insert: index {idx} out of bounds for length {len}"
                 )));
             }
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             let f = match value {
                 Value::Float(f) => Some(f),
                 Value::Int(n) => Some(n as f64),

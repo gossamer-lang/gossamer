@@ -1687,7 +1687,9 @@ pub(super) fn lower_intrinsic_call_string(
         // lowering to read each element via a follow-up
         // `gos_load(ptr, 0)` so the same code handles scalar
         // and pointer-shaped element types.
-        "gos_rt_vec_get_ptr" => {
+        // The unchecked form addresses an index MIR already proved in bounds,
+        // which the checked address reaches along its in-bounds path.
+        "gos_rt_vec_get_ptr" | "gos_rt_vec_get_ptr_unchecked" => {
             let vec_p = match args.first() {
                 Some(a) => lower_operand(
                     module,

@@ -273,6 +273,7 @@ const PURE_READ: &[&str] = &[
     "gos_rt_vec_get_i128",
     "gos_rt_vec_get_opt",
     "gos_rt_vec_get_ptr",
+    "gos_rt_vec_get_ptr_unchecked",
     "gos_rt_arr_len",
     "gos_rt_heap_i64_get",
 ];

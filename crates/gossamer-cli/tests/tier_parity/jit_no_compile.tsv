@@ -165,7 +165,6 @@ feature-testing-examples/format_width_pad_parity.gos	no hot user body
 feature-testing-examples/from_json_infer.gos	entry shape
 feature-testing-examples/fs_dir_ops.gos	no hot body
 feature-testing-examples/fs_error_text.gos	no hot body
-feature-testing-examples/fs_file_positional_io.gos	bytecode-only local
 feature-testing-examples/fs_metadata.gos	entry shape
 feature-testing-examples/fs_permission_modes.gos	no hot body
 feature-testing-examples/fs_read_to_string_missing.gos	no hot body
@@ -200,14 +199,12 @@ feature-testing-examples/http_csrf_attach.gos	bytecode-only local
 feature-testing-examples/http_router_lookup.gos	no hot body
 feature-testing-examples/http_serve_err_binding.gos	bytecode-only local
 feature-testing-examples/http_session.gos	no hot body
-feature-testing-examples/http_session_roundtrip.gos	bytecode-only local
 feature-testing-examples/http_surface.gos	bytecode-only local
 feature-testing-examples/httptest_record_and_clock.gos	no hot body
 feature-testing-examples/httptest_static_server.gos	no hot body
 feature-testing-examples/inferred_map_dispatch.gos	bytecode-only local
 feature-testing-examples/inline_index_remap.gos	admission gate
 feature-testing-examples/instant_methods.gos	no hot body
-feature-testing-examples/intcode_day2_mut_slice_native.gos	&mut aggregate param
 feature-testing-examples/integer_overflow_edges.gos	no hot body
 feature-testing-examples/iterator_param_argument.gos	unlowerable local
 feature-testing-examples/iterator_trait_user_impl.gos	admission gate
@@ -241,7 +238,6 @@ feature-testing-examples/module_impl_ordering.gos	no hot body
 feature-testing-examples/module_same_fn_names.gos	no hot body
 feature-testing-examples/module_scoped_type_names.gos	entry shape
 feature-testing-examples/mut_param_is_a_copy.gos	no hot body
-feature-testing-examples/mut_ref_container_assign.gos	&mut aggregate param
 feature-testing-examples/mut_ref_container_params.gos	&mut aggregate param
 feature-testing-examples/mut_ref_params.gos	callable local
 feature-testing-examples/mut_ref_scalar_writeback.gos	no hot body
@@ -268,7 +264,6 @@ feature-testing-examples/numeric_conversion_matrix.gos	no hot body
 feature-testing-examples/oob_index_aggregate_panic.gos	no hot user body
 feature-testing-examples/oob_index_scalar_panic.gos	no hot body
 feature-testing-examples/open_ended_ranges.gos	no hot body
-feature-testing-examples/open_range_take.gos	&mut aggregate param
 feature-testing-examples/operator_overload_arith.gos	entry shape
 feature-testing-examples/operator_overload_enum_generic.gos	admission gate
 feature-testing-examples/operator_overloads.gos	entry shape
@@ -317,7 +312,6 @@ feature-testing-examples/spawn_join.gos	no hot body
 feature-testing-examples/spawn_operand_order.gos	cross-goroutine
 feature-testing-examples/static_mut_basic.gos	no hot body
 feature-testing-examples/static_mut_goroutines.gos	bytecode-only local
-feature-testing-examples/stdlib_compiled_wiring.gos	bytecode-only local
 feature-testing-examples/stdlib_encoding_crypto.gos	no hot body
 feature-testing-examples/stdlib_env_portable.gos	no hot body
 feature-testing-examples/stdlib_fs_ops.gos	no hot body

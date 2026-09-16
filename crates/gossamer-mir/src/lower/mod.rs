@@ -159,6 +159,7 @@ fn field_fits_inline(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
 
 /// Lower an entire HIR program to MIR `Body`s, one per top-level function.
 pub fn lower_program(program: &HirProgram, tcx: &mut TyCtxt) -> Vec<Body> {
+    crate::opt::intern_row_table_types(tcx);
     let tables = ProgramTables::collect(program, tcx);
     let mut bodies = Vec::new();
     for item in &program.items {
@@ -631,6 +632,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
         crate::opt::elide_vec_clone_of_fresh_temporary(body, tcx);
         crate::opt::elide_vec_clone_of_dead_aggregate_source(body, &user_fn_names);
+        crate::opt::move_vec_clone_of_dead_local(body, tcx, &user_fn_names);
         crate::opt::share_read_only_vec_bindings(body, tcx);
         // Follows the drop passes, so the carrier releases they place are part
         // of what it accounts for.
@@ -664,6 +666,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
             crate::opt::elide_redundant_rc_pairs(body, tcx);
             crate::opt::elide_borrowed_holder_rc(body, tcx);
             crate::opt::elide_moved_aggregate_shares(body, tcx);
+            crate::opt::move_stored_rc_shares(body, tcx);
             crate::opt::elide_settled_guarded_walks(body);
             crate::opt::reduce_materialised_counts(body);
         }

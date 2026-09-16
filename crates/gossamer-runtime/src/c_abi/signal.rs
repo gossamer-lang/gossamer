@@ -770,6 +770,20 @@ pub unsafe extern "C" fn gos_rt_vec_get_i64_unchecked(v: *const GosVec, idx: i64
     })
 }
 
+/// Address of element `idx` of `v`, for an index already proven in
+/// `[0, v.len)` on a non-null vector. The LLVM tier inlines it; the symbol
+/// exists so that declarations resolve.
+///
+/// # Safety
+/// `v` must be a non-null `GosVec` and `idx` in `[0, v.len)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_get_ptr_unchecked(v: *const GosVec, idx: i64) -> *mut u8 {
+    ffi_entry!(std::ptr::null_mut(), {
+        let vec = unsafe { &*v };
+        unsafe { vec.ptr.add(idx as usize * vec.elem_bytes as usize) }
+    })
+}
+
 /// Writes an `i64`-shaped element to a `Vec` at `idx`. Invalid scalar
 /// indexing is a bounds panic; it is never silently ignored.
 #[unsafe(no_mangle)]

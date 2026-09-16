@@ -2345,7 +2345,28 @@ pub(super) fn lower_terminator(
             // A failed assertion renders `error[GX0005]` and exits /
             // unwinds through the runtime, matching the VM and AOT
             // tiers, instead of a bare illegal-instruction trap.
-            emit_runtime_panic(module, builder, intrinsics, assert_message_text(msg))?;
+            if let AssertMessage::BoundsCheck { index, seq } = msg {
+                let index =
+                    lower_operand(module, builder, locals, body, tcx, index, None, intrinsics)?;
+                let index = coerce_arg_to(builder, index, types::I64)?;
+                let ptr_ty = module.target_config().pointer_type();
+                let seq = lower_operand(
+                    module,
+                    builder,
+                    locals,
+                    body,
+                    tcx,
+                    seq,
+                    Some(ptr_ty),
+                    intrinsics,
+                )?;
+                let panic_fn = intrinsics.extern_fn_by_name(module, "gos_rt_panic_vec_index")?;
+                let panic_ref = module.declare_func_in_func(panic_fn, builder.func);
+                let _ = builder.ins().call(panic_ref, &[seq, index]);
+                builder.ins().trap(ir::TrapCode::user(5).unwrap());
+            } else {
+                emit_runtime_panic(module, builder, intrinsics, assert_message_text(msg))?;
+            }
             builder.switch_to_block(pass);
             let block = blocks[&target.as_u32()];
             builder.ins().jump(block, &[]);
@@ -2379,7 +2400,7 @@ pub(super) const UNREACHABLE_PANIC_MSG: &str = "internal error: reached unreacha
 /// backend's strings so panic output is identical across tiers.
 pub(super) fn assert_message_text(msg: &AssertMessage) -> &'static str {
     match msg {
-        AssertMessage::BoundsCheck => "index out of bounds\n",
+        AssertMessage::BoundsCheck { .. } => "index out of bounds\n",
         AssertMessage::Overflow => "arithmetic overflow\n",
         AssertMessage::DivideByZero => "divide by zero\n",
     }

@@ -344,6 +344,21 @@ pub unsafe extern "C" fn gos_rt_panic_oob(what: *const c_char, idx: i64, len: i6
     panic_oob_text(&label, idx, len);
 }
 
+/// Panic helper for a failed `Vec` bounds check: names the index and the
+/// vector's length, read here on the failing path so a passing check carries
+/// no length for it. A null vector is the empty one.
+///
+/// # Safety
+/// `v` must be null or point to a live `GosVec`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_panic_vec_index(
+    v: *const crate::c_abi::vec::GosVec,
+    idx: i64,
+) -> ! {
+    let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+    panic_oob_text("vec index", idx, len);
+}
+
 // ---------------------------------------------------------------
 // Exit
 // ---------------------------------------------------------------

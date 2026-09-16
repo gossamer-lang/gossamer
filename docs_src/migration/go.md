@@ -258,6 +258,48 @@ let total = #[1, 2, 3, 4, 5]
 The same pipe-friendly shape exists for `std::option` and
 `std::result`.
 
+## Integer Overflow And Wrapping Arithmetic
+
+Go integers wrap silently on overflow. Gossamer's plain `+`, `-`, and `*`
+do not: they panic on overflow under `gos run`, the JIT, and `gos build`,
+and wrap only under `gos build --release`. Code that relies on Go's
+wrapping - hashes, checksums, pseudo-random generators, `counter++` on a
+`uint8` - ports to the wrapping operators, which wrap at the declared
+width on every tier and in every profile.
+
+| Go | Gossamer |
+| --- | --- |
+| `a + b`, `a - b`, `a * b` (wrapping) | `a +% b`, `a -% b`, `a *% b` |
+| `h *= 16777619` | `h *%= 16777619` (also `+%=`, `-%=`) |
+| `counter++` on a `uint8` at 255 | `counter +%= 1` |
+| `uint32(b)` | `b as u32` |
+
+```go
+func fnv1a(data []byte) uint32 {
+    hash := uint32(2166136261)
+    for _, b := range data {
+        hash ^= uint32(b)
+        hash *= 16777619
+    }
+    return hash
+}
+```
+
+```gos
+fn fnv1a(data: String) -> u32 {
+    let mut hash: u32 = 2166136261
+    for b in data.bytes() {
+        hash ^= b as u32
+        hash *%= 16777619
+    }
+    hash
+}
+```
+
+Keep plain operators where overflow would be a bug: the panic reports it
+where Go would hand back a wrapped value. `^`, `<<`, `>>`, `&`, and `|` need
+no special spelling.
+
 ## Visibility
 
 Gossamer has three visibilities, and they are declared per item, per method,

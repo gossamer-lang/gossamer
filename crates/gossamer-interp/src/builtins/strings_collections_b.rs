@@ -11,7 +11,9 @@ type PackedBytes = (Vec<u8>, fn(Vec<u8>) -> Value);
 /// `IntArray` / `FloatVec` would answer its receiver unchanged.
 fn packed_bytes_receiver(recv: &Value) -> Option<PackedBytes> {
     match recv {
-        Value::ByteVec(data) => Some((data.as_ref().clone(), |b| Value::ByteVec(Arc::new(b)))),
+        Value::ByteVec(data) => Some((crate::value::copy_with_capacity(data), |b| {
+            Value::ByteVec(Arc::new(b))
+        })),
         Value::ByteArray(data) => {
             Some((data.to_vec(), |b| Value::ByteArray(Arc::new(b.into()))))
         }
@@ -24,59 +26,74 @@ fn packed_bytes_receiver(recv: &Value) -> Option<PackedBytes> {
 
 /// Rebuilds a sequence in the receiver's own representation when the new
 /// elements still fit it, so a packed `Vec<u8>` or `Vec<i64>` stays
-/// packed instead of widening to boxed values on every bulk edit.
+/// packed instead of widening to boxed values on every bulk edit. The
+/// rebuilt storage keeps the receiver's capacity, as an in-place edit would.
 fn rebuild_sequence(receiver: &Value, values: Vec<Value>) -> Value {
-    fn all_bytes(values: &[Value]) -> Option<Vec<u8>> {
-        values
-            .iter()
-            .map(|v| match v {
-                Value::Int(n) => u8::try_from(*n).ok(),
-                _ => None,
-            })
-            .collect()
+    fn packed<T>(
+        capacity: usize,
+        values: &[Value],
+        elem: impl Fn(&Value) -> Option<T>,
+    ) -> Option<Vec<T>> {
+        let mut out = Vec::with_capacity(capacity);
+        for value in values {
+            out.push(elem(value)?);
+        }
+        Some(out)
     }
+    fn byte(value: &Value) -> Option<u8> {
+        match value {
+            Value::Int(n) => u8::try_from(*n).ok(),
+            _ => None,
+        }
+    }
+    let capacity = sequence_capacity(receiver).max(values.len());
+    let boxed = |values: Vec<Value>| {
+        let mut out = Vec::with_capacity(capacity);
+        out.extend(values);
+        Value::Array(Arc::new(out))
+    };
     match receiver {
-        Value::IntArray(_) => {
-            let ints: Option<Vec<i64>> = values
-                .iter()
-                .map(|v| match v {
-                    Value::Int(n) => Some(*n),
-                    Value::Uint(n) => Some(*n as i64),
-                    _ => None,
-                })
-                .collect();
-            ints.map_or_else(
-                || Value::Array(Arc::new(values.clone())),
-                |ints| Value::IntArray(Arc::new(ints)),
-            )
-        }
-        Value::FloatVec(_) => {
-            let floats: Option<Vec<f64>> = values
-                .iter()
-                .map(|v| match v {
-                    Value::Float(f) => Some(*f),
-                    Value::Int(n) => Some(*n as f64),
-                    _ => None,
-                })
-                .collect();
-            floats.map_or_else(
-                || Value::Array(Arc::new(values.clone())),
-                |floats| Value::FloatVec(Arc::new(floats)),
-            )
-        }
-        Value::ByteVec(_) => all_bytes(&values).map_or_else(
-            || Value::Array(Arc::new(values.clone())),
-            |bytes| Value::ByteVec(Arc::new(bytes)),
-        ),
-        Value::ByteArray(_) => all_bytes(&values).map_or_else(
-            || Value::Array(Arc::new(values.clone())),
+        Value::IntArray(_) => packed(capacity, &values, |v| match v {
+            Value::Int(n) => Some(*n),
+            Value::Uint(n) => Some(*n as i64),
+            _ => None,
+        })
+        .map_or_else(|| boxed(values), |ints| Value::IntArray(Arc::new(ints))),
+        Value::FloatVec(_) => packed(capacity, &values, |v| match v {
+            Value::Float(f) => Some(*f),
+            Value::Int(n) => Some(*n as f64),
+            _ => None,
+        })
+        .map_or_else(|| boxed(values), |floats| Value::FloatVec(Arc::new(floats))),
+        Value::ByteVec(_) => packed(capacity, &values, byte)
+            .map_or_else(|| boxed(values), |bytes| Value::ByteVec(Arc::new(bytes))),
+        Value::ByteArray(_) => packed(capacity, &values, byte).map_or_else(
+            || boxed(values),
             |bytes| Value::ByteArray(Arc::new(bytes.into())),
         ),
-        Value::InlineByteArray(_) => all_bytes(&values).map_or_else(
-            || Value::Array(Arc::new(values.clone())),
+        Value::InlineByteArray(_) => packed(capacity, &values, byte).map_or_else(
+            || boxed(values),
             |bytes| Value::InlineByteArray(Arc::new(smallvec::SmallVec::from_vec(bytes))),
         ),
-        _ => Value::Array(Arc::new(values)),
+        _ => boxed(values),
+    }
+}
+
+/// Element capacity of a sequence value's backing store; zero for a non-sequence.
+fn sequence_capacity(value: &Value) -> usize {
+    match value {
+        Value::Array(parts) => parts.capacity(),
+        Value::IntArray(data) => data.capacity(),
+        Value::ByteArray(data) => data.len(),
+        Value::InlineByteArray(data) => data.capacity(),
+        Value::ByteVec(data) => data.capacity(),
+        Value::FloatVec(data) => data.capacity(),
+        Value::FloatArray(inner) => inner
+            .data
+            .capacity()
+            .checked_div(usize::from(inner.stride))
+            .unwrap_or(0),
+        _ => 0,
     }
 }
 
@@ -187,7 +204,7 @@ fn builtin_remove(args: &[Value]) -> RuntimeResult<Value> {
                     "remove: index {idx} out of bounds for length {len}"
                 )));
             }
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.remove(idx as usize);
             Ok(Value::Array(Arc::new(owned)))
         }
@@ -198,7 +215,7 @@ fn builtin_remove(args: &[Value]) -> RuntimeResult<Value> {
                     "remove: index {idx} out of bounds for length {len}"
                 )));
             }
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.remove(idx as usize);
             Ok(Value::IntArray(Arc::new(owned)))
         }
@@ -209,7 +226,7 @@ fn builtin_remove(args: &[Value]) -> RuntimeResult<Value> {
                     "remove: index {idx} out of bounds for length {len}"
                 )));
             }
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.remove(idx as usize);
             Ok(Value::FloatVec(Arc::new(owned)))
         }
@@ -225,9 +242,18 @@ fn builtin_clear(args: &[Value]) -> RuntimeResult<Value> {
         return builtin_map_clear(args);
     }
     match args.first() {
-        Some(Value::Array(_)) => Ok(Value::empty_array()),
-        Some(Value::IntArray(_)) => Ok(Value::IntArray(Arc::new(Vec::new()))),
-        Some(Value::FloatVec(_)) => Ok(Value::FloatVec(Arc::new(Vec::new()))),
+        Some(Value::Array(parts)) => {
+            Ok(Value::Array(Arc::new(Vec::with_capacity(parts.capacity()))))
+        }
+        Some(Value::IntArray(data)) => Ok(Value::IntArray(Arc::new(Vec::with_capacity(
+            data.capacity(),
+        )))),
+        Some(Value::FloatVec(data)) => Ok(Value::FloatVec(Arc::new(Vec::with_capacity(
+            data.capacity(),
+        )))),
+        Some(Value::ByteVec(data)) => Ok(Value::ByteVec(Arc::new(Vec::with_capacity(
+            data.capacity(),
+        )))),
         Some(Value::String(_)) => Ok(Value::String(SmolStr::from(String::new()))),
         Some(v) if packed_bytes_receiver(v).is_some() => Ok(Value::ByteVec(Arc::new(Vec::new()))),
         _ => Ok(args.first().cloned().unwrap_or(Value::Unit)),
@@ -237,14 +263,14 @@ fn builtin_clear(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_extend(args: &[Value]) -> RuntimeResult<Value> {
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             if let Some(extra) = args.get(1).and_then(array_as_values) {
                 owned.extend(extra);
             }
             Ok(Value::Array(Arc::new(owned)))
         }
         Some(Value::IntArray(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             if let Some(extra) = args.get(1).and_then(array_as_values) {
                 owned.extend(extra.into_iter().filter_map(|v| match v {
                     Value::Int(n) => Some(n),
@@ -254,7 +280,7 @@ fn builtin_extend(args: &[Value]) -> RuntimeResult<Value> {
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             if let Some(extra) = args.get(1).and_then(array_as_values) {
                 owned.extend(extra.into_iter().filter_map(|v| match v {
                     Value::Float(f) => Some(f),
@@ -294,17 +320,17 @@ fn builtin_truncate(args: &[Value]) -> RuntimeResult<Value> {
     };
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.truncate(cap);
             Ok(Value::Array(Arc::new(owned)))
         }
         Some(Value::IntArray(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.truncate(cap);
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.truncate(cap);
             Ok(Value::FloatVec(Arc::new(owned)))
         }
@@ -341,45 +367,33 @@ fn builtin_vec_reserve(args: &[Value]) -> RuntimeResult<Value> {
     };
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(parts);
+            owned.reserve(min_capacity.saturating_sub(owned.len()));
             Ok(Value::Array(Arc::new(owned)))
         }
         Some(Value::IntArray(data)) => {
-            let mut owned = data.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(data);
+            owned.reserve(min_capacity.saturating_sub(owned.len()));
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::ByteArray(data)) => {
             let mut owned = data.to_vec();
-            if min_capacity > owned.capacity() {
-                owned.reserve(min_capacity - owned.capacity());
-            }
+            owned.reserve(min_capacity.saturating_sub(owned.len()));
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::InlineByteArray(data)) => {
             let mut owned = data.to_vec();
-            if min_capacity > owned.capacity() {
-                owned.reserve(min_capacity - owned.capacity());
-            }
+            owned.reserve(min_capacity.saturating_sub(owned.len()));
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::ByteVec(data)) => {
-            let mut owned = data.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(data);
+            owned.reserve(min_capacity.saturating_sub(owned.len()));
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(data);
+            owned.reserve(min_capacity.saturating_sub(owned.len()));
             Ok(Value::FloatVec(Arc::new(owned)))
         }
         other => Ok(other.cloned().unwrap_or(Value::Unit)),
@@ -398,45 +412,33 @@ fn builtin_vec_reserve_exact(args: &[Value]) -> RuntimeResult<Value> {
     };
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve_exact(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(parts);
+            owned.reserve_exact(min_capacity.saturating_sub(owned.len()));
             Ok(Value::Array(Arc::new(owned)))
         }
         Some(Value::IntArray(data)) => {
-            let mut owned = data.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve_exact(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(data);
+            owned.reserve_exact(min_capacity.saturating_sub(owned.len()));
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::ByteArray(data)) => {
             let mut owned = data.to_vec();
-            if min_capacity > owned.capacity() {
-                owned.reserve_exact(min_capacity - owned.capacity());
-            }
+            owned.reserve_exact(min_capacity.saturating_sub(owned.len()));
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::InlineByteArray(data)) => {
             let mut owned = data.to_vec();
-            if min_capacity > owned.capacity() {
-                owned.reserve_exact(min_capacity - owned.capacity());
-            }
+            owned.reserve_exact(min_capacity.saturating_sub(owned.len()));
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::ByteVec(data)) => {
-            let mut owned = data.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve_exact(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(data);
+            owned.reserve_exact(min_capacity.saturating_sub(owned.len()));
             Ok(Value::ByteVec(Arc::new(owned)))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
-            if min_capacity > owned.capacity() {
-                owned.reserve_exact(min_capacity - owned.capacity());
-            }
+            let mut owned = crate::value::copy_with_capacity(data);
+            owned.reserve_exact(min_capacity.saturating_sub(owned.len()));
             Ok(Value::FloatVec(Arc::new(owned)))
         }
         other => Ok(other.cloned().unwrap_or(Value::Unit)),
@@ -444,36 +446,24 @@ fn builtin_vec_reserve_exact(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_vec_capacity(args: &[Value]) -> RuntimeResult<Value> {
-    let cap = match args.first() {
-        Some(Value::Array(parts)) => parts.capacity(),
-        Some(Value::IntArray(data)) => data.capacity(),
-        Some(Value::ByteArray(data)) => data.len(),
-        Some(Value::InlineByteArray(data)) => data.capacity(),
-        Some(Value::ByteVec(data)) => data.capacity(),
-        Some(Value::FloatVec(data)) => data.capacity(),
-        Some(rx @ Value::FloatArray(_)) => match rx.float_array_to_value_array() {
-            Value::Array(items) => items.capacity(),
-            _ => 0,
-        },
-        _ => 0,
-    };
+    let cap = args.first().map_or(0, sequence_capacity);
     Ok(Value::Int(i64::try_from(cap).unwrap_or(i64::MAX)))
 }
 
 fn builtin_sort(args: &[Value]) -> RuntimeResult<Value> {
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.sort_by(crate::stdlib_builtins::iter::compare_values_total);
             Ok(Value::Array(Arc::new(owned)))
         }
         Some(Value::IntArray(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.sort_unstable();
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             Ok(Value::FloatVec(Arc::new(owned)))
         }
@@ -491,17 +481,17 @@ fn builtin_sort(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_reverse(args: &[Value]) -> RuntimeResult<Value> {
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.reverse();
             Ok(Value::Array(Arc::new(owned)))
         }
         Some(Value::IntArray(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.reverse();
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.reverse();
             Ok(Value::FloatVec(Arc::new(owned)))
         }
@@ -541,19 +531,19 @@ fn builtin_swap(args: &[Value]) -> RuntimeResult<Value> {
     };
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             let (i, j) = swapped(owned.len())?;
             owned.swap(i, j);
             Ok(Value::Array(Arc::new(owned)))
         }
         Some(Value::IntArray(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             let (i, j) = swapped(owned.len())?;
             owned.swap(i, j);
             Ok(Value::IntArray(Arc::new(owned)))
         }
         Some(Value::FloatVec(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             let (i, j) = swapped(owned.len())?;
             owned.swap(i, j);
             Ok(Value::FloatVec(Arc::new(owned)))
@@ -569,7 +559,7 @@ fn builtin_fill(args: &[Value]) -> RuntimeResult<Value> {
     };
     match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.fill(value.clone());
             Ok(Value::Array(Arc::new(owned)))
         }
@@ -579,7 +569,7 @@ fn builtin_fill(args: &[Value]) -> RuntimeResult<Value> {
                     "fill expects an integer element".to_string(),
                 ));
             };
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.fill(*value);
             Ok(Value::IntArray(Arc::new(owned)))
         }
@@ -589,7 +579,7 @@ fn builtin_fill(args: &[Value]) -> RuntimeResult<Value> {
                     "fill expects a float element".to_string(),
                 ));
             };
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.fill(*value);
             Ok(Value::FloatVec(Arc::new(owned)))
         }
@@ -625,7 +615,7 @@ fn builtin_fill(args: &[Value]) -> RuntimeResult<Value> {
                 .map_err(|_| {
                     RuntimeError::Type("fill byte must be in the range 0..=255".to_string())
                 })?;
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.fill(byte);
             Ok(Value::ByteVec(Arc::new(owned)))
         }
@@ -1095,17 +1085,17 @@ fn native_sort_by(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> RuntimeR
     let mut sort_err: Option<RuntimeError> = None;
     let result = match args.first() {
         Some(Value::Array(parts)) => {
-            let mut owned = parts.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(parts);
             owned.sort_by(|a, b| cmp_with(a.clone(), b.clone(), &mut sort_err));
             Value::Array(Arc::new(owned))
         }
         Some(Value::IntArray(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.sort_by(|a, b| cmp_with(Value::Int(*a), Value::Int(*b), &mut sort_err));
             Value::IntArray(Arc::new(owned))
         }
         Some(Value::FloatVec(data)) => {
-            let mut owned = data.as_ref().clone();
+            let mut owned = crate::value::copy_with_capacity(data);
             owned.sort_by(|a, b| cmp_with(Value::Float(*a), Value::Float(*b), &mut sort_err));
             Value::FloatVec(Arc::new(owned))
         }

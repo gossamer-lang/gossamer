@@ -14,6 +14,7 @@ mod fuse;
 mod ids;
 mod lift;
 mod lower;
+mod place_refs;
 mod tree;
 
 pub use fuse::fuse_iter_pipelines;

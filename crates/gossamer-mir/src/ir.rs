@@ -346,12 +346,40 @@ pub enum Terminator {
 /// code.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AssertMessage {
-    /// `index < len` failed for an indexing operation.
-    BoundsCheck,
+    /// `index < len` failed for an indexing operation. The panic names the
+    /// index and the sequence's length, which the failing path reads from the
+    /// sequence itself, so a passing check keeps no length alive for it.
+    BoundsCheck {
+        /// The index the access used, an integer.
+        index: Operand,
+        /// The `Vec` the access indexed.
+        seq: Operand,
+    },
     /// Arithmetic overflow in debug mode.
     Overflow,
     /// Integer divide/modulo by zero.
     DivideByZero,
+}
+
+impl AssertMessage {
+    /// The operands the message reads when the assertion fails, beside the
+    /// assertion's own condition.
+    pub fn operands(&self) -> impl Iterator<Item = &Operand> {
+        let pair = match self {
+            Self::BoundsCheck { index, seq } => Some([index, seq]),
+            Self::Overflow | Self::DivideByZero => None,
+        };
+        pair.into_iter().flatten()
+    }
+
+    /// [`Self::operands`], mutably.
+    pub fn operands_mut(&mut self) -> impl Iterator<Item = &mut Operand> {
+        let pair = match self {
+            Self::BoundsCheck { index, seq } => Some([index, seq]),
+            Self::Overflow | Self::DivideByZero => None,
+        };
+        pair.into_iter().flatten()
+    }
 }
 
 /// An lvalue - a place the IR can read from or write to.

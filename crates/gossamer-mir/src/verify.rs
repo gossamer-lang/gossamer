@@ -489,8 +489,13 @@ fn check_terminator(
                 }
             }
         }
-        Terminator::Assert { cond, target, .. } => {
+        Terminator::Assert {
+            cond, target, msg, ..
+        } => {
             check_operand(body, block, cond, n_locals, errors);
+            for op in msg.operands() {
+                check_operand(body, block, op, n_locals, errors);
+            }
             check_block_id(body, block, *target, n_blocks, errors);
         }
         Terminator::Unreachable | Terminator::Panic { .. } => {}

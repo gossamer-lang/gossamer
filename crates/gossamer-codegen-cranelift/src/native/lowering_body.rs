@@ -171,8 +171,9 @@ pub(super) fn collect_body_str_consts(body: &Body) -> Vec<String> {
             Terminator::SwitchInt { discriminant, .. } => {
                 out.extend(op_str(discriminant));
             }
-            Terminator::Assert { cond, .. } => {
+            Terminator::Assert { cond, msg, .. } => {
                 out.extend(op_str(cond));
+                out.extend(msg.operands().filter_map(op_str));
             }
             Terminator::Goto { .. }
             | Terminator::Return

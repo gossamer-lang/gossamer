@@ -1171,6 +1171,163 @@ fn redirect_terminator_target(term: &mut Terminator, from: usize, to: BlockId) {
     }
 }
 
+/// Moves a read of a struct's field out of the counted loop that repeats it.
+///
+/// The lowering re-reads `g.data` and `g.w` wherever a loop body names them, so
+/// `for x in 0..g.w { g.data[y * g.w + x] = v }` copies the vector handle and
+/// the width into fresh locals on every iteration. Nothing in such a loop can
+/// change a struct it only reads, so each copy yields the value it yielded on
+/// entry, and the versioner can prove the loop only once the copies stand
+/// outside it.
+///
+/// A copy `l = r.f..` moves to the end of the loop's single entry block when:
+/// - every mention of `r` inside the loop is such a field copy into a bare
+///   local, and nothing borrows `r` anywhere in the body. A reference-typed
+///   `r` names storage another local may also reach, so every mention of it in
+///   the whole body must be a field copy;
+/// - `l` has no other definition in the loop, and every other mention of `l`
+///   in the loop comes after the copy in the copy's own block;
+/// - outside the loop `l` is written only by zero stores and never read, so
+///   the value it holds when the loop runs no times is never observed.
+pub(crate) fn hoist_loop_invariant_field_reads(body: &mut Body, tcx: &TyCtxt) {
+    let headers: Vec<usize> = (0..body.blocks.len())
+        .filter(|&h| recognise_counted_header(&body.blocks[h]).is_some())
+        .collect();
+    for h in headers {
+        let succs: Vec<Vec<usize>> = body
+            .blocks
+            .iter()
+            .map(|b| successor_indices(&b.terminator))
+            .collect();
+        let Some(header) = recognise_counted_header(&body.blocks[h]) else {
+            continue;
+        };
+        let Some((region, _latch)) =
+            counted_loop_region(body, &succs, h, header.body_entry, header.exit)
+        else {
+            continue;
+        };
+        let in_loop = |b: usize| b == h || region.contains(&b);
+        let Some(pre) = loop_entry_block(body, &succs, h, &in_loop) else {
+            continue;
+        };
+        let hoists: Vec<(usize, usize)> = region
+            .iter()
+            .flat_map(|&b| (0..body.blocks[b].stmts.len()).map(move |si| (b, si)))
+            .filter(|&(b, si)| field_read_is_hoistable(body, tcx, (b, si), &in_loop))
+            .collect();
+        for (b, si) in hoists {
+            let span = body.blocks[b].span;
+            let stmt = std::mem::replace(
+                &mut body.blocks[b].stmts[si],
+                Statement {
+                    kind: StatementKind::Nop,
+                    span,
+                    inlined: None,
+                },
+            );
+            body.blocks[pre].stmts.push(stmt);
+        }
+    }
+}
+
+/// The single block outside the loop headed at `h` that enters it, when that
+/// block does nothing but fall into the header.
+fn loop_entry_block(
+    body: &Body,
+    succs: &[Vec<usize>],
+    h: usize,
+    in_loop: &impl Fn(usize) -> bool,
+) -> Option<usize> {
+    let outside_preds: Vec<usize> = (0..body.blocks.len())
+        .filter(|&b| !in_loop(b) && succs[b].contains(&h))
+        .collect();
+    let [pre] = outside_preds.as_slice() else {
+        return None;
+    };
+    matches!(&body.blocks[*pre].terminator, Terminator::Goto { target } if target.0 as usize == h)
+        .then_some(*pre)
+}
+
+/// Whether `stmt` copies a field of `r` into a bare local.
+fn copies_field_of(stmt: &Statement, r: Local) -> bool {
+    matches!(&stmt.kind, StatementKind::Assign {
+        place,
+        rvalue: Rvalue::Use(Operand::Copy(src)),
+    } if src.local == r
+        && place.projection.is_empty()
+        && place.local != r
+        && src.projection.iter().any(|x| matches!(x, Projection::Field(_)))
+        && src.projection.iter().all(|x| matches!(x, Projection::Field(_) | Projection::Deref)))
+}
+
+/// Whether every mention of `r` in the blocks `blocks` selects is a field copy.
+fn only_field_copies_of(body: &Body, r: Local, blocks: &dyn Fn(usize) -> bool) -> bool {
+    body.blocks.iter().enumerate().filter(|(bi, _)| blocks(*bi)).all(|(_, block)| {
+        block
+            .stmts
+            .iter()
+            .all(|stmt| copies_field_of(stmt, r) || !stmt_mentions_local(stmt, r))
+            && !term_mentions_local(&block.terminator, r)
+    })
+}
+
+/// Whether the field copy at `at` may move to the loop's entry block, by the
+/// rules [`hoist_loop_invariant_field_reads`] states.
+fn field_read_is_hoistable(
+    body: &Body,
+    tcx: &TyCtxt,
+    (b, si): (usize, usize),
+    in_loop: &dyn Fn(usize) -> bool,
+) -> bool {
+    let block = &body.blocks[b];
+    let stmt = &block.stmts[si];
+    let StatementKind::Assign {
+        place,
+        rvalue: Rvalue::Use(Operand::Copy(src)),
+    } = &stmt.kind
+    else {
+        return false;
+    };
+    let (r, l) = (src.local, place.local);
+    if !copies_field_of(stmt, r) || r.0 as usize >= body.locals.len() {
+        return false;
+    }
+    let borrowed = body.blocks.iter().flat_map(|blk| blk.stmts.iter()).any(|s| {
+        matches!(&s.kind, StatementKind::Assign { rvalue: Rvalue::Ref { place, .. }, .. } if place.local == r)
+    });
+    if borrowed {
+        return false;
+    }
+    let root_read_only = if matches!(tcx.kind_of(body.locals[r.0 as usize].ty), TyKind::Ref { .. }) {
+        only_field_copies_of(body, r, &|_| true)
+    } else {
+        only_field_copies_of(body, r, in_loop)
+    };
+    if !root_read_only {
+        return false;
+    }
+    let mentions = |blk: &BasicBlock| {
+        blk.stmts.iter().any(|s| stmt_mentions_local(s, l)) || term_mentions_local(&blk.terminator, l)
+    };
+    let earlier = block.stmts[..si].iter().any(|s| stmt_mentions_local(s, l));
+    let other_loop_mention = (0..body.blocks.len())
+        .any(|ob| ob != b && in_loop(ob) && mentions(&body.blocks[ob]));
+    let later_write = block.stmts[si + 1..].iter().any(|s| stmt_writes_bare(s, l))
+        || term_writes_bare(&block.terminator, l);
+    let read_outside = (0..body.blocks.len()).filter(|&ob| !in_loop(ob)).any(|ob| {
+        let blk = &body.blocks[ob];
+        blk.stmts.iter().any(|s| {
+            stmt_mentions_local(s, l)
+                && !matches!(&s.kind, StatementKind::Assign {
+                    place: zp,
+                    rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                } if zp.local == l && zp.projection.is_empty())
+        }) || term_mentions_local(&blk.terminator, l)
+    });
+    !(earlier || other_loop_mention || later_write || read_outside)
+}
+
 /// Bounds-check elision via loop versioning - the general affine form of
 /// [`bounds_check_elim`]. For each innermost counted loop
 /// `for counter in lo..bound`, collects every scalar vec access

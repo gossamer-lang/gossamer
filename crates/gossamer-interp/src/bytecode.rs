@@ -405,10 +405,15 @@ pub enum Op {
         /// Register holding the non-negative repeat count.
         count_v: Reg,
     },
-    /// Rejects a negative `i64` before using it as a collection capacity.
-    CheckNonNegativeCapacity {
-        /// Capacity in the typed integer register file.
+    /// Builds an empty flat `Vec` whose backing store holds room for the
+    /// element count in `capacity_i` (`Vec::with_capacity(n)`).
+    BuildVecWithCapacity {
+        /// Destination value register.
+        dst_v: Reg,
+        /// Requested capacity in the typed integer register file.
         capacity_i: Reg,
+        /// Flat storage the element type lowers to.
+        storage: FlatVecStorage,
     },
     /// Builds a `Value::Tuple` from `count` consecutive value
     /// registers starting at `first` for an `(a, b, …)` literal.
@@ -1789,6 +1794,17 @@ pub struct ClosureProto {
     pub chunk: Arc<FnChunk>,
     /// Enclosing-frame registers to snapshot as upvalues, in capture order.
     pub capture_regs: Vec<Reg>,
+}
+
+/// Flat backing store an [`Op::BuildVecWithCapacity`] allocates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlatVecStorage {
+    /// `Value::IntArray` for `i64`, `isize`, and `usize` elements.
+    I64,
+    /// `Value::ByteVec` for `u8` elements.
+    U8,
+    /// `Value::FloatVec` for `f64` elements.
+    F64,
 }
 
 /// Which arithmetic operation an [`Op::ArithImmI64`] performs.

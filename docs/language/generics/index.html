@@ -2122,10 +2122,21 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#const-generic-array-length" class="md-nav__link">
+  <a href="#const-generic-parameters" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Const-generic array length
+        Const generic parameters
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#const-parameters-on-structs-and-enums" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Const parameters on structs and enums
 
     </span>
   </a>
@@ -2150,7 +2161,7 @@
 
 
 <h1 id="langgenerics"><code>lang::generics</code><a class="headerlink" href="#langgenerics" title="Permanent link">&para;</a></h1>
-<p>Type parameters on functions / impls / structs.</p>
+<p>Type and const parameters on functions, impls, structs, and enums. A const parameter is a value inside the item that declares it (<code>N as i64</code>, <code>[0; N]</code>), taken from an array argument's length, a turbofish, an array field or payload, or the type the context expects.</p>
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
 <h2 id="trait-bounds-and-static-dispatch">Trait bounds and static dispatch<a class="headerlink" href="#trait-bounds-and-static-dispatch" title="Permanent link">&para;</a></h2>
@@ -2204,31 +2215,110 @@ returns the real instantiated type):</p>
 <code>Wrapper&lt;Point&gt;</code> stores a whole <code>Point</code> inline) and runs bit-identically
 on every tier. Multiple type parameters (<code>Pair&lt;A, B&gt;</code>), nested generic
 structs, and arrays of generic structs all work.</p>
-<h2 id="const-generic-array-length">Const-generic array length<a class="headerlink" href="#const-generic-array-length" title="Permanent link">&para;</a></h2>
-<p>A function may take a fixed-size array of generic length:</p>
+<h2 id="const-generic-parameters">Const generic parameters<a class="headerlink" href="#const-generic-parameters" title="Permanent link">&para;</a></h2>
+<p>A <code>const N: usize</code> parameter is a value inside the item that declares it. A
+function reads it (<code>N as i64</code>), builds a fixed array from it (<code>[0; N]</code>), and
+answers one (<code>-&gt; [i64; N]</code>):</p>
 <div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">fn</span> <span class="nf">sum</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="p">(</span><span class="n">xs</span>: <span class="p">[</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span>
 <a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">acc</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">0</span>
 <a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">xs</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">acc</span><span class="w"> </span><span class="o">+=</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="p">}</span>
 <a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="n">acc</span>
 <a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="p">}</span>
 <a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="s">&quot;{} {}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">sum</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]),</span><span class="w"> </span><span class="n">sum</span><span class="p">([</span><span class="mi">10</span><span class="p">,</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span><span class="w"> </span><span class="mi">30</span><span class="p">,</span><span class="w"> </span><span class="mi">40</span><span class="p">,</span><span class="w"> </span><span class="mi">50</span><span class="p">]))</span><span class="w">  </span><span class="c1">// 6 150</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="k">fn</span> <span class="nf">zeros</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="p">[</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">]</span>
 <a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="p">}</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="k">fn</span> <span class="nf">describe</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="p">(</span><span class="n">xs</span>: <span class="p">[</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="nb">String</span> <span class="p">{</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">    </span><span class="n">format</span><span class="p">(</span><span class="s">&quot;{} values summing to {}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">N</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">sum</span><span class="p">(</span><span class="n">xs</span><span class="p">))</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="p">}</span>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="s">&quot;{} {}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">sum</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]),</span><span class="w"> </span><span class="n">sum</span><span class="p">([</span><span class="mi">10</span><span class="p">,</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span><span class="w"> </span><span class="mi">30</span><span class="p">,</span><span class="w"> </span><span class="mi">40</span><span class="p">,</span><span class="w"> </span><span class="mi">50</span><span class="p">]))</span><span class="w">  </span><span class="c1">// 6 150</span>
+<a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="s">&quot;{:?} {}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">zeros</span>::<span class="o">&lt;</span><span class="mi">4</span><span class="o">&gt;</span><span class="p">(),</span><span class="w"> </span><span class="n">describe</span><span class="p">([</span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">]))</span><span class="w">           </span><span class="c1">// [0, 0, 0, 0] 2 values summing to 15</span>
+<a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="p">}</span>
 </code></pre></div>
 <ul>
-<li><code>N</code> is inferred from the array argument's length at the call site and
-  keyed into monomorphisation, so each distinct length is its own
-  specialisation.</li>
-<li>The function body may iterate the parameter and read <code>xs.len()</code>, the
-  const may appear in the return type (<code>-&gt; [i64; N]</code>), and a function may
-  take more than one const parameter (<code>&lt;const N: usize, const M: usize&gt;</code>).</li>
-<li>Every instantiation runs bit-identically across the bytecode VM, the
-  Cranelift JIT, and the LLVM AOT tiers.</li>
+<li>A call supplies <code>N</code> from the length of an array argument whose type names
+  it, or from a turbofish (<code>zeros::&lt;4&gt;()</code>). A call that gives it neither
+  reports <code>GT0088</code>.</li>
+<li>A caller's own const parameter may supply a callee's:
+  <code>fn outer&lt;const M: usize&gt;(xs: [i64; M]) -&gt; i64 { sum(xs) }</code>.</li>
+<li>A function may take more than one const parameter
+  (<code>&lt;const N: usize, const M: usize&gt;</code>), and each distinct set of values is its
+  own specialisation.</li>
+<li>A function may be generic over a lane vector's lane count:
+  <code>fn dot&lt;const N: usize&gt;(a: Simd&lt;f64, N&gt;, b: Simd&lt;f64, N&gt;) -&gt; f64</code> (see
+  <a href="../simd/">lane vectors</a>).</li>
 </ul>
-<p>Supported today: the const is inferred from a <code>[T; N]</code> argument's length.
-Not yet supported: using <code>N</code> as a bare value expression in the body or as
-a repeat count (<code>[0; N]</code>).</p>
+<h2 id="const-parameters-on-structs-and-enums">Const parameters on structs and enums<a class="headerlink" href="#const-parameters-on-structs-and-enums" title="Permanent link">&para;</a></h2>
+<p>A struct, a tuple struct, or an enum may declare const parameters, and a field
+or variant payload may name one as an array length. Methods in
+<code>impl&lt;const N: usize&gt; Ring&lt;N&gt;</code> read <code>N</code> as a value, whether the call is written
+<code>r.capacity()</code> or <code>Ring::capacity(r)</code>:</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="k">struct</span> <span class="nc">Ring</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">    </span><span class="n">items</span>: <span class="p">[</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">]</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">    </span><span class="n">head</span>: <span class="kt">i64</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="p">}</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="k">impl</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Ring</span><span class="o">&lt;</span><span class="n">N</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">capacity</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">        </span><span class="n">N</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i64</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">push</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="bp">self</span><span class="p">,</span><span class="w"> </span><span class="n">value</span>: <span class="kt">i64</span><span class="p">)</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">items</span><span class="p">[</span><span class="bp">self</span><span class="p">.</span><span class="n">head</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">value</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">head</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">(</span><span class="bp">self</span><span class="p">.</span><span class="n">head</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="p">(</span><span class="n">N</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i64</span><span class="p">)</span>
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="p">}</span>
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="k">enum</span> <span class="nc">Grid</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a><span class="w">    </span><span class="n">Filled</span><span class="p">([</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">])</span>
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a><span class="w">    </span><span class="n">Empty</span>
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a><span class="p">}</span>
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>
+<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">ring</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Ring</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">items</span>: <span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">head</span>: <span class="mi">0</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">value</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mi">1</span><span class="o">..</span><span class="mi">6</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ring</span><span class="p">.</span><span class="n">push</span><span class="p">(</span><span class="n">value</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">blank</span>: <span class="nc">Grid</span><span class="o">&lt;</span><span class="mi">2</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Grid</span>::<span class="n">Empty</span>
+<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">full</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Grid</span>::<span class="n">Filled</span><span class="p">([</span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="mi">8</span><span class="p">])</span>
+<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="s">&quot;{:?} {}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">ring</span><span class="p">.</span><span class="n">items</span><span class="p">,</span><span class="w"> </span><span class="n">ring</span><span class="p">.</span><span class="n">capacity</span><span class="p">())</span><span class="w">              </span><span class="c1">// [4, 5, 3] 3</span>
+<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="s">&quot;{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">matches</span><span class="p">(</span><span class="n">full</span><span class="p">,</span><span class="w"> </span><span class="n">Grid</span>::<span class="n">Filled</span><span class="p">(</span><span class="n">_</span><span class="p">))</span><span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="n">matches</span><span class="p">(</span><span class="n">blank</span><span class="p">,</span><span class="w"> </span><span class="n">Grid</span>::<span class="n">Empty</span><span class="p">))</span><span class="w">  </span><span class="c1">// true</span>
+<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a><span class="p">}</span>
+</code></pre></div>
+<p>A method may also answer an array of the block's length
+(<code>fn snapshot(&amp;self) -&gt; [i64; N]</code>), and the caller receives a fixed <code>[i64; k]</code>
+for its receiver's <code>k</code>. An associated function with no receiver takes the
+block's const parameters from the turbofish on the type it is called through:</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">struct</span> <span class="nc">Ring</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">    </span><span class="n">items</span>: <span class="p">[</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">]</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="p">}</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="k">impl</span><span class="o">&lt;</span><span class="k">const</span><span class="w"> </span><span class="n">N</span>: <span class="kt">usize</span><span class="o">&gt;</span><span class="w"> </span><span class="n">Ring</span><span class="o">&lt;</span><span class="n">N</span><span class="o">&gt;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">snapshot</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="p">[</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">        </span><span class="bp">self</span><span class="p">.</span><span class="n">items</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">blank</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="p">[</span><span class="kt">i64</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">]</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">        </span><span class="p">[</span><span class="mi">0</span><span class="p">;</span><span class="w"> </span><span class="n">N</span><span class="p">]</span>
+<a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="p">}</span>
+<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a>
+<a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">r</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">Ring</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">items</span>: <span class="p">[</span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="s">&quot;{:?} {:?}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">r</span><span class="p">.</span><span class="n">snapshot</span><span class="p">(),</span><span class="w"> </span><span class="n">Ring</span>::<span class="o">&lt;</span><span class="mi">2</span><span class="o">&gt;</span>::<span class="n">blank</span><span class="p">())</span><span class="w">  </span><span class="c1">// [4, 2, 3] [0, 0]</span>
+<a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a><span class="p">}</span>
+</code></pre></div>
+<p><code>Ring::blank()</code> with no turbofish names no length and reports <code>GT0088</code>.</p>
+<p>A struct literal takes each const argument from the length of the array field
+that names it, from a caller's own const parameter it forwards, or from the
+type the context expects (<code>let r: Ring&lt;3&gt; = ...</code>). A variant takes it from its
+payload the same way, and a variant with no payload - <code>Grid::Empty</code> - takes it
+from the type the context expects: an annotated <code>let</code>, a parameter, or a
+return type. A literal or variant that gives it none reports <code>GT0088</code>.</p>
+<p>Every instantiation runs bit-identically across the bytecode VM, the Cranelift
+JIT, and the LLVM AOT tiers. See <code>examples/const_generics.gos</code> for a complete
+program.</p>
 
 
 

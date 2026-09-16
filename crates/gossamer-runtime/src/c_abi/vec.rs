@@ -1132,6 +1132,54 @@ pub unsafe extern "C" fn gos_rt_vec_mark_str_elems(v: *mut GosVec) {
     vec.elem_kind = vec_elem_kind::STRING;
 }
 
+/// Width of the header prefix every inline element access reads: length at
+/// offset 0, element width at 16, and the data pointer at 24.
+pub const VEC_HEADER_PREFIX_BYTES: usize = 32;
+
+/// A vector of copies of the header prefix of each nested-vector element of
+/// `v`, one [`VEC_HEADER_PREFIX_BYTES`]-wide primitive element per row, with a
+/// null row copied as zeros (an empty row).
+///
+/// The address of element `i` serves as row `i`'s handle for reading its
+/// length and elements: the copy names the same length and the same element
+/// storage the row does for as long as no row is resized and `v` itself is not
+/// changed, which the compiler proves for the loop nest that builds the table.
+/// A reader then reaches a row's elements from the table without first loading
+/// the row's own header.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_header_table(v: *const GosVec) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        let len = if v.is_null() {
+            0
+        } else {
+            unsafe { (*v).len.max(0) }
+        };
+        let table = unsafe {
+            alloc_box_vec(
+                VEC_HEADER_PREFIX_BYTES as u32,
+                vec_elem_kind::PRIMITIVE,
+                len,
+                len,
+            )
+        };
+        if len == 0 || table.is_null() {
+            return table;
+        }
+        let rows = unsafe { (*v).ptr };
+        let out = unsafe { (*table).ptr };
+        for i in 0..len as usize {
+            let row = unsafe { slot_read_word(rows.add(i * 8)) }.cast::<u8>();
+            let dst = unsafe { out.add(i * VEC_HEADER_PREFIX_BYTES) };
+            if row.is_null() {
+                unsafe { std::ptr::write_bytes(dst, 0, VEC_HEADER_PREFIX_BYTES) };
+            } else {
+                unsafe { std::ptr::copy_nonoverlapping(row, dst, VEC_HEADER_PREFIX_BYTES) };
+            }
+        }
+        table
+    })
+}
+
 /// Rebuilds every nested-vector element of `v` in index order, in place.
 ///
 /// A `Vec<Vec<T>>` grown element by element has its element storage scattered

@@ -1163,7 +1163,13 @@ fn remap_terminator_full(
         } => Terminator::Assert {
             cond: remap_operand_full(cond, remap_local),
             expected: *expected,
-            msg: msg.clone(),
+            msg: {
+                let mut msg = msg.clone();
+                for op in msg.operands_mut() {
+                    *op = remap_operand_full(op, remap_local);
+                }
+                msg
+            },
             target: remap_block(*target),
         },
         Terminator::Unreachable => Terminator::Unreachable,

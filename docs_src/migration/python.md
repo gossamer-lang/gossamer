@@ -244,6 +244,42 @@ while let Some(result) = rx.recv() {
 Close the sender when no more values will arrive, or coordinate with
 `sync::WaitGroup`.
 
+## Integer Overflow And Wrapping Arithmetic
+
+Python integers grow without bound, so a hash or checksum written in Python
+masks by hand to stay in 32 or 64 bits. Gossamer integers have a fixed
+width: plain `+`, `-`, and `*` panic when a result leaves the type's range
+under `gos run`, the JIT, and `gos build`, and wrap only under
+`gos build --release`. The wrapping operators `+%`, `-%`, and `*%` wrap at
+the declared width on every tier and in every profile, so the mask becomes
+the type.
+
+| Python | Gossamer |
+| --- | --- |
+| `(h * 16777619) & 0xFFFFFFFF` | `h *% 16777619` with `h: u32` |
+| `(a + b) & 0xFFFFFFFFFFFFFFFF` | `a +% b` with `a, b: u64` |
+| `h = (h * 31 + c) & 0xFFFFFFFF` | `h = h *% 31 +% c` (also `+%=`, `-%=`, `*%=`) |
+| unbounded `int` arithmetic | `std::math::big` |
+
+```python
+def fnv1a(data: bytes) -> int:
+    h = 2166136261
+    for b in data:
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return h
+```
+
+```gos
+fn fnv1a(data: String) -> u32 {
+    let mut hash: u32 = 2166136261
+    for b in data.bytes() {
+        hash ^= b as u32
+        hash *%= 16777619
+    }
+    hash
+}
+```
+
 ## Visibility
 
 Gossamer has three visibilities, and they are declared per item, per method,

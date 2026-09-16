@@ -1,0 +1,51 @@
+// `Vec::with_capacity(n)` answers a vector whose capacity is at least `n` for
+// every element type, before and after the pushes, pops, and inserts that fit
+// in it, and a hot function that builds one reserves the same room.
+
+struct Point { x: i64, y: i64 }
+
+fn reserved(n: i64) -> bool {
+    let mut v: Vec<i64> = Vec::with_capacity(n)
+    let mut ok = v.capacity() >= n
+    for i in 0..n {
+        v.push(i)
+        ok = ok && v.capacity() >= n
+    }
+    ok
+}
+
+fn main() {
+    let mut ints: Vec<i64> = Vec::with_capacity(16)
+    let mut bytes: Vec<u8> = Vec::with_capacity(16)
+    let mut floats: Vec<f64> = Vec::with_capacity(16)
+    let mut strings: Vec<String> = Vec::with_capacity(16)
+    let mut points: Vec<Point> = Vec::with_capacity(16)
+    let mut flags: Vec<bool> = Vec::with_capacity(16)
+    println("empty {} {} {} {} {} {}", ints.capacity() >= 16, bytes.capacity() >= 16
+        floats.capacity() >= 16, strings.capacity() >= 16, points.capacity() >= 16
+        flags.capacity() >= 16)
+
+    ints.push(1)
+    bytes.push(2)
+    floats.push(3.5)
+    strings.push("s")
+    points.push(Point { x: 1, y: 2 })
+    flags.push(true)
+    println("pushed {} {} {} {} {} {}", ints.capacity() >= 16, bytes.capacity() >= 16
+        floats.capacity() >= 16, strings.capacity() >= 16, points.capacity() >= 16
+        flags.capacity() >= 16)
+
+    let _ = ints.insert(0, 7)
+    let _ = ints.pop()
+    let _ = floats.pop()
+    println("mutated {} {} {}", ints.capacity() >= 16, floats.capacity() >= 16, ints.len())
+
+    let inferred = Vec::with_capacity(8)
+    let mut filled = inferred
+    filled.push(4)
+    println("inferred {} {}", filled.capacity() >= 8, filled.len())
+
+    let mut all = true
+    for n in 0..300 { all = all && reserved(n % 40) }
+    println("hot {}", all)
+}

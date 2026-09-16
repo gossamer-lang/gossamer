@@ -1032,7 +1032,10 @@ fn rename_local_in_block(block: &mut crate::ir::BasicBlock, from: Local, to: Loc
             args.iter_mut().for_each(operand);
             place(destination);
         }
-        Terminator::Assert { cond, .. } => operand(cond),
+        Terminator::Assert { cond, msg, .. } => {
+            operand(cond);
+            msg.operands_mut().for_each(operand);
+        }
         Terminator::Drop { place: p, .. } => place(p),
         Terminator::Goto { .. }
         | Terminator::Return

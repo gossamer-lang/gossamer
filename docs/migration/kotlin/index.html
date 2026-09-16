@@ -1798,6 +1798,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#integer-overflow-and-wrapping-arithmetic" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Integer Overflow And Wrapping Arithmetic
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#visibility" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2373,6 +2384,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#integer-overflow-and-wrapping-arithmetic" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Integer Overflow And Wrapping Arithmetic
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#visibility" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2685,6 +2707,61 @@ below), so a data-first callee reads left to right.</p>
 <a id="__codelineno-19-8" name="__codelineno-19-8" href="#__codelineno-19-8"></a>
 <a id="__codelineno-19-9" name="__codelineno-19-9" href="#__codelineno-19-9"></a><span class="k">const</span><span class="w"> </span><span class="n">DEFAULT_PORT</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="mi">5432</span>
 </code></pre></div>
+<h2 id="integer-overflow-and-wrapping-arithmetic">Integer Overflow And Wrapping Arithmetic<a class="headerlink" href="#integer-overflow-and-wrapping-arithmetic" title="Permanent link">&para;</a></h2>
+<p>Kotlin's <code>Int</code> and <code>Long</code> arithmetic wraps silently on overflow, and
+<code>Math.addExact</code> / <code>Math.multiplyExact</code> throw instead. Gossamer's plain <code>+</code>,
+<code>-</code>, and <code>*</code> behave like the <code>Exact</code> forms under <code>gos run</code>, the JIT, and
+<code>gos build</code> - an overflow panics - and wrap only under
+<code>gos build --release</code>. Code that relies on the JVM's wrapping (hashes,
+<code>hashCode</code> combinations, pseudo-random generators) ports to the wrapping
+operators, which wrap at the declared width on every tier and in every
+profile.</p>
+<table>
+<thead>
+<tr>
+<th>Kotlin</th>
+<th>Gossamer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>a + b</code>, <code>a - b</code>, <code>a * b</code> (wrapping)</td>
+<td><code>a +% b</code>, <code>a -% b</code>, <code>a *% b</code></td>
+</tr>
+<tr>
+<td><code>Math.addExact(a, b)</code></td>
+<td><code>a + b</code> (panics on overflow outside release builds)</td>
+</tr>
+<tr>
+<td><code>h = 31 * h + x</code></td>
+<td><code>h = 31 *% h +% x</code></td>
+</tr>
+<tr>
+<td><code>Int</code>, <code>Long</code></td>
+<td><code>i32</code>, <code>i64</code></td>
+</tr>
+</tbody>
+</table>
+<div class="language-kotlin highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="kd">fun</span><span class="w"> </span><span class="nf">nextSeed</span><span class="p">(</span><span class="n">seed</span><span class="p">:</span><span class="w"> </span><span class="kt">Long</span><span class="p">):</span><span class="w"> </span><span class="kt">Long</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">seed</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="m">6364136223846793005L</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="m">1442695040888963407L</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a><span class="kd">fun</span><span class="w"> </span><span class="nf">stringHash</span><span class="p">(</span><span class="n">bytes</span><span class="p">:</span><span class="w"> </span><span class="n">ByteArray</span><span class="p">):</span><span class="w"> </span><span class="kt">Int</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="w">    </span><span class="kd">var</span><span class="w"> </span><span class="nv">h</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="m">0</span>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="p">(</span><span class="n">b</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">bytes</span><span class="p">)</span><span class="w"> </span><span class="n">h</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="m">31</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">h</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span>
+<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a><span class="w">    </span><span class="k">return</span><span class="w"> </span><span class="n">h</span>
+<a id="__codelineno-20-7" name="__codelineno-20-7" href="#__codelineno-20-7"></a><span class="p">}</span>
+</code></pre></div>
+<div class="language-gos highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="k">fn</span> <span class="nf">next_seed</span><span class="p">(</span><span class="n">seed</span>: <span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="w">    </span><span class="n">seed</span><span class="w"> </span><span class="o">*%</span><span class="w"> </span><span class="mi">6364136223846793005</span><span class="w"> </span><span class="o">+%</span><span class="w"> </span><span class="mi">1442695040888963407</span>
+<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="p">}</span>
+<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a>
+<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a><span class="k">fn</span> <span class="nf">string_hash</span><span class="p">(</span><span class="n">text</span>: <span class="nb">String</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span> <span class="p">{</span>
+<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">h</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="mi">0</span>
+<a id="__codelineno-21-7" name="__codelineno-21-7" href="#__codelineno-21-7"></a><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">text</span><span class="p">.</span><span class="n">bytes</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">h</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">31</span><span class="w"> </span><span class="o">*%</span><span class="w"> </span><span class="n">h</span><span class="w"> </span><span class="o">+%</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">i32</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-21-8" name="__codelineno-21-8" href="#__codelineno-21-8"></a><span class="w">    </span><span class="n">h</span>
+<a id="__codelineno-21-9" name="__codelineno-21-9" href="#__codelineno-21-9"></a><span class="p">}</span>
+</code></pre></div>
+<p>A Kotlin <code>Byte</code> is signed while <code>text.bytes()</code> yields <code>u8</code>, so the two hashes
+agree for ASCII text. Compound forms <code>+%=</code>, <code>-%=</code>, and <code>*%=</code> exist as well.</p>
 <h2 id="visibility">Visibility<a class="headerlink" href="#visibility" title="Permanent link">&para;</a></h2>
 <p>Gossamer has three visibilities, and they are declared per item, per method,
 and per struct field.</p>
@@ -2714,21 +2791,21 @@ and per struct field.</p>
 A <strong>module</strong> is a directory under <code>src/</code>. A module nested inside another is a
 <strong>module descendant</strong>, and visibility flows inward only: a descendant reaches
 its ancestors' private items, never the reverse.</p>
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="c1">// src/money/mod.gos</span>
-<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Amount</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">currency</span>: <span class="nb">String</span><span class="p">,</span>
-<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="w">    </span><span class="n">cents</span>: <span class="kt">i64</span><span class="p">,</span><span class="w">                     </span><span class="c1">// private representation</span>
-<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="p">}</span>
-<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a>
-<a id="__codelineno-20-7" name="__codelineno-20-7" href="#__codelineno-20-7"></a><span class="k">impl</span><span class="w"> </span><span class="n">Amount</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-20-8" name="__codelineno-20-8" href="#__codelineno-20-8"></a><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">new</span><span class="p">(</span><span class="n">currency</span>: <span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">cents</span>: <span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Amount</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-20-9" name="__codelineno-20-9" href="#__codelineno-20-9"></a><span class="w">        </span><span class="n">Amount</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">currency</span>: <span class="nc">currency</span><span class="p">,</span><span class="w"> </span><span class="n">cents</span>: <span class="nc">cents</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-20-10" name="__codelineno-20-10" href="#__codelineno-20-10"></a><span class="w">    </span><span class="p">}</span>
-<a id="__codelineno-20-11" name="__codelineno-20-11" href="#__codelineno-20-11"></a><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">cents</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">cents</span><span class="w"> </span><span class="p">}</span>
-<a id="__codelineno-20-12" name="__codelineno-20-12" href="#__codelineno-20-12"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">normalize</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">cents</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1">// private helper</span>
-<a id="__codelineno-20-13" name="__codelineno-20-13" href="#__codelineno-20-13"></a><span class="p">}</span>
-<a id="__codelineno-20-14" name="__codelineno-20-14" href="#__codelineno-20-14"></a>
-<a id="__codelineno-20-15" name="__codelineno-20-15" href="#__codelineno-20-15"></a><span class="k">pub</span><span class="p">(</span><span class="n">package</span><span class="p">)</span><span class="w"> </span><span class="k">fn</span> <span class="nf">round_trip</span><span class="p">(</span><span class="n">a</span>: <span class="nc">Amount</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="n">a</span><span class="p">.</span><span class="n">normalize</span><span class="p">()</span><span class="w"> </span><span class="p">}</span>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="c1">// src/money/mod.gos</span>
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="k">pub</span><span class="w"> </span><span class="k">struct</span> <span class="nc">Amount</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="n">currency</span>: <span class="nb">String</span><span class="p">,</span>
+<a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a><span class="w">    </span><span class="n">cents</span>: <span class="kt">i64</span><span class="p">,</span><span class="w">                     </span><span class="c1">// private representation</span>
+<a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a><span class="p">}</span>
+<a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a>
+<a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a><span class="k">impl</span><span class="w"> </span><span class="n">Amount</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">new</span><span class="p">(</span><span class="n">currency</span>: <span class="nb">String</span><span class="p">,</span><span class="w"> </span><span class="n">cents</span>: <span class="kt">i64</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">Amount</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a><span class="w">        </span><span class="n">Amount</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">currency</span>: <span class="nc">currency</span><span class="p">,</span><span class="w"> </span><span class="n">cents</span>: <span class="nc">cents</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-22-10" name="__codelineno-22-10" href="#__codelineno-22-10"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-22-11" name="__codelineno-22-11" href="#__codelineno-22-11"></a><span class="w">    </span><span class="k">pub</span><span class="w"> </span><span class="k">fn</span> <span class="nf">cents</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">cents</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-22-12" name="__codelineno-22-12" href="#__codelineno-22-12"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">normalize</span><span class="p">(</span><span class="o">&amp;</span><span class="bp">self</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="bp">self</span><span class="p">.</span><span class="n">cents</span><span class="w"> </span><span class="p">}</span><span class="w">   </span><span class="c1">// private helper</span>
+<a id="__codelineno-22-13" name="__codelineno-22-13" href="#__codelineno-22-13"></a><span class="p">}</span>
+<a id="__codelineno-22-14" name="__codelineno-22-14" href="#__codelineno-22-14"></a>
+<a id="__codelineno-22-15" name="__codelineno-22-15" href="#__codelineno-22-15"></a><span class="k">pub</span><span class="p">(</span><span class="n">package</span><span class="p">)</span><span class="w"> </span><span class="k">fn</span> <span class="nf">round_trip</span><span class="p">(</span><span class="n">a</span>: <span class="nc">Amount</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i64</span> <span class="p">{</span><span class="w"> </span><span class="n">a</span><span class="p">.</span><span class="n">normalize</span><span class="p">()</span><span class="w"> </span><span class="p">}</span>
 </code></pre></div>
 <p>A <code>pub</code> type may keep private methods and private fields, so a struct with any
 private field can only be built by the module that declares it. Importing does

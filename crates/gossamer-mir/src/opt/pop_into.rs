@@ -96,7 +96,12 @@ fn terminator_locals(term: &Terminator, out: &mut Vec<Local>) {
             }
             place_locals(destination, out);
         }
-        Terminator::Assert { cond, .. } => operand_locals(cond, out),
+        Terminator::Assert { cond, msg, .. } => {
+            operand_locals(cond, out);
+            for op in msg.operands() {
+                operand_locals(op, out);
+            }
+        }
         Terminator::Drop { place, .. } => place_locals(place, out),
         Terminator::Goto { .. }
         | Terminator::Return

@@ -2,826 +2,834 @@
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
     <url>
          <loc>https://gossamer-lang.org/docs/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/codegen_abi/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/collection_literals/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/compatibility/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/contributing/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/deployment/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/examples/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/install/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/libraries/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/memory/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/method_support/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/prelude/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/running/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/rust_bindings/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/security/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib_coverage/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/supported_targets/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/syntax/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/toolchain/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/wasm/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/diagnostics/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/goroutine_stacks/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/incremental/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/jit_native_memory_ownership/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/lazy_iterators/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/memory_model/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/runtime/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/selfhosting/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/design/sequence_reference_safety/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/arena/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/async_await/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/attribute/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/break/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/builtin_calls/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/builtin_traits/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/callback_shorthand/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/cfg/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/channel/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/closure/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/cohort/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/comptime/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/const/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/continue/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/doctest/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/enum/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/fn/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/for/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/generics/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/if/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/if_let/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/impl/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/keyword_arguments/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/let/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/let_mut/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/lifetimes/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/loop/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/match/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/move_keyword/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/mut_ref_params/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/opaque_nominal_alias/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/pipe/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/question_mark/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/return/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/select/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
+    </url>
+    <url>
+         <loc>https://gossamer-lang.org/docs/language/simd/</loc>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/slicing/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/spawn/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/static/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/struct/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/top_level_statements/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/trait/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/triple_quoted_string/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/tuples/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/type_alias/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/unicode_identifiers/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/visibility/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/weak_references/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/language/while_let/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
+    </url>
+    <url>
+         <loc>https://gossamer-lang.org/docs/language/wrapping_arithmetic/</loc>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/migration/fsharp/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/migration/go/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/migration/kotlin/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/migration/python/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/migration/rust/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/misc/tooling_faithful_fmt/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/archive_tar/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/archive_zip/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/bufio/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/bytes/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/collection_patterns/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/collections/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/compress_bzip2/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/compress_flate/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/compress_gzip/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/compress_zlib/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/compress_zstd/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/context/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_aead/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_blake3/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_ecdsa/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_ed25519/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_hmac/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_insecure/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_kdf/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_password/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_rand/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_sha256/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_sha512/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_subtle/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/crypto_x509/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/database_sql/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_ascii85/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_base32/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_base64/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_binary/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_csv/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_hex/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_json/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_pem/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_toml/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_xml/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/encoding_yaml/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/env/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/errors/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/flag/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/fmt/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/fs/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/hash_adler32/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/hash_crc32/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/hash_fnv/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/html/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/html_template/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_binary_bodies/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_chunked/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_client_request_native/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_cookie/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_csrf/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_form/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_h3/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_health/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_middleware/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_multipart/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_native_client/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_proxy/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_query/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_redirect_policy/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_request_streaming/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_response_headers/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_router/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_server_request_headers/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_session/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_sse/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_state/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_static_files/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_streaming_responses/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/http_websocket/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/httptest/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/image/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/io/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/iter/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/jwt/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/lifecycle/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/math/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/math_big/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/math_bits/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/math_rand/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/metrics/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/mime/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/net/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/net_ip/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/net_netip/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/net_smtp/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/net_url/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/option/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/os/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/os_exec/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/os_signal/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/os_user/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/panic/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/path/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/pprof/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/process/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/regex/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/result/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/runtime/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/runtime_collect_cycles/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/slog/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/sort/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/strconv/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/strings/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/sync/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/testing/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/thread/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/time/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/tls/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/trace/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/unicode/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/utf16/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/utf8/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/uuid/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/stdlib/validate/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/toolchain/diagnostics/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/toolchain/lints/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
     <url>
          <loc>https://gossamer-lang.org/docs/toolchain/zig/</loc>
-         <lastmod>2026-09-03</lastmod>
+         <lastmod>2026-09-16</lastmod>
     </url>
 </urlset>

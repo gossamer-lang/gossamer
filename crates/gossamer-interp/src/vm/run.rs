@@ -3892,17 +3892,24 @@ impl Vm {
                             count
                         ])));
                 }
-                Op::CheckNonNegativeCapacity { capacity_i } => unsafe {
-                    let capacity = *ints.get_unchecked(capacity_i as usize);
-                    if capacity < 0 {
-                        return Err(RuntimeError::Type(
-                            "Vec::with_capacity: capacity must be non-negative".to_string(),
-                        ));
-                    }
-                    if capacity as u64 > (isize::MAX as u64) / (std::mem::size_of::<i64>() as u64) {
-                        return Err(RuntimeError::Panic("capacity overflow".to_string()));
-                    }
-                },
+                Op::BuildVecWithCapacity {
+                    dst_v,
+                    capacity_i,
+                    storage,
+                } => {
+                    let capacity = ints[capacity_i as usize];
+                    registers[dst_v as usize] = match storage {
+                        crate::bytecode::FlatVecStorage::I64 => {
+                            Value::IntArray(Arc::new(crate::value::vec_with_capacity(capacity)?))
+                        }
+                        crate::bytecode::FlatVecStorage::U8 => {
+                            Value::ByteVec(Arc::new(crate::value::vec_with_capacity(capacity)?))
+                        }
+                        crate::bytecode::FlatVecStorage::F64 => {
+                            Value::FloatVec(Arc::new(crate::value::vec_with_capacity(capacity)?))
+                        }
+                    };
+                }
                 Op::IntToFloatF64 { dst_f, src_i } => unsafe {
                     *floats.get_unchecked_mut(dst_f as usize) =
                         *ints.get_unchecked(src_i as usize) as f64;
@@ -4635,15 +4642,22 @@ impl Vm {
 /// so far were integer-valued. Returns the replacement value, or `None`
 /// when the ordinary push applies.
 fn promote_scalar_push(recv: &Value, new_value: &Value) -> Option<Value> {
+    // The promoted store keeps the receiver's reserved capacity: a
+    // representation change is not a reallocation the program asked for.
     match (recv, new_value) {
         (Value::Array(items), Value::Int(n)) if items.is_empty() => {
-            Some(Value::IntArray(Arc::new(vec![*n])))
+            let mut data = Vec::with_capacity(items.capacity().max(1));
+            data.push(*n);
+            Some(Value::IntArray(Arc::new(data)))
         }
         (Value::Array(items), Value::Float(f)) if items.is_empty() => {
-            Some(Value::FloatVec(Arc::new(vec![*f])))
+            let mut data = Vec::with_capacity(items.capacity().max(1));
+            data.push(*f);
+            Some(Value::FloatVec(Arc::new(data)))
         }
         (Value::IntArray(data), Value::Float(f)) => {
-            let mut wide: Vec<f64> = data.iter().map(|n| *n as f64).collect();
+            let mut wide = Vec::with_capacity(data.capacity().max(data.len() + 1));
+            wide.extend(data.iter().map(|n| *n as f64));
             wide.push(*f);
             Some(Value::FloatVec(Arc::new(wide)))
         }

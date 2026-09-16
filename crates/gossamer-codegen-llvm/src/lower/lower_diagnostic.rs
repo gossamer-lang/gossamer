@@ -74,6 +74,9 @@ use gossamer_mir::{
 };
 use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 
+/// The label of the block a release body's failed bounds checks share.
+const BOUNDS_FAIL_LABEL: &str = "bounds_fail";
+
 impl<'a> Lowerer<'a> {
     /// Emits the runtime call + `unreachable` for a MIR
     /// `Terminator::Panic`. The message is interned as a
@@ -92,6 +95,36 @@ impl<'a> Lowerer<'a> {
     /// Cranelift backend's `BoundsCheck` / `Overflow` /
     /// `DivideByZero` strings so panic output stays consistent
     /// across backends.
+    /// The shared block every failed bounds check in a release body branches
+    /// to, when any does: it raises the report for the vector and index the
+    /// failing check carried in.
+    pub(crate) fn emit_shared_bounds_fail(&mut self) {
+        if self.bounds_fail_edges.is_empty() {
+            return;
+        }
+        let edges = std::mem::take(&mut self.bounds_fail_edges);
+        declare_rt(&mut self.runtime_refs, "gos_rt_panic_vec_index");
+        let incoming = |ty: &str, pick: fn(&(String, String, String)) -> &String| {
+            let arms = edges
+                .iter()
+                .map(|edge| format!("[ {}, %{} ]", pick(edge), edge.0))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("phi {ty} {arms}")
+        };
+        let seq = self.fresh();
+        let idx = self.fresh();
+        writeln!(self.out, "{BOUNDS_FAIL_LABEL}:").unwrap();
+        writeln!(self.out, "  {seq} = {}", incoming("ptr", |e| &e.1)).unwrap();
+        writeln!(self.out, "  {idx} = {}", incoming("i64", |e| &e.2)).unwrap();
+        writeln!(
+            self.out,
+            "  call void @gos_rt_panic_vec_index(ptr {seq}, i64 {idx})"
+        )
+        .unwrap();
+        writeln!(self.out, "  unreachable").unwrap();
+    }
+
     pub(crate) fn lower_assert(
         &mut self,
         cond: &Operand,
@@ -113,13 +146,51 @@ impl<'a> Lowerer<'a> {
         self.next_ssa += 1;
         let br_true = if expected { &ok_label } else { &fail_label };
         let br_false = if expected { &fail_label } else { &ok_label };
+        // Without frame lines to name, every failed bounds check in a body
+        // raises the same report from one shared block, so the body carries
+        // one report call however many indexed accesses it makes. A report
+        // call per access weighs on the inliner's estimate of the body even
+        // though no access takes that path.
+        if let gossamer_mir::AssertMessage::BoundsCheck { index, seq } = msg
+            && !crate::emit::want_stack_frames()
+        {
+            let idx = self.lower_operand(index)?;
+            let idx = self.widen_to_i64(index, &idx);
+            let handle = self.vec_operand_ptr(seq)?;
+            writeln!(
+                self.out,
+                "  br i1 {cond_bit}, label %{br_true}, label %{br_false}"
+            )
+            .unwrap();
+            writeln!(self.out, "{fail_label}:").unwrap();
+            writeln!(self.out, "  br label %{BOUNDS_FAIL_LABEL}").unwrap();
+            self.bounds_fail_edges.push((fail_label, handle, idx));
+            return Ok(());
+        }
         writeln!(
             self.out,
             "  br i1 {cond_bit}, label %{br_true}, label %{br_false}"
         )
         .unwrap();
+        if let gossamer_mir::AssertMessage::BoundsCheck { index, seq } = msg {
+            declare_rt(&mut self.runtime_refs, "gos_rt_panic_vec_index");
+            let cold_start = self.out.len();
+            writeln!(self.out, "{fail_label}:").unwrap();
+            let idx = self.lower_operand(index)?;
+            let idx = self.widen_to_i64(index, &idx);
+            let handle = self.vec_operand_ptr(seq)?;
+            self.emit_panic_site_line();
+            writeln!(
+                self.out,
+                "  call void @gos_rt_panic_vec_index(ptr {handle}, i64 {idx})"
+            )
+            .unwrap();
+            writeln!(self.out, "  unreachable").unwrap();
+            self.mark_cold(cold_start);
+            return Ok(());
+        }
         let msg_text = match msg {
-            gossamer_mir::AssertMessage::BoundsCheck => "index out of bounds\n",
+            gossamer_mir::AssertMessage::BoundsCheck { .. } => "index out of bounds\n",
             gossamer_mir::AssertMessage::Overflow => "arithmetic overflow\n",
             gossamer_mir::AssertMessage::DivideByZero => "divide by zero\n",
         };

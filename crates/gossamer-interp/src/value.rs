@@ -52,6 +52,38 @@ pub fn dense_map_with_capacity<K, V>(capacity: usize) -> DenseMap<K, V> {
     DenseMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher)
 }
 
+/// Empty `Vec` with room for `capacity` elements, the storage `Vec::with_capacity(n)` builds.
+///
+/// A negative capacity is a type error and a byte size past `isize::MAX` panics with
+/// `capacity overflow`, as on the compiled tiers.
+pub fn vec_with_capacity<T>(capacity: i64) -> RuntimeResult<Vec<T>> {
+    let Ok(capacity) = usize::try_from(capacity) else {
+        return Err(RuntimeError::Type(
+            "Vec::with_capacity: capacity must be non-negative".to_string(),
+        ));
+    };
+    let Some(bytes) = capacity
+        .checked_mul(std::mem::size_of::<T>())
+        .filter(|bytes| isize::try_from(*bytes).is_ok())
+    else {
+        return Err(RuntimeError::Panic("capacity overflow".to_string()));
+    };
+    let mut storage = Vec::new();
+    storage
+        .try_reserve_exact(capacity)
+        .map_err(|_| RuntimeError::Panic(format!("memory allocation of {bytes} bytes failed")))?;
+    Ok(storage)
+}
+
+/// Copy of `items` that keeps its capacity. A mutating builtin answers the receiver's storage
+/// rebuilt, and that rebuilt storage is the vector whose `capacity()` the program observes.
+#[must_use]
+pub fn copy_with_capacity<T: Clone>(items: &Vec<T>) -> Vec<T> {
+    let mut copy = Vec::with_capacity(items.capacity());
+    copy.extend_from_slice(items);
+    copy
+}
+
 /// Thin fixed-byte owner used by packed arrays.
 #[derive(Debug)]
 pub struct PackedBytes {

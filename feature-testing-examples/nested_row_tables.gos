@@ -1,0 +1,159 @@
+// Counted loop nests reading rows of a nested vector: a neighbour count over
+// data-dependent rows, element writes through the rows, a nest re-entered many
+// times, an early return from inside it, empty rows and an empty grid, and the
+// routes that change the rows inside the nest - a push to a row, a push to the
+// outer vector, a row replaced, a helper handed the grid - each of which reads
+// every change it made.
+
+struct Cell {
+    alive: bool
+    next: bool
+    links: Vec<(i64, i64)>
+}
+
+struct World {
+    w: i64
+    h: i64
+    cells: Vec<Vec<Cell>>
+}
+
+fn build(w: i64, h: i64) -> World {
+    let mut cells: Vec<Vec<Cell>> = #[]
+    for y in 0..h {
+        let mut row: Vec<Cell> = #[]
+        for x in 0..w {
+            row.push(Cell { alive: (x * 7 + y * 3) % 5 == 0, next: false, links: #[] })
+        }
+        cells.push(row)
+    }
+    let mut world = World { w: w, h: h, cells: cells }
+    for y in 0..h {
+        for x in 0..w {
+            for d in 0..4 {
+                let ny = (y + d + h - 1) % h
+                let nx = (x + d * 2 + w - 3) % w
+                world.cells[y][x].links.push((nx, ny))
+            }
+        }
+    }
+    world
+}
+
+fn step(world: &mut World) -> i64 {
+    let mut changed = 0
+    for y in 0..world.h {
+        for x in 0..world.w {
+            let mut n = 0
+            for (nx, ny) in world.cells[y][x].links {
+                if world.cells[ny][nx].alive { n += 1 }
+            }
+            world.cells[y][x].next = n == 1 || n == 3
+        }
+    }
+    for y in 0..world.h {
+        for x in 0..world.w {
+            if world.cells[y][x].alive != world.cells[y][x].next { changed += 1 }
+            world.cells[y][x].alive = world.cells[y][x].next
+        }
+    }
+    changed
+}
+
+fn first_alive(world: World) -> i64 {
+    for y in 0..world.h {
+        for x in 0..world.w {
+            if world.cells[y][x].alive { return y * 1000 + x }
+        }
+    }
+    -1
+}
+
+fn grow_rows_inside(grid: &mut Vec<Vec<i64>>) -> i64 {
+    let mut s = 0
+    for y in 0..grid.len() {
+        for x in 0..2 {
+            grid[y].push(x + y)
+            s += grid[y][grid[y].len() - 1] + grid[y].len()
+        }
+    }
+    s
+}
+
+fn grow_outer_inside(grid: &mut Vec<Vec<i64>>) -> i64 {
+    let mut s = 0
+    for y in 0..3 {
+        for x in 0..2 {
+            s += grid[y % grid.len()][0] + x
+            grid.push(#[y * 10])
+        }
+    }
+    s + grid.len()
+}
+
+fn replace_rows_inside(grid: &mut Vec<Vec<i64>>) -> i64 {
+    let mut s = 0
+    for y in 0..grid.len() {
+        for x in 0..2 {
+            s += grid[y][0] + x
+            grid[y] = #[y + 100, x]
+        }
+    }
+    s
+}
+
+fn touch(grid: &mut Vec<Vec<i64>>) { grid[0].push(77) }
+
+fn helper_inside(grid: &mut Vec<Vec<i64>>) -> i64 {
+    let mut s = 0
+    for y in 0..2 {
+        for x in 0..2 {
+            s += grid[0].len() + x + y
+            touch(grid)
+        }
+    }
+    s
+}
+
+fn sum_rows(grid: Vec<Vec<i64>>) -> i64 {
+    let mut s = 0
+    for y in 0..grid.len() {
+        for x in 0..grid[y].len() { s += grid[y][x] * (x + 1) }
+    }
+    s
+}
+
+fn lookups(table: Vec<Vec<i64>>, keys: Vec<i64>) -> i64 {
+    let first = table[0]
+    let mut s = first.len()
+    for round in 0..3 {
+        for i in 0..keys.len() {
+            let k = keys[i]
+            s += table[k][(i + round) % table[k].len()] * (round + 1)
+        }
+    }
+    s
+}
+
+fn main() {
+    let mut world = build(12, 9)
+    let mut total = 0
+    for _ in 0..20 { total += step(&mut world) }
+    let mut alive = 0
+    for row in world.cells { for cell in row { if cell.alive { alive += 1 } } }
+    println("world {} {} {}", total, alive, first_alive(world))
+
+    let empty = World { w: 0, h: 0, cells: #[] }
+    println("empty {}", first_alive(empty))
+    println("ragged {}", sum_rows(#[#[1, 2, 3], #[], #[4], #[5, 6]]))
+
+    let table = #[#[1, 2, 3], #[4, 5], #[6], #[7, 8, 9, 10]]
+    println("lookups {}", lookups(table, #[3, 0, 2, 1, 3, 3, 0]))
+    let mut a = #[#[1], #[2], #[3]]
+    println("grow rows {} {:?}", grow_rows_inside(&mut a), a)
+    let mut b = #[#[1], #[2]]
+    println("grow outer {} {}", grow_outer_inside(&mut b), b.len())
+    let mut c = #[#[1], #[2]]
+    println("replace {} {:?}", replace_rows_inside(&mut c), c)
+    let mut d = #[#[1], #[2]]
+    println("helper {} {:?}", helper_inside(&mut d), d)
+}

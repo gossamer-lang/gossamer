@@ -2503,16 +2503,18 @@ site expects:</p>
 <a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="p">}</span>
 </code></pre></div>
 <h2 id="compile-time-validation-regexcompile-sqlstatement">Compile-time validation - <code>regex::compile</code> / <code>sql::statement</code><a class="headerlink" href="#compile-time-validation-regexcompile-sqlstatement" title="Permanent link">&para;</a></h2>
-<p><code>regex::compile("…")</code> and <code>sql::statement("…")</code> validate their argument at
-build time and
-fold to the validated string. A malformed pattern or statement fails the
-build with a diagnostic rather than reaching runtime - the project's
-"if it compiles, it works" goal:</p>
+<p><code>regex::compile("…")</code> and <code>sql::statement("…")</code> check a literal argument
+while the program is parsed, so a malformed pattern or statement fails the
+build with a diagnostic at the literal rather than reaching runtime - the
+project's "if it compiles, it works" goal. A pattern is compiled with the
+engine <code>regex::compile</code> uses at run time; <code>sql::statement</code> answers the
+statement it checked:</p>
 <div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="kd">let</span><span class="w"> </span><span class="n">pattern</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">regex</span>::<span class="n">compile</span><span class="p">(</span><span class="s">&quot;^</span><span class="se">\\</span><span class="s">d{4}-</span><span class="se">\\</span><span class="s">d{2}-</span><span class="se">\\</span><span class="s">d{2}$&quot;</span><span class="p">)</span><span class="w">   </span><span class="c1">// compiled + checked at build time</span>
 <a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="kd">let</span><span class="w"> </span><span class="n">query</span><span class="w">   </span><span class="o">=</span><span class="w"> </span><span class="n">sql</span>::<span class="n">statement</span><span class="p">(</span><span class="s">&quot;SELECT id, name FROM users WHERE id = 1&quot;</span><span class="p">)</span>
 </code></pre></div>
-<p><code>regex::compile("(unclosed")</code> fails the build with <code>unclosed group</code>; an
-unbalanced <code>sql::statement</code> fails with a parenthesis error. These are the
+<p><code>regex::compile("(unclosed")</code> fails the build with <code>GP0057</code> (<code>unclosed
+group</code>); an empty or unbalanced <code>sql::statement</code> fails with <code>GP0058</code>. Neither
+check runs the compile-time evaluator. These are the
 only compile-time-validated calls, and both stay module paths rather than
 globals - the older <code>regex!</code> / <code>sql!</code> spellings report <code>GP0051</code>.</p>
 <h2 id="how-it-works">How it works<a class="headerlink" href="#how-it-works" title="Permanent link">&para;</a></h2>

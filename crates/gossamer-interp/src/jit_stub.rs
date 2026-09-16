@@ -60,6 +60,8 @@ pub enum JitKind {
     NativeVecStr,
     /// `Vec<(i64, f64)>` as a native `GosVec` of 16-byte primitive slots.
     NativeVecTupleIF,
+    /// `Vec<u8>` as a native `GosVec` of one-byte primitive slots.
+    NativeVecU8,
     /// `Vec<Vec<i64>>` as a native outer `GosVec` of inner `GosVec` pointers.
     NativeVecVecI64,
     /// `U8Vec` byte-buffer handle, marshalled by copy-in / copy-back.
@@ -205,6 +207,7 @@ pub fn jit_entry_body_names(
 #[must_use]
 pub fn jit_entry_body_names_with_admitted(
     _bodies: &[gossamer_mir::Body],
+    _tcx: &gossamer_types::TyCtxt,
     _admitted: &std::collections::HashSet<String>,
 ) -> std::collections::HashSet<String> {
     std::collections::HashSet::new()

@@ -365,6 +365,15 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/carrier_payload_views.gos"),
     spec("feature-testing-examples/byte_append_loops.gos"),
     spec("feature-testing-examples/descending_swap_loops.gos"),
+    spec("feature-testing-examples/stored_node_shares.gos"),
+    spec("feature-testing-examples/vec_with_capacity_reserves.gos"),
+    spec("feature-testing-examples/hoisted_field_reads.gos"),
+    spec("feature-testing-examples/field_reference_writes.gos"),
+    spec("feature-testing-examples/nested_row_tables.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/nested_row_table_oob.gos")
+    },
     spec("feature-testing-examples/packed_struct_layout.gos"),
     // `Vec<u8>` reductions read packed bytes, and a lazy `filter_map` calls
     // its callback one element per pull.

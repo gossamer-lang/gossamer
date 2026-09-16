@@ -206,7 +206,10 @@ fn for_each_operand(body: &Body, f: &mut impl FnMut(&Operand)) {
                 }
             }
             Terminator::SwitchInt { discriminant, .. } => f(discriminant),
-            Terminator::Assert { cond, .. } => f(cond),
+            Terminator::Assert { cond, msg, .. } => {
+                f(cond);
+                msg.operands().for_each(&mut *f);
+            }
             Terminator::Goto { .. }
             | Terminator::Return
             | Terminator::Unreachable

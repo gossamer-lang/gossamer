@@ -127,6 +127,9 @@ pub(crate) struct Lowerer<'a> {
     /// they hold do not make the hot path write a frame line. Recorded by
     /// [`Lowerer::mark_cold`] and consumed once per statement.
     pub(crate) cold_spans: Vec<(usize, usize)>,
+    /// `(predecessor label, vector handle, index)` for each failed bounds check that
+    /// branches to the body's shared report block.
+    pub(crate) bounds_fail_edges: Vec<(String, String, String)>,
     /// Whether any call this body makes can reach a panic report, which is
     /// what a call-stack frame for this body is read by. A body that makes
     /// no such call raises only from its own cold blocks, which name the

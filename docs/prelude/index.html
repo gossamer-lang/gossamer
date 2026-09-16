@@ -2449,7 +2449,7 @@ buffered and flush stdout first, so the two streams keep their order.</p>
 <tr>
 <td><code>regex::compile</code></td>
 <td><code>regex::compile("pattern") -&gt; regex::Pattern</code></td>
-<td>Compile a checked regular expression at build time.</td>
+<td>Compile a regular expression; a literal pattern is checked while the program is parsed. The <code>regex</code> module is imported like any other: <code>use std::regex</code>.</td>
 </tr>
 <tr>
 <td><code>sql::statement</code></td>
@@ -2637,6 +2637,11 @@ compile time.</p>
 <td>Concurrency</td>
 <td><code>Sender</code>, <code>Receiver</code>, <code>Mutex</code>, <code>WaitGroup</code>, <code>JoinHandle</code></td>
 <td>Channel, lock, wait, and goroutine-handle types.</td>
+</tr>
+<tr>
+<td>Lane vectors</td>
+<td><code>Simd</code>, <code>Mask</code></td>
+<td>Fixed-width vectors of <code>N</code> lanes of one scalar type, and their <code>bool</code> form; see <a href="../language/simd/">lane vectors</a>.</td>
 </tr>
 </tbody>
 </table>
