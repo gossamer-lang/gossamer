@@ -4790,3 +4790,26 @@ fn a_wrapping_method_chain_is_rewritten_whole_by_its_outermost_call() {
         "{replacements:?}"
     );
 }
+
+#[test]
+fn a_wrapping_method_with_a_prefixed_operand_is_rewritten() {
+    for (call, rewrite) in [
+        ("bb.wrapping_add(-1)", "(bb +% -1)"),
+        ("bb.wrapping_sub(-d)", "(bb -% -d)"),
+        ("(!bb).wrapping_mul(2)", "(!bb *% 2)"),
+    ] {
+        let source =
+            format!("fn main() {{ let bb: i64 = 12\n let d: i64 = 3\n let _ = {call} }}\n");
+        let replacements: Vec<String> = diagnostics_for(&source)
+            .into_iter()
+            .filter_map(|d| match d.error {
+                gossamer_types::TypeError::WrappingMethodRetired { replacement, .. } => replacement,
+                _ => None,
+            })
+            .collect();
+        assert!(
+            replacements.iter().any(|r| r == rewrite),
+            "{call}: {replacements:?}"
+        );
+    }
+}

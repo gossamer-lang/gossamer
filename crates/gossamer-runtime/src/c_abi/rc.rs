@@ -3559,6 +3559,7 @@ pub(crate) unsafe fn boxed_carrier_child_kind(payload: *mut u8) -> Option<i64> {
 /// which takes the blob's child shares with them. A blob no one else holds is
 /// freed without walking its children; one that is still held keeps them, so
 /// the new owner takes shares of its own first.
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) unsafe fn release_blob_moved(payload: *mut u8) {
     if payload.is_null() || in_region_arena(payload) {
         return;

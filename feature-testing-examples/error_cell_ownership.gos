@@ -1,7 +1,9 @@
 // An `errors::Error` is reclaimed when its last holder lets go, wherever it
 // is held: a binding, a cause another error wraps, a `Result` arm, a struct
 // field, a tuple position, or a `Vec`. `map`, `and_then`, `map_err`, and
-// `or_else` give back the payload they hand their closure, an answer that
+// `or_else` give back the payload they hand their closure, `ok_or` hands its
+// error to the carrier it answers - which is then the cell's only holder, on
+// the arm that keeps it and the arm that discards it - an answer that
 // passes the receiver's error through holds a share of its own, a receiver
 // read again after `unwrap_or` keeps its value, and an error read out of a
 // `Vec` renders as the error it is.
@@ -133,6 +135,12 @@ fn main() {
         }
         let chained = errors::wrap(errors::wrap(errors::new("root"), "mid"), "top")
         total += chained.chain().len()
+        let parsed: Result<i64, errors::Error> = "x".to_i64().ok_or(errors::new("parse"))
+        match parsed {
+            Ok(v) => total += v
+            Err(e) => total += e.message().len()
+        }
+        total += i.to_string().to_i64().ok_or(errors::new("unused")).unwrap_or(0)
         i += 1
     }
     let first = held[0]

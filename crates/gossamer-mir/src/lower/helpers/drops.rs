@@ -4041,6 +4041,10 @@ fn is_consuming_call(name: &str) -> bool {
         || name.starts_with("gos_rt_omap_insert")
         || name.starts_with("gos_rt_ovec_insert")
         || name.starts_with("gos_rt_chan_send")
+        // `option.ok_or(err)` packs the error word into the carrier it
+        // answers without taking a share of its own, so the carrier's
+        // payload release is the error cell's only give-back.
+        || name == "gos_rt_result_ok_or"
 }
 
 /// Picks the retain/release runtime helper for a heap value by its type. Vecs
@@ -6173,6 +6177,48 @@ pub(crate) fn holder_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::
         TyKind::String => Some(1),
         TyKind::DynError => Some(4),
         _ => None,
+    }
+}
+
+/// The storage kind of an `ok_or` replacement error, in the kinds
+/// `gos_rt_result_ok_payload_release` takes: `1` a `String`, `2` a `Vec`, `4`
+/// an `errors::Error` cell, `0` a value the carrier does not own. The call
+/// consumes the replacement on either arm, so the kind is what lets the arm
+/// that discards it give it back.
+pub(crate) fn ok_or_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> i64 {
+    use gossamer_types::TyKind;
+    match tcx.kind_of(ty) {
+        TyKind::String => 1,
+        TyKind::Vec(_) | TyKind::Slice(_) => 2,
+        TyKind::DynError => 4,
+        _ => 0,
+    }
+}
+
+/// Gives every `gos_rt_result_ok_or` call the kind its replacement error is
+/// given back by. The method resolves through several dispatch tables, each
+/// assembling its own argument list, so the kind is appended once here - where
+/// every lowering path's call is already in hand - rather than at each site
+/// that can build one. A call that already carries its kind is left alone.
+pub(crate) fn complete_ok_or_err_kind(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    let local_tys: Vec<gossamer_types::Ty> = body.locals.iter().map(|l| l.ty).collect();
+    for block in &mut body.blocks {
+        let Terminator::Call { callee, args, .. } = &mut block.terminator else {
+            continue;
+        };
+        let Operand::Const(ConstValue::Str(name)) = callee else {
+            continue;
+        };
+        if name != "gos_rt_result_ok_or" || args.len() != 2 {
+            continue;
+        }
+        let kind = match &args[1] {
+            Operand::Copy(p) if p.projection.is_empty() => local_tys
+                .get(p.local.0 as usize)
+                .map_or(0, |ty| ok_or_err_kind(tcx, *ty)),
+            _ => 0,
+        };
+        args.push(Operand::Const(ConstValue::Int(i128::from(kind))));
     }
 }
 

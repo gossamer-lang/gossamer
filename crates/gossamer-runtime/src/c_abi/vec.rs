@@ -3124,11 +3124,16 @@ pub extern "C" fn gos_rt_result_err(r: i128) -> i64 {
     }
 }
 
-/// `result.ok_or(new_err)`. On Ok, returns the receiver unchanged; on Err,
-/// returns a new `Err(new_err)`.
+/// `option.ok_or(new_err)`. On Some, answers the receiver and gives back the
+/// replacement the caller handed over; on None, answers `Err(new_err)`, which
+/// takes that share. The call consumes `new_err` on either arm, so the caller
+/// hands its share over once and never gives it back itself. `err_kind` names
+/// the replacement's storage in the kinds
+/// [`gos_rt_result_ok_payload_release`] takes.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_ok_or(r: i128, new_err: i64) -> i128 {
+pub extern "C" fn gos_rt_result_ok_or(r: i128, new_err: i64, err_kind: i64) -> i128 {
     if result_disc_of(r) == 0 {
+        gos_rt_result_ok_payload_release(pack_result(0, new_err), err_kind);
         r
     } else {
         pack_result(1, new_err)

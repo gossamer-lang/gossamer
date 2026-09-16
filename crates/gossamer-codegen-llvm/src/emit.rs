@@ -1655,7 +1655,7 @@ fn render_module_to_path(
 /// would require `unsafe` to set on stable Rust 2024).
 static DEBUG_INFO: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Unit name and line-start offsets registered by [`set_source_lines`].
+/// Unit name and line-start offsets registered by [`set_source_positions`].
 static SOURCE_POSITIONS: std::sync::RwLock<Option<SourcePositions>> = std::sync::RwLock::new(None);
 
 /// Process-wide flag toggled by [`set_reproducible`] requesting
@@ -2304,11 +2304,44 @@ fn operand_is_zero_offset(body: &Body, op: &gossamer_mir::Operand) -> bool {
     operand_const_int(body, op) == Some(0)
 }
 
+/// The locals a closure env reaches through plain copies, starting with the
+/// local itself. A call hands over the binding the closure was bound to, while
+/// the `gos_store` that placed the callable names the local the env blob was
+/// built in, so the two are the same env under different names.
+fn env_copy_aliases(body: &Body, target: gossamer_mir::Local) -> Vec<gossamer_mir::Local> {
+    use gossamer_mir::{Operand, Rvalue, StatementKind};
+    let mut aliases = vec![target];
+    let mut next = 0;
+    while next < aliases.len() {
+        let current = aliases[next];
+        next += 1;
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                    continue;
+                };
+                if place.local != current || !place.projection.is_empty() {
+                    continue;
+                }
+                let Rvalue::Use(Operand::Copy(src)) = rvalue else {
+                    continue;
+                };
+                if !src.projection.is_empty() || aliases.contains(&src.local) {
+                    continue;
+                }
+                aliases.push(src.local);
+            }
+        }
+    }
+    aliases
+}
+
 /// For a closure env-blob local, resolves the callable stored at offset 0 -
 /// the `gos_store(env, 0, gos_fn_addr("name"))` the lowering emits when it
 /// builds the env. Returns the referenced non-runtime function name.
 fn resolve_env_slot0_fn(body: &Body, env_local: gossamer_mir::Local) -> Option<String> {
     use gossamer_mir::{Operand, Rvalue, StatementKind};
+    let envs = env_copy_aliases(body, env_local);
     for block in &body.blocks {
         for stmt in &block.stmts {
             let StatementKind::Assign { rvalue, .. } = &stmt.kind else {
@@ -2323,7 +2356,7 @@ fn resolve_env_slot0_fn(body: &Body, env_local: gossamer_mir::Local) -> Option<S
             let [Operand::Copy(env), off, Operand::Copy(fn_addr)] = args.as_slice() else {
                 continue;
             };
-            if env.local != env_local || !env.projection.is_empty() {
+            if !envs.contains(&env.local) || !env.projection.is_empty() {
                 continue;
             }
             if !operand_is_zero_offset(body, off) {
@@ -3968,6 +4001,20 @@ mod cabi_thunk_tests {
         );
     }
 
+    /// A closure bound to a name reaches its shim through that binding, which
+    /// holds a copy of the local the env blob was built in - and the
+    /// `gos_store` that placed the callable names the latter. Both spell the
+    /// same env, so the callable resolves through the copy.
+    #[test]
+    fn an_env_reached_through_a_binding_is_collected_as_a_cabi_handler() {
+        let handlers =
+            super::collect_cabi_handlers(&[copied_env_callback_body("gos_rt_fs_walk_dir_raw")]);
+        assert!(
+            handlers.contains_key("visit"),
+            "an env handed over through a binding must still resolve its callable, got: {handlers:?}"
+        );
+    }
+
     /// `spawn(f)` hands the runtime a callable the runtime invokes as
     /// `extern "C-unwind" fn(usize) -> i128` - the same crossing the
     /// combinators make, so a two-word spawn needs the Win64 forwarding
@@ -4016,6 +4063,29 @@ mod cabi_thunk_tests {
         if let Terminator::Call { args, .. } = &mut block.terminator {
             args.push(Operand::Copy(Place::local(words)));
             args.push(Operand::Const(ConstValue::Int(0)));
+        }
+        body
+    }
+
+    /// The env-blob callback body with the env handed over through a binding
+    /// of its own: the blob is built in one local and copied into the local
+    /// the call names, the shape a closure bound to a name lowers to.
+    fn copied_env_callback_body(shim: &str) -> gossamer_mir::Body {
+        use gossamer_mir::{Local, Operand, Place, Rvalue, Statement, StatementKind, Terminator};
+        let mut body = env_callback_body(shim);
+        let block = &mut body.blocks[0];
+        let span = block.span;
+        let (env, binding) = (Local(2), Local(6));
+        block.stmts.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(binding),
+                rvalue: Rvalue::Use(Operand::Copy(Place::local(env))),
+            },
+            span,
+            inlined: None,
+        });
+        if let Terminator::Call { args, .. } = &mut block.terminator {
+            args[1] = Operand::Copy(Place::local(binding));
         }
         body
     }

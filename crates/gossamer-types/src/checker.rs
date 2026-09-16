@@ -20449,6 +20449,18 @@ fn wrapping_operand_display(expr: &Expr) -> Option<String> {
     {
         return wrapping_operator_rewrite(receiver, arg, operator);
     }
+    // A prefix operator binds tighter than the wrapping operator, and the
+    // enclosing rewrite parenthesizes the pair, so the operand keeps its
+    // reach where the rewrite lands.
+    if let ExprKind::Unary { op, operand } = &expr.kind
+        && matches!(op, UnaryOp::Neg | UnaryOp::Not | UnaryOp::Deref)
+    {
+        return Some(format!(
+            "{}{}",
+            op.as_str(),
+            wrapping_operand_display(operand)?
+        ));
+    }
     expr_display(expr)
 }
 
