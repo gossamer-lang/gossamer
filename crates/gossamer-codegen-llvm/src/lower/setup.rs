@@ -96,6 +96,7 @@ impl<'a> Lowerer<'a> {
             preempt_seq: 0,
             capture_summary: gossamer_mir::CaptureSummary::default(),
             cabi_handlers: std::collections::BTreeMap::new(),
+            cabi_thunk_sites: std::collections::BTreeSet::new(),
             entry_allocas: Vec::new(),
             sret_bodies: std::collections::BTreeSet::new(),
         }

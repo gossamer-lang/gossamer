@@ -131,11 +131,12 @@ pub mod packed_leaf {
 /// backend targeting Windows hands the runtime a vector-returning wrapper in
 /// place of the callback's own address. Callbacks that answer `i64`, `bool`,
 /// or `f64` agree on the register already and are not listed.
+///
+/// The sequence combinators are absent here and answered by
+/// [`reads_carrier_from_callback`] instead: each has one shim per element
+/// class, and which classes exist is the registry's to say.
 pub const I128_CALLBACK_SHIMS: &[&str] = &[
     "gos_rt_fs_walk_dir_raw",
-    "gos_rt_iter_filter_map_i64",
-    "gos_rt_iter_find_map_i64",
-    "gos_rt_iter_map_ptr_i64",
     "gos_rt_lazy_iter_filter_map_i64",
     "gos_rt_lazy_iter_filter_map_str",
     "gos_rt_option_and_then",
@@ -143,6 +144,35 @@ pub const I128_CALLBACK_SHIMS: &[&str] = &[
     "gos_rt_result_and_then",
     "gos_rt_result_or_else",
 ];
+
+/// Sequence combinators whose callback answers the two-word carrier, named
+/// without an element class. Every registry shim implementing one of these
+/// reads a carrier back, whichever class its symbol carries.
+const I128_CALLBACK_COMBINATORS: &[&str] = &["filter_map", "find_map"];
+
+/// Whether `name` invokes a gossamer callback that answers the two-word
+/// `[disc, payload]` carrier, so a Win64 backend must hand the runtime a
+/// vector-returning wrapper in place of the callback's own address.
+///
+/// A combinator shim is recognised through its registry entry rather than by
+/// spelling, so a class the registry gains is covered the moment it is
+/// declared. See [`I128_CALLBACK_SHIMS`].
+#[must_use]
+pub fn reads_carrier_from_callback(name: &str) -> bool {
+    if I128_CALLBACK_SHIMS.contains(&name) {
+        return true;
+    }
+    // Every combinator shim is spelled under this prefix, so a name outside
+    // it needs no registry lookup.
+    if !name.starts_with("gos_rt_iter_") {
+        return false;
+    }
+    registry::lookup(name).is_some_and(|entry| {
+        entry
+            .combinator
+            .is_some_and(|abi| I128_CALLBACK_COMBINATORS.contains(&abi.combinator))
+    })
+}
 
 /// Content-keyed map and set entry points that take a key. Each reads the key's
 /// slots through the layout descriptor that follows it, so every backend passes
@@ -238,6 +268,43 @@ pub fn checked_integer_entry(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A combinator shim exists once per element class, so recognising the
+    /// carrier crossing by spelling loses whichever class nobody wrote down.
+    /// The registry is what knows the classes, and the answer follows it.
+    #[test]
+    fn every_element_class_of_a_carrier_combinator_reads_a_carrier() {
+        for combinator in I128_CALLBACK_COMBINATORS {
+            let shims: Vec<&str> = registry::REGISTRY
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .combinator
+                        .is_some_and(|abi| abi.combinator == *combinator)
+                })
+                .map(|entry| entry.name)
+                .collect();
+            assert_eq!(
+                shims.len(),
+                3,
+                "{combinator} has one shim per element class: {shims:?}"
+            );
+            for name in shims {
+                assert!(
+                    reads_carrier_from_callback(name),
+                    "{name} answers a carrier and needs the Win64 wrapper"
+                );
+            }
+        }
+    }
+
+    /// A callback that answers a word agrees on the register already, so
+    /// wrapping it would hand the runtime a vector register it never reads.
+    #[test]
+    fn a_word_answering_callback_reads_no_carrier() {
+        assert!(!reads_carrier_from_callback("gos_rt_iter_map_ptr_i64"));
+        assert!(!reads_carrier_from_callback("gos_rt_iter_filter_i64"));
+    }
 
     #[test]
     fn win64_marshals_fat_i128_across_the_ffi_boundary() {

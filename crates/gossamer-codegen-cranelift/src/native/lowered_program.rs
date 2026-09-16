@@ -379,8 +379,8 @@ pub(super) fn define_shape_thunk(
 /// at the front of that blob is the entry both the Rust runtime and the
 /// closure-dispatch lowering call - so on Win64 each of these functions needs
 /// the wire shape rather than the one Cranelift compiled it with. Which
-/// runtime shims read a two-word carrier back is recorded in
-/// [`gossamer_abi::I128_CALLBACK_SHIMS`] and
+/// runtime shims read a two-word carrier back is answered by
+/// [`gossamer_abi::reads_carrier_from_callback`] and recorded in
 /// [`gossamer_abi::I128_HANDLER_REGISTRATIONS`]; the wrapper is emitted for
 /// every address-taken carrier body regardless, so the env word means one
 /// thing everywhere.

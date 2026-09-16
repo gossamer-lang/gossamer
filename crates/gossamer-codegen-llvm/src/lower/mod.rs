@@ -177,6 +177,11 @@ pub(crate) struct Lowerer<'a> {
     /// redirected to a `<16 x i8>` C-ABI return thunk (`name$cabi`).
     /// Maps the handler name to its parameter arity. Empty off Windows.
     pub(crate) cabi_handlers: std::collections::BTreeMap<String, usize>,
+    /// Locals of THIS body whose `gos_fn_addr` names a shared shape thunk the
+    /// rustc runtime calls for its carrier. The thunk serves every call site
+    /// of its shape, so the redirect to `name$cabi` keys on the site rather
+    /// than on the name. Empty off Windows.
+    pub(crate) cabi_thunk_sites: std::collections::BTreeSet<gossamer_mir::Local>,
     /// `alloca` lines for the call-scoped temporaries the body needs, spliced
     /// into the entry block once the blocks are lowered.
     ///

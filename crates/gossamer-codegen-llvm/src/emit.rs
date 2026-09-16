@@ -881,6 +881,9 @@ fn render_chunk_module(
     // Windows for return thunks, but the collected set is still used by
     // function setup to bind raw runtime pointer params correctly.
     let cabi_handlers = collect_cabi_handlers(ctx.all_bodies);
+    let cabi_thunk_sites = collect_cabi_thunk_sites(ctx.all_bodies);
+    let mut cabi_shape_thunks: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     let sret_bodies = collect_sret_bodies(ctx.all_bodies, ctx.tcx);
 
     let defined = chunk_indices.iter().map(|&idx| (idx, false));
@@ -897,6 +900,10 @@ fn render_chunk_module(
         lowerer.strings = string_pool.clone();
         lowerer.capture_summary = ctx.capture_summary.clone();
         lowerer.cabi_handlers.clone_from(&cabi_handlers);
+        if let Some(sites) = cabi_thunk_sites.get(&body.name) {
+            lowerer.cabi_thunk_sites = sites.keys().copied().collect();
+            cabi_shape_thunks.extend(sites.values().cloned());
+        }
         lowerer.sret_bodies.clone_from(&sret_bodies);
 
         let text = lowerer.lower()?;
@@ -1043,16 +1050,28 @@ fn render_chunk_module(
         // on ELF (which deduplicates `linkonce_odr` implicitly), but lld-link
         // (COFF/PE, Windows) requires an explicit COMDAT section for dedup and
         // treats bare `linkonce_odr` as a duplicate strong symbol error.
+        // A shape thunk's wrapper is `linkonce_odr`, as the thunk it wraps is:
+        // every chunk reaching that shape renders both, and the linker keeps
+        // one.
+        for name in &cabi_shape_thunks {
+            let Some(param_tys) = shape_thunk_param_tys(name) else {
+                continue;
+            };
+            out.push_str(&render_cabi_thunk_with_linkage(
+                name,
+                &param_tys,
+                "linkonce_odr ",
+            ));
+            writeln!(out).unwrap();
+        }
         for (name, arity) in &cabi_handlers {
             let handler_idx = ctx.all_bodies.iter().position(|b| b.name == *name);
             let owns_handler = handler_idx.is_some_and(|i| chunk_indices.contains(&i));
+            let param_tys = cabi_thunk_param_tys(ctx.all_bodies, ctx.tcx, name, *arity);
             if owns_handler {
-                out.push_str(&render_cabi_handler_thunk(name, *arity));
+                out.push_str(&render_cabi_handler_thunk(name, &param_tys));
             } else {
-                let param_list = (0..*arity)
-                    .map(|_| "ptr".to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let param_list = param_tys.join(", ");
                 writeln!(out, "declare <16 x i8> @\"{name}$cabi\"({param_list})").unwrap();
             }
             writeln!(out).unwrap();
@@ -1445,12 +1464,21 @@ fn render_module_to_path(
     let mut body_w = BufWriter::with_capacity(64 * 1024, body_file);
 
     let sret_bodies = collect_sret_bodies(bodies, tcx);
+    let cabi_handlers = collect_cabi_handlers(bodies);
+    let cabi_thunk_sites = collect_cabi_thunk_sites(bodies);
+    let mut cabi_shape_thunks: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
     for body in bodies {
         let mut lowerer = Lowerer::new(body, tcx);
         lowerer.fn_name_by_def.clone_from(&fn_name_by_def);
         lowerer.param_tys_by_name.clone_from(&param_tys_by_name);
         lowerer.strings = string_pool.clone();
         lowerer.capture_summary = capture_summary.clone();
+        lowerer.cabi_handlers.clone_from(&cabi_handlers);
+        if let Some(sites) = cabi_thunk_sites.get(&body.name) {
+            lowerer.cabi_thunk_sites = sites.keys().copied().collect();
+            cabi_shape_thunks.extend(sites.values().cloned());
+        }
         lowerer.sret_bodies.clone_from(&sret_bodies);
         match lowerer.lower() {
             Ok(text) => {
@@ -1501,6 +1529,24 @@ fn render_module_to_path(
         body_w
             .write_all(b"\n")
             .with_context(|| format!("writing {}", body_path.display()))?;
+    }
+    if target_is_windows() {
+        for (name, arity) in &cabi_handlers {
+            let param_tys = cabi_thunk_param_tys(bodies, tcx, name, *arity);
+            body_w
+                .write_all(render_cabi_handler_thunk(name, &param_tys).as_bytes())
+                .with_context(|| format!("writing {}", body_path.display()))?;
+        }
+        for name in &cabi_shape_thunks {
+            let Some(param_tys) = shape_thunk_param_tys(name) else {
+                continue;
+            };
+            body_w
+                .write_all(
+                    render_cabi_thunk_with_linkage(name, &param_tys, "linkonce_odr ").as_bytes(),
+                )
+                .with_context(|| format!("writing {}", body_path.display()))?;
+        }
     }
 
     if let Some(user_main) = bodies.iter().find(|b| b.name == "main") {
@@ -2183,11 +2229,6 @@ fn collect_thunk_names_in_body(body: &Body, out: &mut std::collections::BTreeSet
     }
 }
 
-/// Runtime shims whose closure callback returns the 2-word `i128`
-/// Option/Result, from the shared ABI table so the Cranelift backend and
-/// this one agree on which callbacks cross that boundary.
-const CABI_I128_COMBINATORS: &[&str] = gossamer_abi::I128_CALLBACK_SHIMS;
-
 /// `spawn(f)`'s shim. Its callable crosses as `i128` only when it answers
 /// a two-word `Result` / `Option`; the runtime reads the `ret_words`
 /// argument (index 2) to decide, and calls a one-word callable as
@@ -2236,10 +2277,11 @@ fn render_spawn_wide_cabi_thunk() -> String {
     out
 }
 
-/// Resolves a fn-address local to the non-runtime function name its defining
-/// `gos_fn_addr("name")` references, within `body`. The lowering assigns the
-/// address directly, so a single pass over the body's statements suffices.
-fn resolve_fn_addr_name(body: &Body, target: gossamer_mir::Local) -> Option<String> {
+/// Resolves a fn-address local to the name its defining `gos_fn_addr("name")`
+/// references, within `body`. The lowering assigns the address directly, so a
+/// single pass over the body's statements suffices. A runtime symbol is not
+/// one of ours to rewire and answers `None`.
+fn resolve_fn_addr_target(body: &Body, target: gossamer_mir::Local) -> Option<String> {
     use gossamer_mir::{ConstValue, Operand, Rvalue, StatementKind};
     for block in &body.blocks {
         for stmt in &block.stmts {
@@ -2255,21 +2297,24 @@ fn resolve_fn_addr_name(body: &Body, target: gossamer_mir::Local) -> Option<Stri
             if *name != "gos_fn_addr" {
                 continue;
             }
-            // `__fn_thunk_*` shape thunks are linkonce-synthesized, not MIR
-            // bodies, and are shared across every call site of their shape -
-            // a name-based `$cabi` redirect would both reference an undefined
-            // symbol and corrupt unrelated (gossamer-invoked) uses of the same
-            // shape. They are excluded here; a bare-fn / non-capturing-closure
-            // callback that lowers through a shape thunk is not rewired.
             if let Some(Operand::Const(ConstValue::Str(hname))) = args.first()
                 && !hname.starts_with("gos_rt_")
-                && !hname.starts_with("__fn_thunk_")
             {
                 return Some(hname.clone());
             }
         }
     }
     None
+}
+
+/// As [`resolve_fn_addr_target`], restricted to a body of this unit.
+///
+/// A `__fn_thunk_*` shape thunk is linkonce-synthesized rather than lowered
+/// from MIR, and one thunk serves every call site of its shape, so a
+/// name-keyed answer would reach uses that need no rewiring. Which sites do is
+/// [`collect_cabi_thunk_sites`]'s question.
+fn resolve_fn_addr_name(body: &Body, target: gossamer_mir::Local) -> Option<String> {
+    resolve_fn_addr_target(body, target).filter(|name| !name.starts_with("__fn_thunk_"))
 }
 
 /// The integer literal `op` names, either directly or through a local bound
@@ -2338,8 +2383,12 @@ fn env_copy_aliases(body: &Body, target: gossamer_mir::Local) -> Vec<gossamer_mi
 
 /// For a closure env-blob local, resolves the callable stored at offset 0 -
 /// the `gos_store(env, 0, gos_fn_addr("name"))` the lowering emits when it
-/// builds the env. Returns the referenced non-runtime function name.
-fn resolve_env_slot0_fn(body: &Body, env_local: gossamer_mir::Local) -> Option<String> {
+/// builds the env. Answers the local the address lands in and the name it
+/// references, so a caller can key on the site as well as the name.
+fn resolve_env_slot0_addr(
+    body: &Body,
+    env_local: gossamer_mir::Local,
+) -> Option<(gossamer_mir::Local, String)> {
     use gossamer_mir::{Operand, Rvalue, StatementKind};
     let envs = env_copy_aliases(body, env_local);
     for block in &body.blocks {
@@ -2362,8 +2411,8 @@ fn resolve_env_slot0_fn(body: &Body, env_local: gossamer_mir::Local) -> Option<S
             if !operand_is_zero_offset(body, off) {
                 continue;
             }
-            if let Some(hname) = resolve_fn_addr_name(body, fn_addr.local) {
-                return Some(hname);
+            if let Some(hname) = resolve_fn_addr_target(body, fn_addr.local) {
+                return Some((fn_addr.local, hname));
             }
         }
     }
@@ -2497,12 +2546,14 @@ fn collect_cabi_handlers(all_bodies: &[Body]) -> std::collections::BTreeMap<Stri
                     let arity = arity_of(&hname);
                     handlers.insert(hname, arity);
                 }
-            } else if CABI_I128_COMBINATORS.contains(&sym.as_str()) {
+            } else if gossamer_abi::reads_carrier_from_callback(sym.as_str()) {
                 for arg in args {
                     let Operand::Copy(env_place) = arg else {
                         continue;
                     };
-                    if let Some(hname) = resolve_env_slot0_fn(body, env_place.local) {
+                    if let Some((_, hname)) = resolve_env_slot0_addr(body, env_place.local)
+                        && !hname.starts_with("__fn_thunk_")
+                    {
                         let arity = arity_of(&hname);
                         handlers.insert(hname, arity);
                     }
@@ -2513,26 +2564,120 @@ fn collect_cabi_handlers(all_bodies: &[Body]) -> std::collections::BTreeMap<Stri
     handlers
 }
 
+/// Where a `gos_fn_addr` hands a shared shape thunk's address to a runtime
+/// shim that reads a two-word carrier back from it: for each body, the locals
+/// the address lands in, mapped to the thunk they name.
+///
+/// A bare fn or a non-capturing closure reaches a callback slot through a
+/// `__fn_thunk_<inputs>_<ret>` shape thunk, which is synthesized once per
+/// shape and serves every call site of it. The Win64 vector return is
+/// therefore not a property the thunk's name can carry - a Gossamer-invoked
+/// use of the same shape reads the carrier from the register pair. The site
+/// is what knows, so the site is what the redirect keys on.
+type CabiThunkSites =
+    std::collections::BTreeMap<String, std::collections::BTreeMap<gossamer_mir::Local, String>>;
+
+/// Collects the [`CabiThunkSites`] of `all_bodies`.
+fn collect_cabi_thunk_sites(all_bodies: &[Body]) -> CabiThunkSites {
+    use gossamer_mir::{ConstValue, Operand, Terminator};
+    let mut sites = CabiThunkSites::new();
+    for body in all_bodies {
+        for block in &body.blocks {
+            let Terminator::Call { callee, args, .. } = &block.terminator else {
+                continue;
+            };
+            let Operand::Const(ConstValue::Str(sym)) = callee else {
+                continue;
+            };
+            if !gossamer_abi::reads_carrier_from_callback(sym.as_str()) {
+                continue;
+            }
+            for arg in args {
+                let Operand::Copy(env_place) = arg else {
+                    continue;
+                };
+                if let Some((local, hname)) = resolve_env_slot0_addr(body, env_place.local)
+                    && hname.starts_with("__fn_thunk_")
+                    && shape_thunk_answers_carrier(&hname)
+                {
+                    sites
+                        .entry(body.name.clone())
+                        .or_default()
+                        .insert(local, hname);
+                }
+            }
+        }
+    }
+    sites
+}
+
+/// Whether a shape thunk answers the two-word carrier - shape character `r`,
+/// the one return shape whose register differs between the two ABIs.
+fn shape_thunk_answers_carrier(name: &str) -> bool {
+    name.strip_prefix("__fn_thunk_")
+        .and_then(|suffix| suffix.rsplit_once('_'))
+        .is_some_and(|(_, ret)| ret == "r")
+}
+
+/// The LLVM parameter types a shape thunk declares: the env pointer, then one
+/// per input shape character. `None` when the name is not a shape a thunk is
+/// rendered for.
+fn shape_thunk_param_tys(name: &str) -> Option<Vec<String>> {
+    let suffix = name.strip_prefix("__fn_thunk_")?;
+    let (inputs, _) = suffix.rsplit_once('_')?;
+    let mut tys = vec!["ptr".to_string()];
+    for c in inputs.chars() {
+        tys.push(shape_char_to_llvm_ty(c)?.to_string());
+    }
+    Some(tys)
+}
+
+/// The LLVM parameter types a `$cabi` thunk forwards: the handler's own, so
+/// each argument keeps the register class the handler reads it from - an
+/// `f64` element reaches its callback in an SSE register, which a `ptr` slot
+/// would move to the GP file. A handler with no body in this unit falls back
+/// to `arity` pointer words.
+fn cabi_thunk_param_tys(
+    all_bodies: &[Body],
+    tcx: &TyCtxt,
+    name: &str,
+    arity: usize,
+) -> Vec<String> {
+    let Some(body) = all_bodies.iter().find(|b| b.name == name) else {
+        return vec!["ptr".to_string(); arity];
+    };
+    (0..body.arity)
+        .map(|i| crate::ty::param_llvm_ty(tcx, body.local_ty(gossamer_mir::Local(i + 1))))
+        .collect()
+}
+
 /// Renders the Win64 handler-return thunk `define <16 x i8> @"name$cabi"` -
-/// it forwards every (pointer) argument to the real handler `@"name"`
-/// (which returns the 2-word `i128` in the GP-register pair) and re-emits
-/// the value as `<16 x i8>` so the rustc runtime reads it from xmm0.
+/// it forwards every argument to the real handler `@"name"` (which returns
+/// the 2-word `i128` in the GP-register pair) and re-emits the value as
+/// `<16 x i8>` so the rustc runtime reads it from xmm0.
 /// Emitted in exactly the one chunk that owns the handler body (never duplicated).
-fn render_cabi_handler_thunk(name: &str, arity: usize) -> String {
-    let params: Vec<String> = (0..arity).map(|i| format!("ptr %a{i}")).collect();
-    let call_args: Vec<String> = (0..arity).map(|i| format!("ptr %a{i}")).collect();
+fn render_cabi_handler_thunk(name: &str, param_tys: &[String]) -> String {
+    render_cabi_thunk_with_linkage(name, param_tys, "")
+}
+
+/// Body shared by both `$cabi` thunk renderers; `linkage` is the empty string
+/// for a handler's own thunk, emitted once in the chunk that owns the body,
+/// and `"linkonce_odr "` for a shape thunk's, which every chunk reaching that
+/// shape renders and the linker deduplicates.
+fn render_cabi_thunk_with_linkage(name: &str, param_tys: &[String], linkage: &str) -> String {
+    let params: Vec<String> = param_tys
+        .iter()
+        .enumerate()
+        .map(|(i, ty)| format!("{ty} %a{i}"))
+        .collect();
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "define <16 x i8> @\"{name}$cabi\"({}) {{",
+        "define {linkage}<16 x i8> @\"{name}$cabi\"({}) {{",
         params.join(", ")
     );
     writeln!(out, "entry:").unwrap();
-    let _ = writeln!(
-        out,
-        "  %r = call i128 @\"{name}\"({})",
-        call_args.join(", ")
-    );
+    let _ = writeln!(out, "  %r = call i128 @\"{name}\"({})", params.join(", "));
     writeln!(out, "  %v = bitcast i128 %r to <16 x i8>").unwrap();
     writeln!(out, "  ret <16 x i8> %v").unwrap();
     writeln!(out, "}}").unwrap();
@@ -3962,7 +4107,7 @@ mod cabi_thunk_tests {
     /// so `linkonce_odr` is no longer needed - and no longer safe on COFF.
     #[test]
     fn cabi_thunk_uses_plain_define_not_linkonce_odr() {
-        let ir = render_cabi_handler_thunk("App::serve", 2);
+        let ir = render_cabi_handler_thunk("App::serve", &["ptr".to_string(), "ptr".to_string()]);
         assert!(
             ir.contains("define <16 x i8>"),
             "expected plain `define`, got:\n{ir}"
@@ -3973,9 +4118,27 @@ mod cabi_thunk_tests {
         );
     }
 
+    /// The thunk stands between the runtime and the handler, so each argument
+    /// must keep the register class the handler reads it from: an `f64`
+    /// element arrives in an SSE register, which a `ptr` slot would move to
+    /// the GP file and leave the handler reading an unset register.
+    #[test]
+    fn cabi_thunk_keeps_each_argument_in_its_own_register_class() {
+        let ir =
+            render_cabi_handler_thunk("__closure_0", &["i64".to_string(), "double".to_string()]);
+        assert!(
+            ir.contains("define <16 x i8> @\"__closure_0$cabi\"(i64 %a0, double %a1)"),
+            "the thunk declares the handler's own parameter types:\n{ir}"
+        );
+        assert!(
+            ir.contains("call i128 @\"__closure_0\"(i64 %a0, double %a1)"),
+            "and forwards them unchanged:\n{ir}"
+        );
+    }
+
     #[test]
     fn cabi_thunk_calls_the_real_handler_and_bitcasts() {
-        let ir = render_cabi_handler_thunk("Proxy::serve", 2);
+        let ir = render_cabi_handler_thunk("Proxy::serve", &["ptr".to_string(), "ptr".to_string()]);
         assert!(
             ir.contains("call i128 @\"Proxy::serve\""),
             "must call real handler"
@@ -3998,6 +4161,46 @@ mod cabi_thunk_tests {
         assert!(
             handlers.contains_key("visit"),
             "walk_dir visitor must be collected, got: {handlers:?}"
+        );
+    }
+
+    /// A bare fn or a non-capturing closure reaches a carrier-reading shim
+    /// through a shared shape thunk, which is not a body of this unit: it is
+    /// collected as a site, so the redirect reaches that use and no other.
+    #[test]
+    fn a_shape_thunk_callback_is_collected_as_a_site_not_a_handler() {
+        let body = named_env_callback_body("gos_rt_option_and_then", "__fn_thunk_i_r");
+        assert!(
+            super::collect_cabi_handlers(std::slice::from_ref(&body)).is_empty(),
+            "a shape thunk is not a handler body"
+        );
+        let sites = super::collect_cabi_thunk_sites(std::slice::from_ref(&body));
+        assert_eq!(
+            sites.get("main").and_then(|s| s.values().next()),
+            Some(&"__fn_thunk_i_r".to_string()),
+            "the site that hands the thunk over must be collected: {sites:?}"
+        );
+    }
+
+    /// Only a carrier answer crosses in a different register, so a shape that
+    /// answers a word is left with its own address.
+    #[test]
+    fn a_word_answering_shape_thunk_is_not_a_site() {
+        let body = named_env_callback_body("gos_rt_option_and_then", "__fn_thunk_i_i");
+        assert!(super::collect_cabi_thunk_sites(std::slice::from_ref(&body)).is_empty());
+    }
+
+    /// The wrapper's parameters are the shape thunk's own: the env pointer,
+    /// then one per input character.
+    #[test]
+    fn a_shape_thunk_wrapper_declares_the_thunks_parameters() {
+        assert_eq!(
+            super::shape_thunk_param_tys("__fn_thunk_if_r"),
+            Some(vec![
+                "ptr".to_string(),
+                "i64".to_string(),
+                "double".to_string()
+            ])
         );
     }
 
@@ -4094,6 +4297,10 @@ mod cabi_thunk_tests {
     /// callable's address is stored at offset 0 of the env, and the env is
     /// handed to `shim` as its second argument.
     fn env_callback_body(shim: &str) -> gossamer_mir::Body {
+        named_env_callback_body(shim, "visit")
+    }
+
+    fn named_env_callback_body(shim: &str, callable: &str) -> gossamer_mir::Body {
         use gossamer_lex::{SourceMap, Span};
         use gossamer_mir::{
             BasicBlock, BlockId, Body, ConstValue, Local, Operand, Place, Rvalue, Statement,
@@ -4123,7 +4330,7 @@ mod cabi_thunk_tests {
                         addr,
                         Rvalue::CallIntrinsic {
                             name: "gos_fn_addr",
-                            args: vec![Operand::Const(ConstValue::Str("visit".to_string()))],
+                            args: vec![Operand::Const(ConstValue::Str(callable.to_string()))],
                         },
                     ),
                     assign(

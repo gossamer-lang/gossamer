@@ -350,6 +350,21 @@
   from all of them. It replaced the report with only the fixtures under
   `PATH`, so `gos feature-status` showed every other surface with no tier
   evidence.
+- A `filter_map` or `find_map` over `f64` or aggregate elements answers the
+  same sequence on a Windows native build as on every other tier. Each
+  combinator has one shim per element class, and only the word class handed
+  the runtime a callback answering its carrier in the register the runtime
+  reads, so a `None` could be kept as a zero.
+- A `map` over aggregate elements reads each mapped element from the register
+  its closure wrote it to on a Windows native build, where the closure was
+  wrapped as if it answered a two-word carrier.
+- `opt.and_then(f)`, `res.or_else(f)`, and every other combinator answering an
+  `Option` or `Result` read `f`'s answer from the register it wrote on a
+  Windows native build when `f` is a plain function or a closure capturing
+  nothing. Such a callback is reached through a thunk shared by every callable
+  of its shape, and the thunk answered its carrier in the register pair while
+  the runtime read the vector register, so `json::get(doc, "rows")
+  .and_then(json::as_array)` answered an empty array.
 
 ## 0.60.2 - Parsed JSON documents are reclaimed, and aggregates cost less to hold
 

@@ -2333,7 +2333,8 @@ impl<'a> Lowerer<'a> {
                 // C-ABI return thunk (`name$cabi`) instead so the runtime
                 // reads the discriminant/payload from the register it expects.
                 let sym = if crate::emit::target_is_windows()
-                    && self.cabi_handlers.contains_key(fname.as_str())
+                    && (self.cabi_handlers.contains_key(fname.as_str())
+                        || self.cabi_thunk_sites.contains(&destination.local))
                 {
                     format!("{fname}$cabi")
                 } else {
