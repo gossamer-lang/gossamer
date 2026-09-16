@@ -400,6 +400,8 @@ fn is_receiver_safe_call(name: &str) -> bool {
             | "gos_rt_vec_set_i64"
             | "gos_rt_vec_get_i64_unchecked"
             | "gos_rt_vec_set_i64_unchecked"
+            | "gos_rt_vec_swap_safe"
+            | "gos_rt_vec_swap_unchecked"
             | "gos_rt_vec_len"
             | "gos_rt_len"
     )
@@ -828,6 +830,9 @@ struct VersionedAccess {
 enum VersionedIndex {
     /// `base + counter`, where `base` is loop-invariant.
     AffineCounter { base: InvExpr },
+    /// `base - counter`, where `base` is loop-invariant: the falling half of
+    /// a walk such as `v.swap(i, k - i)`.
+    DescendingCounter { base: InvExpr },
     /// An index expression that does not depend on the counted-loop counter.
     Invariant { expr: InvExpr },
 }
@@ -1056,13 +1061,61 @@ fn affine_base(
 }
 
 /// The `_unchecked` runtime symbol paired with a checked scalar vec
-/// get/set, or `None` for any other callee.
+/// get/set/swap, or `None` for any other callee.
 fn unchecked_variant(name: &str) -> Option<&'static str> {
     match name {
         "gos_rt_vec_get_i64" => Some("gos_rt_vec_get_i64_unchecked"),
         "gos_rt_vec_set_i64" => Some("gos_rt_vec_set_i64_unchecked"),
+        "gos_rt_vec_swap_safe" => Some("gos_rt_vec_swap_unchecked"),
         _ => None,
     }
+}
+
+/// The loop-invariant `base` of an index written `base - counter`, or `None`
+/// when the index is not that shape.
+fn descending_base(
+    body: &Body,
+    header: usize,
+    region: &[usize],
+    counter: Local,
+    idx: &Operand,
+    depth: usize,
+) -> Option<InvExpr> {
+    let Operand::Copy(p) = idx else {
+        return None;
+    };
+    if !p.projection.is_empty() || depth == 0 {
+        return None;
+    }
+    match unique_def_rvalue(body, p.local)? {
+        Rvalue::Use(op) => descending_base(body, header, region, counter, op, depth - 1),
+        Rvalue::BinaryOp {
+            op: BinOp::Sub,
+            lhs,
+            rhs,
+        } if index_is_counter(body, region, counter, rhs) => {
+            invariant_expr(body, header, region, counter, lhs, depth - 1)
+        }
+        _ => None,
+    }
+}
+
+/// How one index argument moves with the counter, or `None` when the
+/// versioner cannot describe it.
+fn version_index_of(
+    body: &Body,
+    h: usize,
+    region: &[usize],
+    counter: Local,
+    arg: &Operand,
+) -> Option<VersionedIndex> {
+    if let Some(base) = affine_base(body, h, region, counter, arg, INV_EXPR_MAX_DEPTH) {
+        return Some(VersionedIndex::AffineCounter { base });
+    }
+    if let Some(base) = descending_base(body, h, region, counter, arg, INV_EXPR_MAX_DEPTH) {
+        return Some(VersionedIndex::DescendingCounter { base });
+    }
+    invariant_index_expr(body, h, region, counter, arg).map(|expr| VersionedIndex::Invariant { expr })
 }
 
 /// Rewrites every block reference in `term` through `map` (old index ->
@@ -1244,9 +1297,12 @@ fn collect_affine_candidates(
         else {
             continue;
         };
-        let idx_i = match name.as_str() {
-            "gos_rt_vec_get_i64" if args.len() == 2 => 1,
-            "gos_rt_vec_set_i64" if args.len() == 3 => 1,
+        // A swap reads and writes two elements, so the loop runs unchecked
+        // only when the preheader proves both of its indices.
+        let idx_args: &[usize] = match name.as_str() {
+            "gos_rt_vec_get_i64" if args.len() == 2 => &[1],
+            "gos_rt_vec_set_i64" if args.len() == 3 => &[1],
+            "gos_rt_vec_swap_safe" if args.len() == 3 => &[1, 2],
             _ => continue,
         };
         let Operand::Copy(recv) = &args[0] else {
@@ -1263,20 +1319,20 @@ fn collect_affine_candidates(
         if !ok {
             continue;
         }
-        let index = if let Some(base) =
-            affine_base(body, h, region, counter, &args[idx_i], INV_EXPR_MAX_DEPTH)
-        {
-            VersionedIndex::AffineCounter { base }
-        } else if let Some(expr) = invariant_index_expr(body, h, region, counter, &args[idx_i]) {
-            VersionedIndex::Invariant { expr }
-        } else {
+        let indices: Vec<VersionedIndex> = idx_args
+            .iter()
+            .filter_map(|&ai| version_index_of(body, h, region, counter, &args[ai]))
+            .collect();
+        if indices.len() != idx_args.len() {
             continue;
-        };
-        cands.push(VersionedAccess {
-            block: b,
-            xs,
-            index,
-        });
+        }
+        for index in indices {
+            cands.push(VersionedAccess {
+                block: b,
+                xs,
+                index,
+            });
+        }
     }
     cands
 }
@@ -1479,6 +1535,11 @@ fn version_preheader_len(checks: &[(Local, VersionedIndex)], xs_count: usize) ->
                 VersionedIndex::AffineCounter { base } => {
                     2 + usize::from(invariant_index_needs_block(base))
                 }
+                // The highest index `base - lo` is rebuilt in a block of its
+                // own, beside the two comparisons and the base itself.
+                VersionedIndex::DescendingCounter { base } => {
+                    3 + usize::from(invariant_index_needs_block(base))
+                }
                 VersionedIndex::Invariant { expr } => {
                     2 + usize::from(invariant_index_needs_block(expr))
                 }
@@ -1616,6 +1677,48 @@ impl VersionPreheader<'_> {
         *p += 1;
     }
 
+    /// `xs[base - counter]` stays in range while the counter runs from its
+    /// entry value `lo` up to the header's bound: the highest index is
+    /// `base - lo`, which must be below the length, and the lowest is
+    /// `base - (bound - 1)` - `base - bound` for an inclusive header - which
+    /// must not be negative.
+    fn push_descending_counter(
+        &mut self,
+        p: &mut usize,
+        x: Local,
+        base_expr: &InvExpr,
+        locals: VersionLoopLocals,
+    ) {
+        let highest = InvExpr::Bin {
+            op: BinOp::Sub,
+            lhs: Box::new(base_expr.clone()),
+            rhs: Box::new(InvExpr::Operand(Operand::Copy(Place::local(locals.counter)))),
+        };
+        let top = self.materialise(p, &highest);
+        self.push_range(
+            *p,
+            RangeCheck {
+                arith_lhs: Operand::Copy(Place::local(self.len_of[&x])),
+                arith_rhs: Operand::Const(ConstValue::Int(0)),
+                base: top,
+                cmp: BinOp::Lt,
+            },
+        );
+        *p += 1;
+
+        let base = self.materialise(p, base_expr);
+        self.push_range(
+            *p,
+            RangeCheck {
+                arith_lhs: Operand::Copy(Place::local(locals.bound)),
+                arith_rhs: Operand::Const(ConstValue::Int(i128::from(!locals.inclusive))),
+                base,
+                cmp: BinOp::Ge,
+            },
+        );
+        *p += 1;
+    }
+
     fn push_invariant(&mut self, p: &mut usize, x: Local, expr: &InvExpr) {
         let index_op = self.materialise(p, expr);
 
@@ -1677,6 +1780,9 @@ fn emit_version_preheader(
         match index {
             VersionedIndex::AffineCounter { base } => {
                 emit.push_affine_counter(&mut p, *x, base, locals);
+            }
+            VersionedIndex::DescendingCounter { base } => {
+                emit.push_descending_counter(&mut p, *x, base, locals);
             }
             VersionedIndex::Invariant { expr } => emit.push_invariant(&mut p, *x, expr),
         }

@@ -2234,12 +2234,9 @@ mod tests {
             let slot = unsafe { vec_ref.ptr.add(i * 16) };
             // Slots hold cstring pointers exposed as integers by the
             // flat-slot ABI; recover provenance before use.
-            let name_ptr: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
-                (slot as *const usize).read_unaligned()
-            });
-            let value_ptr: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
-                (slot.add(8) as *const usize).read_unaligned()
-            });
+            let name_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast::<c_char>();
+            let value_ptr =
+                unsafe { crate::c_abi::vec::slot_read_word(slot.add(8)) }.cast::<c_char>();
             let got_name = unsafe { CStr::from_ptr(name_ptr) }.to_str().unwrap();
             let got_value = unsafe { CStr::from_ptr(value_ptr) }.to_str().unwrap();
             assert_eq!(got_name, *name);
@@ -2316,12 +2313,9 @@ mod tests {
             let slot = unsafe { vec_ref.ptr.add(i * 16) };
             // Slots hold cstring pointers exposed as integers by the
             // flat-slot ABI; recover provenance before use.
-            let name_ptr: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
-                (slot as *const usize).read_unaligned()
-            });
-            let value_ptr: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
-                (slot.add(8) as *const usize).read_unaligned()
-            });
+            let name_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast::<c_char>();
+            let value_ptr =
+                unsafe { crate::c_abi::vec::slot_read_word(slot.add(8)) }.cast::<c_char>();
             assert_eq!(unsafe { CStr::from_ptr(name_ptr) }.to_str().unwrap(), *name);
             assert_eq!(
                 unsafe { CStr::from_ptr(value_ptr) }.to_str().unwrap(),
@@ -2450,12 +2444,9 @@ mod tests {
             let slot = unsafe { vec_ref.ptr.add(i * 16) };
             // Slots hold cstring pointers exposed as integers by the
             // flat-slot ABI; recover provenance before use.
-            let name_ptr: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
-                (slot as *const usize).read_unaligned()
-            });
-            let value_ptr: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
-                (slot.add(8) as *const usize).read_unaligned()
-            });
+            let name_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast::<c_char>();
+            let value_ptr =
+                unsafe { crate::c_abi::vec::slot_read_word(slot.add(8)) }.cast::<c_char>();
             unsafe {
                 crate::c_abi::string::gos_rt_str_free(name_ptr);
                 crate::c_abi::string::gos_rt_str_free(value_ptr);

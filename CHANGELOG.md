@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.61.0 - Wrapping arithmetic, incremental builds, narrow integers keep their width
+## 0.61.0 - Const generics and lane vectors, wrapping arithmetic, narrow integers keep their width, incremental builds
 
 - Wrapping arithmetic: `a +% b`, `a -% b`, and `a *% b` add, subtract, and
   multiply with two's-complement wrapping at the operands' declared integer

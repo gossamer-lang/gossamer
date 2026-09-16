@@ -1002,7 +1002,7 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
             b'S' => {
                 // The string field holds a cstring pointer exposed as an
                 // integer by the flat-slot ABI; recover its provenance.
-                let raw = unsafe { (slot as *const usize).read_unaligned() };
+                let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
                 let sptr: *const c_char = std::ptr::with_exposed_provenance(raw);
                 if sptr.is_null() {
                     out.extend_from_slice(&0u64.to_le_bytes());
@@ -1017,7 +1017,7 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
             // allocations key one slot exactly as the interpreter's
             // by-value keying does.
             b'V' => {
-                let raw = unsafe { (slot as *const usize).read_unaligned() };
+                let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
                 let vec: *const crate::c_abi::GosVec = std::ptr::with_exposed_provenance(raw);
                 if vec.is_null() {
                     out.extend_from_slice(&0u64.to_le_bytes());
@@ -1073,7 +1073,8 @@ pub(crate) unsafe fn consume_moved_skey(key: *const u8, desc: *const c_char) {
     }
     let desc = unsafe { crate::c_abi::gos_str_arg_bytes(desc) };
     for (index, &kind) in desc.iter().enumerate() {
-        let raw = unsafe { (key.add(index * 8) as *const usize).read_unaligned() };
+        let raw =
+            unsafe { crate::c_abi::vec::slot_read_word(key.add(index * 8)) }.expose_provenance();
         match kind {
             b'S' => {
                 let text: *mut c_char = std::ptr::with_exposed_provenance_mut(raw);
@@ -2429,7 +2430,7 @@ pub(crate) unsafe fn render_desc_storage(
             let arg = if by_slot_address && storage == Storage::Inline {
                 slot
             } else {
-                let word = unsafe { (slot as *const usize).read_unaligned() };
+                let word = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
                 std::ptr::with_exposed_provenance::<u8>(word)
             };
             out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
@@ -3927,7 +3928,8 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
                     // flat-slot ABI in a byte buffer with no 8-byte
                     // alignment guarantee; read unaligned and recover
                     // provenance before the dereferencing free.
-                    let raw = unsafe { base.add(i * 8).cast::<usize>().read_unaligned() };
+                    let raw = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
+                        .expose_provenance();
                     if raw == 0 {
                         continue;
                     }

@@ -401,8 +401,8 @@ pub unsafe extern "C" fn gos_rt_json_value_array_owned(vec: *mut GosVec) -> *mut
                 out.reserve(len);
                 let base = header.ptr;
                 for i in 0..len {
-                    let addr = unsafe { base.add(i * 8).cast::<usize>().read_unaligned() };
-                    let elem: *mut GosJson = std::ptr::with_exposed_provenance_mut(addr);
+                    let elem = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
+                        .cast::<GosJson>();
                     out.push(unsafe { take_json_value(elem) });
                 }
             }
@@ -491,8 +491,8 @@ pub unsafe extern "C" fn gos_rt_json_free_slots(vec: *mut GosVec, first: i64, st
         let base = header.ptr;
         let mut i = first;
         while i < len {
-            let addr = unsafe { base.add(i * 8).cast::<usize>().read_unaligned() };
-            let child: *mut GosJson = std::ptr::with_exposed_provenance_mut(addr);
+            let child =
+                unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }.cast::<GosJson>();
             unsafe { gos_rt_json_free(child) };
             i += stride;
         }
@@ -1269,8 +1269,9 @@ pub unsafe extern "C" fn gos_rt_json_value_array(vec: *const GosVec) -> *mut Gos
                     // Slots hold child pointers exposed as integers by the
                     // flat-slot ABI in an unaligned byte buffer; read
                     // unaligned and recover provenance.
-                    let addr = unsafe { base.add(i * 8).cast::<usize>().read_unaligned() };
-                    let elem: *const GosJson = std::ptr::with_exposed_provenance(addr);
+                    let elem = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
+                        .cast_const()
+                        .cast::<GosJson>();
                     if let Some(v) = unsafe { json_borrow(elem) } {
                         out.push(v.clone());
                     } else {
@@ -1792,11 +1793,7 @@ mod tests {
         // Probe-share key 0, free the vec WITHOUT iterating (the
         // early-break consumer shape): deep-free must release exactly
         // the vec's share - rc 2 -> 1, not 2 (leak), not 0 (double free).
-        let k0 = unsafe {
-            std::ptr::with_exposed_provenance_mut::<c_char>(
-                (vec.ptr.as_ptr() as *const usize).read_unaligned(),
-            )
-        };
+        let k0 = unsafe { crate::c_abi::vec::slot_read_word(vec.ptr.as_ptr()).cast::<c_char>() };
         unsafe { crate::c_abi::string::gos_rt_str_retain(k0) };
         assert_eq!(unsafe { str_rc(k0) }, 2);
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };

@@ -622,7 +622,7 @@ unsafe fn visit_slot_children(
 unsafe fn visit_slot_child_words(
     slot: *const u8,
     children: &[VecSlotChild],
-    mut f: impl FnMut(*mut usize, *mut u8, u8),
+    mut f: impl FnMut(*mut u8, *mut u8, u8),
 ) {
     for c in children {
         if c.gate >= 0 {
@@ -633,9 +633,8 @@ unsafe fn visit_slot_child_words(
         }
         // Slots hold child pointers exposed as integers by the flat-slot
         // ABI; recover provenance before use.
-        let word = unsafe { slot.add(c.word * 8).cast::<usize>().cast_mut() };
-        let raw = unsafe { word.read_unaligned() };
-        let child: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+        let word = unsafe { slot.add(c.word * 8).cast_mut() };
+        let child = unsafe { slot_read_word(word) };
         if !child.is_null() {
             f(word, child, c.kind);
         }
@@ -660,11 +659,11 @@ pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_retain(child),
             vec_elem_kind::MAP => {
                 let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
-                word.write_unaligned((cloned as *mut u8).expose_provenance());
+                slot_write_word(word, cloned as *mut u8);
             }
             vec_elem_kind::SET => {
                 let cloned = crate::c_abi::set::gos_rt_set_clone(child.cast());
-                word.write_unaligned((cloned as *mut u8).expose_provenance());
+                slot_write_word(word, cloned as *mut u8);
             }
             _ => {}
         });
@@ -857,9 +856,7 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
         match vec.elem_kind {
             vec_elem_kind::STRING | vec_elem_kind::RC_ENUM | vec_elem_kind::VEC if stride == 8 => {
                 for index in 0..len {
-                    let raw =
-                        unsafe { vec.ptr.add(index * stride).cast::<usize>().read_unaligned() };
-                    let child = std::ptr::with_exposed_provenance_mut::<u8>(raw);
+                    let child = unsafe { slot_read_word(vec.ptr.add(index * stride)) };
                     if child.is_null() {
                         continue;
                     }
@@ -986,9 +983,8 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
             let len = unsafe { (*out).len.max(0) as usize };
             for i in 0..len {
                 // Exposed-integer slot (flat-slot ABI); recover provenance.
-                let slot = unsafe { (*out).ptr.add(i * 8).cast::<usize>() };
-                let raw = unsafe { slot.read_unaligned() };
-                let child: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+                let slot = unsafe { (*out).ptr.add(i * 8) };
+                let child = unsafe { slot_read_word(slot) };
                 if child.is_null() {
                     continue;
                 }
@@ -1003,7 +999,7 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // of its own onto the same document.
                     vec_elem_kind::JSON => unsafe {
                         let cloned = crate::c_abi::json::gos_rt_json_clone_handle(child.cast());
-                        slot.write_unaligned((cloned.cast::<u8>()).expose_provenance());
+                        slot_write_word(slot, cloned.cast::<u8>());
                     },
                     // A `GosMap` carries no reference count, so a map element
                     // cannot be shared: the copy takes a table of its own and
@@ -1012,11 +1008,11 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // elements, so one table under two of them is freed twice.
                     vec_elem_kind::MAP => unsafe {
                         let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
-                        slot.write_unaligned((cloned as *mut u8).expose_provenance());
+                        slot_write_word(slot, cloned as *mut u8);
                     },
                     _ => unsafe {
                         let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
-                        slot.write_unaligned(cloned.expose_provenance());
+                        slot_write_word(slot, cloned.cast::<u8>());
                     },
                 }
             }
@@ -1056,15 +1052,15 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                             }
                             vec_elem_kind::VEC => {
                                 let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
-                                word.write_unaligned(cloned.expose_provenance());
+                                slot_write_word(word, cloned.cast::<u8>());
                             }
                             vec_elem_kind::MAP => {
                                 let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
-                                word.write_unaligned((cloned as *mut u8).expose_provenance());
+                                slot_write_word(word, cloned as *mut u8);
                             }
                             vec_elem_kind::SET => {
                                 let cloned = crate::c_abi::set::gos_rt_set_clone(child.cast());
-                                word.write_unaligned((cloned as *mut u8).expose_provenance());
+                                slot_write_word(word, cloned as *mut u8);
                             }
                             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_retain(child),
                             _ => {}
@@ -1164,17 +1160,16 @@ pub unsafe extern "C" fn gos_rt_vec_compact_elems(v: *mut GosVec) {
     }
     for i in 0..vec.len.max(0) as usize {
         // Exposed-integer slot (flat-slot ABI); recover provenance.
-        let slot = unsafe { vec.ptr.add(i * 8).cast::<usize>() };
-        let raw = unsafe { slot.read_unaligned() };
-        if raw == 0 {
+        let slot = unsafe { vec.ptr.add(i * 8) };
+        let child = unsafe { slot_read_word(slot) }.cast::<GosVec>();
+        if child.is_null() {
             continue;
         }
-        let child: *mut GosVec = std::ptr::with_exposed_provenance_mut(raw);
         let fresh = unsafe { crate::c_abi::string::gos_rt_vec_clone(child) };
         if fresh.is_null() {
             continue;
         }
-        unsafe { slot.write_unaligned(fresh.cast::<u8>().expose_provenance()) };
+        unsafe { slot_write_word(slot, fresh.cast::<u8>()) };
         unsafe { crate::c_abi::map::gos_rt_vec_free(child) };
     }
 }
@@ -1419,7 +1414,7 @@ pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64)
         return;
     }
     let p = unsafe { v.ptr.add((idx as usize) * 8) };
-    let raw = unsafe { p.cast::<usize>().read_unaligned() };
+    let raw = unsafe { slot_read_word(p) }.expose_provenance();
     // A slot storing back what it already holds keeps its one share.
     if raw == 0 || raw == (incoming as usize) {
         return;
@@ -1453,6 +1448,32 @@ pub(crate) unsafe fn vec_elem_store_i64(v: &GosVec, idx: i64, value: i64) {
             unsafe { p.cast::<i64>().write_unaligned(value) };
         }
     }
+}
+
+/// Reads the child word a slot holds.
+///
+/// A slot is eight bytes wide on every target and holds its word
+/// little-endian, while a pointer is the target's own width: read the eight
+/// bytes, then narrow. Reading through `usize` instead would move four bytes
+/// on a 32-bit target and leave the rest of the word unread.
+///
+/// # Safety
+/// `slot` addresses eight readable bytes.
+#[inline]
+pub(crate) unsafe fn slot_read_word(slot: *const u8) -> *mut u8 {
+    let raw = unsafe { slot.cast::<u64>().read_unaligned() };
+    std::ptr::with_exposed_provenance_mut(usize::try_from(raw).unwrap_or_default())
+}
+
+/// Writes `child` into a slot as the eight-byte word [`slot_read_word`]
+/// reads back, zero-extended where a pointer is narrower than the slot.
+///
+/// # Safety
+/// `slot` addresses eight writable bytes.
+#[inline]
+pub(crate) unsafe fn slot_write_word(slot: *mut u8, child: *mut u8) {
+    let raw = child.expose_provenance() as u64;
+    unsafe { slot.cast::<u64>().write_unaligned(raw) };
 }
 
 /// The atomic refcount field. Interior-mutable, so a shared `&GosVec` can
@@ -2215,7 +2236,7 @@ unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
     if vec.elem_bytes as usize != 8 {
         return;
     }
-    let raw = unsafe { slot.cast::<usize>().read_unaligned() };
+    let raw = unsafe { slot_read_word(slot) }.expose_provenance();
     if raw == 0 {
         return;
     }
@@ -2303,7 +2324,7 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
     if vec.elem_bytes as usize != 8 {
         return false;
     }
-    let raw = unsafe { slot.cast::<usize>().read_unaligned() };
+    let raw = unsafe { slot_read_word(slot) }.expose_provenance();
     if raw == 0 {
         return true;
     }
@@ -2319,8 +2340,7 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
             // own onto the same document and the slot names that one.
             vec_elem_kind::JSON => {
                 let cloned = crate::c_abi::json::gos_rt_json_clone_handle(ptr.cast());
-                slot.cast::<usize>()
-                    .write_unaligned((cloned.cast::<u8>()).expose_provenance());
+                slot_write_word(slot, cloned.cast::<u8>());
             }
             // A GosMap carries no count, so a shared element has no protocol.
             vec_elem_kind::MAP => return false,
@@ -3314,11 +3334,12 @@ pub(crate) fn decode_header_tuple_vec(headers: *const GosVec) -> Vec<(String, St
         let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
         // Slots hold cstring pointers exposed as integers by the
         // flat-slot ABI; recover provenance before reading the bytes.
-        let key_ptr: *const std::os::raw::c_char =
-            std::ptr::with_exposed_provenance(unsafe { (slot as *const usize).read_unaligned() });
-        let val_ptr: *const std::os::raw::c_char = std::ptr::with_exposed_provenance(unsafe {
-            (slot.add(8) as *const usize).read_unaligned()
-        });
+        let key_ptr = unsafe { slot_read_word(slot) }
+            .cast_const()
+            .cast::<std::os::raw::c_char>();
+        let val_ptr = unsafe { slot_read_word(slot.add(8)) }
+            .cast_const()
+            .cast::<std::os::raw::c_char>();
         let key = if key_ptr.is_null() {
             String::new()
         } else {
@@ -3438,5 +3459,69 @@ mod extend_str_bytes_tests {
             crate::c_abi::map::gos_rt_vec_free(pushed);
             crate::c_abi::string::gos_rt_str_free(text);
         }
+    }
+}
+
+#[cfg(test)]
+mod swap_unchecked_tests {
+    use super::*;
+
+    /// The unchecked swap leaves the vector exactly as the checked one does
+    /// for indices inside the length.
+    #[test]
+    fn an_unchecked_swap_matches_the_checked_one_in_range() {
+        unsafe {
+            let a = gos_rt_vec_new_typed(8, vec_elem_kind::PRIMITIVE);
+            let b = gos_rt_vec_new_typed(8, vec_elem_kind::PRIMITIVE);
+            for v in [a, b] {
+                for n in 0..8i64 {
+                    gos_rt_vec_push(v, std::ptr::addr_of!(n).cast());
+                }
+            }
+            for (i, j) in [(0i64, 7i64), (1, 6), (3, 4), (2, 2)] {
+                crate::c_abi::signal::gos_rt_vec_swap_safe(a, i, j);
+                crate::c_abi::signal::gos_rt_vec_swap_unchecked(b, i, j);
+            }
+            let len = (*a).len as usize;
+            assert_eq!(len, (*b).len as usize);
+            assert_eq!(
+                std::slice::from_raw_parts((*a).ptr.as_ptr(), len * 8),
+                std::slice::from_raw_parts((*b).ptr.as_ptr(), len * 8)
+            );
+            crate::c_abi::map::gos_rt_vec_free(a);
+            crate::c_abi::map::gos_rt_vec_free(b);
+        }
+    }
+}
+
+#[cfg(test)]
+mod slot_word_tests {
+    use super::{slot_read_word, slot_write_word};
+
+    /// A slot round-trips a child word through the helper pair, and the write
+    /// fills all eight bytes: a pointer-width write would leave the upper half
+    /// holding whatever the slot held before, which a later read would answer.
+    #[test]
+    fn a_slot_write_fills_the_whole_word_and_reads_back() {
+        let mut slot = [0xABu8; 8];
+        let mut target = 0u64;
+        let child: *mut u8 = std::ptr::addr_of_mut!(target).cast();
+        unsafe {
+            slot_write_word(slot.as_mut_ptr(), child);
+            assert_eq!(slot_read_word(slot.as_ptr()), child);
+        }
+        let high = u64::from_le_bytes(slot) >> 32;
+        assert_eq!(
+            high,
+            (child as usize as u64) >> 32,
+            "the upper half is the word's own, not the slot's previous bytes"
+        );
+
+        let mut zero = [0x5Au8; 8];
+        unsafe {
+            slot_write_word(zero.as_mut_ptr(), std::ptr::null_mut());
+            assert!(slot_read_word(zero.as_ptr()).is_null());
+        }
+        assert_eq!(u64::from_le_bytes(zero), 0, "a null child clears the slot");
     }
 }

@@ -944,9 +944,9 @@ unsafe fn exec_run_with(
             for i in 0..v.len {
                 let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
                 let cstr_ptr = unsafe {
-                    std::ptr::with_exposed_provenance::<c_char>(
-                        (slot as *const usize).read_unaligned(),
-                    )
+                    crate::c_abi::vec::slot_read_word(slot)
+                        .cast_const()
+                        .cast::<c_char>()
                 };
                 if cstr_ptr.is_null() {
                     cmd_args.push(String::new());

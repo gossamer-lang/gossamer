@@ -1,0 +1,58 @@
+// Counted loops that swap a rising index with a falling one: a reversal whose
+// indices meet in the middle, a partial flip, ranges that run zero times, an
+// inclusive header, a bound the vector cannot satisfy, and a byte vector.
+
+fn flip(perm: &mut Vec<i64>, k: i64) {
+    let k2 = (k + 1) >> 1
+    for i in 0..k2 { perm.swap(i, k - i) }
+}
+
+fn flip_inclusive(perm: &mut Vec<i64>, k: i64) {
+    let last = (k - 1) >> 1
+    for i in 0..=last { perm.swap(i, k - i) }
+}
+
+fn flip_bytes(buf: &mut Vec<u8>, k: i64) {
+    let k2 = (k + 1) >> 1
+    for i in 0..k2 { buf.swap(i, k - i) }
+}
+
+fn rotate_pairs(perm: &mut Vec<i64>, r: i64) {
+    for i in 0..r { perm.swap(i, i + 1) }
+}
+
+fn render(values: Vec<i64>) -> String {
+    let mut out = String::new()
+    for v in values { out += format("{},", v) }
+    out
+}
+
+fn main() {
+    let mut perm: Vec<i64> = #[]
+    for i in 0..12 { perm.push(i) }
+    flip(&mut perm, 11)
+    println("flip {}", render(perm))
+
+    flip(&mut perm, 5)
+    println("partial {}", render(perm))
+
+    // The counter never runs, so no index is ever formed.
+    flip(&mut perm, 0)
+    flip(&mut perm, -3)
+    println("empty {}", render(perm))
+
+    flip_inclusive(&mut perm, 9)
+    println("inclusive {}", render(perm))
+
+    // A bound the vector cannot satisfy keeps the checked path.
+    let mut short: Vec<i64> = #[1, 2, 3]
+    rotate_pairs(&mut short, 2)
+    println("rotate {}", render(short))
+
+    let mut bytes: Vec<u8> = #[]
+    for i in 0..8 { bytes.push((i * 3) as u8) }
+    flip_bytes(&mut bytes, 7)
+    let mut sum = 0
+    for b in bytes { sum = sum *% 31 +% b as i64 }
+    println("bytes {} {}", bytes.len(), sum)
+}

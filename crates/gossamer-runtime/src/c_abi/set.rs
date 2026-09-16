@@ -103,7 +103,10 @@ impl GosSet {
                 .get(index * 8..index * 8 + 8)
                 .and_then(|b| <[u8; 8]>::try_from(b).ok())
                 .unwrap_or_default();
-            std::ptr::with_exposed_provenance_mut(usize::from_le_bytes(bytes))
+            // A slot is eight bytes wide on every target, while a pointer is
+            // the target's own width: read the word, then narrow it.
+            let word = u64::from_le_bytes(bytes);
+            std::ptr::with_exposed_provenance_mut(usize::try_from(word).unwrap_or_default())
         };
         if self.node_elements {
             return vec![(word_at(0), CountedWord::Rc)];

@@ -852,6 +852,20 @@ pub unsafe extern "C" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
     });
 }
 
+/// Swaps two `Vec` elements WITHOUT the null and bounds guards of
+/// [`gos_rt_vec_swap_safe`]. Emitted only by the counted-loop versioner,
+/// whose preheader proved both indices in `[0, len)` against this vec and
+/// the receiver non-null; the swap it performs is the checked one's.
+///
+/// # Safety
+/// `v` is a non-null `GosVec` and `i`, `j` lie in `[0, v.len)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_swap_unchecked(v: *mut GosVec, i: i64, j: i64) {
+    ffi_entry!((), {
+        unsafe { gos_rt_vec_swap_i64(v, i, j) };
+    });
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_ptr(v: *const GosVec, idx: i64) -> *mut u8 {
     ffi_entry!(std::ptr::null_mut(), {
@@ -1104,7 +1118,9 @@ pub unsafe extern "C" fn gos_rt_vec_index_of_str(v: *const GosVec, needle: *cons
         for i in 0..vec.len {
             let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
             let elem = unsafe {
-                std::ptr::with_exposed_provenance::<c_char>((p as *const usize).read_unaligned())
+                crate::c_abi::vec::slot_read_word(p)
+                    .cast_const()
+                    .cast::<c_char>()
             };
             if !elem.is_null()
                 && unsafe {
@@ -1148,7 +1164,9 @@ pub unsafe extern "C" fn gos_rt_vec_count_of_str(v: *const GosVec, needle: *cons
         for i in 0..vec.len {
             let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
             let elem = unsafe {
-                std::ptr::with_exposed_provenance::<c_char>((p as *const usize).read_unaligned())
+                crate::c_abi::vec::slot_read_word(p)
+                    .cast_const()
+                    .cast::<c_char>()
             };
             if !elem.is_null()
                 && unsafe {
@@ -1190,7 +1208,9 @@ pub unsafe extern "C" fn gos_rt_vec_contains_str(v: *const GosVec, needle: *cons
         for i in 0..vec.len {
             let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
             let elem = unsafe {
-                std::ptr::with_exposed_provenance::<c_char>((p as *const usize).read_unaligned())
+                crate::c_abi::vec::slot_read_word(p)
+                    .cast_const()
+                    .cast::<c_char>()
             };
             if !elem.is_null()
                 && unsafe {

@@ -7167,6 +7167,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::gos_rt_vec_swap_safe as *const u8,
         ),
         (
+            "gos_rt_vec_swap_unchecked",
+            crate::c_abi::gos_rt_vec_swap_unchecked as *const u8,
+        ),
+        (
             "gos_rt_vec_slice",
             crate::c_abi::gos_rt_vec_slice as *const u8,
         ),

@@ -1917,3 +1917,41 @@ fn shifted(out: &mut Vec<u8>, s: String) {
         "{shifted:?}"
     );
 }
+
+#[test]
+fn a_loop_swapping_a_rising_index_with_a_falling_one_versions_unchecked() {
+    let body = optimised_fn(
+        r#"
+fn flip(perm: &mut Vec<i64>, k: i64) {
+    let k2 = (k + 1) >> 1
+    for i in 0..k2 { perm.swap(i, k - i) }
+}
+fn main() { let mut w: Vec<i64> = #[1, 2, 3]; flip(&mut w, 2); println("{}", w[0]) }
+"#,
+        "flip",
+    );
+    let names = call_symbol_names(&body);
+    assert!(
+        names.iter().any(|n| n == "gos_rt_vec_swap_unchecked"),
+        "the proven clone swaps without bounds checks: {names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "gos_rt_vec_swap_safe"),
+        "the guarded original keeps its checks: {names:?}"
+    );
+
+    let scatter = optimised_fn(
+        r#"
+fn scatter(perm: &mut Vec<i64>, k: i64, step: i64) {
+    for i in 0..k { perm.swap(i, k *% i +% step) }
+}
+fn main() { let mut w: Vec<i64> = #[1, 2, 3]; scatter(&mut w, 1, 0); println("{}", w[0]) }
+"#,
+        "scatter",
+    );
+    let names = call_symbol_names(&scatter);
+    assert!(
+        !names.iter().any(|n| n == "gos_rt_vec_swap_unchecked"),
+        "a product index is not affine in the counter: {names:?}"
+    );
+}

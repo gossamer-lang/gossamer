@@ -224,6 +224,8 @@ impl RuntimeEntry {
                 ""
             } else if PURE_ARGMEM_READ.contains(&self.name) {
                 "nounwind memory(argmem: read)"
+            } else if PURE_READ.contains(&self.name) {
+                "nounwind memory(read)"
             } else {
                 "nounwind"
             };
@@ -240,23 +242,38 @@ impl RuntimeEntry {
     }
 }
 
-/// Runtime getters that only read memory reachable through their pointer
-/// arguments - no writes, no global state. Marked `memory(argmem: read)` so
-/// the optimiser can hoist/CSE them across non-aliasing loop bodies. Keep
-/// this list conservative: a wrong entry (a helper that writes or reads
-/// globals) is a miscompile.
+/// Runtime getters whose every access lands in the allocation one of their
+/// pointer arguments addresses - a `GosVec` header word, a string's own
+/// content and index footer - with no writes and no global state. Marked
+/// `memory(argmem: read)` so the optimiser can hoist and fold them across a
+/// loop body that writes elsewhere. A reader that follows a pointer stored in
+/// that allocation belongs in [`PURE_READ`] instead, and a helper that writes
+/// or touches globals belongs in neither: a wrong entry is a miscompile.
 const PURE_ARGMEM_READ: &[&str] = &[
+    "gos_rt_vec_len",
+    "gos_rt_str_len",
+    "gos_rt_str_byte_at",
+    "gos_rt_str_byte_len",
+    "gos_rt_str_eq",
+];
+
+/// Runtime getters that read no memory the caller can write through a pointer
+/// of its own, but whose reads are not confined to their arguments: an element
+/// read follows the data pointer the header holds, and `gos_rt_arr_len`
+/// consults the process argv statics. LLVM reads `argmem` as the memory
+/// *based on* a pointer argument - derived from it by offset - which a buffer
+/// loaded out of the argument is not, so these take the weaker
+/// `memory(read)`: the optimiser may still fold repeated reads and hoist one
+/// out of a loop that writes nothing, and a store to the buffer still orders
+/// against them. Keep this list read-only: an entry that writes is a
+/// miscompile.
+const PURE_READ: &[&str] = &[
     "gos_rt_vec_get_i64",
     "gos_rt_vec_get_i64_unchecked",
     "gos_rt_vec_get_i128",
     "gos_rt_vec_get_opt",
     "gos_rt_vec_get_ptr",
-    "gos_rt_vec_len",
     "gos_rt_arr_len",
-    "gos_rt_str_len",
-    "gos_rt_str_byte_at",
-    "gos_rt_str_byte_len",
-    "gos_rt_str_eq",
     "gos_rt_heap_i64_get",
 ];
 
@@ -275,3 +292,31 @@ const NOALIAS_RET: &[&str] = &[
     "gos_rt_vec_with_capacity",
     "gos_rt_vec_with_capacity_typed",
 ];
+
+#[cfg(test)]
+mod memory_effect_tests {
+    use super::{PURE_ARGMEM_READ, PURE_READ};
+    use crate::lookup;
+
+    /// A getter claims `argmem` only when every read lands in the allocation
+    /// an argument addresses; one that follows the header's data pointer, or
+    /// reads a global, claims the weaker `memory(read)`.
+    #[test]
+    fn an_element_read_does_not_claim_argument_memory() {
+        for name in ["gos_rt_vec_len", "gos_rt_str_byte_at"] {
+            let decl = lookup(name).expect(name).llvm_declare_for(false);
+            assert!(decl.contains("memory(argmem: read)"), "{name}: {decl}");
+        }
+        for name in ["gos_rt_vec_get_i64", "gos_rt_vec_get_ptr", "gos_rt_arr_len"] {
+            let decl = lookup(name).expect(name).llvm_declare_for(false);
+            assert!(decl.contains("memory(read)"), "{name}: {decl}");
+            assert!(!decl.contains("argmem"), "{name}: {decl}");
+        }
+        for name in PURE_ARGMEM_READ.iter().chain(PURE_READ.iter()) {
+            assert!(lookup(name).is_some(), "{name} is not a registry symbol");
+        }
+        for name in PURE_ARGMEM_READ {
+            assert!(!PURE_READ.contains(name), "{name} is in both lists");
+        }
+    }
+}

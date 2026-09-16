@@ -1265,6 +1265,53 @@ impl<'a> Lowerer<'a> {
     /// Inline the in-bounds path of `gos_rt_vec_swap_safe(vec, i, j)`,
     /// retaining the runtime helper as the uncommon out-of-bounds path where
     /// it raises the bounds panic.
+    /// Inline `gos_rt_vec_swap_unchecked(vec, i, j)`: the element loads and
+    /// stores the checked path performs once its guards hold. The header
+    /// reads stay unconditional here, so a loop keeps them in registers.
+    pub(crate) fn lower_vec_swap_unchecked_inline(
+        &mut self,
+        args: &[Operand],
+        target: Option<&gossamer_mir::BlockId>,
+    ) -> Result<(), BuildError> {
+        let word_elem = self.vec_operand_has_word_elem(&args[0]);
+        let byte_elem = !word_elem && self.vec_operand_has_byte_elem(&args[0]);
+        if !word_elem && !byte_elem {
+            return Err(BuildError::InternalLoweringBug(
+                "inline unchecked Vec::swap requires statically word- or byte-sized elements",
+            ));
+        }
+        let vec_ptr = self.vec_operand_ptr(&args[0])?;
+        let i_raw = self.lower_operand(&args[1])?;
+        let i = self.widen_to_i64(&args[1], &i_raw);
+        let j_raw = self.lower_operand(&args[2])?;
+        let j = self.widen_to_i64(&args[2], &j_raw);
+        let (_len, data) = self.vec_header_len_data(&vec_ptr);
+        let stride = if word_elem { 8 } else { 1 };
+        let i_off = self.fresh();
+        writeln!(self.out, "  {i_off} = mul i64 {i}, {stride}").unwrap();
+        let j_off = self.fresh();
+        writeln!(self.out, "  {j_off} = mul i64 {j}, {stride}").unwrap();
+        let i_addr = self.elem_addr(&data, &i_off);
+        let j_addr = self.elem_addr(&data, &j_off);
+        if word_elem {
+            let a = self.fresh();
+            writeln!(self.out, "  {a} = load i64, ptr {i_addr}{TBAA_DATA}").unwrap();
+            let b = self.fresh();
+            writeln!(self.out, "  {b} = load i64, ptr {j_addr}{TBAA_DATA}").unwrap();
+            writeln!(self.out, "  store i64 {b}, ptr {i_addr}{TBAA_DATA}").unwrap();
+            writeln!(self.out, "  store i64 {a}, ptr {j_addr}{TBAA_DATA}").unwrap();
+        } else {
+            let a = self.fresh();
+            writeln!(self.out, "  {a} = load i8, ptr {i_addr}{TBAA_DATA}").unwrap();
+            let b = self.fresh();
+            writeln!(self.out, "  {b} = load i8, ptr {j_addr}{TBAA_DATA}").unwrap();
+            writeln!(self.out, "  store i8 {b}, ptr {i_addr}{TBAA_DATA}").unwrap();
+            writeln!(self.out, "  store i8 {a}, ptr {j_addr}{TBAA_DATA}").unwrap();
+        }
+        emit_terminator_branch(&mut self.out, target);
+        Ok(())
+    }
+
     pub(crate) fn lower_vec_swap_safe_inline(
         &mut self,
         args: &[Operand],

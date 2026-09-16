@@ -483,9 +483,9 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
                     if p.is_null() {
                         std::ptr::null()
                     } else {
-                        std::ptr::with_exposed_provenance::<c_char>(
-                            p.cast::<usize>().read_unaligned(),
-                        )
+                        crate::c_abi::vec::slot_read_word(p)
+                            .cast_const()
+                            .cast::<c_char>()
                     }
                 });
                 (len, 0, getter) // GosVec from os::args() already excludes argv[0]

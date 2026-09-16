@@ -2020,6 +2020,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_vec_step_by", (Ptr, I64) -> Ptr, Both, "xs.step_by(step) -> fresh Vec of every step-th element; step below 1 is treated as 1."),
     rt!("gos_rt_vec_swap_i64", (Ptr, I64, I64) -> Void, Cranelift, "Swap two scalar-shaped GosVec elements; null or out-of-range indices are a no-op."),
     rt!("gos_rt_vec_swap_safe", (Ptr, I64, I64) -> Void, Cranelift, "Bounds-checked in-place Vec swap; an index outside [0, len) is a bounds panic."),
+    rt!("gos_rt_vec_swap_unchecked", (Ptr, I64, I64) -> Void, Both, "Swap two scalar-shaped GosVec elements without the bounds guard; emitted only where the loop versioner proved both indices in [0, len) against this vec."),
     rt!("gos_rt_vec_take", (Ptr, I64) -> Ptr, Both, "xs.take(n) -> fresh Vec of the first n elements, clamped to [0, len]."),
     rt!("gos_rt_vec_truncate", (Ptr, I64) -> Void, Cranelift, "Truncate a GosVec in place, dropping removed elements."),
     rt!("gos_rt_vec_with_capacity", (I32, I64) -> Ptr, Cranelift, "Allocate a GosVec with a pre-reserved capacity."),

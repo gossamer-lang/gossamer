@@ -2867,7 +2867,7 @@ unsafe fn clone_map_children(payload: *mut u8) {
                 }
                 _ => return,
             };
-            slot.write_unaligned(cloned.expose_provenance());
+            crate::c_abi::vec::slot_write_word(slot, cloned);
         });
     }
 }
@@ -2877,7 +2877,7 @@ unsafe fn clone_map_children(payload: *mut u8) {
 unsafe fn visit_slot_children_meta(
     payload: *mut u8,
     meta: *const i64,
-    mut f: impl FnMut(i64, *mut usize, *mut u8),
+    mut f: impl FnMut(i64, *mut u8, *mut u8),
 ) {
     use crate::c_abi::vec::vec_elem_kind;
     use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_SET, RC_CHILD_VEC};
@@ -2904,13 +2904,8 @@ unsafe fn visit_slot_children_meta(
             Ok(vec_elem_kind::SET) => RC_CHILD_SET,
             _ => continue,
         };
-        let slot = unsafe {
-            payload
-                .add(usize::try_from(word).unwrap_or(0) * 8)
-                .cast::<usize>()
-        };
-        let raw = unsafe { slot.read_unaligned() };
-        let child: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+        let slot = unsafe { payload.add(usize::try_from(word).unwrap_or(0) * 8) };
+        let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
         if !child.is_null() {
             f(kind, slot, child);
         }
@@ -2947,7 +2942,7 @@ unsafe fn visit_entries(payload: *mut u8, mut f: impl FnMut(i64, *mut u8)) {
 /// of the payload word holding the child. A kind whose copy takes a value of
 /// its own - [`gossamer_abi::rc::RC_CHILD_MAP`] - writes the new handle back
 /// through that address.
-unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut usize, *mut u8)) {
+unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *mut u8)) {
     use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_WORD_MASK};
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
@@ -2990,9 +2985,8 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut usize,
                 // Aggregate slots cross the C ABI as pointer-sized integer
                 // words. Reconstruct exposed provenance explicitly instead
                 // of treating those integer bits as a Rust pointer load.
-                let slot = unsafe { payload.add((word as usize) * 8).cast::<usize>() };
-                let raw = unsafe { slot.read_unaligned() };
-                let child: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+                let slot = unsafe { payload.add((word as usize) * 8) };
+                let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
                 if child.is_null() {
                     continue;
                 }
@@ -3340,9 +3334,8 @@ unsafe fn visit_guarded_children(base: *mut u8, meta: *const i64, mut f: impl Fn
                 continue;
             }
         }
-        let slot = unsafe { base.add(payload_word as usize * 8).cast::<usize>() };
-        let raw = unsafe { slot.read_unaligned() };
-        let child: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+        let slot = unsafe { base.add(payload_word as usize * 8) };
+        let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
         if !child.is_null() && unsafe { is_copy_blob(child) } {
             f(child);
         }

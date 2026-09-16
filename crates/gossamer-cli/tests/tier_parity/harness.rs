@@ -364,6 +364,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/enum_handle_vec_walk.gos"),
     spec("feature-testing-examples/carrier_payload_views.gos"),
     spec("feature-testing-examples/byte_append_loops.gos"),
+    spec("feature-testing-examples/descending_swap_loops.gos"),
     spec("feature-testing-examples/packed_struct_layout.gos"),
     // `Vec<u8>` reductions read packed bytes, and a lazy `filter_map` calls
     // its callback one element per pull.

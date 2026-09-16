@@ -714,6 +714,16 @@ impl<'a> Lowerer<'a> {
             self.lower_vec_set_i64_unchecked_inline(args, destination, target)?;
             return Ok(());
         }
+        // The versioner emits this only inside a loop whose preheader
+        // proved both indices, so the swap is the stores alone.
+        if name == "gos_rt_vec_swap_unchecked"
+            && args.len() == 3
+            && (self.vec_operand_has_word_elem(&args[0])
+                || self.vec_operand_has_byte_elem(&args[0]))
+        {
+            self.lower_vec_swap_unchecked_inline(args, target)?;
+            return Ok(());
+        }
         if name == "gos_rt_vec_swap_safe"
             && args.len() == 3
             && (self.vec_operand_has_word_elem(&args[0])

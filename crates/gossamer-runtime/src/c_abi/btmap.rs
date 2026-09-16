@@ -182,8 +182,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_adt(
             let arg = if by_ref != 0 {
                 slot
             } else {
-                let word = unsafe { (slot as *const usize).read_unaligned() };
-                std::ptr::with_exposed_provenance::<u8>(word)
+                unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast_const()
             };
             out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
         }
@@ -254,9 +253,8 @@ pub unsafe extern "C" fn gos_rt_vec_format_map(v: *const GosVec, bare: i32) -> *
                 out.push_str(", ");
             }
             let slot = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let word = unsafe { (slot as *const usize).read_unaligned() };
-            let rendered =
-                unsafe { crate::c_abi::gos_rt_map_format(std::ptr::with_exposed_provenance(word)) };
+            let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
+            let rendered = unsafe { crate::c_abi::gos_rt_map_format(child.cast_const().cast()) };
             if !rendered.is_null() {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                 // The formatter answered a fresh rendering whose bytes are now copied.
@@ -331,7 +329,9 @@ pub unsafe extern "C" fn gos_rt_vec_format_string(v: *const GosVec, bare: i32) -
             }
             let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
             let s_ptr = unsafe {
-                std::ptr::with_exposed_provenance::<c_char>((p as *const usize).read_unaligned())
+                crate::c_abi::vec::slot_read_word(p)
+                    .cast_const()
+                    .cast::<c_char>()
             };
             if !s_ptr.is_null() {
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(s_ptr) });
@@ -361,7 +361,9 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_i64(v: *const GosVec, bare: i32) 
             }
             let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
             let inner_ptr = unsafe {
-                std::ptr::with_exposed_provenance::<GosVec>((p as *const usize).read_unaligned())
+                crate::c_abi::vec::slot_read_word(p)
+                    .cast_const()
+                    .cast::<GosVec>()
             };
             if inner_ptr.is_null() {
                 out.push_str("#[]");
@@ -399,7 +401,9 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_f64(v: *const GosVec, bare: i32) 
             }
             let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
             let inner_ptr = unsafe {
-                std::ptr::with_exposed_provenance::<GosVec>((p as *const usize).read_unaligned())
+                crate::c_abi::vec::slot_read_word(p)
+                    .cast_const()
+                    .cast::<GosVec>()
             };
             if inner_ptr.is_null() {
                 out.push_str("#[]");
@@ -438,7 +442,9 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_string(v: *const GosVec, bare: i3
             }
             let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
             let inner_ptr = unsafe {
-                std::ptr::with_exposed_provenance::<GosVec>((p as *const usize).read_unaligned())
+                crate::c_abi::vec::slot_read_word(p)
+                    .cast_const()
+                    .cast::<GosVec>()
             };
             if inner_ptr.is_null() {
                 out.push_str("#[]");
@@ -607,8 +613,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_adt(
             let arg = if by_ref != 0 {
                 slot
             } else {
-                let word = unsafe { (slot as *const usize).read_unaligned() };
-                std::ptr::with_exposed_provenance::<u8>(word)
+                unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast_const()
             };
             out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
         }
@@ -824,11 +829,9 @@ pub unsafe extern "C" fn gos_rt_exec_spawn(prog: *const c_char, args: *mut GosVe
             if elem_bytes != 0 && !v.ptr.is_null() {
                 for i in 0..v.len {
                     let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
-                    let cstr_ptr = unsafe {
-                        std::ptr::with_exposed_provenance::<c_char>(
-                            (slot as *const usize).read_unaligned(),
-                        )
-                    };
+                    let cstr_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }
+                        .cast_const()
+                        .cast::<c_char>();
                     if cstr_ptr.is_null() {
                         cmd_args.push(String::new());
                         continue;

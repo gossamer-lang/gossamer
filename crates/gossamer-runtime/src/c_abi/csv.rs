@@ -258,10 +258,10 @@ mod tests {
         // Slots hold child pointers exposed as i64 by the flat-slot ABI;
         // read the address and recover its provenance.
         let row1: *mut GosVec = std::ptr::with_exposed_provenance_mut(unsafe {
-            (o.ptr.add(8) as *const usize).read_unaligned()
+            crate::c_abi::vec::slot_read_word(o.ptr.add(8)).expose_provenance()
         });
         let field: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
-            ((*row1).ptr.as_ptr() as *const usize).read_unaligned()
+            crate::c_abi::vec::slot_read_word((*row1).ptr.as_ptr()).expose_provenance()
         });
         unsafe { crate::c_abi::string::gos_rt_str_retain(field) };
         assert_eq!(unsafe { str_rc(field) }, 2);
@@ -290,11 +290,14 @@ mod tests {
             // Slots hold child pointers exposed as i64 by the flat-slot
             // ABI; read the address and recover its provenance so the
             // borrow is sound under strict provenance.
-            let raw = unsafe { (o.ptr.add(i * 8) as *const usize).read_unaligned() };
+            let raw =
+                unsafe { crate::c_abi::vec::slot_read_word(o.ptr.add(i * 8)).expose_provenance() };
             let row: *mut GosVec = std::ptr::with_exposed_provenance_mut(raw);
             let rv = unsafe { &*row };
             for j in 0..rv.len as usize {
-                let raw = unsafe { (rv.ptr.add(j * 8) as *const usize).read_unaligned() };
+                let raw = unsafe {
+                    crate::c_abi::vec::slot_read_word(rv.ptr.add(j * 8)).expose_provenance()
+                };
                 let f: *mut c_char = std::ptr::with_exposed_provenance_mut(raw);
                 fields.push(unsafe { CStr::from_ptr(f) }.to_str().unwrap().to_string());
             }

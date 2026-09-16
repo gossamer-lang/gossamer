@@ -533,7 +533,7 @@ unsafe fn enum_parts(slot: *const u8, storage: CmpStorage, inline: bool) -> (i64
         let disc = unsafe { (base as *const i64).read_unaligned() };
         (disc, unsafe { base.add(8) })
     } else {
-        let raw = unsafe { (slot as *const usize).read_unaligned() };
+        let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
         let base: *const u8 = std::ptr::with_exposed_provenance(raw & !7usize);
         (unsafe { node_disc(raw, base) }, base)
     }
