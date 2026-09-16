@@ -1314,18 +1314,17 @@ mod tests {
 
     #[test]
     fn client_request_timeout_ms_aborts_a_stalled_response() {
-        // A listener that accepts the connection and never responds:
-        // the configured 100 ms global timeout must abort the request
-        // with a timeout transport error.
+        // A listener that is never accepted from is a server that never
+        // responds: the kernel completes the handshake into its backlog
+        // and nothing answers, so the configured 100 ms global timeout
+        // must abort the request with a timeout transport error.
         //
-        // The listener thread answers the accepted socket rather than
-        // reading it, so this test owns when it closes. Reading to EOF
-        // instead would make the wait for that thread depend on when
-        // the client's connection pool drops its end, which is not
-        // something this test states or controls.
+        // No thread waits on the listener. The request may time out
+        // before it connects (the client resolves the host on a thread
+        // of its own under the same budget), and an accept would then
+        // wait for a connection that never arrives.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind loopback");
         let addr = listener.local_addr().expect("addr");
-        let server = std::thread::spawn(move || listener.accept().map(|(stream, _)| stream).ok());
         let client = configured_client(10, 100);
         let sent = builtin_http_client_request(&[
             client,
@@ -1340,10 +1339,9 @@ mod tests {
             msg.starts_with("http: transport:") && msg.contains("timeout"),
             "unexpected timeout error shape: {msg}"
         );
-        // The listener thread answers the accepted socket and ends
-        // there, so the stalled connection outlives the request - the
-        // point of the case - and closes here, after the verdict.
-        drop(server.join().expect("join the listener"));
+        // The listener outlives the request, so the connection stays
+        // stalled until the verdict is in.
+        drop(listener);
     }
 
     #[test]
