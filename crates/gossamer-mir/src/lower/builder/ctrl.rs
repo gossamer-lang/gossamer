@@ -58,6 +58,23 @@ use super::*;
 use super::Builder;
 
 impl<'a> Builder<'a> {
+    /// The value a branch hands to the join of a conditional.
+    ///
+    /// Every branch writes the one result local, which a later call reads as a
+    /// callable environment whichever branch ran, so a branch answering a
+    /// function's name wraps it into the environment every callable slot holds.
+    fn branch_result_value(&mut self, value: Local, result: Local, span: Span) -> Local {
+        let result_ty = self.locals[result.0 as usize].ty;
+        if matches!(
+            self.tcx.kind_of(result_ty),
+            gossamer_types::TyKind::FnTrait(_) | gossamer_types::TyKind::FnPtr(_)
+        ) {
+            self.coerce_to_fn_trait_if_needed(value, result_ty, span)
+        } else {
+            value
+        }
+    }
+
     pub(crate) fn lower_if(
         &mut self,
         condition: &HirExpr,
@@ -82,6 +99,7 @@ impl<'a> Builder<'a> {
 
         self.set_current(then_block);
         if let Some(then_value) = self.lower_expr(then_branch) {
+            let then_value = self.branch_result_value(then_value, result_local, span);
             self.emit_assign(
                 Place::local(result_local),
                 Rvalue::Use(Operand::Copy(Place::local(then_value))),
@@ -93,6 +111,7 @@ impl<'a> Builder<'a> {
         self.set_current(else_block);
         if let Some(else_branch) = else_branch {
             if let Some(else_value) = self.lower_expr(else_branch) {
+                let else_value = self.branch_result_value(else_value, result_local, span);
                 self.emit_assign(
                     Place::local(result_local),
                     Rvalue::Use(Operand::Copy(Place::local(else_value))),
@@ -332,6 +351,7 @@ impl<'a> Builder<'a> {
                 self.bind_local(&bname.name, scrutinee_local);
             }
             if let Some(value_local) = self.lower_expr(body) {
+                let value_local = self.branch_result_value(value_local, result_local, span);
                 // Pin the match-result local's type to the arm's
                 // value type when the HIR type is opaque (Var /
                 // Error). Lets chained patterns like `let v =
@@ -505,6 +525,7 @@ impl<'a> Builder<'a> {
                 _ => {}
             }
             if let Some(value_local) = self.lower_expr(&arm.body) {
+                let value_local = self.branch_result_value(value_local, result_local, span);
                 // The arm's own value carries the shape the match answers
                 // with when typeck left the match's type open, which is what
                 // a following field access or method call reads.
@@ -622,6 +643,7 @@ impl<'a> Builder<'a> {
 
             self.set_current(arm_block);
             if let Some(value_local) = self.lower_expr(&arm.body) {
+                let value_local = self.branch_result_value(value_local, result_local, span);
                 use gossamer_types::TyKind;
                 let arm_value_ty = self.locals[value_local.0 as usize].ty;
                 let result_kind = self.tcx.kind_of(self.locals[result_local.0 as usize].ty);

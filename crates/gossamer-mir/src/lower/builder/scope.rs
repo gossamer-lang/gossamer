@@ -65,7 +65,7 @@ impl<'a> Builder<'a> {
             // runtime-length sequence, as its parameters and return do.
             carrier
         } else {
-            ty
+            self.env_callable_ty(ty)
         };
         let id = u32::try_from(self.locals.len()).expect("local overflow");
         self.locals.push(LocalDecl {
@@ -75,6 +75,72 @@ impl<'a> Builder<'a> {
             region: self.region_depth > 0,
         });
         Local(id)
+    }
+
+    /// `ty` with every `fn(..)` it names typed `Fn(..)`.
+    ///
+    /// The checker types a closure literal `fn(..)`, the raw code-pointer
+    /// shape, which owns nothing. A callable value in a body is the counted
+    /// environment every callable slot holds, so a local, and every container
+    /// or carrier it holds callables in, is typed as one. The one local that
+    /// holds a raw function name is retyped by [`Self::record_fn_name`].
+    pub(crate) fn env_callable_ty(&mut self, ty: Ty) -> Ty {
+        let kind = self.tcx.kind_of(ty).clone();
+        let folded = match kind {
+            TyKind::FnPtr(sig) => TyKind::FnTrait(sig),
+            TyKind::Ref { inner, mutability } => TyKind::Ref {
+                inner: self.env_callable_ty(inner),
+                mutability,
+            },
+            TyKind::Vec(elem) => TyKind::Vec(self.env_callable_ty(elem)),
+            TyKind::Slice(elem) => TyKind::Slice(self.env_callable_ty(elem)),
+            TyKind::Iterator(elem) => TyKind::Iterator(self.env_callable_ty(elem)),
+            TyKind::Sender(elem) => TyKind::Sender(self.env_callable_ty(elem)),
+            TyKind::Receiver(elem) => TyKind::Receiver(self.env_callable_ty(elem)),
+            TyKind::JoinHandle(elem) => TyKind::JoinHandle(self.env_callable_ty(elem)),
+            TyKind::Array { elem, len } => TyKind::Array {
+                elem: self.env_callable_ty(elem),
+                len,
+            },
+            TyKind::Tuple(elems) => {
+                TyKind::Tuple(elems.iter().map(|e| self.env_callable_ty(*e)).collect())
+            }
+            TyKind::HashMap {
+                key,
+                value,
+                ordered,
+            } => TyKind::HashMap {
+                key: self.env_callable_ty(key),
+                value: self.env_callable_ty(value),
+                ordered,
+            },
+            TyKind::Adt { def, substs } => {
+                let args: Vec<Ty> = substs
+                    .types()
+                    .iter()
+                    .map(|t| self.env_callable_ty(*t))
+                    .collect();
+                if args.as_slice() == substs.types() {
+                    return ty;
+                }
+                TyKind::Adt {
+                    def,
+                    substs: gossamer_types::Substs::from_types(args),
+                }
+            }
+            _ => return ty,
+        };
+        let folded = self.tcx.intern(folded);
+        if folded == ty { ty } else { folded }
+    }
+
+    /// Records that `local` holds a function's name or code address rather
+    /// than a callable environment, typing it as the raw code-pointer shape.
+    pub(crate) fn record_fn_name(&mut self, local: Local, name: String) {
+        if let TyKind::FnTrait(sig) = self.tcx.kind_of(self.locals[local.0 as usize].ty).clone() {
+            self.locals[local.0 as usize].ty = self.tcx.intern(TyKind::FnPtr(sig));
+        }
+        self.local_fn_name.insert(local, name);
     }
 
     pub(crate) fn fresh(&mut self, ty: Ty) -> Local {
@@ -308,6 +374,18 @@ impl<'a> Builder<'a> {
                 },
                 _ => None,
             };
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                ..
+            } = &terminator
+                && matches!(name.as_str(), "gos_rt_chan_send" | "gos_rt_chan_try_send")
+                && let Some(Operand::Copy(value)) = args.get(1)
+                && value.projection.is_empty()
+            {
+                let value_ty = self.locals[value.local.0 as usize].ty;
+                self.ensure_sent_aggregate_meta(value_ty);
+            }
             let terminator_span = self.expr_span;
             let block = self.current_block();
             block.terminator = terminator;

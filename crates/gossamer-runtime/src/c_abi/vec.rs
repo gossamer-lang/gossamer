@@ -2990,6 +2990,24 @@ pub extern "C" fn gos_rt_result_unwrap_or_str(r: i128, default: i64) -> i64 {
     default
 }
 
+/// `unwrap_or` where the value is a counted node: a payload-enum node or a
+/// callable's environment.
+///
+/// The answer carries a share of its own on both arms, as
+/// [`gos_rt_result_unwrap_or_str`] does: the payload's share moves out of the
+/// carrier, and a fallback that becomes the answer takes a second share, since
+/// its own binding still gives one back.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_result_unwrap_or_node(r: i128, default: i64) -> i64 {
+    if result_disc_of(r) == 0 {
+        return result_payload_of(r);
+    }
+    // SAFETY: a non-null word of a counted-node type points at a live RC
+    // allocation, and the retain masks the enum tag bits.
+    unsafe { crate::c_abi::rc::gos_rt_rc_retain(default as usize as *mut u8) };
+    default
+}
+
 /// Reads the two-word carrier a map keeps boxed, answering `None` for a null
 /// box: a map reader answers the box's address rather than the carrier.
 #[unsafe(no_mangle)]

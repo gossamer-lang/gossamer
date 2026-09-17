@@ -377,6 +377,14 @@ const SPECS: &[Spec] = &[
     // sent on a channel, count their `String` / `Vec` shares atomically while
     // eight OS threads copy and drop them at once.
     spec("feature-testing-examples/shared_struct_captures.gos"),
+    // Closures held by a `Vec`, a `Map`, a `Deque`, and a struct field in a
+    // `Vec` own their environments; element stores, `remove`, `pop`, and
+    // `unwrap_or` hand a callable over with a share of its own.
+    spec("feature-testing-examples/callable_containers.gos"),
+    // A struct sent on a channel owns its heap fields in the copy the queue
+    // carries, and a carrier field matched out of a struct hands its payload
+    // over.
+    spec("feature-testing-examples/chan_struct_owned_fields.gos"),
     spec("feature-testing-examples/hoisted_field_reads.gos"),
     spec("feature-testing-examples/field_reference_writes.gos"),
     spec("feature-testing-examples/nested_row_tables.gos"),

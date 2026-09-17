@@ -728,6 +728,13 @@ impl<'a> Builder<'a> {
                                 }
                                 _ => false,
                             };
+                            // A carrier of a closure literal holds its counted
+                            // environment, which the initialiser's type says
+                            // and the checker's `fn(..)` arm does not.
+                            let binding_ty = self.locals[local.0 as usize].ty;
+                            let promote_env_callable = init_ty != binding_ty
+                                && self.carrier_with_env_callable_arms(binding_ty) == init_ty;
+                            let binding_kind = self.tcx.kind_of(binding_ty);
                             if !matches!(
                                 binding_kind,
                                 TyKind::Bool
@@ -746,6 +753,7 @@ impl<'a> Builder<'a> {
                                 || promote_handle
                                 || promote_array_elem
                                 || promote_vec_elem
+                                || promote_env_callable
                             {
                                 self.locals[local.0 as usize].ty = init_ty;
                             }
@@ -760,7 +768,7 @@ impl<'a> Builder<'a> {
                             self.local_closure.insert(local, closure_name);
                         }
                         if let Some(fn_name) = self.local_fn_name.get(&value).cloned() {
-                            self.local_fn_name.insert(local, fn_name);
+                            self.record_fn_name(local, fn_name);
                         }
                         if let Some(rk) = self.local_runtime_kind.get(&value).copied() {
                             self.local_runtime_kind.insert(local, rk);

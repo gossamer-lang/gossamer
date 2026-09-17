@@ -2626,6 +2626,8 @@ impl<'a> Builder<'a> {
                         Some("gos_rt_result_unwrap_or_vec")
                     } else if self.carrier_payload_is_string(receiver_ty) {
                         Some("gos_rt_result_unwrap_or_str")
+                    } else if self.carrier_payload_is_counted_node(receiver_ty) {
+                        Some("gos_rt_result_unwrap_or_node")
                     } else {
                         Some("gos_rt_result_unwrap_or")
                     }
@@ -4388,6 +4390,7 @@ impl<'a> Builder<'a> {
             "gos_rt_option_unwrap"
             | "gos_rt_result_unwrap"
             | "gos_rt_result_unwrap_or"
+            | "gos_rt_result_unwrap_or_node"
             | "gos_rt_result_ok" => {
                 let inner = self
                     .first_generic_of(receiver.ty)
@@ -5411,6 +5414,8 @@ impl<'a> Builder<'a> {
                         "gos_rt_result_unwrap_or_vec"
                     } else if self.carrier_payload_is_string(lowered_recv_ty) {
                         "gos_rt_result_unwrap_or_str"
+                    } else if self.carrier_payload_is_counted_node(lowered_recv_ty) {
+                        "gos_rt_result_unwrap_or_node"
                     } else {
                         "gos_rt_result_unwrap_or"
                     });
@@ -5713,6 +5718,11 @@ impl<'a> Builder<'a> {
                     _ => None,
                 }
             }
+            // An `unwrap_or` fallback is an answer in place of the payload, so
+            // it takes the payload's shape.
+            Some(sym) if sym.starts_with("gos_rt_result_unwrap_or") => self
+                .first_generic_of(self.locals[receiver_local.0 as usize].ty)
+                .or_else(|| self.first_generic_of(receiver.ty)),
             Some(sym)
                 if sym.starts_with("gos_rt_map_insert")
                     || sym.starts_with("gos_rt_map_or_insert") =>

@@ -966,6 +966,10 @@ pub fn runtime_symbol_addrs() -> Vec<(&'static str, *const u8)> {
             crate::c_abi::vec::gos_rt_result_unwrap_or_str as *const u8,
         ),
         (
+            "gos_rt_result_unwrap_or_node",
+            crate::c_abi::vec::gos_rt_result_unwrap_or_node as *const u8,
+        ),
+        (
             "gos_rt_result_ok_payload_release",
             crate::c_abi::vec::gos_rt_result_ok_payload_release as *const u8,
         ),

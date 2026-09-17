@@ -28,14 +28,8 @@ const SLACK_KB: i64 = 4096
 /// Probes whose growth is a known-open bug: exercised and reported on every
 /// run, but not a gate, because the leak they show has not been fixed yet. A
 /// name leaves this list in the same change that fixes it.
-///
-/// `map_field_replaced` is the shape that blocked the container-ownership
-/// work: a `Map` field of a struct behind `&mut`, replaced wholesale, holding
-/// `Vec` values. Replacing the field never releases the map it replaced, so
-/// its peak still grows - the run is here to catch the teardown spin that
-/// shape once caused, which is a crash rather than a size.
 fn known_open() -> Vec<String> {
-    #["map_field_replaced"]
+    #[]
 }
 
 /// Programs whose peak belongs to one iteration, each written against a
@@ -143,6 +137,58 @@ fn probes() -> Vec<(String, String)> {
                 let mut cache = Cache { pages: Map::new(), seen: Set::new(), hits: 0 }
                 for i in 0..50 { fill(&mut cache, i) }
                 acc += cache.pages.len() + cache.hits + cache.seen.len()
+            }
+            println("{}", acc)
+        }
+        """)
+        ("closures_in_vec", """
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let mut fs: Vec<Fn(i64) -> i64> = #[]
+                let tag = format("t{}", i)
+                fs.push(|x| x + tag.len())
+                acc += fs[0](1)
+            }
+            println("{}", acc)
+        }
+        """)
+        ("closures_as_map_values", """
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let mut m: Map<i64, Fn(i64) -> i64> = Map::new()
+                let tag = format("t{}", i)
+                let other = format("u{}", i)
+                m.insert(i, |x| x + tag.len())
+                m.insert(i + 1, |x| x + other.len())
+                acc += m.get(i).unwrap()(1) + m.len()
+            }
+            println("{}", acc)
+        }
+        """)
+        ("struct_on_channel", """
+        use std::sync::channel
+        struct Msg { name: String, body: String, n: i64 }
+        fn produce(tx: Sender<Msg>) {
+            for i in 0..COUNT { tx.send(Msg { name: format("a{}", i), body: format("b{}", i), n: i }) }
+            tx.close()
+        }
+        fn main() {
+            let tx, rx = channel()
+            spawn(|| produce(tx))
+            let mut acc = 0
+            while let Some(m) = rx.recv() { acc += m.n + m.name.len() + m.body.len() }
+            println("{}", acc)
+        }
+        """)
+        ("option_field_if_let", """
+        struct Msg { opt: Option<String>, n: i64 }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                let m = Msg { opt: Some(format("o{}", i)), n: i }
+                if let Some(o) = m.opt { acc += o.len() }
             }
             println("{}", acc)
         }

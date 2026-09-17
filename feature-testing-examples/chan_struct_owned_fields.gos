@@ -1,0 +1,55 @@
+// A struct sent on a channel travels as a counted copy that owns its heap
+// fields, so a receiver that reads, keeps, or drops the value gives back every
+// `String`, `Vec`, `Map`, and `Option` payload it carried exactly once, and a
+// carrier field matched straight out of a struct hands its payload over.
+
+use std::sync::channel
+
+struct Inner { tags: Vec<String>, label: String }
+
+struct Msg { name: String, inner: Inner, counts: Map<String, i64>, opt: Option<String>, n: i64 }
+
+struct Point { x: i64, y: i64 }
+
+fn produce(tx: Sender<Msg>) {
+    for i in 0..30 {
+        let mut counts = Map::new()
+        counts.insert(format("c{}", i), i)
+        let opt = if i % 2 == 0 { Some(format("o{}", i)) } else { None }
+        let inner = Inner { tags: #[format("t{}", i), format("u{}", i)], label: format("l{}", i) }
+        tx.send(Msg { name: format("a{}", i), inner: inner, counts: counts, opt: opt, n: i })
+    }
+    tx.close()
+}
+
+fn points(tx: Sender<Point>) {
+    for i in 0..10 { tx.send(Point { x: i, y: i * 2 }) }
+    tx.close()
+}
+
+fn describe(m: Msg) -> String {
+    match m.opt {
+        Some(o) => format("{}:{}", m.name, o)
+        None => format("{}:-", m.name)
+    }
+}
+
+fn main() {
+    let tx, rx = channel()
+    spawn(|| produce(tx))
+    let mut total = 0
+    let mut kept: Vec<Msg> = #[]
+    let mut notes: Vec<String> = #[]
+    while let Some(m) = rx.recv() {
+        total += m.n + m.name.len() + m.inner.tags.len() + m.inner.label.len() + m.counts.len()
+        if let Some(o) = m.opt { total += o.len() }
+        if m.n % 7 == 0 { notes.push(describe(m)) }
+        if m.n % 3 == 0 { kept.push(m) }
+    }
+    let ptx, prx = channel()
+    spawn(|| points(ptx))
+    while let Some(p) = prx.recv() { total += p.x + p.y }
+    let last = kept.pop().unwrap()
+    println("{} {} {} {}", total, kept.len(), last.name, last.inner.tags[1])
+    println("{}", notes.join(" "))
+}

@@ -16637,6 +16637,40 @@ impl<'a> TypeChecker<'a> {
 
     /// Joins branch types without silently converting arrays or slices to Vec.
     /// As in Rust, both value-producing branches must have one compatible type.
+    /// The element type of an unannotated sequence literal. A function item
+    /// stored as an element is a callable value, so the elements share its
+    /// signature rather than one item's own type.
+    fn join_element_tys(&mut self, elems: &[Expr]) -> Ty {
+        let Some(first) = elems.first() else {
+            return self.fresh();
+        };
+        let first_ty = self.check_expr(first);
+        let elem_ty = match self.fn_item_value_ty(first_ty) {
+            Some(callable) => {
+                self.record_fn_item_coercion(first, callable);
+                callable
+            }
+            None => first_ty,
+        };
+        for elem in elems.iter().skip(1) {
+            let ty = self.check_expr(elem);
+            self.record_fn_item_coercion(elem, elem_ty);
+            self.unify(elem_ty, ty, elem.span);
+        }
+        elem_ty
+    }
+
+    /// The callable type a function item has as a stored value: its
+    /// instantiated signature. `None` when `ty` is not a function item.
+    fn fn_item_value_ty(&mut self, ty: Ty) -> Option<Ty> {
+        let resolved = self.infer.resolve(self.tcx, ty);
+        let Some(TyKind::FnDef { def, substs }) = self.tcx.kind(resolved).cloned() else {
+            return None;
+        };
+        let sig = self.instantiated_fn_item_sig(def, &substs)?;
+        Some(self.tcx.intern(TyKind::FnPtr(sig)))
+    }
+
     fn join_branch_tys(&mut self, a: Ty, b: Ty, span: Span) -> Ty {
         self.unify(a, b, span);
         a
@@ -17245,6 +17279,22 @@ impl<'a> TypeChecker<'a> {
             if let Some(error) = self.option_value_mismatch(pattern, binding_ty, init, init_ty) {
                 self.emit(error, init.span);
             } else {
+                // A mutable binding may later hold any callable of the same
+                // signature, so a function item stored in one is a callable
+                // value rather than the item's own type.
+                if ty.is_none()
+                    && forced.is_none()
+                    && matches!(
+                        &pattern.kind,
+                        PatternKind::Ident {
+                            mutability: gossamer_ast::Mutability::Mutable,
+                            ..
+                        }
+                    )
+                    && let Some(callable) = self.fn_item_value_ty(init_ty)
+                {
+                    self.unify(binding_ty, callable, init.span);
+                }
                 self.record_fn_item_coercion(init, binding_ty);
                 self.unify(binding_ty, init_ty, init.span);
             }
@@ -17984,15 +18034,7 @@ impl<'a> TypeChecker<'a> {
                     }
                     return self.tcx.intern(TyKind::Vec(want_elem));
                 }
-                let mut elem_ty = if let Some(first) = elems.first() {
-                    self.check_expr(first)
-                } else {
-                    self.fresh()
-                };
-                for elem in elems.iter().skip(1) {
-                    let ty = self.check_expr(elem);
-                    elem_ty = self.join_branch_tys(elem_ty, ty, elem.span);
-                }
+                let elem_ty = self.join_element_tys(elems);
                 self.tcx.intern(TyKind::Vec(elem_ty))
             }
             ArrayExpr::Repeat { value, count } => {
@@ -18040,15 +18082,7 @@ impl<'a> TypeChecker<'a> {
                         len: crate::ArrayLen::Concrete(elems.len()),
                     });
                 }
-                let mut elem_ty = if let Some(first) = elems.first() {
-                    self.check_expr(first)
-                } else {
-                    self.fresh()
-                };
-                for elem in elems.iter().skip(1) {
-                    let ty = self.check_expr(elem);
-                    elem_ty = self.join_branch_tys(elem_ty, ty, elem.span);
-                }
+                let elem_ty = self.join_element_tys(elems);
                 self.tcx.intern(TyKind::Array {
                     elem: elem_ty,
                     len: crate::ArrayLen::Concrete(elems.len()),

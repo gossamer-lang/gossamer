@@ -666,15 +666,17 @@ impl<'a> Lowerer<'a> {
                 // the sending frame's stack alloca; storing its address
                 // into the channel hands the receiver - on its own
                 // goroutine stack - a pointer that dangles the moment the
-                // sender's frame is reused. Heap-copy it (RC-aware) so the
-                // channel carries a stable pointer the receiver owns,
-                // matching the `gos_rt_result_new` Ok-payload path.
+                // sender's frame is reused. Copy it into a counted block so
+                // the channel carries a stable pointer the receiver owns. The
+                // block is laid out by the structural meta, as a map entry's
+                // is, so it holds its own share of every heap field and the
+                // receiver's release of the block gives them back.
                 // An `Option` or `Result` element is a two-word carrier, which
                 // no 8-byte channel slot holds. It boxes the way a value enum
                 // does everywhere else a single word must carry one, so the
                 // element word is the address of the carrier.
                 if let Some(heap_v) = self
-                    .maybe_heap_copy_aggregate(arg)
+                    .maybe_heap_copy_aggregate_for_map(arg)
                     .or_else(|| self.maybe_heap_copy_value_enum(arg))
                 {
                     let slot = self.entry_alloca("i64");

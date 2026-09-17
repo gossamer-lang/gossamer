@@ -1498,21 +1498,13 @@ fn link_posix(
         // symbol stripping, which `-g` may disable.
         cmd.arg(macos_link_optimisation_flag(opts));
     }
-    // Prefer a fast linker for a native host link only; a cross gcc
-    // driver selects its own target linker, so mold/lld here would
-    // target the host.
-    // Linux: mold (3-8x faster than GNU ld). macOS: ld.lld from brew
-    // llvm; `-fuse-ld=lld` tells Apple's clang driver to pick it up.
-    if !lt.is_cross {
-        match lt.os {
-            TargetOs::Linux if which::which("mold").is_ok() => {
-                cmd.arg("-fuse-ld=mold");
-            }
-            TargetOs::MacOs if which::which("ld.lld").is_ok() => {
-                cmd.arg("-fuse-ld=lld");
-            }
-            _ => {}
-        }
+    // Prefer mold for a native Linux host link only; a cross gcc driver
+    // selects its own target linker, so mold here would target the host.
+    // macOS keeps Apple's `ld`: it ships with the SDK and reads that SDK's
+    // `.tbd` library stubs, whose target list moves with each release
+    // faster than another linker's stub reader follows.
+    if !lt.is_cross && lt.os == TargetOs::Linux && which::which("mold").is_ok() {
+        cmd.arg("-fuse-ld=mold");
     }
     for p in object_paths {
         cmd.arg(p);

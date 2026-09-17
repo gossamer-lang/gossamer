@@ -1169,13 +1169,13 @@ pub(super) fn lower_intrinsic_call_handles(
             // A multi-slot aggregate value lives in the sender frame's
             // backing slot; storing its address into the channel hands the
             // receiver - on its own goroutine stack - a pointer that
-            // dangles once the sender frame is reused. Heap-copy it so the
+            // dangles once the sender frame is reused. Copy it so the
             // channel carries a stable pointer the receiver owns.
-            if let Some(slots) = args
-                .get(1)
-                .and_then(|a| operand_aggregate_slots(body, tcx, a))
+            if let Some(arg) = args.get(1)
+                && let Some(slots) = operand_aggregate_slots(body, tcx, arg)
             {
-                value = clone_aggregate_value(module, builder, intrinsics, value, slots)?;
+                value =
+                    sent_aggregate_copy(module, builder, intrinsics, body, tcx, arg, value, slots)?;
             }
             let v64 = coerce_arg_to(builder, value, types::I64)?;
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -1218,11 +1218,11 @@ pub(super) fn lower_intrinsic_call_handles(
                 Some(a) => lower_operand(module, builder, locals, body, tcx, a, None, intrinsics)?,
                 None => builder.ins().iconst(types::I64, 0),
             };
-            if let Some(slots) = args
-                .get(1)
-                .and_then(|a| operand_aggregate_slots(body, tcx, a))
+            if let Some(arg) = args.get(1)
+                && let Some(slots) = operand_aggregate_slots(body, tcx, arg)
             {
-                value = clone_aggregate_value(module, builder, intrinsics, value, slots)?;
+                value =
+                    sent_aggregate_copy(module, builder, intrinsics, body, tcx, arg, value, slots)?;
             }
             let v64 = coerce_arg_to(builder, value, types::I64)?;
             let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -1603,4 +1603,56 @@ pub(super) fn lower_intrinsic_call_handles(
         }
         _ => Ok(false),
     }
+}
+
+/// Copies an aggregate a channel send carries into the block the queue holds.
+///
+/// The block is a counted copy laid out by the value type's structural meta
+/// when one is registered, so it holds its own share of every heap field and
+/// the receiver's release of the block gives them back. A type with only a
+/// copy meta takes a counted copy under that, and one with neither a plain
+/// block, as on the LLVM tier.
+fn sent_aggregate_copy(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    body: &Body,
+    tcx: &TyCtxt,
+    arg: &Operand,
+    value: ir::Value,
+    slots: u32,
+) -> Result<ir::Value> {
+    let copy_meta = match arg {
+        Operand::Copy(place) if place.projection.is_empty() => {
+            let ty = body.local_ty(place.local);
+            let structural = format!("gos_rc_meta_boxaggr_{}", ty.as_u32());
+            tcx.rc_meta(&structural).map(|_| structural).or_else(|| {
+                tcx.aggr_copy_meta(ty)
+                    .filter(|sym| !sym.is_empty())
+                    .map(str::to_owned)
+            })
+        }
+        _ => None,
+    };
+    let Some((sym, blob)) = copy_meta.and_then(|sym| tcx.rc_meta(&sym).map(|blob| (sym, blob)))
+    else {
+        return clone_aggregate_value(module, builder, intrinsics, value, slots);
+    };
+    let ptr_ty = module.target_config().pointer_type();
+    let data_id = intrinsics.intern_rc_meta(module, &sym, blob)?;
+    let gv = module.declare_data_in_func(data_id, builder.func);
+    let meta = builder.ins().symbol_value(ptr_ty, gv);
+    let alloc_fn = intrinsics.extern_fn(
+        module,
+        "gos_rt_rc_alloc_copy",
+        &[types::I64, ptr_ty, ptr_ty],
+        &[ptr_ty],
+    )?;
+    let alloc_ref = module.declare_func_in_func(alloc_fn, builder.func);
+    let bytes = builder
+        .ins()
+        .iconst(types::I64, i64::from(slots.max(1)) * 8);
+    let src = coerce_arg_to(builder, value, ptr_ty)?;
+    let call = builder.ins().call(alloc_ref, &[bytes, meta, src]);
+    Ok(builder.inst_results(call)[0])
 }

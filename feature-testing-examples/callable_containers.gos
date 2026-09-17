@@ -1,0 +1,111 @@
+// Callables held by containers: a `Vec`, a `Map`, a `Deque`, and a struct
+// field inside a `Vec` each own the capture environment of every closure they
+// hold, and an element store, `remove`, `pop`, and `unwrap_or` hand a callable
+// over with a share of its own.
+
+use std::collections::Deque
+
+struct Handler { name: String, run: Fn(i64) -> i64 }
+
+enum Shape { Named(String), Pt(i64) }
+
+fn double(x: i64) -> i64 { x * 2 }
+
+fn build(n: i64) -> Vec<Fn(i64) -> i64> {
+    let mut out: Vec<Fn(i64) -> i64> = #[]
+    for i in 0..n {
+        let tag = format("tag{}", i)
+        out.push(|x| x + tag.len())
+    }
+    out
+}
+
+fn pick(add: bool) -> Fn(i64) -> i64 {
+    if add { |x| x + 1 } else { double }
+}
+
+fn apply_all(fs: Vec<Fn(i64) -> i64>, v: i64) -> i64 {
+    let mut acc = 0
+    for f in fs { acc += f(v) }
+    acc
+}
+
+fn main() {
+    let mut fs = build(50)
+    fs.push(double)
+    let noncap = |x: i64| x + 1
+    fs.push(noncap)
+    println("apply {} {}", apply_all(fs, 3), apply_all(fs, 4))
+    let mut total = 0
+    for i in 0..fs.len() { total += fs[i](1) }
+    let first = fs[0]
+    println("indexed {} first {}", total, first(10))
+    let copy = fs.clone()
+    fs.truncate(10)
+    println("copy {} {}", copy.len(), copy[40](0))
+    if let Some(last) = fs.pop() { println("pop {}", last(7)) }
+    let removed = fs.remove(0).unwrap_or(double)
+    let k = format("kk{}", 2)
+    let fallback = Vec::new().remove(0).unwrap_or(|x| x + k.len())
+    let bare = Vec::new().remove(0).unwrap_or(double)
+    println("removed {} {} {}", removed(7), fallback(7), bare(7))
+    fs[0] = |x| x - 100
+    let offset = 9
+    fs[1] = |x| x - offset
+    println("replaced {} {}", fs[0](0), fs[1](0))
+
+    let mut hs: Vec<Handler> = #[]
+    for i in 0..40 {
+        let s = format("h{}", i)
+        hs.push(Handler { name: format("n{}", i), run: |x| x + s.len() })
+    }
+    let mut filler: Vec<String> = #[]
+    for i in 0..200 { filler.push(format("filler-{}", i)) }
+    let mut hsum = 0
+    for h in hs { hsum += (h.run)(1) + h.name.len() }
+    println("handlers {} {}", hsum, filler.len())
+
+    let mut m: Map<i64, Fn(i64) -> i64> = Map::new()
+    for i in 0..20 {
+        let s = format("m{}", i)
+        m.insert(i, |x| x + s.len())
+    }
+    m.insert(3, |x| x * 1000)
+    m.remove(4)
+    println("map {} {} {}", m.get(3).unwrap()(1), m.get(12).unwrap()(1), m.len())
+
+    let mut shapes: Map<String, Shape> = Map::new()
+    for i in 0..10 { shapes.insert(format("k{}", i), Shape::Named(format("s{}", i))) }
+    shapes.remove("k4")
+    let picked = match shapes.get("k3") {
+        Some(Shape::Named(s)) => s
+        _ => "none"
+    }
+    let kept = shapes.remove("k5").unwrap_or(Shape::Pt(1))
+    let kept_name = match kept { Shape::Named(s) => s, Shape::Pt(n) => format("{}", n) }
+    println("shapes {} {} {}", picked, kept_name, shapes.len())
+
+    let mut d: Deque<Fn(i64) -> i64> = Deque::new()
+    for i in 0..20 {
+        let s = format("d{}", i)
+        d.push_back(|x| x + s.len())
+    }
+    println("deque {}", d.len())
+
+    let yes = format("{}", "yes").len() > 2
+    let chosen = if yes { |x: i64| x + 1 } else { |x: i64| x + 2 }
+    let matched = match yes { true => double, false => |x: i64| x - 1 }
+    let mut rebound = double
+    if yes { rebound = |x| x + 7 }
+    let items = #[double, |x: i64| x * 5]
+    let branch_vec = if yes { #[double] } else { #[] }
+    let tag = format("{}", "tail")
+    let maybe = if yes { Some(|x: i64| x + tag.len()) } else { None }
+    let wrapped = Some(|x: i64| x + tag.len())
+    let mut total = chosen(1) + matched(1) + pick(true)(1) + pick(false)(1) + rebound(1)
+    for f in items { total += f(2) }
+    total += branch_vec[0](3)
+    if let Some(f) = maybe { total += f(4) }
+    if let Some(f) = wrapped { total += f(5) }
+    println("branches {}", total)
+}

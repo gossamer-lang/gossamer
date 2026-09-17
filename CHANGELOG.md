@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.61.3 - Closures in containers, structs on channels, MacOS 27 support
+
+- A closure stored in a `Vec`, a `Deque`, a `Map`, an `Option`, or a `Result` is released with its holder, so the values it captured no longer leak on the compiled tiers.
+- A struct with a closure field held in a `Vec` keeps the closure's captured values alive for as long as the element holds it, where they could be freed while still in use.
+- A payload-bearing enum stored as a `Map` value, or in an `Option` held by a `Vec`, is released with its holder and when removed, where it leaked or was freed while still in use.
+- A closure that captures nothing, or a function name, used as a value through an `if` or `match`, returned from a function, stored in a `Vec` literal, or reassigned into a `let mut` binding runs on the compiled tiers, where the call crashed or ignored the reassignment.
+- `xs[i] = |x| ...` with a closure that captures nothing stores a callable on the compiled tiers, where calling the element crashed.
+- `unwrap_or` on an `Option` or `Result` of a closure or a payload-bearing enum accepts a function name as the fallback and releases the value it answers on the compiled tiers.
+- A struct sent on a channel carries its `String`, `Vec`, `Map`, and `Option` fields in a copy the receiver releases, where every sent struct leaked them on the compiled tiers.
+- `if let` and `match` on a struct's `Option<String>` field release the payload on the compiled tiers.
+- A mutating method or element store on a temporary (`Vec::new().pop()`, `#[3, 4].remove(0)`, `make()[0] = x`) runs under `gos run`, where the VM refused to load the program.
+- `gos build` on macOS links with the `ld` that ships with the SDK, so a build no longer fails on macOS 27 when an `ld.lld` from Homebrew LLVM is on `PATH`.
+
 ## 0.61.2 - Module-scoped serde types, typed `Map::with_capacity`, deferred constant initializers, use after free fix
 
 - A struct field that names a type declared in its own module refers to that

@@ -1474,6 +1474,7 @@ impl<'a> Builder<'a> {
             span,
         );
         let payload_local = self.lower_expr(payload_expr)?;
+        let ty = self.carrier_with_env_callable_arms(ty);
         // A callable payload slot holds the env-shaped callable every callable
         // slot holds, so a bare fn item is wrapped for the arm it fills.
         let payload_local = match self.carrier_arm_payload_ty(ty, disc) {
@@ -1481,6 +1482,41 @@ impl<'a> Builder<'a> {
             None => payload_local,
         };
         Some(self.lower_result_ctor_local(disc_local, payload_local, ty, span))
+    }
+
+    /// Carrier type `ty` with each `fn(..)` arm typed `Fn(..)`.
+    ///
+    /// A callable a carrier holds is always the counted environment every
+    /// callable slot holds (a closure literal is one, and a function item is
+    /// wrapped into one as it is stored), while the checker types a closure
+    /// literal `fn(..)`, the raw code-pointer shape that owns nothing. The
+    /// environment type is what makes the carrier give its payload back.
+    pub(crate) fn carrier_with_env_callable_arms(&mut self, ty: Ty) -> Ty {
+        use gossamer_types::TyKind;
+        let TyKind::Adt { def, substs } = self.tcx.kind_of(ty).clone() else {
+            return ty;
+        };
+        if def.local != u32::MAX && def.local != u32::MAX - 1 {
+            return ty;
+        }
+        let arms = substs.types();
+        if !arms
+            .iter()
+            .any(|arm| matches!(self.tcx.kind_of(*arm), TyKind::FnPtr(_)))
+        {
+            return ty;
+        }
+        let arms: Vec<Ty> = arms
+            .iter()
+            .map(|arm| match self.tcx.kind_of(*arm).clone() {
+                TyKind::FnPtr(sig) => self.tcx.intern(TyKind::FnTrait(sig)),
+                _ => *arm,
+            })
+            .collect();
+        self.tcx.intern(TyKind::Adt {
+            def,
+            substs: gossamer_types::Substs::from_types(arms),
+        })
     }
 
     /// The payload type of the `Ok` / `Some` (`disc` 0) or `Err` (`disc` 1)

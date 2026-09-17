@@ -15,7 +15,7 @@ fixtures on native CI. They are the supported 1.0 execution contract.
 |---|---|
 | `x86_64-unknown-linux-gnu` | `ubuntu-latest` |
 | `aarch64-unknown-linux-gnu` | `ubuntu-24.04-arm` |
-| `aarch64-apple-darwin` | `macos-15` |
+| `aarch64-apple-darwin` | `xcode-27` (macOS 27) |
 | `x86_64-pc-windows-msvc` | `windows-latest` |
 
 ## Tier 2
@@ -53,8 +53,8 @@ or standard-library surface to Stable.
 
 Release artifacts, the embedded runtime, user Rust bindings, and executables
 produced by `gos build` use `MACOSX_DEPLOYMENT_TARGET=15.0`. macOS 15 is the
-supported deployment baseline and the native build regression runs on a
-`macos-15` GitHub Actions runner.
+supported deployment baseline, and the native build regression checks it on
+the macOS 27 `xcode-27` GitHub Actions runner.
 
 Building the complete toolchain from source for macOS 11 through 14 is allowed
 as an unsupported, best-effort configuration. Export one target for both the

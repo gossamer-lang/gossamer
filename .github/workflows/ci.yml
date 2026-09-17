@@ -72,13 +72,13 @@ jobs:
 
   macos-deployment-target:
     name: macOS 15 deployment target
-    runs-on: macos-15
+    runs-on: xcode-27
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
         with:
-          cache-prefix: v2-macos-15-deployment-target
+          cache-prefix: v3-macos-27-deployment-target
       - name: Verify final Mach-O deployment target
         run: |
           "$CARGO_BIN" test -p gossamer-cli --test cli \
@@ -95,12 +95,14 @@ jobs:
         # Always use *-latest runners. Pinned major versions
         # (macos-13, ubuntu-20.04, …) get retired by GitHub and
         # the queued job then waits forever for a runner that
-        # no longer exists. `ubuntu-24.04-arm` is the exception:
+        # no longer exists. Two exceptions: `ubuntu-24.04-arm`, because
         # GitHub ships Linux arm64 hosted runners only in pinned-major
         # form (no `*-arm-latest` yet), and this is the native aarch64
         # runner that executes `gos run FILE`, the Cranelift JIT, and
-        # `gos build` on real ARM Linux - the Raspberry Pi target.
-        os: [ubuntu-latest, macos-latest, windows-latest, ubuntu-24.04-arm]
+        # `gos build` on real ARM Linux - the Raspberry Pi target; and
+        # `xcode-27`, the macOS 27 image, whose SDK is the one a macOS
+        # user's `gos build` links against.
+        os: [ubuntu-latest, xcode-27, windows-latest, ubuntu-24.04-arm]
         suite: [general-0, general-1, general-2, parity-0-1, parity-2-3, parity-4-5]
     steps:
       - uses: actions/checkout@v6
@@ -550,7 +552,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-24.04-arm]
+        os: [xcode-27, windows-latest, ubuntu-24.04-arm]
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup
@@ -911,7 +913,7 @@ jobs:
   # zigbuild` (zig as the C toolchain).
   cross-from-macos:
     name: Cross macOS -> {aarch64,x86_64}-linux-musl
-    runs-on: macos-latest
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/rust-test-setup

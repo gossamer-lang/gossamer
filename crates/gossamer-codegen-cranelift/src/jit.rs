@@ -3231,6 +3231,7 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_result_unwrap_or"    => rt::gos_rt_result_unwrap_or,
         "gos_rt_result_unwrap_or_vec" => rt::vec::gos_rt_result_unwrap_or_vec,
         "gos_rt_result_unwrap_or_str" => rt::vec::gos_rt_result_unwrap_or_str,
+        "gos_rt_result_unwrap_or_node" => rt::vec::gos_rt_result_unwrap_or_node,
         "gos_rt_result_ok_payload_release" => rt::vec::gos_rt_result_ok_payload_release,
         "gos_rt_result_payload_release" => rt::vec::gos_rt_result_payload_release,
         "gos_rt_result_payload_retain" => rt::vec::gos_rt_result_payload_retain,

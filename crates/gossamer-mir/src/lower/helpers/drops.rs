@@ -407,11 +407,15 @@ pub(crate) fn carrier_field_kind(tcx: &TyCtxt, ty: Ty) -> Option<FieldRcKind> {
     if def.local != u32::MAX && def.local != u32::MAX - 1 {
         return None;
     }
-    let arm = |payload: Option<&Ty>| match payload.map(|t| tcx.kind_of(*t)) {
-        Some(TyKind::String) => 1,
-        Some(TyKind::Vec(_) | TyKind::Slice(_)) => 2,
-        Some(TyKind::DynError) => 4,
-        _ => 0,
+    let arm = |payload: Option<&Ty>| match payload {
+        Some(t) if tcx.is_counted_node(*t) => 4,
+        Some(t) => match tcx.kind_of(*t) {
+            TyKind::String => 1,
+            TyKind::Vec(_) | TyKind::Slice(_) => 2,
+            TyKind::DynError => 4,
+            _ => 0,
+        },
+        None => 0,
     };
     let types = substs.types();
     let (ok, err) = (arm(types.first()), arm(types.get(1)));
@@ -924,6 +928,52 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
             }
         }
     }
+    // A carrier the payload walk emptied right after an extraction held a
+    // share of its own (`own_carrier_payloads` took it where the carrier was
+    // read out of its slot), and the extraction handed that share over. Its
+    // payload is the binding's, not a borrow of the slot.
+    for block in &body.blocks {
+        for pair in block.stmts.windows(2) {
+            if let [
+                Statement {
+                    kind:
+                        StatementKind::Assign {
+                            rvalue: Rvalue::CallIntrinsic { name, args },
+                            ..
+                        },
+                    ..
+                },
+                Statement {
+                    kind:
+                        StatementKind::Assign {
+                            place: emptied,
+                            rvalue:
+                                Rvalue::CallIntrinsic {
+                                    name: empty_name,
+                                    args: empty_args,
+                                },
+                        },
+                    ..
+                },
+            ] = pair
+                && *name == "gos_rt_result_payload"
+                && *empty_name == "gos_rt_result_new"
+                && matches!(
+                    empty_args.as_slice(),
+                    [
+                        Operand::Const(ConstValue::Int(1)),
+                        Operand::Const(ConstValue::Int(0))
+                    ]
+                )
+                && emptied.projection.is_empty()
+                && matches!(args.first(), Some(Operand::Copy(c))
+                    if c.projection.is_empty() && c.local == emptied.local)
+                && (emptied.local.0 as usize) < n_locals
+            {
+                borrowed_enum_src[emptied.local.0 as usize] = false;
+            }
+        }
+    }
     let enum_arg_is_borrowed = |args: &[Operand]| -> bool {
         matches!(
             args.first(),
@@ -1058,6 +1108,17 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 set[p.local.0 as usize] = true;
             }
         };
+        // A carrier copied to or from another binding keeps its payload share
+        // through an extraction (`own_carrier_payloads` gives it back), so
+        // reading the payload out of one hands nothing over.
+        let carrier_aliases = bare_copies(body);
+        let carrier_is_aliased = |args: &[Operand]| {
+            matches!(args.first(), Some(Operand::Copy(p))
+                if p.projection.is_empty()
+                    && (p.local.0 as usize) < n_locals
+                    && (carrier_aliases.sourced[p.local.0 as usize]
+                        || carrier_aliases.target[p.local.0 as usize]))
+        };
         for block in &body.blocks {
             for stmt in &block.stmts {
                 let StatementKind::Assign { place, rvalue } = &stmt.kind else {
@@ -1072,6 +1133,7 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                             && is_rc_payload(place.local)
                             && !enum_arg_is_borrowed(args)
                             && carrier_is_frame_owned(args)
+                            && !carrier_is_aliased(args)
                         {
                             extraction_results[place.local.0 as usize] = true;
                         }
@@ -1498,6 +1560,16 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 {
                     continue;
                 }
+                // A map of payload-enum or callable values owns its values the
+                // same way, so the insert mints the entry's share of the node.
+                if (name.starts_with("gos_rt_map_insert")
+                    || name.starts_with("gos_rt_map_or_insert"))
+                    && arg_idx >= 2
+                    && let Some(l) = rc_operand(arg)
+                    && tcx.is_counted_node(body.locals[l.0 as usize].ty)
+                {
+                    continue;
+                }
                 if let Some(l) = rc_operand(arg).or_else(|| vec_operand(arg)) {
                     terminator_retains.push((block_idx, l));
                     continue;
@@ -1517,9 +1589,11 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 // check is the same fact the backend's copy site reads, so
                 // the two sides always agree; a route that never registered
                 // the meta keeps the mint and degrades to a bounded leak
-                // rather than an entry whose fields die under it.
+                // rather than an entry whose fields die under it. A channel
+                // send boxes its aggregate the same way.
                 if (name.starts_with("gos_rt_map_insert")
-                    || name.starts_with("gos_rt_map_or_insert"))
+                    || name.starts_with("gos_rt_map_or_insert")
+                    || name.starts_with("gos_rt_chan_send"))
                     && let Operand::Copy(vp) = arg
                     && vp.projection.is_empty()
                     && (vp.local.0 as usize) < body.locals.len()
@@ -3724,6 +3798,7 @@ fn mints_owned_string(name: &str) -> bool {
     matches!(
         name,
         "gos_rt_result_unwrap_or_str"
+            | "gos_rt_result_unwrap_or_node"
             | "gos_rt_option_unwrap"
             | "gos_rt_result_unwrap"
             | "gos_rt_option_default_with"
@@ -4864,6 +4939,7 @@ fn collect_field_rc(
                     {
                         Some(SLOT_KIND_RC_NODE)
                     }
+                    _ if tcx.is_counted_node(t) => Some(SLOT_KIND_RC_NODE),
                     _ => None,
                 }
             };
@@ -4874,12 +4950,17 @@ fn collect_field_rc(
                     continue;
                 };
                 out.push((gate, word, word + 1, k));
-                // A `String` or container payload is no copy blob, so only
-                // the owned-children store gives it back.
-                if k != SLOT_KIND_RC_NODE {
+                // A `String`, container, enum-node, or callable payload is no
+                // copy blob, so only the owned-children store gives it back.
+                if k != SLOT_KIND_RC_NODE || side.is_some_and(|t| tcx.is_counted_node(t)) {
                     *has_direct = true;
                 }
             }
+        }
+        // A callable's one word is its counted capture environment.
+        TyKind::FnTrait(_) | TyKind::Closure { .. } => {
+            out.push((-1, 0, word, SLOT_KIND_RC_NODE));
+            *has_direct = true;
         }
         TyKind::Adt { .. } => {
             if tcx.is_rc_managed(fty) {
@@ -4949,7 +5030,7 @@ pub(crate) fn elem_ownership(
     {
         return Some(ElemOwnership::Guarded(sym.to_string()));
     }
-    if tcx.is_payload_enum(elem) {
+    if tcx.is_counted_node(elem) {
         return Some(ElemOwnership::RcElems);
     }
     if matches!(tcx.kind_of(elem), TyKind::Vec(_) | TyKind::Slice(_)) {
@@ -5136,7 +5217,10 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
         // entry's death; under-tagging leaves the stored blob owned by the
         // inserting frame alone, which then frees it out from under the map.
         let structural = format!("gos_rc_meta_boxaggr_{}", value.as_u32());
-        if tcx.aggr_copy_meta(*value).is_some() || tcx.rc_meta(&structural).is_some() {
+        if tcx.aggr_copy_meta(*value).is_some()
+            || tcx.rc_meta(&structural).is_some()
+            || tcx.is_counted_node(*value)
+        {
             Some(VecMeta::MapBlob)
         } else if let TyKind::Vec(elem) | TyKind::Slice(elem) = tcx.kind_of(*value) {
             // A byte sequence is stored as the bytes themselves - the insert
@@ -5157,13 +5241,12 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
         if let Some(meta) = elem_meta_of(l).map(VecMeta::Guarded) {
             return Some(meta);
         }
-        // A payload-enum element is a single RC node pointer the vec owns
-        // outright: push moves the frame's share in (`gos_rt_vec_push` is
-        // a consuming call for RC-managed locals), so the vec's free must
-        // release each element or every pushed node leaks. String elements
-        // keep their dedicated `STRING` kind; `Weak` elements are not
-        // strong owners.
-        if elem_ty_of(l, tcx).is_some_and(|e| tcx.is_payload_enum(e)) {
+        // A payload-enum or callable element is a single RC node pointer the
+        // vec owns outright: push moves the frame's share in
+        // (`gos_rt_vec_push` is a consuming call for RC-managed locals), so
+        // the vec's free releases each element. String elements keep their
+        // dedicated `STRING` kind; `Weak` elements are not strong owners.
+        if elem_ty_of(l, tcx).is_some_and(|e| tcx.is_counted_node(e)) {
             return Some(VecMeta::RcElems);
         }
         // A nested-vec element is a refcounted container the outer vec
@@ -5603,6 +5686,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 | "gos_rt_result_unwrap_or"
                 | "gos_rt_result_unwrap_or_carrier"
                 | "gos_rt_result_unwrap_or_str"
+                | "gos_rt_result_unwrap_or_node"
                 | "gos_rt_result_unwrap_or_vec"
                 | "gos_rt_result_ok"
                 | "gos_rt_result_err"
@@ -6186,7 +6270,11 @@ pub(crate) fn holder_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::
     if !ok_is_aggregate {
         return None;
     }
-    match tcx.kind_of(*types.get(1)?) {
+    let err = *types.get(1)?;
+    if tcx.is_counted_node(err) {
+        return Some(4);
+    }
+    match tcx.kind_of(err) {
         TyKind::String => Some(1),
         TyKind::DynError => Some(4),
         _ => None,
@@ -6200,6 +6288,9 @@ pub(crate) fn holder_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::
 /// that discards it give it back.
 pub(crate) fn ok_or_err_kind(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> i64 {
     use gossamer_types::TyKind;
+    if tcx.is_counted_node(ty) {
+        return 4;
+    }
     match tcx.kind_of(ty) {
         TyKind::String => 1,
         TyKind::Vec(_) | TyKind::Slice(_) => 2,
@@ -6805,15 +6896,17 @@ fn send_layout_entries(
             // skips, and a scalar payload is never a counted kind.
             TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
                 let payload_kind = substs.types().iter().find_map(|t| match tcx.kind_of(*t) {
+                    _ if tcx.is_counted_node(*t) => Some(RC_CHILD_RC),
                     TyKind::String => Some(RC_CHILD_RC),
                     TyKind::Vec(_) | TyKind::Slice(_) => Some(RC_CHILD_VEC),
                     _ => None,
                 });
                 let uniform = substs.types().iter().all(|t| {
-                    matches!(
-                        tcx.kind_of(*t),
-                        TyKind::String | TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Unit
-                    )
+                    tcx.is_counted_node(*t)
+                        || matches!(
+                            tcx.kind_of(*t),
+                            TyKind::String | TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Unit
+                        )
                 });
                 if let Some(kind) = payload_kind
                     && uniform
@@ -6823,6 +6916,7 @@ fn send_layout_entries(
                         .filter(|t| !matches!(tcx.kind_of(**t), TyKind::Unit))
                         .all(|t| {
                             let same = match tcx.kind_of(*t) {
+                                _ if tcx.is_counted_node(*t) => RC_CHILD_RC,
                                 TyKind::String => RC_CHILD_RC,
                                 _ => RC_CHILD_VEC,
                             };
@@ -6939,7 +7033,12 @@ pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &mut gossamer_types
         }
         let val_ty = body.locals[val.local.0 as usize].ty;
         let kind = kind_of(val_ty);
-        let desc = if kind == Some(3) {
+        // A value boxed under its structural meta is a counted copy that owns
+        // its children, so releasing the box is the whole give-back.
+        let boxed_with_children = tcx
+            .rc_meta(&format!("gos_rc_meta_boxaggr_{}", val_ty.as_u32()))
+            .is_some();
+        let desc = if kind == Some(3) && !boxed_with_children {
             descriptor(val_ty)
         } else {
             None
@@ -7060,15 +7159,20 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
     }
 
     // The `gos_rt_result_payload_release` kinds of a carrier's two arms,
-    // `(ok, err)`: `1` for a `String`, `2` for a `Vec` / slice, `4` for an
-    // `errors::Error` cell, `0` for an arm whose payload the helper does not
-    // own. `None` when neither arm is one.
+    // `(ok, err)`: `1` for a `String`, `2` for a `Vec` / slice, `4` for a
+    // counted node (an `errors::Error` cell, a payload-enum node, or a
+    // callable's environment), `0` for an arm whose payload the helper does
+    // not own. `None` when neither arm is one.
     let payload_kind = |ty: gossamer_types::Ty| -> Option<(i64, i64)> {
-        let arm = |payload: Option<&gossamer_types::Ty>| match payload.map(|t| tcx.kind_of(*t)) {
-            Some(TyKind::String) => 1,
-            Some(TyKind::Vec(_) | TyKind::Slice(_)) => 2,
-            Some(TyKind::DynError) => 4,
-            _ => 0,
+        let arm = |payload: Option<&gossamer_types::Ty>| match payload {
+            Some(t) if tcx.is_counted_node(*t) => 4,
+            Some(t) => match tcx.kind_of(*t) {
+                TyKind::String => 1,
+                TyKind::Vec(_) | TyKind::Slice(_) => 2,
+                TyKind::DynError => 4,
+                _ => 0,
+            },
+            None => 0,
         };
         match tcx.kind_of(ty) {
             TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
@@ -8074,6 +8178,7 @@ fn discarded_receiver_arm(name: &str) -> Option<(usize, usize)> {
         | "gos_rt_result_or_else"
         | "gos_rt_result_unwrap_or"
         | "gos_rt_result_unwrap_or_str"
+        | "gos_rt_result_unwrap_or_node"
         | "gos_rt_result_unwrap_or_vec"
         | "gos_rt_result_unwrap_or_carrier"
         | "gos_rt_result_default_with"
@@ -8104,6 +8209,9 @@ pub(crate) fn release_mapped_payloads(body: &mut Body, tcx: &gossamer_types::TyC
                     if def.local == u32::MAX || def.local == u32::MAX - 1 =>
                 {
                     return substs.types().get(arm).and_then(|payload| {
+                        if tcx.is_counted_node(*payload) {
+                            return Some(4);
+                        }
                         match tcx.kind_of(*payload) {
                             TyKind::String => Some(1),
                             TyKind::Vec(_) | TyKind::Slice(_) => Some(2),

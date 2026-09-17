@@ -972,6 +972,7 @@ impl<'a> Builder<'a> {
             | "gos_rt_option_unwrap_carrier"
             | "gos_rt_result_unwrap_carrier"
             | "gos_rt_result_unwrap_or"
+            | "gos_rt_result_unwrap_or_node"
             | "gos_rt_result_ok" => self
                 .first_generic_of(receiver_ty)
                 .or_else(|| self.first_generic_of(lowered_recv_ty))
@@ -1190,7 +1191,10 @@ impl<'a> Builder<'a> {
         if dest_kind.is_none()
             && matches!(
                 sym,
-                "gos_rt_option_unwrap" | "gos_rt_result_unwrap" | "gos_rt_result_unwrap_or"
+                "gos_rt_option_unwrap"
+                    | "gos_rt_result_unwrap"
+                    | "gos_rt_result_unwrap_or"
+                    | "gos_rt_result_unwrap_or_node"
             )
             && let Some(rk) = self.local_runtime_kind.get(&receiver_local).copied()
         {

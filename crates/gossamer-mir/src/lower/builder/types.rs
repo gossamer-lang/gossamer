@@ -1612,6 +1612,27 @@ impl<'a> Builder<'a> {
     /// Whether the carrier's payload is a `String` - the case where
     /// `unwrap_or`'s fallback is itself a heap value and only one of the two
     /// becomes the answer.
+    /// Whether the carrier's payload is a counted node (a payload-enum node or
+    /// a callable's environment), whose `unwrap_or` answers a share of its own.
+    pub(crate) fn carrier_payload_is_counted_node(&self, ty: Ty) -> bool {
+        use gossamer_types::TyKind;
+        let mut cur = ty;
+        loop {
+            match self.tcx.kind_of(cur) {
+                TyKind::Ref { inner, .. } => cur = *inner,
+                TyKind::Adt { def, substs }
+                    if def.local == u32::MAX || def.local == u32::MAX - 1 =>
+                {
+                    return substs
+                        .types()
+                        .first()
+                        .is_some_and(|payload| self.tcx.is_counted_node(*payload));
+                }
+                _ => return false,
+            }
+        }
+    }
+
     pub(crate) fn carrier_payload_is_string(&self, ty: Ty) -> bool {
         use gossamer_types::TyKind;
         let mut cur = ty;
@@ -2030,6 +2051,7 @@ impl<'a> Builder<'a> {
             return None;
         };
         let child_kind = |t: Ty| match self.tcx.kind_of(t) {
+            _ if self.tcx.is_counted_node(t) => Some(gossamer_abi::rc::RC_CHILD_RC),
             TyKind::String => Some(gossamer_abi::rc::RC_CHILD_RC),
             TyKind::Vec(_) | TyKind::Slice(_) => Some(gossamer_abi::rc::RC_CHILD_VEC),
             _ => None,
@@ -2044,6 +2066,19 @@ impl<'a> Builder<'a> {
             return None;
         };
         Some((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | (word + 1))
+    }
+
+    /// Registers the metas a channel send boxes an aggregate value under.
+    ///
+    /// The queue carries a counted copy of the value, and the structural meta
+    /// is what makes that copy own the value's heap children: the copy takes a
+    /// share of each, and the receiver's release of the copy gives them back.
+    pub(crate) fn ensure_sent_aggregate_meta(&mut self, ty: Ty) {
+        if !self.is_inline_aggregate_ty(ty) {
+            return;
+        }
+        let _ = self.ensure_aggr_struct_meta(ty);
+        let _ = self.ensure_aggr_copy_meta(ty);
     }
 
     /// Registers (idempotently) the `RC_KIND_STRUCT` child-word meta for an

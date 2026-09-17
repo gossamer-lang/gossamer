@@ -550,7 +550,7 @@ impl<'a> Builder<'a> {
             })
         {
             let local = self.fresh(ty);
-            self.local_fn_name.insert(local, name.clone());
+            self.record_fn_name(local, name.clone());
             self.emit_assign(
                 Place::local(local),
                 Rvalue::Use(Operand::Const(ConstValue::Str(name))),
@@ -762,7 +762,7 @@ impl<'a> Builder<'a> {
                         | gossamer_types::TyKind::FnTrait(_)
                         | gossamer_types::TyKind::Closure { .. }
                 ) {
-                    self.local_fn_name.insert(local, joined_name.clone());
+                    self.record_fn_name(local, joined_name.clone());
                 }
                 Operand::FnRef {
                     def,
@@ -782,7 +782,7 @@ impl<'a> Builder<'a> {
             // the C-ABI shim exactly like a lifted bare closure.
             let resolved_name = gossamer_types::std_fn_values::rt_symbol_for_std_fn(&joined_name)
                 .map_or(joined_name, str::to_string);
-            self.local_fn_name.insert(local, resolved_name.clone());
+            self.record_fn_name(local, resolved_name.clone());
             Operand::Const(ConstValue::Str(resolved_name))
         };
         self.emit_assign(Place::local(local), Rvalue::Use(operand), span);
@@ -2062,6 +2062,7 @@ impl<'a> Builder<'a> {
                 let Some(value_local) = self.lower_expr(value) else {
                     return;
                 };
+                let value_local = self.coerce_to_fn_trait_if_needed(value_local, elem_ty, span);
                 let Some(base_local) = self.lower_expr(base) else {
                     return;
                 };

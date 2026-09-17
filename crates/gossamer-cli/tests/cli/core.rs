@@ -1767,7 +1767,7 @@ fn build_subcommand_accepts_known_target_triple_and_rejects_unknown() {
     // any host (no bundled SDK); it is refused with a specific error,
     // not silently stubbed. Pick the darwin triple for the *other*
     // arch: on an Apple Silicon macOS runner (host `aarch64-apple-darwin`,
-    // what `macos-latest` is today) the same-arch triple equals the host
+    // what CI's `xcode-27` runner is) the same-arch triple equals the host
     // and takes the native, non-cross build path instead of being refused.
     let other_arch_darwin = if cfg!(target_arch = "aarch64") {
         "x86_64-apple-darwin"

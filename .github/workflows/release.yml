@@ -268,10 +268,10 @@ jobs:
       matrix:
         include:
           - arch: aarch64
-            runner: macos-15
+            runner: xcode-27
             target: aarch64-apple-darwin
           - arch: x86_64
-            runner: macos-15
+            runner: xcode-27
             target: x86_64-apple-darwin
     steps:
       - uses: actions/checkout@v6

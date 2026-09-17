@@ -1442,6 +1442,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_result_unwrap_carrier", (I128) -> I128, Both, "result.unwrap() / result.expect() over an Ok payload that is itself a carrier: the boxed carrier, or a panic naming the `Err` value."),
     rt!("gos_rt_result_unwrap_or", (I128, I64) -> I64, Cranelift, "Unwrap a Result's Ok payload, or return the default if Err."),
     rt!("gos_rt_result_unwrap_or_carrier", (I128, I128) -> I128, Both, "unwrap_or where the payload is itself a Result / Option carrier, which is boxed rather than packed into the payload half."),
+    rt!("gos_rt_result_unwrap_or_node", (I128, I64) -> I64, Both, "unwrap_or over a payload-enum node or a callable: answers the payload, or answers the fallback with a share of its own."),
     rt!("gos_rt_result_unwrap_or_str", (I128, I64) -> I64, Both, "unwrap_or over a String: answers the payload, or answers the fallback with a share of its own."),
     rt!("gos_rt_result_unwrap_or_vec", (I128, I64) -> I64, Both, "unwrap_or over a sequence: answers the payload and reclaims the fallback, or answers the fallback."),
     rt!("gos_rt_router_add", (Ptr, Ptr, Ptr, Ptr, I64) -> Void, Cranelift, "Register a route on a Router: (method, pattern, handler-env, fn-addr)."),

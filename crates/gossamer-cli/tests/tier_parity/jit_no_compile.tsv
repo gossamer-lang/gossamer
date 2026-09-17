@@ -77,6 +77,7 @@ feature-testing-examples/bounded_channel.gos	bytecode-only local
 feature-testing-examples/break_unknown_label.gos	no hot body
 feature-testing-examples/by_value_container_semantics.gos	admission gate
 feature-testing-examples/bytes_builder.gos	unlowered call
+feature-testing-examples/callable_containers.gos	callable local
 feature-testing-examples/callable_in_map_values.gos	no hot body
 feature-testing-examples/callback_shorthands.gos	callable local
 feature-testing-examples/capture_by_reference.gos	string append
@@ -87,6 +88,7 @@ feature-testing-examples/carrier_unwrap_or_else.gos	admission gate
 feature-testing-examples/chan_carrier_elements.gos	cross-goroutine
 feature-testing-examples/chan_select_struct_payload.gos	bytecode-only local
 feature-testing-examples/chan_struct_local_recv.gos	bytecode-only local
+feature-testing-examples/chan_struct_owned_fields.gos	cross-goroutine
 feature-testing-examples/chan_struct_payload.gos	bytecode-only local
 feature-testing-examples/channel_fan_in.gos	cross-goroutine
 feature-testing-examples/channel_progress_not_deadlock.gos	cross-goroutine

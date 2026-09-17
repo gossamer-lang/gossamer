@@ -631,16 +631,12 @@ impl<'tcx> FnBuilder<'tcx> {
         // recursive place store. A local-rooted place bottoms out in a
         // register move; a `static mut`-rooted place (`COUNTER = …`,
         // `STATIC.field = …`) bottoms out in an `Op::StoreStatic` against
-        // the shared `Global::MutStatic` cell. Those are the only
-        // assignable place roots - a `const` or immutable `static` is
-        // rejected by the typechecker before it reaches here.
-        if self.place_root_is_local(place) || self.place_root_is_mut_static(place) {
-            let value_reg = self.compile_expr(value)?;
-            return self.compile_place_store(place, value_reg);
-        }
-        Err(RuntimeError::Unsupported(
-            "assignment to a place that is neither a local nor a mutable static",
-        ))
+        // the shared `Global::MutStatic` cell; a place rooted at a
+        // temporary (`make()[0] = x`) writes into the temporary, which
+        // then dies. A `const` or immutable `static` root is rejected by
+        // the typechecker before it reaches here.
+        let value_reg = self.compile_expr(value)?;
+        self.compile_place_store(place, value_reg)
     }
 
     fn returned_mut_ref_home(&self, init: &HirExpr) -> Option<TypedReg> {
@@ -901,9 +897,12 @@ impl<'tcx> FnBuilder<'tcx> {
                 op: HirUnaryOp::Deref,
                 operand,
             } => self.compile_place_store(operand, value_reg),
-            _ => Err(RuntimeError::Unsupported(
-                "assignment to non-place expression",
-            )),
+            // A temporary - a call's answer, a literal - has no storage for the
+            // updated value to go back to, so it dies with the expression, as
+            // on the compiled tiers. The checker rejects an assignment naming
+            // no place (GT0078), so what arrives here is the write-back of a
+            // mutating method or an element store on a temporary receiver.
+            _ => Ok(()),
         }
     }
 }
