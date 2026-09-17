@@ -26,12 +26,22 @@ opt-level = 0
 debug = 0
 incremental = false
 
+# Build scripts and proc-macros run only on the build machine, and rustc loads
+# a proc-macro through the crate metadata in its dylib. They stay unstripped:
+# the Xcode 27 linker lays out a stripped macOS dylib built for a deployment
+# target the SDK supplies in a way rustc cannot read that metadata from.
+[profile.dev.build-override]
+strip = false
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
 incremental = false
+
+[profile.release.build-override]
+strip = false
 
 [dependencies]
 gossamer-cli     = { path = '{{ gossamer_root }}/crates/gossamer-cli' }

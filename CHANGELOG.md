@@ -12,6 +12,7 @@
 - `if let` and `match` on a struct's `Option<String>` field release the payload on the compiled tiers.
 - A mutating method or element store on a temporary (`Vec::new().pop()`, `#[3, 4].remove(0)`, `make()[0] = x`) runs under `gos run`, where the VM refused to load the program.
 - `gos build` on macOS links with the `ld` that ships with the SDK, so a build no longer fails on macOS 27 when an `ld.lld` from Homebrew LLVM is on `PATH`.
+- A project with `[rust-bindings]` builds on macOS 27, and so does a release build of the toolchain from source, where the build stopped with `can't find crate` for a proc-macro dependency.
 
 ## 0.61.2 - Module-scoped serde types, typed `Map::with_capacity`, deferred constant initializers, use after free fix
 
