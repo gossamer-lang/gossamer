@@ -1,7 +1,7 @@
 # Gossamer
 
-A goroutine-powered, fast-compiling language with
-Rust-flavoured syntax and a Go-shaped runtime. Memory is automatic
+A fast-compiling language with Rust-flavoured syntax and a Go-shaped
+runtime. Memory is automatic
 and deterministic - a Swift-like model of reference counting (with
 automatic cycle collection) plus `arena { }` regions, and no tracing
 collector.

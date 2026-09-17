@@ -1,6 +1,6 @@
 site_name: Gossamer
 site_url: https://gossamer-lang.org/docs/
-site_description: A goroutine-powered, fast-compiling language with Rust-flavoured syntax and automatic, pause-free memory management.
+site_description: A fast-compiling language with Rust-flavoured syntax and automatic, pause-free memory management.
 site_author: Gossamer contributors
 repo_url: https://github.com/gossamer-lang/gossamer
 repo_name: gossamer-lang/gossamer

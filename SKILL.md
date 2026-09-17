@@ -6,8 +6,8 @@ Self-contained. For anything not covered here, lean on the toolchain
 
 ## 1. What Gossamer is
 
-A goroutine-powered, fast-compiling language with automatic,
-deterministic memory management (reference counting with cycle
+A fast-compiling language with automatic, deterministic memory
+management (reference counting with cycle
 collection, plus `arena { }` regions - no borrow checker, no
 lifetimes, no tracing-GC pauses). Syntax is Rust-flavoured; the
 runtime is Go-shaped (goroutines, channels). Source files conventionally end
@@ -104,7 +104,10 @@ extend(&mut items)           // items is now #[1, 2, 1]
   spelled at the call site, and the parameter's type says `&mut T`.
 - **Assignment is the same story**: `let b = a` gives `b` a value of its
   own. `b.push(3)` leaves `a` alone. `a.clone()` is only needed when you
-  want a second value from one you are still writing to.
+  want a second value from one you are still writing to. When `a` is not
+  read again, `let mut b = a` moves its storage (and capacity) rather than
+  copying, so building a `Vec` in one binding and finishing it in another
+  costs nothing.
 - **Passing a value twice is fine.** Nothing is consumed, so `f(xs)`
   then `g(xs)` needs no clone and no borrow.
 - **Scalars are copies** (`i64`, `f64`, `bool`, `char`).
@@ -186,7 +189,8 @@ Write clear, low-complexity, concise code.
   `fs::read_dir(dir)` hands back `Result<Vec<T>, _>`, so take the value
   first (`?`, a `match`, `unwrap_or(..)`) and iterate that.
 - **Bare integer indices** - `arr[i]` takes `i64`, no `as usize`.
-  Indexed reads and writes outside `[0, len)` panic on every tier. Vec
+  Indexed reads and writes outside `[0, len)` panic on every tier with
+  `vec index out of bounds: the len is N but the index is I`. Vec
   `insert` accepts `0..=len` and returns `Result<(), errors::Error>`;
   `remove` accepts `0..len` and returns `Result<T, errors::Error>`.
 - **Any hashable value is a `Map` / `Set` key** - integers, `bool`,
@@ -523,7 +527,11 @@ let shout = "  Hi  ".trim().to_lowercase() |> exclaim
 - **`&x` and `&mut x` are aliases, never copies**, and there are no
   lifetimes or non-lexical borrow analysis. A lightweight lexical check
   rejects a second named `&mut` to the same root, overlap with an active
-  named mutable alias, and repeated mutable roots in one call.
+  named mutable alias, a read of the root while its alias is live, and
+  repeated mutable roots in one call. An alias of a field writes the
+  field: `let d = &mut g.data` then `d[1] = v` or `d.push(x)`, and
+  `let w = &mut g.w` then `*w = 42`. Scope each alias in its own `{ }`
+  when the root is read or aliased again afterwards.
 - **Types**: `bool char i8..i64 u8..u64 isize usize f32 f64 String
   [T] [T; N] (A, B) Option<T> Result<T, E> &mut T` + user types.
   `Simd<T, N>` is a lane vector (`f32 f64 i32 i64 u8 u32`, 2/4/8/16 lanes;
@@ -920,7 +928,13 @@ you can reduce is a bug - check against both `gos` and `gos
 build`. Known sharp edges:
 
 - `+` on `String` copies; heavy assembly wants `bytes::Builder` or a
-  `mut String` with `+=`.
+  `mut String` with `+=`, reserved up front with `String::with_capacity(n)`
+  when the size is known (`Vec::with_capacity(n)` likewise).
+- Hot indexed loops compile tightest over struct fields the loop does
+  not reassign: `for x in 0..g.w { g.data[y * g.w + x] = v }` reads
+  `g.w` once before the loop and proves the index in range, so no
+  element pays a bounds check. A counted nest reading `grid[ny][nx]` that resizes no row
+  reads each row's header once on entry, not per access.
 - Method dispatch is type-directed for user methods, core
   `String`/`Map`/`Vec` receivers, and typed stdlib receivers.
   Qualified paths (`Point::origin()`) remain the most explicit form

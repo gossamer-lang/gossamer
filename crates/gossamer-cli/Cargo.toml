@@ -25,8 +25,8 @@ maintainer = "Gossamer contributors"
 copyright = "2026, Gossamer contributors"
 license-file = ["../../LICENSE", "4"]
 extended-description = """
-Gossamer is a garbage-collected, goroutine-powered, fast-compiling
-language with Rust-flavoured syntax. The `gos` toolchain
+Gossamer is a fast-compiling language with Rust-flavoured syntax and
+automatic, deterministic memory management. The `gos` toolchain
 ships the parser, type-checker, interpreter, linter, formatter,
 LSP adapter, doc generator, and test/bench harness as one binary."""
 section = "devel"
