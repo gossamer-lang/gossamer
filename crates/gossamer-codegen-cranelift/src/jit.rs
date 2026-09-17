@@ -3587,6 +3587,8 @@ fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashS
         "gos_rt_vec_free"            => rt::gos_rt_vec_free,
         "gos_rt_vec_retain"          => rt::gos_rt_vec_retain,
         "gos_rt_vec_mark_shared"     => rt::gos_rt_vec_mark_shared,
+        "gos_rt_set_mark_shared"     => rt::gos_rt_set_mark_shared,
+        "gos_rt_aggr_mark_shared_children" => rt::gos_rt_aggr_mark_shared_children,
         "gos_rt_set_free"            => rt::gos_rt_set_free,
         "gos_rt_map_keys_i64"        => rt::gos_rt_map_keys_i64,
         "gos_rt_map_values_i64"      => rt::gos_rt_map_values_i64,

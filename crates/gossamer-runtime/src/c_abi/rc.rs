@@ -572,8 +572,53 @@ unsafe fn mark_shared(payload: *mut u8) {
         }
         unsafe {
             visit_children_raw(p, |c| work.push(c));
+            // A container child is reached from other threads through this
+            // node, so the counted values it holds switch to atomic counting
+            // along with the node itself.
+            visit_entries(p, |kind, child| {
+                if kind != gossamer_abi::rc::RC_CHILD_RC {
+                    mark_shared_child(kind, child);
+                }
+            });
         }
     }
+}
+
+/// Marks one child of a node or an aggregate as shared, by the kind its layout
+/// entry names.
+unsafe fn mark_shared_child(kind: i64, child: *mut u8) {
+    match kind {
+        gossamer_abi::rc::RC_CHILD_RC => unsafe { mark_shared(child) },
+        gossamer_abi::rc::RC_CHILD_VEC => unsafe {
+            crate::c_abi::vec::gos_rt_vec_mark_shared(child.cast());
+        },
+        gossamer_abi::rc::RC_CHILD_MAP => unsafe {
+            crate::c_abi::map::gos_rt_map_mark_shared(child.cast());
+        },
+        gossamer_abi::rc::RC_CHILD_SET => unsafe {
+            crate::c_abi::set::gos_rt_set_mark_shared(child.cast());
+        },
+        _ => {}
+    }
+}
+
+/// Marks every counted field of a by-value aggregate as shared before the
+/// aggregate is published to another goroutine. `base` is the aggregate's own
+/// storage and `meta` its `RC_KIND_STRUCT` child-word layout; the aggregate is
+/// not a node, so the walk reads the layout it is handed rather than a header.
+///
+/// # Safety
+/// `base` must name the words `meta` describes, or be null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_aggr_mark_shared_children(base: *mut u8, meta: *const i64) {
+    if base.is_null() || meta.is_null() {
+        return;
+    }
+    unsafe {
+        visit_layout_entry_slots(base, meta, 0, |kind, _slot, child| {
+            mark_shared_child(kind, child);
+        });
+    };
 }
 
 /// Marks the reachable RC subgraph of `payload` as shared across
@@ -3019,13 +3064,11 @@ unsafe fn visit_entries(payload: *mut u8, mut f: impl FnMut(i64, *mut u8)) {
 /// its own - [`gossamer_abi::rc::RC_CHILD_MAP`] - writes the new handle back
 /// through that address.
 unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *mut u8)) {
-    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_WORD_MASK};
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
         return;
     }
     let kind = unsafe { *meta };
-    let variant_count = unsafe { *meta.add(1) };
     if kind == RC_KIND_STRUCT_GUARDED {
         unsafe {
             visit_guarded_children(payload, meta, |c| {
@@ -3048,6 +3091,21 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *m
     } else {
         0
     };
+    unsafe { visit_layout_entry_slots(payload, meta, target_disc, f) };
+}
+
+/// Walks the child entries an `RC_KIND_ENUM` / `RC_KIND_STRUCT` layout names
+/// over the words at `payload`, for the record `target_disc` selects (a struct
+/// layout has one record and ignores it).
+unsafe fn visit_layout_entry_slots(
+    payload: *mut u8,
+    meta: *const i64,
+    target_disc: i64,
+    mut f: impl FnMut(i64, *mut u8, *mut u8),
+) {
+    use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_WORD_MASK};
+    let kind = unsafe { *meta };
+    let variant_count = unsafe { *meta.add(1) };
     let mut idx: usize = 2;
     for _ in 0..variant_count.max(0) {
         let disc = unsafe { *meta.add(idx) };
@@ -5523,5 +5581,85 @@ mod tests {
             }
         }
         assert_eq!(rc_live_count(), base, "no leak and no double-free");
+    }
+
+    /// Whether a runtime string counts its shares atomically.
+    unsafe fn string_is_shared(s: *const std::ffi::c_char) -> bool {
+        let hdr = unsafe { s.cast::<u8>().sub(13) };
+        let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
+        rc & crate::c_abi::string::STR_SHARED != 0
+    }
+
+    /// A closure environment holding a boxed struct capture: marking the
+    /// environment shared reaches the strings inside the struct.
+    #[test]
+    fn mark_shared_reaches_strings_inside_a_boxed_struct_capture() {
+        let _g = count_guard();
+        fresh_cycle_state();
+        let base = rc_live_count();
+        let struct_meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 2, 0, 1];
+        let env_meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 1, 1];
+        unsafe {
+            let dir = crate::c_abi::string::test_gos_str("/tmp/datadir-marker-string");
+            let web = crate::c_abi::string::test_gos_str("/tmp/web-marker-string");
+            let words: [i64; 2] = [dir as i64, web as i64];
+            let boxed = gos_rt_enum_box_aggr(16, struct_meta.as_ptr(), words.as_ptr().cast());
+            let env = gos_rt_rc_alloc(16, env_meta.as_ptr());
+            set_child(env, 1, boxed);
+            assert!(!string_is_shared(dir) && !string_is_shared(web));
+            gos_rt_rc_mark_shared(env);
+            assert!(string_is_shared(dir), "the struct's first String is shared");
+            assert!(
+                string_is_shared(web),
+                "the struct's second String is shared"
+            );
+            gos_rt_rc_release(env);
+            crate::c_abi::string::gos_rt_str_free_typed(dir.cast_mut());
+            crate::c_abi::string::gos_rt_str_free_typed(web.cast_mut());
+        }
+        assert_eq!(rc_live_count(), base, "environment and box are reclaimed");
+    }
+
+    /// A node's `Vec` child is reached from other threads through the node, so
+    /// marking the node shared marks the strings the vector holds.
+    #[test]
+    fn mark_shared_reaches_strings_inside_a_vec_child() {
+        let _g = count_guard();
+        fresh_cycle_state();
+        let vec_child = gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT;
+        let meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 1, vec_child];
+        unsafe {
+            let tag = crate::c_abi::string::test_gos_str("tag-marker-string");
+            let tags = crate::c_abi::vec::gos_rt_vec_new_typed(
+                8,
+                crate::c_abi::vec::vec_elem_kind::STRING,
+            );
+            crate::c_abi::vec::gos_rt_vec_push_i64(tags, tag as i64);
+            let node = gos_rt_rc_alloc(8, meta.as_ptr());
+            set_child(node, 0, tags.cast());
+            gos_rt_rc_mark_shared(node);
+            assert!(string_is_shared(tag), "a Vec child's String is shared");
+        }
+    }
+
+    /// A by-value aggregate is marked in place, by the layout it is handed.
+    #[test]
+    fn aggregate_mark_shared_marks_counted_fields_in_place() {
+        let vec_child = gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT;
+        let meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 2, 0, vec_child | 2];
+        unsafe {
+            let dir = crate::c_abi::string::test_gos_str("aggregate-dir-marker");
+            let tag = crate::c_abi::string::test_gos_str("aggregate-tag-marker");
+            let tags = crate::c_abi::vec::gos_rt_vec_new_typed(
+                8,
+                crate::c_abi::vec::vec_elem_kind::STRING,
+            );
+            crate::c_abi::vec::gos_rt_vec_push_i64(tags, tag as i64);
+            let mut words: [i64; 3] = [dir as i64, 7, tags as i64];
+            gos_rt_aggr_mark_shared_children(words.as_mut_ptr().cast(), meta.as_ptr());
+            assert!(string_is_shared(dir), "the String field is shared");
+            assert!(string_is_shared(tag), "the Vec field's String is shared");
+            assert_eq!(words[1], 7, "a scalar word is left alone");
+        }
     }
 }

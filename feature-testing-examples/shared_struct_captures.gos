@@ -1,0 +1,48 @@
+// A struct a closure captures, or a struct sent on a channel, reaches other
+// threads with every `String` and `Vec` it holds counting its shares
+// atomically, so concurrent copies and drops never free a value still in use.
+
+use std::sync::channel
+
+struct App { dir: String, web: String }
+
+struct Holder { dir: String }
+
+struct Report { worker: i64, total: i64, sample: String, tags: Vec<String> }
+
+fn tally(app: App, rounds: i64) -> i64 {
+    let mut n = 0
+    for _ in 0..rounds {
+        let h = Holder { dir: app.dir }
+        n += (h.dir + "/LOCK").len() + app.web.len()
+    }
+    n
+}
+
+fn main() {
+    let base = format("/srv/{}", 7)
+    let app = App { dir: base + "/datadir-marker-string", web: base + "/web-marker-string" }
+    let mut grand = 0
+    let mut samples = 0
+    for round in 0..12 {
+        let tx, rx = channel()
+        let result = cohort(isolation: Isolation::Thread) {
+            for worker in 0..8 {
+                spawn(|| {
+                    let total = tally(app, 3000)
+                    let sample = app.dir + "/LOCK"
+                    tx.send(Report { worker: worker, total: total, sample: sample, tags: #[app.web, app.dir] })
+                })
+            }
+            for _ in 0..8 {
+                if let Some(report) = rx.recv() {
+                    grand += report.total + report.worker + report.tags.len()
+                    samples += report.sample.len() + report.tags[0].len()
+                }
+            }
+        }
+        if let Err(e) = result { println("round {} failed: {}", round, e) }
+    }
+    println("{} {}", grand, samples)
+    println("{} {}", app.dir, app.web)
+}

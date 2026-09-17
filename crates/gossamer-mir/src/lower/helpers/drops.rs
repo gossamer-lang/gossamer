@@ -6710,7 +6710,139 @@ fn emit_channel_drops(body: &mut Body, handle: Local) {
 /// receives is given back by the channel's teardown - which needs to know the
 /// shape of the word it is holding, and learns it here, where the element's
 /// static type is in hand.
-pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+/// The runtime call that marks a value of type `ty` shared as it is sent to
+/// another goroutine, with the layout meta symbol an in-place aggregate walk
+/// reads, or `None` when the value counts nothing.
+fn send_mark_shared_call(
+    tcx: &mut gossamer_types::TyCtxt,
+    ty: gossamer_types::Ty,
+) -> Option<(&'static str, Option<String>)> {
+    use gossamer_types::TyKind;
+    let mut cur = ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(cur) {
+        cur = *inner;
+    }
+    match tcx.kind_of(cur).clone() {
+        TyKind::Vec(_) | TyKind::Slice(_) => return Some(("gos_rt_vec_mark_shared", None)),
+        TyKind::HashMap { .. } => return Some(("gos_rt_map_mark_shared", None)),
+        TyKind::Adt { def, .. } if is_set_def(tcx, def) => {
+            return Some(("gos_rt_set_mark_shared", None));
+        }
+        _ => {}
+    }
+    if tcx.is_rc_managed(cur) {
+        return Some(("gos_rt_rc_mark_shared", None));
+    }
+    let inline = match tcx.kind_of(cur) {
+        TyKind::Tuple(_) | TyKind::Array { .. } => true,
+        TyKind::Adt { def, .. } => {
+            def.local < u32::MAX - 16 && tcx.struct_field_tys(*def).is_some()
+        }
+        _ => false,
+    };
+    if !inline {
+        return None;
+    }
+    let mut entries = Vec::new();
+    send_layout_entries(tcx, cur, 0, 0, &mut entries);
+    if entries.is_empty() {
+        return None;
+    }
+    let symbol = format!("gos_rc_meta_sendmark_{}", cur.as_u32());
+    if tcx.rc_meta(&symbol).is_none() {
+        let mut blob = vec![gossamer_abi::rc::RC_KIND_STRUCT, 1, 0, entries.len() as i64];
+        blob.extend_from_slice(&entries);
+        tcx.register_rc_meta(symbol.clone(), blob);
+    }
+    Some(("gos_rt_aggr_mark_shared_children", Some(symbol)))
+}
+
+/// Whether `def` names the `Set` / `BTreeSet` handle.
+fn is_set_def(tcx: &gossamer_types::TyCtxt, def: gossamer_resolve::DefId) -> bool {
+    tcx.def_name(def)
+        .is_some_and(|name| matches!(name, "Set" | "BTreeSet"))
+}
+
+/// Child-word entries naming every counted word of the by-value aggregate `ty`
+/// laid out from `base_word`, for the in-place sharing walk.
+fn send_layout_entries(
+    tcx: &gossamer_types::TyCtxt,
+    ty: gossamer_types::Ty,
+    base_word: i64,
+    depth: u32,
+    out: &mut Vec<i64>,
+) {
+    use gossamer_abi::rc::{
+        RC_CHILD_KIND_SHIFT, RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_SET, RC_CHILD_VEC,
+    };
+    use gossamer_types::TyKind;
+    if depth > 16 {
+        return;
+    }
+    let field_tys: Vec<gossamer_types::Ty> = match tcx.kind_of(ty) {
+        TyKind::Tuple(elems) => elems.clone(),
+        TyKind::Array { elem, len } => vec![*elem; len.to_usize()],
+        TyKind::Adt { def, substs } if def.local < u32::MAX - 16 => {
+            match tcx.adt_field_tys(*def, substs) {
+                Some(fields) => fields.to_vec(),
+                None => return,
+            }
+        }
+        _ => return,
+    };
+    let mut word = base_word;
+    for fty in field_tys {
+        let fwords = i64::from(tcx.slot_bytes(fty).max(8) / 8);
+        let entry = |kind: i64, at: i64| (kind << RC_CHILD_KIND_SHIFT) | at;
+        match tcx.kind_of(fty).clone() {
+            TyKind::Vec(_) | TyKind::Slice(_) => out.push(entry(RC_CHILD_VEC, word)),
+            TyKind::HashMap { .. } => out.push(entry(RC_CHILD_MAP, word)),
+            TyKind::Adt { def, .. } if is_set_def(tcx, def) => {
+                out.push(entry(RC_CHILD_SET, word));
+            }
+            // An `Option` / `Result` holds its payload in the word after the
+            // discriminant; a `None` payload word is zero, which the walk
+            // skips, and a scalar payload is never a counted kind.
+            TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
+                let payload_kind = substs.types().iter().find_map(|t| match tcx.kind_of(*t) {
+                    TyKind::String => Some(RC_CHILD_RC),
+                    TyKind::Vec(_) | TyKind::Slice(_) => Some(RC_CHILD_VEC),
+                    _ => None,
+                });
+                let uniform = substs.types().iter().all(|t| {
+                    matches!(
+                        tcx.kind_of(*t),
+                        TyKind::String | TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Unit
+                    )
+                });
+                if let Some(kind) = payload_kind
+                    && uniform
+                    && substs
+                        .types()
+                        .iter()
+                        .filter(|t| !matches!(tcx.kind_of(**t), TyKind::Unit))
+                        .all(|t| {
+                            let same = match tcx.kind_of(*t) {
+                                TyKind::String => RC_CHILD_RC,
+                                _ => RC_CHILD_VEC,
+                            };
+                            same == kind
+                        })
+                {
+                    out.push(entry(kind, word + 1));
+                }
+            }
+            _ if tcx.is_rc_managed(fty) => out.push(entry(RC_CHILD_RC, word)),
+            TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. } => {
+                send_layout_entries(tcx, fty, word, depth + 1, out);
+            }
+            _ => {}
+        }
+        word += fwords;
+    }
+}
+
+pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &mut gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
 
     let kind_of = |ty: gossamer_types::Ty| -> Option<i64> {
@@ -6782,7 +6914,7 @@ pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &gossamer_types::Ty
         (slot_desc(tcx, ty, &mut out) && out.bytes().any(|b| b != b's')).then_some(out)
     };
 
-    let mut sites: Vec<(usize, Local, i64, Option<String>)> = Vec::new();
+    let mut sites: Vec<(usize, Local, Local, i64, Option<String>)> = Vec::new();
     for (bi, block) in body.blocks.iter().enumerate() {
         let Terminator::Call {
             callee: Operand::Const(ConstValue::Str(name)),
@@ -6802,17 +6934,53 @@ pub(crate) fn record_channel_elem_kind(body: &mut Body, tcx: &gossamer_types::Ty
         if !chan.projection.is_empty() || (val.local.0 as usize) >= body.locals.len() {
             continue;
         }
-        let val_ty = body.locals[val.local.0 as usize].ty;
-        if let Some(kind) = kind_of(val_ty) {
-            let desc = if kind == 3 { descriptor(val_ty) } else { None };
-            sites.push((bi, chan.local, kind, desc));
+        if !val.projection.is_empty() {
+            continue;
         }
+        let val_ty = body.locals[val.local.0 as usize].ty;
+        let kind = kind_of(val_ty);
+        let desc = if kind == Some(3) {
+            descriptor(val_ty)
+        } else {
+            None
+        };
+        sites.push((bi, chan.local, val.local, kind.unwrap_or(0), desc));
     }
     if sites.is_empty() {
         return;
     }
     let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
-    for (bi, chan, kind, desc) in sites {
+    for (bi, chan, val, kind, desc) in sites {
+        // The value reaches the receiving goroutine, so everything it counts
+        // switches to atomic reference counting before it is enqueued.
+        let val_ty = body.locals[val.0 as usize].ty;
+        if let Some((name, meta)) = send_mark_shared_call(tcx, val_ty) {
+            let sink = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+            body.locals.push(crate::ir::LocalDecl {
+                ty: unit_ty,
+                debug_name: None,
+                mutable: false,
+                region: false,
+            });
+            if let Some(block) = body.blocks.get_mut(bi) {
+                let span = block.span;
+                let mut args = vec![Operand::Copy(Place::local(val))];
+                if let Some(meta) = meta {
+                    args.push(Operand::Const(ConstValue::Str(meta)));
+                }
+                block.stmts.push(Statement {
+                    kind: StatementKind::Assign {
+                        place: Place::local(sink),
+                        rvalue: Rvalue::CallIntrinsic { name, args },
+                    },
+                    span,
+                    inlined: None,
+                });
+            }
+        }
+        if kind == 0 {
+            continue;
+        }
         let record = |name: &'static str, arg: Operand, body: &mut Body| {
             let sink = Local(u32::try_from(body.locals.len()).expect("local overflow"));
             body.locals.push(crate::ir::LocalDecl {

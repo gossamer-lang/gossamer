@@ -2492,3 +2492,98 @@ fn projected_rc_calls(body: &gossamer_mir::Body, name: &str, field: u32) -> usiz
         })
         .count()
 }
+
+/// The `gos_rc_alloc` meta symbols a body builds environments with.
+fn closure_env_metas(body: &gossamer_mir::Body) -> Vec<String> {
+    body.blocks
+        .iter()
+        .flat_map(|b| b.stmts.iter())
+        .filter_map(|stmt| match &stmt.kind {
+            StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, args },
+                ..
+            } if *name == "gos_rc_alloc" => match args.get(1) {
+                Some(Operand::Const(ConstValue::Str(sym))) => Some(sym.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// A closure capturing a multi-slot struct holds it as a counted box its
+/// environment lists as a child, so sharing, release, and teardown walks over
+/// the environment reach the struct's `String` fields.
+#[test]
+fn closure_environment_owns_a_boxed_struct_capture() {
+    let source = r#"
+struct App { dir: String, web: String }
+
+fn make(base: String) -> Fn() -> String {
+    let app = App { dir: base + "/data", web: base + "/web" }
+    let f = || app.dir + "/LOCK"
+    f
+}
+"#;
+    let (bodies, tcx) = build_with_lift(source);
+    let body = bodies.iter().find(|b| b.name == "make").expect("body");
+    assert!(
+        call_symbol_names(body).iter().any(|n| n == "gos_rt_enum_box_aggr"),
+        "the struct capture is boxed with its child meta"
+    );
+    let metas = closure_env_metas(body);
+    let meta = metas
+        .iter()
+        .find(|sym| sym.starts_with("gos_rc_meta_closure_"))
+        .expect("the environment carries a layout meta");
+    let blob = tcx.rc_meta(meta).expect("registered meta");
+    assert_eq!(
+        blob,
+        &[gossamer_abi::rc::RC_KIND_STRUCT, 1, 0, 1, 1],
+        "the capture word is an RC child of the environment"
+    );
+}
+
+/// A struct sent on a channel marks each counted field shared in place before
+/// it is enqueued, whichever lowering produced the send.
+#[test]
+fn channel_send_of_a_struct_marks_its_fields_shared() {
+    let source = r#"
+use std::sync::channel
+
+struct App { dir: String, n: i64, tags: Vec<String> }
+
+fn main() {
+    let tx, rx = channel()
+    let app = App { dir: format("{}", 1), n: 2, tags: #[format("{}", 3)] }
+    tx.send(app)
+    tx.close()
+    let _ = rx.recv()
+}
+"#;
+    let (bodies, tcx) = build(source);
+    let body = bodies.iter().find(|b| b.name == "main").expect("body");
+    let marker = body
+        .blocks
+        .iter()
+        .flat_map(|b| b.stmts.iter())
+        .find_map(|stmt| match &stmt.kind {
+            StatementKind::Assign {
+                rvalue: Rvalue::CallIntrinsic { name, args },
+                ..
+            } if *name == "gos_rt_aggr_mark_shared_children" => match args.get(1) {
+                Some(Operand::Const(ConstValue::Str(sym))) => Some(sym.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .expect("the send marks the struct's fields shared");
+    let blob = tcx.rc_meta(&marker).expect("registered meta");
+    let rc = gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT;
+    let vec = gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT;
+    assert_eq!(
+        blob,
+        &[gossamer_abi::rc::RC_KIND_STRUCT, 1, 0, 2, rc, vec | 2],
+        "the String at word 0 and the Vec at word 2 are marked"
+    );
+}

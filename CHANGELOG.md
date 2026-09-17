@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.61.2 - Module-scoped serde types, typed `Map::with_capacity`, deferred constant initializers
+## 0.61.2 - Module-scoped serde types, typed `Map::with_capacity`, deferred constant initializers, use after free fix
 
 - A struct field that names a type declared in its own module refers to that
   type, even when another module declares a struct with the same name. A
@@ -18,6 +18,21 @@
 - `with_capacity` on a collection that does not declare it (`BTreeMap`,
   `Set`, `Deque`, `Stack`, ...) is rejected at check time with GT0002; `Vec`,
   `Map`, and `String` keep it.
+- A closure that captures a struct by value holds it in a counted box its
+  environment owns, so registering the closure with a router or handing it to
+  a goroutine marks the struct's `String`, `Vec`, `Map`, and `Set` fields
+  shared. Concurrent requests to handlers that captured such a struct no
+  longer free a `String` still in use, and a captured struct's `Vec` and `Map`
+  fields read correctly in compiled closures.
+- A value sent on a channel - a `String`, a `Vec`, a `Map`, a `Set`, or a
+  struct or tuple holding them - switches to atomic reference counting before
+  it is enqueued, on every path a send is lowered through.
+- Marking a value shared reaches the `String` and counted values inside its
+  `Vec`, `Map`, and `Set` fields.
+- A goroutine spawned under `cohort(isolation: Isolation::Thread)` counts as a
+  party that can still send or receive, so a compiled program no longer
+  reports `all goroutines are asleep - deadlock!` while such a goroutine is
+  about to use the channel.
 - `gos fmt` keeps the item after a `type` or `newtype` alias whose right-hand
   side has type arguments (`type Opts = Map<String, i64>`) at its own
   indentation, where it indented that item one level.

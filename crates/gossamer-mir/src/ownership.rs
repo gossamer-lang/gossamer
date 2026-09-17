@@ -16,6 +16,9 @@ use crate::ir::{Body, ConstValue, Local, Operand, Rvalue, StatementKind, Termina
 /// goroutine (`go f(args)`, `spawn` closure captures, channel `send`).
 const MARK_SHARED: &str = "gos_rt_rc_mark_shared";
 
+/// The in-place counterpart of [`MARK_SHARED`] for a by-value aggregate.
+const MARK_SHARED_AGGREGATE: &str = "gos_rt_aggr_mark_shared_children";
+
 /// Per-body facts about which locals may reference a goroutine-shared
 /// object.
 pub(crate) struct ShareFacts {
@@ -49,7 +52,7 @@ impl ShareFacts {
                             connect(&mut adj, n, dest, src);
                         });
                         if let Rvalue::CallIntrinsic { name, args } = rvalue
-                            && *name == MARK_SHARED
+                            && (*name == MARK_SHARED || *name == MARK_SHARED_AGGREGATE)
                         {
                             push_operand_locals(args, &mut seeds);
                         }

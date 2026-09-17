@@ -1075,7 +1075,12 @@ impl<'a> Builder<'a> {
     /// aggregate's `RC_KIND_STRUCT` child-word meta (so its release reclaims
     /// `String` / nested-node children) and retains those children at copy
     /// time (so they outlive the source aggregate's scope-end teardown).
-    fn box_aggregate_payload(&mut self, payload_local: Local, agg_ty: Ty, span: Span) -> Local {
+    pub(crate) fn box_aggregate_payload(
+        &mut self,
+        payload_local: Local,
+        agg_ty: Ty,
+        span: Span,
+    ) -> Local {
         self.tcx.register_boxed_enum_payload(agg_ty);
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let size_bytes = i128::from(self.type_slot_bytes(agg_ty));

@@ -361,6 +361,7 @@ impl<'a> Lowerer<'a> {
                     *name,
                     "gos_rt_aggr_release_children"
                         | "gos_rt_aggr_retain_children"
+                        | "gos_rt_aggr_mark_shared_children"
                         | "gos_rt_aggr_zero_guarded"
                         | "gos_rt_option_slot_retain"
                         | "gos_rt_option_slot_release"

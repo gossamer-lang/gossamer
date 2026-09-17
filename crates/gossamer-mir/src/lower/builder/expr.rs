@@ -1180,8 +1180,31 @@ impl<'a> Builder<'a> {
         // it shared flips it from the goroutine-local lock-free fast path
         // to the synchronized one before it is published to the spawned
         // goroutine / channel peer.
+        if self.is_inline_aggregate_ty(ty) {
+            // A struct, tuple, or array is not a counted node; it escapes as
+            // its words, so each counted field it holds is marked in place.
+            let Some(meta) = self.ensure_aggr_struct_meta(ty) else {
+                return;
+            };
+            let unit_ty = self.tcx.unit();
+            let dest = self.fresh(unit_ty);
+            self.emit_assign(
+                Place::local(dest),
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_aggr_mark_shared_children",
+                    args: vec![
+                        Operand::Copy(Place::local(value)),
+                        Operand::Const(ConstValue::Str(meta)),
+                    ],
+                },
+                span,
+            );
+            return;
+        }
         let callee = if self.ty_is_hashmap(ty) {
             "gos_rt_map_mark_shared"
+        } else if self.is_set_ty(ty) {
+            "gos_rt_set_mark_shared"
         } else if matches!(self.tcx.kind_of(ty), gossamer_types::TyKind::Vec(_)) {
             "gos_rt_vec_mark_shared"
         } else if self.tcx.is_rc_managed(ty) {

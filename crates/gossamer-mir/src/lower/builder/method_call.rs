@@ -4206,12 +4206,6 @@ impl<'a> Builder<'a> {
                     self.emit_owned_clone_binding(a, cloned, span);
                     a = cloned;
                 }
-                // A value sent on a channel escapes to the receiving
-                // goroutine: switch any RC-managed value to atomic
-                // reference counting before it is enqueued.
-                if rt == "gos_rt_chan_send" {
-                    self.emit_mark_shared_if_rc(a, span);
-                }
                 arg_operands.push(Operand::Copy(Place::local(a)));
             }
         }
@@ -5294,12 +5288,6 @@ impl<'a> Builder<'a> {
                     let cloned = self.fresh(self.locals[a.0 as usize].ty);
                     self.emit_owned_clone_binding(a, cloned, span);
                     a = cloned;
-                }
-                // A value sent on a channel escapes to the receiving
-                // goroutine: switch any RC-managed value to atomic
-                // reference counting before it is enqueued.
-                if rt == "gos_rt_chan_send" {
-                    self.emit_mark_shared_if_rc(a, span);
                 }
                 arg_operands.push(Operand::Copy(Place::local(a)));
             }

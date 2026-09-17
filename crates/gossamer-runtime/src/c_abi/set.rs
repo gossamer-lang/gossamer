@@ -217,6 +217,29 @@ pub unsafe extern "C" fn gos_rt_set_eq(a: *const GosSet, b: *const GosSet) -> i6
     })
 }
 
+/// Marks every counted word a set's aggregate elements hold as shared, before
+/// the set is reached from another thread. Text and integer elements are owned
+/// copies with no count of their own.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_mark_shared(set: *mut GosSet) {
+    ffi_entry!((), {
+        if set.is_null() {
+            return;
+        }
+        let set = unsafe { &*set };
+        for slots in set.struct_inner.values() {
+            for (word, kind) in set.counted_words(slots) {
+                match kind {
+                    CountedWord::Rc => unsafe { crate::c_abi::rc::gos_rt_rc_mark_shared(word) },
+                    CountedWord::Vec => unsafe {
+                        crate::c_abi::vec::gos_rt_vec_mark_shared(word.cast());
+                    },
+                }
+            }
+        }
+    });
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_new() -> *mut GosSet {
     ffi_entry!(std::ptr::null_mut(), {

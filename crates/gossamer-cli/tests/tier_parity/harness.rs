@@ -373,6 +373,10 @@ const SPECS: &[Spec] = &[
     // A `const` / `static` initializer that calls an associated function
     // evaluates on the VM once functions are loaded, as it does compiled.
     spec("feature-testing-examples/const_initializer_calls_associated_fn.gos"),
+    // A struct a thread-isolated goroutine's closure captures, and a struct
+    // sent on a channel, count their `String` / `Vec` shares atomically while
+    // eight OS threads copy and drop them at once.
+    spec("feature-testing-examples/shared_struct_captures.gos"),
     spec("feature-testing-examples/hoisted_field_reads.gos"),
     spec("feature-testing-examples/field_reference_writes.gos"),
     spec("feature-testing-examples/nested_row_tables.gos"),

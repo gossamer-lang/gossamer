@@ -366,10 +366,18 @@ impl<'a> Builder<'a> {
         let mut vec_captures = vec![false; captures.len()];
         let mut child_entries: Vec<i64> = Vec::new();
         for (i, cap) in captures.iter().enumerate() {
-            let value_local = self.lower_expr(cap)?;
+            let mut value_local = self.lower_expr(cap)?;
             let value_ty = self.locals[value_local.0 as usize].ty;
             let word = i as i64 + 1;
-            if self.tcx.is_rc_managed(value_ty) {
+            if self.is_inline_aggregate_ty(value_ty) && self.type_slot_bytes(value_ty) > 8 {
+                // A multi-slot aggregate travels in its word as a box. The box
+                // carries the aggregate's child meta and holds a share of each
+                // counted field, so the environment owns it as an RC child and
+                // every walk over the environment (release, teardown, sharing)
+                // reaches those fields through it.
+                value_local = self.box_aggregate_payload(value_local, value_ty, span);
+                child_entries.push(word);
+            } else if self.tcx.is_rc_managed(value_ty) {
                 child_entries.push(word);
             } else if matches!(
                 self.tcx.kind_of(value_ty),

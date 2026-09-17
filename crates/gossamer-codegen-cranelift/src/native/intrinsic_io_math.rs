@@ -1257,6 +1257,7 @@ pub(super) fn lower_intrinsic_call_io_math(
         }
         "gos_rt_aggr_release_children"
         | "gos_rt_aggr_retain_children"
+        | "gos_rt_aggr_mark_shared_children"
         | "gos_rt_aggr_zero_guarded"
         | "gos_rt_vec_set_elem_meta"
         | "gos_rt_lazy_iter_set_elem_meta" => {
@@ -1308,6 +1309,7 @@ pub(super) fn lower_intrinsic_call_io_math(
             let sym: &'static str = match name {
                 "gos_rt_aggr_release_children" => "gos_rt_aggr_release_children",
                 "gos_rt_aggr_retain_children" => "gos_rt_aggr_retain_children",
+                "gos_rt_aggr_mark_shared_children" => "gos_rt_aggr_mark_shared_children",
                 "gos_rt_aggr_zero_guarded" => "gos_rt_aggr_zero_guarded",
                 "gos_rt_lazy_iter_set_elem_meta" => "gos_rt_lazy_iter_set_elem_meta",
                 _ => "gos_rt_vec_set_elem_meta",

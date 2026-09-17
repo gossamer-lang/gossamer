@@ -954,10 +954,16 @@ pub fn spawn_isolated(body: Box<dyn FnOnce() + Send + 'static>) {
 pub fn spawn_isolated(body: Box<dyn FnOnce() + Send + 'static>) {
     let cell = Arc::new(Mutex::new(Some(body)));
     let on_thread = Arc::clone(&cell);
+    // The child is not a scheduler goroutine, yet it can send, receive, and
+    // close. It counts as an actor from before its thread exists until the
+    // thread ends, so a channel wait elsewhere is never read as terminal
+    // while the child is still positioned to act.
+    let actor = crate::sched_global::ExternalActor::enter();
     let spawned = std::thread::Builder::new()
         .name("gos-isolated".to_string())
         .stack_size(ISOLATED_STACK_BYTES)
         .spawn(move || {
+            let _actor = actor;
             gossamer_coro::arm_stack_guard(
                 ISOLATED_STACK_BYTES - gossamer_coro::STACK_GUARD_MARGIN,
             );
