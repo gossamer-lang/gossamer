@@ -86,6 +86,24 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// The `String` whose bytes `expr` names when it is `text.as_bytes()`.
+    pub(crate) fn string_as_bytes_text<'h>(&self, expr: &'h HirExpr) -> Option<&'h HirExpr> {
+        match &expr.kind {
+            HirExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                ..
+            } if name.name == "as_bytes"
+                && args.is_empty()
+                && self.is_string_receiver(receiver) =>
+            {
+                Some(receiver)
+            }
+            _ => None,
+        }
+    }
+
     pub(crate) fn is_string_receiver(&self, expr: &HirExpr) -> bool {
         use gossamer_types::TyKind;
         let mut ty = self

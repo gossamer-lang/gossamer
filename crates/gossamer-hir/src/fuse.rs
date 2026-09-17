@@ -16,7 +16,9 @@
 //!
 //! Method chains get the same treatment: `xs.iter().map(f).filter(g).sum()`,
 //! `(1..n).map(f).sum()`, and an eager `xs.map(f).sum()` over a sequence of
-//! scalars become one index or counter loop.
+//! scalars become one index or counter loop. A `for` loop over such a chain,
+//! `for (i, x) in xs.iter().enumerate()` or `for i in (0..n).rev()`, becomes
+//! the same loop with its body spliced in as the terminal.
 //!
 //! Recognition is conservative: integer-range and scalar-sequence sources,
 //! `filter` / `map` stages, and a fixed set of terminals, with inline
@@ -36,6 +38,9 @@ use crate::tree::{
     HirLiteral, HirMatchArm, HirParam, HirPat, HirPatKind, HirProgram, HirStmt, HirStmtKind,
     HirUnaryOp,
 };
+
+/// The binding a `for` loop over a stateful iterable keeps its cursor in.
+pub(crate) const FOR_ITER: &str = "__for_iter";
 
 /// Rewrites every recognised `iter::` range pipeline in `program` into a
 /// fused loop.
@@ -166,6 +171,14 @@ enum Terminal {
     Max,
     /// `collect()` - a `Vec` of every element, in order.
     Collect,
+    /// The body of a `for` loop over the chain, run with its pattern bound to
+    /// each element. `label` is the loop's own, so a labelled `break` or
+    /// `continue` in the body reaches the fused loop.
+    Loop {
+        pat: HirPat,
+        body: HirExpr,
+        label: Option<String>,
+    },
 }
 
 /// Where a fused loop's elements come from.
@@ -392,6 +405,9 @@ impl Fuser<'_> {
     // ----- recognition -----
 
     fn plan(&mut self, expr: &HirExpr) -> Option<Plan> {
+        if let Some(plan) = self.plan_for_loop(expr) {
+            return Some(plan);
+        }
         if let Some(plan) = self.plan_sequence_call(expr) {
             return Some(plan);
         }
@@ -735,6 +751,13 @@ impl Fuser<'_> {
                 }
                 expr_ty
             }
+            // The pattern binds the element as the loop's own `next()` hands it.
+            Terminal::Loop { pat, .. } => {
+                if pat.ty != elem_ty {
+                    return None;
+                }
+                self.tcx.unit_interned()?
+            }
             Terminal::SumBy(_) | Terminal::ProductBy(_) => return None,
         })
     }
@@ -752,6 +775,106 @@ impl Fuser<'_> {
             return None;
         };
         let terminal = chain_terminal(name.name.as_str(), args)?;
+        self.plan_chain(receiver, terminal, expr.ty)
+    }
+
+    /// Recognises `for pat in chain { body }`, as the `__for_iter` binding and
+    /// `next()` loop it lowers to, over a chain whose source is an `i64` range,
+    /// `xs.iter()`, or a sequence binding.
+    fn plan_for_loop(&mut self, expr: &HirExpr) -> Option<Plan> {
+        let HirExprKind::Block(block) = &expr.kind else {
+            return None;
+        };
+        let ([iter_let], Some(tail)) = (block.stmts.as_slice(), block.tail.as_deref()) else {
+            return None;
+        };
+        let HirStmtKind::Let {
+            pattern,
+            init: Some(chain),
+            ..
+        } = &iter_let.kind
+        else {
+            return None;
+        };
+        if !matches!(&pattern.kind, HirPatKind::Binding { name, .. } if name.name == FOR_ITER) {
+            return None;
+        }
+        let HirExprKind::Loop { body, label } = &tail.kind else {
+            return None;
+        };
+        let HirExprKind::Block(loop_block) = &body.kind else {
+            return None;
+        };
+        let (true, Some(turn)) = (loop_block.stmts.is_empty(), loop_block.tail.as_deref()) else {
+            return None;
+        };
+        let HirExprKind::Match { scrutinee, arms } = &turn.kind else {
+            return None;
+        };
+        let HirExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &scrutinee.kind
+        else {
+            return None;
+        };
+        let HirExprKind::Unary {
+            op: HirUnaryOp::RefMut,
+            operand,
+        } = &receiver.kind
+        else {
+            return None;
+        };
+        if name.name != "next" || !args.is_empty() || !is_binding_path(operand, FOR_ITER) {
+            return None;
+        }
+        let [some_arm, none_arm] = arms.as_slice() else {
+            return None;
+        };
+        let HirPatKind::Variant {
+            name: some_name,
+            fields,
+        } = &some_arm.pattern.kind
+        else {
+            return None;
+        };
+        let [pat] = fields.as_slice() else {
+            return None;
+        };
+        let none_breaks = matches!(
+            &none_arm.body.kind,
+            HirExprKind::Break {
+                value: None,
+                label: None
+            }
+        );
+        if some_name.name != "Some"
+            || some_arm.guard.is_some()
+            || none_arm.guard.is_some()
+            || !matches!(&none_arm.pattern.kind, HirPatKind::Variant { name, fields }
+                if name.name == "None" && fields.is_empty())
+            || !none_breaks
+        {
+            return None;
+        }
+        let terminal = Terminal::Loop {
+            pat: pat.clone(),
+            body: some_arm.body.clone(),
+            label: label.clone(),
+        };
+        let unit_ty = self.tcx.unit_interned()?;
+        let plan = self.plan_chain(chain, terminal, unit_ty)?;
+        // A map's own `for` loop already walks its entries in place.
+        if matches!(plan.walk, Walk::Map { .. }) {
+            return None;
+        }
+        Some(plan)
+    }
+
+    /// The plan for `terminal` over the chain `receiver`, answering `expr_ty`.
+    fn plan_chain(&mut self, receiver: &HirExpr, terminal: Terminal, expr_ty: Ty) -> Option<Plan> {
         let (walk, stages_rev, eager) = self.chain_source(receiver)?;
         if eager && !eager_order_kept(&stages_rev, &terminal) {
             return None;
@@ -791,7 +914,7 @@ impl Fuser<'_> {
         if !is_walked_elem(self.tcx, elem_ty) {
             return None;
         }
-        let result_ty = self.chain_result_ty(&terminal, expr.ty, elem_ty)?;
+        let result_ty = self.chain_result_ty(&terminal, expr_ty, elem_ty)?;
         // A closure that names a walked binding could change it mid-walk.
         let walked_bases = stages_rev
             .iter()
@@ -825,7 +948,13 @@ impl Fuser<'_> {
         if segments.len() != 1 {
             return None;
         }
-        let elem_ty = match self.tcx.kind_of(base.ty) {
+        // A sequence parameter is a reference to its caller's value; indexing
+        // and `len` read through it.
+        let mut seq_ty = base.ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(seq_ty) {
+            seq_ty = *inner;
+        }
+        let elem_ty = match self.tcx.kind_of(seq_ty) {
             TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => *elem,
             _ => return None,
         };
@@ -846,7 +975,7 @@ impl Fuser<'_> {
         let counter = self.temp_name("i");
         let end_name = self.temp_name("end");
         let acc = self.temp_name("acc");
-        let has_acc = !matches!(plan.terminal, Terminal::ForEach(_));
+        let has_acc = !matches!(plan.terminal, Terminal::ForEach(_) | Terminal::Loop { .. });
 
         let Plan {
             walk,
@@ -1276,9 +1405,16 @@ impl Fuser<'_> {
             let down = self.step_stmt(shape.counter, HirBinaryOp::Sub, span);
             body_stmts.push(down);
         }
+        // A loop body may `continue`, which skips everything after it in the
+        // turn, so the counter steps before the body runs. The element is
+        // read into a binding first, since a range's element is the counter.
+        let (step_first, label) = match terminal {
+            Terminal::Loop { label, .. } => (true, label.clone()),
+            _ => (false, None),
+        };
         let value = self.elem_value(&read, shape.counter, span);
         let elem_ty = value.ty;
-        let elem = if matches!(read, ElemRead::Counter) {
+        let elem = if matches!(read, ElemRead::Counter) && !step_first {
             value
         } else {
             let elem_name = self.temp_name("e");
@@ -1286,8 +1422,12 @@ impl Fuser<'_> {
             body_stmts.push(bind);
             self.path(&elem_name, elem_ty, span)
         };
+        if step_first && !shape.reversed {
+            let up = self.step_stmt(shape.counter, HirBinaryOp::Add, span);
+            body_stmts.push(up);
+        }
         body_stmts.extend(self.build_body(steps, 0, elem, terminal, acc, result_ty, span));
-        if !shape.reversed {
+        if !shape.reversed && !step_first {
             let up = self.step_stmt(shape.counter, HirBinaryOp::Add, span);
             body_stmts.push(up);
         }
@@ -1307,7 +1447,7 @@ impl Fuser<'_> {
             HirExprKind::While {
                 condition: Box::new(cond),
                 body: Box::new(body_block),
-                label: None,
+                label,
             },
         )
     }
@@ -1748,6 +1888,21 @@ impl Fuser<'_> {
             }
             Terminal::Min | Terminal::Max => {
                 self.extreme_stmts(matches!(terminal, Terminal::Min), elem, acc, ty, span)
+            }
+            Terminal::Loop { pat, body, .. } => {
+                let bind = HirStmt {
+                    id: self.ids.next(),
+                    span,
+                    kind: HirStmtKind::Let {
+                        pattern: pat.clone(),
+                        ty: pat.ty,
+                        init: Some(elem),
+                    },
+                };
+                let body = self.expr_stmt(body.clone(), span);
+                let unit_ty = self.tcx.unit();
+                let turn = self.block(vec![bind, body], None, unit_ty, span);
+                vec![self.expr_stmt(turn, span)]
             }
         }
     }
@@ -2442,7 +2597,8 @@ fn closures_name_base(base: &HirExpr, stages: &[Stage], terminal: &Terminal) -> 
         | Terminal::SumBy(c)
         | Terminal::ProductBy(c)
         | Terminal::Find(c)
-        | Terminal::Position(c) => closures.push(c),
+        | Terminal::Position(c)
+        | Terminal::Loop { body: c, .. } => closures.push(c),
         Terminal::Sum
         | Terminal::Product
         | Terminal::Count

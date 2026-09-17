@@ -1,0 +1,87 @@
+// Extending a vector appends the source's elements in order, leaving the
+// source untouched and the capacity at least the length, and truncating or
+// clearing one keeps the prefix, for bytes taken from a string, scalar
+// elements, flat tuples, and elements that own heap values.
+
+fn lzw_like(codes: Vec<i64>) -> Vec<u8> {
+    let mut dict: Vec<String> = #[]
+    for i in 0..4 {
+        dict.push((('a' as i64 + i) as u8 as char).to_string())
+    }
+    let mut out: Vec<u8> = #[]
+    let mut prev = dict[codes[0]]
+    out.extend_from_slice(prev.as_bytes())
+    for i in 1..codes.len() {
+        let code = codes[i]
+        let word = if code < dict.len() { dict[code] } else { prev + prev.substring(0, 1) }
+        out.extend_from_slice(word.as_bytes())
+        dict.push(prev + word.substring(0, 1))
+        prev = word
+    }
+    out
+}
+
+fn main() {
+    let mut bytes: Vec<u8> = #[]
+    let words = #["", "a", "héllo", "", "wörld!", "0123456789abcdef0123"]
+    for w in words {
+        bytes.extend_from_slice(w.as_bytes())
+        println("bytes len={} fits={}", bytes.len(), bytes.capacity() >= bytes.len())
+    }
+    println("bytes = {:?}", bytes)
+
+    let mut via_extend: Vec<u8> = #[9]
+    via_extend.extend("xyz".as_bytes())
+    println("extend as_bytes = {:?}", via_extend)
+
+    let decoded = lzw_like(#[0, 1, 4, 2, 6, 3])
+    println("lzw-like = {}", String::from_utf8(decoded).unwrap_or("?"))
+
+    let mut ints: Vec<i64> = #[1]
+    let chunk: Vec<i64> = #[2, 3, 4, 5, 6]
+    for _ in 0..4 {
+        ints.extend_from_slice(chunk)
+        println("ints len={} fits={}", ints.len(), ints.capacity() >= ints.len())
+    }
+    ints.extend(#[])
+    println("ints = {:?}", ints)
+
+    let mut floats: Vec<f64> = Vec::with_capacity(3)
+    floats.extend(#[0.5, 1.5, 2.5, 3.5])
+    println("floats = {:?} fits={}", floats, floats.capacity() >= floats.len())
+
+    let mut pairs: Vec<(i64, bool)> = #[(0, false)]
+    pairs.extend(#[(1, true), (2, false), (3, true)])
+    pairs.extend_from_slice(pairs.clone())
+    println("pairs = {:?} fits={}", pairs, pairs.capacity() >= pairs.len())
+
+    let mut names: Vec<String> = #["ann"]
+    let more = #["bo", "cy"]
+    names.extend(more)
+    names.extend(more)
+    println("names = {:?} fits={} source = {:?}", names, names.capacity() >= names.len(), more)
+
+    let mut own: Vec<i64> = #[1, 2, 3]
+    own.extend(own.clone())
+    println("self extend = {:?}", own)
+
+    let mut sized: Vec<u8> = #[0; 4096]
+    for i in 0..10 {
+        sized[i] = (i * 3) as u8
+    }
+    sized.truncate(10)
+    println("truncated bytes = {:?}", sized)
+    sized.clear()
+    println("cleared bytes len={}", sized.len())
+
+    let mut words: Vec<String> = #[]
+    for i in 0..6 {
+        words.push(format("w{}", i))
+    }
+    let kept = words[1]
+    words.truncate(2)
+    println("truncated words = {:?} kept = {}", words, kept)
+    words.clear()
+    words.push("again")
+    println("cleared words = {:?}", words)
+}

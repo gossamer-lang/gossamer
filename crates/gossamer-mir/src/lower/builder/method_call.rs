@@ -2563,6 +2563,11 @@ impl<'a> Builder<'a> {
                 _ => Some(""),
             },
             "extend" | "extend_from_slice" if args.len() == 1 => match &receiver_kind_flat {
+                // The text's own bytes are appended in place, so no byte
+                // vector is built only to be copied and released.
+                TyKind::Vec(_) if self.string_as_bytes_text(&args[0]).is_some() => {
+                    Some("gos_rt_vec_extend_str_bytes")
+                }
                 TyKind::Vec(_) => Some("gos_rt_vec_extend"),
                 _ => None,
             },
@@ -5762,7 +5767,12 @@ impl<'a> Builder<'a> {
             )
         );
         for (index, arg) in args.iter().enumerate() {
-            let a = self.lower_expr(arg)?;
+            let a = match self.string_as_bytes_text(arg) {
+                Some(text) if runtime_symbol == Some("gos_rt_vec_extend_str_bytes") => {
+                    self.lower_expr(text)?
+                }
+                _ => self.lower_expr(arg)?,
+            };
             // 0.7.0 flag::Cell auto-deref at the call boundary -
             // mirrors the bytecode VM's auto-unwrap shape so
             // `get_comic(flags.number)` works without `*`.

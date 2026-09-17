@@ -1,0 +1,184 @@
+// A `for` loop over an iterator chain walks the same elements, in the same
+// order, and honours `continue`, `break`, labels, and `return` in its body the
+// way the loop over the runtime iterator does, on every tier.
+
+fn weighted(data: [u8]) -> i64 {
+    let mut acc = 0
+    for (i, b) in data.iter().enumerate() {
+        acc += i * (b as i64)
+    }
+    acc
+}
+
+fn odd_down(n: i64) -> String {
+    let mut out = #[]
+    for i in (0..n).rev() {
+        if i % 2 == 0 {
+            continue
+        }
+        out.push(i)
+    }
+    format("{:?}", out)
+}
+
+fn first_index_of(xs: Vec<i64>, want: i64) -> i64 {
+    for (i, x) in xs.iter().enumerate() {
+        if x == want {
+            return i
+        }
+    }
+    -1
+}
+
+fn bits_msb_first(byte: u8) -> String {
+    let mut out = ""
+    for bit in (0..8).rev() {
+        out += if (byte >> bit as u8) & 1 == 1 { "1" } else { "0" }
+    }
+    out
+}
+
+fn parse_all(words: Vec<String>) -> Result<i64, String> {
+    let mut total = 0
+    for i in (0..words.len()).rev() {
+        let Some(n) = words[i].to_i64() else {
+            return Err(format("bad word at {}", i))
+        }
+        total += n
+    }
+    Ok(total)
+}
+
+fn main() {
+    let bytes: Vec<u8> = #[3, 1, 4, 1, 5, 9, 2, 6]
+    println("weighted = {}", weighted(bytes))
+    println("weighted empty = {}", weighted(#[]))
+
+    println("odd_down 9 = {}", odd_down(9))
+    println("odd_down 0 = {}", odd_down(0))
+    println("odd_down -3 = {}", odd_down(-3))
+
+    let xs = #[7, 8, 9, 8]
+    println("first 8 = {}, first 5 = {}", first_index_of(xs, 8), first_index_of(xs, 5))
+
+    println("bits 0xA5 = {}", bits_msb_first(0xA5))
+    println("parse ok = {:?}", parse_all(#["1", "20", "300"]))
+    println("parse bad = {:?}", parse_all(#["1", "x", "3", "y"]))
+
+    let mut stopped = #[]
+    for (i, x) in (10..20).enumerate() {
+        if i == 4 {
+            break
+        }
+        if x % 3 == 0 {
+            continue
+        }
+        stopped.push(x * 10 + i)
+    }
+    println("break/continue = {:?}", stopped)
+
+    let mut pairs = #[]
+    'outer: for (i, x) in xs.iter().enumerate() {
+        for j in (0..4).rev() {
+            if j == i {
+                continue 'outer
+            }
+            if x == 9 && j == 1 {
+                break 'outer
+            }
+            pairs.push(i * 10 + j)
+        }
+    }
+    println("labelled = {:?}", pairs)
+
+    let mut staged = #[]
+    for (i, v) in (0..30).filter(|v| v % 2 == 1).map(|v| v * v).skip(1).step_by(2).take(4).enumerate() {
+        if v == 121 {
+            continue
+        }
+        staged.push(i * 1000 + v)
+    }
+    println("staged = {:?}", staged)
+
+    let ys = #[100, 200, 300]
+    let mut zipped = #[]
+    for (x, y) in xs.iter().zip(ys.iter()) {
+        if x == 8 {
+            continue
+        }
+        zipped.push(x + y)
+    }
+    println("zipped = {:?}", zipped)
+
+    let mut trimmed = #[]
+    for v in (0..20).skip_while(|v| v < 5).take_while(|v| v < 12) {
+        if v == 7 {
+            continue
+        }
+        trimmed.push(v)
+    }
+    println("trimmed = {:?}", trimmed)
+
+    let mut halves = #[]
+    for h in xs.iter().filter_map(|v| if v % 2 == 0 { Some(v / 2) } else { None }) {
+        halves.push(h)
+    }
+    println("halves = {:?}", halves)
+
+    let mut backwards = #[]
+    for x in xs.iter().rev() {
+        backwards.push(x)
+    }
+    println("iter.rev = {:?}", backwards)
+
+    let text = "héllo"
+    let mut positions = #[]
+    for (i, b) in text.bytes().enumerate() {
+        if b > 127 {
+            continue
+        }
+        positions.push(i)
+    }
+    println("ascii byte positions = {:?}", positions)
+
+    let arr: [i64; 4] = [5, 6, 7, 8]
+    let mut arr_sum = 0
+    for (i, v) in arr.iter().enumerate() {
+        arr_sum += i * v
+    }
+    println("array enumerate = {}", arr_sum)
+
+    let mut grid = #[]
+    for i in (0..3).rev() {
+        for (j, v) in xs.iter().enumerate() {
+            if j > i {
+                break
+            }
+            grid.push(i * 100 + v)
+        }
+    }
+    println("nested = {:?}", grid)
+
+    let mut seen = #[]
+    for (i, x) in xs.iter().enumerate() {
+        let i = i + x
+        let x = xs.len()
+        seen.push(i * x)
+    }
+    println("shadowed = {:?}", seen)
+
+    let mut reads_source = 0
+    for (i, x) in xs.iter().enumerate() {
+        reads_source += x * xs.len() + i
+    }
+    println("body reads source = {}", reads_source)
+
+    let mut steps = #[]
+    let mut count = 0
+    for i in (0..5).rev() {
+        count += 1
+        let f = |k: i64| k * 10 + i
+        steps.push(f(count))
+    }
+    println("closure over loop var = {:?}", steps)
+}

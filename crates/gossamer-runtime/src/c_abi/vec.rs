@@ -2145,6 +2145,19 @@ pub unsafe extern "C" fn gos_rt_vec_reserve_exact(v: *mut GosVec, cap: i64) {
     });
 }
 
+/// Grows `vec` to hold `need` elements with the capacity that growing one
+/// push at a time reaches.
+unsafe fn vec_reserve_as_pushed(vec: &mut GosVec, need: i64) {
+    if need <= vec.cap {
+        return;
+    }
+    let mut cap = vec.cap;
+    while cap < need {
+        cap = next_geometric_cap(cap, cap.saturating_add(1));
+    }
+    unsafe { vec_reserve_to(vec, cap, true) };
+}
+
 /// Appends every byte of the string `s` to the byte vector `v`, leaving the
 /// vector exactly as one [`gos_rt_vec_push`] per byte would: the same bytes in
 /// order, the capacity that growth one element at a time reaches, and the
@@ -2171,13 +2184,7 @@ pub unsafe extern "C" fn gos_rt_vec_extend_str_bytes(
         let added = bytes.len() as i64;
         vec.mutation_generation = vec.mutation_generation.wrapping_add(bytes.len() as u64);
         let need = vec.len.saturating_add(added);
-        if need > vec.cap {
-            let mut cap = vec.cap;
-            while cap < need {
-                cap = next_geometric_cap(cap, cap.saturating_add(1));
-            }
-            unsafe { vec_reserve_to(vec, cap, true) };
-        }
+        unsafe { vec_reserve_as_pushed(vec, need) };
         let stride = vec.elem_bytes as usize;
         let base = unsafe { vec.ptr.add((vec.len as usize) * stride) };
         if stride == 1 {
@@ -2255,6 +2262,32 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
             unsafe { vec_retain_slot_children(v, dst) };
         }
     });
+}
+
+/// Whether [`vec_release_elem_at`] releases nothing for any element of `vec`,
+/// so a run of its elements is dropped without visiting each one.
+fn vec_elems_release_nothing(vec: &GosVec) -> bool {
+    match vec.elem_kind {
+        vec_elem_kind::AGGR_GUARDED | vec_elem_kind::AGGR_OWNED => false,
+        vec_elem_kind::STRING
+        | vec_elem_kind::VEC
+        | vec_elem_kind::MAP
+        | vec_elem_kind::RC_ENUM
+        | vec_elem_kind::JSON => vec.elem_bytes as usize != 8,
+        _ => true,
+    }
+}
+
+/// Whether [`vec_retain_elem_at_for_copy`] takes no share and succeeds for
+/// every in-bounds element of `vec`.
+fn vec_elems_copy_without_retain(vec: &GosVec) -> bool {
+    matches!(
+        vec.elem_kind,
+        vec_elem_kind::PRIMITIVE
+            | vec_elem_kind::AGGR_GUARDED
+            | vec_elem_kind::AGGR_OWNED
+            | vec_elem_kind::AGGR_FLAT
+    )
 }
 
 unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
@@ -2407,8 +2440,10 @@ pub unsafe extern "C" fn gos_rt_vec_clear(v: *mut GosVec) {
         }
         let len = unsafe { (*v).len.max(0) };
         unsafe { bump_vec_mutation_generation(&mut *v) };
-        for idx in 0..len {
-            unsafe { vec_release_elem_at(v, idx) };
+        if !vec_elems_release_nothing(unsafe { &*v }) {
+            for idx in 0..len {
+                unsafe { vec_release_elem_at(v, idx) };
+            }
         }
         unsafe {
             (*v).len = 0;
@@ -2432,8 +2467,10 @@ pub unsafe extern "C" fn gos_rt_vec_truncate(v: *mut GosVec, len: i64) {
             return;
         }
         unsafe { bump_vec_mutation_generation(&mut *v) };
-        for idx in new_len..old_len {
-            unsafe { vec_release_elem_at(v, idx) };
+        if !vec_elems_release_nothing(unsafe { &*v }) {
+            for idx in new_len..old_len {
+                unsafe { vec_release_elem_at(v, idx) };
+            }
         }
         unsafe {
             (*v).len = new_len;
@@ -2512,6 +2549,29 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
         let len = src_ref.len.max(0);
         let stride = src_ref.elem_bytes as usize;
         if stride == 0 || src_ref.ptr.is_null() {
+            return;
+        }
+        // Flat elements own no heap children, so one copy of the block leaves
+        // `dst` exactly as a push per element would.
+        if matches!(
+            src_ref.elem_kind,
+            vec_elem_kind::PRIMITIVE | vec_elem_kind::AGGR_FLAT
+        ) {
+            if len == 0 {
+                return;
+            }
+            let dst_mut = unsafe { &mut *dst };
+            dst_mut.mutation_generation = dst_mut.mutation_generation.wrapping_add(len as u64);
+            let need = dst_mut.len.saturating_add(len);
+            unsafe { vec_reserve_as_pushed(dst_mut, need) };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    src_ref.ptr.as_ptr(),
+                    dst_mut.ptr.add((dst_mut.len as usize) * stride),
+                    (len as usize) * stride,
+                );
+            }
+            dst_mut.len = need;
             return;
         }
         for idx in 0..len {
@@ -3306,9 +3366,11 @@ pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: 
             return;
         }
         unsafe { bump_vec_mutation_generation(&mut *v) };
-        for offset in 0..len {
-            if !unsafe { vec_retain_elem_at_for_copy(v, src + offset) } {
-                crate::c_abi::panic::panic_text("copy_within: element type cannot be copied");
+        if !vec_elems_copy_without_retain(unsafe { &*v }) {
+            for offset in 0..len {
+                if !unsafe { vec_retain_elem_at_for_copy(v, src + offset) } {
+                    crate::c_abi::panic::panic_text("copy_within: element type cannot be copied");
+                }
             }
         }
         let span = (len as usize) * stride;
@@ -3320,8 +3382,10 @@ pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: 
                 span,
             );
         }
-        for offset in 0..len {
-            unsafe { vec_release_elem_at(v, dest + offset) };
+        if !vec_elems_release_nothing(unsafe { &*v }) {
+            for offset in 0..len {
+                unsafe { vec_release_elem_at(v, dest + offset) };
+            }
         }
         unsafe {
             std::ptr::copy_nonoverlapping(
@@ -3365,13 +3429,19 @@ pub unsafe extern "C" fn gos_rt_vec_copy_from_slice(dst: *mut GosVec, src: *cons
             return;
         }
         unsafe { bump_vec_mutation_generation(&mut *dst) };
-        for idx in 0..src_len {
-            if !unsafe { vec_retain_elem_at_for_copy(src, idx) } {
-                crate::c_abi::panic::panic_text("copy_from_slice: element type cannot be copied");
+        if !vec_elems_copy_without_retain(unsafe { &*src }) {
+            for idx in 0..src_len {
+                if !unsafe { vec_retain_elem_at_for_copy(src, idx) } {
+                    crate::c_abi::panic::panic_text(
+                        "copy_from_slice: element type cannot be copied",
+                    );
+                }
             }
         }
-        for idx in 0..dst_len {
-            unsafe { vec_release_elem_at(dst, idx) };
+        if !vec_elems_release_nothing(unsafe { &*dst }) {
+            for idx in 0..dst_len {
+                unsafe { vec_release_elem_at(dst, idx) };
+            }
         }
         unsafe {
             std::ptr::copy_nonoverlapping(src_base, dst_base, (src_len as usize) * stride);

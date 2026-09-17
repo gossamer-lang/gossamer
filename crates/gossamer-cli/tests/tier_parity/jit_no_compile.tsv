@@ -152,7 +152,6 @@ feature-testing-examples/entry_toplevel_err.gos	no hot body
 feature-testing-examples/enum_struct_eq.gos	no hot body
 feature-testing-examples/enum_tuple_payload_collections.gos	aggregate print
 feature-testing-examples/enum_unit_local.gos	no hot body
-feature-testing-examples/enum_vec_payload_escape.gos	admission gate
 feature-testing-examples/exec_pipeline.gos	no hot body
 feature-testing-examples/exec_signal_group.gos	no hot body
 feature-testing-examples/exec_wait_timeout.gos	no hot body

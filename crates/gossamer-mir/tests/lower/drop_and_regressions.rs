@@ -880,6 +880,30 @@ fn map_entry_chains_fuse_into_the_map_walk() {
 }
 
 #[test]
+fn for_loops_over_positional_chains_walk_in_one_loop() {
+    let source = "fn walk(data: [u8], n: i64) -> i64 {\n\
+                  let mut acc = 0\n\
+                  for (i, b) in data.iter().enumerate() { acc += i * (b as i64) }\n\
+                  for i in (0..n).rev() { if i % 2 == 0 { continue }\n\
+                  acc += i }\n\
+                  'outer: for (i, x) in (0..n).enumerate() {\n\
+                  for j in (0..8).rev().step_by(3) { if j == x { continue 'outer }\n\
+                  acc += i + j } }\n\
+                  acc\n\
+                  }\n\
+                  fn main() { let _ = walk(#[1, 2, 3], 5) }\n";
+    let (bodies, _) = build_with_lift(source);
+    let walk = bodies.iter().find(|b| b.name == "walk").expect("walk");
+    let names = call_symbol_names(walk);
+    assert!(
+        !names
+            .iter()
+            .any(|name| name.starts_with("gos_rt_lazy_iter_") || name.starts_with("gos_rt_iter_")),
+        "a for loop over positional stages walks its source in one loop: {names:?}"
+    );
+}
+
+#[test]
 fn aggregate_unwrap_or_copies_the_payload_out_of_the_carrier() {
     let source = "use std::{option, result}\n\
                   struct Inner { a: i64, b: String }\n\

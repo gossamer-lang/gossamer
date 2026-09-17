@@ -2244,7 +2244,7 @@ impl Lowerer<'_> {
             span,
             ty: iter_ty,
             kind: HirPatKind::Binding {
-                name: Ident::new("__for_iter"),
+                name: Ident::new(crate::fuse::FOR_ITER),
                 mutable: true,
             },
         };
@@ -2262,7 +2262,7 @@ impl Lowerer<'_> {
             span,
             ty: iter_ty,
             kind: HirExprKind::Path {
-                segments: vec![Ident::new("__for_iter")],
+                segments: vec![Ident::new(crate::fuse::FOR_ITER)],
                 def: None,
             },
         };

@@ -1887,6 +1887,34 @@ impl Node {
 }
 
 #[test]
+fn extending_bytes_with_a_strings_bytes_appends_the_text_in_place() {
+    let source = r"
+fn appended(out: &mut Vec<u8>, s: String) {
+    out.extend_from_slice(s.as_bytes())
+    out.extend(s.as_bytes())
+}
+";
+    let (bodies, _) = build(source);
+    let body = bodies
+        .iter()
+        .find(|body| body.name == "appended")
+        .expect("appended body");
+    let names = call_symbol_names(body);
+    assert_eq!(
+        names
+            .iter()
+            .filter(|n| *n == "gos_rt_vec_extend_str_bytes")
+            .count(),
+        2,
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n == "gos_rt_str_as_bytes"),
+        "no byte vector is built to be copied: {names:?}"
+    );
+}
+
+#[test]
 fn a_byte_append_loop_becomes_one_append_and_a_changed_byte_stays_a_loop() {
     let source = r"
 fn copied(out: &mut Vec<u8>, s: String) {

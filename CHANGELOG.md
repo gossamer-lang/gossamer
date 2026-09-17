@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.61.4 - Fused `for` loops over iterator chains, in-place byte appends
+
+- A `for` loop over a positional chain, such as `for (i, b) in data.iter().enumerate()` or `for i in (0..n).rev()`, walks its source in one counted loop on every tier, where it first built a vector of the elements - a copy of the `(index, element)` pairs, a collected and reversed copy of the range - and pulled each one through a runtime call. A byte hash over `data.iter().enumerate()` runs about 20 times faster, and a bit loop over `(0..8).rev()` about 30 times.
+- The loop covers `enumerate`, `rev`, `take`, `skip`, `step_by`, `zip`, `filter`, `map`, `take_while`, `skip_while`, and `filter_map` over an `i64` range, a sequence, or a string's `bytes()`, and keeps `continue`, `break`, a label, and `return` in the body reaching what the source wrote.
+- A chain over a sequence parameter (`data: [u8]`) or a sequence a pattern binds walks in one loop, as the same chain over a local binding already did.
+- `v.extend_from_slice(s.as_bytes())` and `v.extend(s.as_bytes())` append the text's bytes in place on the compiled tiers, where they built a byte vector that was copied in and then freed.
+- `extend` on a vector of scalars or flat tuples copies the elements in one block on the compiled tiers, where it made one push call per element.
+- `truncate`, `clear`, `copy_within`, and `copy_from_slice` on a vector of scalars or flat tuples leave the elements they drop in one step on the compiled tiers, where truncating a vector cost time for each element past the new length.
+
 ## 0.61.3 - Closures in containers, structs on channels, MacOS 27 support
 
 - A closure stored in a `Vec`, a `Deque`, a `Map`, an `Option`, or a `Result` is released with its holder, so the values it captured no longer leak on the compiled tiers.
