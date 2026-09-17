@@ -8,6 +8,7 @@
 - `v.extend_from_slice(s.as_bytes())` and `v.extend(s.as_bytes())` append the text's bytes in place on the compiled tiers, where they built a byte vector that was copied in and then freed.
 - `extend` on a vector of scalars or flat tuples copies the elements in one block on the compiled tiers, where it made one push call per element.
 - `truncate`, `clear`, `copy_within`, and `copy_from_slice` on a vector of scalars or flat tuples leave the elements they drop in one step on the compiled tiers, where truncating a vector cost time for each element past the new length.
+- A program whose cohort is cancelled, or which is draining spawned goroutines at exit, wakes its parked channel receivers without stalling against one that is checking whether the program can still make progress.
 
 ## 0.61.3 - Closures in containers, structs on channels, MacOS 27 support
 

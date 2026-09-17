@@ -2526,17 +2526,22 @@ fn any_channel_can_progress(holding: &ChannelInner) -> bool {
 /// the set of participants shrinks at that moment, and a waiter parked
 /// before it can only learn so by being given a chance to look again.
 pub fn wake_all_channel_waiters() {
-    let live = LIVE_CHANNELS.lock();
-    for weak in live.iter() {
-        if let Some(inner) = weak.upgrade() {
-            // Taken and released around the notify: a waiter decides
-            // whether to sleep while holding this lock, so notifying
-            // without it can land in the gap between that decision and
-            // the wait, waking nobody and leaving the waiter asleep on a
-            // condition that has already changed.
-            drop(inner.state.lock());
-            inner.cv.notify_all();
-        }
+    // The registry is released before any channel lock is taken. A waiter
+    // deciding whether to park holds its own channel's lock and reads the
+    // registry from under it, so a walk that held the registry and then
+    // waited on a channel's lock would take the two in the opposite order.
+    let channels: Vec<Arc<ChannelInner>> = {
+        let live = LIVE_CHANNELS.lock();
+        live.iter().filter_map(std::sync::Weak::upgrade).collect()
+    };
+    for inner in channels {
+        // Taken and released around the notify: a waiter decides
+        // whether to sleep while holding this lock, so notifying
+        // without it can land in the gap between that decision and
+        // the wait, waking nobody and leaving the waiter asleep on a
+        // condition that has already changed.
+        drop(inner.state.lock());
+        inner.cv.notify_all();
     }
 }
 
