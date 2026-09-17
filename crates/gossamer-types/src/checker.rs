@@ -8593,9 +8593,20 @@ impl<'a> TypeChecker<'a> {
         args: &[Expr],
         arg_tys: &[Ty],
         expected: Expectation,
+        span: Span,
     ) -> Option<Ty> {
         match method {
-            "new" | "with_capacity" => self.collection_ctor_ty(module),
+            "new" => self.collection_ctor_ty(module),
+            "with_capacity" => {
+                let ty = self.collection_ctor_ty(module)?;
+                if matches!(module.last(), Some(&("Vec" | "Map"))) {
+                    return Some(ty);
+                }
+                let owner = module.last().copied().unwrap_or_default().to_string();
+                let error = self.unresolved_method(owner, method, ty);
+                self.emit(error, span);
+                Some(self.tcx.error_ty())
+            }
             "from" => {
                 self.collection_from_ty(module, *arg_tys.first()?, expected, args.first()?.span)
             }
@@ -9433,7 +9444,9 @@ impl<'a> TypeChecker<'a> {
         {
             return Some(ty);
         }
-        if let Some(ty) = self.collection_call_ret_ty(module, last, args, arg_tys, expected) {
+        if let Some(ty) =
+            self.collection_call_ret_ty(module, last, args, arg_tys, expected, callee.span)
+        {
             return Some(ty);
         }
         if matches!(module, ["fs" | "os"] | ["std", "fs" | "os"]) {

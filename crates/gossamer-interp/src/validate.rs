@@ -822,6 +822,11 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 check_f(op_idx, value_f)?;
             }
             Op::BuildIntMap { dst_v } | Op::BuildStrIntMap { dst_v } => check_v(op_idx, dst_v)?,
+            Op::BuildIntMapWithCapacity { dst_v, capacity_i }
+            | Op::BuildStrIntMapWithCapacity { dst_v, capacity_i } => {
+                check_v(op_idx, dst_v)?;
+                check_i(op_idx, capacity_i)?;
+            }
             Op::IntMapInc {
                 dst_i,
                 map_reg,
@@ -1889,6 +1894,8 @@ pub(crate) fn register_effects(
         | Op::BuildFloatVec { dst_v, .. }
         | Op::BuildIntMap { dst_v }
         | Op::BuildStrIntMap { dst_v }
+        | Op::BuildIntMapWithCapacity { dst_v, .. }
+        | Op::BuildStrIntMapWithCapacity { dst_v, .. }
         | Op::IntMapInsert { dst_v, .. }
         | Op::BoxF64 { dst_v, .. }
         | Op::BoxI64 { dst_v, .. }
@@ -2167,7 +2174,9 @@ pub(crate) fn register_effects(
             effect.i_reads.push(value_i);
             effect.v_reads.push(count_v);
         }
-        Op::BuildVecWithCapacity { capacity_i, .. } => effect.i_reads.push(capacity_i),
+        Op::BuildVecWithCapacity { capacity_i, .. }
+        | Op::BuildIntMapWithCapacity { capacity_i, .. }
+        | Op::BuildStrIntMapWithCapacity { capacity_i, .. } => effect.i_reads.push(capacity_i),
         Op::BuildFloatVec { first_f, count, .. } => {
             add_f_span(&mut effect.f_reads, first_f, u32::from(count));
         }

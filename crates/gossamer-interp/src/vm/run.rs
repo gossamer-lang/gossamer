@@ -4540,6 +4540,18 @@ impl Vm {
                         parking_lot::Mutex::new(crate::value::dense_map_with_capacity(16)),
                     ));
                 }
+                Op::BuildIntMapWithCapacity { dst_v, capacity_i } => {
+                    let capacity = crate::value::map_capacity(ints[capacity_i as usize])?;
+                    registers[dst_v as usize] = Value::IntMap(Arc::new(parking_lot::Mutex::new(
+                        crate::value::dense_map_with_capacity(capacity),
+                    )));
+                }
+                Op::BuildStrIntMapWithCapacity { dst_v, capacity_i } => {
+                    let capacity = crate::value::map_capacity(ints[capacity_i as usize])?;
+                    registers[dst_v as usize] = Value::StrIntMap(Arc::new(
+                        parking_lot::Mutex::new(crate::value::dense_map_with_capacity(capacity)),
+                    ));
+                }
                 Op::IntMapInc {
                     dst_i,
                     map_reg,

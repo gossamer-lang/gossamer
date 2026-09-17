@@ -635,6 +635,20 @@ fn op_label(tag: usize) -> &'static str {
             ),
             (O::BuildIntMap { dst_v: 0 }, "BuildIntMap"),
             (
+                O::BuildIntMapWithCapacity {
+                    dst_v: 0,
+                    capacity_i: 0,
+                },
+                "BuildIntMapWithCapacity",
+            ),
+            (
+                O::BuildStrIntMapWithCapacity {
+                    dst_v: 0,
+                    capacity_i: 0,
+                },
+                "BuildStrIntMapWithCapacity",
+            ),
+            (
                 O::IntMapInc {
                     dst_i: 0,
                     map_reg: 0,

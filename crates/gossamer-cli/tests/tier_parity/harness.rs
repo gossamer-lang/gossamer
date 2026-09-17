@@ -367,6 +367,12 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/descending_swap_loops.gos"),
     spec("feature-testing-examples/stored_node_shares.gos"),
     spec("feature-testing-examples/vec_with_capacity_reserves.gos"),
+    // A typed `Map::with_capacity` binding counts, reads, and measures like
+    // one built by `Map::new()`.
+    spec("feature-testing-examples/map_with_capacity_typed.gos"),
+    // A `const` / `static` initializer that calls an associated function
+    // evaluates on the VM once functions are loaded, as it does compiled.
+    spec("feature-testing-examples/const_initializer_calls_associated_fn.gos"),
     spec("feature-testing-examples/hoisted_field_reads.gos"),
     spec("feature-testing-examples/field_reference_writes.gos"),
     spec("feature-testing-examples/nested_row_tables.gos"),

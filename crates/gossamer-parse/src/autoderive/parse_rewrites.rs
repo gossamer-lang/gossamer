@@ -231,17 +231,26 @@ pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<Par
 /// flows through a serde call - and deduplicated to one diagnostic per struct,
 /// pointing at the first offending field.
 fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
-    let struct_names: HashMap<String, TyId> = struct_identities(&sf.items);
+    let struct_names = struct_identities(&sf.items);
     let aliases = alias_targets(&sf.items);
-    let decls: HashMap<&str, &StructDecl> = flatten_items(&sf.items)
-        .into_iter()
-        .filter_map(|item| match &item.kind {
-            ItemKind::Struct(decl) if decl.generics.params.is_empty() => {
-                Some((decl.name.name.as_str(), decl))
-            }
-            _ => None,
-        })
-        .collect();
+    // Keyed by both the module-folded symbol and the bare name; a bare name
+    // two modules share keeps its first declaration.
+    let mut decls: HashMap<String, (String, &StructDecl)> = HashMap::new();
+    for (module, item) in flatten_items_with_modules(&sf.items) {
+        let ItemKind::Struct(decl) = &item.kind else {
+            continue;
+        };
+        if !decl.generics.params.is_empty() {
+            continue;
+        }
+        let symbol = TyId::new(&module, &decl.name.name).symbol;
+        decls
+            .entry(symbol)
+            .or_insert_with(|| (module.clone(), decl));
+        decls
+            .entry(decl.name.name.clone())
+            .or_insert_with(|| (module, decl));
+    }
     // `augment_source` has already appended a `__gos_serde_to_json_<T>` for every
     // struct the synthesizer accepted (and the user may hand-provide one), so its
     // presence means the type is serializable - only its absence is a dropped
@@ -275,7 +284,8 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
         if reported.contains(&ty_name) || synthesized.contains(symbol.as_str()) {
             continue;
         }
-        let Some(decl) = decls.get(symbol.as_str()).or_else(|| decls.get(ty_name.as_str())) else {
+        let Some((module, decl)) = decls.get(symbol.as_str()).or_else(|| decls.get(ty_name.as_str()))
+        else {
             // No concrete struct behind the spelling. Naming which shape it is
             // beats the alternative, which is the absent synthesized function
             // surfacing as an internal name the user never wrote.
@@ -292,12 +302,12 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
         };
         let offending = match &decl.body {
             StructBody::Named(fields) => fields.iter().find_map(|f| {
-                FieldKind::from_type(&f.ty, &struct_names, &aliases)
+                FieldKind::from_type(&f.ty, module, &struct_names, &aliases)
                     .is_none()
                     .then(|| (f.name.name.clone(), ty_to_string(&f.ty), f.ty.span))
             }),
             StructBody::Tuple(fields) => fields.iter().enumerate().find_map(|(i, f)| {
-                FieldKind::from_type(&f.ty, &struct_names, &aliases)
+                FieldKind::from_type(&f.ty, module, &struct_names, &aliases)
                     .is_none()
                     .then(|| (i.to_string(), ty_to_string(&f.ty), f.ty.span))
             }),

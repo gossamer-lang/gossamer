@@ -41,7 +41,7 @@ pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
     out.push_str("// Synthesized by `gossamer-parse::autoderive`.\n");
     out.push('\n');
 
-    let struct_names: HashMap<String, TyId> = struct_identities(&parsed.items);
+    let struct_names = struct_identities(&parsed.items);
     let aliases = alias_targets(&parsed.items);
     let opaque = opaque_alias_names(&parsed.items);
 
@@ -59,7 +59,7 @@ pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
                 let typed: Option<Vec<(String, FieldKind)>> = fields
                     .iter()
                     .map(|f| {
-                        FieldKind::from_type(&f.ty, &struct_names, &aliases)
+                        FieldKind::from_type(&f.ty, &module, &struct_names, &aliases)
                             .map(|k| (f.name.name.clone(), k))
                     })
                     .collect();
@@ -75,7 +75,7 @@ pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
             StructBody::Tuple(fields) => {
                 let typed: Option<Vec<FieldKind>> = fields
                     .iter()
-                    .map(|f| FieldKind::from_type(&f.ty, &struct_names, &aliases))
+                    .map(|f| FieldKind::from_type(&f.ty, &module, &struct_names, &aliases))
                     .collect();
                 if let Some(typed) = typed {
                     classified.push((ty, SerdeShape::Tuple(typed)));
@@ -797,7 +797,7 @@ fn types_with_user_debug(parsed: &SourceFile) -> HashSet<String> {
     reason = "linear orchestration: collect names, fields, formattable + comparable sets, then emit"
 )]
 pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
-    let struct_names: HashMap<String, TyId> = struct_identities(&parsed.items);
+    let struct_names = struct_identities(&parsed.items);
     let aliases = alias_targets(&parsed.items);
     let user_fmt = types_with_user_debug(parsed);
     let user_to_string = types_with_user_display(parsed);
@@ -1452,7 +1452,7 @@ fn emit_tuple_struct_derive_impl(
     ty: &TyId,
     fields: &[gossamer_ast::TupleField],
     derives: &[String],
-    structs: &HashMap<String, TyId>,
+    structs: &StructIdentities,
     aliases: &HashMap<String, gossamer_ast::Type>,
 ) {
     let name = ty.path.as_str();
@@ -1508,7 +1508,7 @@ fn emit_tuple_struct_derive_impl(
     if want_default {
         let typed: Option<Vec<FieldKind>> = fields
             .iter()
-            .map(|f| FieldKind::from_type(&f.ty, structs, aliases))
+            .map(|f| FieldKind::from_type(&f.ty, &ty.module, structs, aliases))
             .collect();
         if let Some(typed) = typed {
             let init: Vec<String> = typed.iter().map(FieldKind::default_literal).collect();
@@ -1549,7 +1549,7 @@ fn emit_struct_derive_impl(
     ty: &TyId,
     fields: &[gossamer_ast::StructField],
     derives: &[String],
-    structs: &HashMap<String, TyId>,
+    structs: &StructIdentities,
     aliases: &HashMap<String, gossamer_ast::Type>,
 ) {
     let name = ty.path.as_str();
@@ -1625,7 +1625,10 @@ fn emit_struct_derive_impl(
         // than emit code that won't compile.
         let typed: Option<Vec<(String, FieldKind)>> = fields
             .iter()
-            .map(|f| FieldKind::from_type(&f.ty, structs, aliases).map(|k| (f.name.name.clone(), k)))
+            .map(|f| {
+                FieldKind::from_type(&f.ty, &ty.module, structs, aliases)
+                    .map(|k| (f.name.name.clone(), k))
+            })
             .collect();
         if let Some(typed) = typed {
             let init: Vec<(String, String)> = typed

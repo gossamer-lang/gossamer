@@ -52,6 +52,15 @@ pub fn dense_map_with_capacity<K, V>(capacity: usize) -> DenseMap<K, V> {
     DenseMap::with_capacity_and_hasher(capacity, rustc_hash::FxBuildHasher)
 }
 
+/// Entry count a `Map::with_capacity(n)` call reserves.
+///
+/// A negative capacity is a type error, as on the compiled tiers.
+pub fn map_capacity(capacity: i64) -> RuntimeResult<usize> {
+    usize::try_from(capacity).map_err(|_| {
+        RuntimeError::Type("HashMap::with_capacity: capacity must be non-negative".to_string())
+    })
+}
+
 /// Empty `Vec` with room for `capacity` elements, the storage `Vec::with_capacity(n)` builds.
 ///
 /// A negative capacity is a type error and a byte size past `isize::MAX` panics with

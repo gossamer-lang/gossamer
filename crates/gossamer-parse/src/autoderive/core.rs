@@ -66,27 +66,30 @@ enum FieldKind {
 pub(crate) const MAX_ALIAS_DEPTH: u32 = 32;
 
 impl FieldKind {
+    /// Classifies `ty` as written in a field of a type declared in `module`.
     fn from_type(
         ty: &gossamer_ast::Type,
-        structs: &HashMap<String, TyId>,
+        module: &str,
+        structs: &StructIdentities,
         aliases: &HashMap<String, gossamer_ast::Type>,
     ) -> Option<Self> {
-        Self::from_type_within(ty, structs, aliases, 0)
+        Self::from_type_within(ty, module, structs, aliases, 0)
     }
 
     /// `depth` bounds alias expansion, per [`MAX_ALIAS_DEPTH`].
     fn from_type_within(
         ty: &gossamer_ast::Type,
-        structs: &HashMap<String, TyId>,
+        module: &str,
+        structs: &StructIdentities,
         aliases: &HashMap<String, gossamer_ast::Type>,
         depth: u32,
     ) -> Option<Self> {
         // A generic argument that must itself be a supported field kind.
-        let arg_kind = |g: &GenericArg, structs: &HashMap<String, TyId>| -> Option<Self> {
+        let arg_kind = |g: &GenericArg, structs: &StructIdentities| -> Option<Self> {
             let GenericArg::Type(inner) = g else {
                 return None;
             };
-            Self::from_type_within(inner, structs, aliases, depth)
+            Self::from_type_within(inner, module, structs, aliases, depth)
         };
         match &ty.kind {
             TypeKind::Path(path) => {
@@ -120,18 +123,27 @@ impl FieldKind {
                         "bool" => Some(Self::Bool),
                         "String" => Some(Self::String),
                         other => {
-                            if let Some(target) = aliases.get(other) {
+                            let alias = match structs.local(module, other) {
+                                Some(DeclaredType::Struct(ty)) => {
+                                    return Some(Self::Struct(ty.clone()));
+                                }
+                                Some(DeclaredType::Alias(target)) => Some(target),
+                                Some(DeclaredType::Other) => return None,
+                                None => aliases.get(other),
+                            };
+                            if let Some(target) = alias {
                                 if depth >= MAX_ALIAS_DEPTH {
                                     return None;
                                 }
                                 return Self::from_type_within(
                                     target,
+                                    module,
                                     structs,
                                     aliases,
                                     depth + 1,
                                 );
                             }
-                            structs.get(other).cloned().map(Self::Struct)
+                            structs.first(other).cloned().map(Self::Struct)
                         }
                     };
                 }
@@ -161,12 +173,12 @@ impl FieldKind {
                 }
             }
             TypeKind::Slice(inner) => Some(Self::Vec(Box::new(Self::from_type_within(
-                inner, structs, aliases, depth,
+                inner, module, structs, aliases, depth,
             )?))),
             TypeKind::Tuple(elems) => {
                 let mut kinds = Vec::with_capacity(elems.len());
                 for e in elems {
-                    kinds.push(Self::from_type_within(e, structs, aliases, depth)?);
+                    kinds.push(Self::from_type_within(e, module, structs, aliases, depth)?);
                 }
                 Some(Self::Tuple(kinds))
             }
@@ -342,6 +354,8 @@ pub(crate) struct TyId {
     /// The name as declared. Constructors and patterns resolve against the
     /// declaring item, so they spell this rather than the module path.
     pub(crate) bare: String,
+    /// The `::`-joined module that declares the type, empty at the unit root.
+    pub(crate) module: String,
 }
 
 impl TyId {
@@ -353,31 +367,83 @@ impl TyId {
                 path: name.to_string(),
                 symbol: name.to_string(),
                 bare: name.to_string(),
+                module: String::new(),
             };
         }
         Self {
             path: format!("{module}::{name}"),
             symbol: format!("{}__{name}", module.replace("::", "__")),
             bare: name.to_string(),
+            module: module.to_string(),
         }
     }
 }
 
-/// Every named / tuple struct in the tree, indexed by its declared name and
-/// carrying the identity its synthesized functions use. A name two modules
-/// share resolves to the first declaration, matching how the resolver and
-/// type checker break the same tie.
-pub(crate) fn struct_identities(items: &[Item]) -> HashMap<String, TyId> {
-    let mut out: HashMap<String, TyId> = HashMap::new();
+/// What a module declares under a type name, as far as classifying a field
+/// needs to know.
+#[derive(Debug, Clone)]
+pub(crate) enum DeclaredType {
+    /// A named or tuple struct, with the identity its synthesized functions use.
+    Struct(TyId),
+    /// A non-generic `type X = T` alias, transparent or opaque.
+    Alias(gossamer_ast::Type),
+    /// Any other type-namespace item: an enum, a trait, a unit struct, a
+    /// generic alias.
+    Other,
+}
+
+/// Every type name in the tree, per declaring module, with the first
+/// declaration of each named / tuple struct anywhere in the tree.
+#[derive(Debug, Default)]
+pub(crate) struct StructIdentities {
+    scoped: HashMap<String, HashMap<String, DeclaredType>>,
+    first: HashMap<String, TyId>,
+}
+
+impl StructIdentities {
+    /// What `module` itself declares under `name`. A module's own declaration
+    /// shadows a same-named type declared elsewhere, as it does for the
+    /// resolver, whatever kind of type either one is.
+    pub(crate) fn local(&self, module: &str, name: &str) -> Option<&DeclaredType> {
+        self.scoped.get(module).and_then(|names| names.get(name))
+    }
+
+    /// The first named / tuple struct declared as `name` anywhere in the tree,
+    /// for a name the writing module does not declare itself.
+    pub(crate) fn first(&self, name: &str) -> Option<&TyId> {
+        self.first.get(name)
+    }
+}
+
+/// Indexes every type-namespace item in the tree by its declaring module and
+/// declared name.
+pub(crate) fn struct_identities(items: &[Item]) -> StructIdentities {
+    let mut out = StructIdentities::default();
     for (module, item) in flatten_items_with_modules(items) {
-        let ItemKind::Struct(decl) = &item.kind else {
-            continue;
+        let (name, declared) = match &item.kind {
+            ItemKind::Struct(decl)
+                if matches!(&decl.body, StructBody::Named(_) | StructBody::Tuple(_)) =>
+            {
+                let ty = TyId::new(&module, &decl.name.name);
+                out.first
+                    .entry(decl.name.name.clone())
+                    .or_insert_with(|| ty.clone());
+                (&decl.name.name, DeclaredType::Struct(ty))
+            }
+            ItemKind::Struct(decl) => (&decl.name.name, DeclaredType::Other),
+            ItemKind::TypeAlias(decl) if decl.generics.params.is_empty() => {
+                (&decl.name.name, DeclaredType::Alias(decl.ty.clone()))
+            }
+            ItemKind::TypeAlias(decl) => (&decl.name.name, DeclaredType::Other),
+            ItemKind::Enum(decl) => (&decl.name.name, DeclaredType::Other),
+            ItemKind::Trait(decl) => (&decl.name.name, DeclaredType::Other),
+            _ => continue,
         };
-        if !matches!(&decl.body, StructBody::Named(_) | StructBody::Tuple(_)) {
-            continue;
-        }
-        out.entry(decl.name.name.clone())
-            .or_insert_with(|| TyId::new(&module, &decl.name.name));
+        out.scoped
+            .entry(module)
+            .or_default()
+            .entry(name.clone())
+            .or_insert(declared);
     }
     out
 }

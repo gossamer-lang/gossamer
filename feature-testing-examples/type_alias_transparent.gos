@@ -7,11 +7,11 @@
 
 type Id = i64
 type Bytes = Vec<u8>
-    type Count = Id
+type Count = Id
 type Pair<A> = (A, A)
 type Boxed<T> = Vec<T>
 
-    struct Acct { id: Id, tags: Bytes, hits: Count, span: Pair<i64>, codes: Boxed<i64> }
+struct Acct { id: Id, tags: Bytes, hits: Count, span: Pair<i64>, codes: Boxed<i64> }
 
 fn bump(n: Count) -> Id {
     n + 1

@@ -4220,6 +4220,30 @@ impl<'tcx> FnBuilder<'tcx> {
                     self.emit(Op::BuildStrIntMap { dst_v: dst });
                     return Ok(dst);
                 }
+                let is_map_with_capacity = args.len() == 1
+                    && matches!(
+                        segs.as_slice(),
+                        ["Map", "with_capacity"] | ["collections", "Map", "with_capacity"]
+                    );
+                if is_map_with_capacity
+                    && (self.is_int_map_ty(result_ty) || self.is_str_int_map_ty(result_ty))
+                {
+                    let capacity = self.compile_expr_ex(&args[0])?;
+                    let capacity_i = self.as_i64(capacity);
+                    let dst = self.alloc_reg();
+                    if self.is_int_map_ty(result_ty) {
+                        self.emit(Op::BuildIntMapWithCapacity {
+                            dst_v: dst,
+                            capacity_i,
+                        });
+                    } else {
+                        self.emit(Op::BuildStrIntMapWithCapacity {
+                            dst_v: dst,
+                            capacity_i,
+                        });
+                    }
+                    return Ok(dst);
+                }
                 // `{1: 0, 2: 5}` (an int-keyed, int-valued map literal)
                 // desugars to `Map::from([(1, 0), (2, 5)])`, an
                 // explicit-entry-list array argument rather than the

@@ -670,6 +670,7 @@ impl Vm {
             }
         }
 
+        let mut deferred_initializers: Vec<&HirItem> = Vec::new();
         // Pass B: evaluate every `const`/`static` initializer on the VM.
         // Each initializer compiles to a synthetic nullary chunk and runs
         // through `apply`; the resulting value registers in `globals`. A
@@ -719,6 +720,13 @@ impl Vm {
                         // here. Its comptime regions are evaluated in
                         // pass D regardless, so skip rather than abort.
                         Err(_) if self.collect_comptime.get() => continue,
+                        // Functions load in pass C, so an initializer that
+                        // calls one the compiler does not inline evaluates
+                        // after it, and readers reach the value by name.
+                        Err(RuntimeError::UnresolvedName(_)) => {
+                            deferred_initializers.push(item);
+                            continue;
+                        }
                         Err(err) => return Err(err),
                     };
                     self.register_item_value(
@@ -759,6 +767,10 @@ impl Vm {
                     ) {
                         Ok(value) => value,
                         Err(_) if self.collect_comptime.get() => continue,
+                        Err(RuntimeError::UnresolvedName(_)) => {
+                            deferred_initializers.push(item);
+                            continue;
+                        }
                         Err(err) => return Err(err),
                     };
                     let global = if decl.mutable {
@@ -868,6 +880,59 @@ impl Vm {
                 crate::value::intern_type_name(&instance.global),
                 Global::Fn(chunk.into_shared()),
             );
+        }
+        // Pass C'': the initializers pass B deferred, now that every function
+        // is registered. One may read another deferred item, so each round
+        // evaluates what it can until a round makes no progress.
+        while !deferred_initializers.is_empty() {
+            let round_len = deferred_initializers.len();
+            let mut pending = Vec::new();
+            let mut last_err = None;
+            for item in std::mem::take(&mut deferred_initializers) {
+                let (name, value_expr, mutable) = match &item.kind {
+                    HirItemKind::Const(decl) => (&decl.name.name, &decl.value, false),
+                    HirItemKind::Static(decl) => (&decl.name.name, &decl.value, decl.mutable),
+                    _ => continue,
+                };
+                match self.eval_initializer(
+                    value_expr,
+                    &tcx,
+                    &def_layouts,
+                    &wrappers,
+                    &inline_fns,
+                    &fn_param_shareable,
+                    &fn_param_tys,
+                    &module_consts,
+                    &method_muts,
+                    &impl_methods,
+                    &mut_statics,
+                ) {
+                    Ok(value) => {
+                        let module_prefix = if item.module_path.is_empty() {
+                            None
+                        } else {
+                            Some(item.module_path.join("::"))
+                        };
+                        let global = if mutable {
+                            Global::MutStatic(Arc::new(parking_lot::Mutex::new(value)))
+                        } else {
+                            Global::Value(value)
+                        };
+                        self.register_item_value(module_prefix.as_deref(), name, global);
+                    }
+                    Err(err @ RuntimeError::UnresolvedName(_)) => {
+                        last_err = Some(err);
+                        pending.push(item);
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            if let Some(err) = last_err
+                && pending.len() == round_len
+            {
+                return Err(err);
+            }
+            deferred_initializers = pending;
         }
         // Pass D: comptime folding. When enabled, evaluate every
         // `comptime { ... }` block and `comptime fn` call now that

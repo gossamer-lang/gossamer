@@ -613,6 +613,22 @@ pub enum Op {
         /// Destination `Value` register.
         dst_v: Reg,
     },
+    /// [`Op::BuildIntMap`] for `Map::with_capacity(n)`, reserving room for
+    /// the entry count in `capacity_i`.
+    BuildIntMapWithCapacity {
+        /// Destination `Value` register.
+        dst_v: Reg,
+        /// Requested capacity in the typed integer register file.
+        capacity_i: Reg,
+    },
+    /// [`Op::BuildStrIntMap`] for `Map::with_capacity(n)`, reserving room
+    /// for the entry count in `capacity_i`.
+    BuildStrIntMapWithCapacity {
+        /// Destination `Value` register.
+        dst_v: Reg,
+        /// Requested capacity in the typed integer register file.
+        capacity_i: Reg,
+    },
     /// Typed counterpart to [`Op::MapInc`] for `Value::IntMap`. Reads
     /// the key and increment from the i64 register file, mutates
     /// the map's slot in place, and writes the post-increment value

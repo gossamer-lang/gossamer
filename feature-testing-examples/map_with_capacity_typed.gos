@@ -1,0 +1,24 @@
+// `Map::with_capacity(n)` answers the same map `Map::new()` does for every key
+// and value type, so counting, lookup, length, and membership read it alike.
+
+fn count_grams(words: Vec<i64>) -> Map<i64, i64> {
+    let mut counts: Map<i64, i64> = Map::with_capacity(words.len())
+    for w in words { counts.inc(w) }
+    counts
+}
+
+fn main() {
+    let mut ints: Map<i64, i64> = Map::with_capacity(8)
+    ints.inc(5)
+    ints.inc(5)
+    ints.insert(7, 40)
+    println("ints {} {:?} {} {}", ints.len(), ints.get(5), ints.get_or(9, -1), ints.contains_key(7))
+
+    let mut names: Map<String, i64> = Map::with_capacity(4)
+    names.inc("a")
+    names.insert("b", 3)
+    println("names {} {:?} {}", names.len(), names.get("a"), names.contains_key("c"))
+
+    let grams = count_grams(#[4, 2, 4, 4, 9])
+    println("grams {} {} {}", grams.len(), grams.get_or(4, 0), grams.get_or(2, 0))
+}

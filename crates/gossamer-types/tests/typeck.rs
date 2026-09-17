@@ -2411,6 +2411,24 @@ fn sequence_method_the_receiver_lacks_still_reports_as_unknown() {
 }
 
 #[test]
+fn with_capacity_on_a_collection_that_does_not_declare_it_is_unknown() {
+    let d = diagnostics_for(
+        "fn main() { let _: Vec<i64> = Vec::with_capacity(4)\n let _: Map<i64, i64> = Map::with_capacity(4)\n let _: BTreeMap<i64, i64> = BTreeMap::with_capacity(4) }\n",
+    );
+    let unknown: Vec<_> = d
+        .iter()
+        .filter(|x| matches!(&x.error, TypeError::UnresolvedMethod { .. }))
+        .collect();
+    assert!(
+        matches!(
+            unknown.as_slice(),
+            [x] if matches!(&x.error, TypeError::UnresolvedMethod { ty, name, .. } if ty == "BTreeMap" && name == "with_capacity")
+        ),
+        "only BTreeMap lacks with_capacity: {d:?}"
+    );
+}
+
+#[test]
 fn strings_free_fn_accepts_string_and_char_patterns() {
     // A real string needle, a `char` needle, and a `char` pad all type
     // cleanly - the validation must not reject the legitimate shapes.

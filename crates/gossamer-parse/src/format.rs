@@ -893,6 +893,9 @@ fn closes_generic_type(line: &Line<'_>, close_index: usize) -> bool {
             TokenKind::Punct(Punct::ShiftR) => depth += 2,
             TokenKind::Punct(Punct::Lt) if depth == 1 => {
                 let context = &line.toks[..index];
+                if declares_type_alias(context) {
+                    return true;
+                }
                 let Some(context_index) = context.iter().rposition(|candidate| {
                     matches!(
                         candidate.kind,
@@ -914,6 +917,24 @@ fn closes_generic_type(line: &Line<'_>, close_index: usize) -> bool {
         }
     }
     false
+}
+
+/// `true` when `tokens` open a `type` / `newtype` alias whose right-hand
+/// side has started, so every `<` in it opens a type argument list.
+fn declares_type_alias(tokens: &[Tok<'_>]) -> bool {
+    let mut code = tokens.iter().filter(|token| !token.is_comment());
+    let head = match code.next() {
+        Some(token) if token.kind == TokenKind::Keyword(Keyword::Pub) => code.next(),
+        other => other,
+    };
+    let opens_alias = head.is_some_and(|token| {
+        token.kind == TokenKind::Keyword(Keyword::Type)
+            || (token.kind == TokenKind::Ident && token.text == "newtype")
+    });
+    opens_alias
+        && tokens
+            .iter()
+            .any(|token| token.kind == TokenKind::Punct(Punct::Eq))
 }
 
 /// `true` when a token can trail a continued expression.
@@ -1254,6 +1275,12 @@ let s = #{
             fmt(source),
             "#[derive(Clone, PartialEq)]\nstruct Point {\n    x: f64\n}\n"
         );
+    }
+
+    #[test]
+    fn type_alias_with_type_arguments_does_not_indent_the_next_item() {
+        let source = "type OptsMap = Map<String, (i64, bool)>\n\npub type Grid = Vec<Vec<i64>>\n\nnewtype Ids = Vec<i64>\n\nstruct Coordinate {\n    x: f64\n}\n";
+        assert_eq!(fmt(source), source);
     }
 
     #[test]

@@ -917,14 +917,7 @@ fn builtin_map_from(args: &[Value]) -> RuntimeResult<Value> {
 /// `IntMap` here silently made every `HashMap<String, i64>` lookup miss.
 fn builtin_map_with_capacity(args: &[Value]) -> RuntimeResult<Value> {
     let cap = match arg_int(args, 0) {
-        Some(n) if n < 0 => {
-            return Err(RuntimeError::Type(
-                "HashMap::with_capacity: capacity must be non-negative".to_string(),
-            ))
-        }
-        Some(n) => usize::try_from(n).map_err(|_| {
-            RuntimeError::Type("HashMap::with_capacity: capacity is too large".to_string())
-        })?,
+        Some(n) => crate::value::map_capacity(n)?,
         None => 0,
     };
     Ok(Value::Map(Arc::new(parking_lot::Mutex::new(

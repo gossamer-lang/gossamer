@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.61.2 - Module-scoped serde types, typed `Map::with_capacity`, deferred constant initializers
+
+- A struct field that names a type declared in its own module refers to that
+  type, even when another module declares a struct with the same name. A
+  `struct Line { points: Vec<Point> }` beside a local `Point` struct or enum
+  failed to compile with a type mismatch in generated code whenever an earlier
+  module also declared a `Point` struct.
+- `Map::with_capacity(n)` bound to a `Map<i64, i64>` or `Map<String, i64>`
+  counts, reads, and measures under `gos run` as one built by `Map::new()`
+  does, where `len`, `insert`, and the other typed operations failed with
+  `receiver lost typed invariant`.
+- A `const` or `static` whose initializer calls an associated function
+  (`const WHITE: Color = Color::new(1.0, 1.0, 1.0)`) loads under `gos run`, as
+  it does under `gos build`, where the VM refused to load the program with
+  `name Color::new is not bound`.
+- `with_capacity` on a collection that does not declare it (`BTreeMap`,
+  `Set`, `Deque`, `Stack`, ...) is rejected at check time with GT0002; `Vec`,
+  `Map`, and `String` keep it.
+- `gos fmt` keeps the item after a `type` or `newtype` alias whose right-hand
+  side has type arguments (`type Opts = Map<String, i64>`) at its own
+  indentation, where it indented that item one level.
+
 ## 0.61.1 - Faster teardown and indexed loops
 
 - A value a variant or struct constructor stores moves its share into the new

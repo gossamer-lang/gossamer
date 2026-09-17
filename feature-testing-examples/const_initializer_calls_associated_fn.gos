@@ -1,0 +1,31 @@
+// A `const` or `static` initializer may call an associated function, and one
+// such item may read another, whichever order they are declared in.
+
+struct Color { r: f64, g: f64, b: f64 }
+
+impl Color {
+    fn new(r: f64, g: f64, b: f64) -> Color { Color { r: r, g: g, b: b } }
+
+    fn scale(&self, s: f64) -> Color { Color::new(self.r * s, self.g * s, self.b * s) }
+}
+
+struct Light { position: Color, color: Color }
+
+const DIM: Color = WHITE.scale(0.5)
+const WHITE: Color = Color::new(1.0, 1.0, 1.0)
+const KEY: Light = Light { position: Color::new(0.7, -1.0, 1.7), color: WHITE }
+static SCENE: [Color; 2] = [Color::new(1.0, 0.0, 0.0), DIM]
+
+fn brightness(c: Color) -> f64 { c.r + c.g + c.b }
+
+fn accumulated_red(n: i64) -> f64 {
+    let mut total = 0.0
+    for i in 0..n { total += DIM.r * i as f64 }
+    total
+}
+
+fn main() {
+    println("{} {} {}", brightness(WHITE), brightness(DIM), KEY.position.g)
+    println("{} {}", SCENE[0].r, SCENE[1].b)
+    println("{}", accumulated_red(10))
+}

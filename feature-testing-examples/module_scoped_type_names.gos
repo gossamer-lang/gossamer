@@ -1,7 +1,8 @@
 // A type's identity is the module that declares it, so two modules may each
 // declare `Point` and `Tag`. Construction, field access, `{:?}`, `==`, map
 // keying, and serde all reach the right one on every tier, and a rendered
-// value shows the name as declared.
+// value shows the name as declared. A field naming `Point` inside a module
+// names that module's own `Point`, whether that is a struct or an enum.
 
 use std::encoding::json
 use a::Point
@@ -16,8 +17,14 @@ mod a {
 
 mod b {
     pub struct Point { pub name: String }
+    pub struct Line { pub points: Vec<Point>, pub end: Option<Point> }
     pub enum Tag { Red, Blue }
     pub fn make() -> Point { Point { name: "b" } }
+}
+
+mod c {
+    pub enum Point { Origin, At(i64) }
+    pub struct Path { pub stops: Vec<Point> }
 }
 
 fn main() {
@@ -43,4 +50,13 @@ fn main() {
     println("{} {}", encoded, other)
     let back = from_json::<a::Point>(encoded).unwrap_or(a::Point { x: 0, y: 0 })
     println("roundtrip {} {}", back.x, back.y)
+
+    let line = b::Line { points: #[b::make()], end: Some(Label { name: "end" }) }
+    let line_json = to_json::<b::Line>(line).unwrap_or("ERR")
+    println("{}", line_json)
+    let line_back = from_json::<b::Line>(line_json).unwrap_or(b::Line { points: #[], end: None })
+    println("line {} {:?}", line_back.points[0].name, line_back.end)
+
+    let path = c::Path { stops: #[c::Point::Origin, c::Point::At(5)] }
+    println("path {:?}", path.stops)
 }
