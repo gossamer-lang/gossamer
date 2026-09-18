@@ -2302,8 +2302,49 @@ fn run_native(bin: &Path, args: &[&str], stdin: &[u8]) -> Run {
     )
 }
 
+/// Builds the binding runner a `[rust-bindings]` fixture's project needs,
+/// once per project and outside any tier's deadline.
+///
+/// The runner is a cargo build of the whole toolchain plus the bindings; the
+/// first `gos` command against the project pays for it and every later one
+/// reuses it. Charging it to whichever tier happens to run first would time
+/// a toolchain build against a program's run.
+fn prepare_binding_runner(src: &Path) -> Result<(), String> {
+    static PREPARED: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<PathBuf>>> =
+        std::sync::OnceLock::new();
+    let Some(project) = src
+        .ancestors()
+        .find(|dir| dir.join("project.toml").is_file())
+    else {
+        return Ok(());
+    };
+    let manifest = fs::read_to_string(project.join("project.toml")).unwrap_or_default();
+    if !manifest.contains("[rust-bindings]") {
+        return Ok(());
+    }
+    let mut prepared = PREPARED.get_or_init(Default::default).lock();
+    if prepared.contains(project) {
+        return Ok(());
+    }
+    let out = Command::new(gos_bin())
+        .arg("check")
+        .arg(src)
+        .output()
+        .expect("spawn gos check");
+    if !out.status.success() {
+        return Err(format!(
+            "preparing the binding runner for {} failed:\n  stderr: {}",
+            project.display(),
+            String::from_utf8_lossy(&out.stderr)
+        ));
+    }
+    prepared.insert(project.to_path_buf());
+    Ok(())
+}
+
 fn run_tier(spec: &Spec, tier: Tier) -> Result<Run, String> {
     let src = workspace_root().join(spec.path);
+    prepare_binding_runner(&src)?;
     match tier {
         Tier::Vm => Ok(run_vm(&src, spec.args, spec.stdin)),
         Tier::Bytecode => Ok(run_bytecode(&src, spec.args, spec.stdin)),
