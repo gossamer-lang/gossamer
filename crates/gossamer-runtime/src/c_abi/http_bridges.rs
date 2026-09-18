@@ -1519,13 +1519,13 @@ mod static_path_tests {
         let meta: [i64; 2] = [8, 0];
         let env = unsafe { crate::c_abi::rc::gos_rt_rc_alloc(8, meta.as_ptr()) };
         assert!(!env.is_null(), "the test environment allocated");
-        let before = unsafe { crate::c_abi::rc::gos_rt_rc_strong_count(env) };
+        let before = unsafe { crate::c_abi::rc::rc_strong_count(env) };
 
         let router = unsafe { gos_rt_router_new() };
         let pattern = crate::c_abi::string::test_gos_str("/user/{id}");
         unsafe { router_add_verb(router, "GET", pattern, env, 0) };
 
-        let after = unsafe { crate::c_abi::rc::gos_rt_rc_strong_count(env) };
+        let after = unsafe { crate::c_abi::rc::rc_strong_count(env) };
         assert_eq!(
             after,
             before + 1,

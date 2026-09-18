@@ -192,6 +192,11 @@ enum Command {
         /// Print the selected MIR, LLVM, and target linker optimization plan.
         #[arg(long)]
         explain_profile: bool,
+        /// Name each function whose reference-count traffic uniqueness
+        /// inference removed, with what it removed. Compiles even when the
+        /// previous build is still current, so the report is complete.
+        #[arg(long)]
+        uniqueness_report: bool,
         /// Produce a bit-identical artifact across two clean builds
         /// of the same source on the same target. Pins the build
         /// timestamp via `SOURCE_DATE_EPOCH`, strips embedded
@@ -847,7 +852,7 @@ const BASH_COMPLETION_HELPERS: &str = r#"
 "#;
 
 const BASH_BUILD_COMPLETION: &str = r#"        gos__subcmd__build)
-            opts="-g -v -h --target --release --pgo-collect --pgo-profile --debug-info --dynamic --timings --explain-profile --reproducible --out-dir --locked --verbose --help"
+            opts="-g -v -h --target --release --pgo-collect --pgo-profile --debug-info --dynamic --timings --explain-profile --uniqueness-report --reproducible --out-dir --locked --verbose --help"
             if [[ ${cur} == -* ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -1134,6 +1139,7 @@ fn dispatch(
             dynamic,
             timings,
             explain_profile,
+            uniqueness_report,
             reproducible,
             out_dir,
             locked,
@@ -1159,8 +1165,11 @@ fn dispatch(
                     reproducible,
                 },
                 out_dir,
-                timings,
-                explain_profile,
+                BuildReports {
+                    timings,
+                    explain_profile,
+                    uniqueness_report,
+                },
             )
         }
         Some(Command::Init { id }) => cmd::scaffold::init(&id),
@@ -1503,13 +1512,20 @@ struct BuildFlags {
     reproducible: bool,
 }
 
+/// What `gos build` reports besides the artifact.
+#[derive(Clone, Copy)]
+struct BuildReports {
+    timings: bool,
+    explain_profile: bool,
+    uniqueness_report: bool,
+}
+
 fn dispatch_build(
     file: Option<PathBuf>,
     target: Option<&str>,
     flags: BuildFlags,
     out_dir: Option<PathBuf>,
-    timings: bool,
-    explain_profile: bool,
+    reports: BuildReports,
 ) -> anyhow::Result<()> {
     if flags.debug_info {
         gossamer_codegen_llvm::set_debug_info(true);
@@ -1526,8 +1542,9 @@ fn dispatch_build(
             dynamic: flags.link == LinkMode::Dynamic,
         },
         out_dir,
-        timings,
-        explain_profile,
+        timings: reports.timings,
+        explain_profile: reports.explain_profile,
+        uniqueness_report: reports.uniqueness_report,
     })
 }
 
@@ -1754,6 +1771,11 @@ mod tests {
     #[test]
     fn build_subcommand_parses_timings() {
         assert!(Cli::try_parse_from(["gos", "build", "hello.gos", "--timings"]).is_ok());
+    }
+
+    #[test]
+    fn build_subcommand_parses_uniqueness_report() {
+        assert!(Cli::try_parse_from(["gos", "build", "hello.gos", "--uniqueness-report"]).is_ok());
     }
 
     #[test]

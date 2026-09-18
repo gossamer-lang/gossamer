@@ -1,0 +1,8 @@
+[project]
+id = "example.com/binding_all_tiers"
+version = "0.1.0"
+
+[dependencies]
+
+[rust-bindings]
+tier_probe = { path = "../../example-external-libraries/tier_probe" }

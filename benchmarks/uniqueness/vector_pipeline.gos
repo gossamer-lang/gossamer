@@ -1,0 +1,36 @@
+// Vectors built in one function, handed through a chain of stages, and
+// consumed. Each stage's result is the next stage's only input.
+
+fn build(n: i64) -> Vec<i64> {
+    let mut xs = Vec::with_capacity(n)
+    for i in 0..n { xs.push(i) }
+    xs
+}
+
+fn scale(xs: Vec<i64>, k: i64) -> Vec<i64> {
+    let mut out = Vec::with_capacity(xs.len())
+    for x in xs { out.push(x * k) }
+    out
+}
+
+fn keep_even(xs: Vec<i64>) -> Vec<i64> {
+    let mut out = #[]
+    for x in xs {
+        if x % 2 == 0 { out.push(x) }
+    }
+    out
+}
+
+fn stage(n: i64) -> i64 {
+    let built = build(n)
+    let scaled = scale(built, 3)
+    let kept = keep_even(scaled)
+    let last = kept
+    last.len() + last[last.len() - 1]
+}
+
+fn main() {
+    let mut total = 0
+    for round in 0..2000 { total += stage(1000 + round % 7) }
+    println("{}", total)
+}

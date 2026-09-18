@@ -60,7 +60,7 @@ fn ensure_hooks_installed() {
         // hooks do, and they downcast back to `&Inner` knowing
         // the handle came from a live `Arc<Inner>`.
         unsafe {
-            gossamer_runtime::c_abi::gos_rt_install_ctx_hooks(
+            gossamer_runtime::c_abi::install_ctx_hooks(
                 ctx_register_hook,
                 ctx_deregister_hook,
                 ctx_is_cancelled_hook,

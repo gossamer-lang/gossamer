@@ -832,8 +832,7 @@ impl WeakValue {
                 // SAFETY: reading the strong count of a weak-pinned (still
                 // allocated) node; > 0 means a strong owner survives.
                 if base != 0
-                    && unsafe { gossamer_runtime::c_abi::gos_rt_rc_strong_count(base as *mut u8) }
-                        > 0
+                    && unsafe { gossamer_runtime::c_abi::rc_strong_count(base as *mut u8) } > 0
                 {
                     // SAFETY: co-owning a live node; the returned borrowed handle
                     // releases this retain once on drop.
@@ -4513,7 +4512,7 @@ fn release_native_enum_tree(ptr: usize, shape: &NativeEnumShape) {
     // SAFETY: `base` is a live runtime-managed node; reading its strong count
     // is valid. Single-threaded per VM, so the count is stable across the
     // check-then-reclaim below.
-    let last = unsafe { rt::gos_rt_rc_strong_count(base as *mut u8) } <= 1;
+    let last = unsafe { rt::rc_strong_count(base as *mut u8) } <= 1;
     if last {
         let disc = native_enum_disc(ptr, shape);
         if let Some(variant) = shape.variants.get(disc) {
@@ -4718,17 +4717,17 @@ fn free_exclusive_enum_tree(root_ptr: usize, root_shape: Arc<NativeEnumShape>) {
     // cycle-collection candidate.
     for (base, _, _) in &nodes {
         // SAFETY: `base` is a live runtime-managed node reached from the root.
-        let rc = unsafe { rt::gos_rt_rc_strong_count(*base as *mut u8) };
+        let rc = unsafe { rt::rc_strong_count(*base as *mut u8) };
         for _ in 0..rc.max(0) {
             // Re-check before each release so a node already driven to zero by
             // an earlier iteration (a shared node reached along two paths whose
             // count this teardown already drained) is never released past zero
             // into freed memory.
-            if unsafe { rt::gos_rt_rc_strong_count(*base as *mut u8) } <= 0 {
+            if unsafe { rt::rc_strong_count(*base as *mut u8) } <= 0 {
                 break;
             }
             // SAFETY: exclusively owned and count still positive.
-            unsafe { rt::gos_rt_rc_release_no_buffer(*base as *mut u8) };
+            unsafe { rt::rc_release_no_buffer(*base as *mut u8) };
         }
     }
 }
@@ -4948,7 +4947,7 @@ pub fn native_enum_field_consume(owner: &mut NativeEnumOwner, idx: usize) -> Opt
     // Arc uniqueness only proves the Rust handle is unique.  Native nodes have
     // their own RC domain, so require its count to be one before mutating a
     // payload slot that another native alias could observe.
-    let unique = unsafe { gossamer_runtime::c_abi::gos_rt_rc_strong_count(base as *mut u8) == 1 };
+    let unique = unsafe { gossamer_runtime::c_abi::rc_strong_count(base as *mut u8) == 1 };
     if !unique {
         return None;
     }
@@ -5510,7 +5509,7 @@ mod native_consume_tests {
             *((parent as usize - 3) as *mut u8) = 0;
             parent.cast::<i64>().write_unaligned(child as i64);
         }
-        let before = unsafe { gossamer_runtime::c_abi::gos_rt_rc_strong_count(child) };
+        let before = unsafe { gossamer_runtime::c_abi::rc_strong_count(child) };
         let mut owner = NativeEnumOwner {
             ptr: parent as usize,
             shape: Arc::clone(&parent_shape),
@@ -5528,7 +5527,7 @@ mod native_consume_tests {
         assert_eq!(child_owner.ptr, child as usize);
         assert!(Arc::ptr_eq(&child_owner.shape, &child_shape));
         assert_eq!(
-            unsafe { gossamer_runtime::c_abi::gos_rt_rc_strong_count(child) },
+            unsafe { gossamer_runtime::c_abi::rc_strong_count(child) },
             before,
             "moving a child must not retain it"
         );

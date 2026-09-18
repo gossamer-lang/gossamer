@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 #![allow(dead_code, unused_imports, clippy::unnecessary_wraps)]
 
+pub mod coverage;
+
 include!("builtins/setup.rs");
 include!("builtins/install.rs");
 include!("builtins/runtime_state.rs");

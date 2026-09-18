@@ -2162,8 +2162,7 @@ pub unsafe extern "C" fn gos_rt_rc_release(payload: *mut u8) {
 /// never run before exit. The caller (the VM's native-enum tree teardown) owns
 /// the whole tree exclusively and has already cleared child slots, so there is
 /// no live cycle to observe and no child to double-release. Null-safe.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_rc_release_no_buffer(payload: *mut u8) {
+pub unsafe fn rc_release_no_buffer(payload: *mut u8) {
     let payload = untag_rc(payload);
     if payload.is_null() || in_region_arena(payload) {
         return;
@@ -2225,8 +2224,7 @@ pub(crate) unsafe fn rc_payload_is_shared(payload: *mut u8) -> bool {
     unsafe { is_shared(header_ptr(base)) }
 }
 
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_rc_strong_count(payload: *mut u8) -> i64 {
+pub unsafe fn rc_strong_count(payload: *mut u8) -> i64 {
     let payload = untag_rc(payload);
     if payload.is_null() || in_region_arena(payload) {
         return 0;

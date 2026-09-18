@@ -1,6 +1,6 @@
 //! Cross-crate context-hook bridge tests.
 //!
-//! Exercises the `gos_rt_install_ctx_hooks` /
+//! Exercises the `install_ctx_hooks` /
 //! `gos_rt_chan_recv_ctx_option` ABI surface that lets
 //! `gossamer-runtime` observe a `gossamer-std::context::Context`
 //! without depending on the std crate.

@@ -51,9 +51,9 @@ pub static ARGS_PTR: AtomicUsize = AtomicUsize::new(0);
 pub static ARGS_LEN: AtomicI64 = AtomicI64::new(0);
 static ARGS_VEC: AtomicUsize = AtomicUsize::new(0);
 // Pointer to the program name string. Set from argv[0] in
-// `gos_rt_set_args`, or overridden via `gos_rt_set_program_name`.
+// `gos_rt_set_args`, or overridden via `set_program_name`.
 // Lifetime: either the OS-owned argv[0] (process-lifetime), or a
-// leaked CString allocated by `gos_rt_set_program_name`.
+// leaked CString allocated by `set_program_name`.
 static PROGRAM_NAME_PTR: AtomicUsize = AtomicUsize::new(0);
 
 #[unsafe(no_mangle)]
@@ -302,12 +302,11 @@ pub unsafe extern "C" fn gos_rt_os_args() -> *mut GosVec {
 }
 
 /// Overrides the program name returned by `os::program_name()`.
-/// The interpreter calls this via `gos_rt_set_program_name` when it
+/// The interpreter calls this via `set_program_name` when it
 /// knows the script path (e.g. `gos run examples/cat.gos`). The
 /// provided string is copied into a leaked `CString` so the pointer
 /// is process-lifetime safe.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_set_program_name(name: *const c_char) {
+pub unsafe fn set_program_name(name: *const c_char) {
     ffi_entry!((), {
         if name.is_null() {
             return;

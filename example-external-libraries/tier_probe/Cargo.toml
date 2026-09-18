@@ -1,0 +1,13 @@
+[package]
+name = "tier_probe"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+gossamer-binding = { path = "../../crates/gossamer-binding" }

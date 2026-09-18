@@ -335,6 +335,35 @@ fn field_rc_calls_on(body: &gossamer_mir::Body, name: &str, local: Local, field:
         .count()
 }
 
+/// Whether the value whole-copied into `slot` has its `field` set to null in
+/// the same block after the copy: the copy took that field's share.
+fn copy_source_field_nulled(body: &gossamer_mir::Body, slot: Local, field: u32) -> bool {
+    body.blocks.iter().any(|block| {
+        block.stmts.iter().enumerate().any(|(i, stmt)| {
+            let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+            else {
+                return false;
+            };
+            if place.local != slot || !place.projection.is_empty() || !src.projection.is_empty() {
+                return false;
+            }
+            block.stmts[i + 1..].iter().any(|later| {
+                matches!(
+                    &later.kind,
+                    StatementKind::Assign {
+                        place: nulled,
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    } if nulled.local == src.local
+                        && nulled.projection.as_slice() == [gossamer_mir::Projection::Field(field)]
+                )
+            })
+        })
+    })
+}
+
 /// The tuple slot a field-0 extract copies from.
 fn field0_extract_source(body: &gossamer_mir::Body) -> Option<Local> {
     body.blocks
@@ -383,8 +412,11 @@ fn use_it() -> i64 {
     let slot = field0_extract_source(body).expect("field-0 tuple extract");
 
     assert!(
-        field_rc_calls_on(body, "gos_rt_rc_retain", slot, 0) > 0,
-        "the tuple slot's String field must be retained when the slot is copied"
+        field_rc_calls_on(body, "gos_rt_rc_retain", slot, 0) > 0
+            || copy_source_field_nulled(body, slot, 0),
+        "the tuple slot's String field must hold a share of its own when the slot \
+         is copied: a retain, or the share of the dead value it copies, which is \
+         then set to null"
     );
     assert!(
         field_rc_calls_on(body, "gos_rt_rc_release", slot, 0) > 0,
@@ -2241,9 +2273,10 @@ fn a_read_only_container_argument_crosses_without_a_copy() {
         .filter(|name| name.as_str() == "gos_rt_vec_clone")
         .count();
     assert_eq!(
-        clones, 2,
-        "one copy for the `mut` parameter and one for the callee that hands \
-         the value back; the read-only call needs none",
+        clones, 1,
+        "one copy for the `mut` parameter, which the caller reads again; the \
+         callee that hands the value back receives the caller's last use of \
+         it, which moves, and the read-only call needs none",
     );
 }
 

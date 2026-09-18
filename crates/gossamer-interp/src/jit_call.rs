@@ -593,7 +593,7 @@ fn build_variant_to_native_enum_inner(
                 let base = h.ptr & !7;
                 let unique_native = base != 0
                     && Arc::strong_count(h) == 1
-                    && unsafe { rt::gos_rt_rc_strong_count(base as *mut u8) } == 1;
+                    && unsafe { rt::rc_strong_count(base as *mut u8) } == 1;
                 if transfer_unique && unique_native {
                     actions.push(NativeFieldAction::TransferOriginal(i));
                     Some(BuiltField {
@@ -1132,7 +1132,7 @@ fn free_native_enum(ptr: i64, shape: &crate::value::NativeEnumShape) {
     // (count-reaching-zero) release frees nothing twice. A region / immortal
     // node reports count 0 and is released once as a harmless no-op.
     // SAFETY: `base` is a uniquely-owned node; releasing it to zero reclaims it.
-    let strong = unsafe { rt::gos_rt_rc_strong_count(base as *mut u8) }.max(1);
+    let strong = unsafe { rt::rc_strong_count(base as *mut u8) }.max(1);
     for _ in 0..strong {
         unsafe { rt::gos_rt_rc_release(base as *mut u8) };
     }

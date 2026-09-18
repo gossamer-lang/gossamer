@@ -253,7 +253,7 @@ fn stdlib_compiled_coverage() {
          compiled-tier dispatch - they pass `gos` and fail `gos build` with \
          `opt: use of undefined value`.\nWire a MIR dispatch arm in \
          crates/gossamer-mir/src/lower/builder/stdlib_free.rs (and the rt! \
-         registry + gos_rt_* shim + symbol_table entry), or - if the function is \
+         registry + gos_rt_* shim), or - if the function is \
          reached through a non-pattern mechanism - document it in \
          COMPILED_VIA_SPECIAL_MECHANISM:\n  {vm_only:#?}",
         n = vm_only.len()

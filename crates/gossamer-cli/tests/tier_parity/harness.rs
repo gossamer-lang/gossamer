@@ -1096,6 +1096,13 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/bounds_check_elim.gos"),
     spec("feature-testing-examples/borrowed_option_result.gos"),
     spec("feature-testing-examples/aggregate_binding.gos"),
+    // A `[rust-bindings]` call answers the same on every tier. The fixture is
+    // a project, so each tier builds the binding runner from its manifest.
+    spec("feature-testing-examples/binding_all_tiers/src/main.gos"),
+    // A value whose last use hands it to a new holder keeps its contents:
+    // constructor fields, a dead copy, a pushed element view, and an aggregate
+    // copy returned after its source field is set to null.
+    spec("feature-testing-examples/uniqueness_handoffs.gos"),
     spec("feature-testing-examples/fs_metadata.gos"),
     spec("feature-testing-examples/html_escape.gos"),
     spec("feature-testing-examples/html_template_render_json.gos"),

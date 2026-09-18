@@ -32,12 +32,6 @@ use parking_lot::RwLock;
 /// codegen and do not need a side registry entry.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum FnKind {
-    /// `extern "C" fn() -> i64`.
-    I64ArgsToI64 { arity: u8 },
-    /// `extern "C" fn(env: *const u8, args...) -> i64`. Used by
-    /// the `gos_rt_fn_tramp_N` family - env is the closure env
-    /// blob; args are i64 each.
-    EnvI64ArgsToI64 { arity: u8 },
     /// `extern "C" fn(*const u8, *mut GosHttpRequest) -> i128`.
     /// Bare-fn HTTP route handler.
     HttpHandlerBare,

@@ -1,0 +1,70 @@
+// Values whose last use hands them to a new holder keep their contents on
+// every tier: a constructor's fields, a copy nothing reads again, an element
+// pushed out of a container that still owns it, and a struct copy returned
+// after a field of the copied value is rewritten.
+
+struct Prog {
+    ops: Vec<i64>
+    name: String
+}
+
+impl Prog {
+    fn new(n: i64) -> Prog {
+        let mut ops = #[]
+        for i in 0..n { ops.push(i * i) }
+        let name = "prog".repeat(2)
+        Prog { ops: ops, name: name }
+    }
+}
+
+struct Grid {
+    width: i64
+    cells: Vec<Vec<i64>>
+}
+
+impl Grid {
+    fn new(width: i64, height: i64) -> Grid {
+        let mut cells: Vec<Vec<i64>> = #[]
+        for _ in 0..height { cells.push(#[0; width]) }
+        let mut grid = Grid { width: width, cells: cells }
+        for y in 0..height {
+            for x in 0..width { grid.cells[y][x] = y * width + x }
+        }
+        grid
+    }
+}
+
+fn build() -> Vec<i64> { #[4, 5, 6] }
+
+fn flatten(rows: Vec<Vec<i64>>) -> Vec<Vec<i64>> {
+    let mut out: Vec<Vec<i64>> = #[]
+    for row in rows { out.push(row) }
+    out
+}
+
+struct Pair {
+    label: String
+    items: Vec<String>
+}
+
+fn copy_and_measure() -> i64 {
+    let p = Pair { label: "a", items: #["x", "y"] }
+    let q = p
+    q.items.len() + q.label.len()
+}
+
+fn main() {
+    for round in 0..3 {
+        let p = Prog::new(5 + round)
+        println("{} {} {}", p.name, p.ops.len(), p.ops[p.ops.len() - 1])
+        let g = Grid::new(4, 3)
+        println("{} {}", g.cells[2][3], g.width)
+        let xs = build()
+        let ys = xs
+        println("{:?}", ys)
+        let rows = #[#[1, 2], #[3]]
+        let flat = flatten(rows)
+        println("{:?} {:?}", flat, rows)
+        println("{}", copy_and_measure())
+    }
+}

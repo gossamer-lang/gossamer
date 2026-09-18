@@ -661,6 +661,19 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
     // concurrently under the atomic protocol. `GOS_RC_NO_ELIDE` disables
     // the pass for differential measurement and as a safety escape hatch.
     if std::env::var_os("GOS_RC_NO_ELIDE").is_none() {
+        // Uniqueness-driven transfers run first, so the null sources they
+        // leave are what the null-accounting elision below cleans up.
+        // `GOS_RC_NO_UNIQUENESS` disables them for differential measurement.
+        if std::env::var_os("GOS_RC_NO_UNIQUENESS").is_none() {
+            let summaries = crate::uniqueness::CallSummaries::compute(bodies, tcx);
+            for body in &mut bodies[start..] {
+                let report = crate::opt::UniquenessReport {
+                    shares_transferred: crate::opt::transfer_last_use_shares(body, tcx, &summaries),
+                    clones_moved: crate::opt::move_unique_clones(body, tcx, &summaries),
+                };
+                crate::opt::record_uniqueness(&body.name, report);
+            }
+        }
         for body in &mut bodies[start..] {
             crate::opt::elide_null_rc_accounting(body);
             crate::opt::elide_redundant_rc_pairs(body, tcx);

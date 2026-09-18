@@ -27,7 +27,7 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ),
     (
         "args.rs",
-        "gos_rt_set_program_name",
+        "set_program_name",
         "the interpreter passes a Rust CString holding the script path",
     ),
     (

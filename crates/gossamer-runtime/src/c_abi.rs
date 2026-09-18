@@ -311,11 +311,6 @@ pub mod x509;
 pub mod xml_codec;
 pub mod yaml_enc;
 
-#[cfg(not(target_arch = "wasm32"))]
-pub mod symbol_table;
-#[cfg(not(target_arch = "wasm32"))]
-pub use symbol_table::runtime_symbol_addrs;
-
 pub use encoding::*;
 pub use sql::*;
 pub use unicode::*;

@@ -1,0 +1,31 @@
+// Strings assembled piece by piece, stored in records, and handed on.
+
+struct Line {
+    text: String
+    width: i64
+}
+
+fn render(i: i64) -> Line {
+    let mut text = String::with_capacity(32)
+    text += "row-"
+    text += i.to_string()
+    text += ":"
+    text += "x".repeat(i % 4)
+    let width = text.len()
+    Line { text: text, width: width }
+}
+
+fn page(n: i64) -> Vec<Line> {
+    let mut lines = #[]
+    for i in 0..n { lines.push(render(i)) }
+    lines
+}
+
+fn main() {
+    let mut total = 0
+    for round in 0..2000 {
+        let lines = page(50 + round % 3)
+        for line in lines { total += line.width + line.text.len() }
+    }
+    println("{}", total)
+}

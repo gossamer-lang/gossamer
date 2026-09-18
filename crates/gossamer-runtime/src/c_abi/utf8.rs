@@ -45,15 +45,6 @@ pub unsafe extern "C" fn gos_rt_utf8_rune_count_in_string(s: *const c_char) -> i
     })
 }
 
-/// Convenience alias - `utf8::count_runes(&str)` and
-/// `utf8::rune_count(&str)` route here too when the caller passes a
-/// string rather than a byte slice. (Byte-slice callers go through
-/// [`gos_rt_utf8_rune_count_bytes`].)
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_utf8_count_runes(s: *const c_char) -> i64 {
-    unsafe { gos_rt_utf8_rune_count_in_string(s) }
-}
-
 /// `utf8::rune_count(bytes: *mut GosVec) -> i64` - counts code
 /// points in a byte buffer. Invalid sequences return 0 for the run
 /// they cover (matching Rust's `std::str::from_utf8` failure mode).

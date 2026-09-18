@@ -115,8 +115,7 @@ static TRACE_HOOK: std::sync::atomic::AtomicPtr<()> =
     std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
 
 /// Installs the host's call-stack renderer. Idempotent; the last wins.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_install_trace_hook(hook: TraceHookFn) {
+pub unsafe fn install_trace_hook(hook: TraceHookFn) {
     TRACE_HOOK.store(hook as *mut (), std::sync::atomic::Ordering::Release);
 }
 
@@ -128,7 +127,7 @@ fn host_trace() -> String {
         return String::new();
     }
     // SAFETY: `raw` was stored from a `TraceHookFn` in
-    // `gos_rt_install_trace_hook` and is read back at the same type.
+    // `install_trace_hook` and is read back at the same type.
     let hook: TraceHookFn = unsafe { std::mem::transmute::<*mut (), TraceHookFn>(raw) };
     let text = hook();
     if text.is_null() {

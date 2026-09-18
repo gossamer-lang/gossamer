@@ -43,6 +43,7 @@ mod validate;
 pub mod value;
 mod vm;
 
+pub use builtins::coverage;
 pub use builtins::{
     TestTally, registered_names, reset_test_tally, set_assertion_location, set_http_max_requests,
     set_program_args, set_program_name, set_stderr_writer, set_stdout_writer, set_struct_layouts,
@@ -126,12 +127,12 @@ pub(crate) fn set_runtime_program_name(name: &str) {
         let cleaned: Vec<u8> = name.bytes().filter(|b| *b != 0).collect();
         CString::new(cleaned).expect("cleaned bytes have no NUL")
     });
-    // SAFETY: `gos_rt_set_program_name` copies the bytes into a
+    // SAFETY: `set_program_name` copies the bytes into a
     // leaked CString; the temporary `cstr` can be dropped after the
     // call returns.
     #[allow(unsafe_code)]
     unsafe {
-        gossamer_runtime::c_abi::gos_rt_set_program_name(cstr.as_ptr());
+        gossamer_runtime::c_abi::set_program_name(cstr.as_ptr());
     }
 }
 

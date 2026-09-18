@@ -146,6 +146,58 @@ described in the [concurrency memory model](design/memory_model.md).
   discriminant in pointer tag bits, so a two-pointer tree node costs
   24 bytes - and only 16 inside an arena.
 
+## Uniqueness
+
+The compiled tiers prove, per function, which values are held exactly once.
+A value is *unique* at a point in the program when nothing but the binding
+that holds it can observe it: no other binding, container, struct field,
+global, closure, goroutine, or live reference reaches the same storage.
+There is no annotation for this and no diagnostic; the compiler infers it,
+and a program computes the same result whether or not a proof succeeds.
+
+Two things change when it does:
+
+- **A copy becomes a handoff.** `let b = a` gives `b` a value of its own,
+  which is a copy of `a`'s storage. When `a` is unique and nothing reads it
+  again, no program can tell the copy from `a` itself, so `b` takes `a`'s
+  storage instead, with no copy and no second allocation.
+- **The last use hands over its share.** Handing a value to a new holder -
+  a struct field, a container, a returned value - normally adds a reference
+  for the holder and gives the old binding's reference back later. When the
+  handoff is the binding's last use, the holder takes the binding's own
+  reference, and neither count adjustment happens. A constructor that builds
+  a struct from its locals and returns it pays for no reference counting on
+  the way out.
+
+What defeats the proof is anything that gives the storage a second
+observer while the first is still in use:
+
+- storing the value in a container, a field, or a struct literal and then
+  reading the original binding again;
+- capturing it in a closure;
+- sending it to another goroutine, through `spawn` or a channel;
+- writing it into a global;
+- holding a live `&` or `&mut` reference to the binding;
+- receiving it as a parameter, which the caller lends rather than hands
+  over.
+
+A value that crosses into a function the compiler cannot see through keeps
+its ordinary copy and reference counting, because the proof only ever errs
+toward sharing: treating a unique value as shared costs work, while treating
+a shared value as unique would let two observers see one write.
+
+To see what the compiler removed, build with the report:
+
+```sh
+gos build --release --uniqueness-report src/main.gos
+```
+
+Each function the proof changed gets one line on stderr naming how many
+reference-count handoffs and copies it removed. `benchmarks/uniqueness/`
+holds three programs whose reference-count traffic is pinned by the test
+suite: a vector pipeline, a struct-heavy aggregate walk, and a string builder
+loop.
+
 ## Arenas: `arena { }`
 
 An `arena` block bump-allocates everything created while it runs and

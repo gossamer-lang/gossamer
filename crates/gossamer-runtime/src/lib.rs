@@ -286,6 +286,7 @@ pub mod sql;
 pub mod sql_migrate;
 pub mod sql_pool;
 pub mod stack_guard;
+pub mod symbols;
 pub mod value;
 
 // Native-only runtime services that pull crates with no wasm32 build:

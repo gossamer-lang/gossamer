@@ -558,7 +558,7 @@ pub unsafe extern "C" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> i128 {
 /// itself. `ctx_handle` is the opaque pointer the caller passes
 /// to `gos_rt_chan_recv_ctx_option` etc.; the installed callbacks
 /// downcast it on their side. All three hooks must be installed
-/// together via [`gos_rt_install_ctx_hooks`] before any
+/// together via [`install_ctx_hooks`] before any
 /// context-aware runtime entry point is called.
 type CtxRegisterFn = unsafe extern "C" fn(ctx_handle: *const u8, gid: u32);
 type CtxDeregisterFn = unsafe extern "C" fn(ctx_handle: *const u8, gid: u32);
@@ -576,8 +576,7 @@ static CTX_IS_CANCELLED_HOOK: std::sync::atomic::AtomicPtr<()> =
 /// different fn pointer (an actual rebind) is undefined behaviour -
 /// the caller (gossamer-std) installs exactly once at first
 /// use of a context-aware runtime entry.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_install_ctx_hooks(
+pub unsafe fn install_ctx_hooks(
     register: CtxRegisterFn,
     deregister: CtxDeregisterFn,
     is_cancelled: CtxIsCancelledFn,
@@ -596,7 +595,7 @@ fn ctx_register_hook() -> Option<CtxRegisterFn> {
         None
     } else {
         // SAFETY: `p` was stored via `CtxRegisterFn as *mut ()` in
-        // `gos_rt_install_ctx_hooks` and is read back with the
+        // `install_ctx_hooks` and is read back with the
         // same function-pointer type. The pointer itself is
         // immutable for the program's lifetime after install.
         Some(unsafe { std::mem::transmute::<*mut (), CtxRegisterFn>(p) })
@@ -630,7 +629,7 @@ fn ctx_is_cancelled_hook() -> Option<CtxIsCancelledFn> {
 /// next unpark cycle and the function returns `None` (disc=1).
 ///
 /// `ctx_handle` is the opaque pointer the caller's
-/// `gos_rt_install_ctx_hooks` callbacks know how to interpret;
+/// `install_ctx_hooks` callbacks know how to interpret;
 /// the runtime never derefs it directly. Passing `null` falls
 /// back to the unconditional [`gos_rt_chan_recv_option`].
 #[unsafe(no_mangle)]

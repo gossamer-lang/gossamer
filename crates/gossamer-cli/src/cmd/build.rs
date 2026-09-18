@@ -52,11 +52,16 @@ pub(crate) struct BuildRequest<'a> {
     pub(crate) timings: bool,
     /// Print the selected profile and target-sensitive optimization plan.
     pub(crate) explain_profile: bool,
+    /// Name each function uniqueness inference removed RC traffic from.
+    pub(crate) uniqueness_report: bool,
 }
 
 /// `gos build` dispatcher: walks the project root for a default
 /// entry point when no path is supplied.
 pub(crate) fn dispatch(mut request: BuildRequest<'_>) -> Result<()> {
+    if request.uniqueness_report {
+        gossamer_mir::enable_uniqueness_report();
+    }
     let resolved = resolve_entry_arg(request.path.take())?;
     crate::binding_dispatch::ensure_external_signatures_for_entry(&resolved)
         .map_err(|err| anyhow!("failed to load rust-binding signatures: {err}"))?;
@@ -269,7 +274,10 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
     let phase_started = Instant::now();
     let build_key = build_artifact_key(file, &source, cross_target, opts, &out_path);
     let stamp_path = build_stamp_path(file, &out_path);
-    if let Some(outcome) = load_unchanged_build(&stamp_path, &out_path, &build_key) {
+    // A report is about this compile, so a current build does not stand in.
+    let unchanged = (!request.uniqueness_report)
+        .then(|| load_unchanged_build(&stamp_path, &out_path, &build_key));
+    if let Some(outcome) = unchanged.flatten() {
         build_timings.stamp = phase_started.elapsed();
         build_timings.total = started.elapsed();
         report_artifact(&outcome, &out_path);

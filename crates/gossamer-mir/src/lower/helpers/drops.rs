@@ -4108,7 +4108,7 @@ fn stores_aggregate_by_pointer(name: &str) -> bool {
         || name.starts_with("gos_rt_chan_send")
 }
 
-fn is_consuming_call(name: &str) -> bool {
+pub(crate) fn is_consuming_call(name: &str) -> bool {
     is_element_push(name)
         // `xs[i] = v` writes the value into the element store, which owns its
         // elements from then on, so the store mints the container's share the

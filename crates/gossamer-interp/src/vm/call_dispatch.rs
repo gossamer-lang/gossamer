@@ -888,7 +888,7 @@ fn install_trace_hook() {
         // SAFETY: the hook has the C-ABI signature the runtime declares for
         // `TraceHookFn` and answers an owned runtime string the runtime frees.
         unsafe {
-            gossamer_runtime::c_abi::gos_rt_install_trace_hook(render_active_vm_trace);
+            gossamer_runtime::c_abi::install_trace_hook(render_active_vm_trace);
         }
     });
 }

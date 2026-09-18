@@ -998,7 +998,7 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // A JSON handle carries no count, so the copy takes a box
                     // of its own onto the same document.
                     vec_elem_kind::JSON => unsafe {
-                        let cloned = crate::c_abi::json::gos_rt_json_clone_handle(child.cast());
+                        let cloned = crate::c_abi::json::json_clone_handle(child.cast());
                         slot_write_word(slot, cloned.cast::<u8>());
                     },
                     // A `GosMap` carries no reference count, so a map element
@@ -2420,7 +2420,7 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
             // A JSON handle carries no count, so the copy takes a box of its
             // own onto the same document and the slot names that one.
             vec_elem_kind::JSON => {
-                let cloned = crate::c_abi::json::gos_rt_json_clone_handle(ptr.cast());
+                let cloned = crate::c_abi::json::json_clone_handle(ptr.cast());
                 slot_write_word(slot, cloned.cast::<u8>());
             }
             // A GosMap carries no count, so a shared element has no protocol.

@@ -2264,9 +2264,7 @@ impl<'a> Builder<'a> {
                 )
             }
             // ---------------------------------------------------------------
-            // std::utf8 - high-value helpers. The decode_rune family
-            // returns `(char, usize)` tuples and stays interp-only
-            // until the Adt-by-value ABI lands.
+            // std::utf8 - counting, length, and validity helpers.
             "utf8::rune_count_in_string" => (
                 "gos_rt_utf8_rune_count_in_string",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),

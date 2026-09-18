@@ -1,0 +1,13 @@
+// A `[rust-bindings]` call answers the same on every tier: a scalar and a
+// `String` cross the binding boundary and back.
+use tier_probe
+
+fn main() {
+    println("{}", tier_probe::double(21))
+    println("{}", tier_probe::greet("world"))
+    let mut total = 0
+    for i in 0..1000 {
+        total += tier_probe::double(i)
+    }
+    println("{}", total)
+}

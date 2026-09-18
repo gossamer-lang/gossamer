@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.61.5 - Fewer reference counts, generated runtime dispatch
+
+- Values the compiler can prove are held exactly once no longer carry reference-count traffic when they are handed to a new holder: a constructor's fields, a value pushed into a container as its last use, and a copy nothing reads again move instead of being retained and released, so aggregate-heavy programs do less bookkeeping without any change to their source.
+- `let b = a` of a `Vec`, `Map`, `Set`, `Deque`, `Queue`, or `Stack` that nothing else observes and nothing reads again hands `a`'s storage to `b` on the compiled tiers instead of copying it.
+- `gos build --uniqueness-report` names each function whose reference-count traffic or copies the compiler removed.
+- The Cranelift backend resolves runtime helpers through a table the runtime generates from its own definitions, so a helper that reaches one execution tier and not another is a build failure rather than a silently wrong answer.
+- Every runtime helper is checked against a bytecode-VM counterpart, so a compiled-only helper cannot reach a release.
+- A `[rust-bindings]` call answers the same on the bytecode VM, the JIT, and `gos build` in both profiles, and the tier-parity walk now holds it to that.
+
 ## 0.61.4 - Fused `for` loops over iterator chains, in-place byte appends
 
 - A `for` loop over a positional chain, such as `for (i, b) in data.iter().enumerate()` or `for i in (0..n).rev()`, walks its source in one counted loop on every tier, where it first built a vector of the elements - a copy of the `(index, element)` pairs, a collected and reversed copy of the range - and pulled each one through a runtime call. A byte hash over `data.iter().enumerate()` runs about 20 times faster, and a bit loop over `(0..8).rev()` about 30 times.

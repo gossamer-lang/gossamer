@@ -45,24 +45,9 @@ mod macos_deployment;
 /// Runtime symbols that intentionally have no codegen dispatch arm.
 /// Add a one-line comment justifying each entry.
 const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
-    // Reached only from inside the runtime: a vector duplicating a slot that
-    // holds a JSON handle takes a box of its own onto the same document.
-    "gos_rt_json_clone_handle",
     // Intentionally never called from generated code: a debug-only
     // helper used by manual `gdb`/`lldb` sessions.
     "gos_rt_result_dbg",
-    // Strong-count probe used by the in-process JIT trampoline
-    // (`gossamer-interp`'s `free_native_enum`) to reclaim a uniquely-owned
-    // returned enum DOM fully; called from Rust, never emitted by codegen.
-    "gos_rt_rc_strong_count",
-    // Non-buffered strong release used by `gossamer-interp`'s native-enum tree
-    // teardown (`free_exclusive_enum_tree`) to reclaim an exclusively-owned tree
-    // without deferring to the cycle collector; called from Rust, never emitted
-    // by codegen.
-    "gos_rt_rc_release_no_buffer",
-    // Setup function called directly from Rust (gossamer-interp's
-    // `set_runtime_program_name`), not from generated Gossamer code.
-    "gos_rt_set_program_name",
     // ABI 0.4 compiled-tier callback dispatcher fallback. Referenced
     // directly from `gossamer-binding::native::NativeCallback::invoke_raw`
     // (Rust binding code), not from generated Gossamer programs. The
@@ -76,11 +61,6 @@ const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
     // through `gos_rt_chan_recv_ctx` instead, so this two-word
     // return shape has no generated reference of its own.
     "gos_rt_chan_recv_ctx_option",
-    "gos_rt_install_ctx_hooks",
-    // Installed by the bytecode VM so a fault raised in JIT-compiled code
-    // reports the interpreted frames that reached it; no generated code
-    // references it.
-    "gos_rt_install_trace_hook",
     // Branch-coverage hooks. Codegen for `gos test --coverage` is
     // staged but not yet emitting bump/record calls - the runtime
     // surface ships ahead so the harness can install the global

@@ -936,9 +936,8 @@ pub(super) fn lower_intrinsic_call_io_math(
                 // synthesise a real function in this module that
                 // takes (env, typed_args...) -> typed_ret and
                 // forwards to the real fn at env+8 with the right
-                // calling convention. Replaces the earlier
-                // mono-i64 `gos_rt_fn_tramp_N` family which
-                // silently mangled f64 / bool / aggregate args.
+                // calling convention, so f64, bool, and aggregate
+                // arguments cross in the registers their type takes.
                 define_shape_thunk(module, intrinsics, name)?
             } else {
                 bail!("gos_fn_addr: unknown fn `{name}`")

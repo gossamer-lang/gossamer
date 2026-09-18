@@ -15,6 +15,7 @@ mod lower;
 mod monomorph;
 mod opt;
 mod ownership;
+pub mod uniqueness;
 pub mod verify;
 
 pub use cleanup::{
@@ -39,7 +40,8 @@ pub use monomorph::{
     subst_param_ty,
 };
 pub use opt::{
-    carrier_payload_views, const_branch_elim, const_fold, const_value_of, copy_propagate,
-    dead_block_sweep, dead_store_elim, inline_general, inline_small_callees,
-    inline_trivial_wrappers, optimise, optimise_debug, optimise_for_jit, statement_count,
+    UniquenessReport, carrier_payload_views, const_branch_elim, const_fold, const_value_of,
+    copy_propagate, dead_block_sweep, dead_store_elim, enable_uniqueness_report, inline_general,
+    inline_small_callees, inline_trivial_wrappers, optimise, optimise_debug, optimise_for_jit,
+    statement_count,
 };

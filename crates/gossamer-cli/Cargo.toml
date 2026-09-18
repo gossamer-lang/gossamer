@@ -69,6 +69,7 @@ gossamer-diagnostics = { workspace = true }
 # (find_runtime_lib_for_target), so recognising the triple is the better
 # behaviour here.
 gossamer-driver = { workspace = true, features = ["musl"] }
+gossamer-mir = { workspace = true }
 gossamer-hir = { workspace = true }
 gossamer-interp = { workspace = true }
 gossamer-lex = { workspace = true }

@@ -556,22 +556,47 @@ fn insert_default() -> i64 {
             _ => None,
         })
         .expect("or_insert default Vec argument");
-    assert!(
-        body.blocks
-            .iter()
-            .flat_map(|block| &block.stmts)
-            .any(|stmt| {
+    let retained = body
+        .blocks
+        .iter()
+        .flat_map(|block| &block.stmts)
+        .any(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                    ..
+                } if *name == "gos_rt_vec_retain"
+                    && matches!(args.first(), Some(Operand::Copy(place))
+                        if place.projection.is_empty() && place.local == default)
+            )
+        });
+    // The default's last use is the call, so its own share can be the one
+    // the map takes: the binding is set to null where the call returns.
+    let handed_over = body.blocks.iter().any(|block| {
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            target: Some(target),
+            ..
+        } = &block.terminator
+        else {
+            return false;
+        };
+        name.starts_with("gos_rt_map_or_insert")
+            && body.blocks[target.0 as usize].stmts.iter().any(|stmt| {
                 matches!(
                     &stmt.kind,
                     StatementKind::Assign {
-                        rvalue: Rvalue::CallIntrinsic { name, args },
-                        ..
-                    } if *name == "gos_rt_vec_retain"
-                        && matches!(args.first(), Some(Operand::Copy(place))
-                            if place.projection.is_empty() && place.local == default)
+                        place,
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    } if place.local == default && place.projection.is_empty()
                 )
-            }),
-        "or_insert must retain the map's Vec share; body: {body:#?}"
+            })
+    });
+    assert!(
+        retained || handed_over,
+        "or_insert must hand the map a Vec share: a retain, or the default's own \
+         share when the call is its last use; body: {body:#?}"
     );
 }
 
@@ -635,9 +660,32 @@ fn main() {
             )
         })
         .count();
+    // The push is `inner`'s last use, so its own share can be the container's:
+    // the binding is set to null where the push returns and its release gives
+    // nothing back.
+    let handed_over = body.blocks.iter().any(|block| {
+        matches!(
+            &block.terminator,
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                target: Some(target),
+                ..
+            } if name == "gos_rt_vec_push"
+                && matches!(args.get(1), Some(Operand::Copy(p)) if p.local == pushed_inner)
+                && body.blocks[target.0 as usize].stmts.iter().any(|stmt| matches!(
+                    &stmt.kind,
+                    StatementKind::Assign {
+                        place,
+                        rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                    } if place.local == pushed_inner && place.projection.is_empty()
+                ))
+        )
+    });
     assert_eq!(
-        retains, 1,
-        "nested Vec push must mint exactly one container share; body: {body:#?}"
+        retains + usize::from(handed_over),
+        1,
+        "nested Vec push must give the container exactly one share; body: {body:#?}"
     );
 }
 

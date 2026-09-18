@@ -6,6 +6,7 @@ include!("opt/reserve.rs");
 include!("opt/inline.rs");
 include!("opt/simple_passes.rs");
 include!("opt/rc_cleanup.rs");
+include!("opt/share_transfer.rs");
 include!("opt/loop_versioning.rs");
 include!("opt/row_tables.rs");
 include!("opt/payload_views.rs");

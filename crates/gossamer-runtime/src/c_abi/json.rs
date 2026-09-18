@@ -460,8 +460,7 @@ pub unsafe extern "C" fn gos_rt_json_value_object_owned_keyed(
 ///
 /// A handle carries no count of its own - it is a box over a shared tree - so
 /// a copied slot takes a box of its own and the tree's `Arc` gains a holder.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_clone_handle(p: *const GosJson) -> *mut GosJson {
+pub(crate) unsafe fn json_clone_handle(p: *const GosJson) -> *mut GosJson {
     if p.is_null() {
         return std::ptr::null_mut();
     }

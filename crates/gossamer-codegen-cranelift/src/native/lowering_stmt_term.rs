@@ -998,15 +998,28 @@ pub(super) fn lower_statement(
                 // np = *pos; np.f = ..; np`). Copy into a fresh heap
                 // aggregate instead - the same storage a returned aggregate
                 // construction uses, freed by the caller's aggregate drop.
+                // The same holds when the SOURCE is written through a
+                // projection after the copy: aliasing would carry that write
+                // into the value the caller is handed.
+                let copy_source = match rvalue {
+                    Rvalue::Use(Operand::Copy(src)) => Some(src.local),
+                    _ => None,
+                };
+                let written_through_projection = |local: Local| {
+                    body.blocks.iter().any(|b| {
+                        b.stmts.iter().any(|s| {
+                            matches!(&s.kind, StatementKind::Assign { place: p, .. }
+                                if p.local == local && !p.projection.is_empty())
+                        })
+                    }) || local_fields_written_through_address(body, local)
+                };
                 let heap_agg_copy = agg_copy_src
                     && !whole_agg_copy
                     && local_flows_to_return(body, place.local)
-                    && (body.blocks.iter().any(|b| {
-                        b.stmts.iter().any(|s| {
-                            matches!(&s.kind, StatementKind::Assign { place: p, .. }
-                                if p.local == place.local && !p.projection.is_empty())
-                        })
-                    }) || local_fields_written_through_address(body, place.local));
+                    && (written_through_projection(place.local)
+                        || copy_source.is_some_and(|src| {
+                            src != place.local && written_through_projection(src)
+                        }));
                 if whole_agg_copy {
                     let slots = type_slot_count(tcx, body.local_ty(place.local)).max(1);
                     let dst_var = ensure_var(
