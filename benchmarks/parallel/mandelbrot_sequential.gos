@@ -1,0 +1,33 @@
+// The sequential twin of `mandelbrot.gos`: the same rows through `map`.
+use std::env
+
+fn escape(cx: f64, cy: f64, limit: i64) -> i64 {
+    let mut x = 0.0
+    let mut y = 0.0
+    let mut n = 0
+    for _ in 0..limit {
+        if x * x + y * y > 4.0 { return n }
+        let nx = x * x - y * y + cx
+        y = 2.0 * x * y + cy
+        x = nx
+        n += 1
+    }
+    n
+}
+
+fn row(index: i64, size: i64, limit: i64) -> i64 {
+    let mut total = 0
+    let cy = -1.25 + 2.5 * (index as f64) / (size as f64)
+    for col in 0..size {
+        let cx = -2.0 + 3.0 * (col as f64) / (size as f64)
+        total += escape(cx, cy, limit)
+    }
+    total
+}
+
+fn main() {
+    let size = env::args().first().unwrap_or("1200").to_i64().unwrap_or(1200)
+    let rows = (0..size).collect()
+    let totals = rows.map(|i| row(i, size, 1000))
+    println("{}", totals.iter().sum())
+}

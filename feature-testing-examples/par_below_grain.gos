@@ -1,0 +1,15 @@
+// Inputs shorter than one leaf run where the call was made, so the inline
+// path answers exactly what the pooled one does.
+
+fn main() {
+    let xs = #[3, 1, 2]
+    println("{:?}", xs.par_map(|v| v * 10))
+    println("{:?}", xs.par_filter(|v| v > 1))
+    println("{}", xs.par_sum())
+    println("{}", xs.par_reduce(100, |a, b| a + b))
+    println("{:?} {:?}", xs.par_min(), xs.par_max())
+    let empty: Vec<i64> = #[]
+    println("{:?} {} {:?} {}", empty.par_map(|v| v * 2), empty.par_sum(), empty.par_max(), empty.par_reduce(7, |a, b| a + b))
+    let words = #["b", "a"]
+    println("{:?} {}", words.par_min(), words.par_reduce("", |a, b| a + b))
+}

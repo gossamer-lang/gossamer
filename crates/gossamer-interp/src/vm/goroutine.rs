@@ -393,6 +393,20 @@ const MAX_WORKERS: usize = 1024;
 #[cfg(not(target_arch = "wasm32"))]
 const STARVATION_CHECK_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
+/// Workers a parallel adapter spreads its leaves over: the configured pool
+/// size when one is pinned, otherwise the machine's cores. The pool grows to
+/// meet queued work, and a helper it has not started yet costs nothing, since
+/// the caller takes any leaf no helper has claimed.
+pub(crate) fn parallel_width() -> usize {
+    if let Ok(raw) = std::env::var("GOSSAMER_VM_GOROUTINE_WORKERS")
+        && let Ok(requested) = raw.parse::<usize>()
+        && requested > 0
+    {
+        return requested.min(MAX_WORKERS);
+    }
+    std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get)
+}
+
 fn default_worker_count() -> usize {
     if let Ok(raw) = std::env::var("GOSSAMER_VM_GOROUTINE_WORKERS")
         && let Ok(requested) = raw.parse::<usize>()

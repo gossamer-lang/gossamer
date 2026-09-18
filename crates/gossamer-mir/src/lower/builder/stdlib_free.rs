@@ -1067,6 +1067,12 @@ impl<'a> Builder<'a> {
         if !callee_def_some && args.len() == 2 && joined == "__gos_fs_walk_dir_raw" {
             return ControlFlow::Break(self.try_lower_walk_dir(args, span));
         }
+        // A parallel adapter's chunk runner: the leaf closure must reach the
+        // runtime as an environment it can call from every worker, which the
+        // generic stdlib-call path does not shape.
+        if !callee_def_some && args.len() == 3 && joined == "__gos_par_run" {
+            return ControlFlow::Break(self.try_lower_par_run(args, span));
+        }
         // A resolver-bound type-qualified call (`UserStruct::method`, so
         // `callee_def` is some) is a user item and must never be hijacked
         // by a stdlib bare-type alias like `Counter::new` / `Builder::new`

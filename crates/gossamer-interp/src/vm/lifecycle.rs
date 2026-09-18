@@ -1019,6 +1019,10 @@ impl Vm {
             // instead of two) and overflows its stack slot. The bytecode VM is
             // unaffected - it runs the separately-compiled chunks, not these
             // MIR bodies, which are JIT-only.
+            let template_names: std::collections::HashMap<u32, String> = bodies
+                .iter()
+                .filter_map(|body| Some((body.def?.local, body.name.clone())))
+                .collect();
             gossamer_mir::monomorphise(&lifted, &mut bodies, &mut jit_tcx);
             drop(lifted);
             if !roots.is_empty() {
@@ -1106,10 +1110,27 @@ impl Vm {
                 // bodies now, while they are still in hand: the deferred
                 // compile below releases `mir_bodies` for spawn-free
                 // programs, so this is the last point the set is derivable.
-                let eager_names: std::collections::HashSet<String> =
+                // The VM runs a generic as one chunk under its source name, not
+                // one per specialisation, so a loop-bearing specialisation makes
+                // that chunk eager: its first call is the loop's first entry.
+                let mut eager_names: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for name in
                     jit_backend::jit_eager_loop_bodies(&bodies, &jit_tcx, &shapes, &struct_shapes)
-                        .into_iter()
-                        .collect();
+                {
+                    match gossamer_mir::template_of(&name) {
+                        Some(gossamer_mir::Template::Function(def)) => {
+                            if let Some(source) = template_names.get(&def) {
+                                eager_names.insert(source.clone());
+                            }
+                        }
+                        Some(gossamer_mir::Template::Method(base)) => {
+                            eager_names.insert(base.to_string());
+                        }
+                        None => {}
+                    }
+                    eager_names.insert(name);
+                }
                 *self.jit_eager_names.borrow_mut() = Arc::new(eager_names);
                 // Keep the full, collision-free compiler description rather
                 // than a lossy hash: an accidental cache hit could dispatch a

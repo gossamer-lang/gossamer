@@ -69,4 +69,9 @@ impl NativeDispatch for VmDispatch<'_> {
     ) {
         self.vm.spawn_with_outcome_native(target, args, sink);
     }
+
+    fn spawn_task(&mut self, task: crate::value::NativeTask) -> bool {
+        self.vm.spawn_native_task(task);
+        true
+    }
 }

@@ -929,6 +929,7 @@ fn is_container_ctor(name: &str) -> bool {
             | "gos_rt_vec_from_arr"
             | "gos_rt_nested_arr_to_vec"
             | "gos_rt_vec_clone"
+            | "gos_rt_par_run"
             | "gos_rt_str_chars"
             | "gos_rt_i64_chars"
             | "gos_rt_arr_iter"

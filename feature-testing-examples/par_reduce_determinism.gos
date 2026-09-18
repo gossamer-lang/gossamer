@@ -1,0 +1,14 @@
+// A reduction's tree is a function of the input length alone, so a float sum
+// answers the same bits on every tier and at every worker count, and an
+// associative combine that is not commutative keeps index order.
+
+fn main() {
+    let xs = (0..100000).map(|i| 1.0 / ((i + 1) as f64)).collect()
+    println("{:?}", xs.par_sum())
+    println("{:?}", xs.par_reduce(0.0, |a, b| a + b))
+    let words = (0..5000).map(|i| format("{}", i % 10)).collect()
+    let joined = words.par_reduce("", |a, b| a + b)
+    println("{} {}", joined.len(), joined.substring(0, 24))
+    let mixed = (0..3000).map(|i| (i % 17) as f64 - 8.5).collect()
+    println("{:?} {:?} {:?}", mixed.par_min(), mixed.par_max(), mixed.par_sum())
+}

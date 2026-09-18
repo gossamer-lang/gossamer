@@ -901,6 +901,40 @@ impl<'a> Builder<'a> {
         Some(dest)
     }
 
+    /// `__gos_par_run(len, mode, leaf)`: runs `leaf(lo, hi)` over the leaves
+    /// of `[0, len)` on the pool and answers their `Vec`s concatenated in
+    /// index order. The call's type is the leaf's own return type.
+    pub(crate) fn try_lower_par_run(&mut self, args: &[HirExpr], span: Span) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let [len_arg, mode_arg, leaf_arg] = args else {
+            return None;
+        };
+        let (TyKind::FnPtr(sig) | TyKind::FnTrait(sig)) = self.tcx.kind_of(leaf_arg.ty).clone()
+        else {
+            return None;
+        };
+        let result_ty = sig.output;
+        let len_local = self.lower_expr(len_arg)?;
+        let mode_local = self.lower_expr(mode_arg)?;
+        let raw_leaf_local = self.lower_expr(leaf_arg)?;
+        let leaf_trait_ty = self.tcx.intern(TyKind::FnTrait(sig));
+        let leaf_local = self.coerce_to_fn_trait_if_needed(raw_leaf_local, leaf_trait_ty, span);
+        let dest = self.fresh(result_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_par_run".to_string())),
+            args: vec![
+                Operand::Copy(Place::local(leaf_local)),
+                Operand::Copy(Place::local(len_local)),
+                Operand::Copy(Place::local(mode_local)),
+            ],
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        Some(dest)
+    }
+
     pub(crate) fn try_lower_array_swap(
         &mut self,
         receiver: &HirExpr,
@@ -1588,6 +1622,9 @@ impl<'a> Builder<'a> {
                 {
                     return Some(local);
                 }
+                if let Some(local) = self.lower_minmax_string_elem(&args[0], false, span) {
+                    return Some(local);
+                }
                 if let Some(family) = self.lazy_iter_source_family_word(args[0].ty) {
                     let (iter, lazy) = self.lower_iter_seq_arg(&args[0])?;
                     if lazy.is_some() {
@@ -1613,6 +1650,9 @@ impl<'a> Builder<'a> {
                 if let Some(local) =
                     self.lower_minmax_wide_elem(&args[0], wide_elem, ty, true, span)
                 {
+                    return Some(local);
+                }
+                if let Some(local) = self.lower_minmax_string_elem(&args[0], true, span) {
                     return Some(local);
                 }
                 if let Some(family) = self.lazy_iter_source_family_word(args[0].ty) {
@@ -5855,6 +5895,42 @@ impl<'a> Builder<'a> {
     /// is one field of it. Ordering a copy structurally - the comparison
     /// `sort` already uses - puts the answer at a known end, and the element
     /// there becomes the payload.
+    /// `min` / `max` over a `String` sequence, which orders by text. The
+    /// word shims would order the slots' addresses.
+    fn lower_minmax_string_elem(
+        &mut self,
+        seq_arg: &HirExpr,
+        want_max: bool,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let mut seq_ty = seq_arg.ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(seq_ty) {
+            seq_ty = *inner;
+        }
+        let (TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. }) =
+            self.tcx.kind_of(seq_ty).clone()
+        else {
+            return None;
+        };
+        if !matches!(self.tcx.kind_of(elem), TyKind::String) {
+            return None;
+        }
+        let vec_local = self.lower_iter_vec_arg(seq_arg)?;
+        let opt_ty = self.option_payload_adt_ty(elem);
+        let helper = if want_max {
+            "gos_rt_iter_max_str"
+        } else {
+            "gos_rt_iter_min_str"
+        };
+        Some(self.emit_combinator_call(
+            helper,
+            vec![Operand::Copy(Place::local(vec_local))],
+            opt_ty,
+            span,
+        ))
+    }
+
     fn lower_minmax_wide_elem(
         &mut self,
         seq_arg: &HirExpr,

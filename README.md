@@ -88,6 +88,7 @@ My goal is for Gossamer to replace Go, Python, F#/C#, Kotlin/Java, and
 | Keyword arguments                               |    ✓     |      |     |  ✓  |    ✓   |   ✓    |    ✓   |
 | Default argument values                         |    ✓     |      |     |  ✓  |    ✓   |   ✓    |    ✓   |
 | Built in MCP server                             |    ✓     |      |  ✓  |     |        |        |        |
+| Parallel collection adapters                    |    ✓     |   ✓  |     |  ✓  |        |        |    ✓   |
 
 **Not Transpiled**
 
@@ -110,6 +111,26 @@ Or at least - not a carbon copy by intent!
 **Default colorless structured concurrency**
 
 As of 0.51.0 - Gossamer supports and defaults to colorless yet structured concurrency.
+
+**Parallel collection adapters**
+
+As of 0.62.0, every eager collection walk has a parallel twin that spreads the work over
+every core the machine has:
+
+    let scaled  = xs.par_map(|v| v * 2.0)
+    let kept    = xs.par_filter(|v| v > 0.0)
+    let total   = xs.par_sum()
+    let folded  = xs.par_reduce(0.0, |a, b| a + b)
+
+No channel, no cohort, no handle, and no new syntax. The callback is a closure literal or a
+named pure function, which is how the compiler knows running it on many workers at once is
+sound; one that writes a container it captured is rejected rather than raced. Effectful work
+still belongs in a `cohort { }` with `spawn`, and the diagnostic says so.
+
+A reduction's tree is a function of the input length, never of the machine's worker count,
+so a float `par_sum` answers the same bits everywhere and `par_reduce` works with a combine
+that is associative but not commutative. `par_reduce` asks the caller for associativity and
+nothing else.
 
 **Tier Parity Across Interpreted/Compiled**
 

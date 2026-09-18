@@ -1,0 +1,31 @@
+// Order and equality read values, not the storage they sit in: a `String`
+// sequence orders by text, a float sequence by the total order, and an
+// `Option` or `Result` compares its payload, with a NaN equal to nothing.
+
+fn main() {
+    let words = #["zebra", "mango", "apple", "kiwi"]
+    let built = #["b" + "x", "a" + "y", "c" + "z"]
+    println("{:?} {:?}", words.min(), words.max())
+    println("{:?} {:?}", built.min(), built.max())
+    let zs = #[0.0, -0.0, 3.5, -2.0]
+    println("{:?} {:?}", zs.min(), zs.max())
+    let signed = #[0.0, -0.0]
+    println("{:?} {:?}", signed.min(), signed.max())
+
+    let a = "x" + "y"
+    println("{}", Some(a) == Some("xy"))
+    let r: Result<String, String> = Ok("x" + "y")
+    let s: Result<String, String> = Ok("xy")
+    println("{} {}", r == s, r != s)
+    println("{}", Some((1, 2)) == Some((1, 2)))
+    println("{}", Some((1, "a")) == Some((1, "a")))
+    println("{}", Some((1, 2)) != Some((1, 3)))
+    println("{}", Some((1, "a")) < Some((1, "b")))
+    let none: Option<(i64, String)> = None
+    println("{}", none == None)
+
+    let z = 0.0
+    let nan = z / z
+    println("{} {}", (nan, 1) == (nan, 1), (2.5, 1) == (2.5, 1))
+    println("{}", Some(nan) == Some(nan))
+}

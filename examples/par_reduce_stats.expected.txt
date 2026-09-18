@@ -1,0 +1,4 @@
+sum: 2500243808205
+min: Some(0)
+max: Some(999999)
+evens: 2500001 odds: 2499999

@@ -14,7 +14,7 @@ use gossamer_diagnostics::Diagnostic;
 use gossamer_lex::SourceMap;
 use gossamer_parse::parse_source_file;
 use gossamer_resolve::{ResolveError, resolve_source_file};
-use gossamer_types::{TyCtxt, check_arena_escapes, typecheck_source_file};
+use gossamer_types::{TyCtxt, check_arena_escapes, check_parallel_adapters, typecheck_source_file};
 
 fn collect_diagnostics(source: &str, file_name: &str) -> Vec<Diagnostic> {
     let mut map = SourceMap::new();
@@ -41,6 +41,10 @@ fn collect_diagnostics(source: &str, file_name: &str) -> Vec<Diagnostic> {
     }
 
     for diag in check_arena_escapes(&sf, &resolutions, &table, &tcx) {
+        out.push(diag.to_diagnostic());
+    }
+
+    for diag in check_parallel_adapters(&sf, &resolutions, &table, &tcx) {
         out.push(diag.to_diagnostic());
     }
 

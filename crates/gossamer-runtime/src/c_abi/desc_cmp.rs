@@ -28,6 +28,18 @@ use super::*;
 //                    whose type is that enum
 // ---------------------------------------------------------------
 
+/// What a walk decides: an order, or only whether two values are equal.
+///
+/// The two differ for a float, whose IEEE `==` says a NaN equals nothing
+/// while an order has to place it somewhere.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CmpMode {
+    /// `-1` / `0` / `1`.
+    Order,
+    /// `0` for equal, nonzero otherwise.
+    Equal,
+}
+
 /// Where a descriptor's value sits relative to the slot it is reached from.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CmpStorage {
@@ -158,15 +170,19 @@ const fn desc_tag_is_flat(tag: u8) -> bool {
 /// # Safety
 /// `a` and `b` address one slot each, holding a value of the tag's kind.
 pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
+    unsafe { compare_flat_in(CmpMode::Order, tag, a, b) }
+}
+
+/// [`compare_flat`] deciding what `mode` asks.
+///
+/// # Safety
+/// As for [`compare_flat`].
+pub(crate) unsafe fn compare_flat_in(mode: CmpMode, tag: u8, a: *const u8, b: *const u8) -> i64 {
     let wa = unsafe { (a as *const i64).read_unaligned() };
     let wb = unsafe { (b as *const i64).read_unaligned() };
     match tag {
         1 => ord_code((wa as u64).cmp(&(wb as u64))),
-        2 => ord_code(
-            f64::from_bits(wa as u64)
-                .partial_cmp(&f64::from_bits(wb as u64))
-                .unwrap_or(Ordering::Equal),
-        ),
+        2 => float_code(mode, f64::from_bits(wa as u64), f64::from_bits(wb as u64)),
         3 => ord_code((wa & 1).cmp(&(wb & 1))),
         4 => ord_code((wa as u32).cmp(&(wb as u32))),
         5 => {
@@ -178,11 +194,20 @@ pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
     }
 }
 
+/// Two floats under `mode`: IEEE equality, or an order that leaves an
+/// unordered pair equal.
+fn float_code(mode: CmpMode, a: f64, b: f64) -> i64 {
+    match mode {
+        CmpMode::Equal => i64::from(a != b),
+        CmpMode::Order => ord_code(a.partial_cmp(&b).unwrap_or(Ordering::Equal)),
+    }
+}
+
 /// Orders two leaves of a packed struct, each stored as `kind` names.
 ///
 /// # Safety
 /// `a` and `b` address a leaf of that kind's width.
-unsafe fn compare_packed_leaf(kind: u8, a: *const u8, b: *const u8) -> i64 {
+unsafe fn compare_packed_leaf(mode: CmpMode, kind: u8, a: *const u8, b: *const u8) -> i64 {
     use gossamer_abi::packed_leaf;
     // SAFETY: the caller hands two addresses of a leaf of this kind's width.
     unsafe {
@@ -220,11 +245,10 @@ unsafe fn compare_packed_leaf(kind: u8, a: *const u8, b: *const u8) -> i64 {
                     .read_unaligned()
                     .cmp(&b.cast::<u64>().read_unaligned()),
             ),
-            packed_leaf::FLOAT => ord_code(
-                a.cast::<f64>()
-                    .read_unaligned()
-                    .partial_cmp(&b.cast::<f64>().read_unaligned())
-                    .unwrap_or(Ordering::Equal),
+            packed_leaf::FLOAT => float_code(
+                mode,
+                a.cast::<f64>().read_unaligned(),
+                b.cast::<f64>().read_unaligned(),
             ),
             _ => ord_code(
                 a.cast::<i64>()
@@ -268,12 +292,31 @@ pub(crate) unsafe fn compare_desc(
     storage: CmpStorage,
     self_desc: Option<usize>,
 ) -> i64 {
+    unsafe { compare_desc_in(CmpMode::Order, a, b, tags, cursor, storage, self_desc) }
+}
+
+/// [`compare_desc`] deciding what `mode` asks.
+///
+/// # Safety
+/// As for [`compare_desc`].
+pub(crate) unsafe fn compare_desc_in(
+    mode: CmpMode,
+    a: *const u8,
+    b: *const u8,
+    tags: *const u8,
+    cursor: &mut usize,
+    storage: CmpStorage,
+    self_desc: Option<usize>,
+) -> i64 {
     let tag = unsafe { *tags.add(*cursor) };
     match tag {
         gossamer_abi::TUPLE_TAG_NESTED => {
             *cursor += 1;
             let arity = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
+            // A tuple reached by word - a carrier's payload - keeps its slots
+            // in the block that word addresses.
+            let (a, b) = unsafe { inline_bases(a, b, storage) };
             // Where every field is one byte of descriptor over one slot, the
             // field's descriptor is at a known offset and its span is one, so
             // the ordering is read straight off the slots. The general walk
@@ -284,7 +327,7 @@ pub(crate) unsafe fn compare_desc(
                 let mut result = 0i64;
                 for i in 0..arity {
                     let tag = unsafe { *tags.add(*cursor + i) };
-                    let ord = unsafe { compare_flat(tag, a.add(i * 8), b.add(i * 8)) };
+                    let ord = unsafe { compare_flat_in(mode, tag, a.add(i * 8), b.add(i * 8)) };
                     if result == 0 {
                         result = ord;
                     }
@@ -301,7 +344,8 @@ pub(crate) unsafe fn compare_desc(
                 if result == 0 {
                     let mut c = *cursor;
                     result = unsafe {
-                        compare_desc(
+                        compare_desc_in(
+                            mode,
                             a.add(slot * 8),
                             b.add(slot * 8),
                             tags,
@@ -328,7 +372,8 @@ pub(crate) unsafe fn compare_desc(
             for i in 0..count {
                 let mut c = elem_desc;
                 let ord = unsafe {
-                    compare_desc(
+                    compare_desc_in(
+                        mode,
                         base_a.add(i * span * 8),
                         base_b.add(i * span * 8),
                         tags,
@@ -350,7 +395,7 @@ pub(crate) unsafe fn compare_desc(
             let vb: *const GosVec = unsafe { word_ptr(b) };
             let elem_desc = *cursor;
             unsafe { skip_cmp_desc(tags, cursor) };
-            unsafe { compare_vec(va, vb, tags, elem_desc, self_desc) }
+            unsafe { compare_vec_in(mode, va, vb, tags, elem_desc, self_desc) }
         }
         gossamer_abi::DESC_OPTION | gossamer_abi::DESC_RESULT => {
             *cursor += 1;
@@ -375,7 +420,8 @@ pub(crate) unsafe fn compare_desc(
             let arm = if da == 0 { first } else { second };
             let mut c = arm;
             unsafe {
-                compare_desc(
+                compare_desc_in(
+                    mode,
                     std::ptr::addr_of!(payload_a).cast::<u8>(),
                     std::ptr::addr_of!(payload_b).cast::<u8>(),
                     tags,
@@ -430,7 +476,8 @@ pub(crate) unsafe fn compare_desc(
                 let span = unsafe { desc_slot_span(tags, c) };
                 let mut field_cursor = c;
                 let ord = unsafe {
-                    compare_desc(
+                    compare_desc_in(
+                        mode,
                         fields_a.add(slot * 8),
                         fields_b.add(slot * 8),
                         tags,
@@ -458,8 +505,9 @@ pub(crate) unsafe fn compare_desc(
                     *tags.add(at + 1)
                 }]));
                 let kind = unsafe { *tags.add(at + 2) };
-                let ord =
-                    unsafe { compare_packed_leaf(kind, base_a.add(offset), base_b.add(offset)) };
+                let ord = unsafe {
+                    compare_packed_leaf(mode, kind, base_a.add(offset), base_b.add(offset))
+                };
                 if ord != 0 {
                     return ord;
                 }
@@ -472,11 +520,11 @@ pub(crate) unsafe fn compare_desc(
                 return 0;
             };
             let mut c = start;
-            unsafe { compare_desc(a, b, tags, &mut c, CmpStorage::ByWord, self_desc) }
+            unsafe { compare_desc_in(mode, a, b, tags, &mut c, CmpStorage::ByWord, self_desc) }
         }
         _ => {
             *cursor += 1;
-            unsafe { compare_flat(tag, a, b) }
+            unsafe { compare_flat_in(mode, tag, a, b) }
         }
     }
 }
@@ -548,6 +596,17 @@ unsafe fn compare_vec(
     elem_desc: usize,
     self_desc: Option<usize>,
 ) -> i64 {
+    unsafe { compare_vec_in(CmpMode::Order, a, b, tags, elem_desc, self_desc) }
+}
+
+unsafe fn compare_vec_in(
+    mode: CmpMode,
+    a: *const GosVec,
+    b: *const GosVec,
+    tags: *const u8,
+    elem_desc: usize,
+    self_desc: Option<usize>,
+) -> i64 {
     let (la, lb) = (
         if a.is_null() { 0 } else { unsafe { (*a).len } },
         if b.is_null() { 0 } else { unsafe { (*b).len } },
@@ -557,7 +616,8 @@ unsafe fn compare_vec(
         let ea = unsafe { elem_addr(a, i) };
         let eb = unsafe { elem_addr(b, i) };
         let mut c = elem_desc;
-        let ord = unsafe { compare_desc(ea, eb, tags, &mut c, CmpStorage::Inline, self_desc) };
+        let ord =
+            unsafe { compare_desc_in(mode, ea, eb, tags, &mut c, CmpStorage::Inline, self_desc) };
         if ord != 0 {
             return ord;
         }
@@ -685,6 +745,34 @@ pub unsafe extern "C" fn gos_rt_desc_cmp(a: *const u8, b: *const u8, tags: *cons
         }
         let mut cursor = 0usize;
         unsafe { compare_desc(a, b, tags, &mut cursor, CmpStorage::Inline, None) }
+    })
+}
+
+/// Whether two values of one type are equal through their ordering
+/// descriptor, answering `1` or `0`. A float decides by IEEE `==`, so a NaN
+/// equals nothing, as it does on the interpreter.
+///
+/// # Safety
+/// `a` and `b` address values `tags` describes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_desc_eq(a: *const u8, b: *const u8, tags: *const u8) -> i64 {
+    ffi_entry!(0, {
+        if a.is_null() || b.is_null() || tags.is_null() {
+            return i64::from(a == b);
+        }
+        let mut cursor = 0usize;
+        let code = unsafe {
+            compare_desc_in(
+                CmpMode::Equal,
+                a,
+                b,
+                tags,
+                &mut cursor,
+                CmpStorage::Inline,
+                None,
+            )
+        };
+        i64::from(code == 0)
     })
 }
 

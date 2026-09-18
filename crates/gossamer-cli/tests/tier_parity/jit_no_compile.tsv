@@ -388,6 +388,7 @@ feature-testing-examples/unsigned_and_nested_rendering.gos	callable local
 feature-testing-examples/usize_compare.gos	no hot body
 feature-testing-examples/validate_errors.gos	no hot body
 feature-testing-examples/validate_errors_return.gos	bytecode-only local
+feature-testing-examples/value_order_and_equality.gos	no hot body
 feature-testing-examples/vec_capacity_overflow.gos	no hot body
 feature-testing-examples/vec_get_method.gos	admission gate
 feature-testing-examples/vec_literal_rendering.gos	no hot body

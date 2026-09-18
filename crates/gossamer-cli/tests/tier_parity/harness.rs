@@ -154,6 +154,8 @@ const SPECS: &[Spec] = &[
     spec("examples/bubble_sort.gos"),
     spec("examples/caesar_cipher.gos"),
     spec("examples/defer_cleanup.gos"),
+    spec("examples/par_map_mandelbrot.gos"),
+    spec("examples/par_reduce_stats.gos"),
     Spec {
         args: &[
             "--name",
@@ -1103,6 +1105,14 @@ const SPECS: &[Spec] = &[
     // constructor fields, a dead copy, a pushed element view, and an aggregate
     // copy returned after its source field is set to null.
     spec("feature-testing-examples/uniqueness_handoffs.gos"),
+    // The parallel adapters answer what their sequential twins answer, on
+    // every tier, above and below the grain, and a reduction's float bits do
+    // not depend on the tier.
+    spec("feature-testing-examples/par_adapters.gos"),
+    spec("feature-testing-examples/par_below_grain.gos"),
+    spec("feature-testing-examples/par_reduce_determinism.gos"),
+    // Order and equality read values rather than the storage they sit in.
+    spec("feature-testing-examples/value_order_and_equality.gos"),
     spec("feature-testing-examples/fs_metadata.gos"),
     spec("feature-testing-examples/html_escape.gos"),
     spec("feature-testing-examples/html_template_render_json.gos"),

@@ -2981,7 +2981,18 @@ pub trait NativeDispatch {
         args: Vec<Value>,
         sink: Box<dyn FnOnce(RuntimeResult<Value>) + Send>,
     );
+    /// Runs `task` on a pool worker with a dispatch of its own, for a builtin
+    /// that spreads its work over several workers. Answers whether the task
+    /// was queued; an implementor with no pool answers `false`, and the
+    /// builtin does that share of the work itself.
+    fn spawn_task(&mut self, task: NativeTask) -> bool {
+        let _ = task;
+        false
+    }
 }
+
+/// A builtin's share of work, run on a pool worker with a dispatch of its own.
+pub type NativeTask = Box<dyn FnOnce(&mut dyn NativeDispatch) + Send>;
 
 /// What a spawned dispatch invokes.
 #[derive(Debug, Clone)]

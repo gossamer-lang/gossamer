@@ -84,6 +84,9 @@ pub fn lower_source_file(
     // consumer (the bytecode VM, and the native path that lifts closures
     // next) sees the same fused HIR. Runs before closure lifting, so
     // stage/terminal closures are still inline and can be spliced in.
+    // Parallel adapters lower to plain index loops first, so their leaves
+    // meet the fuser like any hand-written loop would.
+    crate::par::desugar_parallel_adapters(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::place_refs::inline_place_references(&mut program);
     program
@@ -96,6 +99,8 @@ fn comparator_ordering_form(method: &str) -> Option<&'static str> {
         "sort" => Some("sort_by"),
         "min" => Some("min_by"),
         "max" => Some("max_by"),
+        "par_min" => Some("par_min_by"),
+        "par_max" => Some("par_max_by"),
         _ => None,
     }
 }

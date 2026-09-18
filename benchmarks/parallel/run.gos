@@ -1,0 +1,116 @@
+// Median wall time of each parallel benchmark and its sequential twin at 1,
+// 2, 4, 8, and all cores, and the two claims the parallel adapters make.
+//
+// Usage: gos run benchmarks/parallel/run.gos [--gos PATH] [--runs N]
+//
+// Exits non-zero when, on this machine, a parallel benchmark at 8 workers is
+// less than 6x faster than itself at 1 worker, or the parallel spelling at 1
+// worker is more than 5% slower than its sequential twin. The 8-worker claim
+// is skipped, and says so, on a machine with fewer than 8 cores.
+
+use std::{env, fs, path, process, thread, time}
+
+const PAIRS: [(String, String); 2] = [
+    ("mandelbrot.gos", "mandelbrot_sequential.gos"),
+    ("stats.gos", "stats_sequential.gos"),
+]
+
+fn median(mut xs: Vec<i64>) -> i64 {
+    xs.sort()
+    xs[xs.len() / 2]
+}
+
+/// Median wall time of `runs` runs of `binary` with its pool pinned to
+/// `workers`, or an error naming what a run reported.
+fn timed(binary: String, workers: i64, runs: i64) -> Result<i64, String> {
+    env::set_var("GOSSAMER_MAX_PROCS", format("{}", workers))
+    let mut samples = #[]
+    for _ in 0..runs {
+        let start = time::now_ms()
+        let out = process::run(binary, #[])?
+        let elapsed = time::now_ms() - start
+        if out.code != 0 {
+            return Err(format("exit {}: {}", out.code, out.stderr))
+        }
+        samples.push(elapsed)
+    }
+    Ok(median(samples))
+}
+
+/// Builds `name` with the release pipeline into `scratch`, answering the
+/// binary's path.
+fn build(gos: String, scratch: String, name: String) -> Result<String, String> {
+    let src = path::join("benchmarks/parallel", name)
+    let out = process::run(gos, #["build", "--release", "--out-dir", scratch, src])?
+    if out.code != 0 {
+        return Err(format("build {}: {}", name, out.stderr))
+    }
+    Ok(path::join(scratch, name.replace(".gos", "")))
+}
+
+fn main() {
+    let mut gos = "./target/release/gos"
+    let mut runs = 5
+    let args = env::args()
+    let mut i = 0
+    while i < args.len() {
+        let has_value = i + 1 < args.len()
+        match args[i] {
+            "--gos" => { if has_value { gos = args[i + 1]; i += 1 } }
+            "--runs" => { if has_value { runs = args[i + 1].to_i64().unwrap_or(5); i += 1 } }
+            other => { eprintln("parallel: unknown argument {}", other); process::exit(2) }
+        }
+        i += 1
+    }
+    let cores = thread::num_cpus()
+    let scratch = path::join(env::temp_dir(), "gos-parallel-bench")
+    let _ = fs::remove_dir_all(scratch)
+    if let Err(e) = fs::create_dir_all(scratch) {
+        eprintln("parallel: scratch: {}", e)
+        process::exit(1)
+    }
+    let mut counts = #[1, 2, 4, 8]
+    if cores > 8 { counts.push(cores) }
+
+    let mut failed = false
+    println("{:<28} {:>8} {:>10}", "benchmark", "workers", "median ms")
+    for pair in PAIRS {
+        let parallel = match build(gos, scratch, pair.0) {
+            Ok(b) => b
+            Err(e) => { eprintln("parallel: {}", e); process::exit(1) }
+        }
+        let sequential = match build(gos, scratch, pair.1) {
+            Ok(b) => b
+            Err(e) => { eprintln("parallel: {}", e); process::exit(1) }
+        }
+        let mut at_one = 0
+        let mut at_eight = 0
+        for workers in counts {
+            let ms = match timed(parallel, workers, runs) {
+                Ok(ms) => ms
+                Err(e) => { eprintln("parallel: {}: {}", pair.0, e); process::exit(1) }
+            }
+            println("{:<28} {:>8} {:>10}", pair.0, workers, ms)
+            if workers == 1 { at_one = ms }
+            if workers == 8 { at_eight = ms }
+        }
+        let sequential_ms = match timed(sequential, 1, runs) {
+            Ok(ms) => ms
+            Err(e) => { eprintln("parallel: {}: {}", pair.1, e); process::exit(1) }
+        }
+        println("{:<28} {:>8} {:>10}", pair.1, 1, sequential_ms)
+
+        if cores < 8 {
+            println("{}: fewer than 8 cores, the 8-worker claim is not checked", pair.0)
+        } else if at_eight * 6 > at_one {
+            println("{}: FAIL at 8 workers: {} ms against {} ms at 1", pair.0, at_eight, at_one)
+            failed = true
+        }
+        if at_one * 100 > sequential_ms * 105 {
+            println("{}: FAIL at 1 worker: {} ms against {} ms sequential", pair.0, at_one, sequential_ms)
+            failed = true
+        }
+    }
+    let _ = fs::remove_dir_all(scratch)
+    if failed { process::exit(1) }
+}

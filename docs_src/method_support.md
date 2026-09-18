@@ -70,7 +70,7 @@ The literal spelling of each container is in
 
 | Receiver | Available surface |
 |---|---|
-| `[T; N]`, `&[T; N]`, `&[T]` | `len`, `is_empty`, `slice`, `first`, `last`, `get`, `contains`, `index_of`, `count_of`, `windows`, `chunks`, `join`, `to_vec`, `iter`; fixed arrays also have value-preserving `clone` |
+| `[T; N]`, `&[T; N]`, `&[T]` | `len`, `is_empty`, `slice`, `first`, `last`, `get`, `contains`, `index_of`, `count_of`, `windows`, `chunks`, `join`, `to_vec`, `iter`, and the parallel adapters `par_map`, `par_filter`, `par_reduce`, `par_sum`, `par_min`, `par_max`; fixed arrays also have value-preserving `clone` |
 | `&mut [T; N]`, `&mut [T]` | Shared methods plus in-place `sort`, `sort_by`, `sort_by_key`, `reverse`, `swap`, and `fill` |
 | `Vec<T>`, `&Vec<T>`, `&mut Vec<T>` | Shared methods plus resizing and capacity operations |
 
@@ -96,6 +96,9 @@ The literal spelling of each container is in
 | `v.any(pred)` / `v.all(pred)` | `bool` | Short-circuiting. |
 | `v.find(pred)` | `Option<T>` | First match; `v.position(pred)` returns its index. |
 | `v.fold(init, f)` | `U` | Left fold: `f(acc, x)` per element. |
+| `v.par_map(f)` / `v.par_filter(pred)` | `Vec<U>` / `Vec<T>` | Parallel twins of `map` / `filter`, elements in input order; the callback is a closure literal or a named pure function. See [Parallel collection adapters](parallel.md). |
+| `v.par_reduce(identity, combine)` | `T` | `identity` for an empty input, else every element combined in index order; `combine` must be associative, not commutative. |
+| `v.par_sum()` / `v.par_min()` / `v.par_max()` | `T` / `Option<T>` / `Option<T>` | Parallel twins of `sum` / `min` / `max`; a float sum answers the same bits at any worker count. |
 | `v.max_by_key(f)` / `v.min_by_key(f)` | `Option<T>` | Extremum by derived key. |
 | `v.take(n)` | `Vec<T>` | First `n` elements (fewer if short). |
 | `v.step_by(n)` | `Vec<T>` | Every `n`-th element, starting at index 0. |

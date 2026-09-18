@@ -1,0 +1,35 @@
+// One row per element. The parallel spelling is `par_map` where the sequential
+// one is `map`.
+
+fn escape(cx: f64, cy: f64, limit: i64) -> i64 {
+    let mut x = 0.0
+    let mut y = 0.0
+    let mut n = 0
+    for _ in 0..limit {
+        if x * x + y * y > 4.0 { return n }
+        let nx = x * x - y * y + cx
+        y = 2.0 * x * y + cy
+        x = nx
+        n += 1
+    }
+    n
+}
+
+fn row(index: i64, width: i64, height: i64, limit: i64) -> String {
+    let mut line = String::with_capacity(width)
+    let cy = -1.25 + 2.5 * (index as f64) / (height as f64)
+    for col in 0..width {
+        let cx = -2.0 + 3.0 * (col as f64) / (width as f64)
+        let n = escape(cx, cy, limit)
+        line += if n >= limit { "#" } else if n > 8 { "+" } else if n > 2 { "." } else { " " }
+    }
+    line
+}
+
+fn main() {
+    let width = 78
+    let height = 30
+    let limit = 500
+    let rows = (0..height).par_map(|i| row(i, width, height, limit))
+    for line in rows { println("{}", line) }
+}

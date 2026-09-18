@@ -638,6 +638,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "__gos_fs_walk_dir_raw",
         native("__gos_fs_walk_dir_raw", native_fs_walk_dir_raw),
     ));
+    globals.push(("__gos_par_run", native("__gos_par_run", native_par_run)));
     globals.push(("__gos_process_run_raw", builtin("__gos_process_run_raw", builtin_process_run_raw)));
     globals.push((
         "__gos_process_run_in_raw",

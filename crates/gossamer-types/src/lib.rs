@@ -13,6 +13,7 @@
 
 #![forbid(unsafe_code)]
 
+mod admissible;
 mod arena_escape;
 pub mod builtin_traits;
 mod checker;
@@ -23,6 +24,7 @@ mod exhaustiveness;
 mod infer;
 mod normalize;
 pub mod printer;
+pub mod purity;
 pub mod std_fn_eta;
 pub mod std_fn_values;
 pub mod stdlib_signatures;
@@ -32,6 +34,7 @@ mod trait_index;
 mod traits;
 mod ty;
 
+pub use admissible::{AdmissibilityDiagnostic, Inadmissible, check_parallel_adapters};
 pub use arena_escape::{
     ArenaEscapeDiagnostic, ArenaEscapeError, ArenaEscapeKind, check_arena_escapes,
 };

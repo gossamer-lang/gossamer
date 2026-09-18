@@ -632,6 +632,19 @@ impl Vm {
         });
     }
 
+    /// Runs a builtin's share of work on a pool goroutine, handing it a
+    /// dispatch over that goroutine's own `Vm`.
+    pub(crate) fn spawn_native_task(&self, task: crate::value::NativeTask) {
+        let origin = GoroutineOrigin {
+            name: "parallel adapter".to_string(),
+            file: String::new(),
+            line: 0,
+        };
+        self.spawn_on_pool(origin, move |vm| {
+            task(&mut super::native_dispatch::VmDispatch::new(vm));
+        });
+    }
+
     /// Spawns `callee(args)` on a goroutine and hands the outcome to
     /// `sink` on that goroutine.
     ///

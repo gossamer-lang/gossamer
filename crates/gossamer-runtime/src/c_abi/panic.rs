@@ -195,6 +195,71 @@ impl Drop for IsolatedFaults {
     }
 }
 
+thread_local! {
+    /// Whether a fault on this thread is held for a caller to re-raise.
+    ///
+    /// A parallel adapter runs leaves on several workers, and the fault it
+    /// reports must be the lowest-indexed leaf's whatever order they finish
+    /// in. So a leaf's fault neither reports, nor calls the user hook, nor
+    /// ends the process: it unwinds to the adapter, which re-raises exactly
+    /// one of them once every leaf below it has run.
+    static DEFERRED_FAULTS: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+thread_local! {
+    /// The call stack a deferred fault was raised with, rendered where it
+    /// happened so the re-raise can report the frames that faulted rather
+    /// than the adapter's.
+    static DEFERRED_TRACE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// A fault a deferred domain held: its message and the call stack it was
+/// raised with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeferredFault {
+    /// The fault's message.
+    pub text: String,
+    /// The call stack rendered where the fault was raised.
+    pub trace: String,
+}
+
+/// Holds this thread's faults for a caller to re-raise, for the guard's life.
+pub struct DeferredFaults(bool);
+
+impl DeferredFaults {
+    /// Enters a deferred fault domain on this thread.
+    #[must_use]
+    pub fn enter() -> Self {
+        Self(DEFERRED_FAULTS.replace(true))
+    }
+}
+
+impl Drop for DeferredFaults {
+    fn drop(&mut self) {
+        DEFERRED_FAULTS.set(self.0);
+    }
+}
+
+/// The fault a deferred domain held, when `payload` is one, taking the call
+/// stack this thread recorded for it.
+#[must_use]
+pub fn take_deferred_fault(payload: &(dyn std::any::Any + Send)) -> Option<DeferredFault> {
+    let text = payload.downcast_ref::<GosPanic>()?.0.clone();
+    let trace = DEFERRED_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
+    Some(DeferredFault { text, trace })
+}
+
+/// Raises a fault a deferred domain held, as though it had been raised here,
+/// reporting the call stack it was first raised with.
+pub fn reraise_deferred_fault(fault: &DeferredFault) -> ! {
+    raise_with_trace(
+        "GX0005",
+        "panic: ",
+        fault.text.clone(),
+        Some(fault.trace.clone()),
+    )
+}
+
 /// Whether a fault raised on this thread ends only the work it is serving.
 fn faults_are_isolated() -> bool {
     gossamer_coro::in_goroutine() || ISOLATED_FAULTS.with(std::cell::Cell::get)
@@ -207,11 +272,35 @@ fn faults_are_isolated() -> bool {
 /// hook, the per-goroutine isolation, the stdout flush, and the pinned
 /// exit code are properties of the fault, not of which one it is.
 fn raise(code: &str, prefix: &str, text: String) -> ! {
+    raise_with_trace(code, prefix, text, None)
+}
+
+/// The call stack a fault report shows: the interpreter's shadow stack, the
+/// host's, or the machine stack, whichever this thread has.
+fn fault_trace() -> String {
+    let trace = crate::sigquit::render_active_panic_trace();
+    if !trace.is_empty() {
+        return trace;
+    }
+    let host = host_trace();
+    if !host.is_empty() {
+        return host;
+    }
+    crate::sigquit::render_native_panic_trace()
+}
+
+/// [`raise`] reporting `trace` in place of this thread's own call stack.
+fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String>) -> ! {
     // A static panic message from codegen carries its own line terminator;
     // the report adds one, and two would leave a blank line between the
     // message and the frames below it.
     let text = text.trim_end_matches('\n').to_string();
     install_silent_gos_hook();
+    if DEFERRED_FAULTS.with(std::cell::Cell::get) {
+        let trace = fault_trace();
+        DEFERRED_TRACE.with(|t| *t.borrow_mut() = trace);
+        std::panic::panic_any(GosPanic(text));
+    }
     let hooked = call_user_panic_hook(&text);
     // per-goroutine panic isolation. If the panic originates inside a spawned
     // goroutine, raise a Rust panic the coroutine wrapper catches - the
@@ -253,18 +342,8 @@ fn raise(code: &str, prefix: &str, text: String) -> ! {
         // Match the unified diagnostic-code prefix the VM uses so both
         // execution modes tag a fault with the same code.
         eprintln!("error[{code}]: {prefix}{text}");
-        let trace = crate::sigquit::render_active_panic_trace();
-        if trace.is_empty() {
-            let host = host_trace();
-            if host.is_empty() {
-                let native = crate::sigquit::render_native_panic_trace();
-                if !native.is_empty() {
-                    eprint!("{native}");
-                }
-            } else {
-                eprint!("{host}");
-            }
-        } else {
+        let trace = trace.unwrap_or_else(fault_trace);
+        if !trace.is_empty() {
             eprint!("{trace}");
         }
     }

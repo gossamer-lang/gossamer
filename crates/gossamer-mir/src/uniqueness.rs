@@ -1056,6 +1056,8 @@ fn runtime_answers_fresh(name: &str) -> bool {
     matches!(
         name,
         "gos_rt_vec_with_capacity"
+            | "Vec::new"
+            | "Vec::with_capacity"
             | "gos_rt_vec_new"
             | "gos_rt_vec_new_typed"
             | "gos_rt_vec_with_capacity_typed"
@@ -1068,7 +1070,13 @@ fn runtime_answers_fresh(name: &str) -> bool {
             | "gos_rt_deque_clone"
             | "gos_rt_queue_clone"
             | "gos_rt_stack_clone"
-    ) || gossamer_abi::lookup(name).is_some_and(|entry| entry.mints_string)
+            | "gos_rt_par_run"
+    ) || gossamer_abi::lookup(name).is_some_and(|entry| {
+        // A sequence combinator builds the collection it answers, so nothing
+        // else holds it.
+        entry.mints_string
+            || (entry.combinator.is_some() && entry.sig.ret == gossamer_abi::AbiType::Ptr)
+    })
 }
 
 /// Whether the runtime helper `name` neither keeps nor hands out a handle to

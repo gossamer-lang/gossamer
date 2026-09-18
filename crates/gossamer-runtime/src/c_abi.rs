@@ -275,6 +275,7 @@ pub mod net_unix;
 pub mod netip;
 pub mod os_user;
 pub mod panic;
+pub mod par;
 pub mod pprof_rt;
 pub mod print;
 pub mod rc;

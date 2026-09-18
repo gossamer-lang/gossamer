@@ -142,8 +142,8 @@ fn vector_pipeline_rc_calls_are_pinned() {
                 "stage",
                 RcCounts {
                     retain: 0,
-                    release: 4,
-                    clone: 1,
+                    release: 3,
+                    clone: 0,
                 },
             ),
         ],
@@ -221,5 +221,49 @@ fn string_builder_rc_calls_are_pinned() {
                 },
             ),
         ],
+    );
+}
+
+/// A parallel adapter's leaf closures run once per chunk of elements. They
+/// must take no reference counts of their own, or every element pays for one
+/// on the parallel path that the sequential walk does not, and the
+/// adapter's result is handed to its binding rather than copied.
+#[test]
+fn parallel_benchmark_rc_calls_are_pinned() {
+    let none = || RcCounts {
+        retain: 0,
+        release: 0,
+        clone: 0,
+    };
+    expect(
+        "benchmarks/parallel/stats.gos",
+        &[
+            ("value", none()),
+            ("__closure_0", none()),
+            ("__closure_1", none()),
+            ("__closure_2", none()),
+            ("__closure_3", none()),
+            ("__closure_4", none()),
+            ("__closure_5", none()),
+        ],
+    );
+    expect(
+        "benchmarks/parallel/mandelbrot.gos",
+        &[
+            ("escape", none()),
+            ("row", none()),
+            ("__closure_0", none()),
+            ("__closure_1", none()),
+        ],
+    );
+    let stats = rc_call_counts("benchmarks/parallel/stats.gos", &["main"]);
+    let mandelbrot = rc_call_counts("benchmarks/parallel/mandelbrot.gos", &["main"]);
+    assert_eq!(
+        stats["main"].clone, 0,
+        "an adapter's result was copied into its binding"
+    );
+    assert_eq!(
+        mandelbrot["main"].clone, 0,
+        "an adapter's result was copied into its binding"
     );
 }

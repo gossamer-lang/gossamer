@@ -1,0 +1,22 @@
+// One pass over five million values, reduced three ways. `par_reduce` takes an
+// identity and an associative combine; the tree is fixed, so this prints the
+// same numbers on every machine.
+
+fn value(i: i64) -> i64 {
+    let mut h = i +% 2166136261
+    h = (h ^ (h >> 13)) *% 1274126177
+    (h ^ (h >> 16)) % 1000000
+}
+
+fn main() {
+    let xs = (0..5000000).par_map(value)
+
+    println("sum: {}", xs.par_sum())
+    println("min: {}", xs.par_min())
+    println("max: {}", xs.par_max())
+
+    // A custom associative combine: carry (count of evens, count of odds).
+    let parity = xs.par_map(|v| if v % 2 == 0 { (1, 0) } else { (0, 1) })
+        .par_reduce((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+    println("evens: {} odds: {}", parity.0, parity.1)
+}

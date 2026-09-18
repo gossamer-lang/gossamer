@@ -191,7 +191,7 @@ const PURE_HANDLE_HI_OFFSET: u32 = 49;
 /// pre-band handles alike. A receiver inside this span whose display name is
 /// module-qualified answers a closed method table, which is what lets an
 /// unknown name on one be named at the call site.
-const HANDLE_SENTINEL_SPAN: u32 = PURE_HANDLE_HI_OFFSET;
+pub(crate) const HANDLE_SENTINEL_SPAN: u32 = PURE_HANDLE_HI_OFFSET;
 
 /// One constructor of a runtime handle: the module path it is written
 /// under, and the associated function's name.
@@ -10932,6 +10932,155 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Types a parallel adapter call: `par_map`, `par_filter`, `par_reduce`,
+    /// `par_sum`, `par_min`, or `par_max` on a sequence or an integer range.
+    /// Each answers what its sequential twin answers, and a range answers a
+    /// `Vec` where its lazy `map` would answer an iterator.
+    fn check_parallel_adapter(
+        &mut self,
+        method: &str,
+        receiver_ty: Ty,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Ty> {
+        let arity = match method {
+            "par_map" | "par_filter" => 1,
+            "par_reduce" => 2,
+            "par_sum" | "par_min" | "par_max" => 0,
+            _ => return None,
+        };
+        let mut resolved = self.infer.resolve(self.tcx, receiver_ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(resolved) {
+            resolved = self.infer.resolve(self.tcx, *inner);
+        }
+        let elem = match self.tcx.kind(resolved).cloned() {
+            Some(
+                TyKind::Vec(elem)
+                | TyKind::Slice(elem)
+                | TyKind::Array { elem, .. }
+                | TyKind::Range(elem),
+            ) => elem,
+            Some(TyKind::Var(_)) => {
+                let elem = self.fresh();
+                let shaped = self.tcx.intern(TyKind::Vec(elem));
+                self.unify(shaped, resolved, span);
+                elem
+            }
+            Some(TyKind::Error) => {
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                return Some(self.tcx.error_ty());
+            }
+            _ => {
+                // A lazy iterator keeps its sequential walk, and nothing else
+                // is a sequence: the adapters are not part of its surface.
+                for arg in args {
+                    self.check_expr(arg);
+                }
+                let owner = self.render_public_ty(resolved);
+                let error = self.unresolved_method(owner, method, resolved);
+                self.emit(error, span);
+                return Some(self.tcx.error_ty());
+            }
+        };
+        if args.len() != arity {
+            for arg in args {
+                self.check_expr(arg);
+            }
+            let owner = self.render_public_ty(resolved);
+            self.emit(
+                TypeError::CallArityMismatch {
+                    callee: format!("{owner}::{method}"),
+                    expected: arity,
+                    found: args.len(),
+                },
+                span,
+            );
+            return Some(self.tcx.error_ty());
+        }
+        let answer = self.parallel_adapter_answer(method, elem, args, span);
+        // Every worker reads the callback's captures and a fixed-array
+        // receiver's elements at once, so they obey the rule a goroutine's
+        // captures do.
+        for arg in args {
+            self.reject_unshareable_goroutine_captures(arg);
+        }
+        if matches!(self.tcx.kind(resolved), Some(TyKind::Array { .. }))
+            && self.ty_is_unshareable_across_goroutines(resolved)
+        {
+            let rendered = self.render_public_ty(resolved);
+            self.emit(
+                TypeError::ConcurrentCaptureUnsupported {
+                    name: "the receiver".to_string(),
+                    ty: rendered,
+                },
+                span,
+            );
+        }
+        Some(answer)
+    }
+
+    /// The type an admitted parallel adapter call answers, with its callback
+    /// and seed checked against the element type `elem`.
+    fn parallel_adapter_answer(&mut self, method: &str, elem: Ty, args: &[Expr], span: Span) -> Ty {
+        let bool_ty = self.tcx.bool_ty();
+        match method {
+            "par_map" => {
+                let out = self.check_parallel_callback(&args[0], &[elem]);
+                self.tcx.intern(TyKind::Vec(out))
+            }
+            "par_filter" => {
+                let kept = self.check_parallel_callback(&args[0], &[elem]);
+                self.unify(bool_ty, kept, args[0].span);
+                self.tcx.intern(TyKind::Vec(elem))
+            }
+            "par_reduce" => {
+                let init = self.check_expr_expecting(&args[0], Expectation::HasType(elem));
+                self.unify(elem, init, args[0].span);
+                let combined = self.check_parallel_callback(&args[1], &[elem, elem]);
+                self.unify(elem, combined, args[1].span);
+                elem
+            }
+            "par_sum" => {
+                let resolved_elem = self.infer.resolve(self.tcx, elem);
+                if !matches!(
+                    self.tcx.kind(resolved_elem),
+                    Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Var(_) | TyKind::Error)
+                ) {
+                    let found = self.render_public_ty(resolved_elem);
+                    self.emit(
+                        TypeError::TypeMismatch {
+                            expected: "a sequence of numbers".to_string(),
+                            found,
+                        },
+                        span,
+                    );
+                }
+                elem
+            }
+            _ => self.option_adt_ty(elem),
+        }
+    }
+
+    /// Checks a parallel adapter's callback against the parameter types it
+    /// is handed, answering its return type.
+    fn check_parallel_callback(&mut self, arg: &Expr, inputs: &[Ty]) -> Ty {
+        let got = match &arg.kind {
+            ExprKind::Closure { params, .. } if params.len() == inputs.len() => {
+                let output = self.fresh();
+                let sig = FnSig {
+                    inputs: inputs.to_vec(),
+                    output,
+                };
+                let want = self.tcx.intern(TyKind::FnPtr(sig));
+                self.check_expr_expecting(arg, Expectation::HasType(want))
+            }
+            _ => self.check_expr(arg),
+        };
+        self.callable_output(got, inputs, arg.span)
+    }
+
     /// The call's argument types with the piped value appended.
     /// `x |> recv.m(a)` desugars to `recv.m(a, x)`, so the built-in
     /// receiver surface sees the piped value as the trailing argument:
@@ -11011,7 +11160,10 @@ impl<'a> TypeChecker<'a> {
         self.check_overlapping_mutable_call_args(args);
         let receiver_expected = self.method_receiver_expectation(method, receiver, expected);
         let receiver_ty = self.check_expr_expecting(receiver, receiver_expected);
-        if let Some(ty) = self.check_simd_method(method, receiver_ty, args, call_span) {
+        if let Some(ty) = self
+            .check_simd_method(method, receiver_ty, args, call_span)
+            .or_else(|| self.check_parallel_adapter(method, receiver_ty, args, receiver.span))
+        {
             return ty;
         }
         if self.reject_invalid_builtin_receiver_call(receiver_ty, method, args, call_id, name_span)
@@ -22427,6 +22579,17 @@ pub fn core_type_declares_method(owner: &str, name: &str) -> bool {
 /// every type derives - equality, ordering, hashing, formatting, copying - is
 /// absent here on purpose, because a written `impl` of one of those overrides
 /// the derived behaviour rather than being answered before it.
+/// The parallel twins of the eager walks, on every sequence and on an
+/// integer range.
+const PARALLEL_ADAPTER_METHODS: &[&str] = &[
+    "par_filter",
+    "par_map",
+    "par_max",
+    "par_min",
+    "par_reduce",
+    "par_sum",
+];
+
 fn core_type_own_method_names(owner: &str) -> Option<Vec<&'static str>> {
     // A tuple `impl` registers under the arity its receiver carries; the
     // surface is the one every tuple shares.
@@ -22443,11 +22606,15 @@ fn core_type_own_method_names(owner: &str) -> Option<Vec<&'static str>> {
             .iter()
             .chain(VEC_ONLY_SEQUENCE_METHODS)
             .chain(SEQUENCE_COMBINATOR_METHODS)
+            .chain(PARALLEL_ADAPTER_METHODS)
             .filter(|name| **name != "to_vec")
             .copied()
             .collect(),
-        "Slice" => SLICE_SEQUENCE_METHODS.to_vec(),
-        "Array" => SLICE_SEQUENCE_METHODS.to_vec(),
+        "Slice" | "Array" => SLICE_SEQUENCE_METHODS
+            .iter()
+            .chain(PARALLEL_ADAPTER_METHODS)
+            .copied()
+            .collect(),
         "Map" | "BTreeMap" => MAP_METHODS.to_vec(),
         "Set" | "BTreeSet" => SET_METHODS.to_vec(),
         "Iterator" | "Range" => ITERATOR_METHODS.to_vec(),

@@ -131,6 +131,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "the VM orders any two values structurally through `Value`'s own comparison",
     ),
     (
+        "gos_rt_desc_eq",
+        "the VM compares any two values for equality through `Value`'s own \
+         equality, which already answers IEEE equality for float fields",
+    ),
+    (
         "gos_rt_dyn_*",
         "the VM implements `DynValue` in `stdlib_builtins/dyn_value.rs` as builtin \
          constructors and methods over its own tagged value",
@@ -352,6 +357,12 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
         "gos_rt_panic_*",
         "the VM raises an out-of-bounds index as its own runtime error with the \
          same message",
+    ),
+    (
+        "gos_rt_par_*",
+        "the VM runs a parallel adapter through its `__gos_par_run` builtin, which \
+         sizes the leaves from the VM's own worker count and needs no grain query \
+         or submission counter from the compiled scheduler",
     ),
     (
         "gos_rt_parse_i64_result",

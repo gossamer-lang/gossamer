@@ -6,6 +6,10 @@ and deterministic - a Swift-like model of reference counting (with
 automatic cycle collection) plus `arena { }` regions, and no tracing
 collector.
 
+Every walk over a collection has a parallel twin. Change `map` to `par_map`
+and it runs on every core you have. See
+[Parallel collection adapters](parallel.md).
+
 - Source on GitHub: [gossamer-lang/gossamer](https://github.com/gossamer-lang/gossamer)
 - Language spec: [`SPEC.md`](https://github.com/gossamer-lang/gossamer/blob/main/SPEC.md)
 - Project style guide: [`GUIDELINES.md`](https://github.com/gossamer-lang/gossamer/blob/main/GUIDELINES.md)

@@ -1,0 +1,35 @@
+// The parallel adapters answer what their sequential twins answer, whatever
+// the element shape: integers, text, tuples, and structs with owned fields.
+
+struct Named { name: String, score: i64 }
+
+fn label(n: i64) -> String {
+    format("item-{}", n)
+}
+
+fn main() {
+    let xs = (0..50000).collect()
+    let doubled = xs.par_map(|v| v * 2)
+    let evens = xs.par_filter(|v| v % 2 == 0)
+    println("{}", doubled.len())
+    println("{}", doubled[49999])
+    println("{}", evens.len())
+    println("{}", xs.par_sum())
+    println("{}", xs.par_reduce(0, |a, b| a + b))
+    println("{} {}", xs.par_min(), xs.par_max())
+
+    let names = xs.par_map(label)
+    println("{} {} {:?} {:?}", names[0], names[49999], names.par_min(), names.par_max())
+    let pairs = xs.par_map(|v| (v % 7, label(v)))
+    println("{:?} {:?}", pairs[10], pairs.par_min())
+    let people = xs.par_map(|v| Named { name: label(v), score: v % 13 })
+    let top = people.par_filter(|p| p.score == 12)
+    println("{} {} {}", top.len(), top[0].name, top[top.len() - 1].name)
+
+    let table = #[10, 20, 30]
+    println("{}", xs.par_map(|v| table[v % 3]).par_sum())
+    println("{}", (0..40).par_map(|r| (0..50).par_map(|c| r * c).par_sum()).par_sum())
+    println("{:?}", (1..=10).par_map(|i| i * i))
+    let arr = [4, 8, 15, 16, 23, 42]
+    println("{:?} {}", arr.par_map(|v| v + 1), arr.par_sum())
+}

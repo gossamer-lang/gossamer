@@ -1,0 +1,10 @@
+// ERROR: GT0090
+fn main() {
+    let xs = #[1, 2, 3]
+    let mut seen = #[]
+    let doubled = xs.par_map(|v| {
+        seen.push(v)
+        v * 2
+    })
+    println("{} {}", doubled.len(), seen.len())
+}

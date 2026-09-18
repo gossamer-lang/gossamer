@@ -23,7 +23,7 @@ use gossamer_lex::FileId;
 use gossamer_resolve::resolve_source_file;
 use gossamer_types::{
     ExhaustivenessError, TyCtxt, check_arena_escapes, check_exhaustiveness,
-    normalize_caller_side_spellings, typecheck_source_file,
+    check_parallel_adapters, normalize_caller_side_spellings, typecheck_source_file,
 };
 use std::time::{Duration, Instant};
 
@@ -173,6 +173,13 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
     let phase_started = Instant::now();
     for diag in check_arena_escapes(&sf, &resolutions, &table, &tcx) {
         if !parse_failed {
+            diagnostics.push(diag.to_diagnostic());
+        }
+    }
+    // A parallel adapter's callback runs on many workers at once, so one
+    // whose purity cannot be shown is refused on every tier.
+    if !parse_failed && diagnostics.is_empty() {
+        for diag in check_parallel_adapters(&sf, &resolutions, &table, &tcx) {
             diagnostics.push(diag.to_diagnostic());
         }
     }

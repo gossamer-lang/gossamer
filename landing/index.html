@@ -84,6 +84,11 @@
         <strong>a Swift-like memory model</strong> - run it
         like a script, or ship it as a single binary.
       </p>
+      <p class="slogan">
+        Every walk over a collection has a parallel twin. Change
+        <code>map</code> to <code>par_map</code> and it runs on every core
+        you have.
+      </p>
       <p class="cta-row">
         <a class="cta" href="docs/">Get started &rarr;</a>
         <a class="cta cta-tour" href="tour/">Take a Tour</a>
@@ -101,6 +106,17 @@
     <section class="why" aria-labelledby="why-h">
       <h2 id="why-h">Why Gossamer</h2>
       <div class="grid">
+        <article class="card">
+          <h3>Every core, one word</h3>
+          <p>
+            <code>par_map</code>, <code>par_filter</code>,
+            <code>par_reduce</code>, and <code>par_sum</code> spread a walk
+            over every core and answer what <code>map</code>,
+            <code>filter</code>, and a fold answer. The compiler proves the
+            callback pure, so nothing races, and a reduction answers the same
+            bits on every machine.
+          </p>
+        </article>
         <article class="card">
           <h3>Expressive and clear syntax</h3>
           <p>

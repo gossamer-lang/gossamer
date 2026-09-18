@@ -1,0 +1,21 @@
+// The sequential twin of `stats.gos`: the same values and reductions through
+// the sequential methods.
+use std::env
+
+fn value(i: i64) -> i64 {
+    let mut h = i +% 2166136261
+    for _ in 0..256 {
+        h = (h ^ (h >> 13)) *% 1274126177
+        h = h ^ (h >> 16)
+    }
+    h % 1000000
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or("2000000").to_i64().unwrap_or(2000000)
+    let xs = (0..n).map(|i| value(i)).collect()
+    let parity = xs.map(|v| if v % 2 == 0 { (1, 0) } else { (0, 1) })
+        .iter()
+        .fold((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+    println("{} {} {} {} {}", xs.iter().sum(), xs.min(), xs.max(), parity.0, parity.1)
+}

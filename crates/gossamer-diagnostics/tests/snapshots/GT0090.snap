@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0090]: A parallel adapter runs its callback on many workers at once, so the - here
+--- framed ---
+error[GT0090]: A parallel adapter runs its callback on many workers at once, so the
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

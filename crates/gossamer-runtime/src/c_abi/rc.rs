@@ -1662,6 +1662,19 @@ fn region_active() -> bool {
     REGION_DEPTH.with(|d| d.get() > 0)
 }
 
+/// Nesting depth of the arena regions open on this thread.
+pub(crate) fn region_depth() -> usize {
+    REGION_DEPTH.with(std::cell::Cell::get)
+}
+
+/// Closes every region opened on this thread above `depth`, for a unit of
+/// work that unwound out of regions it never reached the close of.
+pub(crate) fn close_regions_above(depth: usize) {
+    while region_depth() > depth {
+        gos_rt_arena_pop();
+    }
+}
+
 /// Public: is an arena region active on this thread? Used by the Vec/String
 /// allocators to route their backing storage through the region so it is
 /// freed wholesale at pop (and so their `free` becomes a no-op).

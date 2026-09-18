@@ -215,3 +215,121 @@ mod tests {
         assert_eq!(signal_name(6), "SIGABRT");
     }
 }
+
+/// The tier a source-string run executes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tier {
+    /// `gos run` with `GOS_JIT=0`: the bytecode VM alone.
+    Bytecode,
+    /// `gos run` with the JIT compiling at its first call.
+    Vm,
+    /// `gos build --release`, then the binary.
+    Llvm,
+}
+
+/// Every tier, for tests that assert one answer across all of them.
+pub const TIERS: [Tier; 3] = [Tier::Bytecode, Tier::Vm, Tier::Llvm];
+
+fn gos_bin() -> std::path::PathBuf {
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_gos"))
+}
+
+/// A fresh directory holding `src` as `main.gos`, answering the file.
+fn source_file(src: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "gos-src-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).expect("create a scratch directory");
+    let file = dir.join("main.gos");
+    std::fs::write(&file, src).expect("write the source");
+    file
+}
+
+/// Writes `src` to a fresh file and runs `gos check` on it.
+pub fn gos_check_str(src: &str) -> std::process::Output {
+    let file = source_file(src);
+    let out = std::process::Command::new(gos_bin())
+        .arg("check")
+        .arg(&file)
+        .output()
+        .expect("spawn gos check");
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    out
+}
+
+/// Runs `src` on `tier`. `workers` pins both the compiled scheduler's
+/// `GOSSAMER_MAX_PROCS` and the VM pool's `GOSSAMER_VM_GOROUTINE_WORKERS`
+/// when given; `env` is applied last.
+pub fn gos_run_on(
+    tier: Tier,
+    src: &str,
+    workers: Option<usize>,
+    env: &[(&str, &str)],
+) -> std::process::Output {
+    let file = source_file(src);
+    let dir = file
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_default();
+    let mut cmd = match tier {
+        Tier::Bytecode | Tier::Vm => {
+            let mut cmd = std::process::Command::new(gos_bin());
+            cmd.arg("run").arg(&file);
+            if tier == Tier::Bytecode {
+                cmd.env("GOS_JIT", "0");
+            } else {
+                cmd.env_remove("GOS_JIT").env("GOSSAMER_JIT_THRESHOLD", "1");
+            }
+            cmd
+        }
+        Tier::Llvm => {
+            let out_dir = dir.join("out");
+            let built = std::process::Command::new(gos_bin())
+                .arg("build")
+                .arg("--release")
+                .arg("--out-dir")
+                .arg(&out_dir)
+                .arg(&file)
+                .output()
+                .expect("spawn gos build");
+            assert!(
+                built.status.success(),
+                "gos build --release failed:\n{}",
+                String::from_utf8_lossy(&built.stderr)
+            );
+            std::process::Command::new(native_executable(&out_dir, "main"))
+        }
+    };
+    if let Some(workers) = workers {
+        let count = workers.to_string();
+        cmd.env("GOSSAMER_MAX_PROCS", &count)
+            .env("GOSSAMER_VM_GOROUTINE_WORKERS", &count);
+    }
+    for (key, value) in env {
+        cmd.env(key, value);
+    }
+    let out = cmd.output().expect("spawn the program");
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+/// `gos_run_on(Tier::Vm, src, None, &[])`.
+pub fn gos_run_str(src: &str) -> std::process::Output {
+    gos_run_on(Tier::Vm, src, None, &[])
+}
+
+/// A run's standard output, decoded lossily.
+pub fn stdout(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+/// A run's standard error, decoded lossily.
+pub fn stderr(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}

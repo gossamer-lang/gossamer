@@ -2531,6 +2531,41 @@ are rejected at parse time (`GP0016`). The sole FFI surface is the
 
 ---
 
+### 8.8 Parallel collection adapters
+
+`par_map`, `par_filter`, `par_reduce`, `par_sum`, `par_min`, and `par_max`
+are methods on `Vec<T>`, `[T; N]`, `[T]`, and an integer range (§10.7). They
+are library surface, not constructs: no grammar names them, and each answers
+exactly what its sequential twin answers - `map`, `filter`, a fold, `sum`,
+`min`, `max` - with elements in input order.
+
+**Admissible callbacks.** An adapter runs its callback on several workers at
+once, so the callback of `par_map`, `par_filter`, and `par_reduce` must be a
+closure literal or a path naming a function, and must be pure: it performs no
+I/O, reads no mutable static, starts no goroutine and synchronises with none,
+writes no storage its caller can observe - no `&mut` parameter it was handed,
+no static, and no binding it captured - and calls only pure functions. Purity
+is computed over the whole call graph; mutating the callback's own locals is
+pure. `par_min` and `par_max` run the element type's `cmp` on every worker, so
+a user ordering obeys the same rule. A callback reached through a binding, or
+one that is not pure, reports `GT0090` naming the call path to the effect.
+Termination is not required: a callback that never returns hangs as the same
+call would sequentially.
+
+**Reduction order.** A reduction cuts `[0, len)` into leaves of a fixed width
+and combines them in index order. The tree's shape is a function of the input
+length alone, never of the worker count, so a reduction answers the same
+value, to the bit, on every tier and at every worker count. `par_reduce(identity,
+combine)` answers `identity` for an empty input and otherwise every element
+combined in index order; `combine` must be associative and need not be
+commutative. A `combine` that is not associative answers a result that is the
+same on every run.
+
+**Failure.** When callbacks panic on several workers, the panic raised is the
+one at the lowest element index. An adapter owns no goroutine and publishes
+nothing: it is not a cohort child, has no handle, and has nothing to cancel.
+Work that performs effects belongs in a `cohort { }` with `spawn` (§8.6).
+
 ## 9. Error handling
 
 Errors are values of types implementing the `Error` trait. Because
@@ -2807,6 +2842,10 @@ transformation when the chain doesn't return from the enclosing fn.
   Each container has exactly one name: `HashMap`, `HashSet`, `VecDeque`,
   `VecQueue`, `VecStack`, `BinaryHeap`, `MaxBinaryHeap`, and `MinBinaryHeap`
   are rejected with `GR0006`.
+- Parallel adapters on `Vec<T>`, `[T; N]`, `[T]`, and an integer range:
+  `par_map(f) -> Vec<U>`, `par_filter(f) -> Vec<T>`,
+  `par_reduce(identity, combine) -> T`, `par_sum() -> T` over numbers, and
+  `par_min()` / `par_max() -> Option<T>`. The rules they obey are §8.8's.
 
 ### 10.8 `std::sync`
 

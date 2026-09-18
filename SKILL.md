@@ -256,6 +256,14 @@ Write clear, low-complexity, concise code.
   `opt.unwrap_or(0)` - and a call written with the data last reports
   GR0021. `xs.join(sep)` Display-joins any
   sequence whose element `{}` renders, without a traversal.
+- **Every eager walk has a parallel twin**: `par_map`, `par_filter`,
+  `par_reduce`, `par_sum`, `par_min`, `par_max`, on a `Vec`, an array, a
+  slice, or a range. The callback is a closure literal or a named pure
+  function; one that performs an effect or writes a container it captured
+  reports GT0090, and effectful concurrency is `cohort { }` with `spawn`.
+  `par_reduce(identity, combine)` asks only that `combine` be associative:
+  the tree is fixed, so index order is kept and the answer does not depend on
+  the machine. `identity` is the answer for an empty input only.
 - **A `Set` has no element order, so its traversal is the iterator's.**
   The set itself answers membership and cardinality (`insert`, `remove`,
   `contains`, `len`, `is_empty`, `clear`), set algebra (`union`,
@@ -675,6 +683,14 @@ never a kill: a cancelled `recv` answers `None` exactly as a closed
 channel does, a `sleep` returns early, and the child leaves through its
 own exit path with its `defer` frames running in order. Pure computation
 is not a cancellation point - poll `runtime::cohort_cancelled()`.
+
+**The parallel adapters and `cohort` are not alternatives.** `cohort { }` owns
+goroutines that perform effects and may outlive an individual statement; its
+children talk over channels and its failure mode is the first child's error. An
+adapter owns nothing: it walks a collection with a pure callback and answers a
+value, so there is no handle, no channel, and nothing to cancel. A callback that
+panics reports the lowest element index, never whichever got there first, so a
+failure does not depend on scheduling.
 
 **Scheduling is cooperative; there is no async preemption.** A goroutine
 yields at a safepoint - any channel / `select` / mutex / `sleep` /

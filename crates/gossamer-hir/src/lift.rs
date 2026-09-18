@@ -308,7 +308,12 @@ fn is_synthetic_global<H: std::hash::BuildHasher>(
     if shadowed.contains(name) {
         return false;
     }
-    SYNTHETIC_GLOBAL_NAMES.contains(&name) || name.starts_with(LIFTED_CLOSURE_PREFIX)
+    // A compiler-emitted comparator is a top-level function, named without a
+    // resolved definition because nothing in the source spells it.
+    SYNTHETIC_GLOBAL_NAMES.contains(&name)
+        || name.starts_with(LIFTED_CLOSURE_PREFIX)
+        || name.starts_with(gossamer_ast::USER_COMPARATOR_PREFIX)
+        || name.starts_with(gossamer_ast::STRUCTURAL_COMPARATOR_PREFIX)
 }
 
 struct Lifter {

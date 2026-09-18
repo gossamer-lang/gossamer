@@ -2664,7 +2664,48 @@ pub unsafe extern "C" fn gos_rt_tuple_cmp(
         }
         let mut slot_cursor = 0usize;
         let mut tag_cursor = 0usize;
-        unsafe { compare_tuple_elements(a, b, tags, n as usize, &mut slot_cursor, &mut tag_cursor) }
+        unsafe {
+            compare_tuple_elements(
+                crate::c_abi::desc_cmp::CmpMode::Order,
+                a,
+                b,
+                tags,
+                n as usize,
+                &mut slot_cursor,
+                &mut tag_cursor,
+            )
+        }
+    })
+}
+
+/// Whether two tuples of `n` elements are equal under the `tags` stream,
+/// answering `1` or `0`. A float element decides by IEEE `==`, so a NaN
+/// equals nothing, as it does on the interpreter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_tuple_eq(
+    a: *const i64,
+    b: *const i64,
+    n: i64,
+    tags: *const u8,
+) -> i64 {
+    ffi_entry!(0, {
+        if a.is_null() || b.is_null() || tags.is_null() || n <= 0 {
+            return i64::from(a == b || n <= 0);
+        }
+        let mut slot_cursor = 0usize;
+        let mut tag_cursor = 0usize;
+        let code = unsafe {
+            compare_tuple_elements(
+                crate::c_abi::desc_cmp::CmpMode::Equal,
+                a,
+                b,
+                tags,
+                n as usize,
+                &mut slot_cursor,
+                &mut tag_cursor,
+            )
+        };
+        i64::from(code == 0)
     })
 }
 
@@ -2673,6 +2714,7 @@ pub unsafe extern "C" fn gos_rt_tuple_cmp(
 /// `-1` / `0` / `1`; the cursors are left past the compared elements
 /// either way so a caller can keep walking.
 unsafe fn compare_tuple_elements(
+    mode: crate::c_abi::desc_cmp::CmpMode,
     a: *const i64,
     b: *const i64,
     tags: *const u8,
@@ -2693,7 +2735,8 @@ unsafe fn compare_tuple_elements(
             let span = unsafe { crate::c_abi::desc_cmp::desc_slot_span(tags, field) };
             let mut walk = field;
             let ord = unsafe {
-                crate::c_abi::desc_cmp::compare_desc(
+                crate::c_abi::desc_cmp::compare_desc_in(
+                    mode,
                     a.add(*slot_cursor).cast::<u8>(),
                     b.add(*slot_cursor).cast::<u8>(),
                     tags,
@@ -2713,8 +2756,9 @@ unsafe fn compare_tuple_elements(
         if tag == TUPLE_TAG_NESTED {
             let nested = unsafe { *tags.add(*tag_cursor) } as usize;
             *tag_cursor += 1;
-            let ord =
-                unsafe { compare_tuple_elements(a, b, tags, nested, slot_cursor, tag_cursor) };
+            let ord = unsafe {
+                compare_tuple_elements(mode, a, b, tags, nested, slot_cursor, tag_cursor)
+            };
             if result == 0 {
                 result = ord;
             }
@@ -2728,9 +2772,13 @@ unsafe fn compare_tuple_elements(
         }
         let ord = match tag {
             1 => (wa as u64).cmp(&(wb as u64)),
-            2 => f64::from_bits(wa as u64)
-                .partial_cmp(&f64::from_bits(wb as u64))
-                .unwrap_or(Ordering::Equal),
+            2 => {
+                let (fa, fb) = (f64::from_bits(wa as u64), f64::from_bits(wb as u64));
+                match mode {
+                    crate::c_abi::desc_cmp::CmpMode::Equal if fa != fb => Ordering::Greater,
+                    _ => fa.partial_cmp(&fb).unwrap_or(Ordering::Equal),
+                }
+            }
             3 => (wa & 1).cmp(&(wb & 1)),
             4 => (wa as u32).cmp(&(wb as u32)),
             5 => {

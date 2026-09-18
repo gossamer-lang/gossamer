@@ -1441,6 +1441,17 @@ pub const REGISTRY: &[(&str, &str)] = &[
             count from the annotated type.",
     ),
     (
+        "GT0090",
+        "A parallel adapter runs its callback on many workers at once, so the\n\
+            callback must be one whose purity the compiler can decide: a closure\n\
+            literal with a pure body, or a named pure function. A callable reached\n\
+            through a binding is not decidable at the call site. A closure that\n\
+            writes a container it captured is rejected for a stronger reason: the\n\
+            capture is by managed reference, so every worker would write the same\n\
+            container. Collect the results instead and combine them afterwards, or\n\
+            use `cohort { }` with `spawn` for work that must perform effects.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.62.0 - Parallel collections and cross-tier correctness
+
+- `par_map`, `par_filter`, `par_reduce`, `par_sum`, `par_min`, and `par_max` on a `Vec`, an array, a slice, or an integer range spread the work across every core, keeping the input's order in the result. The callback is a closure literal or a named pure function, and one that writes a container it captured is rejected rather than run on every worker at once. A call over a short input runs inline without touching the pool.
+- A parallel reduction combines its elements in index order under a tree whose shape follows the input's length and not the machine's core count, so a float `par_sum` answers the same bits everywhere and `par_reduce` accepts a combine that is associative without being commutative.
+- A callback that is not pure reports `GT0090`, naming the chain of calls that reaches the effect, and a callback passed through a binding is refused with the spelling that works.
+- When callbacks panic on several workers, the panic reported is the one at the lowest element index, with the call stack of the element that raised it.
+- `examples/par_map_mandelbrot.gos` and `examples/par_reduce_stats.gos` show the two shapes beside their sequential spellings.
+- `min()` and `max()` over a `Vec<String>` order by text on the compiled tiers, where they compared the strings' addresses and could answer any element.
+- `min()` and `max()` over floats on the bytecode VM order `-0.0` below `0.0` and place a NaN, as the compiled tiers already did, so the tiers agree.
+- `==` and `!=` between two `Option` or `Result` values compare their payloads on the compiled tiers, so two equal tuples or strings built separately compare equal, where the answer depended on where each payload was stored.
+- A tuple holding a NaN is not equal to itself on the compiled tiers, matching the bytecode VM and IEEE equality.
+- Ordering two `Option`s or `Result`s whose payload is a tuple reads the tuples' fields on the compiled tiers, where it read the wrong memory and could crash.
+- Binding the result of `map`, `filter`, and the other sequence combinators, or of a collected loop, takes the result as it is on the compiled tiers instead of copying the whole sequence first.
+- A generic function whose body loops is compiled by the in-process JIT on its first call, as a non-generic one already was, where it waited until its calls had run enough bytecode and a short run never compiled it.
+
 ## 0.61.5 - Fewer reference counts, generated runtime dispatch
 
 - Values the compiler can prove are held exactly once no longer carry reference-count traffic when they are handed to a new holder: a constructor's fields, a value pushed into a container as its last use, and a copy nothing reads again move instead of being retained and released, so aggregate-heavy programs do less bookkeeping without any change to their source.

@@ -1,0 +1,21 @@
+// Two million values, each an iterated hash, reduced four ways: a sum, a
+// minimum, a maximum, and a custom associative combine. The sequential twin
+// in `stats_sequential.gos` spells the same work with the sequential methods.
+use std::env
+
+fn value(i: i64) -> i64 {
+    let mut h = i +% 2166136261
+    for _ in 0..256 {
+        h = (h ^ (h >> 13)) *% 1274126177
+        h = h ^ (h >> 16)
+    }
+    h % 1000000
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or("2000000").to_i64().unwrap_or(2000000)
+    let xs = (0..n).par_map(|i| value(i))
+    let parity = xs.par_map(|v| if v % 2 == 0 { (1, 0) } else { (0, 1) })
+        .par_reduce((0, 0), |a, b| (a.0 + b.0, a.1 + b.1))
+    println("{} {} {} {} {}", xs.par_sum(), xs.par_min(), xs.par_max(), parity.0, parity.1)
+}

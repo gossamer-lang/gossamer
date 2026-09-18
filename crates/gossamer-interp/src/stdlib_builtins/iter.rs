@@ -2784,6 +2784,12 @@ pub(crate) fn some_payload(v: &Value) -> Option<Value> {
 /// `Equal` for cross-type comparisons rather than panicking.
 pub(crate) fn compare_values_total(a: &Value, b: &Value) -> std::cmp::Ordering {
     use std::cmp::Ordering;
+    // A float sequence orders by `total_cmp`, as the compiled runtime's float
+    // sort, `min`, and `max` do: `-0.0` sorts below `0.0`, and a NaN has a
+    // place rather than comparing equal to everything.
+    if let (Value::Float(x), Value::Float(y)) = (a, b) {
+        return x.total_cmp(y);
+    }
     crate::vm::value_ordering(a, b).unwrap_or(Ordering::Equal)
 }
 

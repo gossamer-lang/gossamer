@@ -77,6 +77,7 @@ nav:
       - Triple-quoted strings: language/triple_quoted_string.md
       - Tuples: language/tuples.md
   - Memory model: memory.md
+  - Parallel collection adapters: parallel.md
   - Writing libraries: libraries.md
   - Calling Rust: rust_bindings.md
   - Standard library:

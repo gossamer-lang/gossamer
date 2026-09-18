@@ -1058,6 +1058,29 @@ fn complete_method_substs(
     call_site_method_substs(template, caller, args, destination, &base.types(), tcx)
 }
 
+/// The generic a specialised body was instantiated from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Template<'a> {
+    /// A generic function, by its template's `DefId` local.
+    Function(u32),
+    /// A generic method or lifted closure, by its base name.
+    Method(&'a str),
+}
+
+/// Reads back the template a [`mangled_name`] or [`method_mangled_name`]
+/// names, or `None` for a body that is not a specialisation.
+#[must_use]
+pub fn template_of(name: &str) -> Option<Template<'_>> {
+    if let Some((base, _)) = name.split_once("$mono$") {
+        return Some(Template::Method(base));
+    }
+    let (head, _) = name.split_once("__mono__")?;
+    head.strip_prefix("fn#")?
+        .parse()
+        .ok()
+        .map(Template::Function)
+}
+
 /// Mangled name of a generic method instantiation. Methods carry no `DefId`,
 /// so the name keys the specialisation: the base `Type::method` name plus the
 /// interned id of each concrete type argument (equal types share an id, so a
@@ -1763,6 +1786,16 @@ pub fn mangled_name(def: DefId, substs: &Substs) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn template_of_reads_back_both_mangling_schemes() {
+        assert_eq!(template_of("fn#9__mono__t18"), Some(Template::Function(9)));
+        assert_eq!(
+            template_of("Wrapper::get$mono$t4_t7"),
+            Some(Template::Method("Wrapper::get"))
+        );
+        assert_eq!(template_of("tally"), None);
+    }
 
     #[test]
     fn monomorphise_is_idempotent_on_a_concrete_body() {

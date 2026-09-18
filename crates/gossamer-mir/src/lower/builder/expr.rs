@@ -1456,6 +1456,21 @@ impl<'a> Builder<'a> {
             }
             return Some(cmp);
         }
+        // Carrier equality: an `Option` / `Result` is equal to one of the same
+        // arm whose payload is equal, whatever allocation that payload sits in,
+        // so the two words are compared through the carrier's descriptor
+        // rather than as bits.
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            let tys = [
+                lhs.ty,
+                self.locals[lhs_local.0 as usize].ty,
+                rhs.ty,
+                self.locals[rhs_local.0 as usize].ty,
+            ];
+            if let Some(local) = self.lower_carrier_eq(op, lhs_local, rhs_local, &tys, span) {
+                return Some(local);
+            }
+        }
         // Struct / enum equality: route `==` / `!=` to a `Type::eq`
         // method when one exists (synthesized by `#[derive(PartialEq)]`
         // or hand-written). Without this an aggregate `==` pointer-
@@ -2658,6 +2673,11 @@ impl<'a> Builder<'a> {
         {
             return self.lower_tuple_cmp(HirBinaryOp::Eq, lhs_local, rhs_local, &tags, span);
         }
+        if let Some(local) =
+            self.lower_carrier_eq(HirBinaryOp::Eq, lhs_local, rhs_local, &[ty, lhs_ty], span)
+        {
+            return local;
+        }
         if let Some(tag) = self
             .vec_elem_cmp_tag(ty)
             .or_else(|| self.vec_elem_cmp_tag(lhs_ty))
@@ -2810,7 +2830,76 @@ impl<'a> Builder<'a> {
             Operand::Const(ConstValue::Int(tags.len() as i128)),
             Operand::Const(ConstValue::Str(tag_str)),
         ];
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+            return self.lower_equality_call(op, "gos_rt_tuple_eq", args, span);
+        }
         self.lower_ordering_call(op, "gos_rt_tuple_cmp", args, span)
+    }
+
+    /// Emits a call to a runtime equality answering `1` / `0`, mapped to a
+    /// bool for `==`, or negated for `!=`. Equality is its own question: a
+    /// float element decides by IEEE `==`, where an ordering has to rank it.
+    fn lower_equality_call(
+        &mut self,
+        op: HirBinaryOp,
+        symbol: &str,
+        args: Vec<Operand>,
+        span: Span,
+    ) -> Local {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let equal = self.fresh(i64_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+            args,
+            destination: Place::local(equal),
+            target: Some(next),
+        });
+        self.set_current(next);
+        let bool_ty = self.tcx.bool_ty();
+        let dest = self.fresh(bool_ty);
+        let bin = if matches!(op, HirBinaryOp::Ne) {
+            BinOp::Eq
+        } else {
+            BinOp::Ne
+        };
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::BinaryOp {
+                op: bin,
+                lhs: Operand::Copy(Place::local(equal)),
+                rhs: Operand::Const(ConstValue::Int(0)),
+            },
+            span,
+        );
+        dest
+    }
+
+    /// `==` / `!=` over two `Option` / `Result` values, compared arm then
+    /// payload through the carrier's descriptor, or `None` when `ty` is not
+    /// a carrier or its payload has no descriptor.
+    fn lower_carrier_eq(
+        &mut self,
+        op: HirBinaryOp,
+        lhs_local: Local,
+        rhs_local: Local,
+        tys: &[Ty],
+        span: Span,
+    ) -> Option<Local> {
+        let (carrier, desc) = tys
+            .iter()
+            .map(|ty| self.peel_ref_ty(*ty))
+            .find(|ty| self.is_result_or_option_adt(*ty))
+            .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))?;
+        let lhs_slots = self.ordered_value_slots(lhs_local, carrier, span);
+        let rhs_slots = self.ordered_value_slots(rhs_local, carrier, span);
+        let desc_text: String = desc.iter().map(|&b| b as char).collect();
+        let args = vec![
+            Operand::Copy(Place::local(lhs_slots)),
+            Operand::Copy(Place::local(rhs_slots)),
+            Operand::Const(ConstValue::Str(desc_text)),
+        ];
+        Some(self.lower_equality_call(op, "gos_rt_desc_eq", args, span))
     }
 
     /// The element ordering descriptor of a `Vec` or slice type, or `None`

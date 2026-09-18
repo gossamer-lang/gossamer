@@ -289,6 +289,43 @@ pub unsafe extern "C" fn gos_rt_iter_max_i64(v: *const GosVec) -> i128 {
     })
 }
 
+/// The first smallest (or, with `greatest`, the last largest) `String` in
+/// `v`, by text rather than by the address its slot holds.
+unsafe fn string_extreme(v: *const GosVec, greatest: bool) -> i128 {
+    if v.is_null() {
+        return 1i128;
+    }
+    let vec = unsafe { &*v };
+    if vec.ptr.is_null() || vec.len <= 0 {
+        return 1i128;
+    }
+    let text = |word: i64| -> *const c_char { std::ptr::with_exposed_provenance(word as usize) };
+    let mut best: Option<i64> = None;
+    for word in unsafe { vec_words(vec) } {
+        let Some(current) = best else {
+            best = Some(word);
+            continue;
+        };
+        let order = unsafe { crate::c_abi::string::gos_rt_str_compare(text(word), text(current)) };
+        if (greatest && order >= 0) || (!greatest && order < 0) {
+            best = Some(word);
+        }
+    }
+    best.map_or(1i128, |word| gos_rt_result_new(0, word))
+}
+
+/// `xs.min() -> Option<String>` over a `Vec<String>`, ordered by text.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_iter_min_str(v: *const GosVec) -> i128 {
+    ffi_entry!(1i128, { unsafe { string_extreme(v, false) } })
+}
+
+/// `xs.max() -> Option<String>` over a `Vec<String>`, ordered by text.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_iter_max_str(v: *const GosVec) -> i128 {
+    ffi_entry!(1i128, { unsafe { string_extreme(v, true) } })
+}
+
 /// `iter::min(xs) -> Option<f64>` as an i128-packed Option carrying the
 /// payload's f64 bits: `None` (= 1) for empty input, `Some(m)` otherwise.
 ///
