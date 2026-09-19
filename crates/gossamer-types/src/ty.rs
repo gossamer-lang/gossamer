@@ -289,18 +289,13 @@ pub enum TyKind {
     /// blocks for the goroutine's `Result<T, String>` outcome.
     /// Carried as a one-shot channel pointer at runtime.
     JoinHandle(Ty),
-    /// `time::Duration` - a transparent `i64`-of-milliseconds newtype.
-    /// The runtime representation is exactly an `i64`; the distinct
-    /// kind exists only so method-form accessors (`d.as_millis()`)
-    /// resolve against the receiver's static type. MIR lowering
-    /// normalizes it back to `i64`, so codegen never observes it.
+    /// `time::Duration` - a count of nanoseconds, its own type: it converts
+    /// to and from an integer only through its constructors and accessors.
+    /// The runtime value is an `i64`; MIR lowering normalizes it to one.
     Duration,
-    /// `time::Instant` - a transparent `i64`-of-monotonic-milliseconds
-    /// newtype. Like `Duration`, the runtime value is exactly an `i64`
-    /// (the monotonic-ms reading at `Instant::now()`); the distinct
-    /// kind only steers the method-form accessor (`inst.elapsed_ms()`)
-    /// against the receiver's static type. MIR lowering normalizes it
-    /// back to `i64`, so codegen never observes it.
+    /// `time::Instant` - a reading of the monotonic clock in nanoseconds,
+    /// its own type like `Duration`. The runtime value is an `i64`; MIR
+    /// lowering normalizes it to one.
     Instant,
     /// `json::Value` - opaque dynamic JSON node. Carries no
     /// generic parameters; the runtime backs every node with a

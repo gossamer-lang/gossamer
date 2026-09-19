@@ -1153,7 +1153,10 @@ impl<'a> Builder<'a> {
         Some(cell)
     }
 
-    /// `d.as_millis()` / `inst.elapsed_ms()` - transparent time accessors.
+    /// `d.as_millis()`, `inst.elapsed()`, `later.duration_since(earlier)`:
+    /// the `time::Duration` / `time::Instant` methods, each the runtime
+    /// helper its qualified form calls with the receiver as the first
+    /// argument.
     fn lower_time_unit_method(
         &mut self,
         receiver: &HirExpr,
@@ -1161,77 +1164,59 @@ impl<'a> Builder<'a> {
         args: &[HirExpr],
         span: Span,
     ) -> MethodLowering {
-        // `d.as_millis()` / `d.as_secs()` / `d.as_micros()` - method
-        // form of the `time::Duration` accessors. The receiver's static
-        // type carries the transparent Duration tag (its runtime value is
-        // a bare `i64`), so route to the same `gos_rt_duration_*` helper
-        // the qualified `time::Duration::as_millis(d)` free call uses.
-        if matches!(method.name.as_str(), "as_millis" | "as_secs" | "as_micros") && args.is_empty()
-        {
-            let mut recv_kind = self.tcx.kind_of(receiver.ty).clone();
-            while let TyKind::Ref { inner, .. } = recv_kind {
-                recv_kind = self.tcx.kind_of(inner).clone();
-            }
-            // A `flag::Set` duration cell carries no Duration tag on its
-            // HIR type (the typechecker leaves it an inference var); its
-            // MIR binding is tagged `flag::Cell::Duration`. Auto-deref it
-            // to the transparent i64-of-ms Duration local so the accessor
-            // routes exactly like a plain `time::Duration` receiver.
-            let is_duration_cell = self
-                .receiver_local_from_path(receiver)
-                .and_then(|l| self.local_runtime_kind.get(&l).copied())
-                == Some("flag::Cell::Duration");
-            if matches!(recv_kind, TyKind::Duration) || is_duration_cell {
-                let sym = match method.name.as_str() {
-                    "as_secs" => "gos_rt_duration_as_secs",
-                    "as_micros" => "gos_rt_duration_as_micros",
-                    _ => "gos_rt_duration_as_millis",
-                };
-                let Some(recv_local) = self.lower_expr(receiver) else {
-                    return MethodLowering::Handled(None);
-                };
-                let recv_local = self.auto_deref_cell(recv_local, span);
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let dest = self.fresh(i64_ty);
-                let next = self.new_block(span);
-                self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str(sym.to_string())),
-                    args: vec![Operand::Copy(Place::local(recv_local))],
-                    destination: Place::local(dest),
-                    target: Some(next),
-                });
-                self.set_current(next);
-                return MethodLowering::Handled(Some(dest));
-            }
+        let mut recv_kind = self.tcx.kind_of(receiver.ty).clone();
+        while let TyKind::Ref { inner, .. } = recv_kind {
+            recv_kind = self.tcx.kind_of(inner).clone();
         }
-        // `inst.elapsed_ms()` - method form of the `time::Instant`
-        // accessor. The receiver's static type carries the transparent
-        // Instant tag (its runtime value is a bare `i64` of monotonic ms),
-        // so route to `gos_rt_time_since_ms`, the same helper the
-        // qualified `time::Instant::elapsed_ms(inst)` free call uses.
-        if method.name.as_str() == "elapsed_ms" && args.is_empty() {
-            let mut recv_kind = self.tcx.kind_of(receiver.ty).clone();
-            while let TyKind::Ref { inner, .. } = recv_kind {
-                recv_kind = self.tcx.kind_of(inner).clone();
+        // A `flag::Set` duration cell carries no Duration tag on its HIR
+        // type (the typechecker leaves it an inference var); its MIR binding
+        // is tagged `flag::Cell::Duration` and auto-derefs to the Duration.
+        let is_duration_cell = self
+            .receiver_local_from_path(receiver)
+            .and_then(|l| self.local_runtime_kind.get(&l).copied())
+            == Some("flag::Cell::Duration");
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let duration = is_duration_cell || matches!(recv_kind, TyKind::Duration);
+        let (sym, ret) = match (&recv_kind, method.name.as_str(), args.len()) {
+            (_, name, 0) if duration => match name {
+                "as_nanos" => ("gos_rt_duration_as_nanos", i64_ty),
+                "as_micros" => ("gos_rt_duration_as_micros", i64_ty),
+                "as_millis" => ("gos_rt_duration_as_millis", i64_ty),
+                "as_secs" => ("gos_rt_duration_as_secs", i64_ty),
+                "as_secs_f64" => (
+                    "gos_rt_duration_as_secs_f64",
+                    self.tcx.float_ty(gossamer_types::FloatTy::F64),
+                ),
+                _ => return MethodLowering::Pass,
+            },
+            (TyKind::Instant, "elapsed_ms", 0) => ("gos_rt_instant_elapsed_ms", i64_ty),
+            (TyKind::Instant, "elapsed", 0) => ("gos_rt_instant_elapsed", self.tcx.duration_ty()),
+            (TyKind::Instant, "duration_since", 1) => {
+                ("gos_rt_instant_duration_since", self.tcx.duration_ty())
             }
-            if matches!(recv_kind, TyKind::Instant) {
-                let Some(recv_local) = self.lower_expr(receiver) else {
-                    return MethodLowering::Handled(None);
-                };
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let dest = self.fresh(i64_ty);
-                let next = self.new_block(span);
-                self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str("gos_rt_time_since_ms".to_string())),
-                    args: vec![Operand::Copy(Place::local(recv_local))],
-                    destination: Place::local(dest),
-                    target: Some(next),
-                });
-                self.set_current(next);
-                return MethodLowering::Handled(Some(dest));
-            }
+            _ => return MethodLowering::Pass,
+        };
+        let Some(recv_local) = self.lower_expr(receiver) else {
+            return MethodLowering::Handled(None);
+        };
+        let recv_local = self.auto_deref_cell(recv_local, span);
+        let mut call_args = vec![Operand::Copy(Place::local(recv_local))];
+        for arg in args {
+            let Some(local) = self.lower_expr(arg) else {
+                return MethodLowering::Handled(None);
+            };
+            call_args.push(Operand::Copy(Place::local(local)));
         }
-        MethodLowering::Pass
+        let dest = self.fresh(ret);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(sym.to_string())),
+            args: call_args,
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        MethodLowering::Handled(Some(dest))
     }
 
     /// `h.join()` - block on a spawned goroutine's outcome.
@@ -1688,6 +1673,7 @@ impl<'a> Builder<'a> {
                 | "get_or"
                 | "or_insert"
                 | "inc"
+                | "__range"
         ) && let Some(local) =
             self.try_lower_struct_key_map_op(receiver, method.name.as_str(), args, span)
         {
@@ -3304,6 +3290,17 @@ impl<'a> Builder<'a> {
                 }
                 _ => None,
             },
+            // A `BTreeMap`'s ordered slices, which its `first_key_value`,
+            // `pop_first`, `range`, and kin desugar to.
+            "__window" if matches!(&receiver_kind_flat, TyKind::HashMap { .. }) => {
+                Some("gos_rt_map_window")
+            }
+            "__range" if matches!(&receiver_kind_flat, TyKind::HashMap { .. }) => {
+                match self.hash_map_key_kind(receiver_ty) {
+                    Some(MapKeyKind::String) => Some("gos_rt_map_range_typed_str"),
+                    _ => Some("gos_rt_map_range_i64"),
+                }
+            }
             "contains_key" | "contains"
                 if matches!(&receiver_kind_flat, TyKind::HashMap { .. }) =>
             {
@@ -3603,6 +3600,10 @@ impl<'a> Builder<'a> {
             (Some("collections::HashSet" | "collections::BTreeSet"), "clear") => {
                 Some("gos_rt_set_clear")
             }
+            // A `BTreeSet`'s ordered slices, which its `first`, `pop_first`,
+            // `range`, and kin desugar to.
+            (Some("collections::BTreeSet"), "__window") => Some("gos_rt_set_window"),
+            (Some("collections::BTreeSet"), "__range") => Some("gos_rt_set_range_str"),
             // A `GosSet` table is reached through a handle carrying no count
             // of its holders, so the clone takes a table of its own.
             (Some("collections::HashSet" | "collections::BTreeSet"), "clone") => {
@@ -3910,6 +3911,7 @@ impl<'a> Builder<'a> {
             (Some("fs::File"), "write" | "write_all") => Some("gos_rt_fs_file_write"),
             (Some("fs::File"), "write_bytes") => Some("gos_rt_fs_file_write_bytes"),
             (Some("fs::File"), "read_at") => Some("gos_rt_fs_file_read_at"),
+            (Some("fs::File"), "read_at_into") => Some("gos_rt_fs_file_read_at_into"),
             (Some("fs::File"), "write_at") => Some("gos_rt_fs_file_write_at"),
             (Some("fs::File"), "seek") => Some("gos_rt_fs_file_seek"),
             (Some("fs::File"), "set_len") => Some("gos_rt_fs_file_set_len"),
@@ -4107,6 +4109,11 @@ impl<'a> Builder<'a> {
         // `to_vec` / `iter` carry no element argument, so recover the
         // set's element kind from the receiver's HIR type to read an
         // i64 set's keys back as integers (sorted numerically).
+        if rt == "gos_rt_set_range_str"
+            && matches!(self.set_elem_kind_of(receiver), MapKeyKind::I64)
+        {
+            rt = "gos_rt_set_range_i64";
+        }
         if rt == "gos_rt_set_to_vec" && matches!(self.set_elem_kind_of(receiver), MapKeyKind::I64) {
             rt = if self.set_elems_unsigned(receiver.ty) {
                 "gos_rt_set_to_vec_u64"
@@ -4120,6 +4127,7 @@ impl<'a> Builder<'a> {
                 "gos_rt_set_contains" | "gos_rt_set_contains_i64" => "gos_rt_set_contains_ekey",
                 "gos_rt_set_remove" | "gos_rt_set_remove_i64" => "gos_rt_set_remove_ekey",
                 "gos_rt_set_to_vec" | "gos_rt_set_to_vec_i64" => "gos_rt_set_to_vec_ekey",
+                "gos_rt_set_range_str" | "gos_rt_set_range_i64" => "gos_rt_set_range_ekey",
                 _ => rt,
             };
         }
@@ -4130,6 +4138,7 @@ impl<'a> Builder<'a> {
                 "gos_rt_set_remove" => "gos_rt_set_remove_skey",
                 "gos_rt_set_to_vec" => "gos_rt_set_to_vec_skey",
                 "gos_rt_set_intersection" => "gos_rt_set_intersection_skey",
+                "gos_rt_set_range_str" => "gos_rt_set_range_skey",
                 _ => rt,
             };
         }
@@ -4215,6 +4224,16 @@ impl<'a> Builder<'a> {
                 }
                 arg_operands.push(Operand::Copy(Place::local(a)));
             }
+        }
+        // A range's descriptor sits between its two bounds: `(set, lo, desc,
+        // hi, mode)`, the shape the other key-descriptor calls share.
+        if let Some(desc) = match rt {
+            "gos_rt_set_range_skey" => aggregate_set_desc.clone(),
+            "gos_rt_set_range_ekey" => enum_set_desc.clone(),
+            _ => None,
+        } && arg_operands.len() >= 2
+        {
+            arg_operands.insert(2, Operand::Const(ConstValue::Str(desc)));
         }
         if matches!(
             rt,
@@ -4328,6 +4347,12 @@ impl<'a> Builder<'a> {
                 let s = self.tcx.string_ty();
                 self.tcx.intern(gossamer_types::TyKind::Vec(s))
             }
+            // A window or a range of a set is a set of the same type.
+            "gos_rt_set_window"
+            | "gos_rt_set_range_i64"
+            | "gos_rt_set_range_str"
+            | "gos_rt_set_range_skey"
+            | "gos_rt_set_range_ekey" => receiver.ty,
             "gos_rt_set_to_vec_ekey" => {
                 let elem = self
                     .first_generic_of(receiver.ty)
@@ -5110,6 +5135,7 @@ impl<'a> Builder<'a> {
             (Some("fs::File"), "write" | "write_all") => Some("gos_rt_fs_file_write"),
             (Some("fs::File"), "write_bytes") => Some("gos_rt_fs_file_write_bytes"),
             (Some("fs::File"), "read_at") => Some("gos_rt_fs_file_read_at"),
+            (Some("fs::File"), "read_at_into") => Some("gos_rt_fs_file_read_at_into"),
             (Some("fs::File"), "write_at") => Some("gos_rt_fs_file_write_at"),
             (Some("fs::File"), "seek") => Some("gos_rt_fs_file_seek"),
             (Some("fs::File"), "set_len") => Some("gos_rt_fs_file_set_len"),
@@ -5316,6 +5342,29 @@ impl<'a> Builder<'a> {
         receiver_ty: Ty,
         owner: Option<&Ident>,
     ) -> Option<Local> {
+        // An iterator whose lowering materialised its elements (a set's
+        // `iter()`, a sorted walk) advances through a cursor over them, the
+        // state `next` steps.
+        let materialised_walk = method.name == "next"
+            && args.is_empty()
+            && matches!(self.tcx.kind_of(receiver.ty), TyKind::Iterator(_))
+            && matches!(
+                self.tcx.kind_of(self.locals[receiver_local.0 as usize].ty),
+                TyKind::Vec(_) | TyKind::Slice(_)
+            );
+        let cursor = if materialised_walk {
+            self.entries_cursor(receiver_local, span)
+        } else {
+            None
+        };
+        // An element no cursor carries is read in place: `next` consumes its
+        // iterator (GT0042), so the one pull a walk takes is its first element.
+        let runtime_symbol = if materialised_walk && cursor.is_none() {
+            Some("gos_rt_vec_first")
+        } else {
+            runtime_symbol
+        };
+        let receiver_local = cursor.unwrap_or(receiver_local);
         let method_inputs = self
             .struct_name_of(receiver_ty)
             .or_else(|| self.struct_name_from_expr(receiver))
@@ -5846,6 +5895,20 @@ impl<'a> Builder<'a> {
                 } else {
                     a
                 }
+            } else {
+                a
+            };
+            // A map handle carries no count, so the channel always takes a
+            // table of its own: a named map stays the sender's, and a
+            // temporary may itself be a map borrowed out of another.
+            let a = if runtime_symbol == Some("gos_rt_chan_send")
+                && matches!(
+                    self.tcx.kind_of(self.locals[a.0 as usize].ty),
+                    TyKind::HashMap { .. }
+                ) {
+                let cloned = self.fresh(self.locals[a.0 as usize].ty);
+                self.emit_owned_clone_binding(a, cloned, span);
+                cloned
             } else {
                 a
             };

@@ -1737,7 +1737,7 @@ impl Vm {
                                             key_str.to_string(),
                                         ));
                                         let mut guard = map.lock();
-                                        let entry = guard.entry(key).or_insert(Value::Int(0));
+                                        let entry = guard.get_or_insert_with(key, || Value::Int(0));
                                         let new_val = match entry {
                                             Value::Int(cur) => *cur + by,
                                             _ => by,
@@ -1881,7 +1881,7 @@ impl Vm {
                         let key = MapKey::from_value(&registers[key_reg as usize]);
                         let by_val = &registers[by_reg as usize];
                         let mut guard = map.lock();
-                        let entry = guard.entry(key).or_insert(Value::Int(0));
+                        let entry = guard.get_or_insert_with(key, || Value::Int(0));
                         if let (Value::Int(cur), Value::Int(b)) = (&*entry, by_val) {
                             *entry = Value::Int(*cur + *b);
                         } else {

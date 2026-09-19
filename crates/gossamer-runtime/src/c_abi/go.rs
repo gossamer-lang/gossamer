@@ -491,17 +491,30 @@ pub unsafe extern "C" fn gos_rt_sleep_ms_ctx(ctx_handle: *const u8, ms: i64) -> 
                 );
             };
         }
+        unsafe { gos_rt_sleep_ns_ctx(ctx_handle, ms.saturating_mul(1_000_000)) }
+    })
+}
+
+/// [`gos_rt_sleep_ms_ctx`] for a wait given as a `time::Duration`, a count of
+/// nanoseconds. A negative duration waits not at all.
+///
+/// # Safety
+/// `ctx_handle` is an opaque context handle, or null for an uncancellable
+/// sleep.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const u8, ns: i64) -> i64 {
+    ffi_entry!(0, {
         let addr = ctx_handle as usize;
         let cancelled = || super::context::addr_is_cancelled(addr);
         if cancelled() {
             return 0;
         }
         if addr == 0 {
-            unsafe { gos_rt_sleep_ms(ms) };
+            unsafe { gos_rt_sleep_ns(ns) };
             return 1;
         }
         let deadline =
-            crate::platform::Instant::now() + std::time::Duration::from_millis(ms.max(0) as u64);
+            crate::platform::Instant::now() + std::time::Duration::from_nanos(ns.max(0) as u64);
         // Cancelling unparks every goroutine registered on the node, so the
         // sleep resumes on whichever of the two arrives first and re-parks
         // for the remainder when it was neither.

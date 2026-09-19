@@ -564,9 +564,11 @@ impl<'a> Lowerer<'a> {
             name,
             "gos_rt_map_insert_skey"
                 | "gos_rt_map_insert_skey_opt"
+                | "gos_rt_map_insert_ekey_opt"
                 // `or_insert` stores its default when the slot is
                 // absent, so that default is a stored value too.
                 | "gos_rt_map_or_insert_skey"
+                | "gos_rt_map_or_insert_ekey"
         );
         // `gos_rt_enum_box_aggr(size, meta, src)` and its weak-cell sibling
         // `gos_rt_rc_weak_cell`: the second argument names a module-global

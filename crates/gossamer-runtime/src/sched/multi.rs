@@ -264,6 +264,55 @@ struct WorkerSlot {
     /// the loop runs, which is a kernel round trip per worker per pass on
     /// both sides and interrupts the very work it is waiting for.
     last_signal_micros: AtomicU64,
+    /// Monotonic micros-since-process-start at which this worker entered a
+    /// blocking system call, or zero outside one. Written lock-free by the
+    /// worker, read by the watchdog.
+    syscall_since_micros: AtomicU64,
+    /// Whether the watchdog started an extra worker for this worker's
+    /// current system call, which leaving the call gives back.
+    handed_off: AtomicBool,
+}
+
+/// How long a worker may sit in a blocking system call while goroutines wait
+/// before the watchdog starts another worker to run them. A page-cache read
+/// finishes well inside it and never pays for a thread; the watchdog's own
+/// pass interval is the finer bound in practice.
+pub const SYSCALL_HANDOFF_THRESHOLD: Duration = Duration::from_millis(1);
+
+thread_local! {
+    /// The slot of the scheduler worker running on this thread, if any.
+    static CURRENT_SLOT: std::cell::RefCell<Option<Arc<WorkerSlot>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Marks this worker as inside a blocking system call until the guard drops.
+/// Off a worker thread it does nothing.
+#[must_use]
+pub fn syscall_enter() -> SyscallGuard {
+    let slot = CURRENT_SLOT.with(|current| current.borrow().clone());
+    if let Some(slot) = &slot {
+        slot.syscall_since_micros
+            .store(now_micros_since_start().max(1), Ordering::Release);
+    }
+    SyscallGuard { slot }
+}
+
+/// Leaves the system call [`syscall_enter`] marked, giving back a worker the
+/// watchdog started for it.
+pub struct SyscallGuard {
+    slot: Option<Arc<WorkerSlot>>,
+}
+
+impl Drop for SyscallGuard {
+    fn drop(&mut self) {
+        let Some(slot) = &self.slot else {
+            return;
+        };
+        slot.syscall_since_micros.store(0, Ordering::Release);
+        if slot.handed_off.swap(false, Ordering::AcqRel) {
+            crate::sched_global::scheduler().end_syscall_handoff();
+        }
+    }
 }
 
 impl WorkerSlot {
@@ -711,6 +760,23 @@ impl MultiScheduler {
         self.inner.request_safepoint.store(false, Ordering::Release);
     }
 
+    /// Spawns or retires workers to match the current target.
+    pub(crate) fn reconcile_workers(&self) {
+        self.reconcile_pool();
+    }
+
+    /// Gives back the worker the watchdog started for a system call that has
+    /// now returned; the surplus worker retires on its next park.
+    pub(crate) fn end_syscall_handoff(&self) {
+        let _ = self
+            .inner
+            .target_workers
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_sub(1).max(1))
+            });
+        self.reconcile_pool();
+    }
+
     fn reconcile_pool(&self) {
         let target = self.inner.target_workers.load(Ordering::Relaxed);
         let current = self.inner.live_workers.load(Ordering::Relaxed);
@@ -741,6 +807,8 @@ impl MultiScheduler {
             thread_handle: AtomicU64::new(0),
             last_yield_micros: AtomicU64::new(now_micros_since_start()),
             last_signal_micros: AtomicU64::new(0),
+            syscall_since_micros: AtomicU64::new(0),
+            handed_off: AtomicBool::new(false),
         });
         {
             let mut workers = self.inner.workers.lock();
@@ -762,6 +830,8 @@ impl MultiScheduler {
                         thread_handle: AtomicU64::new(0),
                         last_yield_micros: AtomicU64::new(now_micros_since_start()),
                         last_signal_micros: AtomicU64::new(0),
+                        syscall_since_micros: AtomicU64::new(0),
+                        handed_off: AtomicBool::new(false),
                     });
                     workers.push(placeholder);
                 }
@@ -879,6 +949,7 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
     // the value before it tries to use it.
     slot.thread_handle
         .store(crate::preempt::current_thread_handle(), Ordering::Release);
+    CURRENT_SLOT.with(|current| *current.borrow_mut() = Some(Arc::clone(&slot)));
     // RAII guard: even if the worker panics, the handle is released
     // and the slot zeroed before this frame unwinds.
     let _handle_guard = WorkerHandleGuard {
@@ -1070,6 +1141,42 @@ fn default_max_live() -> usize {
 /// inside a tight C-side loop or a blocking syscall; the kernel
 /// signal interrupts both.
 #[cfg_attr(miri, allow(dead_code))]
+/// Starts one more worker for each worker that has sat in a blocking system
+/// call past [`SYSCALL_HANDOFF_THRESHOLD`] while goroutines are waiting to
+/// run, so the call holds its own thread and nothing else.
+fn start_workers_for_blocked_syscalls(shared: &Arc<Shared>, now_micros: u64) {
+    let threshold = u64::try_from(SYSCALL_HANDOFF_THRESHOLD.as_micros()).unwrap_or(u64::MAX);
+    let workers = shared.workers.lock();
+    let waiting = !shared.injector.is_empty()
+        || workers
+            .iter()
+            .any(|slot| !slot.stealer.is_empty() || !slot.inbox.is_empty());
+    if !waiting {
+        return;
+    }
+    let mut added = 0usize;
+    for slot in workers.iter() {
+        let since = slot.syscall_since_micros.load(Ordering::Acquire);
+        if since != 0
+            && now_micros.saturating_sub(since) > threshold
+            && !slot.retired.load(Ordering::Acquire)
+            && !slot.handed_off.swap(true, Ordering::AcqRel)
+        {
+            added += 1;
+        }
+    }
+    drop(workers);
+    if added > 0 {
+        let cap = MultiScheduler::worker_count_cap();
+        let _ = shared
+            .target_workers
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {
+                Some(n.saturating_add(added).min(cap))
+            });
+        crate::sched_global::scheduler().reconcile_workers();
+    }
+}
+
 fn watchdog_loop(shared: Arc<Shared>) {
     let preempt_threshold = Duration::from_millis(10);
     let kill_threshold = Duration::from_millis(100);
@@ -1106,6 +1213,7 @@ fn watchdog_loop(shared: Arc<Shared>) {
                 kill_indices.push(i);
             }
         }
+        start_workers_for_blocked_syscalls(&shared, now_micros);
         if needs_preempt || shared.request_safepoint.load(Ordering::Acquire) {
             crate::preempt::request_yield_all();
             crate::preempt::bump_pressure();

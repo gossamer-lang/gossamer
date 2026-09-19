@@ -998,6 +998,19 @@ impl TyCtxt {
         self.boxed_enum_payload_tys.contains(&ty)
     }
 
+    /// Whether binding an enum payload of type `ty` copies it out of a heap box,
+    /// taking a share of each counted field: an aggregate wider than one slot,
+    /// or one registered as boxed.
+    #[must_use]
+    pub fn is_boxed_payload_binding(&self, ty: Ty) -> bool {
+        let aggregate = match self.kind_of(ty) {
+            TyKind::Tuple(_) | TyKind::Array { .. } => true,
+            TyKind::Adt { def, .. } => self.struct_field_tys(*def).is_some(),
+            _ => false,
+        };
+        aggregate && (self.slot_bytes(ty) > 8 || self.is_boxed_enum_payload(ty))
+    }
+
     /// Returns the RC type-meta blob registered under `symbol`, if any.
     #[must_use]
     pub fn rc_meta(&self, symbol: &str) -> Option<&[i64]> {

@@ -1,5 +1,5 @@
 // Locks the `time::Duration` accessors in method form across every
-// tier. A Duration is a transparent `i64`-of-milliseconds newtype, so
+// tier. A Duration is its own type over an `i64` of nanoseconds, so
 // `d.as_millis()` must dispatch by the receiver's static type and yield
 // exactly the same value as the qualified `time::Duration::as_millis(d)`
 // free call already locked by `stdlib_time_methods.gos`.

@@ -638,7 +638,7 @@ where
             let key = value_to_map_key(&key_value);
             out.insert(key, v.to_gos());
         }
-        Value::Map(Arc::new(parking_lot::Mutex::new(out)))
+        Value::Map(Arc::new(parking_lot::Mutex::new(out.into())))
     }
 }
 
@@ -653,7 +653,7 @@ fn map_key_to_value(k: &MapKey) -> Value {
         MapKey::Char(c) => Value::Char(*c),
         // A float key holds the value's bit pattern, so it reads back as the
         // float those bits spell.
-        MapKey::Float(bits) => Value::Float(f64::from_bits(*bits)),
+        MapKey::Float(bits) => Value::Float(f64::from_bits(bits.0)),
         MapKey::Str(s) => Value::String(s.clone()),
         // Aggregate keys don't round-trip to their typed shape (field names /
         // element types aren't retained in the key).
@@ -667,7 +667,7 @@ fn value_to_map_key(v: &Value) -> MapKey {
         Value::Int(i) => MapKey::Int(*i),
         Value::Uint(u) => MapKey::Int(i64::try_from(*u).unwrap_or(i64::MAX)),
         Value::Char(c) => MapKey::Char(*c),
-        Value::Float(f) => MapKey::Float(f.to_bits()),
+        Value::Float(f) => MapKey::Float(gossamer_interp::value::FloatBits(f.to_bits())),
         Value::String(s) => MapKey::Str(s.clone()),
         _ => MapKey::NonHashable,
     }
@@ -864,7 +864,7 @@ fn dyn_to_value(d: DynValue) -> Value {
                 let key = value_to_map_key(&key_value);
                 out.insert(key, dyn_to_value(v));
             }
-            Value::Map(Arc::new(parking_lot::Mutex::new(out)))
+            Value::Map(Arc::new(parking_lot::Mutex::new(out.into())))
         }
         DynValue::Tagged { name, payload } => {
             let fields: Vec<Value> = payload.into_iter().map(dyn_to_value).collect();

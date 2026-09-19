@@ -2546,7 +2546,7 @@ pub(crate) fn native_iter_chunk_by(
     for (k, v) in groups {
         map.insert(k, Value::Array(Arc::new(v)));
     }
-    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(map))))
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(map.into()))))
 }
 
 pub(crate) fn native_iter_count_by(
@@ -2579,7 +2579,7 @@ pub(crate) fn native_iter_count_by(
     for (k, v) in counts {
         map.insert(k, Value::Int(v));
     }
-    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(map))))
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(map.into()))))
 }
 
 pub(crate) fn native_iter_flat_map(

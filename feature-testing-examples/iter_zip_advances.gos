@@ -1,0 +1,28 @@
+// `zip` answers an iterator: `next` advances it, `collect` and `count` end it,
+// and `for` walks it, over any element types, identically on every tier. A
+// set's walk and a `Vec` of enums answer `next` the same way.
+struct Pt { x: i64, y: i64 }
+enum K { A(i64), B }
+fn main() {
+    let a = #[1, 2, 3]
+    let b = #["x", "y"]
+    println("{:?}", a.iter().zip(b.iter()).next())
+    let all: Vec<(i64, String)> = a.iter().zip(b.iter()).collect()
+    println("{:?}", all)
+    for (n, s) in a.iter().zip(b.iter()) { println("{} {}", n, s) }
+    let ps = #[Pt { x: 1, y: 2 }]
+    let fs = #[1.5, 2.5]
+    println("{:?}", ps.iter().zip(fs.iter()).next())
+    let ws: Vec<(i64, i64)> = a.iter().zip(a.iter()).collect()
+    println("{:?} {:?}", ws, a.iter().zip(a.iter()).next())
+    println("{}", a.iter().zip(b.iter()).count())
+    let ks = #[K::A(1), K::B]
+    let first = ks.iter()
+    println("{:?}", first.next())
+    let mut kinds: BTreeSet<K> = BTreeSet::new()
+    kinds.insert(K::B)
+    kinds.insert(K::A(3))
+    let names: BTreeSet<String> = #{"pear", "apple"}
+    let nums: BTreeSet<i64> = #{7, -1}
+    println("{:?} {:?} {:?}", kinds.iter().next(), names.iter().next(), nums.iter().next())
+}

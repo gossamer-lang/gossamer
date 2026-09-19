@@ -2943,91 +2943,60 @@ impl<'tcx> FnBuilder<'tcx> {
                 }
             }
         }
-        // `d.as_millis()` / `d.as_secs()` / `d.as_micros()` - method form
-        // of the `time::Duration` accessors. A Duration value is a bare
-        // `Value::Int` at runtime with no qualified-key receiver, so the
-        // generic `MethodCall` dispatch cannot reach the accessor by name.
-        // Resolve it statically from the receiver's Duration type and emit
-        // a direct call to the `time::Duration::<accessor>` global.
-        if matches!(name.name.as_str(), "as_millis" | "as_secs" | "as_micros") && args.is_empty() {
+        // `d.as_millis()`, `inst.elapsed()`, `later.duration_since(earlier)`:
+        // a `time::Duration` / `time::Instant` is a bare `Value::Int` at run
+        // time with no qualified-key receiver, so the method resolves
+        // statically from the receiver's type to the `time::Duration::<m>` /
+        // `time::Instant::<m>` global, called with the receiver first.
+        {
             let mut k = self.tcx.kind(receiver.ty).cloned();
             while let Some(TyKind::Ref { inner, .. }) = k {
                 k = self.tcx.kind(inner).cloned();
             }
             // A `flag::Set` duration cell (`fs.duration(...)`) carries no
-            // Duration tag on its HIR type (an unresolved inference var),
-            // so dispatch on the compile-time `duration_cell_locals` tag.
-            // The cell is a `__Cell` handle at runtime; auto-derefing it at
-            // the call boundary yields its backing `Value::Int`-of-ms, so
-            // the accessor receives the same shape as a bare Duration.
+            // Duration tag on its HIR type (an unresolved inference var), so
+            // it dispatches on the compile-time `duration_cell_locals` tag.
+            // The cell auto-derefs at the call boundary to its Duration.
             let is_duration_cell = self.receiver_is_duration_cell(receiver);
-            if matches!(k, Some(TyKind::Duration)) || is_duration_cell {
-                let qual = format!("time::Duration::{}", name.name);
-                let idx = self.global_idx(&qual);
+            let owner = match (&k, name.name.as_str(), args.len()) {
+                (_, "as_nanos" | "as_micros" | "as_millis" | "as_secs" | "as_secs_f64", 0)
+                    if is_duration_cell || matches!(k, Some(TyKind::Duration)) =>
+                {
+                    Some("time::Duration")
+                }
+                (Some(TyKind::Instant), "elapsed_ms" | "elapsed", 0)
+                | (Some(TyKind::Instant), "duration_since", 1) => Some("time::Instant"),
+                _ => None,
+            };
+            if let Some(owner) = owner {
+                let idx = self.global_idx(&format!("{owner}::{}", name.name));
                 let callee_reg = self.alloc_reg();
                 self.emit(Op::LoadGlobal {
                     dst: callee_reg,
                     idx,
                 });
+                let argc = u16::try_from(args.len() + 1).expect("time method arity");
                 let args_start = self.next_reg;
                 self.next_reg = self
                     .next_reg
-                    .checked_add(1)
-                    .expect("register overflow reserving duration accessor arg");
-                let recv_reg = self.compile_expr(receiver)?;
-                self.emit(Op::Move {
-                    dst: args_start,
-                    src: recv_reg,
-                });
+                    .checked_add(argc)
+                    .expect("register overflow reserving time method args");
+                for (slot, expr) in std::iter::once(receiver).chain(args.iter()).enumerate() {
+                    let reg = self.compile_expr(expr)?;
+                    self.emit(Op::Move {
+                        dst: args_start + u16::try_from(slot).expect("time method arity"),
+                        src: reg,
+                    });
+                }
                 let dst = self.alloc_reg();
                 let cache_idx = self.alloc_cache_idx();
                 self.emit(Op::Call {
                     dst,
                     callee: callee_reg,
                     args: args_start,
-                    argc: 1,
+                    argc,
                     cache_idx,
                     may_have_cells: is_duration_cell,
-                });
-                return Ok(dst);
-            }
-        }
-        // `inst.elapsed_ms()` - method form of the `time::Instant`
-        // accessor. An Instant value is a bare `Value::Int` of monotonic
-        // ms at runtime with no qualified-key receiver, so resolve it
-        // statically from the receiver's Instant type and emit a direct
-        // call to the `time::Instant::elapsed_ms` global.
-        if name.name.as_str() == "elapsed_ms" && args.is_empty() {
-            let mut k = self.tcx.kind(receiver.ty).cloned();
-            while let Some(TyKind::Ref { inner, .. }) = k {
-                k = self.tcx.kind(inner).cloned();
-            }
-            if matches!(k, Some(TyKind::Instant)) {
-                let idx = self.global_idx("time::Instant::elapsed_ms");
-                let callee_reg = self.alloc_reg();
-                self.emit(Op::LoadGlobal {
-                    dst: callee_reg,
-                    idx,
-                });
-                let args_start = self.next_reg;
-                self.next_reg = self
-                    .next_reg
-                    .checked_add(1)
-                    .expect("register overflow reserving instant accessor arg");
-                let recv_reg = self.compile_expr(receiver)?;
-                self.emit(Op::Move {
-                    dst: args_start,
-                    src: recv_reg,
-                });
-                let dst = self.alloc_reg();
-                let cache_idx = self.alloc_cache_idx();
-                self.emit(Op::Call {
-                    dst,
-                    callee: callee_reg,
-                    args: args_start,
-                    argc: 1,
-                    cache_idx,
-                    may_have_cells: false,
                 });
                 return Ok(dst);
             }
@@ -4210,6 +4179,21 @@ impl<'tcx> FnBuilder<'tcx> {
                         segs.as_slice(),
                         ["Map" | "BTreeMap", "from"] | ["collections", "Map" | "BTreeMap", "from"]
                     );
+                let is_map_from = args.len() == 1
+                    && matches!(
+                        segs.as_slice(),
+                        ["Map" | "BTreeMap", "from"] | ["collections", "Map" | "BTreeMap", "from"]
+                    );
+                if (is_map_new || is_map_from)
+                    && let Some(unsigned) = self.btree_map_unsigned(result_ty)
+                {
+                    let flag = self.load_int_value(i64::from(unsigned));
+                    let mut operands = vec![flag];
+                    if is_map_from && !is_empty_map_from {
+                        operands.push(self.compile_expr(&args[0])?);
+                    }
+                    return self.emit_global_call("__btree_map_new", &operands);
+                }
                 if (is_map_new || is_empty_map_from) && self.is_int_map_ty(result_ty) {
                     let dst = self.alloc_reg();
                     self.emit(Op::BuildIntMap { dst_v: dst });
@@ -4362,11 +4346,22 @@ impl<'tcx> FnBuilder<'tcx> {
                 None
             } else {
                 let stripped = strip_module_relative(segments);
-                let name = stripped
+                let mut name = stripped
                     .iter()
                     .map(|segment| segment.name.as_str())
                     .collect::<Vec<_>>()
                     .join("::");
+                // A wait given as a `time::Duration` counts nanoseconds.
+                let duration_arg = |i: usize| {
+                    args.get(i).is_some_and(|a| {
+                        matches!(self.tcx.kind(self.static_ty(a)), Some(TyKind::Duration))
+                    })
+                };
+                if def.is_none() && name == "time::sleep" && duration_arg(0) {
+                    name = "time::__sleep_ns".to_string();
+                } else if def.is_none() && name == "time::sleep_ctx" && duration_arg(1) {
+                    name = "time::__sleep_ns_ctx".to_string();
+                }
                 Some(self.global_idx(&name))
             }
         } else {
@@ -4843,7 +4838,13 @@ impl<'tcx> FnBuilder<'tcx> {
 
     /// True when a call renders its arguments through `Display`.
     fn callee_renders_args(callee: &HirExpr) -> bool {
-        let HirExprKind::Path { segments, .. } = &callee.kind else {
+        // A path the resolver bound to a program item is that item, never
+        // the builtin its name spells.
+        let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &callee.kind
+        else {
             return false;
         };
         segments.last().is_some_and(|s| {
@@ -4857,7 +4858,11 @@ impl<'tcx> FnBuilder<'tcx> {
     /// Whether `callee` encodes its argument as JSON text, which reads an
     /// integer declared `u64` / `usize` as unsigned the way rendering does.
     fn callee_encodes_json(callee: &HirExpr) -> bool {
-        let HirExprKind::Path { segments, .. } = &callee.kind else {
+        let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &callee.kind
+        else {
             return false;
         };
         match segments.as_slice() {

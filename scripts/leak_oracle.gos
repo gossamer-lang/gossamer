@@ -214,6 +214,94 @@ fn probes() -> Vec<(String, String)> {
             println("{}", n)
         }
         """)
+        ("vec_rebound_through_try", """
+        struct V { tag: u8, s: String }
+        fn decode(n: i64) -> Result<Vec<V>, String> { Ok(#[V { tag: 1, s: format("v{}", n) }]) }
+        fn keep(p: i64) -> Result<i64, String> {
+            let mut vals: Vec<V> = #[]
+            if p > 0 { vals = decode(p)? }
+            if p < 2 { vals = decode(2)? }
+            Ok(vals.len())
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT { acc += keep(i % 3).unwrap_or(0) }
+            println("{}", acc)
+        }
+        """)
+        ("vec_read_then_stored_in_ok", """
+        struct Res { rows: Vec<String>, count: i64 }
+        fn build(i: i64) -> Result<Res, String> {
+            let mut rows: Vec<String> = #[]
+            rows.push(format("r{}", i))
+            Ok(Res { rows: rows, count: rows.len() })
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                match build(i) {
+                    Ok(r) => acc += r.count
+                    Err(e) => println("{}", e)
+                }
+            }
+            println("{}", acc)
+        }
+        """)
+        ("tuple_filled_through_mut_ref", """
+        fn fill(i: i64, rows: &mut Vec<String>) { rows.push(format("r{}", i)) }
+        fn walk(i: i64) -> (i64, Vec<String>) {
+            let mut rows: Vec<String> = #[]
+            fill(i, &mut rows)
+            fill(i + 1, &mut rows)
+            (i, rows)
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT { acc += walk(i).1.len() }
+            println("{}", acc)
+        }
+        """)
+        ("enum_struct_payload_param", """
+        struct Q { table: String, cols: Vec<i64> }
+        enum Stmt { Select(Q), Compact }
+        fn parse(i: i64) -> Result<Stmt, String> {
+            Ok(Stmt::Select(Q { table: format("t{}", i), cols: #[i] }))
+        }
+        fn arity(s: Stmt) -> i64 {
+            match s {
+                Stmt::Select(q) => q.cols.len()
+                Stmt::Compact => 0
+            }
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT {
+                match parse(i) {
+                    Ok(s) => acc += arity(s)
+                    Err(e) => println("{}", e)
+                }
+            }
+            println("{}", acc)
+        }
+        """)
+        ("enum_struct_payload_try", """
+        struct Q { table: String, cols: Vec<i64> }
+        enum Stmt { Select(Q), Compact }
+        fn parse(i: i64) -> Result<Stmt, String> {
+            Ok(Stmt::Select(Q { table: format("t{}", i), cols: #[i] }))
+        }
+        fn exec(i: i64) -> Result<i64, String> {
+            match parse(i)? {
+                Stmt::Select(q) => Ok(q.cols.len() + q.table.len())
+                Stmt::Compact => Ok(0)
+            }
+        }
+        fn main() {
+            let mut acc = 0
+            for i in 0..COUNT { acc += exec(i).unwrap_or(0) }
+            println("{}", acc)
+        }
+        """)
         ("map_of_vecs", """
         fn main() {
             let mut acc = 0

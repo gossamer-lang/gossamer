@@ -336,6 +336,16 @@ pub(crate) fn builtin_time_sleep(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Unit)
 }
 
+/// `time::sleep(d)` for a wait given as a `time::Duration`, a count of
+/// nanoseconds. A negative duration waits not at all.
+pub(crate) fn builtin_time_sleep_ns(args: &[Value]) -> RuntimeResult<Value> {
+    let ns = args.first().and_then(value_to_int).unwrap_or(0).max(0);
+    let _elapsed = crate::stdlib_builtins::cohort::sleep_cancellable(
+        std::time::Duration::from_nanos(u64::try_from(ns).unwrap_or(0)),
+    );
+    Ok(Value::Unit)
+}
+
 pub(crate) fn builtin_time_now_unix_ms(_args: &[Value]) -> RuntimeResult<Value> {
     let ms = gossamer_runtime::platform::system_time_now()
         .duration_since(std::time::UNIX_EPOCH)

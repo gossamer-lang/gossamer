@@ -103,9 +103,7 @@ fn builtin_env_vars(_args: &[Value]) -> RuntimeResult<Value> {
             Value::String(SmolStr::from(value)),
         );
     }
-    Ok(Value::Map(std::sync::Arc::new(parking_lot::Mutex::new(
-        storage,
-    ))))
+    Ok(Value::Map(std::sync::Arc::new(parking_lot::Mutex::new(storage.into()))))
 }
 
 fn builtin_process_id(_args: &[Value]) -> RuntimeResult<Value> {
@@ -380,8 +378,7 @@ fn builtin_time_is_frozen(_args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// `time::sleep_ctx(ctx, ms)` - sleeps unless the context fires first,
-/// answering whether the full duration elapsed. The wait is split into short
-/// steps so a cancellation raised while sleeping is observed promptly.
+/// answering whether the full duration elapsed.
 fn builtin_time_sleep_ctx(args: &[Value]) -> RuntimeResult<Value> {
     let ms = args.get(1).and_then(value_to_int).unwrap_or(0);
     if ms < 0 {
@@ -389,27 +386,42 @@ fn builtin_time_sleep_ctx(args: &[Value]) -> RuntimeResult<Value> {
             "time::sleep_ctx: duration_ms must be non-negative".to_string(),
         ));
     }
-    let Some(ctx) = args.first() else {
-        return Ok(Value::Bool(true));
+    let ms = u64::try_from(ms)
+        .map_err(|_| RuntimeError::Type("time::sleep_ctx: duration_ms is too large".to_string()))?;
+    Ok(sleep_ctx_for(args.first(), std::time::Duration::from_millis(ms)))
+}
+
+/// `time::sleep_ctx(ctx, d)` for a wait given as a `time::Duration`, a count
+/// of nanoseconds. A negative duration waits not at all.
+pub(crate) fn builtin_time_sleep_ns_ctx(args: &[Value]) -> RuntimeResult<Value> {
+    let ns = args.get(1).and_then(value_to_int).unwrap_or(0).max(0);
+    Ok(sleep_ctx_for(
+        args.first(),
+        std::time::Duration::from_nanos(u64::try_from(ns).unwrap_or(0)),
+    ))
+}
+
+/// Waits for `wait` unless `ctx` is cancelled first, answering whether the
+/// whole wait elapsed. The wait is split into short steps so a cancellation
+/// raised while sleeping is observed promptly.
+fn sleep_ctx_for(ctx: Option<&Value>, wait: std::time::Duration) -> Value {
+    let Some(ctx) = ctx else {
+        return Value::Bool(true);
     };
     let cancelled = || crate::stdlib_builtins::context::value_is_cancelled(ctx);
     if cancelled() {
-        return Ok(Value::Bool(false));
+        return Value::Bool(false);
     }
-    let ms = u64::try_from(ms)
-        .map_err(|_| RuntimeError::Type("time::sleep_ctx: duration_ms is too large".to_string()))?;
-    let deadline = gossamer_runtime::platform::Instant::now() + std::time::Duration::from_millis(ms);
+    let deadline = gossamer_runtime::platform::Instant::now() + wait;
     while gossamer_runtime::platform::Instant::now() < deadline {
         if cancelled() {
-            return Ok(Value::Bool(false));
+            return Value::Bool(false);
         }
         let remaining = deadline.saturating_duration_since(gossamer_runtime::platform::Instant::now());
         gossamer_runtime::platform::sleep(remaining.min(std::time::Duration::from_millis(5)));
     }
-    Ok(Value::Bool(!cancelled()))
+    Value::Bool(!cancelled())
 }
-
-
 
 fn builtin_pprof_cpu_profile(args: &[Value]) -> RuntimeResult<Value> {
     let ms = args.first().and_then(value_to_int).unwrap_or(0);
@@ -1324,7 +1336,7 @@ fn builtin_bufio_scanner_new(args: &[Value]) -> RuntimeResult<Value> {
         MapKey::Str(SmolStr::from("current")),
         Value::String(SmolStr::from("")),
     );
-    let state_map = Value::Map(Arc::new(parking_lot::Mutex::new(state)));
+    let state_map = Value::Map(Arc::new(parking_lot::Mutex::new(state.into())));
     let fields: Vec<(&'static str, Value)> = vec![("__state", state_map)];
     Ok(Value::struct_(
         "Scanner",
@@ -1333,7 +1345,7 @@ fn builtin_bufio_scanner_new(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// Extracts the mutable state Map from a Scanner struct.
-fn scanner_state(args: &[Value]) -> Option<Arc<parking_lot::Mutex<DenseMap<MapKey, Value>>>> {
+fn scanner_state(args: &[Value]) -> Option<Arc<parking_lot::Mutex<crate::vm_map::VmMap>>> {
     let first = args.first()?;
     let guard;
     let value = if let Value::MutCell(cell) = first {

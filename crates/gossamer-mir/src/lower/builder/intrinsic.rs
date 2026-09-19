@@ -1028,6 +1028,12 @@ impl<'a> Builder<'a> {
             return None;
         }
         let desc_sym = self.ensure_enum_eq_desc(key_ty)?;
+        // A multi-slot value crosses as one handle word the backend copies
+        // onto the heap, as a content-keyed map's value does.
+        let _ = self.ensure_aggr_struct_meta(val_ty);
+        if self.is_inline_aggregate_ty(val_ty) {
+            let _ = self.ensure_aggr_copy_meta(val_ty);
+        }
         let recv_local = self.lower_expr(receiver)?;
         let key_local = self.lower_expr(args.first()?)?;
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
@@ -1052,6 +1058,14 @@ impl<'a> Builder<'a> {
             ),
             "contains_key" | "contains" if args.len() == 1 => {
                 ("gos_rt_map_contains_ekey", self.tcx.bool_ty(), None)
+            }
+            "__range" if args.len() == 3 => {
+                let hi_local = self.lower_expr(&args[1])?;
+                (
+                    "gos_rt_map_range_ekey",
+                    recv_ty,
+                    Some(Operand::Copy(Place::local(hi_local))),
+                )
             }
             "get_or" if args.len() == 2 => {
                 let default_local = self.lower_expr(&args[1])?;
@@ -1084,6 +1098,10 @@ impl<'a> Builder<'a> {
             Operand::Const(ConstValue::Str(desc_sym)),
         ];
         call_args.extend(extra);
+        if op == "__range" {
+            let mode = self.lower_expr(args.get(2)?)?;
+            call_args.push(Operand::Copy(Place::local(mode)));
+        }
         let dest = self.fresh(dest_ty);
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
@@ -1155,6 +1173,14 @@ impl<'a> Builder<'a> {
             "contains_key" | "contains" if args.len() == 1 => {
                 ("gos_rt_map_contains_skey", self.tcx.bool_ty(), None)
             }
+            "__range" if args.len() == 3 => {
+                let hi_local = self.lower_expr(&args[1])?;
+                (
+                    "gos_rt_map_range_skey",
+                    recv_ty,
+                    Some(Operand::Copy(Place::local(hi_local))),
+                )
+            }
             "get_or" if args.len() == 2 => {
                 let default_local = self.lower_expr(&args[1])?;
                 (
@@ -1190,6 +1216,10 @@ impl<'a> Builder<'a> {
             desc_op,
         ];
         call_args.extend(val_arg);
+        if op == "__range" {
+            let mode = self.lower_expr(args.get(2)?)?;
+            call_args.push(Operand::Copy(Place::local(mode)));
+        }
         let dest = self.fresh(dest_ty);
         let next = self.new_block(span);
         self.terminate(Terminator::Call {
@@ -2119,10 +2149,12 @@ impl<'a> Builder<'a> {
                 // is the element itself only for an integer-shaped scalar; a
                 // float, a String, or an aggregate carries a bit pattern or a
                 // managed address the pair has to take ownership of.
-                if self.zip_slot_is_the_element(a_elem) && self.zip_slot_is_the_element(b_elem) {
+                let pairs = if self.zip_slot_is_the_element(a_elem)
+                    && self.zip_slot_is_the_element(b_elem)
+                {
                     let pair = self.tcx.intern(TyKind::Tuple(vec![a_elem, b_elem]));
                     let dest_ty = self.tcx.intern(TyKind::Vec(pair));
-                    return Some(self.emit_iter_combinator_call(
+                    self.emit_iter_combinator_call(
                         "zip",
                         ElemAbi::Word,
                         None,
@@ -2132,9 +2164,17 @@ impl<'a> Builder<'a> {
                         ],
                         dest_ty,
                         span,
-                    ));
+                    )
+                } else {
+                    self.lower_zip_general(a, b, a_elem, b_elem, span)
+                };
+                // An iterator-typed zip answers a cursor over its pairs, the
+                // shape `next` and the adapters advance, as a map's `iter()`
+                // does over the pairs it reads out.
+                if matches!(self.tcx.kind_of(ty), TyKind::Iterator(_)) {
+                    return Some(self.entries_cursor(pairs, span).unwrap_or(pairs));
                 }
-                Some(self.lower_zip_general(a, b, a_elem, b_elem, span))
+                Some(pairs)
             }
             // Successive overlapping pairs are the sequence zipped against
             // itself advanced by one, which is the general pairing lowering
@@ -7189,6 +7229,32 @@ impl<'a> Builder<'a> {
         span: Span,
     ) -> Option<Local> {
         use gossamer_types::TyKind;
+        // A struct, tuple, array, or enum key is stored as content bytes the
+        // runtime rebuilds into keys, so the pairs are the key snapshot and
+        // the value snapshot - both in the one key order - zipped together.
+        if let Some((key, value)) = self.hash_map_kv_tys(recv_ty)
+            && (self.is_aggregate_key(key)
+                || (self.struct_name_of(key).is_none() && self.ensure_enum_eq_desc(key).is_some()))
+        {
+            let recv_local = self.lower_expr(receiver)?;
+            let recv = || vec![Operand::Copy(Place::local(recv_local))];
+            let keys_ty = self.tcx.intern(TyKind::Vec(key));
+            let keys = self.emit_combinator_call("gos_rt_map_keys_vec", recv(), keys_ty, span);
+            let (values_helper, stored_value) = if self.map_value_is_carrier(recv_ty) {
+                ("gos_rt_map_values_carrier", value)
+            } else if self.struct_name_of(value).is_some() {
+                let boxed = self.tcx.intern(TyKind::Ref {
+                    mutability: gossamer_types::Mutbl::Not,
+                    inner: value,
+                });
+                ("gos_rt_map_values_vec", boxed)
+            } else {
+                ("gos_rt_map_values_vec", value)
+            };
+            let values_ty = self.tcx.intern(TyKind::Vec(stored_value));
+            let values = self.emit_combinator_call(values_helper, recv(), values_ty, span);
+            return Some(self.lower_zip_general(keys, values, key, value, span));
+        }
         let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let str_ty = self.tcx.string_ty();
         let key_kind = self.hash_map_key_kind(recv_ty);

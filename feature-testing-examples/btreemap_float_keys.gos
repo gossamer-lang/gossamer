@@ -1,0 +1,23 @@
+// Float keys order by value in IEEE total order, the same on every tier:
+// negatives first, `-0.0` just below `0.0` (distinct keys, as a `Map`
+// keeps them), infinities at the ends of the finite range, and a NaN after
+// positive infinity.
+fn main() {
+    let mut m: BTreeMap<f64, i64> = BTreeMap::new()
+    let keys = #[0.0, 2.5, -1.5, -0.0, f64::INFINITY, f64::NEG_INFINITY, 1e-300, -7.0]
+    let mut i = 0
+    for k in keys {
+        m.insert(k, i)
+        i += 1
+    }
+    println("{:?}", m.keys())
+    println("{:?}", m.values())
+    let nan = f64::NAN
+    m.insert(nan, 99)
+    println("{}", m.len())
+    let ks = m.keys()
+    println("{} {}", ks[0], ks[ks.len() - 2])
+    for (k, v) in m.iter() {
+        if k > 2.0 { println("{} {}", k, v) }
+    }
+}

@@ -1,0 +1,41 @@
+// Every numeric primitive carries its limit constants, typed as the primitive
+// they bound (`BITS` as a `u32`), with the same value on every tier.
+fn main() {
+    println("{} {} {}", i8::MIN, i8::MAX, i8::BITS)
+    println("{} {} {}", i16::MIN, i16::MAX, i16::BITS)
+    println("{} {} {}", i32::MIN, i32::MAX, i32::BITS)
+    println("{} {} {}", i64::MIN, i64::MAX, i64::BITS)
+    println("{} {}", isize::MIN, isize::MAX)
+    println("{} {} {}", u8::MIN, u8::MAX, u8::BITS)
+    println("{} {} {}", u16::MIN, u16::MAX, u16::BITS)
+    println("{} {} {}", u32::MIN, u32::MAX, u32::BITS)
+    println("{} {} {}", u64::MIN, u64::MAX, u64::BITS)
+    println("{} {}", usize::MIN, usize::MAX)
+
+    // SPEC 3.1: the one signed division that overflows wraps.
+    let min = i64::MIN
+    let neg = -1
+    println("{}", min / neg == i64::MIN)
+    // A float too large for the target saturates at its limit.
+    println("{}", 1e20 as i64 == i64::MAX)
+    let byte: u8 = u8::MAX
+    println("{} {}", byte, byte as i64 + 1)
+    let wide: u64 = u64::MAX
+    println("{} {}", wide, wide == u64::MAX)
+
+    println("{} {} {}", f64::MAX, f64::MIN, f64::MIN_POSITIVE)
+    println("{} {} {}", f64::EPSILON, f64::INFINITY, f64::NEG_INFINITY)
+    let nan = f64::NAN
+    let other = f64::NAN
+    println("{} {}", nan == other, nan != other)
+    println("{} {}", 1.0 + f64::EPSILON > 1.0, 1.0 + f64::EPSILON / 4.0 > 1.0)
+    println("{} {}", f64::MAX < f64::INFINITY, f64::NEG_INFINITY < f64::MIN)
+    let small: f32 = f32::EPSILON
+    println("{} {} {}", f32::MAX, f32::MIN, small)
+    println("{} {}", f32::MIN_POSITIVE > 0.0, f32::INFINITY > f32::MAX)
+    let mut lowest = i64::MAX
+    for v in #[5, -3, 12] {
+        if v < lowest { lowest = v }
+    }
+    println("{}", lowest)
+}

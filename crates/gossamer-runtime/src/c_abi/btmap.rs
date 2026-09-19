@@ -334,7 +334,9 @@ pub unsafe extern "C" fn gos_rt_vec_format_string(v: *const GosVec, bare: i32) -
                     .cast::<c_char>()
             };
             if !s_ptr.is_null() {
-                out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(s_ptr) });
+                crate::c_abi::map::push_quoted_str(&mut out, &unsafe {
+                    crate::c_abi::gos_str_arg_lossy(s_ptr)
+                });
             }
         }
         out.push(']');
@@ -642,7 +644,9 @@ pub unsafe extern "C" fn gos_rt_arr_format_string(
             }
             let s_ptr = unsafe { p.add(i).read_unaligned() };
             if !s_ptr.is_null() {
-                out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(s_ptr) });
+                crate::c_abi::map::push_quoted_str(&mut out, &unsafe {
+                    crate::c_abi::gos_str_arg_lossy(s_ptr)
+                });
             }
         }
         out.push(']');

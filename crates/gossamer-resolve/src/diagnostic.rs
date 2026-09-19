@@ -262,7 +262,7 @@ pub enum ResolveError {
         /// Labels that are in scope here, for the help line.
         in_scope: Vec<String>,
     },
-    /// A `name =` argument label naming no parameter of the callee.
+    /// A `name:` argument label naming no parameter of the callee.
     #[error("`{name}` is not a parameter of this function")]
     UnknownNamedArgument {
         /// Label as the caller wrote it.
@@ -290,8 +290,8 @@ pub enum ResolveError {
         /// Another declaring type, whose parameters differ.
         second: String,
     },
-    /// A `name =` label on a call this pass cannot match to a declaration.
-    #[error("`{name} =` cannot be matched to a parameter of {target}")]
+    /// A `name:` label on a call this pass cannot match to a declaration.
+    #[error("`{name}:` cannot be matched to a parameter of {target}")]
     NamedArgumentTarget {
         /// Label as the caller wrote it.
         name: String,

@@ -1375,15 +1375,10 @@ fn emit_named_struct_fmt_impl(
         }));
     }
     tmpl.push_str(" }}");
+    // A `String` field's `{:?}` placeholder quotes it.
     let argvals: Vec<String> = fields
         .iter()
-        .map(|f| {
-            if type_head_name(&f.ty) == Some("String") {
-                format!("__gos_strconv_quote(self.{})", f.name.name)
-            } else {
-                format!("self.{}", f.name.name)
-            }
-        })
+        .map(|f| format!("self.{}", f.name.name))
         .collect();
     if field_names.is_empty() {
         out.push_str(&format!(
@@ -1526,13 +1521,7 @@ fn emit_tuple_struct_derive_impl(
         let argvals: Vec<String> = fields
             .iter()
             .enumerate()
-            .map(|(i, f)| {
-                if type_head_name(&f.ty) == Some("String") {
-                    format!("__gos_strconv_quote(self.{i})")
-                } else {
-                    format!("self.{i}")
-                }
-            })
+            .map(|(i, _)| format!("self.{i}"))
             .collect();
         out.push_str(&format!(
             "    fn {render_method}(&self) -> String {{ format(\"{bare}({})\", {}) }}\n",

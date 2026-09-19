@@ -1,0 +1,36 @@
+// A map sent through a channel is the receiver's own table: a goroutine may
+// send a map it built and finish, the sender may keep using a map it sent,
+// and a map borrowed out of another is sent as a copy. Every tier reads the
+// same entries.
+use std::sync::channel
+
+fn make(tag: i64) -> Map<String, i64> {
+    let mut m: Map<String, i64> = Map::new()
+    for i in 0..5 { m.insert(format("k{}", i + tag), i * tag) }
+    m
+}
+
+fn main() {
+    let tx, rx = channel(8)
+    cohort {
+        for w in 1..4 {
+            let t = tx
+            spawn(|| t.send(make(w * 10)))
+        }
+    }.unwrap()
+    let mut kept = make(100)
+    tx.send(kept)
+    kept.insert("after", 1)
+    let mut outer: Map<String, Map<String, i64>> = Map::new()
+    outer.insert("inner", make(200))
+    tx.send(outer.get("inner").unwrap())
+    tx.close()
+    let mut sizes: Vec<i64> = #[]
+    let mut total = 0
+    while let Some(part) = rx.recv() {
+        sizes.push(part.len())
+        for (_, v) in part.iter() { total += v }
+    }
+    sizes.sort()
+    println("{:?} {} {} {}", sizes, total, kept.len(), outer.get("inner").unwrap().len())
+}

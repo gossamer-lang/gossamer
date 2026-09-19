@@ -678,7 +678,9 @@ impl RawIntrinsic {
             | "gos_rt_map_pop_ekey"
             | "gos_rt_map_get_or_ekey"
             | "gos_rt_map_or_insert_ekey"
-            | "gos_rt_map_inc_ekey" => Self::MapEnumKey,
+            | "gos_rt_map_inc_ekey"
+            | "gos_rt_map_range_ekey"
+            | "gos_rt_set_range_ekey" => Self::MapEnumKey,
             "gos_fn_addr" => Self::FnAddr,
             "gos_rt_weak_opt_payload" => Self::WeakOptPayload,
             "gos_jit_unsupported_user_iterator" => Self::JitUnsupportedUserIterator,
@@ -713,7 +715,7 @@ impl RawIntrinsic {
             Self::Store | Self::StoreI128 | Self::RcAllocReuse | Self::EnumStructEq => {
                 RawIntrinsicArity::Exact(3)
             }
-            Self::MapEnumKey => RawIntrinsicArity::Range { min: 3, max: 4 },
+            Self::MapEnumKey => RawIntrinsicArity::Range { min: 3, max: 5 },
             Self::EnumDiscTag
             | Self::EnumUntag
             | Self::EnumDisc

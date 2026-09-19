@@ -105,7 +105,9 @@ use crate::value::{MapKey, NativeCall, NativeDispatch, RuntimeResult, Value};
 /// One set's elements, in the order they were added. A `Set` traverses in
 /// that order and gives it no meaning beyond being the same on every tier; a
 /// `BTreeSet` sorts on the way out.
-pub(crate) type SetEntries = indexmap::IndexMap<MapKey, Value>;
+/// A set's elements keyed by value: insertion-ordered for a `Set`, in the
+/// ordered tree for a `BTreeSet`.
+pub(crate) type SetEntries = crate::vm_map::VmMap;
 
 /// Entry point invoked from `builtins::install`.
 use super::*;
@@ -282,8 +284,13 @@ pub(crate) fn builtin_btreeset_new(_args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_set_new_named(name: &'static str) -> RuntimeResult<Value> {
     let id = next_set_handle();
+    let entries = if name == "BTreeSet" {
+        SetEntries::ordered(crate::vm_map::KeyOrder::Natural)
+    } else {
+        SetEntries::default()
+    };
     SET_REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, SetEntries::default());
+        r.borrow_mut().insert(id, entries);
     });
     Ok(set_handle_named(name, id))
 }
@@ -483,7 +490,9 @@ pub(crate) fn builtin_set_union(args: &[Value]) -> RuntimeResult<Value> {
     set_binary_op(args, |a, b| {
         let mut result = a.clone();
         for (key, value) in b {
-            result.entry(key.clone()).or_insert_with(|| value.clone());
+            if !result.contains_key(key) {
+                result.insert(key.clone(), value.clone());
+            }
         }
         result
     })
@@ -491,29 +500,38 @@ pub(crate) fn builtin_set_union(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_set_intersection(args: &[Value]) -> RuntimeResult<Value> {
     set_binary_op(args, |a, b| {
-        a.iter()
-            .filter(|(key, _)| b.contains_key(*key))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+        let mut result = a.empty_like();
+        result.extend(
+            a.iter()
+                .filter(|(key, _)| b.contains_key(key))
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        result
     })
 }
 
 pub(crate) fn builtin_set_difference(args: &[Value]) -> RuntimeResult<Value> {
     set_binary_op(args, |a, b| {
-        a.iter()
-            .filter(|(key, _)| !b.contains_key(*key))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+        let mut result = a.empty_like();
+        result.extend(
+            a.iter()
+                .filter(|(key, _)| !b.contains_key(key))
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        result
     })
 }
 
 pub(crate) fn builtin_set_symmetric_difference(args: &[Value]) -> RuntimeResult<Value> {
     set_binary_op(args, |a, b| {
-        a.iter()
-            .filter(|(key, _)| !b.contains_key(*key))
-            .chain(b.iter().filter(|(key, _)| !a.contains_key(*key)))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect()
+        let mut result = a.empty_like();
+        result.extend(
+            a.iter()
+                .filter(|(key, _)| !b.contains_key(key))
+                .chain(b.iter().filter(|(key, _)| !a.contains_key(key)))
+                .map(|(key, value)| (key.clone(), value.clone())),
+        );
+        result
     })
 }
 
@@ -673,6 +691,52 @@ pub(crate) fn atomic_id_of(value: &Value, expected: &str) -> Option<i64> {
         }
     }
     None
+}
+
+/// `s.__window(lo, hi, take)` on a `BTreeSet`: a set of its elements ranked
+/// `lo..hi`, the primitive its `first` / `pop_first` / `pop_last` desugar to.
+/// `None` when the receiver is not a set.
+pub(crate) fn set_window(args: &[Value]) -> Option<Value> {
+    let id = set_id_of(args.first()?)?;
+    let int = |i: usize| args.get(i).and_then(value_to_int).unwrap_or(0);
+    let window = SET_REGISTRY.with(|r| {
+        r.borrow_mut()
+            .get_mut(&id)
+            .map(|entries| entries.window(int(1), int(2), int(3) != 0))
+    })?;
+    Some(register_btree_set(window))
+}
+
+/// `s.__range(lo, hi, mode)` on a `BTreeSet`: a set of its elements between
+/// two bounds, under the same mode word a `BTreeMap` range takes.
+pub(crate) fn set_range(args: &[Value]) -> Option<Value> {
+    let id = set_id_of(args.first()?)?;
+    let mode = args.get(3).and_then(value_to_int).unwrap_or(0);
+    let bound = |i: usize| MapKey::from_value(args.get(i).unwrap_or(&Value::Unit));
+    let window = SET_REGISTRY.with(|r| {
+        r.borrow_mut().get_mut(&id).map(|entries| {
+            let lo = if mode & 1 != 0 {
+                entries.rank(&bound(1), false) as i64
+            } else {
+                0
+            };
+            let hi = if mode & 2 != 0 {
+                entries.rank(&bound(2), mode & 4 != 0) as i64
+            } else {
+                i64::MAX
+            };
+            entries.window(lo, hi, false)
+        })
+    })?;
+    Some(register_btree_set(window))
+}
+
+fn register_btree_set(entries: SetEntries) -> Value {
+    let id = next_set_handle();
+    SET_REGISTRY.with(|r| {
+        r.borrow_mut().insert(id, entries);
+    });
+    set_handle_named("BTreeSet", id)
 }
 
 #[cfg(test)]

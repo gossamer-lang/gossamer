@@ -16,15 +16,14 @@
 #![allow(clippy::wildcard_imports)]
 
 use crate::c_abi::GosVec;
-use indexmap::{IndexMap, IndexSet};
-use rustc_hash::FxBuildHasher;
+use crate::c_abi::set_table::OrdTable;
 use std::os::raw::c_char;
 
-/// A membership table keyed by content, in the order elements were added.
-type SetTable<T> = IndexSet<T, FxBuildHasher>;
-/// The aggregate family's canonical-bytes to stored-slots table, in the order
-/// elements were added.
-type AggregateTable = IndexMap<Box<[u8]>, Box<[u8]>, FxBuildHasher>;
+/// A membership table keyed by content: in the order elements were added for
+/// a `Set`, in element order for a `BTreeSet`.
+type SetTable<T> = OrdTable<T, ()>;
+/// The aggregate family's canonical-bytes to stored-slots table.
+type AggregateTable = OrdTable<Box<[u8]>, Box<[u8]>>;
 
 // ---------------------------------------------------------------
 // Sets - one heap table per element family, with the pointer to the
@@ -95,6 +94,53 @@ impl Drop for GosSet {
 }
 
 impl GosSet {
+    /// Makes this a `BTreeSet`: every element family moves into the ordered
+    /// tree. The aggregate family takes its order once the first element
+    /// names its descriptor.
+    fn make_ordered(&mut self) {
+        use crate::c_abi::map::KeyOrder;
+        use crate::c_abi::map_table::TableOrder;
+        self.ordered = true;
+        let reorder = |table: &mut SetTable<String>, order: TableOrder| {
+            let mut tree = SetTable::ordered(order);
+            for k in table.keys() {
+                tree.add(k.clone());
+            }
+            *table = tree;
+        };
+        if !self.inner.is_ordered() {
+            reorder(&mut self.inner, TableOrder::Bytes);
+        }
+        if !self.i64_inner.is_ordered() {
+            let mut tree = SetTable::ordered(TableOrder::Word(KeyOrder::Signed));
+            for k in self.i64_inner.keys() {
+                tree.add(*k);
+            }
+            self.i64_inner = tree;
+        }
+        self.order_aggregates();
+    }
+
+    /// Moves a `BTreeSet`'s aggregate elements into the tree once their order
+    /// is known: field by field under the descriptor, or by canonical bytes
+    /// for enum nodes.
+    fn order_aggregates(&mut self) {
+        use crate::c_abi::map_table::TableOrder;
+        if !self.ordered || self.struct_inner.is_ordered() {
+            return;
+        }
+        let order = match (&self.skey_desc, self.node_elements) {
+            (Some(desc), _) => TableOrder::Skey(desc.clone()),
+            (None, true) => TableOrder::Bytes,
+            (None, false) => return,
+        };
+        let mut tree = AggregateTable::ordered(order);
+        for (k, v) in self.struct_inner.iter() {
+            tree.insert(k.clone(), v.clone());
+        }
+        self.struct_inner = tree;
+    }
+
     /// The counted words an aggregate element's slots hold: the node of an
     /// enum element, or each `String` and `Vec` field the descriptor names.
     fn counted_words(&self, slots: &[u8]) -> Vec<(*mut u8, CountedWord)> {
@@ -251,7 +297,7 @@ pub unsafe extern "C" fn gos_rt_set_new() -> *mut GosSet {
 pub unsafe extern "C" fn gos_rt_btree_set_new() -> *mut GosSet {
     ffi_entry!(std::ptr::null_mut(), {
         let mut set = GosSet::default();
-        set.ordered = true;
+        set.make_ordered();
         Box::into_raw(Box::new(set))
     })
 }
@@ -259,7 +305,7 @@ pub unsafe extern "C" fn gos_rt_btree_set_new() -> *mut GosSet {
 /// Marks a set as reading in sorted order (the `BTreeSet` contract).
 fn mark_ordered(set: *mut GosSet) -> *mut GosSet {
     if !set.is_null() {
-        unsafe { &mut *set }.ordered = true;
+        unsafe { &mut *set }.make_ordered();
     }
     set
 }
@@ -364,7 +410,7 @@ pub unsafe extern "C" fn gos_rt_set_from_vec_i64(v: *const GosVec) -> *mut GosSe
         let ptr = vec.ptr.cast::<i64>();
         let out = unsafe { &mut *set };
         for i in 0..vec.len.max(0) as usize {
-            out.i64_inner.insert(unsafe { *ptr.add(i) });
+            out.i64_inner.add(unsafe { *ptr.add(i) });
         }
         set
     })
@@ -390,7 +436,7 @@ pub unsafe extern "C" fn gos_rt_set_from_vec_str(v: *const GosVec) -> *mut GosSe
                 continue;
             }
             out.inner
-                .insert(unsafe { crate::c_abi::gos_str_arg_string(entry) });
+                .add(unsafe { crate::c_abi::gos_str_arg_string(entry) });
         }
         set
     })
@@ -421,7 +467,7 @@ pub unsafe extern "C" fn gos_rt_set_insert(s: *mut GosSet, key: *const c_char) -
         }
         let k = unsafe { crate::c_abi::gos_str_arg_string(key) };
         let s = unsafe { &mut *s };
-        i64::from(s.inner.insert(k))
+        i64::from(s.inner.add(k))
     })
 }
 
@@ -435,7 +481,7 @@ pub unsafe extern "C" fn gos_rt_set_contains(s: *const GosSet, key: *const c_cha
         // Gossamer strings are always valid UTF-8 at the source level.
         let k: &str = unsafe { std::str::from_utf8_unchecked(bytes) };
         let s = unsafe { &*s };
-        i64::from(s.inner.contains(k))
+        i64::from(s.inner.contains_key(k))
     })
 }
 
@@ -449,7 +495,7 @@ pub unsafe extern "C" fn gos_rt_set_remove(s: *mut GosSet, key: *const c_char) -
         // Gossamer strings are always valid UTF-8 at the source level.
         let k: &str = unsafe { std::str::from_utf8_unchecked(bytes) };
         let s = unsafe { &mut *s };
-        i64::from(s.inner.shift_remove(k))
+        i64::from(s.inner.shift_remove(k).is_some())
     })
 }
 
@@ -463,7 +509,7 @@ pub unsafe extern "C" fn gos_rt_set_insert_i64(s: *mut GosSet, key: i64) -> i64 
             return 0;
         }
         let s = unsafe { &mut *s };
-        i64::from(s.i64_inner.insert(key))
+        i64::from(s.i64_inner.add(key))
     })
 }
 
@@ -474,7 +520,7 @@ pub unsafe extern "C" fn gos_rt_set_contains_i64(s: *const GosSet, key: i64) -> 
             return 0;
         }
         let s = unsafe { &*s };
-        i64::from(s.i64_inner.contains(&key))
+        i64::from(s.i64_inner.contains_key(&key))
     })
 }
 
@@ -485,7 +531,7 @@ pub unsafe extern "C" fn gos_rt_set_remove_i64(s: *mut GosSet, key: i64) -> i64 
             return 0;
         }
         let s = unsafe { &mut *s };
-        i64::from(s.i64_inner.shift_remove(&key))
+        i64::from(s.i64_inner.shift_remove(&key).is_some())
     })
 }
 
@@ -522,7 +568,7 @@ pub unsafe extern "C" fn gos_rt_set_format_i64(s: *const GosSet, _ordered: i32) 
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             let set = unsafe { &*s };
-            let mut keys: Vec<i64> = set.i64_inner.iter().copied().collect();
+            let mut keys: Vec<i64> = set.i64_inner.keys().copied().collect();
             keys.sort_unstable();
             for (index, key) in keys.iter().enumerate() {
                 if index > 0 {
@@ -552,7 +598,7 @@ pub unsafe extern "C" fn gos_rt_set_format_tagged(
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             let set = unsafe { &*s };
-            let mut keys: Vec<i64> = set.i64_inner.iter().copied().collect();
+            let mut keys: Vec<i64> = set.i64_inner.keys().copied().collect();
             keys.sort_unstable();
             for (index, key) in keys.iter().enumerate() {
                 if index > 0 {
@@ -618,7 +664,7 @@ pub unsafe extern "C" fn gos_rt_set_format_u64(s: *const GosSet, _ordered: i32) 
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             let set = unsafe { &*s };
-            let mut keys: Vec<u64> = set.i64_inner.iter().map(|n| *n as u64).collect();
+            let mut keys: Vec<u64> = set.i64_inner.keys().map(|n| *n as u64).collect();
             keys.sort_unstable();
             for (index, key) in keys.iter().enumerate() {
                 if index > 0 {
@@ -638,13 +684,13 @@ pub unsafe extern "C" fn gos_rt_set_format_string(s: *const GosSet, _ordered: i3
         let mut out = String::from(set_format_open());
         if !s.is_null() {
             let set = unsafe { &*s };
-            let mut keys: Vec<&str> = set.inner.iter().map(String::as_str).collect();
+            let mut keys: Vec<&str> = set.inner.keys().map(String::as_str).collect();
             keys.sort_unstable();
             for (index, key) in keys.iter().enumerate() {
                 if index > 0 {
                     out.push_str(", ");
                 }
-                out.push_str(key);
+                crate::c_abi::map::push_quoted_str(&mut out, key);
             }
         }
         out.push('}');
@@ -665,7 +711,7 @@ pub unsafe extern "C" fn gos_rt_set_to_vec(s: *const GosSet) -> *mut crate::c_ab
             return out;
         }
         let s = unsafe { &*s };
-        let mut keys: Vec<&str> = s.inner.iter().map(String::as_str).collect();
+        let mut keys: Vec<&str> = s.inner.keys().map(String::as_str).collect();
         if s.ordered {
             keys.sort_unstable();
         }
@@ -708,7 +754,7 @@ unsafe fn set_to_vec_ordered(
             return out;
         }
         let s = unsafe { &*s };
-        let mut keys: Vec<i64> = s.i64_inner.iter().copied().collect();
+        let mut keys: Vec<i64> = s.i64_inner.keys().copied().collect();
         if s.ordered {
             keys.sort_unstable_by_key(|key| order.rank(*key));
         }
@@ -732,7 +778,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec(
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
         let (a, b) = unsafe { set_refs(a, b) };
-        let mut keys: Vec<&str> = a.inner.intersection(&b.inner).map(String::as_str).collect();
+        let mut keys: Vec<&str> = a.inner.common_keys(&b.inner).map(String::as_str).collect();
         if a.ordered {
             keys.sort_unstable();
         }
@@ -756,7 +802,7 @@ pub unsafe extern "C" fn gos_rt_set_intersection_to_vec_i64(
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::PRIMITIVE)
         };
         let (a, b) = unsafe { set_refs(a, b) };
-        let mut keys: Vec<i64> = a.i64_inner.intersection(&b.i64_inner).copied().collect();
+        let mut keys: Vec<i64> = a.i64_inner.common_keys(&b.i64_inner).copied().collect();
         if a.ordered {
             keys.sort_unstable();
         }
@@ -838,28 +884,6 @@ unsafe fn set_relation(
     )
 }
 
-fn aggregate_union(a: &AggregateTable, b: &AggregateTable) -> AggregateTable {
-    let mut out = a.clone();
-    for (key, slots) in b {
-        out.entry(key.clone()).or_insert_with(|| slots.clone());
-    }
-    out
-}
-
-fn aggregate_intersection(a: &AggregateTable, b: &AggregateTable) -> AggregateTable {
-    a.iter()
-        .filter(|(key, _)| b.contains_key(key.as_ref()))
-        .map(|(key, slots)| (key.clone(), slots.clone()))
-        .collect()
-}
-
-fn aggregate_difference(a: &AggregateTable, b: &AggregateTable) -> AggregateTable {
-    a.iter()
-        .filter(|(key, _)| !b.contains_key(key.as_ref()))
-        .map(|(key, slots)| (key.clone(), slots.clone()))
-        .collect()
-}
-
 /// Inserts a struct or tuple by value. `desc` is the same slot descriptor as
 /// the aggregate-keyed HashMap ABI, so equal values at different addresses
 /// remain equal in the native runtime.
@@ -883,6 +907,7 @@ pub unsafe extern "C" fn gos_rt_set_insert_skey(
         let s = unsafe { &mut *s };
         if s.skey_desc.is_none() {
             s.skey_desc = Some(unsafe { crate::c_abi::gos_str_arg_bytes(desc) }.into());
+            s.order_aggregates();
         }
         // The inserted key arrives holding shares of its counted words. A new
         // element keeps them; an equal element already present stays, and the
@@ -1023,9 +1048,9 @@ pub unsafe extern "C" fn gos_rt_set_union(a: *const GosSet, b: *const GosSet) ->
             set_combine(
                 a,
                 b,
-                |x, y| x.union(y).cloned().collect(),
-                |x, y| x.union(y).copied().collect(),
-                aggregate_union,
+                OrdTable::union,
+                OrdTable::union,
+                AggregateTable::union,
             )
         }
     })
@@ -1041,9 +1066,9 @@ pub unsafe extern "C" fn gos_rt_set_intersection(
             set_combine(
                 a,
                 b,
-                |x, y| x.intersection(y).cloned().collect(),
-                |x, y| x.intersection(y).copied().collect(),
-                aggregate_intersection,
+                OrdTable::intersection,
+                OrdTable::intersection,
+                AggregateTable::intersection,
             )
         }
     })
@@ -1059,9 +1084,9 @@ pub unsafe extern "C" fn gos_rt_set_intersection_skey(
             set_combine(
                 a,
                 b,
-                |x, y| x.intersection(y).cloned().collect(),
-                |x, y| x.intersection(y).copied().collect(),
-                aggregate_intersection,
+                OrdTable::intersection,
+                OrdTable::intersection,
+                AggregateTable::intersection,
             )
         }
     })
@@ -1074,9 +1099,9 @@ pub unsafe extern "C" fn gos_rt_set_difference(a: *const GosSet, b: *const GosSe
             set_combine(
                 a,
                 b,
-                |x, y| x.difference(y).cloned().collect(),
-                |x, y| x.difference(y).copied().collect(),
-                aggregate_difference,
+                OrdTable::difference,
+                OrdTable::difference,
+                AggregateTable::difference,
             )
         }
     })
@@ -1092,13 +1117,9 @@ pub unsafe extern "C" fn gos_rt_set_symmetric_difference(
             set_combine(
                 a,
                 b,
-                |x, y| x.symmetric_difference(y).cloned().collect(),
-                |x, y| x.symmetric_difference(y).copied().collect(),
-                |x, y| {
-                    let mut out = aggregate_difference(x, y);
-                    out.extend(aggregate_difference(y, x));
-                    out
-                },
+                OrdTable::symmetric_difference,
+                OrdTable::symmetric_difference,
+                AggregateTable::symmetric_difference,
             )
         }
     })
@@ -1178,7 +1199,10 @@ pub unsafe extern "C" fn gos_rt_set_insert_ekey(
         }
         let slots = (node as usize as i64).to_le_bytes().to_vec();
         let s = unsafe { &mut *s };
-        s.node_elements = true;
+        if !s.node_elements {
+            s.node_elements = true;
+            s.order_aggregates();
+        }
         // The node arrives as a moved share: a new element keeps it, and an
         // equal element already present stays while the moved share goes back.
         if s.struct_inner.contains_key(key.as_slice()) {
@@ -1305,5 +1329,162 @@ pub unsafe extern "C" fn gos_rt_set_format_ekey(
         }
         out.push('}');
         crate::c_abi::string::alloc_cstring(out.as_bytes())
+    })
+}
+
+/// A new `BTreeSet` of the elements of `s` ranked `lo..hi` (clamped; a
+/// negative `lo` counts back from the end), moved out of `s` when `take` is
+/// non-zero and copied otherwise. The primitive a `BTreeSet`'s `first`,
+/// `last`, `pop_first`, and `pop_last` desugar to.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_window(
+    s: *mut GosSet,
+    lo: i64,
+    hi: i64,
+    take: i64,
+) -> *mut GosSet {
+    ffi_entry!(std::ptr::null_mut(), {
+        if s.is_null() {
+            return unsafe { gos_rt_btree_set_new() };
+        }
+        let set = unsafe { &mut *s };
+        let len = (set.inner.len() + set.i64_inner.len() + set.struct_inner.len()) as i64;
+        let lo = if lo < 0 { lo.saturating_add(len) } else { lo };
+        let lo = lo.clamp(0, len) as usize;
+        let hi = (hi.clamp(0, len) as usize).max(lo);
+        Box::into_raw(Box::new(unsafe { set_window(set, lo, hi, take != 0) }))
+    })
+}
+
+/// The elements of `set` ranked `lo..hi` as a set of the same kind; a copied
+/// element takes its own share of each counted word it holds.
+unsafe fn set_window(set: &mut GosSet, lo: usize, hi: usize, take: bool) -> GosSet {
+    let out = GosSet {
+        inner: set.inner.window(lo, hi, take, |_, ()| ()),
+        i64_inner: set.i64_inner.window(lo, hi, take, |_, ()| ()),
+        struct_inner: set
+            .struct_inner
+            .window(lo, hi, take, |_, slots| slots.clone()),
+        node_elements: set.node_elements,
+        skey_desc: set.skey_desc.clone(),
+        ordered: set.ordered,
+    };
+    if !take {
+        out.retain_all_elements();
+    }
+    out
+}
+
+/// A range's `mode` word: a lower bound is present, an upper bound is
+/// present, and the upper bound is inclusive.
+const RANGE_HAS_LO: i64 = 1;
+const RANGE_HAS_HI: i64 = 2;
+const RANGE_HI_INCLUSIVE: i64 = 4;
+
+/// A new `BTreeSet` of the elements of `s` between two bounds, each ranked
+/// by `rank(set, is_lower_bound, inclusive)`.
+unsafe fn set_range(
+    s: *mut GosSet,
+    mode: i64,
+    rank: impl Fn(&GosSet, bool, bool) -> usize,
+) -> *mut GosSet {
+    if s.is_null() {
+        return unsafe { gos_rt_btree_set_new() };
+    }
+    let set = unsafe { &mut *s };
+    let lo = if mode & RANGE_HAS_LO != 0 {
+        rank(set, true, false)
+    } else {
+        0
+    };
+    let hi = if mode & RANGE_HAS_HI != 0 {
+        rank(set, false, mode & RANGE_HI_INCLUSIVE != 0)
+    } else {
+        usize::MAX
+    };
+    Box::into_raw(Box::new(unsafe { set_window(set, lo, hi.max(lo), false) }))
+}
+
+/// `s.range(lo..hi)` on a `BTreeSet` of integers.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_range_i64(
+    s: *mut GosSet,
+    lo: i64,
+    hi: i64,
+    mode: i64,
+) -> *mut GosSet {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe {
+            set_range(s, mode, |set, low, incl| {
+                set.i64_inner.rank(if low { &lo } else { &hi }, incl)
+            })
+        }
+    })
+}
+
+/// `s.range(lo..hi)` on a `BTreeSet` of strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_range_str(
+    s: *mut GosSet,
+    lo: *const c_char,
+    hi: *const c_char,
+    mode: i64,
+) -> *mut GosSet {
+    ffi_entry!(std::ptr::null_mut(), {
+        let text = |p: *const c_char| -> &str {
+            if p.is_null() {
+                return "";
+            }
+            // Gossamer strings are always valid UTF-8 at the source level.
+            unsafe { std::str::from_utf8_unchecked(crate::c_abi::gos_str_arg_bytes(p)) }
+        };
+        let (lo, hi) = (text(lo), text(hi));
+        unsafe {
+            set_range(s, mode, |set, low, incl| {
+                set.inner.rank(if low { lo } else { hi }, incl)
+            })
+        }
+    })
+}
+
+/// `s.range(lo..hi)` on a `BTreeSet` of structs or tuples encoded under `desc`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_range_skey(
+    s: *mut GosSet,
+    lo: *const u8,
+    desc: *const c_char,
+    hi: *const u8,
+    mode: i64,
+) -> *mut GosSet {
+    ffi_entry!(std::ptr::null_mut(), {
+        let lo = unsafe { crate::c_abi::map::build_skey_for_set(lo, desc) }.unwrap_or_default();
+        let hi = unsafe { crate::c_abi::map::build_skey_for_set(hi, desc) }.unwrap_or_default();
+        unsafe {
+            set_range(s, mode, |set, low, incl| {
+                set.struct_inner
+                    .rank(if low { lo.as_slice() } else { hi.as_slice() }, incl)
+            })
+        }
+    })
+}
+
+/// `s.range(lo..hi)` on a `BTreeSet` of enums.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_range_ekey(
+    s: *mut GosSet,
+    lo: *mut u8,
+    desc: *const i64,
+    hi: *mut u8,
+    mode: i64,
+) -> *mut GosSet {
+    ffi_entry!(std::ptr::null_mut(), {
+        let lo = unsafe { enum_element_key(lo, desc) }.unwrap_or_default();
+        let hi = unsafe { enum_element_key(hi, desc) }.unwrap_or_default();
+        unsafe {
+            set_range(s, mode, |set, low, incl| {
+                set.struct_inner
+                    .rank(if low { lo.as_slice() } else { hi.as_slice() }, incl)
+            })
+        }
     })
 }

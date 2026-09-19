@@ -19,6 +19,7 @@
 
 #![allow(missing_docs)]
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -558,4 +559,66 @@ fn main() {
     let (ok, _stdout, stderr) = run_check("spec_7_5_call_alias", src);
     assert!(!ok, "one call must not borrow the same root mutably twice");
     assert!(stderr.contains("GT0043"), "expected GT0043, got: {stderr}");
+}
+
+// ---------- labelled arguments: the spelling SKILL.md and SPEC.md teach ----------
+
+/// Every `volume(..)` call the text spells, in order of appearance.
+fn volume_calls(text: &str) -> Vec<String> {
+    let mut calls = Vec::new();
+    let mut rest = text;
+    while let Some(at) = rest.find("volume(") {
+        let tail = &rest[at..];
+        let Some(end) = tail.find(')') else { break };
+        let call = &tail[..=end];
+        if !call.contains("i64") {
+            calls.push(call.to_string());
+        }
+        rest = &tail[end + 1..];
+    }
+    calls
+}
+
+#[test]
+fn skill_card_and_spec_labelled_argument_examples_run() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let skill = std::fs::read_to_string(root.join("SKILL.md")).expect("read SKILL.md");
+    let spec = std::fs::read_to_string(root.join("SPEC.md")).expect("read SPEC.md");
+    let mut calls = volume_calls(&skill);
+    calls.extend(volume_calls(&spec));
+    assert!(
+        calls.len() >= 6,
+        "expected the labelled-argument examples, found {calls:?}"
+    );
+    let mut body = String::new();
+    for call in &calls {
+        let _ = writeln!(body, "    println(\"{{}}\", {call})");
+    }
+    let source = format!(
+        "fn volume(width: i64, height: i64 = 2, depth: i64 = 3) -> i64 {{\n    \
+         width * 100 + height * 10 + depth\n}}\n\nfn main() {{\n{body}}}\n"
+    );
+    let (ok, stdout, stderr) = run_program("labelled_arguments", &source, &[]);
+    assert!(ok, "the documented calls must run:\n{source}\n{stderr}");
+    assert_eq!(stdout.lines().count(), calls.len(), "{stdout}");
+    // SPEC.md states each call's (width, height, depth) in its comment.
+    for line in spec
+        .lines()
+        .filter(|l| l.trim_start().starts_with("volume("))
+    {
+        let Some((call, comment)) = line.split_once("//") else {
+            continue;
+        };
+        let digits: Vec<i64> = comment
+            .split(',')
+            .filter_map(|d| d.trim().parse().ok())
+            .collect();
+        let [w, h, d] = digits[..] else { continue };
+        let index = calls
+            .iter()
+            .position(|c| c == call.trim())
+            .expect("SPEC call collected");
+        let got = stdout.lines().nth(index).expect("one line per call");
+        assert_eq!(got, (w * 100 + h * 10 + d).to_string(), "{call}");
+    }
 }

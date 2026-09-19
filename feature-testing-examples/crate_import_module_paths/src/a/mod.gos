@@ -1,0 +1,2 @@
+// A module whose submodule is reached through a `crate::`-anchored import.
+pub fn top() -> i64 { 1 }

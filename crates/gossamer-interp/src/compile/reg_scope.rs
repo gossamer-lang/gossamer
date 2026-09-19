@@ -181,6 +181,16 @@ impl<'tcx> FnBuilder<'tcx> {
     }
 
     pub(crate) fn bind_local(&mut self, name: &str, typed: TypedReg) {
+        // A register a scope gave back is bound again by the next local,
+        // whose value is its own: an unsigned reading recorded for the
+        // register's last binding says nothing about this one.
+        self.uint_display_locals.remove(&typed.reg);
+        self.bind_recorded_local(name, typed);
+    }
+
+    /// [`Self::bind_local`] for a binding whose register tags were recorded
+    /// from its own initialiser just before.
+    pub(crate) fn bind_recorded_local(&mut self, name: &str, typed: TypedReg) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.locals.insert(name.to_string(), typed);
         }

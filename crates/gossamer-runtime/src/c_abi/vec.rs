@@ -2809,7 +2809,11 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
             } else {
                 let sptr: *const std::ffi::c_char =
                     std::ptr::with_exposed_provenance(payload as usize);
-                unsafe { crate::c_abi::gos_str_arg_string(sptr) }
+                let mut out = String::new();
+                super::map::push_quoted_str(&mut out, &unsafe {
+                    crate::c_abi::gos_str_arg_string(sptr)
+                });
+                out
             }
         }
         // A collection payload arrives as its `GosVec` pointer, so the

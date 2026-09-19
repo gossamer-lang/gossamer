@@ -728,8 +728,71 @@ fn builtin_path_join_v(args: &[Value]) -> RuntimeResult<Value> {
     )))
 }
 
-fn builtin_btmap_new(args: &[Value]) -> RuntimeResult<Value> {
-    builtin_map_new(args)
+fn builtin_btmap_new(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(
+        crate::vm_map::VmMap::ordered(crate::vm_map::KeyOrder::Natural),
+    ))))
+}
+
+fn builtin_btmap_from(args: &[Value]) -> RuntimeResult<Value> {
+    map_from(
+        args,
+        crate::vm_map::VmMap::ordered(crate::vm_map::KeyOrder::Natural),
+    )
+}
+
+/// `m.__window(lo, hi, take)`: a `BTreeMap`'s entries ranked `lo..hi`, the
+/// primitive its `first_key_value` / `pop_first` / `pop_last` desugar to.
+fn builtin_btree_map_window(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(window) = crate::stdlib_builtins::set::set_window(args) {
+        return Ok(window);
+    }
+    let Some(Value::Map(map)) = args.first() else {
+        return Ok(Value::Map(Arc::new(parking_lot::Mutex::new(
+            crate::vm_map::VmMap::ordered(crate::vm_map::KeyOrder::Natural),
+        ))));
+    };
+    let int = |i: usize| args.get(i).and_then(value_to_int).unwrap_or(0);
+    let window = map.lock().window(int(1), int(2), int(3) != 0);
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(window))))
+}
+
+/// `m.__range(lo, hi, mode)`: a `BTreeMap`'s entries between two keys. The
+/// mode word says a lower bound is present (1), an upper bound is present
+/// (2), and the upper bound is inclusive (4).
+fn builtin_btree_map_range(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(window) = crate::stdlib_builtins::set::set_range(args) {
+        return Ok(window);
+    }
+    let Some(Value::Map(map)) = args.first() else {
+        return builtin_btree_map_window(args);
+    };
+    let mode = args.get(3).and_then(value_to_int).unwrap_or(0);
+    let mut locked = map.lock();
+    let bound = |i: usize| MapKey::from_value(args.get(i).unwrap_or(&Value::Unit));
+    let lo = if mode & 1 != 0 { locked.rank(&bound(1), false) as i64 } else { 0 };
+    let hi = if mode & 2 != 0 {
+        locked.rank(&bound(2), mode & 4 != 0) as i64
+    } else {
+        i64::MAX
+    };
+    let window = locked.window(lo, hi, false);
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(window))))
+}
+
+/// `__btree_map_new(unsigned, [pairs])`: a `BTreeMap` whose integer keys
+/// order unsigned when `unsigned` is set, filled from the optional pairs.
+fn builtin_btree_map_new(args: &[Value]) -> RuntimeResult<Value> {
+    let order = if matches!(args.first(), Some(Value::Int(n)) if *n != 0) {
+        crate::vm_map::KeyOrder::Unsigned
+    } else {
+        crate::vm_map::KeyOrder::Natural
+    };
+    let empty = crate::vm_map::VmMap::ordered(order);
+    match args.get(1) {
+        Some(_) => map_from(&args[1..], empty),
+        None => Ok(Value::Map(Arc::new(parking_lot::Mutex::new(empty)))),
+    }
 }
 
 fn builtin_set_new(args: &[Value]) -> RuntimeResult<Value> {
@@ -1123,6 +1186,22 @@ fn native_sort_by(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> RuntimeR
 /// type supplies `method` answers through it - at any depth, since a value
 /// carries its type name at run time. `method` is the channel's contract:
 /// `to_string` for `Display` (`{}`), `fmt` for `Debug` (`{:?}`).
+/// [`render_display`] for a value nested inside another: a string reads in
+/// the quoted spelling that builds it, and a float in the form that shows it
+/// is one, as every other nested rendering writes them.
+fn render_nested(
+    dispatch: &mut dyn NativeDispatch,
+    value: &Value,
+    aliases: &std::collections::HashMap<String, String>,
+    method: &str,
+) -> RuntimeResult<String> {
+    match value {
+        Value::String(text) => Ok(format!("{:?}", text.as_str())),
+        Value::Float(number) => Ok(gossamer_runtime::builtins::format_float_debug(*number)),
+        other => render_display(dispatch, other, aliases, method),
+    }
+}
+
 fn render_display(
     dispatch: &mut dyn NativeDispatch,
     value: &Value,
@@ -1151,11 +1230,7 @@ fn render_display(
         for item in items {
             // A float inside a sequence reads in the form that shows it is
             // one, the same text every other sequence rendering writes.
-            if let Value::Float(number) = item {
-                out.push(gossamer_runtime::builtins::format_float_debug(*number));
-                continue;
-            }
-            out.push(render_display(dispatch, item, aliases, method)?);
+            out.push(render_nested(dispatch, item, aliases, method)?);
         }
         Ok(out)
     };
@@ -1219,20 +1294,19 @@ fn render_display(
         Value::Struct(inner) => {
             let mut parts = Vec::with_capacity(inner.fields.len());
             for (name, field) in &inner.fields {
-                parts.push(format!("{name}: {}", render_display(dispatch, field, aliases, method)?));
+                parts.push(format!("{name}: {}", render_nested(dispatch, field, aliases, method)?));
             }
             Ok(format!("{} {{ {} }}", inner.name, parts.join(", ")))
         }
         Value::Map(map) => {
-            let mut entries: Vec<(crate::value::MapKey, Value)> = map
+            // Entries render in key order, as the plain formatter and both
+            // compiled tiers' `gos_rt_map_format` render them.
+            let entries: Vec<(crate::value::MapKey, Value)> = map
                 .lock()
-                .iter()
+                .sorted()
+                .into_iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            // Native map storage has its own order, so entries are rendered
-            // key-sorted here exactly as the plain formatter and both compiled
-            // tiers' `gos_rt_map_format` render them.
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
             let mut parts = Vec::with_capacity(entries.len());
             for (key, entry) in &entries {
                 // A map renders a string key quoted, the way the synthesized
@@ -1242,7 +1316,7 @@ fn render_display(
                     Value::Char(ch) => ch.to_string(),
                     other => render_display(dispatch, &other, aliases, method)?,
                 };
-                parts.push(format!("{key}: {}", render_display(dispatch, entry, aliases, method)?));
+                parts.push(format!("{key}: {}", render_nested(dispatch, entry, aliases, method)?));
             }
             Ok(format!("{{{}}}", parts.join(", ")))
         }
@@ -1605,7 +1679,11 @@ fn builtin_channel_send(args: &[Value]) -> RuntimeResult<Value> {
             "send: receiver must be a channel".to_string(),
         ));
     };
-    let value = args.get(1).cloned().unwrap_or(Value::Unit);
+    // The receiver gets a value of its own: a table the sender still holds
+    // is copied rather than shared, as a by-value argument's is.
+    let value = args
+        .get(1)
+        .map_or(Value::Unit, crate::vm::run::map_like_deep_clone);
     match channel.send(value) {
         crate::value::SendOutcome::Sent => Ok(Value::Unit),
         crate::value::SendOutcome::Closed => Err(RuntimeError::Panic(

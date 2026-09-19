@@ -1,0 +1,43 @@
+// A `BTreeSet` answers its elements between two bounds in order for every
+// range form, and its first and last elements, reading or taking them, over
+// any ordered element type. Identical on every tier.
+struct Pt { x: i64, y: i64 }
+enum Level { Low, Mid(i64), High }
+
+fn main() {
+    let mut nums: BTreeSet<i64> = BTreeSet::new()
+    for n in #[40, -5, 12, 7, 99, 0] { nums.insert(n) }
+    println("{:?} {:?}", nums.first(), nums.last())
+    let a: Vec<i64> = nums.range(0..40).collect()
+    let b: Vec<i64> = nums.range(0..=40).collect()
+    let c: Vec<i64> = nums.range(13..).collect()
+    let d: Vec<i64> = nums.range(..7).collect()
+    let e: Vec<i64> = nums.range(50..10).collect()
+    println("{:?} {:?} {:?} {:?} {:?}", a, b, c, d, e)
+    let back: Vec<i64> = nums.range(..).rev().collect()
+    println("{:?}", back)
+    println("{:?} {:?} {:?}", nums.pop_first(), nums.pop_last(), nums)
+
+    let words: BTreeSet<String> = #{"kiwi", "apple", "fig", "date"}
+    let mid: Vec<String> = words.range("b".."g").collect()
+    println("{:?} {:?} {:?}", mid, words.first(), words.last())
+
+    let mut points: BTreeSet<Pt> = BTreeSet::new()
+    points.insert(Pt { x: 2, y: 1 })
+    points.insert(Pt { x: 1, y: 5 })
+    points.insert(Pt { x: 2, y: 0 })
+    let upper: Vec<Pt> = points.range(Pt { x: 2, y: 0 }..).collect()
+    println("{:?} {:?} {:?}", upper, points.pop_first(), points.len())
+
+    let mut levels: BTreeSet<Level> = BTreeSet::new()
+    levels.insert(Level::High)
+    levels.insert(Level::Mid(7))
+    levels.insert(Level::Low)
+    levels.insert(Level::Mid(2))
+    let middle: Vec<Level> = levels.range(Level::Mid(0)..Level::High).collect()
+    println("{:?} {:?} {:?}", middle, levels.last(), levels.pop_last())
+
+    let mut empty: BTreeSet<i64> = BTreeSet::new()
+    let none: Vec<i64> = empty.range(0..9).collect()
+    println("{:?} {:?} {:?}", empty.first(), empty.pop_last(), none)
+}

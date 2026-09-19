@@ -892,6 +892,14 @@ pub enum TypeError {
         /// What the vector type or operation does not support.
         reason: String,
     },
+    /// `m.range(r)` on a `BTreeMap` given something other than a range
+    /// written in place: the bounds are keys, so they are read from the
+    /// range expression itself.
+    #[error("`range` takes a range written in place over `{key}` keys, such as `lo..hi`")]
+    OrderedRangeArgument {
+        /// Rendered key type of the map.
+        key: String,
+    },
     /// A call to a function with a const generic parameter gave no value
     /// for it: no turbofish names it and no array argument's length does.
     #[error("cannot infer the const generic argument of `{callee}`")]
@@ -1118,6 +1126,7 @@ impl TypeError {
             Self::WrappingMethodRetired { .. } => "wrapping-method-retired",
             Self::ConstGenericNotInferred { .. } => "const-generic-not-inferred",
             Self::SimdShape { .. } => "simd-shape",
+            Self::OrderedRangeArgument { .. } => "ordered-range-argument",
             Self::ReferenceArgumentNeedsDeref { .. } => "reference-argument-needs-deref",
             Self::DerefWriteToNonReference { .. } => "deref-write-to-non-reference",
             Self::EnumReprTooNarrow { .. } => "enum-repr-too-narrow",
@@ -1165,6 +1174,7 @@ impl TypeError {
             Self::WrappingMethodRetired { .. } => "GT0087",
             Self::ConstGenericNotInferred { .. } => "GT0088",
             Self::SimdShape { .. } => "GT0089",
+            Self::OrderedRangeArgument { .. } => "GT0091",
             Self::UnresolvedMethod { .. } => "GT0002",
             Self::UnresolvedOp { .. } | Self::UnresolvedOpImpl { .. } => "GT0003",
             Self::NonExhaustiveMatch { .. } => "GT0004",
@@ -2082,6 +2092,12 @@ impl TypeDiagnostic {
                         rewrite.clone(),
                     ));
                 }
+            }
+            TypeError::OrderedRangeArgument { .. } => {
+                out = out.with_note(
+                    "the bounds of a `BTreeMap` range are keys, so the range is written in the \
+                     call: `m.range(lo..hi)`, `m.range(lo..=hi)`, `m.range(lo..)`, `m.range(..hi)`",
+                );
             }
             TypeError::SimdShape { .. } => {
                 out = out.with_note(

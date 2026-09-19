@@ -1,0 +1,7 @@
+// A path through a module imported with `crate::`, `self::`, or `super::`
+// reaches the item the module declares, typed and called on every tier.
+use crate::a::b
+use crate::c
+fn main() {
+    println("{} {} {}", b::f(1), b::g("hi"), c::g())
+}

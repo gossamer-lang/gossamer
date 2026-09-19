@@ -161,6 +161,7 @@ pub(crate) fn install_fs_extras(globals: &mut Vec<(&'static str, Value)>) {
         ("File::write_all", builtin_fs_file_write),
         ("File::write_bytes", builtin_fs_file_write_bytes),
         ("File::read_at", builtin_fs_file_read_at),
+        ("File::read_at_into", builtin_fs_file_read_at_into),
         ("File::write_at", builtin_fs_file_write_at),
         ("File::seek", builtin_fs_file_seek),
         ("File::set_len", builtin_fs_file_set_len),
@@ -252,19 +253,19 @@ fn fetch_file_handle(id: i64) -> Option<Arc<parking_lot::Mutex<std::fs::File>>> 
 /// the file is closed by the process, so a handle owns exactly one for
 /// its lifetime and a lock taken through it survives later reads and
 /// writes.
-fn with_file_blocking<T, F>(id: i64, label: &'static str, context: &str, op: F) -> Result<T, Value>
+/// Runs a file operation in place, as the compiled tiers do: a file call
+/// never waits without bound, so it holds its thread for the syscall rather
+/// than handing it to another.
+fn with_file_inline<T, F>(id: i64, _label: &'static str, context: &str, op: F) -> Result<T, Value>
 where
-    T: Send + 'static,
-    F: FnOnce(&mut std::fs::File) -> T + Send + 'static,
+    F: FnOnce(&mut std::fs::File) -> T,
 {
     let Some(file) = fetch_file_handle(id) else {
         return Err(err_variant(format!("{context}: stale handle")));
     };
-    gossamer_runtime::sched_global::run_blocking(label, move || {
-        let mut guard = file.lock();
-        op(&mut guard)
-    })
-    .map_err(err_variant)
+    let mut guard = file.lock();
+    let _syscall = gossamer_runtime::sched_global::syscall_enter();
+    Ok(op(&mut guard))
 }
 
 /// Byte offset a `whence` selector names, or the diagnostic for an
@@ -441,7 +442,7 @@ pub(crate) fn builtin_fs_file_read(args: &[Value]) -> RuntimeResult<Value> {
         Some(n) => n.min(1 << 24),
         None => 4096,
     };
-    match with_file_blocking(id, "fs-file-read", "File::read", move |file| {
+    match with_file_inline(id, "fs-file-read", "File::read", move |file| {
         let mut buf = vec![0u8; max as usize];
         file.read(&mut buf).map(|n| {
             buf.truncate(n);
@@ -458,7 +459,7 @@ pub(crate) fn builtin_fs_file_read_to_string(args: &[Value]) -> RuntimeResult<Va
     let Some(id) = args.first().and_then(handle_id) else {
         return Ok(err_variant("File::read_to_string: missing handle"));
     };
-    match with_file_blocking(
+    match with_file_inline(
         id,
         "fs-file-read-string",
         "File::read_to_string",
@@ -479,7 +480,7 @@ pub(crate) fn builtin_fs_file_write(args: &[Value]) -> RuntimeResult<Value> {
     };
     let bytes = crate::stdlib_builtins::crypto::value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
     let written = bytes.len() as i64;
-    match with_file_blocking(id, "fs-file-write", "File::write", move |file| {
+    match with_file_inline(id, "fs-file-write", "File::write", move |file| {
         file.write_all(&bytes)
     }) {
         Ok(Ok(())) => Ok(ok_variant(Value::Int(written))),
@@ -495,7 +496,7 @@ pub(crate) fn builtin_fs_file_write_bytes(args: &[Value]) -> RuntimeResult<Value
         return Ok(err_variant("File::write_bytes: missing handle"));
     };
     let bytes = crate::stdlib_builtins::crypto::value_to_bytes(args.get(1).unwrap_or(&Value::Unit));
-    match with_file_blocking(
+    match with_file_inline(
         id,
         "fs-file-write-bytes",
         "File::write_bytes",
@@ -521,7 +522,7 @@ pub(crate) fn builtin_fs_file_read_at(args: &[Value]) -> RuntimeResult<Value> {
     }
     let cap = len.min(1 << 24) as usize;
     let at = offset as u64;
-    match with_file_blocking(id, "fs-file-read-at", "File::read_at", move |file| {
+    match with_file_inline(id, "fs-file-read-at", "File::read_at", move |file| {
         let mut buf = vec![0u8; cap];
         read_at_offset(file, &mut buf, at).map(|n| {
             buf.truncate(n);
@@ -530,6 +531,44 @@ pub(crate) fn builtin_fs_file_read_at(args: &[Value]) -> RuntimeResult<Value> {
     }) {
         Ok(Ok(buf)) => Ok(ok_variant(bytes_value(&buf))),
         Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, "File::read_at"))),
+        Err(v) => Ok(v),
+    }
+}
+
+/// `fs::File::read_at_into(buf, len, offset) -> Result<i64, Error>`: the
+/// VM hands the `&mut Vec<u8>` over as a write-back cell, which holds
+/// exactly the bytes read afterwards.
+pub(crate) fn builtin_fs_file_read_at_into(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(id) = args.first().and_then(handle_id) else {
+        return Ok(err_variant("File::read_at_into: missing handle"));
+    };
+    let Some(Value::MutCell(cell)) = args.get(1) else {
+        return Ok(err_variant(
+            "File::read_at_into: the buffer must be a `&mut Vec<u8>`",
+        ));
+    };
+    let len = args.get(2).and_then(value_to_int).unwrap_or(0);
+    let offset = args.get(3).and_then(value_to_int).unwrap_or(0);
+    if len < 0 || offset < 0 {
+        return Ok(err_variant(
+            "File::read_at_into: length and offset must be non-negative",
+        ));
+    }
+    let cap = len.min(1 << 24) as usize;
+    let at = offset as u64;
+    match with_file_inline(id, "fs-file-read-at", "File::read_at_into", move |file| {
+        let mut buf = vec![0u8; cap];
+        read_at_offset(file, &mut buf, at).map(|n| {
+            buf.truncate(n);
+            buf
+        })
+    }) {
+        Ok(Ok(buf)) => {
+            let n = buf.len() as i64;
+            *cell.lock() = Value::ByteVec(Arc::new(buf));
+            Ok(ok_variant(Value::Int(n)))
+        }
+        Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, "File::read_at_into"))),
         Err(v) => Ok(v),
     }
 }
@@ -545,7 +584,7 @@ pub(crate) fn builtin_fs_file_write_at(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(err_variant("File::write_at: offset must be non-negative"));
     }
     let at = offset as u64;
-    match with_file_blocking(id, "fs-file-write-at", "File::write_at", move |file| {
+    match with_file_inline(id, "fs-file-write-at", "File::write_at", move |file| {
         write_at_offset(file, &bytes, at)
     }) {
         Ok(Ok(n)) => Ok(ok_variant(Value::Int(n as i64))),
@@ -565,7 +604,7 @@ pub(crate) fn builtin_fs_file_seek(args: &[Value]) -> RuntimeResult<Value> {
         Ok(from) => from,
         Err(v) => return Ok(v),
     };
-    match with_file_blocking(id, "fs-file-seek", "File::seek", move |file| {
+    match with_file_inline(id, "fs-file-seek", "File::seek", move |file| {
         std::io::Seek::seek(file, from)
     }) {
         Ok(Ok(pos)) => Ok(ok_variant(Value::Int(pos as i64))),
@@ -584,7 +623,7 @@ pub(crate) fn builtin_fs_file_set_len(args: &[Value]) -> RuntimeResult<Value> {
         return Ok(err_variant("File::set_len: length must be non-negative"));
     }
     let len = len as u64;
-    match with_file_blocking(id, "fs-file-set-len", "File::set_len", move |file| {
+    match with_file_inline(id, "fs-file-set-len", "File::set_len", move |file| {
         file.set_len(len)
     }) {
         Ok(Ok(())) => Ok(ok_variant(Value::Unit)),
@@ -598,7 +637,7 @@ pub(crate) fn builtin_fs_file_len(args: &[Value]) -> RuntimeResult<Value> {
     let Some(id) = args.first().and_then(handle_id) else {
         return Ok(err_variant("File::len: missing handle"));
     };
-    match with_file_blocking(id, "fs-file-len", "File::len", |file| {
+    match with_file_inline(id, "fs-file-len", "File::len", |file| {
         file.metadata().map(|m| m.len())
     }) {
         Ok(Ok(len)) => Ok(ok_variant(Value::Int(len as i64))),
@@ -612,7 +651,7 @@ pub(crate) fn builtin_fs_file_sync_all(args: &[Value]) -> RuntimeResult<Value> {
     let Some(id) = args.first().and_then(handle_id) else {
         return Ok(err_variant("File::sync_all: missing handle"));
     };
-    match with_file_blocking(id, "fs-file-sync-all", "File::sync_all", |file| {
+    match with_file_inline(id, "fs-file-sync-all", "File::sync_all", |file| {
         file.sync_all()
     }) {
         Ok(Ok(())) => Ok(ok_variant(Value::Unit)),
@@ -626,7 +665,7 @@ pub(crate) fn builtin_fs_file_sync_data(args: &[Value]) -> RuntimeResult<Value> 
     let Some(id) = args.first().and_then(handle_id) else {
         return Ok(err_variant("File::sync_data: missing handle"));
     };
-    match with_file_blocking(id, "fs-file-sync-data", "File::sync_data", |file| {
+    match with_file_inline(id, "fs-file-sync-data", "File::sync_data", |file| {
         file.sync_data()
     }) {
         Ok(Ok(())) => Ok(ok_variant(Value::Unit)),
@@ -664,7 +703,7 @@ pub(crate) fn builtin_fs_file_try_lock_range(args: &[Value]) -> RuntimeResult<Va
         ));
     }
     let (start, len) = (start as u64, len as u64);
-    match with_file_blocking(id, "fs-file-lock", "File::try_lock_range", move |file| {
+    match with_file_inline(id, "fs-file-lock", "File::try_lock_range", move |file| {
         try_lock_range_on(file, start, len, exclusive)
     }) {
         Ok(Ok(acquired)) => Ok(ok_variant(Value::Bool(acquired))),
@@ -686,7 +725,7 @@ pub(crate) fn builtin_fs_file_unlock_range(args: &[Value]) -> RuntimeResult<Valu
         ));
     }
     let (start, len) = (start as u64, len as u64);
-    match with_file_blocking(id, "fs-file-unlock", "File::unlock_range", move |file| {
+    match with_file_inline(id, "fs-file-unlock", "File::unlock_range", move |file| {
         unlock_range_on(file, start, len)
     }) {
         Ok(Ok(())) => Ok(ok_variant(Value::Unit)),
@@ -723,7 +762,7 @@ pub(crate) fn builtin_fs_file_flush(args: &[Value]) -> RuntimeResult<Value> {
     let Some(id) = args.first().and_then(handle_id) else {
         return Ok(err_variant("File::flush: missing handle"));
     };
-    match with_file_blocking(id, "fs-file-flush", "File::flush", |file| file.flush()) {
+    match with_file_inline(id, "fs-file-flush", "File::flush", |file| file.flush()) {
         Ok(Ok(())) => Ok(ok_variant(Value::Unit)),
         Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, "File::flush"))),
         Err(v) => Ok(v),

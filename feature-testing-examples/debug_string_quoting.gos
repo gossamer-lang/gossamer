@@ -1,0 +1,40 @@
+// A `String` renders in the spelling that builds it: quoted wherever it is
+// nested, and at the top level of `{:?}`, while `{}` of a bare string stays
+// unquoted - identically on every tier.
+struct P { b: String }
+enum E { Text(String), Nil }
+fn main() {
+    let v: Vec<String> = #["a", "b"]
+    let arr: [String; 2] = ["x", "y"]
+    let t = ("a", 1)
+    let o: Option<String> = Some("s")
+    let r: Result<String, String> = Err("e")
+    let m: Map<String, String> = {"k": "v"}
+    let s: Set<String> = #{"z"}
+    println("{:?}", P { b: "a" })
+    println("{:?}", v)
+    println("{:?}", arr)
+    println("{:?}", t)
+    println("{:?}", E::Text("a"))
+    println("{:?}", o)
+    println("{:?}", r)
+    println("{:?}", m)
+    println("{:?}", s)
+    println("{:?}", "top")
+    println("{}", v)
+    extra()
+    beside_user_types()
+}
+fn extra() {
+    let e = E::Text("q\"x")
+    println("{} {:?}", P { b: "a" }, e)
+    println("{}", E::Text("a"))
+}
+
+// A tuple, `Vec`, or `Option` holding a user type renders its other string
+// elements quoted too.
+fn beside_user_types() {
+    let pair = ("a", P { b: "c" })
+    println("{:?} {} {:?}", pair, pair, Some(("d", E::Nil)))
+    println("{:?}", #[("e", E::Text("f"))])
+}

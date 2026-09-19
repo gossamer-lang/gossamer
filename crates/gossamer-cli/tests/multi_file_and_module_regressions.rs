@@ -4009,3 +4009,65 @@ fn an_aggregate_holding_growable_storage_crosses_a_channel() {
     assert_eq!(vm.0, "59700 1980\ntrue\n", "vm stdout");
     assert_eq!(native.0, vm.0, "tier parity");
 }
+
+/// Runs `gos <subcommand> .` at the project root.
+fn project_command(dir: &Path, subcommand: &str) -> (String, String, Option<i32>) {
+    let child = Command::new(gos_bin())
+        .arg(subcommand)
+        .arg(".")
+        .current_dir(dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn gos");
+    run_with_timeout(child)
+}
+
+#[test]
+fn a_test_module_checks_as_the_module_around_it() {
+    let dir = write_project(
+        "test-module-checks",
+        "example.com/test-module-checks",
+        &[
+            (
+                "src/engine/mod.gos",
+                "pub struct Store { pub v: Vec<i64> }\n\
+                 pub struct Engine { pub store: Store }\n\
+                 pub fn len_of(s: &mut Store) -> i64 { s.v.len() }\n\
+                 pub fn open(dir: String, read_only: bool = false) -> Engine {\n    \
+                 Engine { store: Store { v: #[dir.len(), if read_only { 1 } else { 0 }] } }\n}\n",
+            ),
+            (
+                "src/engine/scan.gos",
+                "use crate::engine\n\
+                 pub fn count(eng: &mut engine::Engine) -> i64 { engine::len_of(&mut eng.store) }\n\
+                 pub fn ro() -> engine::Engine { engine::open(\"d\", read_only: true) }\n\
+                 \n\
+                 #[cfg(test)]\n\
+                 mod tests {\n    \
+                 use crate::engine\n    \
+                 fn helper(eng: &mut engine::Engine) -> i64 { engine::len_of(&mut eng.store) }\n    \
+                 #[test]\n    \
+                 fn opens_read_only() {\n        \
+                 let mut e = engine::open(\"d\", read_only: true)\n        \
+                 assert_eq(helper(&mut e), 2)\n    \
+                 }\n\
+                 }\n",
+            ),
+            (
+                "src/main.gos",
+                "use engine::scan\nfn main() {\n    let mut e = scan::ro()\n    \
+                 println(\"{}\", scan::count(&mut e))\n}\n",
+            ),
+        ],
+    );
+    let (out, err, code) = project_command(&dir, "check");
+    assert_eq!(code, Some(0), "gos check:\n{out}\n{err}");
+    let (out, err, code) = project_command(&dir, "test");
+    assert_eq!(code, Some(0), "gos test:\n{out}\n{err}");
+    assert!(out.contains("1 passed"), "{out}");
+    let (out, err, code) = project_run_vm(&dir);
+    assert_eq!(code, Some(0), "{err}");
+    assert_eq!(out.trim(), "2");
+}

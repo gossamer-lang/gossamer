@@ -450,7 +450,10 @@ impl<'a> Lowerer<'a> {
         // Map ownership markers take the map POINTER VALUE.
         if matches!(
             name,
-            "gos_rt_map_set_blob_values" | "gos_rt_map_set_vec_values"
+            "gos_rt_map_set_blob_values"
+                | "gos_rt_map_set_vec_values"
+                | "gos_rt_map_set_float_keys"
+                | "gos_rt_map_set_ordered"
         ) {
             if !p.projection.is_empty() {
                 return Ok(());
@@ -463,7 +466,15 @@ impl<'a> Lowerer<'a> {
             )
             .unwrap();
             declare_rt(&mut self.runtime_refs, name);
-            writeln!(self.out, "  call void @{name}(ptr {v})").unwrap();
+            if name == "gos_rt_map_set_ordered" {
+                let unsigned = match args.get(1) {
+                    Some(Operand::Const(ConstValue::Int(n))) => *n,
+                    _ => 0,
+                };
+                writeln!(self.out, "  call void @{name}(ptr {v}, i64 {unsigned})").unwrap();
+            } else {
+                writeln!(self.out, "  call void @{name}(ptr {v})").unwrap();
+            }
             return Ok(());
         }
         // `vec_set_elem_meta` takes the vec POINTER VALUE, and

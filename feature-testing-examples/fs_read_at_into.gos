@@ -1,0 +1,27 @@
+// A positional read into a buffer the caller keeps reuses its storage: the
+// buffer holds exactly the bytes read, short at end of file, on every tier.
+use std::{env, fs, path}
+
+fn main() {
+    let file_path = path::join(env::temp_dir(), "gos_fs_read_at_into.bin")
+    let mut data: Vec<u8> = #[]
+    for i in 0..300 { data.push((i % 251) as u8) }
+    fs::write(file_path, data).unwrap()
+    let f = fs::File::open(file_path).unwrap()
+    let mut buf: Vec<u8> = #[]
+    let mut total = 0
+    for chunk in 0..3 {
+        let n = f.read_at_into(&mut buf, 128, chunk * 128).unwrap()
+        total += n
+        println("{} {} {} {}", n, buf.len(), buf[0], buf[buf.len() - 1])
+    }
+    let n = f.read_at_into(&mut buf, 16, 400).unwrap()
+    println("{} {} {}", n, buf.len(), total)
+    let wide = f.read_at_into(&mut buf, 4096, 290).unwrap()
+    println("{} {:?}", wide, buf)
+    match f.read_at_into(&mut buf, -1, 0) {
+        Ok(_) => println("accepted a negative length")
+        Err(e) => println("{}", e)
+    }
+    fs::remove_file(file_path).unwrap()
+}

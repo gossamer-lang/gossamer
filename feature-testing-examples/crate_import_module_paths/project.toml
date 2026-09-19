@@ -1,0 +1,3 @@
+[project]
+id = "example.com/crate-import-module-paths"
+version = "0.1.0"

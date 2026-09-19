@@ -1,0 +1,70 @@
+// A buffer that arrives as a parameter reaches a standard-library reader as
+// the caller's own storage: the reader cannot keep or change it, so nothing is
+// copied, and each call answers the same on every tier.
+use std::encoding::{binary, hex}
+use std::hash::{crc32, fnv}
+
+fn word_at(buf: Vec<u8>, p: i64) -> i64 {
+    binary::get_u32_le_at(buf, p).unwrap_or(0u32) as i64
+}
+
+fn wide_at(buf: Vec<u8>, p: i64) -> i64 {
+    binary::get_u64_be_at(buf, p).unwrap_or(0u64) as i64
+}
+
+fn window_crc(buf: Vec<u8>, p: i64) -> i64 {
+    crc32::update_window(0, buf, p, p + 4)
+}
+
+fn whole_crc(buf: Vec<u8>) -> i64 {
+    crc32::checksum(buf)
+}
+
+fn digest(buf: Vec<u8>) -> i64 {
+    fnv::hash64(buf)
+}
+
+fn prefix_hex(buf: Vec<u8>) -> String {
+    hex::encode(buf).substring(0, 8)
+}
+
+fn text_at(buf: Vec<u8>, p: i64, next: &mut i64) -> Result<String, String> {
+    let n = match binary::get_u32_le_at(buf, p) {
+        Ok(x) => (x % 8u32) as i64
+        Err(e) => return Err("length: " + e.message())
+    }
+    let bytes = match buf.slice(p + 4, p + 4 + n) {
+        Ok(b) => b
+        Err(_) => return Err("truncated")
+    }
+    *next = p + 4 + n
+    Ok(hex::encode(bytes))
+}
+
+fn field_at(buf: Vec<u8>, p: i64, tag: i64, next: &mut i64) -> i64 {
+    if tag == 9 {
+        return match text_at(buf, p, next) {
+            Ok(text) => text.len()
+            Err(e) => e.len()
+        }
+    }
+    *next = p + 4
+    word_at(buf, p)
+}
+
+fn main() {
+    let mut buf: Vec<u8> = #[]
+    for i in 0..4096 { buf.push((i * 7 % 251) as u8) }
+    let mut acc = 0
+    for i in 0..1000 {
+        let p = i % 64
+        acc +%= word_at(buf, p) +% wide_at(buf, p) +% window_crc(buf, p)
+    }
+    println("{}", acc)
+    println("{} {} {}", whole_crc(buf), digest(buf), prefix_hex(buf))
+    println("{}", word_at(buf, 4093) + window_crc(buf, 4094))
+    let mut next = 0
+    let mut fields = 0
+    for i in 0..100 { fields +%= field_at(buf, i, i % 10, &mut next) }
+    println("{} {}", fields, next)
+}

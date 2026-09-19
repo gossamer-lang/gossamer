@@ -673,17 +673,23 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
     // `path::walk` was deprecated in favour of `fs::walk_dir`; the
     // dispatch entry stays for one release so existing user code keeps
     // resolving while we migrate examples.
+    globals.push((
+        "__btree_map_new",
+        builtin("__btree_map_new", builtin_btree_map_new),
+    ));
+    globals.push(("__window", builtin("__window", builtin_btree_map_window)));
+    globals.push(("__range", builtin("__range", builtin_btree_map_range)));
     globals.push(("walk", native("walk", native_fs_walk_dir)));
     globals.push(("path::walk", native("path::walk", native_fs_walk_dir)));
     install_module("path", &[("join", builtin_path_join_v)], globals);
     install_module(
         "BTreeMap",
-        &[("new", builtin_btmap_new), ("from", builtin_map_from)],
+        &[("new", builtin_btmap_new), ("from", builtin_btmap_from)],
         globals,
     );
     install_module(
         "collections::BTreeMap",
-        &[("new", builtin_btmap_new), ("from", builtin_map_from)],
+        &[("new", builtin_btmap_new), ("from", builtin_btmap_from)],
         globals,
     );
     install_module("Set", &[("new", builtin_set_new)], globals);

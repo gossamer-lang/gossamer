@@ -1,0 +1,23 @@
+// An Instant reads the monotonic clock in nanoseconds: readings never go
+// backwards, and a short span measures below one millisecond. Only
+// invariants are printed, so every tier answers the same.
+use std::time
+
+fn main() {
+    let start = time::Instant::now()
+    let mut sum = 0
+    for i in 0..10 { sum += i }
+    let short = start.elapsed()
+    let later = time::Instant::now()
+    println("{}", sum)
+    println("{}", short.as_nanos() >= 0)
+    println("{}", later >= start)
+    println("{}", later.duration_since(start) >= short)
+    println("{}", start.duration_since(later).as_nanos() == 0)
+    let spans = #[short.as_nanos(), time::Instant::now().elapsed().as_nanos()]
+    let mut below_ms = false
+    for ns in spans { if ns < 1000000 { below_ms = true } }
+    println("{}", below_ms)
+    time::sleep(time::Duration::from_micros(1500))
+    println("{}", start.elapsed_ms() >= 1)
+}

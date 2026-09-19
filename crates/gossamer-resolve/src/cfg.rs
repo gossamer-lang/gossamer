@@ -68,6 +68,46 @@ fn platform_flags() -> &'static [&'static str] {
     ACTIVE
 }
 
+/// `source` with every item inactive under the current cfg removed, at any
+/// depth, or `None` when every item is active.
+///
+/// The resolver never resolves an inactive item, so a pass that walks the
+/// items after it reads this view: an item it would otherwise see has no
+/// resolutions, and checking it reports names and bindings as missing.
+#[must_use]
+pub fn without_inactive_items(
+    source: &gossamer_ast::SourceFile,
+) -> Option<gossamer_ast::SourceFile> {
+    if !any_inactive(&source.items) {
+        return None;
+    }
+    let mut stripped = source.clone();
+    retain_active(&mut stripped.items);
+    Some(stripped)
+}
+
+fn any_inactive(items: &[gossamer_ast::Item]) -> bool {
+    items.iter().any(|item| {
+        !item_is_active(&item.attrs)
+            || matches!(
+                &item.kind,
+                gossamer_ast::ItemKind::Mod(decl)
+                    if matches!(&decl.body, gossamer_ast::ModBody::Inline(inner) if any_inactive(inner))
+            )
+    })
+}
+
+fn retain_active(items: &mut Vec<gossamer_ast::Item>) {
+    items.retain(|item| item_is_active(&item.attrs));
+    for item in items {
+        if let gossamer_ast::ItemKind::Mod(decl) = &mut item.kind
+            && let gossamer_ast::ModBody::Inline(inner) = &mut decl.body
+        {
+            retain_active(inner);
+        }
+    }
+}
+
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TEST_CFG_ENABLED: AtomicBool = AtomicBool::new(false);

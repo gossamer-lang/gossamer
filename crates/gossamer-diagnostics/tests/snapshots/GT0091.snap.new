@@ -1,0 +1,13 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+assertion_line: 86
+expression: rendered
+---
+--- plain ---
+error[GT0091]: `m.range(r)` on a `BTreeMap` reads its bounds from the range written - here
+--- framed ---
+error[GT0091]: `m.range(r)` on a `BTreeMap` reads its bounds from the range written
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

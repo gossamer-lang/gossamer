@@ -69,31 +69,99 @@ pub unsafe extern "C" fn gos_rt_monotonic_nanos() -> i64 {
     })
 }
 
-// `time::Duration` accessors - Duration is stored as i64
-// milliseconds in the compiled tier (matches the existing
-// `gos_rt_duration_from_secs`/`from_millis` constructors in
-// `string.rs`). These accessors complete the surface so callers
-// can round-trip a Duration through `from_secs(n)` and recover
-// the same `n` via `as_secs`.
+// `time::Duration` is a count of nanoseconds and `time::Instant` a reading of
+// the monotonic clock in nanoseconds, both carried as an `i64`. Every
+// conversion saturates rather than wrapping.
 
+const NANOS_PER_MICRO: i64 = 1_000;
+const NANOS_PER_MILLI: i64 = 1_000_000;
+const NANOS_PER_SEC: i64 = 1_000_000_000;
+
+/// `time::Duration::from_nanos(n)`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_duration_from_nanos(ns: i64) -> i64 {
+    ns
+}
+
+/// `time::Duration::from_micros(n)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_duration_from_micros(us: i64) -> i64 {
-    us / 1_000
+    us.saturating_mul(NANOS_PER_MICRO)
 }
 
+/// `time::Duration::from_millis(n)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_duration_as_millis(ms: i64) -> i64 {
-    ms
+pub extern "C" fn gos_rt_duration_from_millis(ms: i64) -> i64 {
+    ms.saturating_mul(NANOS_PER_MILLI)
 }
 
+/// `time::Duration::from_secs(n)`.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_duration_as_secs(ms: i64) -> i64 {
-    ms / 1_000
+pub extern "C" fn gos_rt_duration_from_secs(secs: i64) -> i64 {
+    secs.saturating_mul(NANOS_PER_SEC)
 }
 
+/// `time::Duration::from_secs_f64(s)`: the nearest whole nanosecond count,
+/// saturating at the `i64` range; NaN is zero.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_duration_as_micros(ms: i64) -> i64 {
-    ms.saturating_mul(1_000)
+pub extern "C" fn gos_rt_duration_from_secs_f64(secs: f64) -> i64 {
+    // A float-to-int `as` saturates and maps NaN to zero.
+    (secs * NANOS_PER_SEC as f64).round() as i64
+}
+
+/// `d.as_nanos()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_duration_as_nanos(ns: i64) -> i64 {
+    ns
+}
+
+/// `d.as_micros()`, truncated toward zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_duration_as_micros(ns: i64) -> i64 {
+    ns / NANOS_PER_MICRO
+}
+
+/// `d.as_millis()`, truncated toward zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_duration_as_millis(ns: i64) -> i64 {
+    ns / NANOS_PER_MILLI
+}
+
+/// `d.as_secs()`, truncated toward zero.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_duration_as_secs(ns: i64) -> i64 {
+    ns / NANOS_PER_SEC
+}
+
+/// `d.as_secs_f64()`.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_duration_as_secs_f64(ns: i64) -> f64 {
+    ns as f64 / NANOS_PER_SEC as f64
+}
+
+/// `time::Instant::now()`: the monotonic clock in nanoseconds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_instant_now() -> i64 {
+    unsafe { gos_rt_monotonic_nanos() }
+}
+
+/// `inst.elapsed()`: nanoseconds since `start`, never negative.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_instant_elapsed(start: i64) -> i64 {
+    gos_rt_instant_duration_since(unsafe { gos_rt_monotonic_nanos() }, start)
+}
+
+/// `inst.elapsed_ms()`: whole milliseconds since `start`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_instant_elapsed_ms(start: i64) -> i64 {
+    (unsafe { gos_rt_instant_elapsed(start) }) / NANOS_PER_MILLI
+}
+
+/// `later.duration_since(earlier)`: the nanoseconds between two readings,
+/// zero when `earlier` is the later one.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_instant_duration_since(later: i64, earlier: i64) -> i64 {
+    later.saturating_sub(earlier).max(0)
 }
 
 // Civil-time bridge used by the source-level `time` wrappers. Locations are

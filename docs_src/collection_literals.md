@@ -111,8 +111,22 @@ let ordered: BTreeMap<i64, i64> = {2: 20, 1: 10}
 println(ordered.len())
 ```
 
-`Map` and `BTreeMap` are distinct types over one representation, so neither
-converts to the other.
+`Map` and `BTreeMap` are distinct types, so neither converts to the other. A
+`Map` hashes its keys; a `BTreeMap` keeps them in order in a B+ tree, so
+`get`, `insert`, and `remove` take O(log n), a walk reads the keys in order
+without sorting, and the ordered pair answers its ends and its ranges:
+
+```gos
+let mut scores: BTreeMap<String, i64> = {"cy": 3, "ana": 9, "bo": 5}
+println(scores.first_key_value())
+let middle: Vec<(String, i64)> = scores.range("b".."d").collect()
+println(middle)
+println(scores.pop_last())
+```
+
+A range's bounds are keys, so the range is written in the call: `lo..hi`,
+`lo..=hi`, `lo..`, `..hi`, `..=hi`, or `..`. `BTreeSet` answers `first`,
+`last`, `pop_first`, `pop_last`, and `range` the same way.
 
 ## Set And BTreeSet
 

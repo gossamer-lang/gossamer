@@ -370,6 +370,8 @@ impl<'a> Lowerer<'a> {
                         | "gos_rt_vec_set_slot_children"
                         | "gos_rt_map_set_blob_values"
                         | "gos_rt_map_set_vec_values"
+                        | "gos_rt_map_set_float_keys"
+                        | "gos_rt_map_set_ordered"
                         | "gos_rt_map_field_release"
                         | "gos_rt_map_field_clone"
                         | "gos_rt_set_field_release"

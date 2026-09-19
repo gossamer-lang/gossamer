@@ -230,3 +230,8 @@ impl Task for GoroutineTask {
         }
     }
 }
+
+/// Marks the caller as inside a blocking system call. A wasm build runs one
+/// thread with no workers to hand off to, so there is nothing to mark.
+#[must_use]
+pub fn syscall_enter() {}

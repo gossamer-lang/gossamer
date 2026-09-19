@@ -2918,13 +2918,6 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_bool(cell: *const bool) -> i64 {
     })
 }
 
-/// `time::Duration::from_secs(n)` lowering - returns `n * 1000` as
-/// the i64-millisecond Duration the compiled tier carries.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_duration_from_secs(secs: i64) -> i64 {
-    ffi_entry!(-1, { secs.saturating_mul(1_000) })
-}
-
 // `flag::parse([decls])` declarative parser - takes an array of
 // `FlagDecl`-shaped blobs and returns a `FlagMap` handle.
 // Layout per blob: `[name_cs, short_char, kind_tag, int_val,
@@ -3331,13 +3324,6 @@ fn parse_rfc3339_ms(s: &str) -> Option<i64> {
     let unix_secs = civil_to_days(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
         - offset_seconds;
     unix_secs.checked_mul(1_000)
-}
-
-/// `time::Duration::from_millis(n)` lowering - Duration is already
-/// stored as i64 ms in the compiled tier, so this is the identity.
-#[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_duration_from_millis(ms: i64) -> i64 {
-    ffi_entry!(-1, { ms })
 }
 
 /// `*cell` for `flag::Set::float` cells.

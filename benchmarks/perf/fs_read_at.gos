@@ -1,0 +1,46 @@
+use std::{env, fs, path}
+
+const READS: i64 = 64
+
+fn bench_file() -> fs::File {
+    let file_path = path::join(env::temp_dir(), "gos_bench_fs_read_at.bin")
+    if !fs::exists(file_path) {
+        fs::write(file_path, #[7u8; 65536]).unwrap()
+    }
+    fs::File::open(file_path).unwrap()
+}
+
+fn read_many(f: fs::File) -> i64 {
+    let mut total = 0
+    for i in 0..READS {
+        total += f.read_at(256, i * 997 % 60000).unwrap().len()
+    }
+    total
+}
+
+#[bench]
+fn bench_fs_read_at_main_observed() -> i64 {
+    read_many(bench_file())
+}
+
+#[bench]
+fn bench_fs_read_at_goroutine_observed() -> i64 {
+    let f = bench_file()
+    let mut total = 0
+    cohort {
+        let h = spawn(|| read_many(f))
+        total = h.join().unwrap()
+    }.unwrap()
+    total
+}
+
+#[bench]
+fn bench_fs_read_at_into_reused_observed() -> i64 {
+    let f = bench_file()
+    let mut buf: Vec<u8> = #[]
+    let mut total = 0
+    for i in 0..READS {
+        total += f.read_at_into(&mut buf, 256, i * 997 % 60000).unwrap()
+    }
+    total
+}

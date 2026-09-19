@@ -127,7 +127,7 @@ pub(crate) fn xml_node_to_value(node: &gossamer_std::encoding::xml::Node) -> Val
                 Value::String("text".into()),
             );
             map.insert(MapKey::Str("value".into()), Value::String(s.clone().into()));
-            Value::Map(Arc::new(parking_lot::Mutex::new(map)))
+            Value::Map(Arc::new(parking_lot::Mutex::new(map.into())))
         }
         Node::Element {
             name,
@@ -152,14 +152,14 @@ pub(crate) fn xml_node_to_value(node: &gossamer_std::encoding::xml::Node) -> Val
             }
             map.insert(
                 MapKey::Str("attrs".into()),
-                Value::Map(Arc::new(parking_lot::Mutex::new(attr_map))),
+                Value::Map(Arc::new(parking_lot::Mutex::new(attr_map.into()))),
             );
             let child_vals: Vec<Value> = children.iter().map(xml_node_to_value).collect();
             map.insert(
                 MapKey::Str("children".into()),
                 Value::Array(Arc::new(child_vals)),
             );
-            Value::Map(Arc::new(parking_lot::Mutex::new(map)))
+            Value::Map(Arc::new(parking_lot::Mutex::new(map.into())))
         }
     }
 }

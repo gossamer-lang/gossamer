@@ -1,0 +1,61 @@
+// Every key kind holds every value kind: a map keyed by an integer, a
+// string, a tuple, a struct, or an enum stores a scalar, a string, a vector,
+// a struct holding a string, and an enum holding a string, and hands each
+// back intact after overwrites and removals, on every tier.
+struct P { a: i64, b: String }
+struct K2 { x: i64, y: i64 }
+enum E { Nil, Int(i64), Text(String) }
+
+fn show(p: P) -> String { p.a.to_string() + ":" + p.b }
+
+fn by_struct_value() {
+    let mut mi: Map<i64, P> = Map::new()
+    let mut ms: Map<String, P> = Map::new()
+    let mut mt: Map<(i64, i64), P> = Map::new()
+    let mut mk: Map<K2, P> = Map::new()
+    let mut me: Map<E, P> = Map::new()
+    for i in 0..3 {
+        let v = P { a: i, b: "v" + i.to_string() }
+        mi.insert(i, v)
+        ms.insert("k" + i.to_string(), P { a: i, b: "s" + i.to_string() })
+        mt.insert((i, i), P { a: i, b: "t" + i.to_string() })
+        mk.insert(K2 { x: i, y: 0 }, P { a: i, b: "k" + i.to_string() })
+        me.insert(E::Int(i), P { a: i, b: "e" + i.to_string() })
+    }
+    me.insert(E::Text("x"), P { a: 9, b: "text" })
+    me.insert(E::Int(1), P { a: 7, b: "over" })
+    let _ = me.remove(E::Int(0))
+    match mi.get(1) { Some(p) => println("{}", show(p)), None => println("none") }
+    match ms.get("k2") { Some(p) => println("{}", show(p)), None => println("none") }
+    match mt.get((0, 0)) { Some(p) => println("{}", show(p)), None => println("none") }
+    match mk.get(K2 { x: 2, y: 0 }) { Some(p) => println("{}", show(p)), None => println("none") }
+    match me.get(E::Int(1)) { Some(p) => println("{}", show(p)), None => println("none") }
+    match me.get(E::Text("x")) { Some(p) => println("{}", show(p)), None => println("none") }
+    println("{} {}", me.len(), me.contains_key(E::Int(0)))
+}
+
+fn by_other_values() {
+    let mut vs: Map<E, Vec<String>> = Map::new()
+    vs.insert(E::Nil, #["a", "b"])
+    vs.insert(E::Int(3), #["c"])
+    println("{:?}", vs.get(E::Nil))
+    let mut ss: Map<E, String> = Map::new()
+    ss.insert(E::Text("k"), "hello")
+    println("{:?}", ss.get(E::Text("k")))
+    let mut ns: Map<E, i64> = Map::new()
+    ns.insert(E::Int(1), 10)
+    ns.inc(E::Int(1))
+    println("{}", ns.get_or(E::Int(1), 0))
+    let mut en: Map<K2, E> = Map::new()
+    en.insert(K2 { x: 1, y: 1 }, E::Text("payload"))
+    match en.get(K2 { x: 1, y: 1 }) {
+        Some(E::Text(s)) => println("{}", s)
+        Some(_) => println("other")
+        None => println("none")
+    }
+}
+
+fn main() {
+    by_struct_value()
+    by_other_values()
+}

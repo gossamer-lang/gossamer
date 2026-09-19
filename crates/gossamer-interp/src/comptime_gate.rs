@@ -246,6 +246,7 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
     ("fs::File::open", Capability::Read),
     ("fs::File::read", Capability::Read),
     ("fs::File::read_at", Capability::Read),
+    ("fs::File::read_at_into", Capability::Read),
     ("fs::File::read_to_string", Capability::Read),
     ("fs::canonicalize", Capability::Read),
     ("fs::exists", Capability::Read),

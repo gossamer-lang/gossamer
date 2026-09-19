@@ -116,12 +116,29 @@ pub(crate) fn install_time_extras(globals: &mut Vec<(&'static str, Value)>) {
             ("since_ms", builtin_time_since_ms),
             ("Instant::now", builtin_time_instant_now),
             ("Instant::elapsed_ms", builtin_time_instant_elapsed_ms),
+            ("Instant::elapsed", builtin_time_instant_elapsed),
+            (
+                "Instant::duration_since",
+                builtin_time_instant_duration_since,
+            ),
+            ("Duration::from_nanos", builtin_time_duration_from_nanos),
+            ("Duration::from_micros", builtin_time_duration_from_micros),
             ("Duration::from_millis", builtin_time_duration_from_millis),
             ("Duration::from_secs", builtin_time_duration_from_secs),
-            ("Duration::from_micros", builtin_time_duration_from_micros),
+            (
+                "Duration::from_secs_f64",
+                builtin_time_duration_from_secs_f64,
+            ),
+            ("Duration::as_nanos", builtin_time_duration_as_nanos),
+            ("Duration::as_micros", builtin_time_duration_as_micros),
             ("Duration::as_millis", builtin_time_duration_as_millis),
             ("Duration::as_secs", builtin_time_duration_as_secs),
-            ("Duration::as_micros", builtin_time_duration_as_micros),
+            ("Duration::as_secs_f64", builtin_time_duration_as_secs_f64),
+            (
+                "__sleep_ns",
+                super::time_completeness::builtin_time_sleep_ns,
+            ),
+            ("__sleep_ns_ctx", crate::builtins::builtin_time_sleep_ns_ctx),
         ],
         globals,
     );
@@ -170,50 +187,107 @@ pub(crate) fn builtin_time_since_ms(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Int(now.saturating_sub(start)))
 }
 
+// `time::Duration` is a count of nanoseconds and `time::Instant` a reading of
+// the monotonic clock in nanoseconds, the representation the compiled tiers'
+// `gos_rt_duration_*` / `gos_rt_instant_*` helpers share; each builtin is the
+// helper itself.
+
+fn int_arg(args: &[Value], index: usize) -> i64 {
+    args.get(index).and_then(value_to_int).unwrap_or(0)
+}
+
+fn float_arg(args: &[Value], index: usize) -> f64 {
+    match args.get(index) {
+        Some(Value::Float(f)) => *f,
+        Some(other) => value_to_int(other).map_or(0.0, |n| n as f64),
+        None => 0.0,
+    }
+}
+
 pub(crate) fn builtin_time_instant_now(_args: &[Value]) -> RuntimeResult<Value> {
-    // `time::Instant` is a transparent `i64` of monotonic ms, matching
-    // the compiled tier's `gos_rt_monotonic_ms`; the distinct
-    // `TyKind::Instant` only steers method-form `elapsed_ms` dispatch.
-    let ms = i64::try_from(monotonic_base().elapsed().as_millis()).unwrap_or(i64::MAX);
-    Ok(Value::Int(ms))
+    Ok(Value::Int(unsafe {
+        gossamer_runtime::c_abi::time::gos_rt_instant_now()
+    }))
 }
 
 pub(crate) fn builtin_time_instant_elapsed_ms(args: &[Value]) -> RuntimeResult<Value> {
-    let start_ms = args.first().and_then(value_to_int).unwrap_or(0);
-    let now = i64::try_from(monotonic_base().elapsed().as_millis()).unwrap_or(i64::MAX);
-    Ok(Value::Int(now.saturating_sub(start_ms)))
+    Ok(Value::Int(unsafe {
+        gossamer_runtime::c_abi::time::gos_rt_instant_elapsed_ms(int_arg(args, 0))
+    }))
 }
 
-pub(crate) fn builtin_time_duration_from_millis(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(args.first().and_then(value_to_int).unwrap_or(0)))
+pub(crate) fn builtin_time_instant_elapsed(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(unsafe {
+        gossamer_runtime::c_abi::time::gos_rt_instant_elapsed(int_arg(args, 0))
+    }))
 }
 
-pub(crate) fn builtin_time_duration_from_secs(args: &[Value]) -> RuntimeResult<Value> {
-    let secs = args.first().and_then(value_to_int).unwrap_or(0);
-    Ok(Value::Int(secs.saturating_mul(1000)))
+pub(crate) fn builtin_time_instant_duration_since(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_instant_duration_since(
+            int_arg(args, 0),
+            int_arg(args, 1),
+        ),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_from_nanos(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_duration_from_nanos(int_arg(args, 0)),
+    ))
 }
 
 pub(crate) fn builtin_time_duration_from_micros(args: &[Value]) -> RuntimeResult<Value> {
-    let us = args.first().and_then(value_to_int).unwrap_or(0);
-    Ok(Value::Int(us / 1000))
-}
-
-pub(crate) fn builtin_time_duration_as_millis(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(args.first().and_then(value_to_int).unwrap_or(0)))
-}
-
-pub(crate) fn builtin_time_duration_as_secs(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Int(
-        args.first().and_then(value_to_int).unwrap_or(0) / 1000,
+        gossamer_runtime::c_abi::time::gos_rt_duration_from_micros(int_arg(args, 0)),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_from_millis(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_duration_from_millis(int_arg(args, 0)),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_from_secs(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_duration_from_secs(int_arg(args, 0)),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_from_secs_f64(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_duration_from_secs_f64(float_arg(args, 0)),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_as_nanos(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_duration_as_nanos(int_arg(args, 0)),
     ))
 }
 
 pub(crate) fn builtin_time_duration_as_micros(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Int(
-        args.first()
-            .and_then(value_to_int)
-            .unwrap_or(0)
-            .saturating_mul(1000),
+        gossamer_runtime::c_abi::time::gos_rt_duration_as_micros(int_arg(args, 0)),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_as_millis(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_duration_as_millis(int_arg(args, 0)),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_as_secs(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(
+        gossamer_runtime::c_abi::time::gos_rt_duration_as_secs(int_arg(args, 0)),
+    ))
+}
+
+pub(crate) fn builtin_time_duration_as_secs_f64(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Float(
+        gossamer_runtime::c_abi::time::gos_rt_duration_as_secs_f64(int_arg(args, 0)),
     ))
 }
 

@@ -320,27 +320,22 @@ fn render_flag_usage(set: &GosFlagSet) -> String {
     out
 }
 
-fn parse_duration_text(text: &str) -> Option<i64> {
+/// A duration flag's text as a `time::Duration`, in nanoseconds: a count
+/// with an `ns`, `us`, `ms`, `s`, `m`, or `h` unit, or bare seconds.
+pub fn parse_duration_text(text: &str) -> Option<i64> {
     let text = text.trim();
-    if let Some(rest) = text.strip_suffix("ms") {
-        return rest.parse::<i64>().ok();
-    }
-    if let Some(rest) = text.strip_suffix("us") {
-        return rest.parse::<i64>().ok().map(|n| n / 1_000);
-    }
-    if let Some(rest) = text.strip_suffix("ns") {
-        return rest.parse::<i64>().ok().map(|n| n / 1_000_000);
-    }
-    if let Some(rest) = text.strip_suffix("s") {
-        return rest.parse::<i64>().ok().map(|n| n * 1_000);
-    }
-    if let Some(rest) = text.strip_suffix("m") {
-        return rest.parse::<i64>().ok().map(|n| n * 60_000);
-    }
-    if let Some(rest) = text.strip_suffix("h") {
-        return rest.parse::<i64>().ok().map(|n| n * 3_600_000);
-    }
-    text.parse::<i64>().ok().map(|n| n * 1_000)
+    let (digits, scale) = [
+        ("ns", 1),
+        ("us", 1_000),
+        ("ms", 1_000_000),
+        ("s", 1_000_000_000),
+        ("m", 60_000_000_000),
+        ("h", 3_600_000_000_000),
+    ]
+    .into_iter()
+    .find_map(|(unit, scale)| text.strip_suffix(unit).map(|rest| (rest, scale)))
+    .unwrap_or((text, 1_000_000_000));
+    digits.parse::<i64>().ok().map(|n| n.saturating_mul(scale))
 }
 
 fn parse_bool_text(text: &str) -> Option<bool> {

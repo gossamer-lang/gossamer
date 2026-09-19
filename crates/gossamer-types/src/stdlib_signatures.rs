@@ -3346,7 +3346,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::time",
         name: "since_ms",
-        signature: "fn since_ms(instant: time::Instant) -> i64",
+        signature: "fn since_ms(start_ms: i64) -> i64",
     },
     StdFunctionSignature {
         module_path: "std::time",

@@ -1360,6 +1360,46 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/method_dispatch_collision.gos"),
     spec("feature-testing-examples/module_qualified_enum_ctor.gos"),
     spec("feature-testing-examples/module_same_fn_names.gos"),
+    // A program module named like a standard-library module keeps its own
+    // functions: `json::render`, `fs::read`, and `iter::map` reach what the
+    // program declared.
+    spec("feature-testing-examples/user_module_shadows_std_names.gos"),
+    // A path through a module imported with `crate::`, `self::`, or `super::`
+    // reaches the item that module declares.
+    spec("feature-testing-examples/crate_import_module_paths/src/main.gos"),
+    // Values passed through tuples, `Result`s, enum payloads, and rebound
+    // bindings keep their contents, and every holder gives back its share.
+    spec("feature-testing-examples/tuple_vec_of_aggregates_drop.gos"),
+    // A parameter buffer handed to a standard-library reader answers the same
+    // on every tier without being copied first.
+    spec("feature-testing-examples/std_calls_borrow_param_buffers.gos"),
+    // Every numeric primitive's limit constants, typed as the primitive.
+    spec("feature-testing-examples/numeric_limit_constants.gos"),
+    // A register reused by a later binding does not carry the earlier
+    // binding's unsigned reading.
+    spec("feature-testing-examples/uint_tag_register_reuse.gos"),
+    // `Instant` and `Duration` count nanoseconds, with the Rust-shaped API.
+    spec("feature-testing-examples/time_instant_nanos.gos"),
+    spec("feature-testing-examples/time_duration_api.gos"),
+    // Every map key kind holds every value kind, struct values included.
+    spec("feature-testing-examples/map_aggregate_values_by_key_kind.gos"),
+    // Float keys order by value in IEEE total order on every tier.
+    spec("feature-testing-examples/btreemap_float_keys.gos"),
+    // A nested `String` renders quoted, and `{:?}` quotes one at the top.
+    spec("feature-testing-examples/debug_string_quoting.gos"),
+    // A positional read reuses the caller's buffer, short at end of file.
+    spec("feature-testing-examples/fs_read_at_into.gos"),
+    // Goroutines in one cohort read one file positionally, overlapping.
+    spec("feature-testing-examples/fs_positional_io_goroutines.gos"),
+    // A `BTreeMap`'s ranges and first / last entries over every key kind.
+    spec("feature-testing-examples/btreemap_range_api.gos"),
+    spec("feature-testing-examples/btreeset_range_api.gos"),
+    // Goroutines fill `BTreeMap`s and send them to be merged.
+    spec("feature-testing-examples/btreemap_goroutine_shared.gos"),
+    // A map sent through a channel is the receiver's own table.
+    spec("feature-testing-examples/map_channel_ownership.gos"),
+    // `zip` answers an iterator every consumer can advance.
+    spec("feature-testing-examples/iter_zip_advances.gos"),
     spec("feature-testing-examples/mutex_poison_recovery.gos"),
     spec("feature-testing-examples/mutex_vs_channel_counter.gos"),
     spec("feature-testing-examples/numeric_conversion_matrix.gos"),

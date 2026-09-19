@@ -380,12 +380,12 @@ pub const TIME: StdModule = StdModule {
         StdItem {
             name: "Instant",
             kind: StdItemKind::Type,
-            doc: "Monotonic point-in-time.",
+            doc: "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`.",
         },
         StdItem {
             name: "Duration",
             kind: StdItemKind::Type,
-            doc: "Difference between two `Instant`s.",
+            doc: "A span of nanoseconds: `from_nanos` / `from_micros` / `from_millis` / `from_secs` / `from_secs_f64`, the matching `as_*` accessors, `+`, `-`, and ordering.",
         },
         StdItem {
             name: "SystemTime",
@@ -410,7 +410,7 @@ pub const TIME: StdModule = StdModule {
         StdItem {
             name: "sleep",
             kind: StdItemKind::Function,
-            doc: "Suspends the current goroutine for `Duration`.",
+            doc: "Suspends the current goroutine for a `Duration`, or for an integer count of milliseconds.",
         },
         StdItem {
             name: "after",

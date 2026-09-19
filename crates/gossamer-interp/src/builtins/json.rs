@@ -428,7 +428,7 @@ fn coerce_json_to_kind(value: &json_std::Value, kind: &JsonSchemaKind) -> Result
                     coerce_json_to_kind(v, value_kind).map_err(|m| format!("[{k:?}]: {m}"))?;
                 storage.insert(MapKey::Str(SmolStr::from(k.clone())), coerced);
             }
-            Ok(Value::Map(Arc::new(parking_lot::Mutex::new(storage))))
+            Ok(Value::Map(Arc::new(parking_lot::Mutex::new(storage.into()))))
         }
         (got, want) => Err(format!(
             "expected {}, got {}",

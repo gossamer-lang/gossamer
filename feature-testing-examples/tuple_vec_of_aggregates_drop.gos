@@ -1,0 +1,106 @@
+// Values that pass through a tuple, a `Result`, an enum payload, or a rebound
+// binding keep their contents, and each holder gives back what it held: the
+// same answers on every tier, with nothing read after it was released.
+struct V { tag: u8, i: i64, s: String }
+struct Row { rowid: i64, vals: Vec<V> }
+struct Res { cols: Vec<String>, rows: Vec<Row>, count: i64 }
+struct Q { table: String, cols: Vec<i64> }
+enum Stmt { Select(Q), Compact }
+
+fn decode(i: i64) -> Result<Vec<V>, String> {
+    if i < 0 { return Err("negative") }
+    Ok(#[V { tag: 1, i: i, s: "v" + i.to_string() }, V { tag: 2, i: i * 2, s: "w" + i.to_string() }])
+}
+
+fn row(i: i64, probe: i64, rows: &mut Vec<Row>) -> Result<bool, String> {
+    let mut vals: Vec<V> = #[]
+    if probe > 0 { vals = decode(i)? }
+    if probe > 1 { vals = decode(i + 100)? }
+    rows.push(Row { rowid: i, vals: vals })
+    Ok(true)
+}
+
+fn walk(n: i64, probe: i64) -> Result<(i64, Vec<Row>), String> {
+    let mut rows: Vec<Row> = #[]
+    let mut matched = 0
+    for i in 0..n {
+        if row(i, probe, &mut rows)? { matched += 1 }
+    }
+    Ok((matched, rows))
+}
+
+fn project(kept: Vec<Row>, pick: i64) -> Res {
+    let mut projected: Vec<Row> = #[]
+    for r in kept {
+        let mut vals: Vec<V> = #[]
+        if r.vals.len() > pick { vals.push(r.vals[pick]) }
+        projected.push(Row { rowid: r.rowid, vals: vals })
+    }
+    Res { cols: #["picked"], rows: projected, count: projected.len() }
+}
+
+fn select(n: i64, probe: i64) -> Result<Res, String> {
+    let matched, kept = walk(n, probe)?
+    if matched == 0 { return Ok(Res { cols: #[], rows: kept, count: kept.len() }) }
+    Ok(project(kept, 1))
+}
+
+fn parse(i: i64) -> Result<Stmt, String> {
+    if i % 5 == 4 { return Ok(Stmt::Compact) }
+    Ok(Stmt::Select(Q { table: "t" + i.to_string(), cols: #[i, i + 1] }))
+}
+
+fn arity(s: Stmt) -> i64 {
+    match s {
+        Stmt::Select(q) => q.cols.len()
+        Stmt::Compact => 0
+    }
+}
+
+fn exec(i: i64) -> Result<String, String> {
+    match parse(i)? {
+        Stmt::Select(q) => Ok(q.table + ":" + q.cols.len().to_string())
+        Stmt::Compact => Ok("compact")
+    }
+}
+
+fn render(r: Res) -> String {
+    let mut parts: Vec<String> = #[]
+    for row in r.rows {
+        let mut cells: Vec<String> = #[]
+        for v in row.vals { cells.push(v.s + "/" + v.i.to_string()) }
+        parts.push(row.rowid.to_string() + "=" + cells.join(","))
+    }
+    r.count.to_string() + " " + r.cols.join("|") + " " + parts.join(" ")
+}
+
+fn main() {
+    for probe in 0..3 {
+        for _ in 0..50 {
+            let _ = select(4, probe)
+        }
+        match select(3, probe) {
+            Ok(r) => println("probe {}: {}", probe, render(r))
+            Err(e) => println("probe {}: {}", probe, e)
+        }
+    }
+    let t = walk(3, 1)
+    match t {
+        Ok((n, rows)) => println("walk {} {}", n, rows[2].vals[1].s)
+        Err(e) => println("{}", e)
+    }
+    let mut total = 0
+    for i in 0..10 {
+        match parse(i) {
+            Ok(s) => total += arity(s)
+            Err(e) => println("{}", e)
+        }
+    }
+    println("arity total {}", total)
+    for i in 3..6 {
+        match exec(i) {
+            Ok(text) => println("exec {}", text)
+            Err(e) => println("exec error {}", e)
+        }
+    }
+}

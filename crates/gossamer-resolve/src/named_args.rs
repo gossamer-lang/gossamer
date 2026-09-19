@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-use gossamer_ast::visitor::{VisitorMut, walk_expr_mut};
+use gossamer_ast::visitor::{VisitorMut, walk_expr_mut, walk_item_mut};
 use gossamer_ast::{
     Expr, ExprKind, FnDecl, FnParam, ImplItem, Item, ItemKind, Literal, ModBody, NodeId,
     NodeIdGenerator, PathExpr, SourceFile, TraitItem, Type, TypeKind,
@@ -85,11 +85,19 @@ pub fn resolve_named_arguments(
     resolutions: &Resolutions,
 ) -> Vec<ResolveDiagnostic> {
     let mut signatures = SignatureTable::default();
-    for item in &sf.items {
+    for item in sf
+        .items
+        .iter()
+        .filter(|item| crate::cfg::item_is_active(&item.attrs))
+    {
         signatures.collect_item(item, resolutions);
     }
     let mut diagnostics = Vec::new();
-    for item in &sf.items {
+    for item in sf
+        .items
+        .iter()
+        .filter(|item| crate::cfg::item_is_active(&item.attrs))
+    {
         check_defaults(item, &mut diagnostics);
     }
     let labels = std::mem::take(&mut sf.named_args);
@@ -147,7 +155,10 @@ impl SignatureTable {
             }
             ItemKind::Mod(decl) => {
                 if let ModBody::Inline(items) = &decl.body {
-                    for inner in items {
+                    for inner in items
+                        .iter()
+                        .filter(|i| crate::cfg::item_is_active(&i.attrs))
+                    {
                         self.collect_item(inner, resolutions);
                     }
                 }
@@ -211,6 +222,14 @@ struct Rewrite<'a> {
 }
 
 impl VisitorMut for Rewrite<'_> {
+    // The resolver leaves an inactive item unresolved, so its calls have no
+    // callee to match a label against.
+    fn visit_item(&mut self, item: &mut Item) {
+        if crate::cfg::item_is_active(&item.attrs) {
+            walk_item_mut(self, item);
+        }
+    }
+
     fn visit_expr(&mut self, expr: &mut Expr) {
         walk_expr_mut(self, expr);
         let id = expr.id;
@@ -503,7 +522,10 @@ fn check_defaults(item: &Item, out: &mut Vec<ResolveDiagnostic>) {
         ItemKind::Fn(decl) => check_fn_defaults(decl, out),
         ItemKind::Mod(decl) => {
             if let ModBody::Inline(items) = &decl.body {
-                for inner in items {
+                for inner in items
+                    .iter()
+                    .filter(|i| crate::cfg::item_is_active(&i.attrs))
+                {
                     check_defaults(inner, out);
                 }
             }

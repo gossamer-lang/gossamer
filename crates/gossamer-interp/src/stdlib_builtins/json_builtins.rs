@@ -140,7 +140,7 @@ pub(crate) fn json_std_to_value(v: gossamer_std::json::Value) -> Value {
             for (k, v) in map {
                 hmap.insert(MapKey::Str(k.into()), json_std_to_value(v));
             }
-            Value::Map(Arc::new(parking_lot::Mutex::new(hmap)))
+            Value::Map(Arc::new(parking_lot::Mutex::new(hmap.into())))
         }
     }
 }

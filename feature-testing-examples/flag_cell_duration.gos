@@ -1,6 +1,6 @@
 // Locks the method-form `time::Duration` accessors on a `flag::Set`
 // duration cell across every tier. A duration flag cell's element type
-// is the transparent `i64`-of-ms `time::Duration` newtype, but the
+// is `time::Duration`, a count of nanoseconds, but the
 // typechecker leaves the cell an inference var, so `cell.as_millis()`
 // must dispatch on the cell's runtime kind rather than failing as an
 // unbound method name. The default holds with no flags supplied, so the

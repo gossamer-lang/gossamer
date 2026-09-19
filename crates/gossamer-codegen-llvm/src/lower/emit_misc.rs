@@ -536,7 +536,7 @@ impl<'a> Lowerer<'a> {
         // entry reads back as the last one inserted.
         let skey_insert_heap_copy = matches!(
             symbol,
-            "gos_rt_map_insert_skey" | "gos_rt_map_insert_skey_opt"
+            "gos_rt_map_insert_skey" | "gos_rt_map_insert_skey_opt" | "gos_rt_map_insert_ekey_opt"
         );
         // An `or_insert` default is a stored value too, but the runtime keeps
         // its box when the slot is absent and gives it back when it is not, so
@@ -546,7 +546,7 @@ impl<'a> Lowerer<'a> {
             "gos_rt_map_or_insert_i64_i64"
             | "gos_rt_map_or_insert_str_i64"
             | "gos_rt_map_or_insert_typed_str_i64" => Some(2),
-            "gos_rt_map_or_insert_skey" => Some(3),
+            "gos_rt_map_or_insert_skey" | "gos_rt_map_or_insert_ekey" => Some(3),
             _ => None,
         };
         // Win64: the runtime invokes a two-word spawn callable as
@@ -610,6 +610,19 @@ impl<'a> Lowerer<'a> {
                 )
                 .unwrap();
                 let _ = write!(arg_text, "i64 {addr}");
+                continue;
+            }
+            // An enum-keyed entry point's third argument names the key's
+            // equality descriptor, a module global, rather than text.
+            if i == 2
+                && matches!(
+                    symbol,
+                    "gos_rt_map_insert_ekey_opt" | "gos_rt_map_or_insert_ekey"
+                )
+                && let Operand::Const(ConstValue::Str(meta)) = arg
+            {
+                let _ = write!(arg_text, "ptr @\"{meta}\"");
+                arg_tys_for_decl.push("ptr".to_string());
                 continue;
             }
             let want = expected_param_tys.get(i).copied().flatten();

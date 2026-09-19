@@ -97,7 +97,7 @@ fn builtin_dyn_map(args: &[Value]) -> RuntimeResult<Value> {
     for (key, value) in keys.iter().zip(values) {
         out.insert(MapKey::from_value(key), value);
     }
-    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(out))))
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(out.into()))))
 }
 
 fn builtin_dyn_tagged(args: &[Value]) -> RuntimeResult<Value> {

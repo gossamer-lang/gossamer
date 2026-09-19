@@ -1,0 +1,68 @@
+// A `BTreeMap` answers its entries between two keys in key order for every
+// range form, and its first and last entries, reading or taking them; the
+// bounds are keys of any ordered type. Identical on every tier.
+struct Pt { x: i64, y: i64 }
+enum Level { Low, Mid(i64), High }
+
+fn pairs(m: BTreeMap<i64, String>, lo: i64, hi: i64) -> Vec<(i64, String)> {
+    m.range(lo..hi).collect()
+}
+
+fn main() {
+    let mut m: BTreeMap<i64, String> = BTreeMap::new()
+    for i in 0..10 { m.insert(i * 10, format("v{}", i)) }
+    println("{:?} {:?}", m.first_key_value(), m.last_key_value())
+    let a: Vec<(i64, String)> = m.range(20..50).collect()
+    let b: Vec<(i64, String)> = m.range(20..=50).collect()
+    let c: Vec<(i64, String)> = m.range(75..).collect()
+    let d: Vec<(i64, String)> = m.range(..=10).collect()
+    let e: Vec<(i64, String)> = m.range(..20).collect()
+    println("{:?}", a)
+    println("{:?}", b)
+    println("{:?} {:?} {:?}", c, d, e)
+    let all: Vec<(i64, String)> = m.range(..).collect()
+    let inverted: Vec<(i64, String)> = m.range(60..30).collect()
+    let absent: Vec<(i64, String)> = m.range(41..49).collect()
+    println("{} {:?} {:?} {:?}", all.len(), inverted, absent, pairs(m, 15, 35))
+    let back: Vec<(i64, String)> = m.range(30..70).rev().collect()
+    println("{:?}", back)
+    println("{:?} {:?} {}", m.pop_first(), m.pop_last(), m.len())
+    for (k, v) in m.range(35..55) { println("{} {}", k, v) }
+
+    let mut words: BTreeMap<String, i64> = BTreeMap::new()
+    for w in #["kiwi", "apple", "fig", "date", "banana"] { words.insert(w, w.len()) }
+    let lo = "b"
+    let mid: Vec<(String, i64)> = words.range(lo.."f").collect()
+    println("{:?} {:?}", mid, words.pop_last())
+
+    let mut points: BTreeMap<Pt, i64> = BTreeMap::new()
+    points.insert(Pt { x: 2, y: 1 }, 21)
+    points.insert(Pt { x: 1, y: 5 }, 15)
+    points.insert(Pt { x: 2, y: 0 }, 20)
+    let upper: Vec<(Pt, i64)> = points.range(Pt { x: 1, y: 9 }..).collect()
+    println("{:?} {:?}", upper, points.first_key_value())
+
+    let mut levels: BTreeMap<Level, String> = BTreeMap::new()
+    levels.insert(Level::High, "h")
+    levels.insert(Level::Mid(7), "m7")
+    levels.insert(Level::Low, "l")
+    levels.insert(Level::Mid(2), "m2")
+    let middle: Vec<(Level, String)> = levels.range(Level::Mid(0)..Level::High).collect()
+    println("{:?} {:?}", middle, levels.last_key_value())
+
+    let mut wide: BTreeMap<u64, i64> = BTreeMap::new()
+    wide.insert(u64::MAX, 3)
+    wide.insert(5u64, 1)
+    wide.insert(9223372036854775808u64, 2)
+    let top: Vec<(u64, i64)> = wide.range(6u64..).collect()
+    println("{:?} {:?}", top, wide.first_key_value())
+
+    let mut temps: BTreeMap<f64, String> = BTreeMap::new()
+    for t in #[2.5, -1.0, 0.0, 10.25] { temps.insert(t, format("{}", t)) }
+    let cold: Vec<(f64, String)> = temps.range(..1.0).collect()
+    println("{:?}", cold)
+
+    let mut empty: BTreeMap<i64, i64> = BTreeMap::new()
+    let none: Vec<(i64, i64)> = empty.range(0..10).collect()
+    println("{:?} {:?} {:?}", empty.pop_first(), empty.last_key_value(), none)
+}

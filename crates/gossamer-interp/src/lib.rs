@@ -42,6 +42,7 @@ mod stdlib_builtins;
 mod validate;
 pub mod value;
 mod vm;
+pub mod vm_map;
 
 pub use builtins::coverage;
 pub use builtins::{

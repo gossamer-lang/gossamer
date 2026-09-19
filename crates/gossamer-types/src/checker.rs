@@ -76,6 +76,9 @@ pub fn typecheck_source_file_for_repl_inspection(
 
 impl TypeChecker<'_> {
     fn run(mut self, source: &SourceFile) -> (TypeTable, Vec<TypeDiagnostic>) {
+        // The items the resolver resolved, and no others.
+        let active = gossamer_resolve::without_inactive_items(source);
+        let source = active.as_ref().unwrap_or(source);
         self.collect_import_targets(&source.uses);
         self.assoc = gossamer_ast::AssocIndex::build(source);
         self.collect_signatures(&source.items);
@@ -399,6 +402,18 @@ const DEQUE_METHODS: &[&str] = &[
     "is_empty",
     "clear",
 ];
+
+/// The `time::Duration` method surface: its unit accessors.
+const DURATION_METHODS: &[&str] = &[
+    "as_micros",
+    "as_millis",
+    "as_nanos",
+    "as_secs",
+    "as_secs_f64",
+];
+
+/// The `time::Instant` method surface.
+const INSTANT_METHODS: &[&str] = &["duration_since", "elapsed", "elapsed_ms"];
 
 /// The `Queue`, `Stack`, `MaxHeap`, and `MinHeap` method surface.
 const PUSH_POP_METHODS: &[&str] = &["push", "pop", "peek", "len", "is_empty", "clear"];
@@ -8968,6 +8983,13 @@ impl<'a> TypeChecker<'a> {
         let (params, ret) = match (owner.as_str(), method) {
             ("fs::File", "read") => (vec![i64_ty], self.fallible(bytes)),
             ("fs::File", "read_at") => (vec![i64_ty, i64_ty], self.fallible(bytes)),
+            ("fs::File", "read_at_into") => {
+                let buf = self.tcx.intern(TyKind::Ref {
+                    mutability: Mutbl::Mut,
+                    inner: bytes,
+                });
+                (vec![buf, i64_ty, i64_ty], self.fallible(i64_ty))
+            }
             ("fs::File", "read_to_string") => (vec![], self.fallible(string)),
             ("fs::File", "write" | "write_all") => (vec![string], self.fallible(i64_ty)),
             ("fs::File", "write_bytes") => (vec![bytes], self.fallible(i64_ty)),
@@ -9452,26 +9474,15 @@ impl<'a> TypeChecker<'a> {
         if matches!(module, ["fs" | "os"] | ["std", "fs" | "os"]) {
             return self.fs_call_ret_ty(last);
         }
-        // `time::Duration` constructors yield the transparent Duration
-        // newtype so the method-form accessors (`d.as_millis()`) can
-        // dispatch on the receiver's static type; the accessors
-        // themselves return a bare `i64`.
+        // `time::Duration` / `time::Instant` are their own types, a count of
+        // nanoseconds and a reading of the monotonic clock in nanoseconds;
+        // their constructors and accessors are the only way between them and
+        // an integer.
         if matches!(module, ["time", "Duration"] | ["std", "time", "Duration"]) {
-            return match last {
-                "from_millis" | "from_secs" | "from_micros" => Some(self.tcx.duration_ty()),
-                "as_millis" | "as_secs" | "as_micros" => Some(self.tcx.int_ty(IntTy::I64)),
-                _ => None,
-            };
+            return self.duration_fn_ret(last);
         }
-        // `time::Instant::now()` yields the transparent Instant newtype so
-        // the method-form accessor (`inst.elapsed_ms()`) can dispatch on
-        // the receiver's static type; the accessor itself returns `i64`.
         if matches!(module, ["time", "Instant"] | ["std", "time", "Instant"]) {
-            return match last {
-                "now" => Some(self.tcx.instant_ty()),
-                "elapsed_ms" => Some(self.tcx.int_ty(IntTy::I64)),
-                _ => None,
-            };
+            return self.instant_fn_ret(last);
         }
         None
     }
@@ -10006,7 +10017,19 @@ impl<'a> TypeChecker<'a> {
         if shape.params.len() != arg_tys.len() {
             return;
         }
+        // A wait's millisecond count may be given as a `Duration` instead,
+        // which lowering converts by its own unit.
+        let waits =
+            matches!(module, ["time"] | ["std", "time"]) && matches!(name, "sleep" | "sleep_ctx");
         for (param, (arg, &arg_ty)) in shape.params.iter().zip(args.iter().zip(arg_tys)) {
+            if waits
+                && matches!(
+                    self.tcx.kind(self.infer.resolve(self.tcx, arg_ty)),
+                    Some(TyKind::Duration)
+                )
+            {
+                continue;
+            }
             if let Some(param_ty) = self.stdlib_signature_arg_ty(param.ty) {
                 self.check_sig_param_arg(param_ty, arg_ty, arg);
             }
@@ -10260,23 +10283,54 @@ impl<'a> TypeChecker<'a> {
         Some(self.subst_params_in_ty(ret, &subst_tys))
     }
 
-    /// `time::Duration` / `time::Instant` accessors in method form
-    /// (`d.as_millis()`, `inst.elapsed_ms()`) mirror the qualified free
-    /// calls; all yield a bare `i64`. `None` for every other receiver.
+    /// What `time::Duration::<name>` answers, for a constructor or an
+    /// accessor.
+    fn duration_fn_ret(&mut self, name: &str) -> Option<Ty> {
+        match name {
+            "from_nanos" | "from_micros" | "from_millis" | "from_secs" | "from_secs_f64" => {
+                Some(self.tcx.duration_ty())
+            }
+            "as_nanos" | "as_micros" | "as_millis" | "as_secs" => Some(self.tcx.int_ty(IntTy::I64)),
+            "as_secs_f64" => Some(self.tcx.float_ty(FloatTy::F64)),
+            _ => None,
+        }
+    }
+
+    /// What `time::Instant::<name>` answers.
+    fn instant_fn_ret(&mut self, name: &str) -> Option<Ty> {
+        match name {
+            "now" => Some(self.tcx.instant_ty()),
+            "elapsed_ms" => Some(self.tcx.int_ty(IntTy::I64)),
+            "elapsed" | "duration_since" => Some(self.tcx.duration_ty()),
+            _ => None,
+        }
+    }
+
+    /// `time::Duration` / `time::Instant` methods (`d.as_millis()`,
+    /// `inst.elapsed()`), which mirror the qualified free calls with the
+    /// receiver as the first argument. `None` for every other receiver.
     fn time_accessor_method_ret(
         &mut self,
         resolved: Ty,
         method: &str,
         args: &[Expr],
+        arg_tys: &[Ty],
     ) -> Option<Ty> {
-        if !args.is_empty() {
-            return None;
+        match self.tcx.kind(resolved) {
+            Some(TyKind::Duration) if args.is_empty() && DURATION_METHODS.contains(&method) => {
+                self.duration_fn_ret(method)
+            }
+            Some(TyKind::Instant) => match (method, args, arg_tys) {
+                ("elapsed_ms" | "elapsed", [], _) => self.instant_fn_ret(method),
+                ("duration_since", [earlier], [earlier_ty]) => {
+                    let instant = self.tcx.instant_ty();
+                    self.unify(instant, *earlier_ty, earlier.span);
+                    self.instant_fn_ret(method)
+                }
+                _ => None,
+            },
+            _ => None,
         }
-        let duration = matches!(self.tcx.kind(resolved), Some(TyKind::Duration))
-            && matches!(method, "as_millis" | "as_secs" | "as_micros");
-        let instant =
-            matches!(self.tcx.kind(resolved), Some(TyKind::Instant)) && method == "elapsed_ms";
-        (duration || instant).then(|| self.tcx.int_ty(IntTy::I64))
     }
 
     /// Return type of `method` (with `arity` non-receiver arguments) called
@@ -10797,6 +10851,80 @@ impl<'a> TypeChecker<'a> {
         None
     }
 
+    /// The ordered surface only a `BTreeMap` has: its first and last entries,
+    /// taking them, and the entries between two keys. `range` reads its
+    /// bounds from the range written in the call, each typed as a key.
+    fn check_btree_map_method(
+        &mut self,
+        method: &str,
+        receiver_ty: Ty,
+        args: &[Expr],
+    ) -> Option<Ty> {
+        let mut resolved = self.infer.resolve(self.tcx, receiver_ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(resolved) {
+            resolved = self.infer.resolve(self.tcx, *inner);
+        }
+        if BTREE_SET_ONLY_METHODS.contains(&method)
+            && let Some((owner, elem)) = self.set_elem_ty(resolved)
+            && owner == "BTreeSet"
+        {
+            return Some(self.check_ordered_surface(method, elem, elem, args));
+        }
+        if !BTREE_MAP_ONLY_METHODS.contains(&method) {
+            return None;
+        }
+        let Some(TyKind::HashMap {
+            key,
+            value,
+            ordered: true,
+        }) = self.tcx.kind(resolved)
+        else {
+            return None;
+        };
+        let (key, value) = (*key, *value);
+        let pair = self.tcx.intern(TyKind::Tuple(vec![key, value]));
+        Some(self.check_ordered_surface(method, key, pair, args))
+    }
+
+    /// Types one of the ordered surface's methods over keys `key` whose
+    /// entries read as `entry`: the first / last entry and taking it, and a
+    /// range of keys.
+    fn check_ordered_surface(&mut self, method: &str, key: Ty, entry: Ty, args: &[Expr]) -> Ty {
+        let owner = if key == entry { "BTreeSet" } else { "BTreeMap" };
+        match (method, args) {
+            (
+                "first_key_value" | "last_key_value" | "first" | "last" | "pop_first" | "pop_last",
+                [],
+            ) => self.option_adt_ty(entry),
+            ("range", [arg]) => {
+                if let ExprKind::Range { start, end, .. } = &arg.kind {
+                    for bound in [start, end].into_iter().flatten() {
+                        let ty = self.check_expr_expecting(bound, Expectation::HasType(key));
+                        self.unify(key, ty, bound.span);
+                    }
+                    let range = self.tcx.intern(TyKind::Range(key));
+                    self.record(arg.id, range);
+                } else {
+                    self.check_expr(arg);
+                    let key = self.render_public_ty(key);
+                    self.emit(TypeError::OrderedRangeArgument { key }, arg.span);
+                }
+                self.tcx.intern(TyKind::Iterator(entry))
+            }
+            _ => {
+                self.emit(
+                    TypeError::CallArityMismatch {
+                        callee: format!("{owner}::{method}"),
+                        expected: usize::from(method == "range"),
+                        found: args.len(),
+                    },
+                    args.first().map_or(Span::default(), |a| a.span),
+                );
+                self.tcx.error_ty()
+            }
+        }
+    }
+
     fn check_queue_or_stack_method(
         &mut self,
         method: &str,
@@ -11213,7 +11341,10 @@ impl<'a> TypeChecker<'a> {
         if matches!(method, "into" | "try_into") && args.is_empty() {
             return self.check_conversion_method(method, receiver_ty, receiver.span);
         }
-        if let Some(ty) = self.check_deque_method(method, receiver_ty, args) {
+        if let Some(ty) = self
+            .check_deque_method(method, receiver_ty, args)
+            .or_else(|| self.check_btree_map_method(method, receiver_ty, args))
+        {
             return ty;
         }
         if let Some(ty) = self.check_queue_or_stack_method(method, receiver_ty, args) {
@@ -11281,7 +11412,7 @@ impl<'a> TypeChecker<'a> {
         {
             self.unify(value_ty, arg_tys[1], args[1].span);
         }
-        if let Some(ty) = self.time_accessor_method_ret(resolved, method, args) {
+        if let Some(ty) = self.time_accessor_method_ret(resolved, method, args, &arg_tys) {
             return ty;
         }
         if let Some(TyKind::Adt { def, substs }) = self.tcx.kind(resolved)
@@ -11395,7 +11526,9 @@ impl<'a> TypeChecker<'a> {
         }
         self.check_method_arity(call_id, resolved, method, args, span);
         self.maybe_reject_unknown_adt_method(resolved, method, span);
-        if self.reject_unknown_scalar_method(resolved, method, span) {
+        if self.reject_unknown_scalar_method(resolved, method, span)
+            || self.reject_unknown_time_method(resolved, method, span)
+        {
             return self.tcx.error_ty();
         }
         if self.reject_unknown_stdlib_handle_method(resolved, method, span) {
@@ -11454,6 +11587,24 @@ impl<'a> TypeChecker<'a> {
     /// the conversions, and a `use` that binds the name as a free value.
     /// Anything else has no binding on any tier and can only fail at run
     /// time, so it is named here instead.
+    fn reject_unknown_time_method(&mut self, resolved: Ty, method: &str, span: Span) -> bool {
+        let surface = match self.tcx.kind(resolved) {
+            Some(TyKind::Duration) => DURATION_METHODS,
+            Some(TyKind::Instant) => INSTANT_METHODS,
+            _ => return false,
+        };
+        if surface.contains(&method)
+            || self.user_method_owners.contains_key(method)
+            || matches!(method, "clone" | "to_string")
+        {
+            return false;
+        }
+        let ty = self.render_public_ty(resolved);
+        let error = self.unresolved_method(ty, method, resolved);
+        self.emit(error, span);
+        true
+    }
+
     fn reject_unknown_scalar_method(&mut self, resolved: Ty, method: &str, span: Span) -> bool {
         // An unsuffixed literal is still an inference variable here: its
         // width is pinned by defaulting once every item is checked, so the
@@ -11853,6 +12004,12 @@ impl<'a> TypeChecker<'a> {
             Some(TyKind::Iterator(_) | TyKind::Range(_)) => "Iterator",
             Some(TyKind::Tuple(_)) => "Tuple",
             Some(TyKind::Adt { def, .. }) => return self.adt_method_names(*def),
+            Some(TyKind::Duration) => {
+                return DURATION_METHODS.iter().map(|m| (*m).to_string()).collect();
+            }
+            Some(TyKind::Instant) => {
+                return INSTANT_METHODS.iter().map(|m| (*m).to_string()).collect();
+            }
             _ => return Vec::new(),
         };
         let mut names = core_type_own_method_names(owner).unwrap_or_default();
@@ -12076,10 +12233,17 @@ impl<'a> TypeChecker<'a> {
                 },
             ),
             Some(TyKind::JoinHandle(_)) => ("JoinHandle", (method == "join").then_some(0)),
-            Some(TyKind::Instant) => ("time::Instant", (method == "elapsed_ms").then_some(0)),
+            Some(TyKind::Instant) => (
+                "time::Instant",
+                match method {
+                    "elapsed_ms" | "elapsed" => Some(0),
+                    "duration_since" => Some(1),
+                    _ => None,
+                },
+            ),
             Some(TyKind::Duration) => (
                 "time::Duration",
-                matches!(method, "as_millis" | "as_secs" | "as_micros").then_some(0),
+                DURATION_METHODS.contains(&method).then_some(0),
             ),
             Some(TyKind::DynError) => (
                 "errors::Error",
@@ -12539,6 +12703,7 @@ impl<'a> TypeChecker<'a> {
             }
             // A map is keyed, not ordered by position: the sequence surface
             // has nothing to index, reorder, or slice on it.
+            Some(TyKind::HashMap { ordered: true, .. }) => (is_btree_map_method(method), false),
             Some(TyKind::HashMap { .. }) => (is_map_method(method), false),
             _ => return false,
         };
@@ -18022,7 +18187,7 @@ impl<'a> TypeChecker<'a> {
                 | TyKind::Closure { .. }
                 | TyKind::Dyn(_),
             ) => false,
-            // `Duration` / `Instant` are transparent `i64` newtypes.
+            // `Duration` / `Instant` hash as the `i64` they are at run time.
             Some(TyKind::Duration | TyKind::Instant) => true,
             // Unresolved / erased: don't reject what the checker can't see.
             Some(TyKind::Alias { .. } | TyKind::Var(_) | TyKind::Param { .. } | TyKind::Error)
@@ -19284,7 +19449,7 @@ impl<'a> TypeChecker<'a> {
             }
             _ => {}
         }
-        // `time::Duration` / `time::Instant` are transparent i64 newtypes
+        // `time::Duration` / `time::Instant` are built-in types
         // with no resolver `DefId`. An explicit annotation (`d:
         // time::Duration`) must resolve to the dedicated `TyKind` so the
         // method form (`d.as_millis()`) dispatches on the receiver's
@@ -22007,6 +22172,31 @@ const MAP_METHODS: &[&str] = &[
     "clear",
 ];
 
+/// Methods a `BTreeMap` has beyond the `Map` surface: its key order makes a
+/// first and last entry, and a range of keys, meaningful.
+const BTREE_MAP_ONLY_METHODS: &[&str] = &[
+    "first_key_value",
+    "last_key_value",
+    "pop_first",
+    "pop_last",
+    "range",
+];
+
+/// Methods a `BTreeSet` has beyond the `Set` surface.
+const BTREE_SET_ONLY_METHODS: &[&str] = &["first", "last", "pop_first", "pop_last", "range"];
+
+/// Whether a `BTreeSet` receiver answers `name`.
+#[must_use]
+pub fn is_btree_set_method(name: &str) -> bool {
+    is_set_method(name) || BTREE_SET_ONLY_METHODS.contains(&name)
+}
+
+/// Whether a `BTreeMap` receiver answers `name`.
+#[must_use]
+pub fn is_btree_map_method(name: &str) -> bool {
+    is_map_method(name) || BTREE_MAP_ONLY_METHODS.contains(&name)
+}
+
 /// Fixed arrays expose value-preserving `clone` in addition to methods made
 /// available through Rust-like array-to-slice receiver coercion.
 #[must_use]
@@ -22615,8 +22805,18 @@ fn core_type_own_method_names(owner: &str) -> Option<Vec<&'static str>> {
             .chain(PARALLEL_ADAPTER_METHODS)
             .copied()
             .collect(),
-        "Map" | "BTreeMap" => MAP_METHODS.to_vec(),
-        "Set" | "BTreeSet" => SET_METHODS.to_vec(),
+        "Map" => MAP_METHODS.to_vec(),
+        "BTreeMap" => MAP_METHODS
+            .iter()
+            .chain(BTREE_MAP_ONLY_METHODS)
+            .copied()
+            .collect(),
+        "Set" => SET_METHODS.to_vec(),
+        "BTreeSet" => SET_METHODS
+            .iter()
+            .chain(BTREE_SET_ONLY_METHODS)
+            .copied()
+            .collect(),
         "Iterator" | "Range" => ITERATOR_METHODS.to_vec(),
         "Tuple" => TUPLE_METHODS.to_vec(),
         _ => return None,
@@ -22635,8 +22835,10 @@ pub fn core_type_accepts_method(owner: &str, name: &str) -> bool {
     }
     match owner {
         "Iterator" | "Range" => iterator_receiver_accepts_method(name),
-        "Map" | "BTreeMap" => is_map_method(name),
-        "Set" | "BTreeSet" => is_set_method(name),
+        "Map" => is_map_method(name),
+        "BTreeMap" => is_btree_map_method(name),
+        "Set" => is_set_method(name),
+        "BTreeSet" => is_btree_set_method(name),
         "Vec" => {
             is_slice_sequence_method(name)
                 || is_vec_only_sequence_method(name)

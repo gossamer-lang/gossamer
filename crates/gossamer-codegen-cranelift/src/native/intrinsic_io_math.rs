@@ -1007,8 +1007,12 @@ pub(super) fn lower_intrinsic_call_io_math(
         | "gos_rt_map_pop_ekey"
         | "gos_rt_map_get_or_ekey"
         | "gos_rt_map_or_insert_ekey"
-        | "gos_rt_map_inc_ekey" => {
+        | "gos_rt_map_inc_ekey"
+        | "gos_rt_map_range_ekey"
+        | "gos_rt_set_range_ekey" => {
             let (static_name, ret_ty, has_word): (&'static str, _, _) = match name {
+                "gos_rt_map_range_ekey" => ("gos_rt_map_range_ekey", ptr_ty, false),
+                "gos_rt_set_range_ekey" => ("gos_rt_set_range_ekey", ptr_ty, false),
                 "gos_rt_map_insert_ekey_opt" => ("gos_rt_map_insert_ekey_opt", types::I128, true),
                 "gos_rt_map_get_ekey_opt" => ("gos_rt_map_get_ekey_opt", types::I128, false),
                 "gos_rt_map_pop_ekey" => ("gos_rt_map_pop_ekey", types::I128, false),
@@ -1040,6 +1044,22 @@ pub(super) fn lower_intrinsic_call_io_math(
             };
             call_args.push(desc_val);
             let mut sig_params = vec![ptr_ty, ptr_ty, ptr_ty];
+            // A range's upper bound is a second key node, then a mode word.
+            if matches!(
+                static_name,
+                "gos_rt_map_range_ekey" | "gos_rt_set_range_ekey"
+            ) {
+                for (index, ty) in [(3, ptr_ty), (4, types::I64)] {
+                    let v = match args.get(index) {
+                        Some(arg) => lower_operand(
+                            module, builder, locals, body, tcx, arg, None, intrinsics,
+                        )?,
+                        None => builder.ins().iconst(ty, 0),
+                    };
+                    call_args.push(coerce_arg_to(builder, v, ty).unwrap_or(v));
+                    sig_params.push(ty);
+                }
+            }
             if has_word {
                 let w = match args.get(3) {
                     Some(arg) => {
@@ -1193,7 +1213,9 @@ pub(super) fn lower_intrinsic_call_io_math(
         // The map's own handle, not a field address: the tag says the entries
         // own their values, so an insert takes a share and a removal or the
         // map's death gives it back.
-        "gos_rt_map_set_blob_values" | "gos_rt_map_set_vec_values" => {
+        "gos_rt_map_set_blob_values"
+        | "gos_rt_map_set_vec_values"
+        | "gos_rt_map_set_float_keys" => {
             let m = match args.first() {
                 Some(a) => lower_operand(
                     module,
@@ -1207,14 +1229,44 @@ pub(super) fn lower_intrinsic_call_io_math(
                 )?,
                 None => return Ok(true),
             };
-            let sym: &'static str = if name == "gos_rt_map_set_blob_values" {
-                "gos_rt_map_set_blob_values"
-            } else {
-                "gos_rt_map_set_vec_values"
+            let sym: &'static str = match name {
+                "gos_rt_map_set_blob_values" => "gos_rt_map_set_blob_values",
+                "gos_rt_map_set_float_keys" => "gos_rt_map_set_float_keys",
+                _ => "gos_rt_map_set_vec_values",
             };
             let f = intrinsics.extern_fn(module, sym, &[ptr_ty], &[])?;
             let fref = module.declare_func_in_func(f, builder.func);
             builder.ins().call(fref, &[m]);
+            Ok(true)
+        }
+        // A `BTreeMap`'s handle and whether its word keys order unsigned.
+        "gos_rt_map_set_ordered" => {
+            let m = match args.first() {
+                Some(a) => lower_operand(
+                    module,
+                    builder,
+                    locals,
+                    body,
+                    tcx,
+                    a,
+                    Some(ptr_ty),
+                    intrinsics,
+                )?,
+                None => return Ok(true),
+            };
+            let unsigned = match args.get(1) {
+                Some(Operand::Const(ConstValue::Int(n))) => *n as i64,
+                _ => 0,
+            };
+            let flag = builder.ins().iconst(types::I64, unsigned);
+            let f = intrinsics.extern_fn(
+                module,
+                "gos_rt_map_set_ordered",
+                &[ptr_ty, types::I64],
+                &[],
+            )?;
+            let fref = module.declare_func_in_func(f, builder.func);
+            builder.ins().call(fref, &[m, flag]);
             Ok(true)
         }
         "gos_rt_option_slot_retain" | "gos_rt_option_slot_release" => {

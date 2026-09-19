@@ -536,7 +536,12 @@ impl<'tcx> FnBuilder<'tcx> {
     /// non-`i64` payload.
     pub(crate) fn is_int_map_ty(&self, ty: gossamer_types::Ty) -> bool {
         let ty = self.unwrap_ref(ty);
-        let Some(TyKind::HashMap { key, value, .. }) = self.tcx.kind(ty) else {
+        let Some(TyKind::HashMap {
+            key,
+            value,
+            ordered: false,
+        }) = self.tcx.kind(ty)
+        else {
             return false;
         };
         let key_is_i64 = matches!(
@@ -555,9 +560,30 @@ impl<'tcx> FnBuilder<'tcx> {
     /// [`Self::is_int_map_ty`], a partially-erased generic falls back
     /// to the boxed `Value::Map` rather than risk a typed op on a
     /// non-matching payload.
+    /// For a `BTreeMap` type, whether its integer keys order unsigned
+    /// (`u64` / `usize`); `None` for any other type.
+    pub(crate) fn btree_map_unsigned(&self, ty: gossamer_types::Ty) -> Option<bool> {
+        let ty = self.unwrap_ref(ty);
+        let Some(TyKind::HashMap {
+            key, ordered: true, ..
+        }) = self.tcx.kind(ty)
+        else {
+            return None;
+        };
+        Some(matches!(
+            self.tcx.kind(*key),
+            Some(TyKind::Int(IntTy::U64 | IntTy::Usize))
+        ))
+    }
+
     pub(crate) fn is_str_int_map_ty(&self, ty: gossamer_types::Ty) -> bool {
         let ty = self.unwrap_ref(ty);
-        let Some(TyKind::HashMap { key, value, .. }) = self.tcx.kind(ty) else {
+        let Some(TyKind::HashMap {
+            key,
+            value,
+            ordered: false,
+        }) = self.tcx.kind(ty)
+        else {
             return false;
         };
         let key_is_string = matches!(self.tcx.kind(*key), Some(TyKind::String));

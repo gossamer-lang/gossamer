@@ -1,0 +1,17 @@
+// A binding renders by what it holds: a loop variable bound to a register an
+// unsigned local used before reads as signed, and a `u64` still reads as
+// unsigned, on every tier.
+fn main() {
+    let min = 1
+    let neg = -1
+    let byte: u8 = 255
+    let wide: u64 = 0xFFFFFFFFFFFFFFFF
+    let mut lowest = 7
+    for v in #[5, -3, 12] {
+        if v < lowest { lowest = v }
+    }
+    println("{}", lowest)
+    let big: Vec<u64> = #[wide, 3]
+    for u in big { println("{}", u) }
+    println("{} {} {}", min, neg, byte)
+}

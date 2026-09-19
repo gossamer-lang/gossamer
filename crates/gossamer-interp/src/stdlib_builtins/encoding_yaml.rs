@@ -177,7 +177,7 @@ pub(crate) fn yaml_value_to_gossamer(v: gossamer_std::encoding::yaml::Value) -> 
                 };
                 hmap.insert(key, yaml_value_to_gossamer(v));
             }
-            Value::Map(Arc::new(parking_lot::Mutex::new(hmap)))
+            Value::Map(Arc::new(parking_lot::Mutex::new(hmap.into())))
         }
     }
 }

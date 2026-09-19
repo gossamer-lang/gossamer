@@ -833,6 +833,42 @@ impl Lowerer<'_> {
     }
 
     /// A path expression naming a free function, for a call this pass builds.
+    /// `{:?}` of a `String` renders it in the spelling that builds it:
+    /// each `String` argument of the `__debug` channel is quoted first.
+    fn quote_debug_strings(&mut self, callee: &HirExpr, args: &mut [HirExpr]) {
+        let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &callee.kind
+        else {
+            return;
+        };
+        if !matches!(segments.as_slice(), [only] if only.name == "__debug") {
+            return;
+        }
+        for arg in args.iter_mut() {
+            if !matches!(self.tcx.kind_of(arg.ty), gossamer_types::TyKind::String) {
+                continue;
+            }
+            let span = arg.span;
+            let ty = arg.ty;
+            let quote = self.free_path(&["__gos_strconv_quote"], span);
+            let inner = std::mem::replace(
+                arg,
+                HirExpr {
+                    id: self.fresh(),
+                    span,
+                    ty,
+                    kind: HirExprKind::Literal(HirLiteral::Unit),
+                },
+            );
+            arg.kind = HirExprKind::Call {
+                callee: Box::new(quote),
+                args: vec![inner],
+            };
+        }
+    }
+
     fn free_path(&mut self, segments: &[&str], span: Span) -> HirExpr {
         HirExpr {
             id: self.fresh(),
@@ -1443,6 +1479,7 @@ impl Lowerer<'_> {
                     let callee = Box::new(self.lower_expr(callee));
                     let mut args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
                     self.resolve_format_pad_request(&callee, &mut args);
+                    self.quote_debug_strings(&callee, &mut args);
                     self.append_const_generic_args(callee_node, &mut args, expr.span);
                     HirExprKind::Call { callee, args }
                 }
@@ -1467,6 +1504,11 @@ impl Lowerer<'_> {
                 }
                 if let Some(desugared) = self.desugar_or_insert_value(expr) {
                     return desugared.kind;
+                }
+                if let Some(kind) =
+                    self.desugar_btree_map_method(expr, receiver, name.name.as_str(), args)
+                {
+                    return kind;
                 }
                 // Crossing an opaque alias's boundary with `.into()` is the
                 // identity: the two types share one representation, and the
@@ -3608,6 +3650,18 @@ impl Lowerer<'_> {
     }
 
     fn lower_path_expr(&mut self, node: NodeId, path: &gossamer_ast::PathExpr) -> HirExprKind {
+        // A numeric limit constant folds to its literal, so every tier
+        // compiles the same value.
+        if let [ty_name, name] = path.segments.as_slice()
+            && matches!(self.resolutions.get(node), Some(Resolution::Primitive(_)))
+            && let Some(constant) =
+                gossamer_resolve::limit_constant(&ty_name.name.name, &name.name.name)
+        {
+            return HirExprKind::Literal(match constant.literal {
+                gossamer_resolve::LimitLiteral::Int(text) => HirLiteral::Int(text),
+                gossamer_resolve::LimitLiteral::Float(text) => HirLiteral::Float(text),
+            });
+        }
         let mut segments: Vec<Ident> = path.segments.iter().map(|s| s.name.clone()).collect();
         // A single-segment name bound by `use` and targeting a
         // `[rust-bindings]` item or stdlib free function expands to its full
@@ -3718,8 +3772,11 @@ impl Lowerer<'_> {
             Some(Resolution::Def { def, .. }) => Some(def),
             // A `use`-imported name keeps its opaque import resolution, so
             // the definition it targets is what carries the canonical
-            // spelling the rewrite below needs.
-            Some(Resolution::Import { .. }) => self.resolutions.import_def(node),
+            // spelling the rewrite below needs. That definition is the
+            // head's: a longer path names something inside it.
+            Some(Resolution::Import { .. }) if segments.len() == 1 => {
+                self.resolutions.import_def(node)
+            }
             _ => None,
         };
         // A reference to an inline-module function - bare from inside
@@ -3981,6 +4038,143 @@ impl Lowerer<'_> {
     /// value word; an aggregate default's stack word stored raw leaves
     /// the map pointing at a dead frame slot, while get / default /
     /// insert all carry aggregates correctly on every tier.
+    /// The ordered surface of a `BTreeMap` in terms of two primitives every
+    /// tier implements: `__window(lo, hi, take)`, a new map of the entries
+    /// ranked `lo..hi` (a negative `lo` counts back from the end; `take`
+    /// moves them out of the receiver), and `__range(lo, hi, mode)`, a new
+    /// map of the entries between two keys. Each walks the result with the
+    /// map's own `iter()`, so the receiver is evaluated once.
+    fn desugar_btree_map_method(
+        &mut self,
+        expr: &AstExpr,
+        receiver: &AstExpr,
+        method: &str,
+        args: &[AstExpr],
+    ) -> Option<HirExprKind> {
+        use gossamer_types::{IntTy, TyKind};
+        let mut map_ty = self.ty_of(receiver.id);
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(map_ty) {
+            map_ty = *inner;
+        }
+        // A `BTreeMap` walks `(K, V)` pairs; a `BTreeSet` walks its elements.
+        let entry = match self.tcx.kind_of(map_ty) {
+            TyKind::HashMap {
+                key,
+                value,
+                ordered: true,
+            } => {
+                let (key, value) = (*key, *value);
+                self.tcx.intern(TyKind::Tuple(vec![key, value]))
+            }
+            TyKind::Adt { def, substs }
+                if self.tcx.def_name(*def) == Some("BTreeSet")
+                    && matches!(
+                        method,
+                        "first" | "last" | "pop_first" | "pop_last" | "range"
+                    ) =>
+            {
+                substs.types().first().copied()?
+            }
+            _ => return None,
+        };
+        let span = expr.span;
+        let ty = self.ty_of(expr.id);
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let iter_ty = self.tcx.intern(TyKind::Iterator(entry));
+        let (window, take) = match (method, args) {
+            ("first_key_value" | "first", []) => ((0, 1), 0),
+            ("last_key_value" | "last", []) => ((-1, i64::MAX), 0),
+            ("pop_first", []) => ((0, 1), 1),
+            ("pop_last", []) => ((-1, i64::MAX), 1),
+            ("range", [arg]) => {
+                let AstExprKind::Range { start, end, kind } = &arg.kind else {
+                    return None;
+                };
+                let recv = self.lower_expr(receiver);
+                let inclusive = matches!(kind, gossamer_ast::RangeKind::Inclusive);
+                let slice = match (start, end) {
+                    (None, None) => recv,
+                    (Some(lo), Some(hi)) => {
+                        let (lo, hi) = (self.lower_expr(lo), self.lower_expr(hi));
+                        let mode = self.int_lit(3 | if inclusive { 4 } else { 0 }, i64_ty, span);
+                        self.method_call(recv, "__range", vec![lo, hi, mode], map_ty, span)
+                    }
+                    (Some(bound), None) | (None, Some(bound)) => {
+                        let bound = self.lower_expr(bound);
+                        let mode = if start.is_some() {
+                            1
+                        } else {
+                            2 | if inclusive { 4 } else { 0 }
+                        };
+                        let bound_ty = bound.ty;
+                        let bind =
+                            self.entry_let_stmt(span, "__range_bound", bound_ty, false, bound);
+                        let lo = self.entry_path(span, "__range_bound", bound_ty);
+                        let hi = self.entry_path(span, "__range_bound", bound_ty);
+                        let mode = self.int_lit(mode, i64_ty, span);
+                        let call =
+                            self.method_call(recv, "__range", vec![lo, hi, mode], map_ty, span);
+                        let walk = self.method_call(call, "iter", Vec::new(), iter_ty, span);
+                        return Some(HirExprKind::Block(HirBlock {
+                            id: self.fresh(),
+                            span,
+                            stmts: vec![bind],
+                            tail: Some(Box::new(walk)),
+                            ty: iter_ty,
+                            is_comptime: false,
+                        }));
+                    }
+                };
+                return Some(
+                    self.method_call(slice, "iter", Vec::new(), iter_ty, span)
+                        .kind,
+                );
+            }
+            _ => return None,
+        };
+        let recv = self.lower_expr(receiver);
+        let window_args = vec![
+            self.int_lit(window.0, i64_ty, span),
+            self.int_lit(window.1, i64_ty, span),
+            self.int_lit(take, i64_ty, span),
+        ];
+        let slice = self.method_call(recv, "__window", window_args, map_ty, span);
+        let walk = self.method_call(slice, "iter", Vec::new(), iter_ty, span);
+        Some(self.method_call(walk, "next", Vec::new(), ty, span).kind)
+    }
+
+    /// `receiver.name(args)` typed `ty`.
+    fn method_call(
+        &mut self,
+        receiver: HirExpr,
+        name: &str,
+        args: Vec<HirExpr>,
+        ty: Ty,
+        span: Span,
+    ) -> HirExpr {
+        HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                name: Ident::new(name),
+                args,
+                owner: None,
+            },
+        }
+    }
+
+    /// An integer literal typed `ty`.
+    fn int_lit(&mut self, value: i64, ty: Ty, span: Span) -> HirExpr {
+        HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Literal(HirLiteral::Int(value.to_string())),
+        }
+    }
+
     fn desugar_or_insert_value(&mut self, expr: &AstExpr) -> Option<HirExpr> {
         let AstExprKind::MethodCall {
             receiver: map_expr,

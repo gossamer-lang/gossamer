@@ -1,0 +1,40 @@
+// Goroutines in one cohort read disjoint and overlapping ranges of one file
+// positionally; each checks its bytes against the pattern that was written.
+use std::{env, fs, path}
+use std::sync::channel
+
+fn expected(offset: i64, len: i64) -> Vec<u8> {
+    let mut out: Vec<u8> = #[]
+    for i in offset..offset + len { out.push((i * 13 % 251) as u8) }
+    out
+}
+
+fn main() {
+    let file_path = path::join(env::temp_dir(), "gos_fs_positional_goroutines.bin")
+    fs::write(file_path, expected(0, 65536)).unwrap()
+    let tx, rx = channel(8)
+    cohort {
+        for worker in 0..8 {
+            let t = tx
+            spawn(|| {
+                let f = fs::File::open(file_path).unwrap()
+                let mut buf: Vec<u8> = #[]
+                let mut good = 0
+                for step in 0..200 {
+                    let offset = (worker * 4096 + step * 97) % 60000
+                    let len = 64 + step % 512
+                    let bytes = f.read_at(len, offset).unwrap()
+                    let n = f.read_at_into(&mut buf, len, offset).unwrap()
+                    if bytes == expected(offset, len) && n == len && buf == bytes { good += 1 }
+                }
+                t.send((worker, good))
+            })
+        }
+    }.unwrap()
+    tx.close()
+    let mut results: Vec<(i64, i64)> = #[]
+    while let Some(r) = rx.recv() { results.push(r) }
+    results.sort()
+    println("{:?}", results)
+    fs::remove_file(file_path).unwrap()
+}

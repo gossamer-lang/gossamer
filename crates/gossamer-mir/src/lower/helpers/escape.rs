@@ -874,6 +874,49 @@ pub fn collect_shareable_params(
     out
 }
 
+/// Standard-library modules whose functions keep nothing they are handed:
+/// each answers from its arguments alone and stores none of them.
+const STATELESS_STD_MODULES: &[&str] = &[
+    "adler32", "ascii85", "base32", "base64", "binary", "bits", "blake3", "crc32", "fnv", "hex",
+    "hmac", "math", "sha256", "sha512", "strconv", "strings", "subtle", "unicode", "utf8",
+];
+
+/// Whether a call reads its container arguments without keeping them: the
+/// callee is a standard-library function of a stateless module, and the value
+/// it answers has no field that could hold one of them.
+fn std_call_reads_args(tcx: &TyCtxt, callee: &HirExpr, answer: Ty) -> bool {
+    let HirExprKind::Path {
+        segments,
+        def: None,
+    } = &callee.kind
+    else {
+        return false;
+    };
+    let [.., module, _] = segments.as_slice() else {
+        return false;
+    };
+    STATELESS_STD_MODULES.contains(&module.name.as_str()) && cannot_carry(tcx, answer)
+}
+
+/// Whether a value of `ty` has nowhere to hold a container: a scalar, a
+/// `String`, or an `Option`, `Result`, or tuple built only from those.
+fn cannot_carry(tcx: &TyCtxt, ty: Ty) -> bool {
+    match tcx.kind_of(ty) {
+        TyKind::Int(_)
+        | TyKind::Float(_)
+        | TyKind::Bool
+        | TyKind::Char
+        | TyKind::Unit
+        | TyKind::String
+        | TyKind::DynError => true,
+        TyKind::Tuple(elems) => elems.iter().all(|t| cannot_carry(tcx, *t)),
+        TyKind::Adt { def, substs } if def.local == u32::MAX || def.local == u32::MAX - 1 => {
+            substs.types().iter().all(|t| cannot_carry(tcx, *t))
+        }
+        _ => false,
+    }
+}
+
 /// Whether a parameter's storage stays inside its call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ParamShare {
@@ -919,6 +962,9 @@ const READ_ONLY_ARG_METHODS: &[&str] = &[
     "starts_with",
 ];
 
+/// Sequence methods that answer the elements they read in a vector of its own.
+const FRESH_COPY_METHODS: &[&str] = &["clone", "slice", "to_vec"];
+
 /// Walks a body looking for any mention of one parameter outside a read-only
 /// place position.
 struct ShareScan<'a> {
@@ -959,6 +1005,20 @@ impl ShareScan<'_> {
             return true;
         }
         is_copy_ty(self.tcx, ty)
+    }
+
+    /// Whether `receiver.method(..)` answers elements copied out of the
+    /// receiver into storage of their own, sharing nothing with it: a copy of
+    /// a sequence whose elements are scalars or strings.
+    fn answers_fresh_copy(&mut self, receiver: &HirExpr, method: &str) -> bool {
+        if !FRESH_COPY_METHODS.contains(&method) {
+            return false;
+        }
+        let elem = match self.tcx.kind_of(receiver.ty) {
+            TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => *elem,
+            _ => return false,
+        };
+        matches!(self.tcx.kind_of(elem), TyKind::String) || self.copy(elem)
     }
 
     fn block(&mut self, b: &HirBlock, place: bool, returned: bool) {
@@ -1041,7 +1101,9 @@ impl ShareScan<'_> {
                 // a view of it - and is read-only only where the whole call
                 // already sits in a read-only place. This is the rule the
                 // field projection below follows, for the same reason.
-                let scalar = self.copy(e.ty);
+                // A method answering fresh storage copied out of a sequence of
+                // scalars or strings answers nothing that reaches the receiver.
+                let scalar = self.copy(e.ty) || self.answers_fresh_copy(receiver, &name.name);
                 self.expr(receiver, place || scalar, returned && !scalar);
                 // A method that only reads the argument it is handed leaves
                 // the argument's storage inside the call, exactly as a field
@@ -1062,7 +1124,16 @@ impl ShareScan<'_> {
                     HirExprKind::Path { def: Some(d), .. } => Some(*d),
                     _ => None,
                 };
+                // A standard-library function that keeps no state and answers
+                // a value unable to hold its argument can only read it.
+                let std_reads = std_call_reads_args(self.tcx, callee, e.ty);
                 for (idx, a) in args.iter().enumerate() {
+                    if std_reads
+                        && let HirExprKind::Path { segments, .. } = &a.kind
+                        && self.is_tracked(segments)
+                    {
+                        continue;
+                    }
                     // The argument that is exactly the parameter's name is a
                     // forward: whether it stays inside the call is the
                     // callee's own answer for that position.

@@ -712,10 +712,13 @@ fn report_fatal_deadlock(op: &str) -> ! {
     std::process::exit(101);
 }
 
+pub use crate::sched::multi::{SYSCALL_HANDOFF_THRESHOLD, SyscallGuard, syscall_enter};
+
 /// Runs a potentially blocking OS operation without pinning a scheduler
-/// worker. When called from a goroutine, the operation moves to a short-lived
-/// OS thread and the goroutine parks until completion; outside the scheduler
-/// the closure runs inline to preserve ordinary blocking semantics.
+/// worker. When called from a goroutine, the operation runs on the blocking
+/// pool ([`crate::blocking_pool`]) and the goroutine parks until completion;
+/// outside the scheduler the closure runs inline to preserve ordinary
+/// blocking semantics.
 pub fn run_blocking<T, F>(label: &'static str, f: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -741,19 +744,17 @@ where
     };
 
     let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    thread::Builder::new()
-        .name(format!("gos-blocking-{label}"))
-        .spawn(move || {
-            let result = std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|panic| {
-                format!(
-                    "{label}: blocking operation panicked: {}",
-                    panic_message(panic)
-                )
-            });
-            let _ = tx.send(result);
-            scheduler().unpark(gid);
-        })
-        .map_err(|e| format!("{label}: spawn blocking worker: {e}"))?;
+    crate::blocking_pool::submit(Box::new(move || {
+        let result = std::panic::catch_unwind(AssertUnwindSafe(f)).map_err(|panic| {
+            format!(
+                "{label}: blocking operation panicked: {}",
+                panic_message(panic)
+            )
+        });
+        let _ = tx.send(result);
+        scheduler().unpark(gid);
+    }))
+    .map_err(|e| format!("{label}: {e}"))?;
 
     park(ParkReason::Other, |_parker| {});
 

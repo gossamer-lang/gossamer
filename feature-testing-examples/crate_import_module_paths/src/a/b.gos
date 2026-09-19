@@ -1,0 +1,2 @@
+pub fn f(x: i64) -> i64 { x + 1 }
+pub (package) fn g(s: String) -> String { s + "!" }

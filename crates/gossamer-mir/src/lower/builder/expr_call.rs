@@ -202,10 +202,18 @@ impl<'a> Builder<'a> {
         ty: Ty,
         span: Span,
     ) -> Option<Local> {
+        // A callee the resolver bound to a program function is that
+        // function, whatever its path spells: a user module may declare
+        // `json::render` or `fs::read`, and the standard library's lowering
+        // for those names must never capture the call.
+        let user_fn = matches!(
+            &callee.kind,
+            HirExprKind::Path { def: Some(def), .. } if self.fn_inputs.contains_key(def)
+        );
         // `http::serve(addr, handler)` shortcut: pass the handler's
         // serve method address as a third argument so the runtime
         // can dispatch back into Gossamer code per request.
-        if let HirExprKind::Path { segments, .. } = &callee.kind {
+        if !user_fn && let HirExprKind::Path { segments, .. } = &callee.kind {
             let joined: String = segments
                 .iter()
                 .map(|s| s.name.as_str())
@@ -682,19 +690,21 @@ impl<'a> Builder<'a> {
             // (SPEC §10.4 / §10.4a / §10.4b). Data-last; closures
             // pass through `coerce_to_fn_trait_if_needed` so the
             // unified callable infra builds a real env pointer.
-            let joined: String = segments
-                .iter()
-                .map(|s| s.name.as_str())
-                .collect::<Vec<_>>()
-                .join("::");
-            if let Some(local) = self.try_lower_iter_call(&joined, args, ty, span) {
-                return Some(local);
-            }
-            if let Some(local) = self.try_lower_option_call(&joined, args, ty, span) {
-                return Some(local);
-            }
-            if let Some(local) = self.try_lower_combinator_call(&joined, args, ty, span) {
-                return Some(local);
+            if !user_fn {
+                let joined: String = segments
+                    .iter()
+                    .map(|s| s.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("::");
+                if let Some(local) = self.try_lower_iter_call(&joined, args, ty, span) {
+                    return Some(local);
+                }
+                if let Some(local) = self.try_lower_option_call(&joined, args, ty, span) {
+                    return Some(local);
+                }
+                if let Some(local) = self.try_lower_combinator_call(&joined, args, ty, span) {
+                    return Some(local);
+                }
             }
         }
         // When the callee's `DefId` is known and its declared
@@ -826,23 +836,23 @@ impl<'a> Builder<'a> {
         // whether the user wrote `use std::encoding::json` and
         // `json::parse(...)` or the fully-qualified
         // `std::encoding::json::parse(...)` form.
-        if let Some(local) = self.lower_json_free_call(callee, args, span) {
+        if !user_fn && let Some(local) = self.lower_json_free_call(callee, args, span) {
             return Some(local);
         }
-        if let Some(local) = self.lower_dyn_value_ctor(callee, args, span) {
+        if !user_fn && let Some(local) = self.lower_dyn_value_ctor(callee, args, span) {
             return Some(local);
         }
         // External Rust binding (`tuigoose::layout::rect`, etc.).
         // Resolves through `gossamer_resolve::external` populated
         // either by the runner's `install_all` or the build-time
         // `ensure_signatures` pass.
-        if let Some(local) = self.lower_external_binding_call(callee, args, span) {
+        if !user_fn && let Some(local) = self.lower_external_binding_call(callee, args, span) {
             return Some(local);
         }
         // Same for the rest of the stdlib that maps cleanly to
         // a single runtime helper (errors, regex, fs, path,
         // bufio, http, gzip, slog, testing, …).
-        if let Some(local) = self.lower_stdlib_free_call(callee, args, span) {
+        if !user_fn && let Some(local) = self.lower_stdlib_free_call(callee, args, span) {
             return Some(local);
         }
         // If the callee is a bare path that resolves to a local

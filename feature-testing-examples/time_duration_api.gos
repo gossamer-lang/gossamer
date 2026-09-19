@@ -1,0 +1,17 @@
+// `time::Duration` counts nanoseconds: its constructors and accessors
+// convert units, it adds, subtracts, and orders, and it is its own type.
+use std::time
+
+fn main() {
+    let d = time::Duration::from_millis(1500)
+    println("{} {} {} {}", d.as_nanos(), d.as_micros(), d.as_millis(), d.as_secs())
+    println("{}", d.as_secs_f64())
+    let n = time::Duration::from_nanos(250)
+    let f = time::Duration::from_secs_f64(0.25)
+    println("{} {}", n.as_nanos(), f.as_millis())
+    let sum = d + f
+    let diff = d - f
+    println("{} {}", sum.as_millis(), diff.as_millis())
+    println("{} {} {}", f < d, d == time::Duration::from_micros(1500000), sum > d)
+    println("{}", time::Duration::from_secs(2).as_millis())
+}

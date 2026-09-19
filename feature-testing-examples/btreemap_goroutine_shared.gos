@@ -1,0 +1,38 @@
+// Goroutines in one cohort each fill their own `BTreeMap` and send it back;
+// the receiver merges them into one map whose order, ranges, and ends are
+// the same on every tier.
+use std::sync::channel
+
+fn fill(worker: i64) -> BTreeMap<i64, String> {
+    let mut part: BTreeMap<i64, String> = BTreeMap::new()
+    for i in 0..50 {
+        let key = (i * 7919 + worker * 131) % 1000
+        part.insert(key, format("w{}-{}", worker, i))
+    }
+    part
+}
+
+fn main() {
+    let tx, rx = channel(4)
+    cohort {
+        for worker in 0..4 {
+            let t = tx
+            spawn(|| t.send(fill(worker)))
+        }
+    }.unwrap()
+    tx.close()
+    let mut merged: BTreeMap<i64, String> = BTreeMap::new()
+    let mut parts = 0
+    while let Some(part) = rx.recv() {
+        parts += 1
+        for (k, v) in part.iter() {
+            if !merged.contains_key(k) { merged.insert(k, v) }
+        }
+    }
+    let low: Vec<(i64, String)> = merged.range(..20).collect()
+    let keys = merged.keys()
+    let ascending = keys.windows(2).all(|w| w[0] < w[1])
+    println("{} {} {}", parts, merged.len(), ascending)
+    println("{:?}", low)
+    println("{:?} {:?}", merged.first_key_value(), merged.last_key_value())
+}

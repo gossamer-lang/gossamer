@@ -605,7 +605,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         record_channel_elem_kind(body, tcx);
         drop_confined_channels(body);
         clear_region_on_call_results(body);
-        free_overwritten_ctor_values(body, &container_ctor_free);
+        free_overwritten_ctor_values(body, tcx, &container_ctor_free);
         insert_drops_at_returns(body, tcx);
         complete_ok_or_err_kind(body, tcx);
         insert_rc_releases(body, tcx);

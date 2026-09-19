@@ -267,3 +267,27 @@ fn parallel_benchmark_rc_calls_are_pinned() {
         "an adapter's result was copied into its binding"
     );
 }
+
+#[test]
+fn a_parameter_buffer_reaches_std_readers_uncopied() {
+    let functions = [
+        "main",
+        "word_at",
+        "wide_at",
+        "window_crc",
+        "whole_crc",
+        "digest",
+        "text_at",
+        "field_at",
+    ];
+    let counts = rc_call_counts(
+        "feature-testing-examples/std_calls_borrow_param_buffers.gos",
+        &functions,
+    );
+    for function in functions {
+        assert_eq!(
+            counts[function].clone, 0,
+            "{function} copies a buffer a standard-library reader only reads"
+        );
+    }
+}

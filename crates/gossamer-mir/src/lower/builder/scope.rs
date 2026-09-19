@@ -50,10 +50,9 @@ use super::Builder;
 
 impl<'a> Builder<'a> {
     pub(crate) fn push_local(&mut self, ty: Ty, debug_name: Option<Ident>, mutable: bool) -> Local {
-        // `time::Duration` / `time::Instant` are transparent `i64`
-        // newtypes: their distinct kinds exist only to steer method-form
-        // accessor dispatch on the HIR side. Storage and codegen treat
-        // them as an `i64`, so locals never carry those kinds.
+        // `time::Duration` / `time::Instant` are an `i64` of nanoseconds at
+        // run time: their distinct kinds are the checker's. Storage and
+        // codegen treat them as an `i64`, so locals never carry those kinds.
         let ty = if matches!(self.tcx.kind_of(ty), TyKind::Duration | TyKind::Instant) {
             self.tcx.int_ty(IntTy::I64)
         } else if let Some(carrier) =

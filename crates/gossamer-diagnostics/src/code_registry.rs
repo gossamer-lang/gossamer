@@ -1452,6 +1452,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             use `cohort { }` with `spawn` for work that must perform effects.",
     ),
     (
+        "GT0091",
+        "`m.range(r)` on a `BTreeMap` reads its bounds from the range written\n\
+            in the call, and each bound is a key: `m.range(\"b\"..\"d\")` over\n\
+            `String` keys, `m.range(lo..=hi)`, `m.range(lo..)`, `m.range(..hi)`, or\n\
+            `m.range(..)`. A range stored in a binding carries no bounds a key\n\
+            can be compared with, so write the range in place.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\

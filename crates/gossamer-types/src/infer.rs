@@ -381,13 +381,6 @@ impl InferCtxt {
             (TyKind::Never | TyKind::Error, _) | (_, TyKind::Never | TyKind::Error) => Ok(()),
             (TyKind::Var(vid), _) => self.bind_var(tcx, *vid, rhs),
             (_, TyKind::Var(vid)) => self.bind_var(tcx, *vid, lhs),
-            // `time::Duration` is a transparent `i64` newtype: it unifies
-            // freely with any integer kind so passing a Duration to an
-            // `i64` parameter, comparing it, or assigning it to an
-            // annotated `i64` binding all type-check.
-            (TyKind::Duration, TyKind::Int(_)) | (TyKind::Int(_), TyKind::Duration) => Ok(()),
-            // `time::Instant` is likewise a transparent `i64` newtype.
-            (TyKind::Instant, TyKind::Int(_)) | (TyKind::Int(_), TyKind::Instant) => Ok(()),
             _ if lhs_kind == rhs_kind => Ok(()),
             _ => self.unify_structural(tcx, lhs_kind, rhs_kind),
         }

@@ -456,9 +456,9 @@ through `.as_bytes()` which returns an owned `Vec<u8>`.
 | `[T; N]` | Owned fixed-size array. The length is part of its type. |
 | `[T]` | Unsized slice. Ordinarily used as `&[T]` or `&mut [T]`. |
 | `Map<K, V>` | Hash map. Analogue of Go's `map[K]V`. |
-| `BTreeMap<K, V>` | Ordered map. |
+| `BTreeMap<K, V>` | Ordered map: a B+ tree keyed in the language's order, with `first_key_value`, `last_key_value`, `pop_first`, `pop_last`, and `range(lo..hi)`. |
 | `Set<T>` | Unordered set. |
-| `BTreeSet<T>` | Ordered set. |
+| `BTreeSet<T>` | Ordered set, with `first`, `last`, `pop_first`, `pop_last`, and `range(lo..hi)`. |
 | `Deque<T>` | Double-ended queue. |
 | `Queue<T>` | FIFO queue. |
 | `Stack<T>` | LIFO stack. |
@@ -649,7 +649,7 @@ for readability and forward compatibility.
 
 ```
 Param       = [ "comptime" ] Pattern ":" Type [ "=" ConstExpr ]
-CallArg     = [ Ident "=" ] Expr
+CallArg     = [ Ident ":" ] Expr
 ```
 
 A call may name the parameter each argument fills, and a parameter may
@@ -659,8 +659,8 @@ declare a constant default.
 fn volume(width: i64, height: i64 = 2, depth: i64 = 3) -> i64 { .. }
 
 volume(2)                              // 2, 2, 3
-volume(depth = 4, width = 2, height = 3)  // 2, 3, 4
-volume(2, depth = 10)                   // 2, 2, 10
+volume(depth: 4, width: 2, height: 3)  // 2, 3, 4
+volume(2, depth: 10)                   // 2, 2, 10
 ```
 
 Both are spellings at the call site. Between name resolution and type

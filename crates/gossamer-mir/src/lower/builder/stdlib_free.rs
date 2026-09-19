@@ -3286,21 +3286,24 @@ impl<'a> Builder<'a> {
     fn lower_time_free(
         &mut self,
         joined: &str,
-        _args: &[HirExpr],
+        args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
-            // 0.10.0 - time::Duration helpers. Duration is represented
-            // as i64 nanoseconds end-to-end through the compiled tier.
-            "time::Duration::from_secs" => (
-                "gos_rt_duration_from_secs",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "time::Duration::from_millis" => (
-                "gos_rt_duration_from_millis",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
-            "time::Duration::from_micros" => (
-                "gos_rt_duration_from_micros",
+            // `time::Duration` is a count of nanoseconds and `time::Instant`
+            // a monotonic reading in nanoseconds, both an `i64` at run time.
+            "time::Duration::from_nanos" => ("gos_rt_duration_from_nanos", self.tcx.duration_ty()),
+            "time::Duration::from_micros" => {
+                ("gos_rt_duration_from_micros", self.tcx.duration_ty())
+            }
+            "time::Duration::from_millis" => {
+                ("gos_rt_duration_from_millis", self.tcx.duration_ty())
+            }
+            "time::Duration::from_secs" => ("gos_rt_duration_from_secs", self.tcx.duration_ty()),
+            "time::Duration::from_secs_f64" => {
+                ("gos_rt_duration_from_secs_f64", self.tcx.duration_ty())
+            }
+            "time::Duration::as_nanos" => (
+                "gos_rt_duration_as_nanos",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
             "time::Duration::as_millis" => (
@@ -3314,6 +3317,10 @@ impl<'a> Builder<'a> {
             "time::Duration::as_micros" => (
                 "gos_rt_duration_as_micros",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
+            "time::Duration::as_secs_f64" => (
+                "gos_rt_duration_as_secs_f64",
+                self.tcx.float_ty(gossamer_types::FloatTy::F64),
             ),
             "__gos_time_location_raw" => (
                 "gos_rt_time_location_raw",
@@ -3362,7 +3369,15 @@ impl<'a> Builder<'a> {
             // 0.10.0 - time::* free fns previously VM-only. The
             // monotonic/now shims already existed in the runtime;
             // these arms route the language-level calls to them.
+            // A wait given as a `Duration` counts nanoseconds; an integer
+            // counts milliseconds.
+            "time::sleep" if self.arg_is_duration(args.first()) => {
+                ("gos_rt_sleep_ns", self.tcx.unit())
+            }
             "time::sleep" => ("gos_rt_sleep_ms", self.tcx.unit()),
+            "time::sleep_ctx" if self.arg_is_duration(args.get(1)) => {
+                ("gos_rt_sleep_ns_ctx", self.tcx.bool_ty())
+            }
             "time::sleep_ctx" => ("gos_rt_sleep_ms_ctx", self.tcx.bool_ty()),
             "smtp::send" => ("gos_rt_smtp_send", self.result_unit_error_adt_ty()),
             "smtp::send_auth" => ("gos_rt_smtp_send_auth", self.result_unit_error_adt_ty()),
@@ -3393,20 +3408,22 @@ impl<'a> Builder<'a> {
                 "gos_rt_time_since_ms",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
-            // `time::Instant` is a transparent `i64` of monotonic ms.
-            // `Instant::now()` samples the monotonic clock; `elapsed_ms`
-            // is the monotonic delta from that sample, so both route to
-            // the existing monotonic helpers.
-            "time::Instant::now" => (
-                "gos_rt_monotonic_ms",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
-            ),
+            "time::Instant::now" => ("gos_rt_instant_now", self.tcx.instant_ty()),
             "time::Instant::elapsed_ms" => (
-                "gos_rt_time_since_ms",
+                "gos_rt_instant_elapsed_ms",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
+            "time::Instant::elapsed" => ("gos_rt_instant_elapsed", self.tcx.duration_ty()),
+            "time::Instant::duration_since" => {
+                ("gos_rt_instant_duration_since", self.tcx.duration_ty())
+            }
             _ => return None,
         })
+    }
+
+    /// Whether a call argument is a `time::Duration`.
+    fn arg_is_duration(&self, arg: Option<&HirExpr>) -> bool {
+        arg.is_some_and(|arg| matches!(self.tcx.kind_of(arg.ty), gossamer_types::TyKind::Duration))
     }
 
     fn lower_id_misc_free(

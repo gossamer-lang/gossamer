@@ -178,7 +178,7 @@ pub(crate) fn builtin_flag_set_float(args: &[Value]) -> RuntimeResult<Value> {
     Ok(make_cell(id, flag_name, Value::Float(default)))
 }
 
-/// Duration cell - interp stores durations as i64 milliseconds, so
+/// Duration cell - a `time::Duration` is a count of nanoseconds, so
 /// the default is whatever `time::Duration::from_secs(n)` /
 /// `from_millis(n)` produced.
 pub(crate) fn builtin_flag_set_duration(args: &[Value]) -> RuntimeResult<Value> {
@@ -558,29 +558,8 @@ fn set_parse_value(def: &FlagDef, raw: &str) -> Value {
                 Value::Bool(false)
             }
         }
-        FlagKind::Duration => Value::Int(parse_duration_ms(raw).unwrap_or(0)),
+        FlagKind::Duration => {
+            Value::Int(gossamer_runtime::c_abi::flag::parse_duration_text(raw).unwrap_or(0))
+        }
     }
-}
-
-fn parse_duration_ms(text: &str) -> Option<i64> {
-    let text = text.trim();
-    if let Some(rest) = text.strip_suffix("ms") {
-        return rest.parse::<i64>().ok();
-    }
-    if let Some(rest) = text.strip_suffix("us") {
-        return rest.parse::<i64>().ok().map(|n| n / 1_000);
-    }
-    if let Some(rest) = text.strip_suffix("ns") {
-        return rest.parse::<i64>().ok().map(|n| n / 1_000_000);
-    }
-    if let Some(rest) = text.strip_suffix("s") {
-        return rest.parse::<i64>().ok().map(|n| n * 1_000);
-    }
-    if let Some(rest) = text.strip_suffix("m") {
-        return rest.parse::<i64>().ok().map(|n| n * 60_000);
-    }
-    if let Some(rest) = text.strip_suffix("h") {
-        return rest.parse::<i64>().ok().map(|n| n * 3_600_000);
-    }
-    text.parse::<i64>().ok().map(|n| n * 1_000)
 }

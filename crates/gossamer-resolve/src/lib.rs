@@ -20,16 +20,18 @@ mod def_id;
 mod diagnostic;
 mod external;
 mod named_args;
+mod numeric_limits;
 mod resolutions;
 mod resolver;
 mod scope;
 mod stdlib_exports;
 
-pub use cfg::{item_is_active, set_test_cfg, test_cfg_enabled};
+pub use cfg::{item_is_active, set_test_cfg, test_cfg_enabled, without_inactive_items};
 
 pub use def_id::{CrateId, DefId, DefIdGenerator, DefKind, ModId};
 pub use diagnostic::{ResolveDiagnostic, ResolveError};
 pub use named_args::resolve_named_arguments;
+pub use numeric_limits::{LimitConstant, LimitLiteral, limit_constant};
 pub use resolutions::{FloatWidth, IntWidth, PrimitiveTy, Resolution, Resolutions};
 pub use resolver::{project_dep_module_name, resolve_source_file};
 pub use scope::is_prelude_value;

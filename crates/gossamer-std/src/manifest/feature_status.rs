@@ -7036,6 +7036,11 @@ pub const FEATURE_STATUS: &[FeatureStatus] = &[
         doc: "OS-thread yield and CPU-count helpers only. `go`/`spawn` plus channels are the language concurrency model; there is no user-facing `thread::spawn` API.",
     },
     FeatureStatus {
+        path: "std::collections::ordered",
+        status: Status::Shipped,
+        doc: "`BTreeMap` and `BTreeSet` keep their entries in one B+ tree on every tier, keyed in the language's order for any ordered key (`u64` unsigned, floats in total order, tuples, structs, enums). `get` / `insert` / `remove` are O(log n), walks read in key order without sorting, and the ordered pair answers `first_key_value` / `last_key_value` / `pop_first` / `pop_last` (`first` / `last` on a set) and `range(lo..hi)` over every range form.",
+    },
+    FeatureStatus {
         path: "std::collections::parallel",
         status: Status::Shipped,
         doc: "`par_map`, `par_filter`, `par_reduce`, `par_sum`, `par_min`, and `par_max` on a `Vec`, an array, a slice, or an integer range spread the work over the pool and answer what their sequential twins answer on every tier. The callback is a closure literal or a named function the compiler proves pure; anything else reports GT0090. A reduction combines fixed-width leaves in index order, so its answer does not depend on the worker count.",

@@ -496,7 +496,7 @@ fn builtin_map_pop(args: &[Value]) -> RuntimeResult<Value> {
     match args.first() {
         Some(Value::Map(m)) => {
             let key = MapKey::from_value(key_val);
-            match m.lock().swap_remove(&key) {
+            match m.lock().remove(&key) {
                 Some(v) => Ok(some_variant(v)),
                 None => Ok(none_variant()),
             }
@@ -875,13 +875,16 @@ fn builtin_pop(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 fn builtin_map_new(_args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(
-        dense_map_with_capacity(16),
-    ))))
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(crate::vm_map::VmMap::with_capacity(16)))))
 }
 
 fn builtin_map_from(args: &[Value]) -> RuntimeResult<Value> {
-    let map = Arc::new(parking_lot::Mutex::new(dense_map_with_capacity(16)));
+    map_from(args, crate::vm_map::VmMap::with_capacity(16))
+}
+
+/// `Map::from` / `BTreeMap::from`: `empty` filled from the array of pairs.
+fn map_from(args: &[Value], empty: crate::vm_map::VmMap) -> RuntimeResult<Value> {
+    let map = Arc::new(parking_lot::Mutex::new(empty));
     if let Some(source) = args.first() {
         let Some(entries) = array_as_values(source) else {
             return Err(RuntimeError::Type(
@@ -920,9 +923,7 @@ fn builtin_map_with_capacity(args: &[Value]) -> RuntimeResult<Value> {
         Some(n) => crate::value::map_capacity(n)?,
         None => 0,
     };
-    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(
-        dense_map_with_capacity(cap),
-    ))))
+    Ok(Value::Map(Arc::new(parking_lot::Mutex::new(crate::vm_map::VmMap::with_capacity(cap)))))
 }
 
 fn builtin_map_get(args: &[Value]) -> RuntimeResult<Value> {
@@ -1211,7 +1212,7 @@ fn builtin_map_remove(args: &[Value]) -> RuntimeResult<Value> {
                 return Ok(none_variant());
             };
             let key = MapKey::from_value(v);
-            Ok(match map.lock().swap_remove(&key) {
+            Ok(match map.lock().remove(&key) {
                 Some(previous) => some_variant(previous),
                 None => none_variant(),
             })
@@ -1280,9 +1281,7 @@ fn builtin_map_keys(args: &[Value]) -> RuntimeResult<Value> {
             // Sort by key for deterministic order that matches `iter()`
             // and the compiled tier's implementation-defined native map
             // order.
-            let mut keys: Vec<MapKey> = map.lock().keys().cloned().collect();
-            keys.sort();
-            out.extend(keys.iter().map(MapKey::to_value));
+            out.extend(map.lock().sorted().into_iter().map(|(k, _)| k.to_value()));
         }
         Some(Value::IntMap(map)) => {
             let mut keys: Vec<i64> = map.lock().keys().copied().collect();
@@ -1348,12 +1347,12 @@ fn builtin_map_values(args: &[Value]) -> RuntimeResult<Value> {
             // Emit values in key-sorted order so `keys()` / `values()` /
             // `iter()` agree on ordering and it is deterministic across
             // tiers.
-            let mut entries: Vec<(MapKey, Value)> = map
+            let entries: Vec<(MapKey, Value)> = map
                 .lock()
-                .iter()
+                .sorted()
+                .into_iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
             out.extend(entries.into_iter().map(|(_, v)| v));
         }
         Some(Value::IntMap(map)) => {
@@ -1393,12 +1392,12 @@ pub(crate) fn builtin_map_iter(args: &[Value]) -> RuntimeResult<Value> {
     // the two.
     match args.first() {
         Some(Value::Map(map)) => {
-            let mut entries: Vec<(MapKey, Value)> = map
+            let entries: Vec<(MapKey, Value)> = map
                 .lock()
-                .iter()
+                .sorted()
+                .into_iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            entries.sort_by(|a, b| a.0.cmp(&b.0));
             let out: Vec<Value> = entries
                 .into_iter()
                 .map(|(k, v)| Value::Tuple(Arc::from(vec![k.to_value(), v])))
@@ -1473,7 +1472,7 @@ fn builtin_map_inc_batch(args: &[Value]) -> RuntimeResult<Value> {
             if let Some(Value::Array(items)) = args.get(1) {
                 for v in items.iter() {
                     let key = MapKey::from_value(v);
-                    let entry = locked.entry(key).or_insert(Value::Int(0));
+                    let entry = locked.get_or_insert_with(key, || Value::Int(0));
                     if let Value::Int(n) = entry {
                         *n += by;
                     }

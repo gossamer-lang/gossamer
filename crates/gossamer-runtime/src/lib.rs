@@ -261,6 +261,7 @@ pub mod comptime_paths;
 pub mod comptime_policy;
 pub mod coverage;
 pub mod fs_mode;
+pub mod ordered;
 pub mod platform;
 pub mod pprof;
 pub mod preempt;
@@ -276,6 +277,9 @@ pub mod smtp;
 // threads and a mio netpoller. The wasm playground links a
 // cooperative single-threaded equivalent (eager goroutines; a
 // would-be block diverges through `gossamer_coro::suspend`).
+// A wasm build has no threads to run blocking operations on.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod blocking_pool;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sched_global;
 #[cfg(target_arch = "wasm32")]

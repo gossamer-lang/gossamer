@@ -44,11 +44,11 @@ pub use builtin_traits::{
 };
 pub use checker::{
     STDLIB_TRAIT_NAMES, core_type_accepts_method, core_type_declares_method,
-    is_array_sequence_method, is_collection_traversal_method, is_free_call_only_traversal,
-    is_iterator_method, is_map_method, is_set_method, is_slice_sequence_method, is_tuple_method,
-    is_tuple_rejected_method, is_vec_only_sequence_method, iterator_adapter_is_lazy,
-    iterator_receiver_accepts_method, typecheck_source_file,
-    typecheck_source_file_for_repl_inspection,
+    is_array_sequence_method, is_btree_map_method, is_btree_set_method,
+    is_collection_traversal_method, is_free_call_only_traversal, is_iterator_method, is_map_method,
+    is_set_method, is_slice_sequence_method, is_tuple_method, is_tuple_rejected_method,
+    is_vec_only_sequence_method, iterator_adapter_is_lazy, iterator_receiver_accepts_method,
+    typecheck_source_file, typecheck_source_file_for_repl_inspection,
 };
 pub use context::{PackedLayout, PlainLayout, TyCtxt};
 pub use error::{NotDisplayableClass, TypeDiagnostic, TypeError};

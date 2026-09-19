@@ -384,7 +384,7 @@ pub enum Value {
     /// `(K, V)` power-of-two bucket slack on map-heavy workloads. The mutex keeps
     /// `Value: Send + Sync` so goroutines can pass maps through
     /// channels.
-    Map(Arc<parking_lot::Mutex<DenseMap<MapKey, Value>>>),
+    Map(Arc<parking_lot::Mutex<crate::vm_map::VmMap>>),
     /// Typed `HashMap<i64, i64>` aggregate. Skips the [`MapKey`]
     /// enum-tag dispatch on every op and avoids the [`Value`]
     /// box around each integer value. k-nucleotide's k-mer
@@ -851,6 +851,24 @@ impl WeakValue {
     }
 }
 
+/// A float key's bit pattern. Keys are equal when their bits are, and order
+/// by IEEE total order: `-0.0` sorts just below `0.0` and a NaN at either
+/// end, the order the compiled tiers' ordered traversals use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FloatBits(pub u64);
+
+impl Ord for FloatBits {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        f64::from_bits(self.0).total_cmp(&f64::from_bits(other.0))
+    }
+}
+
+impl PartialOrd for FloatBits {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 /// Ordered key type for [`Value::Map`]. Wraps a [`Value`] and
 /// gives it a `(tag, content)` total order so any value the user
 /// can hash (int / bool / char / string) sorts deterministically.
@@ -882,7 +900,7 @@ pub enum MapKey {
     /// `f64` key, held as the value's bit pattern so two keys compare and
     /// hash exactly as the compiled tiers' raw eight bytes do, and read back
     /// as the float they spell.
-    Float(u64),
+    Float(FloatBits),
     /// String key (stored inline when ≤ 7 bytes - see [`SmolStr`]).
     Str(SmolStr),
     /// Aggregate key - struct / tuple / enum variant - hashed by *value*:
@@ -941,7 +959,7 @@ impl MapKey {
             Value::Char(c) => Self::Char(*c),
             // Key floats by their bit pattern - matches the compiled tier,
             // which hashes the raw 8 bytes.
-            Value::Float(f) => Self::Float(f.to_bits()),
+            Value::Float(f) => Self::Float(FloatBits(f.to_bits())),
             Value::String(s) => Self::Str(s.clone()),
             Value::Tuple(vals) => Self::Agg(Box::new(AggKey {
                 rank: 0,
@@ -1052,7 +1070,7 @@ impl MapKey {
             Self::Int(n) => Value::Int(*n),
             Self::Uint(n) => Value::Uint(*n),
             Self::Char(c) => Value::Char(*c),
-            Self::Float(bits) => Value::Float(f64::from_bits(*bits)),
+            Self::Float(bits) => Value::Float(f64::from_bits(bits.0)),
             Self::Str(s) => Value::String(s.clone()),
             // An aggregate key retains the shape it was hashed from, so it
             // rebuilds as the value the program wrote.
@@ -3642,7 +3660,7 @@ fn convert_uint_map(value: &Value, desc: &[u8], cursor: &mut usize) -> Value {
         }
         other => return other.clone(),
     }
-    Value::Map(Arc::new(parking_lot::Mutex::new(out)))
+    Value::Map(Arc::new(parking_lot::Mutex::new(out.into())))
 }
 
 /// Renders one struct field, reading it as unsigned when the declaration
@@ -3726,8 +3744,7 @@ fn repr_value(value: &Value) -> String {
         ),
         Value::Map(map) => {
             let map = map.lock();
-            let mut entries: Vec<_> = map.iter().collect();
-            entries.sort_by(|a, b| a.0.cmp(b.0));
+            let entries = map.sorted();
             format!(
                 "{{{}}}",
                 entries
@@ -3843,6 +3860,7 @@ pub(crate) fn vec_render_items(inner: &StructInner) -> Option<&Value> {
 fn render_element(value: &Value) -> String {
     match value {
         Value::Float(number) => repr_float(*number),
+        Value::String(text) => format!("{:?}", text.as_str()),
         other => other.to_string(),
     }
 }
@@ -4012,6 +4030,8 @@ pub(crate) fn error_chain_text(value: &Value) -> Option<String> {
 fn write_element(out: &mut fmt::Formatter<'_>, value: &Value) -> fmt::Result {
     match value {
         Value::Float(f) => out.write_str(&gossamer_runtime::builtins::format_float_debug(*f)),
+        // A nested string renders in the spelling that builds it.
+        Value::String(text) => write!(out, "{:?}", text.as_str()),
         other => write!(out, "{other}"),
     }
 }
@@ -4034,10 +4054,9 @@ fn write_tuple(out: &mut fmt::Formatter<'_>, parts: &[Value]) -> fmt::Result {
 /// the output is deterministic and byte-identical to the compiled
 /// tiers' `gos_rt_map_format` (native map storage has its own
 /// implementation-defined order).
-fn write_map(out: &mut fmt::Formatter<'_>, map: &DenseMap<MapKey, Value>) -> fmt::Result {
+fn write_map(out: &mut fmt::Formatter<'_>, map: &crate::vm_map::VmMap) -> fmt::Result {
     out.write_str("{")?;
-    let mut entries: Vec<(&MapKey, &Value)> = map.iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(b.0));
+    let entries = map.sorted();
     for (i, (k, v)) in entries.iter().enumerate() {
         if i > 0 {
             out.write_str(", ")?;

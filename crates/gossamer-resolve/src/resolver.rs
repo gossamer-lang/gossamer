@@ -2171,12 +2171,22 @@ impl Resolver {
     /// unbound at run time.
     fn resolve_through_import_head(&self, effective: &[&str]) -> Option<Resolution> {
         let head = effective.first()?;
-        let mut rejoined = self.imported_targets.get(*head)?.clone();
-        for seg in &effective[1..] {
-            rejoined.push_str("::");
-            rejoined.push_str(seg);
-        }
-        self.lookup_value_or_type(&rejoined)
+        let target = self.imported_targets.get(*head)?;
+        // Items register under their path from the unit root, so a `crate::`,
+        // `self::`, or `super::` target is anchored before the rest is joined.
+        let bases = if crate::diagnostic::is_relative_path(target) {
+            let segments: Vec<&str> = target.split("::").collect();
+            self.relative_candidates(&self.current_module, &segments)
+        } else {
+            vec![target.clone()]
+        };
+        bases.into_iter().find_map(|mut rejoined| {
+            for seg in &effective[1..] {
+                rejoined.push_str("::");
+                rejoined.push_str(seg);
+            }
+            self.lookup_value_or_type(&rejoined)
+        })
     }
 
     /// Reports a path whose head names an inlined dependency package that
@@ -2306,6 +2316,78 @@ impl Resolver {
             .is_none()
     }
 
+    /// A path headed by a `use "id" as alias` dependency binding. Answers
+    /// whether it resolved or reported the path.
+    fn resolve_aliased_dependency_path(
+        &mut self,
+        effective: &[&str],
+        path: &PathExpr,
+        anchor: NodeId,
+        span: Span,
+    ) -> bool {
+        // Items are registered under the module's real name, so rewrite the
+        // head and retry. The inlined module's surface is fully known, so a
+        // member that still fails to resolve is a phantom - reject it here
+        // instead of a runtime GX0002 / native undefined symbol.
+        let Some(real) = self.project_alias_modules.get(effective[0]).cloned() else {
+            return false;
+        };
+        let mut rejoined = real.clone();
+        for seg in &effective[1..] {
+            rejoined.push_str("::");
+            rejoined.push_str(seg);
+        }
+        if let Some(resolution) = self.lookup_value_or_type(&rejoined) {
+            self.resolutions.insert(anchor, resolution);
+            self.resolve_path_generic_args(path);
+            return true;
+        }
+        // An item reached through a type (`alias::Point::new`)
+        // stays opaque-by-head, exactly as the unaliased
+        // spelling does: a module binding does not carry its
+        // types' associated surfaces, so absence there says
+        // nothing about whether the item exists. Bind the head
+        // to the real module and leave the rest to the
+        // type-directed passes.
+        if effective[1..].iter().any(|seg| !starts_lowercase(seg))
+            && let Some(binding) = self.scopes.lookup_type(&real)
+        {
+            let resolution = binding.resolution;
+            self.resolutions.insert(anchor, resolution);
+            self.resolve_path_generic_args(path);
+            return true;
+        }
+        self.emit(
+            ResolveError::UnresolvedName {
+                name: effective.join("::"),
+            },
+            span,
+        );
+        self.resolutions.insert(anchor, Resolution::Err);
+        self.resolve_path_generic_args(path);
+        true
+    }
+
+    /// `i64::MIN`, `f64::EPSILON`: a numeric primitive's limit constant,
+    /// typed as the primitive it names. Answers whether `written` named one.
+    fn resolve_limit_constant(
+        &mut self,
+        written: &[&str],
+        path: &PathExpr,
+        anchor: NodeId,
+    ) -> bool {
+        let [ty_name, name] = written else {
+            return false;
+        };
+        let Some(constant) = crate::numeric_limits::limit_constant(ty_name, name) else {
+            return false;
+        };
+        self.resolutions
+            .insert(anchor, Resolution::Primitive(constant.ty));
+        self.resolve_path_generic_args(path);
+        true
+    }
+
     fn resolve_value_path(&mut self, path: &PathExpr, anchor: NodeId, span: Span) {
         let Some(head) = path.segments.first() else {
             return;
@@ -2332,6 +2414,9 @@ impl Resolver {
         // inline module (`fmt::println`, `http::Response::text` -
         // these stay opaque-by-head, matching the historical
         // tree-walker behaviour).
+        if self.resolve_limit_constant(&written, path, anchor) {
+            return;
+        }
         if effective.len() > 1 {
             self.check_dependency_import(&effective, span);
             let joined = effective.join("::");
@@ -2359,41 +2444,7 @@ impl Resolver {
                 self.resolve_path_generic_args(path);
                 return;
             }
-            // A path headed by a `use "id" as alias` dependency
-            // binding: items are registered under the module's real
-            // name, so rewrite the head and retry. The inlined
-            // module's surface is fully known, so a member that still
-            // fails to resolve is a phantom - reject it here instead
-            // of a runtime GX0002 / native undefined symbol.
-            if let Some(real) = self.project_alias_modules.get(effective[0]).cloned() {
-                let mut rejoined = real.clone();
-                for seg in &effective[1..] {
-                    rejoined.push_str("::");
-                    rejoined.push_str(seg);
-                }
-                if let Some(resolution) = self.lookup_value_or_type(&rejoined) {
-                    self.resolutions.insert(anchor, resolution);
-                    self.resolve_path_generic_args(path);
-                    return;
-                }
-                // An item reached through a type (`alias::Point::new`)
-                // stays opaque-by-head, exactly as the unaliased
-                // spelling does: a module binding does not carry its
-                // types' associated surfaces, so absence there says
-                // nothing about whether the item exists. Bind the head
-                // to the real module and leave the rest to the
-                // type-directed passes.
-                if effective[1..].iter().any(|seg| !starts_lowercase(seg))
-                    && let Some(binding) = self.scopes.lookup_type(&real)
-                {
-                    let resolution = binding.resolution;
-                    self.resolutions.insert(anchor, resolution);
-                    self.resolve_path_generic_args(path);
-                    return;
-                }
-                self.emit(ResolveError::UnresolvedName { name: joined }, span);
-                self.resolutions.insert(anchor, Resolution::Err);
-                self.resolve_path_generic_args(path);
+            if self.resolve_aliased_dependency_path(&effective, path, anchor, span) {
                 return;
             }
             if self.names_no_local_module_member(&effective)

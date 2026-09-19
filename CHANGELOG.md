@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.63.0 - Leak-free result shapes, borrowed std buffers, module-path fixes
+
+- A program module named like a standard-library module keeps its own functions on every tier: a program's `json::render`, `math::sqrt`, or `iter::map` is the function the program declared, where the bytecode VM handed its `Vec` arguments over empty and the compiled tiers called the standard-library function of that name or failed to build.
+- A `Vec` a compiled function rebinds through `?` (`let mut vals = #[]` followed by `vals = decode(..)?`) gives back the vector it held before, where every call leaked it.
+- A `Vec` read and then stored into a struct or tuple the function returns, or filled through a `&mut` helper first, is released by the function that built it, so a result such as `Ok(Res { rows: rows, count: rows.len() })` no longer keeps every row it ever returned.
+- Binding the struct payload of an enum (`Stmt::Select(q) => ..`) releases the fields the binding took a share of, on a parameter as well as on a value the function owns.
+- A path through a module imported with `crate::`, `self::`, or `super::` (`use crate::engine::bind` then `bind::stmt(..)`) type-checks and builds, where `gos build` failed with an unresolved function and the call was left untyped.
+- `gos check` checks the items the current configuration compiles and nothing else, so a `#[cfg(test)]` module no longer reports a `&mut` parameter as immutable or a labelled argument as unmatched; `gos test` checks it with the test configuration on.
+- A `Vec` parameter handed to a standard-library reader - the `encoding::binary` accessors, `hash::crc32`, `hash::fnv`, `encoding::hex`, and the other stateless encoding and hashing functions - reaches it as the caller's storage instead of being copied on every call.
+- A user function spelled like a math intrinsic (`math::sqrt` in a program module) is called as written in debug builds, where it was lowered to the floating-point intrinsic and the build failed.
+- `time::Instant` and `time::Duration` count nanoseconds and are types of their own: `t.elapsed()`, `later.duration_since(earlier)` (zero when `earlier` is later), `Duration::from_nanos` / `from_secs_f64`, and `d.as_nanos()` / `as_secs_f64()` join the existing accessors, durations add, subtract, and order, and a span under a millisecond measures as one. A `Duration` no longer passes where an integer is expected - convert with `as_millis()` or another accessor - and it renders as its nanosecond count; `time::sleep` takes a `Duration` or an integer count of milliseconds.
+- An unknown method on an `Instant` or a `Duration` (`t.elapsd()`) is reported by `gos check` with the methods the type has, where it passed the check and failed at run time or at link time.
+- `time::since_ms` takes the millisecond reading `time::monotonic_ms()` answers, as it always measured from.
+- Duration flags (`fs.duration(..)`) accept `ns`, `us`, `ms`, `s`, `m`, and `h` units and hold a `Duration`, keeping sub-millisecond values.
+- Every numeric primitive carries its limit constants - `MIN`, `MAX`, and `BITS` on the integers, and `MIN`, `MAX`, `EPSILON`, `INFINITY`, `NEG_INFINITY`, `NAN`, and `MIN_POSITIVE` on `f32` and `f64` - folded to the same value on every tier.
+- On the bytecode VM, a loop variable bound to a register an unsigned local used before no longer renders its negative values as large unsigned numbers.
+- A map keyed by an enum stores a struct value in a release build, where it kept the address of the inserting frame's copy, so a later read answered a struct with its `String` field empty and the program faulted.
+- A `BTreeMap` with float keys traverses them by value in IEEE total order on every tier - negatives first, `-0.0` just below `0.0` as a distinct key, a NaN past the infinities - where the bytecode VM ordered them by bit pattern and the compiled tiers put `-0.0` first.
+- A `String` renders in the spelling that builds it wherever it is nested - a `Vec`, fixed-array, or set element, a tuple field, an enum, `Option`, or `Result` payload, and a map value now read `"a"` as struct fields and map keys already did - and `{:?}` quotes a `String` at the top level too, while `{}` of a bare string is unchanged. Every tier renders the same text.
+- Blocking calls run on a persistent pool of threads that stay alive while idle and are capped at 512, instead of a new OS thread per call.
+- File reads, writes, and positional I/O run on the goroutine's own worker; a call that stays in the kernel past a millisecond hands its other goroutines to a fresh worker, so file I/O from a goroutine costs about what it costs on the main goroutine.
+- Positional reads and writes on one `fs::File` from several goroutines proceed in parallel, with no lock shared across files.
+- `f.read_at_into(&mut buf, len, offset)` reads into a byte buffer the caller keeps, reusing its storage, and answers the count read; `read_at` allocates its result once.
+- `BTreeMap` and `BTreeSet` keep their entries in a B+ tree on every tier: `get`, `insert`, and `remove` take O(log n), and a walk reads keys in order without sorting a copy first.
+- `BTreeMap` gains `first_key_value`, `last_key_value`, `pop_first`, `pop_last`, and `range(lo..hi)` over every range form, with bounds that are keys of any ordered type (`m.range("b".."f")`); `BTreeSet` gains `first`, `last`, `pop_first`, `pop_last`, and `range`. A range kept in a binding instead of written in the call is reported as GT0091.
+- `BTreeMap<u64, _>` and `BTreeMap<usize, _>` order keys at and above `2^63` after the smaller ones, as an unsigned key orders.
+- A map sent through a channel is the receiver's own table: a map sent from a goroutine that then finished is no longer freed under the receiver in a compiled build, the bytecode VM no longer lets the sender's later changes show through, and the receiver frees what it received.
+- `outer.get(k).unwrap()` on a map of maps no longer frees the inner map the outer map still holds in a compiled build.
+- `iter()` on a struct-, tuple-, or enum-keyed map in a compiled build answers its entries where it answered none unless it drove a `for` loop.
+- `next()` on a `zip`, on a set's `iter()`, and on a walk over enum elements builds and runs in a compiled build, where it failed to link.
+- A tuple, `Vec`, or `Option` that holds a user struct or enum renders its other `String` elements quoted on the bytecode VM too.
+- `SKILL.md` and `SPEC.md` spell labelled arguments `name: value`, as the toolchain requires, and the unmatched-label diagnostic names the label the same way.
+
 ## 0.62.0 - Parallel collections and cross-tier correctness
 
 - `par_map`, `par_filter`, `par_reduce`, `par_sum`, `par_min`, and `par_max` on a `Vec`, an array, a slice, or an integer range spread the work across every core, keeping the input's order in the result. The callback is a closure literal or a named pure function, and one that writes a container it captured is rejected rather than run on every worker at once. A call over a short input runs inline without touching the pool.

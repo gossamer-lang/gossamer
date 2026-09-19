@@ -257,7 +257,7 @@ pub const FS: StdModule = StdModule {
         StdItem {
             name: "File",
             kind: StdItemKind::Type,
-            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
+            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
         },
         StdItem {
             name: "DirInfo",

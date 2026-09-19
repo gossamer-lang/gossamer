@@ -1,5 +1,5 @@
 // Locks the `time::Instant` accessor in method form across every tier.
-// An Instant is a transparent `i64`-of-monotonic-milliseconds newtype, so
+// An Instant is its own type over a monotonic reading in nanoseconds, so
 // `inst.elapsed_ms()` must dispatch by the receiver's static type and
 // reach the same monotonic-delta helper as the qualified
 // `time::Instant::elapsed_ms(inst)` free call. Absolute times are

@@ -327,6 +327,13 @@ impl<'a> Lowerer<'a> {
                 .into_boxed_str(),
             )));
         };
+        // A callee resolved to a program function is that function, whatever
+        // its name spells: a user module may declare `math::sqrt`, and no
+        // standard-library lowering keyed on the name may capture the call.
+        if matches!(callee, Operand::FnRef { .. }) {
+            let mangled = mangle_fn_name(&name);
+            return self.emit_named_call(mangled.as_ref(), args, destination, target);
+        }
         let name = resolve_external_binding_symbol(&name, args.len()).unwrap_or(name);
         // The debug profile checks integer overflow, so an integer shim calls
         // the entry that panics where its `+` or `*` would.
@@ -552,13 +559,13 @@ impl<'a> Lowerer<'a> {
                 | "gos_enum_disc"
                 | "gos_enum_set_disc"
                 | "gos_rt_enum_struct_eq"
-                | "gos_rt_map_insert_ekey_opt"
                 | "gos_rt_map_get_ekey_opt"
                 | "gos_rt_map_contains_ekey"
                 | "gos_rt_map_pop_ekey"
                 | "gos_rt_map_get_or_ekey"
-                | "gos_rt_map_or_insert_ekey"
                 | "gos_rt_map_inc_ekey"
+                | "gos_rt_map_range_ekey"
+                | "gos_rt_set_range_ekey"
                 | "gos_rt_set_insert_ekey"
                 | "gos_rt_set_contains_ekey"
                 | "gos_rt_set_remove_ekey"
@@ -2228,6 +2235,10 @@ impl<'a> Lowerer<'a> {
             | "gos_rt_map_get_or_ekey"
             | "gos_rt_map_or_insert_ekey"
             | "gos_rt_map_inc_ekey"
+            // A range's upper bound is a second key node, and a mode word
+            // follows it.
+            | "gos_rt_map_range_ekey"
+            | "gos_rt_set_range_ekey"
             // A set of enum elements keys by the same descriptor, so its
             // `(set, node, desc)` calls lower the same way.
             | "gos_rt_set_insert_ekey"
@@ -2237,6 +2248,7 @@ impl<'a> Lowerer<'a> {
                     "gos_rt_map_insert_ekey_opt" => ("i128", true),
                     "gos_rt_map_get_ekey_opt" | "gos_rt_map_pop_ekey" => ("i128", false),
                     "gos_rt_map_contains_ekey" => ("i8", false),
+                    "gos_rt_map_range_ekey" | "gos_rt_set_range_ekey" => ("ptr", false),
                     "gos_rt_set_insert_ekey"
                     | "gos_rt_set_contains_ekey"
                     | "gos_rt_set_remove_ekey" => ("i64", false),
@@ -2265,6 +2277,13 @@ impl<'a> Lowerer<'a> {
                 declare_rt(&mut self.runtime_refs, name);
                 let tail = match &word {
                     Some(w) => format!(", i64 {w}"),
+                    None if matches!(name, "gos_rt_map_range_ekey" | "gos_rt_set_range_ekey") => {
+                        let hi = self.lower_raw_ptr_arg(&args[3])?;
+                        let mode = self.lower_operand(&args[4])?;
+                        let mode_ty = self.operand_llvm_ty(&args[4]);
+                        let mode = self.coerce_llvm_value(&mode, &mode_ty, "i64");
+                        format!(", ptr {hi}, i64 {mode}")
+                    }
                     None => String::new(),
                 };
                 let tmp = self.fresh();

@@ -225,7 +225,7 @@ impl<'tcx> FnBuilder<'tcx> {
                             self.lazy_iterator_locals.remove(&typed.reg);
                         }
                         self.record_uint_display_init(init, typed.reg);
-                        self.bind_local(&name.name, typed);
+                        self.bind_recorded_local(&name.name, typed);
                         self.install_capture_cell(&name.name, typed, init.ty);
                     } else {
                         // Declared-only - default to Value; an

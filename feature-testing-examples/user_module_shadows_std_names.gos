@@ -1,0 +1,75 @@
+// Program modules named like standard-library modules, declaring functions
+// with standard-library names and different signatures. A call reaches the
+// function the program declared, on every tier.
+mod json {
+    pub fn render(buf: Vec<u8>, keys: Vec<String>, id: i64) -> String {
+        "buf=" + buf.len().to_string() + " keys=" + keys.len().to_string() + " id=" + id.to_string()
+    }
+    pub fn encode(n: i64) -> i64 { n * 2 }
+    pub fn encode_pretty(xs: Vec<i64>, sep: String) -> String { xs.join(sep) }
+    pub fn parse(s: String) -> i64 { s.len() }
+}
+
+mod codec {
+    pub mod json {
+        pub fn render(buf: Vec<u8>, keys: Vec<String>, id: i64) -> String {
+            "codec buf=" + buf.len().to_string() + " keys=" + keys.len().to_string() + " id="
+                + id.to_string()
+        }
+    }
+}
+
+mod fs {
+    pub fn read_to_string(n: i64) -> String { "file#" + n.to_string() }
+    pub fn read(xs: Vec<i64>) -> i64 { xs.len() }
+    pub fn write(a: String, b: String) -> String { a + "|" + b }
+    pub fn exists(n: i64) -> bool { n > 0 }
+}
+
+mod time {
+    pub fn now() -> String { "noon" }
+    pub fn now_ms() -> String { "later" }
+    pub fn sleep(ms: i64) -> i64 { ms + 1 }
+}
+
+mod strings {
+    pub fn split(s: String, n: i64) -> String { s.substring(0, n) }
+    pub fn join(xs: Vec<i64>) -> i64 { xs.len() * 100 }
+    pub fn contains(a: i64, b: i64) -> bool { a > b }
+}
+
+mod math {
+    pub fn sqrt(x: i64) -> i64 { x * x }
+    pub fn abs(x: i64) -> String { "abs(" + x.to_string() + ")" }
+    pub fn pow(a: i64, b: i64) -> i64 { a + b }
+    pub fn max(xs: Vec<i64>) -> i64 { xs.len() }
+}
+
+mod iter {
+    pub fn map(xs: Vec<i64>, k: i64) -> i64 { xs.len() + k }
+    pub fn sum(xs: Vec<i64>) -> String { "sum of " + xs.len().to_string() }
+}
+
+fn main() {
+    println("{}", json::render(#[1u8, 2], #["a"], 7))
+    println("{}", codec::json::render(#[1u8, 2, 3], #["a", "b"], 9))
+    println("{}", json::encode(21))
+    println("{}", json::encode_pretty(#[1, 2, 3], "-"))
+    println("{}", json::parse("four"))
+    println("{}", fs::read_to_string(3))
+    println("{}", fs::read(#[1, 2, 3, 4]))
+    println("{}", fs::write("a", "b"))
+    println("{}", fs::exists(-1))
+    println("{}", time::now())
+    println("{}", time::now_ms())
+    println("{}", time::sleep(4))
+    println("{}", strings::split("abcdef", 3))
+    println("{}", strings::join(#[5, 6]))
+    println("{}", strings::contains(3, 2))
+    println("{}", math::sqrt(9))
+    println("{}", math::abs(-4))
+    println("{}", math::pow(2, 10))
+    println("{}", math::max(#[7, 8, 9]))
+    println("{}", iter::map(#[1, 2], 10))
+    println("{}", iter::sum(#[1, 2, 3]))
+}
