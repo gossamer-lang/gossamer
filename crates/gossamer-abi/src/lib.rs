@@ -50,6 +50,10 @@ pub const DEBUG_PAYLOAD_DESC: u8 = 12;
 /// Payload kind for a unit payload: the arm carries no value and renders
 /// as `()`, which is what `Result<(), E>` shows on its `Ok` side.
 pub const DEBUG_PAYLOAD_UNIT: u8 = 13;
+/// Payload kind for a `dyn::Value`: the word is the value's runtime handle,
+/// rendered through the `DynValue` debug renderer (`gos_rt_dyn_format`), which
+/// quotes string payloads the way the VM's Debug output does.
+pub const DEBUG_PAYLOAD_DYN: u8 = 14;
 
 /// Descriptor tag for a nested `Result`: the slot holds a pointer to the
 /// two-word `[disc, payload]` pair, and the Ok arm's descriptor follows
@@ -187,9 +191,13 @@ pub const SKEY_BY_ADDRESS: &[&str] = &[
     "gos_rt_map_insert_skey_opt",
     "gos_rt_map_or_insert_skey",
     "gos_rt_map_pop_skey",
+    "gos_rt_map_range_skey",
+    "gos_rt_map_range_ekey",
     "gos_rt_set_contains_skey",
     "gos_rt_set_insert_skey",
     "gos_rt_set_remove_skey",
+    "gos_rt_set_range_skey",
+    "gos_rt_set_range_ekey",
 ];
 
 /// Whether `name` is a content-keyed entry point whose second argument, the

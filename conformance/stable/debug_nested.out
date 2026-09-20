@@ -3,11 +3,11 @@ Point { x: -3, y: 0 }
 Dot
 Line(3, 4)
 Box { w: 5, h: 6 }
-(1, two, 3.5)
+(1, "two", 3.5)
 ((1, 2), (3, 4))
 (true, z, -7)
 #[1, 2, 3]
-#[a, b]
+#["a", "b"]
 #[1.5, 2.5]
-Ok(9) Err(nope) Some(text)
+Ok(9) Err("nope") Some("text")
 Box { w: 1, h: 2 }|(5, 6)|Tagged { label: "c", point: Point { x: 8, y: 9 } }

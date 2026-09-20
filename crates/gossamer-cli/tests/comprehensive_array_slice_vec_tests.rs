@@ -388,6 +388,7 @@ fn map_literal_constructs_hashmap_and_from_accepts_pairs() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn array_slice_and_vec_execution_matches_vm_forced_jit_and_llvm_release() {
     let root = env::temp_dir().join(format!(
         "gossamer-sequence-tier-parity-{}",
@@ -443,7 +444,10 @@ fn array_slice_and_vec_execution_matches_vm_forced_jit_and_llvm_release() {
         "VM stderr: {}",
         String::from_utf8_lossy(&vm.stderr)
     );
-    assert_eq!(String::from_utf8_lossy(&vm.stdout), "[x, x]\n#[y, y]\n22\n");
+    assert_eq!(
+        String::from_utf8_lossy(&vm.stdout),
+        "[\"x\", \"x\"]\n#[\"y\", \"y\"]\n22\n"
+    );
 
     let jit = Command::new(gos_bin())
         .arg("run")
@@ -575,7 +579,7 @@ fn owned_sequence_parameters_do_not_alias_the_caller_on_any_tier() {
     );
     assert_eq!(
         String::from_utf8_lossy(&vm.stdout),
-        "9 4 [1, 2, 3] #[1, 2, 3]\n3 #[#[1, 2]]\n3 #[1, 2]\n3 2\n#[1, 2, 3] #[1, 2, 3, 5]\n#[alpha, beta] #[alpha, beta, gamma]\n2\n2\n"
+        "9 4 [1, 2, 3] #[1, 2, 3]\n3 #[#[1, 2]]\n3 #[1, 2]\n3 2\n#[1, 2, 3] #[1, 2, 3, 5]\n#[\"alpha\", \"beta\"] #[\"alpha\", \"beta\", \"gamma\"]\n2\n2\n"
     );
 
     for function in ["mutate_wrapped", "mutate_array_of_vec", "main"] {

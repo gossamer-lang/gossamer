@@ -2631,7 +2631,57 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
     terminator_retains.retain(|(_, l)| !const_init_only[l.0 as usize]);
     // A rebound `Vec` owner takes a share of each value copied into it and
     // gives back what it holds before every rebinding and at every return.
+    // A copy that is the source's last whole-local read is a transfer
+    // instead: the reads that stand beside the buffer (element stores,
+    // len, gets) take no share of it, so when nothing else releases the
+    // source's own reference - it is not an RC owner, not an extraction
+    // result, not itself rebound, each of which gives the value back
+    // somewhere - that reference, a constructor's or a callee's answer
+    // which nothing else frees, moves into the owner whole, and the
+    // owner's release-before-rebinding and death are what free it.
+    // `copy_is_last_use` rejects a source read after the copy or across a
+    // back-edge without redefinition, and the statement-copy count rejects
+    // a sibling branch handing the same reference to a second owner.
     let rebound = rebound_vec_owners(body, tcx);
+    let mut stmt_copy_reads = vec![0u32; n_locals];
+    {
+        let bump = |op: &Operand, reads: &mut [u32]| {
+            if let Operand::Copy(p) = op
+                && p.projection.is_empty()
+                && (p.local.0 as usize) < reads.len()
+            {
+                let i = p.local.0 as usize;
+                reads[i] = reads[i].saturating_add(1);
+            }
+        };
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let StatementKind::Assign { rvalue, .. } = &stmt.kind {
+                    match rvalue {
+                        Rvalue::Use(op)
+                        | Rvalue::UnaryOp { operand: op, .. }
+                        | Rvalue::Cast { operand: op, .. }
+                        | Rvalue::Repeat { value: op, .. } => bump(op, &mut stmt_copy_reads),
+                        Rvalue::BinaryOp { lhs, rhs, .. } => {
+                            bump(lhs, &mut stmt_copy_reads);
+                            bump(rhs, &mut stmt_copy_reads);
+                        }
+                        Rvalue::Aggregate { operands, .. } => {
+                            for op in operands {
+                                bump(op, &mut stmt_copy_reads);
+                            }
+                        }
+                        Rvalue::CallIntrinsic { args, .. } => {
+                            for op in args {
+                                bump(op, &mut stmt_copy_reads);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
     for (bi, block) in body.blocks.iter().enumerate() {
         for (si, stmt) in block.stmts.iter().enumerate() {
             if let StatementKind::Assign {
@@ -2643,7 +2693,17 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                 && rebound[place.local.0 as usize]
                 && !moved[src.local.0 as usize]
             {
-                retain_sites.push((bi, si, src.local, 1));
+                let s = src.local.0 as usize;
+                let transfer = s > arity
+                    && !body.locals[s].region
+                    && stmt_copy_reads[s] == 1
+                    && !vec_field_extract[s]
+                    && !rebound[s]
+                    && !(is_rc(s) && owned[s])
+                    && copy_is_last_use(body, (bi, si), src.local);
+                if !transfer {
+                    retain_sites.push((bi, si, src.local, 1));
+                }
             }
         }
     }

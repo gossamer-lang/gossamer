@@ -423,6 +423,16 @@ pub const TIME: StdModule = StdModule {
             doc: "Sleeps unless the context fires first; false when it cancelled the wait.",
         },
         StdItem {
+            name: "__sleep_ns",
+            kind: StdItemKind::Builtin,
+            doc: "Internal: suspends the current goroutine for a nanosecond count; the lowering of `sleep` and `sleep_ctx`.",
+        },
+        StdItem {
+            name: "__sleep_ns_ctx",
+            kind: StdItemKind::Builtin,
+            doc: "Internal: context-aware nanosecond sleep; the lowering of `sleep_ctx` that wakes early when the context fires.",
+        },
+        StdItem {
             name: "now",
             kind: StdItemKind::Function,
             doc: "Wall-clock milliseconds since the Unix epoch; `Instant::now()` reads the monotonic clock.",

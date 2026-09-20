@@ -1380,6 +1380,9 @@ impl<'a> Lowerer<'a> {
             // `errors::Error` is the error arm of nearly every fallible
             // signature, so a `Result` carrying one renders like the rest.
             Some(TyKind::DynError) => Some(10),
+            // A `dyn::Value` payload renders through the DynValue debug
+            // renderer, so a nested string quotes exactly as the VM shows.
+            Some(TyKind::DynValue) => Some(i64::from(gossamer_abi::DEBUG_PAYLOAD_DYN) as u8),
             // `Result<(), E>` is the shape of every fallible routine that
             // reports only success or failure; its Ok arm renders `()`.
             Some(TyKind::Unit) => Some(i64::from(gossamer_abi::DEBUG_PAYLOAD_UNIT) as u8),

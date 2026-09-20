@@ -2822,7 +2822,7 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
         6 => unsafe { take_rt_string(super::btmap::gos_rt_vec_format_i64(vec_ptr(payload), 0)) },
         7 => unsafe { take_rt_string(super::btmap::gos_rt_vec_format_string(vec_ptr(payload), 0)) },
         8 => unsafe {
-            take_rt_string(crate::c_abi::gos_rt_json_display(
+            take_rt_string(crate::c_abi::gos_rt_json_debug(
                 std::ptr::with_exposed_provenance(payload as usize),
             ))
         },
@@ -2835,6 +2835,14 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
         },
         // A unit payload carries no value: the arm renders as `()`.
         13 => "()".to_string(),
+        // A `dyn::Value` payload arrives as its runtime handle; render it
+        // through the DynValue debug renderer, which quotes string payloads
+        // the way the VM's Debug output does.
+        14 => unsafe {
+            take_rt_string(crate::c_abi::gos_rt_dyn_format(
+                std::ptr::with_exposed_provenance(payload as usize),
+            ))
+        },
         _ => payload.to_string(),
     }
 }

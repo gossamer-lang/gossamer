@@ -145,7 +145,7 @@ fn main() {
 "#;
     assert_eq!(
         run_main(src),
-        "ascending=[alice, bob, charlie]\ndescending=[9, 7, 5, 2, 1]\n"
+        "ascending=[\"alice\", \"bob\", \"charlie\"]\ndescending=[9, 7, 5, 2, 1]\n"
     );
 }
 

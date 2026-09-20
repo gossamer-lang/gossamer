@@ -4034,7 +4034,7 @@
       "name": "std::fs::File",
       "kind": "type",
       "signature": null,
-      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
+      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15586,7 +15586,7 @@
       "name": "std::time::Duration",
       "kind": "type",
       "signature": null,
-      "description": "Difference between two `Instant`s.",
+      "description": "A span of nanoseconds: `from_nanos` / `from_micros` / `from_millis` / `from_secs` / `from_secs_f64`, the matching `as_*` accessors, `+`, `-`, and ordering.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15605,7 +15605,7 @@
       "name": "std::time::Instant",
       "kind": "type",
       "signature": null,
-      "description": "Monotonic point-in-time.",
+      "description": "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15644,6 +15644,44 @@
       "kind": "type",
       "signature": null,
       "description": "Wall-clock point-in-time.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdtime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-time---sleep-ns",
+      "name": "std::time::__sleep_ns",
+      "kind": "builtin",
+      "signature": null,
+      "description": "Internal: suspends the current goroutine for a nanosecond count; the lowering of `sleep` and `sleep_ctx`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdtime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-time---sleep-ns-ctx",
+      "name": "std::time::__sleep_ns_ctx",
+      "kind": "builtin",
+      "signature": null,
+      "description": "Internal: context-aware nanosecond sleep; the lowering of `sleep_ctx` that wakes early when the context fires.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15908,7 +15946,7 @@
       "id": "std-time-since-ms",
       "name": "std::time::since_ms",
       "kind": "function",
-      "signature": "fn since_ms(instant: time::Instant) -> i64",
+      "signature": "fn since_ms(start_ms: i64) -> i64",
       "description": "Milliseconds elapsed since an earlier monotonic reading.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -15928,7 +15966,7 @@
       "name": "std::time::sleep",
       "kind": "function",
       "signature": "fn sleep(ms: i64) -> ()",
-      "description": "Suspends the current goroutine for `Duration`.",
+      "description": "Suspends the current goroutine for a `Duration`, or for an integer count of milliseconds.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

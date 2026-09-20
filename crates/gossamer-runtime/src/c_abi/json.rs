@@ -844,6 +844,19 @@ pub unsafe extern "C" fn gos_rt_json_display(j: *const GosJson) -> *mut c_char {
     })
 }
 
+/// Debug form of a `json::Value` for `{:?}` inside an `Option`/`Result`
+/// payload: strings keep their JSON quotes, matching the VM's Debug
+/// rendering, where Display strips them from a top-level string.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_debug(j: *const GosJson) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        let Some(v) = (unsafe { json_borrow(j) }) else {
+            return alloc_cstring(b"null");
+        };
+        render_json_direct(v, false)
+    })
+}
+
 /// `value.get(key) -> json::Value`. Returns a fresh `GosJson*`
 /// holding the field's value, or a JSON-null node when the
 /// receiver is not an object or the field is missing. Nested

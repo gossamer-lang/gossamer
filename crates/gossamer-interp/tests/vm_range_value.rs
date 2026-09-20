@@ -152,5 +152,5 @@ fn main() {
     println("{:?} {:?}", xs, rep)
 }
 "#;
-    assert_eq!(run_main(src), "[a, b, c] [7, 7, 7]\n");
+    assert_eq!(run_main(src), "[\"a\", \"b\", \"c\"] [7, 7, 7]\n");
 }

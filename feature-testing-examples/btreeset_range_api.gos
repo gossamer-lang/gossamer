@@ -18,7 +18,7 @@ fn main() {
     println("{:?}", back)
     println("{:?} {:?} {:?}", nums.pop_first(), nums.pop_last(), nums)
 
-    let words: BTreeSet<String> = #{"kiwi", "apple", "fig", "date"}
+    let words: BTreeSet<String> = #{ "kiwi", "apple", "fig", "date" }
     let mid: Vec<String> = words.range("b".."g").collect()
     println("{:?} {:?} {:?}", mid, words.first(), words.last())
 

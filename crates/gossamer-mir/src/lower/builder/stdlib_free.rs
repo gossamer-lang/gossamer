@@ -3379,6 +3379,13 @@ impl<'a> Builder<'a> {
                 ("gos_rt_sleep_ns_ctx", self.tcx.bool_ty())
             }
             "time::sleep_ctx" => ("gos_rt_sleep_ms_ctx", self.tcx.bool_ty()),
+            // `time::__sleep_ns` / `time::__sleep_ns_ctx` are the internal
+            // shims the interpreter's lowering folds `sleep` / `sleep_ctx`
+            // into when the wait is a `Duration`; the compiled tier folds the
+            // same shape into the arms above, but the names are bound
+            // free-function exports, so a direct call needs its own arm.
+            "time::__sleep_ns" => ("gos_rt_sleep_ns", self.tcx.unit()),
+            "time::__sleep_ns_ctx" => ("gos_rt_sleep_ns_ctx", self.tcx.bool_ty()),
             "smtp::send" => ("gos_rt_smtp_send", self.result_unit_error_adt_ty()),
             "smtp::send_auth" => ("gos_rt_smtp_send_auth", self.result_unit_error_adt_ty()),
             "time::freeze" => ("gos_rt_time_freeze", self.tcx.unit()),

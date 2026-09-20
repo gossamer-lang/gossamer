@@ -1,3 +1,4 @@
 use super::a::b
 use self::d
+
 pub fn g() -> i64 { b::f(10) + d::h() }

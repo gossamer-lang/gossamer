@@ -318,8 +318,16 @@ Write clear, low-complexity, concise code.
   Each container has exactly one name: `HashMap`, `HashSet`, `VecDeque`,
   `VecQueue`, `VecStack`, `BinaryHeap`, `MaxBinaryHeap`, and `MinBinaryHeap`
   are rejected (GR0006).
-- **`Map` and `BTreeMap` are distinct types** over one representation:
-  each constructor answers its own, and neither converts to the other.
+- **`Map` and `BTreeMap` are distinct types**: a `Map` hashes, a `BTreeMap`
+  keeps its keys in order in a B+ tree (`get`, `insert`, `remove` in
+  O(log n), a walk in key order with no sort). Each constructor answers its
+  own, and neither converts to the other. Only the ordered pair answers
+  `m.first_key_value()`, `m.last_key_value()`, `m.pop_first()`,
+  `m.pop_last()` (each an `Option<(K, V)>`) and `m.range(lo..hi)` - any range
+  form written in the call, its bounds keys (`m.range("b".."f")`,
+  `m.range(lo..=hi)`, `m.range(lo..)`); a range kept in a binding reports
+  GT0091. `BTreeSet` answers `first`, `last`, `pop_first`, `pop_last`, and
+  `range` the same way.
 - **Collection constructors infer**: `let mut m = Map::new()`,
   `let empty: Map<String, i64> = Map::from([])`, and
   `let map = {"one": 1}`. `Map::from` accepts array pairs, while
@@ -360,7 +368,7 @@ Write clear, low-complexity, concise code.
 - **`let PAT = expr else { ... }`** - the else block must diverge.
 - **Name an argument or default a parameter** when a call reads better
   for it: `fn volume(width: i64, height: i64 = 2)` then `volume(2)`,
-  `volume(width = 2, height = 3)`, or `volume(2, height = 3)`. Positional
+  `volume(width: 2, height: 3)`, or `volume(2, height: 3)`. Positional
   arguments come first, then names, in any order. A default must be a
   literal (optionally negated) and is spliced per call site. Works on
   methods and associated fns; when two types declare one method name with
@@ -555,7 +563,9 @@ let shout = "  Hi  ".trim().to_lowercase() |> exclaim
   `min` `max` `abs` `sqrt` `lanes_lt` `select` `reduce_sum`, the same bits on
   every tier. A kernel may be generic over its lanes:
   `fn dot<const N: usize>(a: Simd<f64, N>, b: Simd<f64, N>) -> f64`. `i128`
-  / `u128` are rejected (GT0014). Transparent `type Id = i64` /
+  / `u128` are rejected (GT0014). Each numeric primitive carries its limits
+  (`i64::MIN`, `u8::MAX`, `u32::BITS`, `f64::EPSILON`, `f64::NAN`,
+  `f64::INFINITY`, `f64::MIN_POSITIVE`). Transparent `type Id = i64` /
   `type Pair<A> = (A, A)` aliases substitute everywhere (cycle =
   GT0024). `newtype UserId = i64` is the OPAQUE form: a distinct
   type over the same representation, at no runtime cost. `.into()`
@@ -795,8 +805,10 @@ are callable as methods/free functions and materialize results.
   `iter()` is a cursor over its `(K, V)` pairs, `keys`, `values`,
   `Map::pop`),
   `Set` (unordered; `#{...}` literals, full set algebra, and `iter()` for
-  every traversal) / `BTreeSet` (the sorted set), `BTreeMap` (sorted; `String` or `i64`
-  keys), `Deque`, `Queue`, `Stack` (each holds whatever a `Vec<T>` holds),
+  every traversal) / `BTreeSet` (the sorted set), `BTreeMap` (sorted by key,
+  any key the language orders - integers of every width including `u64`,
+  floats in total order, `bool`, `char`, `String`, tuples, structs, enums;
+  ordered ranges and ends as above), `Deque`, `Queue`, `Stack` (each holds whatever a `Vec<T>` holds),
   `MaxHeap`, `MinHeap` (any element the language orders: scalars and `String`
   by value, tuples and structs field by field, sequences lexicographically,
   `Option`/`Result` by arm then payload, an enum by variant rank then payload;
@@ -860,7 +872,10 @@ Full path spelling is validated (GR0005); discover signatures with
   `read_stdout()`, `wait() -> Result<i64, _>`, `kill()` - the
   JSON-RPC-over-stdio (MCP client) shape.
   `time`: `now_ms`, `Instant`, `Duration`, `sleep`, `after`,
-  RFC 3339 parse/format. `flag`: `Set::new` + `string/int/bool`
+  RFC 3339 parse/format. `Instant` and `Duration` count nanoseconds and
+  are their own types, never an integer: `t.elapsed()`,
+  `later.duration_since(t)`, `d.as_millis()` / `as_nanos()` /
+  `as_secs_f64()`, `Duration::from_micros(n)`, `d + e`, `d < e`. `flag`: `Set::new` + `string/int/bool`
   cells that auto-deref; no built-in required-flag.
 - Text: `strings strconv utf8 unicode regex`. Prefer `to_lowercase` /
   `to_uppercase`; `split_once`, `substring(a, b)` clamps, `byte_at(i)`

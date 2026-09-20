@@ -938,7 +938,7 @@ fn option_result_chain_methods_match_across_tiers() {
     let path = write_source(&dir, "option_result_chain_methods", &src);
     let vm = run_vm(&path);
     assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
-    let expected = "Some(10)\nNone\nNone\nSome(5)\nNone\nSome(9)\nSome(1)\nOk(7)\nErr(computed)\nOk(5)\nErr(boom)\nOk(4)\n";
+    let expected = "Some(10)\nNone\nNone\nSome(5)\nNone\nSome(9)\nSome(1)\nOk(7)\nErr(\"computed\")\nOk(5)\nErr(\"boom\")\nOk(4)\n";
     assert_eq!(vm.0, expected, "vm output drift");
     let scratch = dir.join("bin");
     std::fs::create_dir_all(&scratch).unwrap();

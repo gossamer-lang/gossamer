@@ -22,7 +22,7 @@ fn main() {
     let mut kinds: BTreeSet<K> = BTreeSet::new()
     kinds.insert(K::B)
     kinds.insert(K::A(3))
-    let names: BTreeSet<String> = #{"pear", "apple"}
-    let nums: BTreeSet<i64> = #{7, -1}
+    let names: BTreeSet<String> = #{ "pear", "apple" }
+    let nums: BTreeSet<i64> = #{ 7, -1 }
     println("{:?} {:?} {:?}", kinds.iter().next(), names.iter().next(), nums.iter().next())
 }

@@ -720,6 +720,21 @@ pub fn debug_verify_program(bodies: &[Body], tcx: &TyCtxt) {
         return;
     }
     if let Err(errors) = verify_program(bodies, tcx) {
+        if std::env::var("GOS_VERIFY_DUMP").is_ok() {
+            for body in bodies {
+                if errors.iter().any(|e| format!("{e:?}").contains(&body.name)) {
+                    eprintln!("body {}:", body.name);
+                    eprintln!("  locals: {:?}", body.locals);
+                    for (i, block) in body.blocks.iter().enumerate() {
+                        eprintln!("  bb{i}:");
+                        for stmt in &block.stmts {
+                            eprintln!("    {:?}", stmt.kind);
+                        }
+                        eprintln!("    -> {:?}", block.terminator);
+                    }
+                }
+            }
+        }
         panic!(
             "gossamer-mir verifier rejected program:\n{}",
             errors

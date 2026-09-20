@@ -1,6 +1,5 @@
 ---
 source: crates/gossamer-diagnostics/tests/snapshots.rs
-assertion_line: 86
 expression: rendered
 ---
 --- plain ---

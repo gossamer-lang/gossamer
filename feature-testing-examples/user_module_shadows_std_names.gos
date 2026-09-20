@@ -14,7 +14,7 @@ mod codec {
     pub mod json {
         pub fn render(buf: Vec<u8>, keys: Vec<String>, id: i64) -> String {
             "codec buf=" + buf.len().to_string() + " keys=" + keys.len().to_string() + " id="
-                + id.to_string()
+            + id.to_string()
         }
     }
 }

@@ -48,6 +48,10 @@ const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
     // Intentionally never called from generated code: a debug-only
     // helper used by manual `gdb`/`lldb` sessions.
     "gos_rt_result_dbg",
+    // Selected inside the runtime by payload kind 8 (JSON) in
+    // `debug_payload_string`; codegen emits only the kind, never
+    // this symbol's name.
+    "gos_rt_json_debug",
     // ABI 0.4 compiled-tier callback dispatcher fallback. Referenced
     // directly from `gossamer-binding::native::NativeCallback::invoke_raw`
     // (Rust binding code), not from generated Gossamer programs. The

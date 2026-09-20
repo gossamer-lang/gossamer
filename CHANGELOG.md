@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.63.0 - Leak-free result shapes, borrowed std buffers, module-path fixes
+## 0.63.0 - Leak-free result shapes, borrowed std buffers, module-path fixes, generic BTreeMap
 
 - A program module named like a standard-library module keeps its own functions on every tier: a program's `json::render`, `math::sqrt`, or `iter::map` is the function the program declared, where the bytecode VM handed its `Vec` arguments over empty and the compiled tiers called the standard-library function of that name or failed to build.
 - A `Vec` a compiled function rebinds through `?` (`let mut vals = #[]` followed by `vals = decode(..)?`) gives back the vector it held before, where every call leaked it.
+- A `Vec` a compiled function rebinds in a plain loop (`rank = next` inside `for`) gives back the vector the previous iteration built, where every rebind kept its `Vec` allocated for the rest of the run.
 - A `Vec` read and then stored into a struct or tuple the function returns, or filled through a `&mut` helper first, is released by the function that built it, so a result such as `Ok(Res { rows: rows, count: rows.len() })` no longer keeps every row it ever returned.
 - Binding the struct payload of an enum (`Stmt::Select(q) => ..`) releases the fields the binding took a share of, on a parameter as well as on a value the function owns.
 - A path through a module imported with `crate::`, `self::`, or `super::` (`use crate::engine::bind` then `bind::stmt(..)`) type-checks and builds, where `gos build` failed with an unresolved function and the call was left untyped.

@@ -184,7 +184,6 @@ fn a_native_heap_profile_carries_allocation_stacks() {
 /// holds the profile window open, then reports how many stack lines the
 /// rendered profile carries.
 const HEAP_PROBE: &str = r#"use std::pprof
-use std::time
 use std::sync::channel
 
 fn churn(n: i64) -> i64 {
@@ -198,7 +197,7 @@ fn churn(n: i64) -> i64 {
 }
 
 fn profiler(tx: Sender<String>) {
-    let p = pprof::heap_profile(time::Duration::from_millis(300))
+    let p = pprof::heap_profile(300)
     tx.send(p)
     tx.close()
 }

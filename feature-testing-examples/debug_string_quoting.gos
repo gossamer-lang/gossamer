@@ -9,8 +9,8 @@ fn main() {
     let t = ("a", 1)
     let o: Option<String> = Some("s")
     let r: Result<String, String> = Err("e")
-    let m: Map<String, String> = {"k": "v"}
-    let s: Set<String> = #{"z"}
+    let m: Map<String, String> = { "k": "v" }
+    let s: Set<String> = #{ "z" }
     println("{:?}", P { b: "a" })
     println("{:?}", v)
     println("{:?}", arr)

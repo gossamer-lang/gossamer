@@ -350,14 +350,31 @@ fn enforce_generic_abi(bodies: &[Body], tcx: &TyCtxt) -> anyhow::Result<()> {
 fn enforce_mir_backend_invariants(bodies: &[Body], tcx: &TyCtxt) -> anyhow::Result<()> {
     match gossamer_mir::verify::verify_program(bodies, tcx) {
         Ok(()) => Ok(()),
-        Err(errors) => Err(anyhow!(
-            "MIR backend invariant violation:\n{}",
-            errors
-                .iter()
-                .map(|err| format!("  {err:?}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        )),
+        Err(errors) => {
+            if std::env::var("GOS_VERIFY_DUMP").is_ok() {
+                for body in bodies {
+                    if errors.iter().any(|e| format!("{e:?}").contains(&body.name)) {
+                        eprintln!("body {}:", body.name);
+                        eprintln!("  locals: {:?}", body.locals);
+                        for (i, block) in body.blocks.iter().enumerate() {
+                            eprintln!("  bb{i}:");
+                            for stmt in &block.stmts {
+                                eprintln!("    {:?}", stmt.kind);
+                            }
+                            eprintln!("    -> {:?}", block.terminator);
+                        }
+                    }
+                }
+            }
+            Err(anyhow!(
+                "MIR backend invariant violation:\n{}",
+                errors
+                    .iter()
+                    .map(|err| format!("  {err:?}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ))
+        }
     }
 }
 

@@ -76,6 +76,7 @@ feature-testing-examples/binary_offset_accessors.gos	aggregate ref arg
 feature-testing-examples/bounded_channel.gos	bytecode-only local
 feature-testing-examples/break_unknown_label.gos	no hot body
 feature-testing-examples/btreemap_goroutine_shared.gos	cross-goroutine
+feature-testing-examples/btreemap_range_api.gos	admission gate
 feature-testing-examples/btreeset_range_api.gos	no hot body
 feature-testing-examples/by_value_container_semantics.gos	admission gate
 feature-testing-examples/bytes_builder.gos	unlowered call
@@ -135,6 +136,7 @@ feature-testing-examples/crypto_sha_hex.gos	no hot body
 feature-testing-examples/cycle_shared_goroutines.gos	bytecode-only local
 feature-testing-examples/debug_impl_dispatch.gos	entry shape
 feature-testing-examples/debug_option_result.gos	no hot body
+feature-testing-examples/debug_string_quoting.gos	admission gate
 feature-testing-examples/debugfmt_aggregates.gos	no hot user body
 feature-testing-examples/debugfmt_floats.gos	no hot body
 feature-testing-examples/debugfmt_nested_adts.gos	no hot user body
@@ -171,7 +173,6 @@ feature-testing-examples/fs_dir_ops.gos	no hot body
 feature-testing-examples/fs_error_text.gos	no hot body
 feature-testing-examples/fs_metadata.gos	entry shape
 feature-testing-examples/fs_permission_modes.gos	no hot body
-feature-testing-examples/fs_positional_io_goroutines.gos	cross-goroutine
 feature-testing-examples/fs_read_at_into.gos	no hot body
 feature-testing-examples/fs_read_to_string_missing.gos	no hot body
 feature-testing-examples/fs_temp_file_lifecycle.gos	no hot body
@@ -230,6 +231,7 @@ feature-testing-examples/let_destructure_struct.gos	entry shape
 feature-testing-examples/literal_forms.gos	no hot body
 feature-testing-examples/map_bare_iteration_binding.gos	admission gate
 feature-testing-examples/map_channel_ownership.gos	cross-goroutine
+feature-testing-examples/map_aggregate_values_by_key_kind.gos	bytecode-only local
 feature-testing-examples/map_entry_and_format_paths.gos	bytecode-only local
 feature-testing-examples/map_from_sequence.gos	bytecode-only local
 feature-testing-examples/map_inc_at_oob.gos	no hot body
@@ -370,6 +372,7 @@ feature-testing-examples/sync_extra.gos	callable local
 feature-testing-examples/sync_map_demo.gos	no hot body
 feature-testing-examples/sync_rwlock.gos	no hot body
 feature-testing-examples/time_civil.gos	no hot body
+feature-testing-examples/time_duration_api.gos	no hot body
 feature-testing-examples/time_param_dispatch.gos	no hot body
 feature-testing-examples/top_level_exit_code.gos	no hot body
 feature-testing-examples/top_level_hello.gos	no hot body

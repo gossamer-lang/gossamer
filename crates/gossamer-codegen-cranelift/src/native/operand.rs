@@ -282,6 +282,9 @@ fn debug_payload_kind(tcx: &TyCtxt, ty: Ty) -> Option<u8> {
         TyKind::Bool => Some(3),
         TyKind::Char => Some(4),
         TyKind::String => Some(5),
+        // A `dyn::Value` payload renders through the DynValue debug
+        // renderer, so a nested string quotes exactly as the VM shows.
+        TyKind::DynValue => Some(gossamer_abi::DEBUG_PAYLOAD_DYN),
         _ => None,
     }
 }

@@ -69,6 +69,7 @@ pub fn is_capture_env_load(init: &HirExpr) -> bool {
 #[must_use]
 pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) -> HirProgram {
     let env_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+    let error_ty = tcx.error_ty();
     let scalar_tys = ScalarTys {
         unit: tcx.unit(),
         boolean: tcx.bool_ty(),
@@ -83,6 +84,7 @@ pub fn lift_closures(mut program: HirProgram, tcx: &mut gossamer_types::TyCtxt) 
         scopes: Vec::new(),
         ids: HirIdGenerator::new(),
         env_ty,
+        error_ty,
         scalar_tys,
         pending: Vec::new(),
     };
@@ -327,6 +329,10 @@ struct Lifter {
     /// of capturing closures so the lifted body sees env as a
     /// pointer-sized register, not a byte / sub-word.
     env_ty: gossamer_types::Ty,
+    /// Ty handle for the Error sentinel, so a capture whose
+    /// occurrence type never resolved can be recognised without
+    /// holding `tcx`.
+    error_ty: gossamer_types::Ty,
     /// Scalar Ty handles for eta-expanding `[rust-bindings]`
     /// references; minted once so the visitor does not need `tcx`.
     scalar_tys: ScalarTys,
@@ -724,7 +730,21 @@ impl Lifter {
         // - the closure's return type, say - hands an `i64`'s bits to a
         // `String` slot, and the compiled tiers then retain the integer
         // as a pointer.
-        let capture_types: Vec<gossamer_types::Ty> = captures.iter().map(|(_, ty)| *ty).collect();
+        let capture_types: Vec<gossamer_types::Ty> = captures
+            .iter()
+            .map(|(_, ty)| {
+                // An unresolved capture type must not reach MIR as the
+                // Error sentinel: the env slot holds one word, and the
+                // load and store of the capture are typed by this handle,
+                // so an Error here poisons the call that fills the slot.
+                // Type the slot as the word type the env itself uses.
+                if *ty == self.error_ty {
+                    self.env_ty
+                } else {
+                    *ty
+                }
+            })
+            .collect();
         // The lifted function's body wraps the original body in a
         // block that first pulls each capture out of the env pointer
         // via `gos_load(env, offset)`, binds it to a local of the
