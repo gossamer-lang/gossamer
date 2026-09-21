@@ -1108,14 +1108,13 @@ mod tests {
         );
 
         let writer_started = std::sync::Arc::new(AtomicBool::new(false));
-        let writer_done = std::sync::Arc::new(AtomicBool::new(false));
+        let (writer_done, write_finished) = std::sync::mpsc::channel();
         let peer_ran = std::sync::Arc::new(AtomicBool::new(false));
         let started = std::sync::Arc::clone(&writer_started);
-        let done = std::sync::Arc::clone(&writer_done);
         let _ = spawn(Box::new(move || {
             started.store(true, Ordering::Release);
             crate::c_abi::write_terminal(1, &vec![b'x'; 1024 * 1024]);
-            done.store(true, Ordering::Release);
+            let _ = writer_done.send(());
         }));
 
         for _ in 0..200 {
@@ -1144,14 +1143,23 @@ mod tests {
             "a terminal write pinned the only scheduler worker"
         );
 
-        // Restore test output before unblocking the terminal writer, then drain
-        // the pipe on a plain OS thread. A descriptor on the pipe's write end
-        // stays open until the writer is done, so the reader sees end of file
-        // only after the last byte rather than while the write is in flight.
-        // SAFETY: fd 1 is the pipe's write end; `dup` answers a new descriptor.
-        let keep_writer = unsafe { libc::dup(libc::STDOUT_FILENO) };
-        assert!(keep_writer >= 0, "hold the pipe's write end");
+        // Drain the pipe on a plain OS thread while fd 1 still names it, and
+        // restore stdout only once the write has returned: on macOS, replacing
+        // a descriptor that a thread is blocked writing to fails that write
+        // with EPIPE rather than letting it finish.
+        let reader = std::thread::spawn(move || {
+            // SAFETY: this thread uniquely owns the pipe's read descriptor.
+            let mut pipe = unsafe { std::fs::File::from_raw_fd(pipe[0]) };
+            let mut buf = [0_u8; 8192];
+            while std::io::Read::read(&mut pipe, &mut buf).expect("read terminal pipe") > 0 {}
+        });
+        write_finished
+            .recv()
+            .expect("terminal write did not resume after pipe drain");
+
         // SAFETY: `saved_stdout` is valid and becomes fd 1; it is then closed.
+        // That drops the last descriptor on the pipe's write end, so the
+        // reader sees end of file.
         assert_eq!(
             unsafe { libc::dup2(saved_stdout, libc::STDOUT_FILENO) },
             libc::STDOUT_FILENO
@@ -1161,28 +1169,6 @@ mod tests {
             0,
             "close saved stdout"
         );
-        let reader = std::thread::spawn(move || {
-            // SAFETY: this thread uniquely owns the pipe's read descriptor.
-            let mut pipe = unsafe { std::fs::File::from_raw_fd(pipe[0]) };
-            let mut buf = [0_u8; 8192];
-            while std::io::Read::read(&mut pipe, &mut buf).expect("read terminal pipe") > 0 {}
-        });
-
-        let mut finished = false;
-        for _ in 0..200 {
-            if writer_done.load(Ordering::Acquire) {
-                finished = true;
-                break;
-            }
-            crate::platform::sleep(Duration::from_millis(5));
-        }
-        // SAFETY: `keep_writer` is the last descriptor on the pipe's write end.
-        assert_eq!(
-            unsafe { libc::close(keep_writer) },
-            0,
-            "release the pipe's write end"
-        );
         reader.join().expect("terminal pipe reader");
-        assert!(finished, "terminal write did not resume after pipe drain");
     }
 }
