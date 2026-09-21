@@ -4529,8 +4529,9 @@ mod tests {
     }
 
     unsafe fn set_child(parent: *mut u8, word: usize, child: *mut u8) {
-        let slot = unsafe { parent.add(word * 8) as *mut *mut u8 };
-        unsafe { *slot = child };
+        // The walks read a child slot as an integer word with its provenance
+        // exposed, so the slot is written the same way.
+        unsafe { crate::c_abi::vec::slot_write_word(parent.add(word * 8), child) };
     }
 
     unsafe fn strong_of(payload: *mut u8) -> usize {

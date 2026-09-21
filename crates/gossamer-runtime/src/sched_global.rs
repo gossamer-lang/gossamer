@@ -1145,7 +1145,12 @@ mod tests {
         );
 
         // Restore test output before unblocking the terminal writer, then drain
-        // the pipe on a plain OS thread until that worker closes its duplicate.
+        // the pipe on a plain OS thread. A descriptor on the pipe's write end
+        // stays open until the writer is done, so the reader sees end of file
+        // only after the last byte rather than while the write is in flight.
+        // SAFETY: fd 1 is the pipe's write end; `dup` answers a new descriptor.
+        let keep_writer = unsafe { libc::dup(libc::STDOUT_FILENO) };
+        assert!(keep_writer >= 0, "hold the pipe's write end");
         // SAFETY: `saved_stdout` is valid and becomes fd 1; it is then closed.
         assert_eq!(
             unsafe { libc::dup2(saved_stdout, libc::STDOUT_FILENO) },
@@ -1163,14 +1168,21 @@ mod tests {
             while std::io::Read::read(&mut pipe, &mut buf).expect("read terminal pipe") > 0 {}
         });
 
+        let mut finished = false;
         for _ in 0..200 {
             if writer_done.load(Ordering::Acquire) {
-                reader.join().expect("terminal pipe reader");
-                return;
+                finished = true;
+                break;
             }
             crate::platform::sleep(Duration::from_millis(5));
         }
-        let _ = reader.join();
-        panic!("terminal write did not resume after pipe drain");
+        // SAFETY: `keep_writer` is the last descriptor on the pipe's write end.
+        assert_eq!(
+            unsafe { libc::close(keep_writer) },
+            0,
+            "release the pipe's write end"
+        );
+        reader.join().expect("terminal pipe reader");
+        assert!(finished, "terminal write did not resume after pipe drain");
     }
 }
