@@ -165,7 +165,12 @@ fn settles_carrier(stmt: &StatementKind, carrier: Local) -> bool {
     };
     match rvalue {
         Rvalue::CallIntrinsic { name, args } => {
-            matches!(*name, "gos_rt_option_slot_release" | "gos_rt_option_slot_retain")
+            matches!(
+                *name,
+                "gos_rt_option_slot_release"
+                    | "gos_rt_option_slot_retain"
+                    | "gos_rt_option_slot_retain_ok"
+            )
                 && args.len() == 1
                 && whole_copy_local(&args[0]) == Some(carrier)
         }

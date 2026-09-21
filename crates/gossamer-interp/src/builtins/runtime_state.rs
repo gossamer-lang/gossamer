@@ -95,14 +95,22 @@ fn default_stdout(text: &str) {
     // JIT-native) output in program order. No-op when nothing was
     // buffered, so pure-bytecode programs pay only an uncontended lock.
     gossamer_runtime::c_abi::flush_stdout_buffer();
-    print!("{text}");
+    write_stdio(&mut std::io::stdout().lock(), text);
+}
+
+/// Writes `text` to a standard stream, ending the process as a compiled
+/// program's write would when the stream's reader has gone.
+fn write_stdio(stream: &mut impl std::io::Write, text: &str) {
+    if let Err(err) = stream.write_all(text.as_bytes()) {
+        gossamer_runtime::c_abi::print::end_on_closed_stdio(&err);
+    }
 }
 
 fn default_stderr(text: &str) {
     // Drain any JIT-buffered stdout first so interleaved stdout/stderr
     // reaches the terminal in program order (see `default_stdout`).
     gossamer_runtime::c_abi::flush_stdout_buffer();
-    eprint!("{text}");
+    write_stdio(&mut std::io::stderr().lock(), text);
 }
 
 /// Installs a custom stdout writer for the current thread. Returns the

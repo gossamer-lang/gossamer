@@ -209,6 +209,21 @@ pub(crate) struct LoopContext {
     pub(crate) defer_depth: usize,
 }
 
+/// The runtime conversion a value of this integer type renders through: an
+/// unsigned type reads its bits as a magnitude, so a value at or above 2^63
+/// renders as itself rather than as a negative.
+pub(crate) const fn int_to_str_symbol(int: gossamer_types::IntTy) -> &'static str {
+    use gossamer_types::IntTy;
+    match int {
+        IntTy::U8 | IntTy::U16 | IntTy::U32 | IntTy::U64 | IntTy::U128 | IntTy::Usize => {
+            "gos_rt_u64_to_str"
+        }
+        IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::I128 | IntTy::Isize => {
+            "gos_rt_i64_to_str"
+        }
+    }
+}
+
 mod ctrl;
 mod expr;
 mod intrinsic;

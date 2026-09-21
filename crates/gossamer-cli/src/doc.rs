@@ -75,7 +75,7 @@ pub(crate) fn cmd_emit_stdlib(out_dir: &Path, check: bool) -> Result<()> {
         }
         let total = stdlib_pages.len() + language_pages.len();
         if drift.is_empty() {
-            println!("doc: stdlib + language docs in sync ({total} pages)");
+            outln!("doc: stdlib + language docs in sync ({total} pages)");
             Ok(())
         } else {
             Err(anyhow!(
@@ -100,7 +100,7 @@ pub(crate) fn cmd_emit_stdlib(out_dir: &Path, check: bool) -> Result<()> {
             fs::write(&path, merge_handwritten(body, &on_disk))
                 .with_context(|| format!("writing {}", path.display()))?;
         }
-        println!(
+        outln!(
             "doc: wrote {} stdlib pages to {}, {} language pages to {}",
             stdlib_pages.len(),
             out_dir.display(),
@@ -140,19 +140,19 @@ pub(crate) fn cmd_doc_std(query: &str) -> Result<()> {
 
     if query == "std" {
         let modules = registry::modules();
-        println!("# Standard library ({} modules)", modules.len());
+        outln!("# Standard library ({} modules)", modules.len());
         for module in modules {
-            println!("- {} - {}", module.path, module.summary);
+            outln!("- {} - {}", module.path, module.summary);
         }
-        println!();
-        println!("`gos doc std::<module>` lists a module's exports.");
+        outln!();
+        outln!("`gos doc std::<module>` lists a module's exports.");
         return Ok(());
     }
 
     if let Some(module) = registry::module(query) {
-        println!("# {} - {}", module.path, module.summary);
+        outln!("# {} - {}", module.path, module.summary);
         for item in module.items {
-            println!(
+            outln!(
                 "- {} {}::{} - {}",
                 item_kind_tag(item.kind),
                 module.path,
@@ -171,13 +171,13 @@ pub(crate) fn cmd_doc_std(query: &str) -> Result<()> {
             _ => query,
         });
     if let Some((module, item)) = registry::item(query) {
-        println!(
+        outln!(
             "# {} {}::{}",
             item_kind_tag(item.kind),
             module.path,
             item.call_name()
         );
-        println!("{}", item.doc);
+        outln!("{}", item.doc);
         return Ok(());
     }
 
@@ -208,11 +208,11 @@ pub(crate) fn cmd_doc(file: &Path, html_out: Option<&std::path::Path>) -> Result
     if let Some(path) = html_out {
         let html = render_doc_html(file, &entries);
         fs::write(path, html).with_context(|| format!("writing {}", path.display()))?;
-        println!("doc: wrote {} items to {}", entries.len(), path.display());
+        outln!("doc: wrote {} items to {}", entries.len(), path.display());
     } else {
-        println!("# Items in {}", file.display());
+        outln!("# Items in {}", file.display());
         for entry in &entries {
-            println!("- {} {}", entry.kind, entry.name);
+            outln!("- {} {}", entry.kind, entry.name);
         }
     }
     Ok(())

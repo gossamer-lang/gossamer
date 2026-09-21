@@ -16,6 +16,9 @@ pub enum KeyOrder {
     /// As [`KeyOrder::Natural`], except an integer key orders by the unsigned
     /// value its bits spell: the keys were declared `u64` / `usize`.
     Unsigned,
+    /// The order the key type's own `cmp` answers, reached through the named
+    /// comparator the program compiled for that type.
+    User(&'static str),
 }
 
 impl KeyOrder {
@@ -24,6 +27,9 @@ impl KeyOrder {
     pub fn cmp(self, a: &MapKey, b: &MapKey) -> Ordering {
         match (self, a, b) {
             (Self::Unsigned, MapKey::Int(x), MapKey::Int(y)) => (*x as u64).cmp(&(*y as u64)),
+            (Self::User(comparator), _, _) => {
+                crate::vm::user_order::order(comparator, a, b).unwrap_or_else(|| a.cmp(b))
+            }
             _ => a.cmp(b),
         }
     }
@@ -136,8 +142,22 @@ impl VmMap {
         }
     }
 
+    /// Settles a `BTreeMap`'s order as its first key arrives: a key type that
+    /// declares its own `cmp` orders by that body, whichever constructor built
+    /// the map. An empty tree holds nothing the new order would reseat.
+    fn settle_order(&mut self, key: &MapKey) {
+        if let Self::Tree(tree, order) = self
+            && *order == KeyOrder::Natural
+            && tree.is_empty()
+            && let Some(comparator) = crate::vm::user_order::comparator_for(key)
+        {
+            *order = KeyOrder::User(comparator);
+        }
+    }
+
     /// Stores `val` under `key`, answering the value it replaced.
     pub fn insert(&mut self, key: MapKey, val: Value) -> Option<Value> {
+        self.settle_order(&key);
         match self {
             Self::Hash(h) => h.insert(key, val),
             Self::Tree(t, order) => {
@@ -174,6 +194,7 @@ impl VmMap {
 
     /// The value under `key`, inserting `make()` first when there is none.
     pub fn get_or_insert_with(&mut self, key: MapKey, make: impl FnOnce() -> Value) -> &mut Value {
+        self.settle_order(&key);
         match self {
             Self::Hash(h) => h.entry(key).or_insert_with(make),
             Self::Tree(t, order) => {

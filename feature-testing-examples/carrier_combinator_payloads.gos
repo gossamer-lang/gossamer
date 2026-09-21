@@ -1,0 +1,112 @@
+// A carrier combinator that hands its receiver's payload on - `map_err`,
+// `or_else`, `ok`, `ok_or`, `filter`, `or` - leaves the struct it carries, and
+// the containers inside it, whole. `map` calls its closure in the caller's
+// frame, so a mapped float, aggregate, or nested carrier keeps its own type.
+// A bare `None` is an `Option` its methods type against, and a constructor
+// named as a value is the function of its payload. Identical on every
+// tier, and nothing here outlives its use.
+
+use std::{errors, option, result}
+
+struct Big {
+    a: Vec<String>
+    m: Map<String, String>
+    s: String
+    n: i64
+}
+
+fn big(tag: String) -> Big {
+    let mut m = Map::new()
+    m.insert("k", tag)
+    Big { a: #["x", "y"], m: m, s: "str", n: 7 }
+}
+
+fn make(ok: bool) -> Result<Big, errors::Error> {
+    if ok { Ok(big("v")) } else { Err(errors::new("bad")) }
+}
+
+fn maybe(some: bool) -> Option<Big> {
+    if some { Some(big("o")) } else { None }
+}
+
+fn show(label: String, b: Big) {
+    println("{label}: a={} m={:?} s={} n={}", b.a.len(), b.m.get("k"), b.s, b.n)
+}
+
+fn map_err_q() -> Result<Big, errors::Error> { make(true).map_err(|e| errors::wrap(e, "ctx")) }
+fn or_else_q() -> Result<Big, errors::Error> { make(true).or_else(|e| Err(errors::wrap(e, "ctx"))) }
+fn and_then_q() -> Result<Big, errors::Error> { make(true).and_then(|b| Ok(b)) }
+fn map_q() -> Result<Big, errors::Error> { make(true).map(|b| b) }
+fn recover_q() -> Result<Big, errors::Error> { make(false).or_else(|_| Ok(big("r"))) }
+
+enum Shape {
+    Circle(i64)
+    Square(i64)
+}
+
+fn half(x: f64) -> Result<f64, errors::Error> {
+    if x > 0.0 { Ok(x / 2.0) } else { Err(errors::new("neg")) }
+}
+
+// A loop over scalars gives the JIT a hot body to compile.
+fn countdown(n: i64) -> i64 {
+    let mut left = n
+    let mut steps = 0
+    while left > 0 {
+        left -= 1
+        steps += 1
+    }
+    steps
+}
+
+fn run() -> Result<(), errors::Error> {
+    show("map_err?", make(true).map_err(|e| errors::wrap(e, "ctx"))?)
+    println("map_err err {}", make(false).map_err(|e| errors::wrap(e, "ctx")).is_err())
+    show("or_else", or_else_q()?)
+    show("recover", recover_q()?)
+    println("or_else err {}", make(false).or_else(|e| Err(errors::wrap(e, "x"))).is_err())
+    show("ok", make(true).ok().unwrap())
+    println("ok none {}", make(false).ok().is_none())
+    show("opt ok_or", maybe(true).ok_or(errors::new("none"))?)
+    println("opt ok_or none {}", maybe(false).ok_or(errors::new("none")).is_err())
+    show("opt ok_or_else", maybe(true).ok_or_else(|| errors::new("none"))?)
+    println("opt ok_or_else none {}", maybe(false).ok_or_else(|| errors::new("none")).is_err())
+    show("opt filter", maybe(true).filter(|b| b.n > 0).unwrap())
+    println("opt filter rejects {}", maybe(true).filter(|b| b.n > 100).is_none())
+    show("opt or", maybe(false).or(maybe(true)).unwrap())
+    show("opt or first", maybe(true).or(maybe(true)).unwrap())
+    println("opt or none {}", maybe(false).or(maybe(false)).is_none())
+    show("opt or_else", maybe(false).or_else(|| maybe(true)).unwrap())
+    show("opt or_else first", maybe(true).or_else(|| maybe(true)).unwrap())
+    show("map", map_q()?)
+    show("opt map", maybe(true).map(|b| b).unwrap())
+    println("{:?}", maybe(true).map(|b| (b.n, b.s)))
+    println("{:?}", maybe(true).map(|b| [b.n, b.a.len()]))
+    println("{:?}", Some(3).map(|n| Some(n + 1)))
+    println("{:?}", maybe(true).map(|b| Some(b.s)))
+    println("{:?}", option::map(maybe(true), |b| (b.n, b.s)))
+    println("{:?}", result::map(make(true), |b| b.s))
+    println("{:?}", Some(2.5).map(|f| f * 2.0))
+    println("{:?}", Some(2.5).filter(|f| f > 1.0))
+    println("{}", None.unwrap_or_else(|| 1.25))
+    println("{}", None.unwrap_or(2.5))
+    println("{:?}", None.or(Some(4)))
+    println("{:?}", None.or_else(|| Some(1.5)))
+    println("{}", half(-1.0).unwrap_or_else(|_| 9.5))
+    println("{}", option::unwrap_or_else(None, || 1.25))
+    println("{:?}", make(true).map(|b| b.n).and_then(Ok))
+    println("{:?}", Some(2).map(Some))
+    println("{:?}", #[1, 2].map(Shape::Circle))
+    println("{:?}", Some(4).map(Shape::Square))
+    let kept = make(true)
+    let wrapped = kept.map_err(|e| errors::wrap(e, "ctx"))?
+    show("kept", wrapped)
+    Ok(())
+}
+
+fn main() {
+    for _ in 0..3 {
+        if let Err(e) = run() { println("err {e}") }
+    }
+    println("steps {}", countdown(3))
+}

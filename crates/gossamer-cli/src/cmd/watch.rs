@@ -194,7 +194,7 @@ fn comptime_inputs() -> BTreeSet<PathBuf> {
 
 fn start_child(entry: &Path, options: &Options, generation: u64, status: &Status) -> Result<Child> {
     if options.clear {
-        print!("\x1b[2J\x1b[H");
+        out!("\x1b[2J\x1b[H");
     }
     let exe = std::env::current_exe().context("locate gos executable")?;
     let mut command = Command::new(exe);

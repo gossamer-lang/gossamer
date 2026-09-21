@@ -41,26 +41,31 @@ pub fn max_size() -> usize {
     MAX_SIZE.load(Ordering::Relaxed)
 }
 
-fn check_depth(value: &serde_norway::Value, depth: usize, cap: usize) -> Result<(), Error> {
-    if depth > cap {
+fn check_depth(node: &gossamer_runtime::yaml_node::Node, cap: usize) -> Result<(), Error> {
+    if node.depth() > cap {
         return Err(Error {
             message: format!("nesting depth exceeds max_depth ({cap})"),
         });
     }
-    match value {
-        serde_norway::Value::Sequence(seq) => {
-            for v in seq {
-                check_depth(v, depth + 1, cap)?;
-            }
-        }
-        serde_norway::Value::Mapping(map) => {
-            for (_, v) in map {
-                check_depth(v, depth + 1, cap)?;
-            }
-        }
-        _ => {}
+    Ok(())
+}
+
+fn check_size(source: &str) -> Result<(), Error> {
+    let size_cap = max_size();
+    if source.len() > size_cap {
+        return Err(Error {
+            message: format!("input exceeds max_size ({} > {size_cap})", source.len()),
+        });
     }
     Ok(())
+}
+
+/// Decodes one document under the process-wide size and depth caps.
+fn decode(source: &str) -> Result<gossamer_runtime::yaml_node::Node, Error> {
+    check_size(source)?;
+    let node = gossamer_runtime::yaml_node::parse(source).map_err(Error::from_serde)?;
+    check_depth(&node, max_depth())?;
+    Ok(node)
 }
 
 /// Dynamically typed YAML value.
@@ -178,33 +183,20 @@ impl Error {
 
 /// Parses a single YAML document into a [`Value`].
 pub fn parse(source: &str) -> Result<Value, Error> {
-    let size_cap = max_size();
-    if source.len() > size_cap {
-        return Err(Error {
-            message: format!("input exceeds max_size ({} > {size_cap})", source.len()),
-        });
-    }
-    let raw: serde_norway::Value = serde_norway::from_str(source).map_err(Error::from_serde)?;
-    check_depth(&raw, 0, max_depth())?;
-    Ok(from_serde(raw))
+    decode(source).map(from_node)
 }
 
 /// Parses every document in a multi-document YAML stream.
 pub fn parse_all(source: &str) -> Result<Vec<Value>, Error> {
-    let size_cap = max_size();
-    if source.len() > size_cap {
-        return Err(Error {
-            message: format!("input exceeds max_size ({} > {size_cap})", source.len()),
-        });
-    }
+    check_size(source)?;
     let depth_cap = max_depth();
-    let mut out = Vec::new();
-    for doc in serde_norway::Deserializer::from_str(source) {
-        let value = serde_norway::Value::deserialize(doc).map_err(Error::from_serde)?;
-        check_depth(&value, 0, depth_cap)?;
-        out.push(from_serde(value));
-    }
-    Ok(out)
+    let docs = gossamer_runtime::yaml_node::parse_all(source).map_err(Error::from_serde)?;
+    docs.into_iter()
+        .map(|doc| {
+            check_depth(&doc, depth_cap)?;
+            Ok(from_node(doc))
+        })
+        .collect()
 }
 
 /// Encodes a [`Value`] as a YAML document (no leading `---`).
@@ -225,42 +217,26 @@ pub fn encode_all(values: &[Value]) -> Result<String, Error> {
     Ok(out)
 }
 
-fn from_serde(value: serde_norway::Value) -> Value {
-    match value {
-        serde_norway::Value::Null => Value::Null,
-        serde_norway::Value::Bool(b) => Value::Bool(b),
-        serde_norway::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Value::Int(i)
-            } else if let Some(u) = n.as_u64() {
-                if let Ok(signed) = i64::try_from(u) {
-                    Value::Int(signed)
-                } else {
-                    Value::Float(u as f64)
-                }
-            } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
-            } else {
-                Value::Null
-            }
-        }
-        serde_norway::Value::String(s) => Value::String(s),
-        serde_norway::Value::Sequence(items) => {
-            Value::Seq(items.into_iter().map(from_serde).collect())
-        }
-        serde_norway::Value::Mapping(map) => {
-            let entries = map
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "YAML's integer is signed, so an unsigned value past its range keeps its magnitude as a float"
+)]
+fn from_node(node: gossamer_runtime::yaml_node::Node) -> Value {
+    use gossamer_runtime::yaml_node::Node;
+    match node {
+        Node::Null => Value::Null,
+        Node::Bool(b) => Value::Bool(b),
+        Node::Int(n) => Value::Int(n),
+        Node::UInt(n) => Value::Float(n as f64),
+        Node::Float(f) => Value::Float(f),
+        Node::String(s) => Value::String(s),
+        Node::Seq(items) => Value::Seq(items.into_iter().map(from_node).collect()),
+        Node::Map(entries) => Value::Map(
+            entries
                 .into_iter()
-                .map(|(k, v)| (from_serde(k), from_serde(v)))
-                .collect();
-            Value::Map(entries)
-        }
-        serde_norway::Value::Tagged(boxed) => {
-            // Drop tag, preserve the inner value. Track B doesn't
-            // expose explicit tag handling yet - most user code uses
-            // YAML as a JSON-shaped data format.
-            from_serde(boxed.value)
-        }
+                .map(|(k, v)| (from_node(k), from_node(v)))
+                .collect(),
+        ),
     }
 }
 
@@ -282,15 +258,12 @@ fn to_serde(value: &Value) -> serde_norway::Value {
     }
 }
 
-use serde::Deserialize;
-
 /// Parses `yaml_text` as a single YAML document and renders it as
 /// JSON. The shape mirrors `encoding::toml::to_json` so callers can
 /// chain into `json::parse` or auto-derived `<Type>::from_yaml`.
 pub fn to_json(yaml_text: &str) -> Result<String, String> {
-    let v = parse(yaml_text).map_err(|e| e.message)?;
-    let jv = value_to_json(&v);
-    serde_json::to_string(&jv).map_err(|e| e.to_string())
+    let node = decode(yaml_text).map_err(|e| e.message)?;
+    serde_json::to_string(&node.into_json()).map_err(|e| e.to_string())
 }
 
 /// Renders a JSON document as YAML. Round-trips through the dynamic
@@ -300,32 +273,6 @@ pub fn from_json(json_text: &str) -> Result<String, String> {
     let jv: serde_json::Value = serde_json::from_str(json_text).map_err(|e| e.to_string())?;
     let yv = json_to_value(&jv);
     encode(&yv).map_err(|e| e.message)
-}
-
-fn value_to_json(v: &Value) -> serde_json::Value {
-    match v {
-        Value::Null => serde_json::Value::Null,
-        Value::Bool(b) => serde_json::Value::Bool(*b),
-        Value::Int(i) => serde_json::Value::Number((*i).into()),
-        Value::Float(f) => serde_json::Number::from_f64(*f)
-            .map_or(serde_json::Value::Null, serde_json::Value::Number),
-        Value::String(s) => serde_json::Value::String(s.clone()),
-        Value::Seq(items) => serde_json::Value::Array(items.iter().map(value_to_json).collect()),
-        Value::Map(entries) => {
-            let mut map = serde_json::Map::new();
-            for (k, v) in entries {
-                let key = match k {
-                    Value::String(s) => s.clone(),
-                    Value::Int(n) => n.to_string(),
-                    Value::Bool(b) => b.to_string(),
-                    Value::Null => "null".to_string(),
-                    other => format!("{other:?}"),
-                };
-                map.insert(key, value_to_json(v));
-            }
-            serde_json::Value::Object(map)
-        }
-    }
 }
 
 fn json_to_value(v: &serde_json::Value) -> Value {

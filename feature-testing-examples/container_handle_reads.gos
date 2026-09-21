@@ -1,0 +1,82 @@
+// A handle read out of a container, a struct field, or a live `Option` is a
+// share the reader may hand on: passing it to a function, calling a method on
+// it, or unwrapping it with a default leaves the container's own share intact,
+// so the next read of the same entry still names a live value. Identical on
+// every tier.
+
+use std::encoding::json
+use std::errors
+use std::regex
+
+struct Doc { body: json::Value, tag: String }
+
+fn show(v: json::Value) -> String { format("{}", v) }
+fn show_err(e: errors::Error) -> String { format("{}", e) }
+fn show_pat(p: regex::Pattern) -> String { format("{}", p.is_match("abc")) }
+
+// A loop over scalars gives the JIT a hot body to compile.
+fn countdown(n: i64) -> i64 {
+    let mut left = n
+    let mut steps = 0
+    while left > 0 {
+        left -= 1
+        steps += 1
+    }
+    steps
+}
+
+fn main() {
+    let parsed = json::parse("{\"x\":1}").unwrap()
+    let docs = #[json::parse("[1]").unwrap(), json::parse("[2]").unwrap()]
+    for i in 0..3 {
+        let v = docs[0]
+        println("vec-index {i} {}", show(v))
+    }
+    for i in 0..2 {
+        for d in docs {
+            println("vec-iter {i} {}", show(d))
+        }
+    }
+    let holder = Doc { body: parsed, tag: "t" }
+    for i in 0..3 {
+        let b = holder.body
+        println("field {i} {} {}", show(b), holder.tag)
+    }
+    let maybe = Some(json::parse("{\"y\":2}").unwrap())
+    for i in 0..3 {
+        if let Some(v) = maybe {
+            println("option {i} {}", show(v))
+        }
+    }
+    let mut errs = Map::new()
+    errs.insert("e", errors::new("boom"))
+    for i in 0..3 {
+        let e = errs.get("e").unwrap()
+        println("err {i} {}", show_err(e))
+    }
+    let mut pats = Map::new()
+    pats.insert("p", regex::compile("b").unwrap())
+    for i in 0..3 {
+        let p = pats.get("p").unwrap()
+        println("pat {i} {}", show_pat(p))
+    }
+    let mut nested = Map::new()
+    nested.insert("n", json::parse("{\"z\":[1,2]}").unwrap())
+    for i in 0..3 {
+        let v = nested.get("n").unwrap()
+        let z = v.get("z")
+        println("method {i} {:?}", z)
+    }
+    for i in 0..3 {
+        let got = nested.get("n").unwrap_or(json::parse("null").unwrap())
+        println("unwrap_or {i} {}", show(got))
+    }
+    let vecs = #[json::parse("3").unwrap()]
+    for i in 0..3 {
+        match vecs.get(0) {
+            Some(v) => println("vec-get {i} {}", show(v))
+            None => println("none")
+        }
+    }
+    println("steps {}", countdown(3))
+}

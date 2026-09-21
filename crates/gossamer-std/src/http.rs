@@ -109,22 +109,10 @@ impl StatusCode {
         self.0 >= 200 && self.0 < 300
     }
 
-    /// Returns the canonical reason phrase for common codes; `None`
-    /// for codes outside the small well-known set.
+    /// Registered reason phrase for this code; `None` for a code with none.
     #[must_use]
     pub const fn reason(self) -> Option<&'static str> {
-        Some(match self.0 {
-            200 => "OK",
-            201 => "Created",
-            204 => "No Content",
-            301 => "Moved Permanently",
-            400 => "Bad Request",
-            401 => "Unauthorized",
-            403 => "Forbidden",
-            404 => "Not Found",
-            500 => "Internal Server Error",
-            _ => return None,
-        })
+        gossamer_runtime::http_status::reason_phrase(self.0)
     }
 }
 
@@ -1927,7 +1915,7 @@ pub mod server {
         response: &mut Response,
         server_name: Option<&str>,
     ) -> io::Result<()> {
-        let reason = response.status.reason().unwrap_or("OK");
+        let reason = response.status.reason().unwrap_or("");
         let mut headers = response.headers.clone();
         let streamed = response.body_stream.is_some();
         let chunked = streamed

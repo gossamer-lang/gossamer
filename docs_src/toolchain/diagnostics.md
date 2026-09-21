@@ -67,12 +67,15 @@ version. This page is auto-generated from the catalogue in
 | [`GT0082`](#gt0082) | Types | reference passed where a value is taken |
 | [`GT0083`](#gt0083) | Types | write through a value that is not a reference |
 | [`GT0084`](#gt0084) | Types | impl of a trait the language supplies itself |
-| [`GT0085`](#gt0085) | Types | ordered container over a type that writes its own `cmp` |
+| [`GT0085`](#gt0085) | Types | heap over a type that writes its own `cmp` |
 | [`GT0086`](#gt0086) | Types | `spawn` outside a `cohort` block |
 | [`GP0052`](#gp0052) | Parser | build-time validated call without a literal |
 | [`GT0087`](#gt0087) | Types | wrapping arithmetic written as a method |
 | [`GT0088`](#gt0088) | Types | const generic argument not inferred |
 | [`GT0089`](#gt0089) | Types | unsupported vector type or operation |
+| [`GT0090`](#gt0090) | Types | parallel adapter callback that is not provably pure |
+| [`GT0091`](#gt0091) | Types | ordered range bounds not written in the call |
+| [`GT0092`](#gt0092) | Types | field read from a closure parameter of undecided type |
 | [`GP0056`](#gp0056) | Parser | retired cohort isolation spelling |
 | [`GP0057`](#gp0057) | Parser | literal regex pattern that does not compile |
 | [`GP0058`](#gp0058) | Parser | malformed literal SQL statement |
@@ -431,9 +434,9 @@ Hashing, copying, release, marker safety, and the `Into` / `TryInto` / `IntoIter
 
 ## `GT0085` <a id="gt0085"></a>
 
-**Types** - ordered container over a type that writes its own `cmp`
+**Types** - heap over a type that writes its own `cmp`
 
-A heap, a `BTreeSet`, or a `BTreeMap` keeps its elements in the order they went in and reads them back with no comparator to call, so an element or key whose type writes its own `cmp` would silently not be ordered by it. A sequence orders on demand and does route through the type's `cmp`: sort a `Vec<T>`, or key the container on a value that carries the order.
+A `MinHeap` or `MaxHeap` keeps its elements in the order they went in and reads them back with no comparator to call, so an element whose type writes its own `cmp` would silently not be ordered by it. A sequence orders on demand and does route through the type's `cmp`, and a `BTreeSet` or `BTreeMap` seats its entries by it: sort a `Vec<T>`, use a sorted set, or key the heap on a value that carries the order.
 
 ## `GT0086` <a id="gt0086"></a>
 
@@ -464,6 +467,24 @@ A call to a function with a const generic parameter gave it no value. A const pa
 **Types** - unsupported vector type or operation
 
 A `Simd` or `Mask` vector named an element type, a lane count, or an operation the vector type does not support. `Simd<T, N>` takes `f32`, `f64`, `i32`, `i64`, `u8`, or `u32` lanes and `N` of 2, 4, 8, or 16 (16 for `u8`, `i32`, and `u32`); `Simd::splat` takes its lane count from the annotated type.
+
+## `GT0090` <a id="gt0090"></a>
+
+**Types** - parallel adapter callback that is not provably pure
+
+A parallel adapter runs its callback on many workers at once, so the callback must be a closure literal with a pure body or a named pure function. A callable reached through a binding is not decidable at the call site, and a closure that writes a container it captured would have every worker write the same container. Collect the results and combine them afterwards, or use `cohort { }` with `spawn` for work that performs effects.
+
+## `GT0091` <a id="gt0091"></a>
+
+**Types** - ordered range bounds not written in the call
+
+`m.range(r)` on a `BTreeMap` reads its bounds from the range written in the call, and each bound is a key: `m.range("b".."d")`, `m.range(lo..=hi)`, `m.range(lo..)`, `m.range(..hi)`, or `m.range(..)`. A range stored in a binding carries no bounds a key can be compared with, so write the range in place.
+
+## `GT0092` <a id="gt0092"></a>
+
+**Types** - field read from a closure parameter of undecided type
+
+A field was read from a closure parameter with no annotation, and the closure is never handed to anything that says what it takes, so nothing decides the parameter's type. The field's layout depends on that type: annotate the parameter, `|r: http::Request| r.path`, or pass the closure where its parameter type is known.
 
 ## `GP0056` <a id="gp0056"></a>
 

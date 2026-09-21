@@ -348,11 +348,13 @@ fn print_table(rows: &[Row], has_tiers: bool) {
     let status_w = "experimental".len();
     let tier_w = "vm:pass cl:pass llvm:pass".len().max(header_tier.len());
     let doc_w = "(no doc)".len();
-    println!(
+    outln!(
         "{:name_w$} | {:status_w$} | {:tier_w$} | Doc",
-        "Name", "Status", header_tier
+        "Name",
+        "Status",
+        header_tier
     );
-    println!(
+    outln!(
         "{} | {} | {} | {}",
         "-".repeat(name_w),
         "-".repeat(status_w),
@@ -371,7 +373,7 @@ fn print_table(rows: &[Row], has_tiers: bool) {
                 .map_or("(no doc)".to_string(), |s| s.to_string_lossy().into_owned()),
             None => "(no doc)".to_string(),
         };
-        println!(
+        outln!(
             "{:name_w$} | {:status_w$} | {:tier_w$} | {}",
             row.entry.path,
             row.status().tag(),
@@ -443,12 +445,12 @@ fn print_json(rows: &[Row], has_tiers: bool) {
         out.push('}');
     }
     out.push_str("\n]\n");
-    println!("{out}");
+    outln!("{out}");
 }
 
 fn print_markdown(rows: &[Row], has_tiers: bool) {
-    println!("| Name | Status | Tier-Parity | Doc |");
-    println!("|---|---|---|---|");
+    outln!("| Name | Status | Tier-Parity | Doc |");
+    outln!("|---|---|---|---|");
     for row in rows {
         let tier_cell = if has_tiers {
             row.tiers.render_compact()
@@ -463,7 +465,7 @@ fn print_markdown(rows: &[Row], has_tiers: bool) {
             ),
             None => "(no doc)".to_string(),
         };
-        println!(
+        outln!(
             "| `{}` | {} | {} | {} |",
             row.entry.path,
             row.status().tag(),
@@ -570,7 +572,7 @@ fn check_mode(
         }
     }
     if failures.is_empty() {
-        println!("feature-status: ok ({} items checked)", entries.len());
+        outln!("feature-status: ok ({} items checked)", entries.len());
         Ok(())
     } else {
         for line in &failures {

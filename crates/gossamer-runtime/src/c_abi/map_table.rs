@@ -9,6 +9,7 @@ use std::hash::Hash;
 use rustc_hash::FxHashMap;
 
 use super::map::{ByteKey, ByteKeyRef, KeyOrder, skey_order_cmp};
+use super::slot_key::UserCmp;
 use crate::ordered::{Cursor, Iter as TreeIter, OrderedTree};
 
 /// How an ordered table compares its keys.
@@ -21,6 +22,9 @@ pub(crate) enum TableOrder {
     /// An aggregate key's flat encoding, field by field under its slot
     /// descriptor.
     Skey(Box<[u8]>),
+    /// The order the key type writes for itself, reached through its own
+    /// `cmp`. The key's stored bytes are the slots that comparator reads.
+    User(UserCmp),
 }
 
 /// A key an ordered table can compare under a [`TableOrder`].
@@ -32,6 +36,9 @@ impl TableKey for i64 {
     fn table_cmp(&self, other: &Self, order: &TableOrder) -> Ordering {
         match order {
             TableOrder::Word(o) => o.rank(*self).cmp(&o.rank(*other)),
+            // SAFETY: the comparator is the one the program compiled for this
+            // key type, whose value is the word the map stores.
+            TableOrder::User(cmp) => unsafe { cmp.order_word(*self, *other) },
             _ => self.cmp(other),
         }
     }
@@ -41,6 +48,9 @@ impl TableKey for ByteKeyRef {
     fn table_cmp(&self, other: &Self, order: &TableOrder) -> Ordering {
         match order {
             TableOrder::Skey(desc) => skey_order_cmp(self.as_slice(), other.as_slice(), desc),
+            // SAFETY: a user-ordered map stores the slots its key type's own
+            // `cmp` reads, so the comparator is called on what it expects.
+            TableOrder::User(cmp) => unsafe { cmp.order(self.as_slice(), other.as_slice()) },
             _ => self.as_slice().cmp(other.as_slice()),
         }
     }
@@ -114,6 +124,12 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
             Self::Hash(_) => Self::default(),
             Self::Tree(_, order) => Self::Tree(OrderedTree::new(), order.clone()),
         }
+    }
+
+    /// Whether the keys are the slots a user comparator reads, which the
+    /// table owns a share of each counted word of.
+    pub(crate) fn keys_own_slots(&self) -> bool {
+        matches!(self, Self::Tree(_, TableOrder::User(_)))
     }
 
     /// Whether traversal already yields key order.

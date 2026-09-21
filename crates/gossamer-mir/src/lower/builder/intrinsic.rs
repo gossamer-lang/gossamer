@@ -2861,6 +2861,24 @@ impl<'a> Builder<'a> {
             // pipe value as the *trailing* arg), opt second. Builds
             // a fresh Option packed in `*mut GosResult` with disc=0
             // for Some(mapped) and disc=1 for None passthrough.
+            ("option::map" | "result::map", 2)
+                if self.enum_payload_ty(ty, 0).is_some_and(|mapped| {
+                    !matches!(
+                        self.tcx.kind_of(mapped),
+                        gossamer_types::TyKind::Var(_)
+                            | gossamer_types::TyKind::Error
+                            | gossamer_types::TyKind::Never
+                    )
+                }) =>
+            {
+                // The closure is called in this frame, as the method form does.
+                let mapped_ty = self.enum_payload_ty(ty, 0)?;
+                let recv = self.lower_expr(&args[1])?;
+                let recv_ty = self.locals[recv.0 as usize].ty;
+                let payload_ty = self.enum_payload_ty(recv_ty, 0).unwrap_or(i64_ty);
+                let closure = self.lower_iter_closure(&args[0], &[payload_ty], mapped_ty, span)?;
+                Some(self.lower_map_inline(recv, closure, recv_ty, mapped_ty, ty, span))
+            }
             ("option::map", 2) => {
                 // Lower the option first so the closure's parameter can be
                 // typed from the payload it actually receives. A payload wider
@@ -2873,7 +2891,9 @@ impl<'a> Builder<'a> {
                     .unwrap_or(i64_ty);
                 let closure_local =
                     self.lower_iter_closure(&args[0], &[payload_ty], i64_ty, span)?;
-                let opt_ty = {
+                let opt_ty = if self.is_option_adt(ty) {
+                    ty
+                } else {
                     let substs = gossamer_types::Substs::from_types([i64_ty]);
                     self.tcx.intern(gossamer_types::TyKind::Adt {
                         def: gossamer_resolve::DefId::local(u32::MAX - 1),
@@ -2941,6 +2961,10 @@ impl<'a> Builder<'a> {
                 let payload_ty = self.enum_payload_ty(args[1].ty, 0).unwrap_or(i64_ty);
                 if self.tcx.elem_is_addressed_aggregate(payload_ty)
                     || self.carrier_payload_is_carrier(args[1].ty)
+                    || matches!(
+                        self.tcx.kind_of(payload_ty),
+                        gossamer_types::TyKind::Float(_)
+                    )
                 {
                     let err_ty = self.enum_payload_ty(args[1].ty, 1).unwrap_or(i64_ty);
                     let closure = self.lower_iter_closure(&args[0], &[err_ty], payload_ty, span)?;
@@ -3023,12 +3047,16 @@ impl<'a> Builder<'a> {
             ("result::map", 2) => {
                 let closure_local = self.lower_iter_closure(&args[0], &[i64_ty], i64_ty, span)?;
                 let res_local = self.lower_expr(&args[1])?;
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([i64_ty, err_ty]);
-                let res_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                });
+                let res_ty = if self.is_result_or_option_adt(ty) && !self.is_option_adt(ty) {
+                    ty
+                } else {
+                    let err_ty = self.tcx.dyn_error_ty();
+                    let substs = gossamer_types::Substs::from_types([i64_ty, err_ty]);
+                    self.tcx.intern(gossamer_types::TyKind::Adt {
+                        def: gossamer_resolve::DefId::local(u32::MAX),
+                        substs,
+                    })
+                };
                 let dest = self.fresh(res_ty);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
@@ -3085,8 +3113,11 @@ impl<'a> Builder<'a> {
                 ty
             };
             let recv = self.lower_expr(receiver)?;
+            // The runtime helpers hand the fallback's answer back as an integer
+            // word, so a float or a wider value is produced in this frame.
             if self.tcx.elem_is_addressed_aggregate(payload_ty)
                 || self.carrier_payload_is_carrier(receiver_ty)
+                || matches!(self.tcx.kind_of(payload_ty), TyKind::Float(_))
             {
                 let err_ty = self.enum_payload_ty(receiver_ty, 1).unwrap_or(i64_ty);
                 let inputs: Vec<Ty> = if is_option { Vec::new() } else { vec![err_ty] };
@@ -3110,6 +3141,18 @@ impl<'a> Builder<'a> {
                 dest_ty,
                 span,
             ));
+        }
+        // A float payload reaches a runtime predicate in an integer register,
+        // so the predicate runs in this frame instead.
+        if method.name.as_str() == "filter"
+            && is_option
+            && let Some(payload_ty) = self.enum_payload_ty(receiver_ty, 0)
+            && matches!(self.tcx.kind_of(payload_ty), TyKind::Float(_))
+        {
+            let recv = self.lower_expr(receiver)?;
+            let bool_ty = self.tcx.bool_ty();
+            let closure = self.lower_iter_closure(closure_arg, &[payload_ty], bool_ty, span)?;
+            return Some(self.lower_filter_inline(recv, closure, receiver_ty, span));
         }
         let helper = match (method.name.as_str(), is_option) {
             ("and_then", true) => "gos_rt_option_and_then",
@@ -3414,6 +3457,10 @@ impl<'a> Builder<'a> {
                 let payload_ty = self.enum_payload_ty(args[1].ty, 0).unwrap_or(i64_ty);
                 if self.tcx.elem_is_addressed_aggregate(payload_ty)
                     || self.carrier_payload_is_carrier(args[1].ty)
+                    || matches!(
+                        self.tcx.kind_of(payload_ty),
+                        gossamer_types::TyKind::Float(_)
+                    )
                 {
                     let closure = self.lower_iter_closure(&args[0], &[], payload_ty, span)?;
                     let opt = self.lower_expr(&args[1])?;
@@ -5310,6 +5357,159 @@ impl<'a> Builder<'a> {
             destination: Place::local(dest),
             target: Some(join),
         });
+        self.set_current(join);
+        dest
+    }
+
+    /// Lowers `carrier.map(f)` whose mapped payload is an aggregate stored by
+    /// address, as the match it stands for.
+    ///
+    /// The closure's aggregate answer is written into a local of this frame
+    /// and boxed by the `Some` / `Ok` constructor, which gives it the copy-blob
+    /// layout every holder of the carrier releases. An empty or `Err` receiver
+    /// is the answer as it stands.
+    pub(crate) fn lower_map_inline(
+        &mut self,
+        recv: Local,
+        closure: Local,
+        receiver_ty: Ty,
+        mapped_ty: Ty,
+        dest_ty: Ty,
+        span: Span,
+    ) -> Local {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let payload_ty = self.enum_payload_ty(receiver_ty, 0).unwrap_or(i64_ty);
+        let dest = self.fresh(dest_ty);
+        let disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(disc),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_disc",
+                args: vec![Operand::Copy(Place::local(recv))],
+            },
+            span,
+        );
+        let present = self.new_block(span);
+        let otherwise = self.new_block(span);
+        let mapped_block = self.new_block(span);
+        let join = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(disc)),
+            arms: vec![(0, present)],
+            default: otherwise,
+        });
+        self.set_current(present);
+        let payload = self.fresh(payload_ty);
+        self.emit_assign(
+            Place::local(payload),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_payload",
+                args: vec![Operand::Copy(Place::local(recv))],
+            },
+            span,
+        );
+        let mapped = self.fresh(mapped_ty);
+        self.terminate(Terminator::Call {
+            callee: Operand::Copy(Place::local(closure)),
+            args: vec![Operand::Copy(Place::local(payload))],
+            destination: Place::local(mapped),
+            target: Some(mapped_block),
+        });
+        self.set_current(mapped_block);
+        let present_disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(present_disc),
+            Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+            span,
+        );
+        self.lower_result_ctor_into(dest, present_disc, mapped, span);
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(otherwise);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::Use(Operand::Copy(Place::local(recv))),
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(join);
+        dest
+    }
+
+    /// Lowers `opt.filter(p)` as the match it stands for: the receiver when it
+    /// holds a value the predicate accepts, `None` otherwise.
+    pub(crate) fn lower_filter_inline(
+        &mut self,
+        recv: Local,
+        predicate: Local,
+        receiver_ty: Ty,
+        span: Span,
+    ) -> Local {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let bool_ty = self.tcx.bool_ty();
+        let payload_ty = self.enum_payload_ty(receiver_ty, 0).unwrap_or(i64_ty);
+        let dest = self.fresh(receiver_ty);
+        let disc = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(disc),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_disc",
+                args: vec![Operand::Copy(Place::local(recv))],
+            },
+            span,
+        );
+        let present = self.new_block(span);
+        let judged = self.new_block(span);
+        let kept = self.new_block(span);
+        let empty = self.new_block(span);
+        let join = self.new_block(span);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(disc)),
+            arms: vec![(0, present)],
+            default: empty,
+        });
+        self.set_current(present);
+        let payload = self.fresh(payload_ty);
+        self.emit_assign(
+            Place::local(payload),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_payload",
+                args: vec![Operand::Copy(Place::local(recv))],
+            },
+            span,
+        );
+        let accepted = self.fresh(bool_ty);
+        self.terminate(Terminator::Call {
+            callee: Operand::Copy(Place::local(predicate)),
+            args: vec![Operand::Copy(Place::local(payload))],
+            destination: Place::local(accepted),
+            target: Some(judged),
+        });
+        self.set_current(judged);
+        self.terminate(Terminator::SwitchInt {
+            discriminant: Operand::Copy(Place::local(accepted)),
+            arms: vec![(0, empty)],
+            default: kept,
+        });
+        self.set_current(kept);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::Use(Operand::Copy(Place::local(recv))),
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
+        self.set_current(empty);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_result_new",
+                args: vec![
+                    Operand::Const(ConstValue::Int(1)),
+                    Operand::Const(ConstValue::Int(0)),
+                ],
+            },
+            span,
+        );
+        self.terminate(Terminator::Goto { target: join });
         self.set_current(join);
         dest
     }

@@ -3135,6 +3135,31 @@ pub extern "C" fn gos_rt_option_vec_payload_release(r: i128) {
     gos_rt_result_ok_payload_release(r, 2);
 }
 
+/// The carrier with its map payload replaced by a table of its own, so a
+/// carrier a function answers owns the map it holds and the caller is the
+/// one that frees it.
+///
+/// `ok_is_map` / `err_is_map` say which arm holds a `GosMap` word; the live
+/// arm decides which one is read, and an arm holding anything else passes
+/// through untouched.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_carrier_own_map(r: i128, ok_is_map: i64, err_is_map: i64) -> i128 {
+    let disc = result_disc_of(r);
+    let is_map = match disc {
+        0 => ok_is_map != 0,
+        1 => err_is_map != 0,
+        _ => false,
+    };
+    let payload = result_payload_of(r);
+    if !is_map || payload == 0 {
+        return r;
+    }
+    // SAFETY: the arm's payload word of a carrier whose static type names a
+    // map is a live `GosMap` the caller still holds.
+    let cloned = unsafe { crate::c_abi::map::gos_rt_map_clone(payload as usize as *mut _) };
+    gos_rt_result_new(disc, cloned as usize as i64)
+}
+
 /// Releases the heap payload of a carrier's `Ok` / `Some` arm, and nothing on
 /// the other arm, whose payload word belongs to the error value.
 ///

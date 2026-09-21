@@ -188,7 +188,11 @@ pub fn run(source_file: &SourceFile, src: &str, registry: &Registry) -> Vec<Diag
         if level.severity().is_none() && !scopes.iter().any(|s| s.levels.contains_key(id)) {
             continue;
         }
-        let findings = lints::run_lint(id, source_file, src);
+        let mut findings = lints::run_lint(id, source_file, src);
+        // A let-chain clones its written `else` onto every clause's failure
+        // edge, so one spelled construct can surface once per clone.
+        findings.sort_by(|a, b| (a.0.start, a.0.end, &a.1).cmp(&(b.0.start, b.0.end, &b.1)));
+        findings.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
         for (span, title, help) in findings {
             let Some(severity) = scoped_level(&scopes, id, span).unwrap_or(level).severity() else {
                 continue;

@@ -1394,10 +1394,17 @@ const SPECS: &[Spec] = &[
     // A `BTreeMap`'s ranges and first / last entries over every key kind.
     spec("feature-testing-examples/btreemap_range_api.gos"),
     spec("feature-testing-examples/btreeset_range_api.gos"),
+    // An unsigned integer renders its magnitude wherever it becomes text.
+    spec("feature-testing-examples/unsigned_to_string.gos"),
+    // A key or element type's own `cmp` seats every entry of an ordered
+    // container.
+    spec("feature-testing-examples/user_ordered_keys.gos"),
     // Goroutines fill `BTreeMap`s and send them to be merged.
     spec("feature-testing-examples/btreemap_goroutine_shared.gos"),
     // A map sent through a channel is the receiver's own table.
     spec("feature-testing-examples/map_channel_ownership.gos"),
+    // A map answered inside a carrier is the caller's own table.
+    spec("feature-testing-examples/map_in_carrier_ownership.gos"),
     // `zip` answers an iterator every consumer can advance.
     spec("feature-testing-examples/iter_zip_advances.gos"),
     spec("feature-testing-examples/mutex_poison_recovery.gos"),
@@ -1836,6 +1843,15 @@ const SPECS: &[Spec] = &[
     // Assets folded into the program at compile time, resolved against the
     // source that embeds them rather than the build's working directory.
     spec("feature-testing-examples/comptime_embedded_assets.gos"),
+    // A YAML integer wider than 64 bits decodes as the nearest float, one
+    // that fits `i64` or `u64` stays exact.
+    spec("feature-testing-examples/yaml_wide_integers.gos"),
+    // A handle read out of a container, a field, or a live `Option` and handed
+    // on leaves the container's own share intact.
+    spec("feature-testing-examples/container_handle_reads.gos"),
+    // A combinator that hands its receiver's payload on leaves it whole, and
+    // `map` keeps a float, aggregate, or nested carrier answer typed.
+    spec("feature-testing-examples/carrier_combinator_payloads.gos"),
 ];
 
 const DEDICATED_FEATURE_TESTING_EXAMPLES: &[&str] = &[
@@ -1844,6 +1860,8 @@ const DEDICATED_FEATURE_TESTING_EXAMPLES: &[&str] = &[
     "http_channel_pool.gos",
     "http_bare_handler.gos",
     "http_plain_fn_handler.gos",
+    "http_status_reason.gos",
+    "http_handler_closure_params.gos",
     "http_middleware_controls.gos",
     "lifecycle_readiness_shutdown.gos",
     "http_server_object.gos",

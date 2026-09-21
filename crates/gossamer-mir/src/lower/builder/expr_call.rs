@@ -852,7 +852,7 @@ impl<'a> Builder<'a> {
         // Same for the rest of the stdlib that maps cleanly to
         // a single runtime helper (errors, regex, fs, path,
         // bufio, http, gzip, slog, testing, …).
-        if !user_fn && let Some(local) = self.lower_stdlib_free_call(callee, args, span) {
+        if !user_fn && let Some(local) = self.lower_stdlib_free_call(callee, args, ty, span) {
             return Some(local);
         }
         // If the callee is a bare path that resolves to a local

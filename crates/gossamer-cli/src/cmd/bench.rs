@@ -103,7 +103,7 @@ pub(crate) fn run_with_opts(opts: BenchOpts) -> Result<()> {
         }
     }
     if discovered.is_empty() {
-        println!(
+        outln!(
             "bench: no #[bench] functions found under {}",
             resolved.display()
         );
@@ -127,7 +127,7 @@ pub(crate) fn run_with_opts(opts: BenchOpts) -> Result<()> {
         .max()
         .unwrap_or(1);
     for record in &records {
-        println!(
+        outln!(
             "{label:<lw$} ... {ns:>nw$} ns/op (tier-ups {tier_ups}, compiles {compiles}, \
              compile {compile_us} us, native-code {native_code} B, peak-rss {peak_rss} B, \
              vm-bypassed {vm_bypassed}, allocs {allocations}, alloc-bytes {allocation_bytes} B, \

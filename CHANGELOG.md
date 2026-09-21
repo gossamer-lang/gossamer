@@ -27,12 +27,34 @@
 - `BTreeMap` and `BTreeSet` keep their entries in a B+ tree on every tier: `get`, `insert`, and `remove` take O(log n), and a walk reads keys in order without sorting a copy first.
 - `BTreeMap` gains `first_key_value`, `last_key_value`, `pop_first`, `pop_last`, and `range(lo..hi)` over every range form, with bounds that are keys of any ordered type (`m.range("b".."f")`); `BTreeSet` gains `first`, `last`, `pop_first`, `pop_last`, and `range`. A range kept in a binding instead of written in the call is reported as GT0091.
 - `BTreeMap<u64, _>` and `BTreeMap<usize, _>` order keys at and above `2^63` after the smaller ones, as an unsigned key orders.
+- A map a function answers inside an `Option` or a `Result` is the caller's own table: one the callee built is handed over and freed once, where a compiled build leaked it, and one the callee read out of another map is copied, so writing to it no longer changes the map it came from on any tier.
 - A map sent through a channel is the receiver's own table: a map sent from a goroutine that then finished is no longer freed under the receiver in a compiled build, the bytecode VM no longer lets the sender's later changes show through, and the receiver frees what it received.
 - `outer.get(k).unwrap()` on a map of maps no longer frees the inner map the outer map still holds in a compiled build.
 - `iter()` on a struct-, tuple-, or enum-keyed map in a compiled build answers its entries where it answered none unless it drove a `for` loop.
 - `next()` on a `zip`, on a set's `iter()`, and on a walk over enum elements builds and runs in a compiled build, where it failed to link.
+- A `BTreeMap` key type and a `BTreeSet` element type that write their own `cmp` seat every entry by that order on every tier, where a compiled build and the bytecode VM both kept the language's order for such a type.
+- `.to_string()` on an unsigned integer at or above 2^63 renders its value in a compiled build, where it rendered as negative.
 - A tuple, `Vec`, or `Option` that holds a user struct or enum renders its other `String` elements quoted on the bytecode VM too.
 - `SKILL.md` and `SPEC.md` spell labelled arguments `name: value`, as the toolchain requires, and the unmatched-label diagnostic names the label the same way.
+- A `use super::{..}` written inside one file's `#[cfg(test)] mod tests` no longer collides with a later sibling file's own import of the same item: outside `gos test` the test module's imports are dropped with it, and a relative import is recorded under the path it names from the project root.
+- A closure written where an `http::Handler` is taken - `Server::serve`, `http::serve`, a router verb, a middleware wrapper - is typed as that handler, so an unannotated `|r|` reads `r.path` as a `String` and a `match` over a call on it lowers, where `gos run` and `gos build` failed with an internal lowering error.
+- A field read from an unannotated closure parameter whose type nothing decides is reported as GT0092 by `gos check`, where it passed the check and failed during lowering.
+- `Map::count` and `retain` with a predicate type their closure's parameter from the map's pairs.
+- `websocket::accept` is typed as answering the 101 `http::Response` it returns on every tier.
+- `GL0026` (`empty_else`) no longer fires on an `if let .. && ..` chain with no `else`.
+- The status line of an `http` response carries the reason phrase RFC 9110 registers for its code on every tier (`405 Method Not Allowed`, `422 Unprocessable Content`), and an empty phrase for a code with none, where the bytecode VM sent `OK` for most codes.
+- `yaml::to_json`, `yaml::parse`, and `from_yaml` read an integer wider than 64 bits as the nearest float, and keep every integer that fits `i64` or `u64` exact, where they rejected the document; both tiers decode YAML the same way.
+- A `json::Value`, `errors::Error`, or other handle read out of a map, a `Vec`, a struct field, or a live `Option` and handed to a function or a method stays valid in a compiled build, where the next read of the same entry found it freed.
+- `map_err`, `or_else`, `ok`, `ok_or`, `ok_or_else`, `filter`, and `or` on a `Result` or `Option` carrying a struct keep the struct's `Vec`, `Map`, and `String` fields in a compiled build, where the answer's containers read empty and a larger program corrupted the heap.
+- `opt.or(alt)` builds on the compiled tiers, where it failed to link.
+- `map` on an `Option` or `Result` answering a float, a struct, a tuple, an array, or another `Option` answers that value on the compiled tiers and the JIT, where a float answered garbage, a nested `Option` answered its discriminant, and an aggregate leaked; the free `option::map` / `result::map` type their closure from the carrier they are given.
+- `filter` and `unwrap_or_else` over a float payload answer the right value on the compiled tiers.
+- `Some([1, 2])` and other `Option` / `Result` values carrying a fixed array free the array in a compiled build.
+- A bare `None` is an `Option` its methods type against, so `None.or(..)`, `None.or_else(..)`, and `None.unwrap_or(1.25)` build and answer the right value on the compiled tiers.
+- `Some`, `Ok`, `Err`, and a tuple enum variant such as `Shape::Circle` passed as a function (`r.and_then(Ok)`, `xs.map(Shape::Circle)`) build and run on the compiled tiers.
+- `gos check` rejects a built-in type's associated function that does not exist (`String::from_utf8_lossy`) with GT0060 and the functions the type has, where it passed the check and failed at run time.
+- A project with `[rust-bindings]` keeps its runner while `gos run`, `gos test`, or `gos build` is using it, where another `gos` process pruning the runner cache could delete it mid-build and the link failed with a missing runtime archive.
+- A program whose stdout is closed by its reader (`gos run prog | head`) ends by `SIGPIPE` with nothing on stderr on every tier, and so does the toolchain's own output, where the bytecode VM and `gos` panicked and a compiled program kept running.
 
 ## 0.62.0 - Parallel collections and cross-tier correctness
 

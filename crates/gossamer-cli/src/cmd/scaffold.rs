@@ -33,10 +33,10 @@ pub(crate) fn init(id: &str) -> Result<()> {
         false
     };
     if scaffolded {
-        println!("init: created project.toml + src/main.gos for {project}");
-        println!("hint: try `gos` or `gos test`");
+        outln!("init: created project.toml + src/main.gos for {project}");
+        outln!("hint: try `gos` or `gos test`");
     } else {
-        println!("init: created project.toml for {project}");
+        outln!("init: created project.toml for {project}");
     }
     Ok(())
 }
@@ -110,14 +110,14 @@ pub(crate) fn new(id: &str, path: Option<PathBuf>, template: &str) -> Result<()>
             ));
         }
     }
-    println!(
+    outln!(
         "new: scaffolded {} ({} template) at {}",
         project,
         template,
         dir.display()
     );
     if let Some((crate_name, crate_dir)) = binding_hint {
-        println!(
+        outln!(
             "add it to the calling project's `project.toml`:\n\n\
              [rust-bindings]\n\
              {crate_name} = {{ path = \"{}\" }}",

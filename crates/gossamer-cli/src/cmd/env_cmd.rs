@@ -46,6 +46,6 @@ pub(crate) fn run() {
     ];
     let width = pairs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     for (k, v) in pairs {
-        println!("{k:<width$}  {v}");
+        outln!("{k:<width$}  {v}");
     }
 }

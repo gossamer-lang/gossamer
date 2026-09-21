@@ -261,6 +261,7 @@ pub mod comptime_paths;
 pub mod comptime_policy;
 pub mod coverage;
 pub mod fs_mode;
+pub mod http_status;
 pub mod ordered;
 pub mod platform;
 pub mod pprof;
@@ -292,6 +293,7 @@ pub mod sql_pool;
 pub mod stack_guard;
 pub mod symbols;
 pub mod value;
+pub mod yaml_node;
 
 // Native-only runtime services that pull crates with no wasm32 build:
 // `ffi` (libloading dynamic loading) and `http2_server` (h2 / tokio).

@@ -1,0 +1,130 @@
+// Builds and runs the ordered-container benchmarks, prints the Gossamer and
+// Rust readings side by side, and fails when a claim about the tree stops
+// holding on the machine it runs on.
+//
+//   gos run benchmarks/ordered/run.gos [--gos PATH] [--skip-rust]
+use std::{env, fs, path, process}
+
+struct Reading { container: String, keys: String, op: String, size: i64, ns: i64 }
+
+fn parse(text: String) -> Vec<Reading> {
+    let mut out: Vec<Reading> = #[]
+    for line in text.lines() {
+        if line.starts_with("#") { continue }
+        let fields = line.split(" ")
+        if fields.len() != 5 { continue }
+        let size = fields[3].to_i64().unwrap_or(0)
+        let ns = fields[4].to_i64().unwrap_or(0)
+        out.push(Reading {
+            container: fields[0]
+            keys: fields[1]
+            op: fields[2]
+            size: size
+            ns: ns
+        })
+    }
+    out
+}
+
+fn reading(rows: Vec<Reading>, container: String, keys: String, op: String, size: i64) -> i64 {
+    for r in rows {
+        if r.container == container && r.keys == keys && r.op == op && r.size == size {
+            return r.ns
+        }
+    }
+    -1
+}
+
+fn run_or_exit(program: String, args: Vec<String>) -> String {
+    match process::run(program, args) {
+        Ok(done) => {
+            if done.code != 0 {
+                eprintln("{} failed ({}): {}", program, done.code, done.stderr)
+                process::exit(1)
+            }
+            done.stdout
+        }
+        Err(e) => {
+            eprintln("{} could not run: {}", program, e)
+            process::exit(1)
+        }
+    }
+}
+
+fn main() {
+    let args = env::args()
+    let mut gos = "./target/release/gos"
+    let mut skip_rust = false
+    let mut i = 0
+    while i < args.len() {
+        if args[i] == "--gos" && i + 1 < args.len() { gos = args[i + 1] }
+        if args[i] == "--skip-rust" { skip_rust = true }
+        i += 1
+    }
+    let dir = path::join(env::temp_dir(), "gos-ordered-benchmarks")
+    fs::create_dir_all(dir).unwrap()
+    let source = path::join("benchmarks", path::join("ordered", "btreemap.gos"))
+    println("building {}", source)
+    let _ = run_or_exit(gos, #["build", "--release", "--out-dir", dir, source])
+    let gossamer = parse(run_or_exit(path::join(dir, "btreemap"), #[]))
+
+    let mut rust: Vec<Reading> = #[]
+    if !skip_rust {
+        let rs = path::join("benchmarks", path::join("ordered", "std_btreemap.rs"))
+        let exe = path::join(dir, "std_btreemap")
+        println("building {}", rs)
+        let _ = run_or_exit("rustc", #["-O", "-o", exe, rs])
+        rust = parse(run_or_exit(exe, #[]))
+    }
+
+    println("")
+    println("{:<8} {:<10} {:>9} {:>12} {:>12} {:>10}", "keys", "op", "size", "gossamer", "rust std", "ratio")
+    let mut failures: Vec<String> = #[]
+    for keys in #["i64", "String"] {
+        for size in #[1_000, 100_000, 1_000_000] {
+            for op in #["insert", "get_hit", "get_miss", "traverse", "range", "pop_first"] {
+                let ours = reading(gossamer, "BTreeMap", keys, op, size)
+                if ours < 0 { continue }
+                let theirs = reading(rust, "std::BTreeMap", keys, op, size)
+                let ratio = if theirs > 0 { format("{:.1}x", ours as f64 / theirs as f64) } else { "-" }
+                println("{:<8} {:<10} {:>9} {:>12} {:>12} {:>10}", keys, op, size, ours, theirs, ratio)
+            }
+            // The ordered walk reads the tree in key order; the hash walk has
+            // to sort a copy to answer the same sequence, which is the shape
+            // the ordered map replaced.
+            let tree_walk = reading(gossamer, "BTreeMap", keys, "traverse", size)
+            let hash_walk = reading(gossamer, "Map", keys, "traverse", size)
+            if tree_walk > 0 && hash_walk > 0 && tree_walk > hash_walk {
+                failures.push(format("{} traverse at {}: tree {}ns > hash {}ns", keys, size, tree_walk, hash_walk))
+            }
+            // A thousand keys out of the tree costs the window, not the tree:
+            // at a hundred times the size the same window may not cost ten
+            // times as much.
+            let ranged = reading(gossamer, "BTreeMap", keys, "range", size)
+            let small = reading(gossamer, "BTreeMap", keys, "range", 1_000)
+            if size >= 100_000 && ranged > 0 && small > 0 && ranged > small * 10 {
+                failures.push(format("{} range at {}: {}ns against {}ns at 1000", keys, size, ranged, small))
+            }
+        }
+    }
+    if !skip_rust {
+        for keys in #["i64", "String"] {
+            for op in #["insert", "get_hit"] {
+                for size in #[1_000, 100_000, 1_000_000] {
+                    let ours = reading(gossamer, "BTreeMap", keys, op, size)
+                    let theirs = reading(rust, "std::BTreeMap", keys, op, size)
+                    if ours > 0 && theirs > 0 && ours > theirs * 10 {
+                        failures.push(format("{} {} at {}: {}ns is over ten times rust's {}ns", keys, op, size, ours, theirs))
+                    }
+                }
+            }
+        }
+    }
+    println("")
+    if failures.is_empty() {
+        println("ordered benchmarks: every claim held")
+    } else {
+        for f in failures { eprintln("FAIL {}", f) }
+        process::exit(1)
+    }
+}

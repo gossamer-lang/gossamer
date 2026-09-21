@@ -900,6 +900,13 @@ pub enum TypeError {
         /// Rendered key type of the map.
         key: String,
     },
+    /// A field was read from an unannotated closure parameter whose type
+    /// nothing in the program decides.
+    #[error("cannot infer the type of the closure parameter whose field `{field}` is read")]
+    FieldReceiverUninferred {
+        /// The field as written.
+        field: String,
+    },
     /// A call to a function with a const generic parameter gave no value
     /// for it: no turbofish names it and no array argument's length does.
     #[error("cannot infer the const generic argument of `{callee}`")]
@@ -1127,6 +1134,7 @@ impl TypeError {
             Self::ConstGenericNotInferred { .. } => "const-generic-not-inferred",
             Self::SimdShape { .. } => "simd-shape",
             Self::OrderedRangeArgument { .. } => "ordered-range-argument",
+            Self::FieldReceiverUninferred { .. } => "field-receiver-uninferred",
             Self::ReferenceArgumentNeedsDeref { .. } => "reference-argument-needs-deref",
             Self::DerefWriteToNonReference { .. } => "deref-write-to-non-reference",
             Self::EnumReprTooNarrow { .. } => "enum-repr-too-narrow",
@@ -1175,6 +1183,7 @@ impl TypeError {
             Self::ConstGenericNotInferred { .. } => "GT0088",
             Self::SimdShape { .. } => "GT0089",
             Self::OrderedRangeArgument { .. } => "GT0091",
+            Self::FieldReceiverUninferred { .. } => "GT0092",
             Self::UnresolvedMethod { .. } => "GT0002",
             Self::UnresolvedOp { .. } | Self::UnresolvedOpImpl { .. } => "GT0003",
             Self::NonExhaustiveMatch { .. } => "GT0004",
@@ -2092,6 +2101,12 @@ impl TypeDiagnostic {
                         rewrite.clone(),
                     ));
                 }
+            }
+            TypeError::FieldReceiverUninferred { .. } => {
+                out = out.with_help(
+                    "annotate the parameter, such as `|r: http::Request| ...`, or pass the \
+                     closure where its parameter type is known",
+                );
             }
             TypeError::OrderedRangeArgument { .. } => {
                 out = out.with_note(

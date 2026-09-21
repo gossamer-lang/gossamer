@@ -327,7 +327,9 @@ Write clear, low-complexity, concise code.
   form written in the call, its bounds keys (`m.range("b".."f")`,
   `m.range(lo..=hi)`, `m.range(lo..)`); a range kept in a binding reports
   GT0091. `BTreeSet` answers `first`, `last`, `pop_first`, `pop_last`, and
-  `range` the same way.
+  `range` the same way. A key or element type that writes its own `cmp`
+  (`impl Ord for Ranked`) is ordered by that body on every tier; every other
+  type takes the language's order.
 - **Collection constructors infer**: `let mut m = Map::new()`,
   `let empty: Map<String, i64> = Map::from([])`, and
   `let map = {"one": 1}`. `Map::from` accepts array pairs, while

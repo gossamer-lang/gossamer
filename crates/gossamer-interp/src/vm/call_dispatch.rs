@@ -23,7 +23,7 @@ impl Vm {
         self.call_stack
             .borrow_mut()
             .push(VmCallStackFrame::new(interned));
-        let result = self.apply(callee, args);
+        let result = self.as_comparator_host(|| self.apply(callee, args));
         if result.is_ok() {
             self.call_stack.borrow_mut().pop();
         }
@@ -620,7 +620,7 @@ impl Vm {
     pub(crate) fn spawn_goroutine_native(&self, callee: Value, args: Vec<Value>) {
         let origin = Self::goroutine_origin(&callee);
         self.spawn_on_pool(origin, move |vm| {
-            if let Err(err) = vm.dispatch_call(&callee, args) {
+            if let Err(err) = vm.as_comparator_host(|| vm.dispatch_call(&callee, args)) {
                 if !vm.invoke_panic_hook(&crate::panic_message(&err)) {
                     // Report an unobserved goroutine panic with the same single
                     // `error[GX0005]: panic: ...` line the compiled runtime
@@ -708,7 +708,7 @@ impl Vm {
         let origin = Self::goroutine_origin(&callee);
         self.spawn_on_pool(origin, move |vm| {
             crate::stdlib_builtins::cohort::enter_child(cohort);
-            let result = vm.dispatch_call(&callee, args);
+            let result = vm.as_comparator_host(|| vm.dispatch_call(&callee, args));
             // A child fails by panicking or by answering `Err`, the same
             // two ways the compiled tier reports one.
             let failure = match &result {

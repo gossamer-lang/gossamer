@@ -157,7 +157,7 @@ pub(crate) fn add(spec: &str, manifest: Option<PathBuf>) -> Result<()> {
     let mut m = gossamer_pkg::Manifest::parse(&source)?;
     let changed = gossamer_pkg::add_registry(&mut m, &id, requirement.clone());
     fs::write(&path, m.render()).with_context(|| format!("writing {}", path.display()))?;
-    println!(
+    outln!(
         "add: {action} {id} ({requirement})",
         action = if changed { "added" } else { "kept" }
     );
@@ -199,9 +199,9 @@ pub(crate) fn add_rust_binding(spec: &str, manifest: Option<PathBuf>) -> Result<
 
     let scaffolded = scaffold_wrapper_if_needed(&name, &binding, &parent)?;
 
-    println!("add: {action} rust-binding `{name}`");
+    outln!("add: {action} rust-binding `{name}`");
     if let Some(wrapper) = scaffolded {
-        println!(
+        outln!(
             "scaffolded wrapper at {}",
             wrapper.strip_prefix(&parent).unwrap_or(&wrapper).display()
         );
@@ -362,7 +362,7 @@ pub(crate) fn remove(id_text: &str, manifest: Option<PathBuf>) -> Result<()> {
         return Err(anyhow!("dependency {id} is not declared"));
     }
     fs::write(&path, m.render()).with_context(|| format!("writing {}", path.display()))?;
-    println!("remove: dropped {id}");
+    outln!("remove: dropped {id}");
     Ok(())
 }
 
@@ -394,14 +394,14 @@ pub(crate) fn tidy(manifest: Option<PathBuf>) -> Result<()> {
         .filter(|id| !m.dependencies.contains_key(id))
         .collect();
     fs::write(&path, m.render()).with_context(|| format!("writing {}", path.display()))?;
-    println!(
+    outln!(
         "tidy: canonicalised {} ({} source file(s), {} unused dependency/dependencies removed)",
         path.display(),
         source_files.len(),
         removed.len(),
     );
     for id in removed {
-        println!("  removed {id}");
+        outln!("  removed {id}");
     }
     Ok(())
 }
@@ -506,9 +506,9 @@ pub(crate) fn fetch(manifest: Option<PathBuf>, offline: bool, update: bool) -> R
     let lock = gossamer_pkg::Lockfile::from_fetched(&pkgs);
     lock.write(&project_root)
         .with_context(|| format!("writing {}", project_root.join("project.lock").display()))?;
-    println!("fetch: {} project(s) cached", pkgs.len());
+    outln!("fetch: {} project(s) cached", pkgs.len());
     for entry in &pkgs {
-        println!("  {} → {}", entry.resolved.id, entry.source.digest);
+        outln!("  {} → {}", entry.resolved.id, entry.source.digest);
     }
     Ok(())
 }
@@ -545,7 +545,7 @@ pub(crate) fn vendor(manifest: Option<PathBuf>, out: Option<PathBuf>) -> Result<
     let written = gossamer_pkg::vendor(&pkgs, &dest)
         .with_context(|| format!("writing vendor dir {}", dest.display()))?;
     let total: usize = written.values().map(Vec::len).sum();
-    println!(
+    outln!(
         "vendor: wrote {total} file(s) for {} project(s) to {}",
         written.len(),
         dest.display()
@@ -598,7 +598,7 @@ pub(crate) fn publish(
     let registry_url = registry.unwrap_or_else(|| self::registry_url(&m));
     let artifact = gossamer_pkg::pack_crate_streaming(&project_root)
         .map_err(|e| anyhow!("pack failed: {e}"))?;
-    println!(
+    outln!(
         "publish: packed {bytes} byte(s), sha256 {sha}",
         bytes = artifact.bytes,
         sha = artifact.sha256
@@ -610,7 +610,7 @@ pub(crate) fn publish(
             // registry directly by the reader-based transport.
             let sig = key.sign(artifact.sha256.as_bytes());
             let pk = key.verifying_key().to_bytes();
-            println!(
+            outln!(
                 "publish: signed with ed25519 pubkey {pk}",
                 pk = key.verifying_key().to_hex()
             );
@@ -623,7 +623,7 @@ pub(crate) fn publish(
         Err(e) => return Err(anyhow!("signing: {e}")),
     };
     if dry_run {
-        println!("publish: --dry-run set; skipping upload to {registry_url}");
+        outln!("publish: --dry-run set; skipping upload to {registry_url}");
         return Ok(());
     }
     let token = credential_for(&registry_url);
@@ -641,7 +641,7 @@ pub(crate) fn publish(
     };
     gossamer_pkg::publish::upload_streaming_with(&uploader, &registry_url, &request)
         .map_err(|e| anyhow!("upload: {e}"))?;
-    println!("publish: uploaded to {registry_url}");
+    outln!("publish: uploaded to {registry_url}");
     Ok(())
 }
 
@@ -672,7 +672,7 @@ pub(crate) fn yank(spec: &str, reason: Option<String>) -> Result<()> {
         token.as_deref(),
     )
     .map_err(|e| anyhow!("yank: {e}"))?;
-    println!("yank: marked {id}@{version_text} as yanked");
+    outln!("yank: marked {id}@{version_text} as yanked");
     Ok(())
 }
 
@@ -692,7 +692,7 @@ pub(crate) fn login(registry: String) -> Result<()> {
     store
         .save(&path)
         .map_err(|e| anyhow!("writing credentials: {e}"))?;
-    println!("login: token stored for {registry} at {}", path.display());
+    outln!("login: token stored for {registry} at {}", path.display());
     Ok(())
 }
 
@@ -707,9 +707,9 @@ pub(crate) fn logout(registry: String) -> Result<()> {
         store
             .save(&path)
             .map_err(|e| anyhow!("writing credentials: {e}"))?;
-        println!("logout: dropped credential for {registry}");
+        outln!("logout: dropped credential for {registry}");
     } else {
-        println!("logout: no credential stored for {registry}");
+        outln!("logout: no credential stored for {registry}");
     }
     Ok(())
 }
@@ -734,7 +734,7 @@ pub(crate) fn owner(op: &str, id_text: &str, user: Option<String>) -> Result<()>
         token.as_deref(),
     )
     .map_err(|e| anyhow!("owner: {e}"))?;
-    println!("owner: {op} applied to {id}");
+    outln!("owner: {op} applied to {id}");
     Ok(())
 }
 

@@ -1306,7 +1306,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::http::websocket",
         name: "accept",
-        signature: "fn accept(request: http::Request) -> Result<http::websocket::Conn, errors::Error>",
+        signature: "fn accept(request: http::Request) -> Result<http::Response, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::http::websocket",
@@ -3896,6 +3896,13 @@ fn find_top_level(s: &str, needle: char) -> Option<usize> {
         }
     }
     None
+}
+
+/// The identifier words a catalogue type spelling names, such as `Option`
+/// and `T` in `Option<T>`.
+pub fn split_type_words(s: &str) -> impl Iterator<Item = &str> {
+    s.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        .filter(|word| !word.is_empty())
 }
 
 /// Splits a comma-like list while preserving nested generic, tuple, and

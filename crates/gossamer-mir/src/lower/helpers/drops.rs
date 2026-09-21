@@ -5070,6 +5070,53 @@ pub(crate) fn insert_aggr_copy_drops(body: &mut Body, tcx: &gossamer_types::TyCt
                 &mut extra_locals,
             ));
         }
+        // A combinator that answers its receiver's `Ok` / `Some` payload as it
+        // is leaves that one blob named by two holders, each of which gives a
+        // share back at its death, so the second holder takes a share of its
+        // own. When the answer can instead be a payload a closure built, the
+        // share is taken on the receiver before the call, where it names the
+        // receiver's payload only.
+        if let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            target: Some(target),
+            ..
+        } = &block.terminator
+            && destination.projection.is_empty()
+            && option_holder(destination.local)
+            && let Some((receivers, after)) = passthrough_receivers(name)
+            && receivers.iter().all(|&at| {
+                matches!(args.get(at), Some(Operand::Copy(carrier))
+                    if carrier.projection.is_empty()
+                        && (carrier.local.0 as usize) < n_locals
+                        && (option_holder(carrier.local)
+                            || ((1..=arity).contains(&(carrier.local.0 as usize))
+                                && is_guarded_option(body.locals[carrier.local.0 as usize].ty))))
+            })
+        {
+            if after {
+                if let Some(head) = gaps.get_mut(target.0 as usize).and_then(|g| g.first_mut()) {
+                    head.push(call_stmt(
+                        "gos_rt_option_slot_retain_ok",
+                        vec![Operand::Copy(Place::local(destination.local))],
+                        span,
+                        &mut next_unit,
+                        &mut extra_locals,
+                    ));
+                }
+            } else if let Some(Operand::Copy(carrier)) =
+                receivers.first().and_then(|&at| args.get(at))
+            {
+                gaps[bi][len].push(call_stmt(
+                    "gos_rt_option_slot_retain_ok",
+                    vec![Operand::Copy(Place::local(carrier.local))],
+                    span,
+                    &mut next_unit,
+                    &mut extra_locals,
+                ));
+            }
+        }
         if matches!(block.terminator, Terminator::Return) {
             for (l, sym) in &guarded_locals {
                 gaps[bi][len].push(call_stmt(
@@ -5431,7 +5478,11 @@ fn ensure_slot_children_meta(
 /// owns those children, retaining them on push and deep-freeing them on
 /// free, so a by-value element pushed in and then dropped at its source
 /// scope (or returned inside the vec) is reclaimed exactly once.
-pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::TyCtxt) {
+pub(crate) fn insert_vec_elem_metas(
+    body: &mut Body,
+    tcx: &mut gossamer_types::TyCtxt,
+    comparators: &std::collections::HashSet<String>,
+) {
     use gossamer_types::TyKind;
     let n_locals = body.locals.len();
     let is_vec_ctor = |name: &str| -> bool {
@@ -5514,7 +5565,16 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
         MapBlob,
         MapVec,
         MapFloatKeys,
-        MapOrdered { unsigned: bool },
+        MapOrdered {
+            unsigned: bool,
+        },
+        /// The key type writes its own `cmp`, which the tree calls: the
+        /// comparator's symbol, and whether it takes its keys by address.
+        MapOrderedBy {
+            comparator: String,
+            by_address: bool,
+            unsigned: bool,
+        },
     }
 
     // Guarded copy-blob meta of a vec element - but only when the element
@@ -5575,7 +5635,32 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
         matches!(tcx.kind_of(*key), TyKind::Float(_)).then_some(VecMeta::MapFloatKeys)
     };
 
-    // A `BTreeMap` keeps its entries in the ordered tree.
+    // The comparator a key type writes for itself, and whether it takes its
+    // keys by address: an aggregate crosses by the address of its slots, a
+    // node or a scalar by its word.
+    let user_comparator = |key: gossamer_types::Ty| -> Option<(String, bool)> {
+        let mut key = key;
+        while let TyKind::Ref { inner, .. } = tcx.kind_of(key) {
+            key = *inner;
+        }
+        let name = match tcx.kind_of(key) {
+            TyKind::Adt { def, .. } | TyKind::Nominal { def, .. } => tcx.def_name(*def)?,
+            _ => return None,
+        };
+        let symbol = format!(
+            "{}{}",
+            gossamer_ast::USER_COMPARATOR_PREFIX,
+            name.replace("::", "__")
+        );
+        if !comparators.contains(&symbol) {
+            return None;
+        }
+        let by_address = tcx.is_flat_inline_aggregate(key);
+        Some((symbol, by_address))
+    };
+
+    // A `BTreeMap` keeps its entries in the ordered tree, in the language's
+    // order for the key or in the one the key type writes for itself.
     let map_ordered = |l: Local| -> Option<VecMeta> {
         let ty = body.locals.get(l.0 as usize)?.ty;
         let TyKind::HashMap {
@@ -5584,11 +5669,19 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
         else {
             return None;
         };
+        let key = *key;
         let unsigned = matches!(
-            tcx.kind_of(*key),
+            tcx.kind_of(key),
             TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize)
         );
-        Some(VecMeta::MapOrdered { unsigned })
+        match user_comparator(key) {
+            Some((comparator, by_address)) => Some(VecMeta::MapOrderedBy {
+                comparator,
+                by_address,
+                unsigned,
+            }),
+            None => Some(VecMeta::MapOrdered { unsigned }),
+        }
     };
 
     let vec_meta_of = |l: Local| -> Option<VecMeta> {
@@ -5687,53 +5780,94 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
 
     let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
     let mut next_unit = body.locals.len();
-    let mk =
-        |l: Local, meta: &VecMeta, span: gossamer_lex::Span, next_unit: &mut usize| -> Statement {
-            let dest = Local(u32::try_from(*next_unit).expect("local overflow"));
-            *next_unit += 1;
-            let rvalue = match meta {
-                VecMeta::MapBlob => Rvalue::CallIntrinsic {
-                    name: "gos_rt_map_set_blob_values",
-                    args: vec![Operand::Copy(Place::local(l))],
-                },
-                VecMeta::MapVec => Rvalue::CallIntrinsic {
-                    name: "gos_rt_map_set_vec_values",
-                    args: vec![Operand::Copy(Place::local(l))],
-                },
-                VecMeta::MapFloatKeys => Rvalue::CallIntrinsic {
-                    name: "gos_rt_map_set_float_keys",
-                    args: vec![Operand::Copy(Place::local(l))],
-                },
-                VecMeta::MapOrdered { unsigned } => Rvalue::CallIntrinsic {
-                    name: "gos_rt_map_set_ordered",
+    // The marker statement, and the one that has to run before it: a marker
+    // naming the key type's own comparator reads its address first.
+    // The locals a comparator's address lands in, which hold a word rather
+    // than the unit every other marker destination does.
+    let mut word_locals: Vec<u32> = Vec::new();
+    let mk = |l: Local,
+              meta: &VecMeta,
+              span: gossamer_lex::Span,
+              next_unit: &mut usize,
+              word_locals: &mut Vec<u32>|
+     -> (Option<Statement>, Statement) {
+        let mut prelude = None;
+        let dest = Local(u32::try_from(*next_unit).expect("local overflow"));
+        *next_unit += 1;
+        let rvalue = match meta {
+            VecMeta::MapBlob => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_blob_values",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::MapVec => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_vec_values",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::MapFloatKeys => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_float_keys",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::MapOrderedBy {
+                comparator,
+                by_address,
+                unsigned,
+            } => {
+                let address = Local(u32::try_from(*next_unit).expect("local overflow"));
+                *next_unit += 1;
+                word_locals.push(address.0);
+                prelude = Some(Statement {
+                    kind: StatementKind::Assign {
+                        place: Place::local(address),
+                        rvalue: Rvalue::CallIntrinsic {
+                            name: "gos_fn_addr",
+                            args: vec![Operand::Const(ConstValue::Str(comparator.clone()))],
+                        },
+                    },
+                    span,
+                    inlined: None,
+                });
+                Rvalue::CallIntrinsic {
+                    name: "gos_rt_map_set_ordered_by",
                     args: vec![
                         Operand::Copy(Place::local(l)),
+                        Operand::Copy(Place::local(address)),
+                        Operand::Const(ConstValue::Int(i128::from(*by_address))),
                         Operand::Const(ConstValue::Int(i128::from(*unsigned))),
                     ],
-                },
-                VecMeta::Guarded(sym) => Rvalue::CallIntrinsic {
-                    name: "gos_rt_vec_set_elem_meta",
-                    args: vec![
-                        Operand::Copy(Place::local(l)),
-                        Operand::Const(ConstValue::Str(sym.clone())),
-                    ],
-                },
-                VecMeta::Owned(sym) => Rvalue::CallIntrinsic {
-                    name: "gos_rt_vec_set_slot_children",
-                    args: vec![
-                        Operand::Copy(Place::local(l)),
-                        Operand::Const(ConstValue::Str(sym.clone())),
-                    ],
-                },
-                VecMeta::RcElems => Rvalue::CallIntrinsic {
-                    name: "gos_rt_vec_mark_rc_elems",
-                    args: vec![Operand::Copy(Place::local(l))],
-                },
-                VecMeta::VecElems => Rvalue::CallIntrinsic {
-                    name: "gos_rt_vec_mark_vec_elems",
-                    args: vec![Operand::Copy(Place::local(l))],
-                },
-            };
+                }
+            }
+            VecMeta::MapOrdered { unsigned } => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_ordered",
+                args: vec![
+                    Operand::Copy(Place::local(l)),
+                    Operand::Const(ConstValue::Int(i128::from(*unsigned))),
+                ],
+            },
+            VecMeta::Guarded(sym) => Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_set_elem_meta",
+                args: vec![
+                    Operand::Copy(Place::local(l)),
+                    Operand::Const(ConstValue::Str(sym.clone())),
+                ],
+            },
+            VecMeta::Owned(sym) => Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_set_slot_children",
+                args: vec![
+                    Operand::Copy(Place::local(l)),
+                    Operand::Const(ConstValue::Str(sym.clone())),
+                ],
+            },
+            VecMeta::RcElems => Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_mark_rc_elems",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::VecElems => Rvalue::CallIntrinsic {
+                name: "gos_rt_vec_mark_vec_elems",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+        };
+        (
+            prelude,
             Statement {
                 kind: StatementKind::Assign {
                     place: Place::local(dest),
@@ -5741,17 +5875,23 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
                 },
                 span,
                 inlined: None,
-            }
-        };
+            },
+        )
+    };
 
     for (bi, l, meta) in &head_inserts {
         let span = body.blocks[*bi].span;
-        let stmt = mk(*l, meta, span, &mut next_unit);
+        let (prelude, stmt) = mk(*l, meta, span, &mut next_unit, &mut word_locals);
+        let mut added = 1;
         body.blocks[*bi].stmts.insert(0, stmt);
+        if let Some(prelude) = prelude {
+            body.blocks[*bi].stmts.insert(0, prelude);
+            added += 1;
+        }
         // Shift any statement-gap inserts in the same block.
         for ins in &mut stmt_inserts {
             if ins.0 == *bi {
-                ins.1 += 1;
+                ins.1 += added;
             }
         }
     }
@@ -5760,12 +5900,17 @@ pub(crate) fn insert_vec_elem_metas(body: &mut Body, tcx: &mut gossamer_types::T
     by_block.sort_by_key(|ins| std::cmp::Reverse((ins.0, ins.1)));
     for (bi, gap, l, meta) in by_block {
         let span = body.blocks[bi].span;
-        let stmt = mk(l, &meta, span, &mut next_unit);
+        let (prelude, stmt) = mk(l, &meta, span, &mut next_unit, &mut word_locals);
         body.blocks[bi].stmts.insert(gap, stmt);
+        if let Some(prelude) = prelude {
+            body.blocks[bi].stmts.insert(gap, prelude);
+        }
     }
-    for _ in body.locals.len()..next_unit {
+    let i64_ty = tcx.int_ty(gossamer_types::IntTy::I64);
+    for index in body.locals.len()..next_unit {
+        let holds_word = word_locals.contains(&(index as u32));
         body.locals.push(LocalDecl {
-            ty: unit_ty,
+            ty: if holds_word { i64_ty } else { unit_ty },
             debug_name: None,
             mutable: false,
             region: false,
@@ -6726,6 +6871,28 @@ pub(crate) fn holds_counted_blob_arm(tcx: &gossamer_types::TyCtxt, ty: gossamer_
             .take(2)
             .any(|p| tcx.aggr_copy_meta(*p).is_some()),
         _ => false,
+    }
+}
+
+/// Moves each passthrough share to the front of its block.
+///
+/// The share is taken at the head of the block a passthrough combinator's call
+/// continues in, where the answer is already written. Later passes place the
+/// receiver's last-use release at that same head, and a release that runs first
+/// would free the blob the answer still names.
+pub(crate) fn lead_passthrough_shares(body: &mut Body) {
+    for block in &mut body.blocks {
+        let (mut leading, rest): (Vec<Statement>, Vec<Statement>) =
+            std::mem::take(&mut block.stmts)
+                .into_iter()
+                .partition(|stmt| {
+                    matches!(&stmt.kind, StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } if *name == "gos_rt_option_slot_retain_ok")
+                });
+        leading.extend(rest);
+        block.stmts = leading;
     }
 }
 
@@ -8435,6 +8602,23 @@ fn bare_copies(body: &Body) -> BareCopies {
 
 /// Readers that answer the carrier a two-word payload was boxed as: the words
 /// stay the box's, so the answer is a view of what the box owns.
+/// The carrier arguments a combinator may answer unchanged, and whether its
+/// answered `Ok` / `Some` payload is always one of theirs (`true`) or may be
+/// one its closure built (`false`).
+fn passthrough_receivers(name: &str) -> Option<(&'static [usize], bool)> {
+    Some(match name {
+        "gos_rt_result_map_err"
+        | "gos_rt_result_map_err_bare"
+        | "gos_rt_result_to_opt_ok"
+        | "gos_rt_result_ok_or"
+        | "gos_rt_result_ok_or_else"
+        | "gos_rt_option_filter" => (&[0], true),
+        "gos_rt_option_or" => (&[0, 1], true),
+        "gos_rt_result_or_else" | "gos_rt_option_or_else" => (&[0], false),
+        _ => return None,
+    })
+}
+
 fn reads_boxed_carrier(name: &str) -> bool {
     matches!(
         name,
@@ -8483,6 +8667,17 @@ fn call_is_last_read(body: &Body, bi: usize, local: Local) -> bool {
 
 /// Whether the call ending block `bi` holds the last mention of `local` on
 /// every path out of it, up to wherever `local` is next defined.
+/// Whether nothing reads `local` after statement `si` of block `bi`, on any
+/// path, before it is written again.
+fn stmt_is_last_use(body: &Body, bi: usize, si: usize, local: Local) -> bool {
+    let block = &body.blocks[bi];
+    match scan_for_local(&block.stmts[si + 1..], Some(&block.terminator), local) {
+        LocalScan::Mentioned => false,
+        LocalScan::Redefined => true,
+        LocalScan::Clear => terminator_is_last_use(body, bi, local),
+    }
+}
+
 fn terminator_is_last_use(body: &Body, bi: usize, local: Local) -> bool {
     let mut work = successors_of(&body.blocks[bi].terminator);
     let mut seen = vec![false; body.blocks.len()];
@@ -9198,6 +9393,213 @@ fn reads_response_only(name: &str) -> bool {
     )
 }
 
+/// Which arms of a carrier type hold a `HashMap` word, as
+/// `gos_rt_carrier_own_map` reads them: `(ok, err)`. `None` for anything that
+/// is not an `Option` / `Result` over a map.
+fn carrier_map_arms(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<(bool, bool)> {
+    use gossamer_types::TyKind;
+    let TyKind::Adt { def, substs } = tcx.kind_of(ty) else {
+        return None;
+    };
+    if def.local != u32::MAX && def.local != u32::MAX - 1 {
+        return None;
+    }
+    let tys = substs.types();
+    let is_map = |arm: Option<&gossamer_types::Ty>| {
+        arm.is_some_and(|t| matches!(tcx.kind_of(*t), TyKind::HashMap { .. }))
+    };
+    let arms = (is_map(tys.first()), is_map(tys.get(1)));
+    (arms.0 || arms.1).then_some(arms)
+}
+
+/// Whether a map answered by a call of `name` is the caller's own table.
+fn answers_owned_map(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_map_new"
+            | "gos_rt_map_new_with_capacity"
+            | "gos_rt_map_new_with_capacity_typed"
+            | "gos_rt_map_clone"
+            | "gos_rt_map_window"
+            | "Map::new"
+            | "collections::Map::new"
+            | "HashMap::new"
+            | "collections::HashMap::new"
+            | "BTreeMap::new"
+            | "collections::BTreeMap::new"
+    ) || name.starts_with("gos_rt_map_range_")
+        || name.starts_with("gos_rt_map_pop")
+        || name.starts_with("gos_rt_chan_recv")
+        || name.starts_with("gos_rt_chan_try_recv")
+}
+
+/// A carrier a function answers owns the map it holds, so the frame that
+/// receives it is the one that frees it. A payload this body did not build -
+/// a map read out of another, or one lent to it as a parameter - is replaced
+/// by a table of its own before the return, and a payload it did build is
+/// handed over as it stands.
+pub(crate) fn own_returned_map_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    if body.locals.is_empty() {
+        return;
+    }
+    let Some((ok_is_map, err_is_map)) = carrier_map_arms(tcx, body.locals[0].ty) else {
+        return;
+    };
+    let n_locals = body.locals.len();
+    let arity = body.arity as usize;
+    // The locals a copy chain lets the return slot stand for, so a carrier
+    // built in one local and returned through another is read at its source.
+    let mut sources: Vec<u32> = vec![Local::RETURN.0];
+    let mut seen: std::collections::HashSet<u32> = sources.iter().copied().collect();
+    let mut index = 0;
+    while index < sources.len() {
+        let current = sources[index];
+        index += 1;
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                place,
+                rvalue: Rvalue::Use(Operand::Copy(src)),
+            } = &stmt.kind
+                && place.projection.is_empty()
+                && src.projection.is_empty()
+                && place.local.0 == current
+                && seen.insert(src.local.0)
+            {
+                sources.push(src.local.0);
+            }
+        }
+    }
+    // A map local the body itself built, reached through the same copy edges.
+    let owned_map = |local: Local| -> bool {
+        let mut reach: Vec<u32> = vec![local.0];
+        let mut visited: std::collections::HashSet<u32> = reach.iter().copied().collect();
+        let mut at = 0;
+        while at < reach.len() {
+            let current = reach[at];
+            at += 1;
+            if (current as usize) <= arity {
+                return false;
+            }
+            let mut built = false;
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    if let StatementKind::Assign { place, rvalue } = &stmt.kind
+                        && place.projection.is_empty()
+                        && place.local.0 == current
+                    {
+                        match rvalue {
+                            Rvalue::Use(Operand::Copy(src)) if src.projection.is_empty() => {
+                                if visited.insert(src.local.0) {
+                                    reach.push(src.local.0);
+                                }
+                                built = true;
+                            }
+                            _ => return false,
+                        }
+                    }
+                }
+                if let Terminator::Call {
+                    callee,
+                    destination,
+                    ..
+                } = &block.terminator
+                    && destination.projection.is_empty()
+                    && destination.local.0 == current
+                {
+                    match callee {
+                        Operand::FnRef { .. } => built = true,
+                        Operand::Const(ConstValue::Str(name)) if answers_owned_map(name) => {
+                            built = true;
+                        }
+                        _ => return false,
+                    }
+                }
+            }
+            if !built {
+                return false;
+            }
+        }
+        true
+    };
+    let mut normalise = false;
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            if !place.projection.is_empty() || !seen.contains(&place.local.0) {
+                continue;
+            }
+            match rvalue {
+                // The carrier the body builds around a map it owns hands that
+                // map over; one built around any other map is a view of it.
+                Rvalue::Aggregate { operands, .. }
+                | Rvalue::CallIntrinsic {
+                    name: "gos_rt_result_new",
+                    args: operands,
+                } => {
+                    for operand in operands {
+                        if let Operand::Copy(p) = operand
+                            && p.projection.is_empty()
+                            && (p.local.0 as usize) < n_locals
+                            && matches!(
+                                tcx.kind_of(body.locals[p.local.0 as usize].ty),
+                                gossamer_types::TyKind::HashMap { .. }
+                            )
+                            && !owned_map(p.local)
+                        {
+                            normalise = true;
+                        }
+                    }
+                }
+                Rvalue::Use(Operand::Copy(_)) => {}
+                _ => normalise = true,
+            }
+        }
+        if let Terminator::Call {
+            callee,
+            destination,
+            ..
+        } = &block.terminator
+            && destination.projection.is_empty()
+            && seen.contains(&destination.local.0)
+            && !matches!(callee, Operand::FnRef { .. })
+            && !matches!(
+                callee,
+                Operand::Const(ConstValue::Str(name)) if answers_owned_map(name)
+            )
+        {
+            normalise = true;
+        }
+    }
+    if !normalise {
+        return;
+    }
+    let unit_ty = tcx.unit_interned().unwrap_or(body.locals[0].ty);
+    let _ = unit_ty;
+    for block_idx in 0..body.blocks.len() {
+        if !matches!(body.blocks[block_idx].terminator, Terminator::Return) {
+            continue;
+        }
+        let span = body.blocks[block_idx].span;
+        body.blocks[block_idx].stmts.push(Statement {
+            kind: StatementKind::Assign {
+                place: Place::local(Local::RETURN),
+                rvalue: Rvalue::CallIntrinsic {
+                    name: "gos_rt_carrier_own_map",
+                    args: vec![
+                        Operand::Copy(Place::local(Local::RETURN)),
+                        Operand::Const(ConstValue::Int(i128::from(ok_is_map))),
+                        Operand::Const(ConstValue::Int(i128::from(err_is_map))),
+                    ],
+                },
+            },
+            span,
+            inlined: None,
+        });
+    }
+}
+
 pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
     use gossamer_types::TyKind;
 
@@ -9388,10 +9790,11 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
     let arity = body.arity as usize;
     let last_block = body.blocks.len();
 
-    // A carrier a channel receive answered is this frame's own, and so is a
-    // copy of it: every send hands the channel a table of its own, so the
-    // binding that takes the payload out owns that map. A Gossamer call's
-    // carrier is not: its payload may be a map borrowed out of another.
+    // A carrier this frame's own answers a map the frame owns: a channel
+    // receive hands over a table of its own, and so does a Gossamer call,
+    // whose return normalises the carrier it answers (see
+    // `own_returned_map_payloads`). A copy of such a carrier carries that
+    // with it.
     let n_all = body.locals.len();
     let mut owned_carrier = vec![false; n_all];
     for block in &body.blocks {
@@ -9402,8 +9805,15 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         } = &block.terminator
             && destination.projection.is_empty()
             && (destination.local.0 as usize) < n_all
-            && let Operand::Const(ConstValue::Str(name)) = callee
-            && (name.starts_with("gos_rt_chan_recv") || name.starts_with("gos_rt_chan_try_recv"))
+            && match callee {
+                Operand::FnRef { .. } => true,
+                Operand::Const(ConstValue::Str(name)) => {
+                    name.starts_with("gos_rt_chan_recv")
+                        || name.starts_with("gos_rt_chan_try_recv")
+                        || name.starts_with("gos_rt_map_pop")
+                }
+                _ => false,
+            }
         {
             owned_carrier[destination.local.0 as usize] = true;
         }
@@ -12339,6 +12749,141 @@ pub(crate) fn insert_json_frees(
             || name.starts_with("gos_rt_deque_get")
             || name.starts_with("gos_rt_map_get")
     };
+    // A handle read through a borrowed carrier is borrowed too: unwrapping or
+    // extracting the payload of a `map.get(k)` answers the container's own
+    // handle, so the frame holds no share of it to give back. A payload read
+    // out of a carrier that is read again - on a later iteration, or by its
+    // own release - is a borrow of that carrier's handle as well; ownership
+    // moves when the carrier is dead after the extraction, or when the
+    // lowering consumes it by resetting it to an empty `Err` right after.
+    let extracts_payload = |name: &str| {
+        matches!(
+            name,
+            "gos_rt_result_payload"
+                | "gos_rt_result_unwrap"
+                | "gos_rt_option_unwrap"
+                | "gos_rt_result_expect"
+                | "gos_rt_result_unwrap_carrier"
+                | "gos_rt_option_unwrap_carrier"
+        ) || name.starts_with("gos_rt_result_unwrap_or")
+    };
+    let resets = |stmt: Option<&Statement>, carrier: u32| {
+        matches!(
+            stmt.map(|s| &s.kind),
+            Some(StatementKind::Assign {
+                place,
+                rvalue: Rvalue::CallIntrinsic { name, args },
+            }) if place.local.0 == carrier
+                && place.projection.is_empty()
+                && *name == "gos_rt_result_new"
+                && args.iter().all(|a| matches!(a, Operand::Const(_)))
+        )
+    };
+    let carrier_arg = |args: &[Operand]| match args.first() {
+        Some(Operand::Copy(p)) if p.projection.is_empty() => Some(p.local.0),
+        _ => None,
+    };
+    let borrowed = {
+        let mut borrowed = vec![false; n_locals];
+        for (bi, block) in body.blocks.iter().enumerate() {
+            for (si, stmt) in block.stmts.iter().enumerate() {
+                if let StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                } = &stmt.kind
+                    && place.projection.is_empty()
+                    && (place.local.0 as usize) < n_locals
+                    && extracts_payload(name)
+                    && let Some(carrier) = carrier_arg(args)
+                    && !resets(block.stmts.get(si + 1), carrier)
+                    && !stmt_is_last_use(body, bi, si, Local(carrier))
+                {
+                    borrowed[place.local.0 as usize] = true;
+                }
+            }
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                destination,
+                target,
+                ..
+            } = &block.terminator
+                && destination.projection.is_empty()
+                && (destination.local.0 as usize) < n_locals
+                && extracts_payload(name)
+                && let Some(carrier) = carrier_arg(args)
+            {
+                let consumed = target.is_some_and(|t| {
+                    body.blocks
+                        .get(t.0 as usize)
+                        .is_some_and(|next| resets(next.stmts.first(), carrier))
+                });
+                if !consumed && !terminator_is_last_use(body, bi, Local(carrier)) {
+                    borrowed[destination.local.0 as usize] = true;
+                }
+            }
+        }
+        let reads_carrier =
+            |name: &str| name.starts_with("gos_rt_option_") || name.starts_with("gos_rt_result_");
+        let mut changed = true;
+        while changed {
+            changed = false;
+            let mut mark = |i: usize, borrowed: &mut Vec<bool>| {
+                if i < n_locals && !borrowed[i] {
+                    borrowed[i] = true;
+                    changed = true;
+                }
+            };
+            let from_borrowed = |args: &[Operand], borrowed: &[bool]| {
+                args.iter().any(|a| {
+                    matches!(a, Operand::Copy(p)
+                        if (p.local.0 as usize) < n_locals && borrowed[p.local.0 as usize])
+                })
+            };
+            for block in &body.blocks {
+                for stmt in &block.stmts {
+                    let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                        continue;
+                    };
+                    if !place.projection.is_empty() {
+                        continue;
+                    }
+                    let dest = place.local.0 as usize;
+                    let is_borrowed = match rvalue {
+                        Rvalue::CallIntrinsic { name, args } => {
+                            borrows_from_container(name)
+                                || (reads_carrier(name) && from_borrowed(args, &borrowed))
+                        }
+                        Rvalue::Use(Operand::Copy(src)) => {
+                            (src.local.0 as usize) < n_locals && borrowed[src.local.0 as usize]
+                        }
+                        _ => false,
+                    };
+                    if is_borrowed {
+                        mark(dest, &mut borrowed);
+                    }
+                }
+                if let Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(name)),
+                    args,
+                    destination,
+                    ..
+                } = &block.terminator
+                    && destination.projection.is_empty()
+                    && (borrows_from_container(name)
+                        || (reads_carrier(name) && from_borrowed(args, &borrowed)))
+                {
+                    mark(destination.local.0 as usize, &mut borrowed);
+                }
+            }
+        }
+        borrowed
+    };
+    for (i, is_borrowed) in borrowed.iter().enumerate() {
+        if *is_borrowed {
+            candidate[i] = false;
+        }
+    }
     // Whole-local handle moves (`v = Copy(tmp)` with both sides
     // JSON-typed): ownership transfers when the move is the source's
     // ONLY value read and its only such move - the destination owns

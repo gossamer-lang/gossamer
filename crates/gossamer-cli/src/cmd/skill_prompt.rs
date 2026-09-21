@@ -7,5 +7,5 @@ const SKILL_CARD: &str = include_str!("../../../../SKILL.md");
 
 /// Entry point for `gos skill-prompt`.
 pub(crate) fn run() {
-    print!("{SKILL_CARD}");
+    out!("{SKILL_CARD}");
 }

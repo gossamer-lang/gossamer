@@ -138,12 +138,19 @@ pub fn dispatch_runner_if_needed(args: &[OsString]) -> DispatchOutcome {
     if std::env::var_os("GOSSAMER_DISPATCH_TRACE").is_some() {
         eprintln!("dispatch: runner ({})", runner.fingerprint_hex);
     }
-    let bin_path = match runner.ensure_built() {
-        Ok(p) => p,
+    // The lease keeps the runner's workdir, which it also links its runtime
+    // from, in place for as long as the runner runs.
+    let lease = match runner.ensure_built() {
+        Ok(lease) => lease,
         Err(err) => return DispatchOutcome::Failed(err),
     };
-    let err = BindingRunner::exec(&bin_path, args);
-    DispatchOutcome::Failed(err)
+    match BindingRunner::exec(lease.artifact(), args) {
+        Ok(code) => {
+            drop(lease);
+            std::process::exit(code)
+        }
+        Err(err) => DispatchOutcome::Failed(err),
+    }
 }
 
 /// Picks debug or release runner based on the parsed argv. `gos
@@ -268,8 +275,9 @@ fn ensure_external_signatures_for_project(
         Ok(None) => return Ok(0),
         Err(err) => return Err(BindingRunnerError::Io(err)),
     };
-    let json_path = runner.ensure_signatures()?;
-    let json = std::fs::read_to_string(&json_path).map_err(BindingRunnerError::Io)?;
+    let signatures = runner.ensure_signatures()?;
+    let json = std::fs::read_to_string(signatures.artifact()).map_err(BindingRunnerError::Io)?;
+    drop(signatures);
     let dump = parse_signature_dump(&json)?;
     let modules: Vec<ExternalModule> = dump
         .modules

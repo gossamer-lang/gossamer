@@ -454,6 +454,8 @@ impl<'a> Lowerer<'a> {
                 | "gos_rt_map_set_vec_values"
                 | "gos_rt_map_set_float_keys"
                 | "gos_rt_map_set_ordered"
+                | "gos_rt_map_set_ordered_by"
+                | "gos_rt_set_ordered_by"
         ) {
             if !p.projection.is_empty() {
                 return Ok(());
@@ -466,6 +468,19 @@ impl<'a> Lowerer<'a> {
             )
             .unwrap();
             declare_rt(&mut self.runtime_refs, name);
+            // A marker naming the key type's own comparator carries its
+            // address and the shapes it reads, after the container.
+            if matches!(name, "gos_rt_map_set_ordered_by" | "gos_rt_set_ordered_by") {
+                let mut words = String::new();
+                for arg in args.iter().skip(1) {
+                    let value = self.lower_operand(arg)?;
+                    let ty = self.operand_llvm_ty(arg);
+                    let value = self.coerce_llvm_value(&value, &ty, "i64");
+                    let _ = write!(words, ", i64 {value}");
+                }
+                writeln!(self.out, "  call void @{name}(ptr {v}{words})").unwrap();
+                return Ok(());
+            }
             if name == "gos_rt_map_set_ordered" {
                 let unsigned = match args.get(1) {
                     Some(Operand::Const(ConstValue::Int(n))) => *n,
@@ -540,6 +555,7 @@ impl<'a> Lowerer<'a> {
         if matches!(
             name,
             "gos_rt_option_slot_retain"
+                | "gos_rt_option_slot_retain_ok"
                 | "gos_rt_option_slot_release"
                 | "gos_rt_map_field_release"
                 | "gos_rt_map_field_clone"

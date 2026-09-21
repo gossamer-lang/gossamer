@@ -85,11 +85,14 @@ fn runner_builds_and_produces_signatures() {
     .unwrap()
     .expect("runner");
 
-    let sigs_path = runner
+    let signatures = runner
         .ensure_signatures()
         .expect("sigs-dump build + run succeeded");
-    assert!(sigs_path.is_file(), "signatures.json must exist");
-    let json = fs::read_to_string(&sigs_path).unwrap();
+    assert!(
+        signatures.artifact().is_file(),
+        "signatures.json must exist"
+    );
+    let json = fs::read_to_string(signatures.artifact()).unwrap();
     let dump = parse_signature_dump(&json).expect("valid sigs json");
     let echo = dump
         .modules

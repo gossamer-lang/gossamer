@@ -169,7 +169,7 @@ impl<'a> Builder<'a> {
         }
         let sym = match self.tcx.kind_of(t) {
             TyKind::String => return local,
-            TyKind::Int(_) => "gos_rt_i64_to_str",
+            TyKind::Int(int) => super::int_to_str_symbol(*int),
             TyKind::Float(_) => "gos_rt_f64_to_str",
             TyKind::Bool => "gos_rt_bool_to_str",
             TyKind::Char => "gos_rt_char_to_str",
@@ -434,7 +434,71 @@ impl<'a> Builder<'a> {
         let set_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
         let set = self.emit_stdlib_free_call(callee, set_ty, std::slice::from_ref(arg), span)?;
         self.local_runtime_kind.insert(set, runtime_kind);
+        if runtime_kind == "collections::BTreeSet" {
+            self.order_set_by_element(set, self.peel_ref_ty(elem_ty), span);
+        }
         Some(set)
+    }
+
+    /// The first type argument of an `Adt`, which for a collection is its
+    /// element or key type.
+    fn adt_first_type_argument(&self, ty: gossamer_types::Ty) -> Option<gossamer_types::Ty> {
+        match self.tcx.kind(ty)? {
+            gossamer_types::TyKind::Adt { substs, .. } => substs.types().first().copied(),
+            _ => None,
+        }
+    }
+
+    /// Seats a `BTreeSet`'s elements by the type's own `cmp` when it writes
+    /// one, through the comparator the program compiled for that type. An
+    /// element type the language orders needs no call: the constructor
+    /// already answers a set in that order.
+    fn order_set_by_element(&mut self, set: Local, elem: gossamer_types::Ty, span: Span) {
+        let Some(name) = self.user_comparator_name(elem) else {
+            return;
+        };
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let address = self.fresh(i64_ty);
+        self.emit_assign(
+            Place::local(address),
+            Rvalue::CallIntrinsic {
+                name: "gos_fn_addr",
+                args: vec![Operand::Const(ConstValue::Str(name))],
+            },
+            span,
+        );
+        // An aggregate crosses the comparator's boundary by the address of
+        // its slots, a node or a scalar by the word that names it.
+        let by_address = self.tcx.is_flat_inline_aggregate(elem);
+        let unit_ty = self.tcx.unit();
+        let dest = self.fresh(unit_ty);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::CallIntrinsic {
+                name: "gos_rt_set_ordered_by",
+                args: vec![
+                    Operand::Copy(Place::local(set)),
+                    Operand::Copy(Place::local(address)),
+                    Operand::Const(ConstValue::Int(i128::from(by_address))),
+                ],
+            },
+            span,
+        );
+    }
+
+    /// The comparator the program declares for `ty`, `None` for a type the
+    /// language orders on its own.
+    fn user_comparator_name(&self, ty: gossamer_types::Ty) -> Option<String> {
+        let gossamer_types::TyKind::Adt { def, .. } = self.tcx.kind(ty)? else {
+            return None;
+        };
+        let registered = self.tcx.def_name(*def)?;
+        let name = format!(
+            "{}{}",
+            gossamer_ast::USER_COMPARATOR_PREFIX,
+            registered.replace("::", "__")
+        );
+        self.fn_ret_names.contains_key(&name).then_some(name)
     }
 
     fn lower_set_from_array(
@@ -454,6 +518,12 @@ impl<'a> Builder<'a> {
         };
         let set = self.emit_stdlib_free_call(ctor, set_ty, &[], span)?;
         self.local_runtime_kind.insert(set, runtime_kind);
+        if runtime_kind == "collections::BTreeSet"
+            && let Some(first) = items.first()
+        {
+            let elem = self.peel_ref_ty(first.ty);
+            self.order_set_by_element(set, elem, span);
+        }
         let bool_ty = self.tcx.bool_ty();
         for item in items {
             let mut value = self.lower_expr(item)?;
@@ -739,6 +809,7 @@ impl<'a> Builder<'a> {
         &mut self,
         callee: &HirExpr,
         args: &[HirExpr],
+        result_ty: gossamer_types::Ty,
         span: Span,
     ) -> Option<Local> {
         let HirExprKind::Path {
@@ -758,6 +829,9 @@ impl<'a> Builder<'a> {
             let set_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
             let set = self.emit_stdlib_free_call("gos_rt_btree_set_new", set_ty, &[], span)?;
             self.local_runtime_kind.insert(set, "collections::BTreeSet");
+            if let Some(elem) = self.adt_first_type_argument(result_ty) {
+                self.order_set_by_element(set, elem, span);
+            }
             return Some(set);
         }
         // `HashMap::from({})` / `BTreeMap::from({})` is the typed empty-map

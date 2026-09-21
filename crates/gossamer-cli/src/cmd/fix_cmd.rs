@@ -27,14 +27,14 @@ pub(crate) fn dispatch(
     check: bool,
 ) -> Result<()> {
     if list {
-        println!("Available rewriters:");
+        outln!("Available rewriters:");
         for r in REWRITERS {
             let versions = if r.versions.is_empty() {
                 "every version".to_string()
             } else {
                 r.versions.join(", ")
             };
-            println!("  {:<28} {} [{versions}]", r.id, r.summary);
+            outln!("  {:<28} {} [{versions}]", r.id, r.summary);
         }
         return Ok(());
     }
@@ -68,7 +68,7 @@ pub(crate) fn dispatch(
                 changed += 1;
                 edits += n;
                 let verb = if check { "would rewrite" } else { "rewrote" };
-                println!("fix: {verb} {} ({n} edit(s))", file.display());
+                outln!("fix: {verb} {} ({n} edit(s))", file.display());
             }
         }
     }
@@ -78,7 +78,7 @@ pub(crate) fn dispatch(
             "{edits} pending migration(s) across {changed} file(s); run `gos fix`"
         ));
     }
-    println!(
+    outln!(
         "fix: {edits} edit(s) across {changed} of {} file(s)",
         files.len()
     );

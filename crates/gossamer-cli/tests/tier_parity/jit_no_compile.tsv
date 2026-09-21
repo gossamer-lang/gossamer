@@ -229,11 +229,12 @@ feature-testing-examples/keyed_traversal_through_ref.gos	callable local
 feature-testing-examples/lazy_iter_element_classes.gos	admission gate
 feature-testing-examples/let_destructure_struct.gos	entry shape
 feature-testing-examples/literal_forms.gos	no hot body
+feature-testing-examples/map_aggregate_values_by_key_kind.gos	bytecode-only local
 feature-testing-examples/map_bare_iteration_binding.gos	admission gate
 feature-testing-examples/map_channel_ownership.gos	cross-goroutine
-feature-testing-examples/map_aggregate_values_by_key_kind.gos	bytecode-only local
 feature-testing-examples/map_entry_and_format_paths.gos	bytecode-only local
 feature-testing-examples/map_from_sequence.gos	bytecode-only local
+feature-testing-examples/map_in_carrier_ownership.gos	bytecode-only local
 feature-testing-examples/map_inc_at_oob.gos	no hot body
 feature-testing-examples/map_iter_wildcard_destructure.gos	bytecode-only local
 feature-testing-examples/map_owned_struct_value_rc.gos	bytecode-only local
@@ -396,6 +397,7 @@ feature-testing-examples/unicode_full.gos	no hot body
 feature-testing-examples/unit_main_goroutine_drain.gos	cross-goroutine
 feature-testing-examples/unit_struct_values.gos	bytecode-only local
 feature-testing-examples/unsigned_and_nested_rendering.gos	callable local
+feature-testing-examples/user_ordered_keys.gos	bytecode-only local
 feature-testing-examples/user_module_shadows_std_names.gos	no hot body
 feature-testing-examples/usize_compare.gos	no hot body
 feature-testing-examples/validate_errors.gos	no hot body

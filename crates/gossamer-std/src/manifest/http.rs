@@ -478,7 +478,7 @@ pub const HTTP_WEBSOCKET: StdModule = StdModule {
         StdItem {
             name: "accept",
             kind: StdItemKind::Function,
-            doc: "Upgrade an incoming Request to a WebSocket (Rust-side).",
+            doc: "Validate a WebSocket upgrade request and answer the 101 Switching Protocols response that completes the handshake.",
         },
         StdItem {
             name: "Error",

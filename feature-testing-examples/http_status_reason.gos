@@ -1,0 +1,79 @@
+// The status line names the reason phrase the code is registered under, on
+// every tier: `405 Method Not Allowed`, `422 Unprocessable Content`, and an
+// empty phrase for a code with none registered, never a borrowed `OK`.
+//
+// Self-terminating: the client runs in main and exits explicitly. The
+// address comes from the harness, which serializes the run under
+// SERVER_PORT_LOCK in `http_status_reason_parity_across_tiers`.
+
+use std::env
+use std::errors
+use std::http
+use std::net
+use std::process
+use std::time
+
+fn addr() -> String { env::args().first().unwrap_or("127.0.0.1:23895") }
+
+fn answer(r: http::Request) -> Result<http::Response, errors::Error> {
+    let status = r.path.substring(1, r.path.byte_len()).to_i64().unwrap_or(500)
+    Ok(http::Response::json(status, "{}"))
+}
+
+fn serve() {
+    if let Err(e) = http::serve(addr(), answer) {
+        eprintln("serve failed: {e}")
+    }
+}
+
+// Polls until the server goroutine accepts connections; binding is
+// asynchronous, so readiness is observable only by connecting.
+fn await_ready() {
+    let mut tries = 0
+    while tries < 400 {
+        if let Ok(_) = http::get("http://" + addr() + "/200", Vec::from([])) {
+            return
+        }
+        time::sleep(25)
+        tries += 1
+    }
+}
+
+// The first line of the raw response, which no client API reports.
+fn status_line(code: i64) -> String {
+    let stream = match net::TcpStream::connect(addr()) {
+        Ok(s) => s
+        Err(e) => return format("connect failed: {e}")
+    }
+    let request = format("GET /{code} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    let _ = stream.write(request.as_bytes())
+    let mut raw = ""
+    loop {
+        match stream.read(4096) {
+            Ok(bytes) => {
+                if bytes.len() == 0 {
+                    break
+                }
+                raw += String::from_utf8(bytes).unwrap_or("")
+                if raw.contains("\r\n") {
+                    break
+                }
+            }
+            Err(_) => break
+        }
+    }
+    let _ = stream.close()
+    match raw.split_once("\r\n") {
+        Some((line, _)) => format("[{line}]")
+        None => format("[{raw}]")
+    }
+}
+
+fn main() {
+    spawn(|| serve())
+    await_ready()
+    for code in [200, 404, 405, 422, 429, 503, 599] {
+        println("{}", status_line(code))
+    }
+    process::exit(0)
+}

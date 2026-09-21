@@ -1,0 +1,40 @@
+// An unsigned integer renders its magnitude wherever it becomes text, so a
+// value at or above 2^63 reads as itself rather than as a negative, whether
+// through `to_string`, a format, or a concatenation. Identical on every tier.
+fn joined(a: u8, b: u16, c: u32, d: u64, e: usize) -> String {
+    a.to_string() + " " + b.to_string() + " " + c.to_string() + " " + d.to_string() + " "
+    + e.to_string()
+}
+
+// A loop gives the JIT a hot body, so the cranelift row renders natively.
+fn repeated(n: u64, times: i64) -> String {
+    let mut out = ""
+    for _ in 0..times {
+        out += n.to_string() + ";"
+    }
+    out
+}
+
+fn main() {
+    let byte: u8 = 255
+    let short: u16 = 65535
+    let word: u32 = 4294967295
+    let big: u64 = 18446744073709551615
+    let size: usize = 18446744073709551615
+    let zero: u64 = 0
+
+    println("{}", big.to_string())
+    println("{}", size.to_string())
+    println("{} {} {} {}", byte.to_string(), short.to_string(), word.to_string(), zero.to_string())
+    println("{}", joined(byte, short, word, big, size))
+    println("{} {} {}", format("{}", big), format("{}", byte), format("{}", zero))
+    println("{} {} {}", big, byte, size)
+    println("{}", "big=" + big.to_string())
+    println("{}", repeated(big, 2))
+
+    let low: i8 = -128
+    let least: i64 = -9223372036854775808
+    println("{} {}", low.to_string(), least.to_string())
+    println("{} {}", format("{}", low), format("{}", least))
+    println("{}", u8::MAX.to_string() + " " + u64::MAX.to_string() + " " + i64::MIN.to_string())
+}

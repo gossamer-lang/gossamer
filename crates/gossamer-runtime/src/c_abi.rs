@@ -287,6 +287,7 @@ pub(crate) mod set_table;
 pub mod shared;
 pub mod signal;
 pub mod slog;
+pub(crate) mod slot_key;
 pub mod sort;
 pub mod sql;
 pub mod strconv;

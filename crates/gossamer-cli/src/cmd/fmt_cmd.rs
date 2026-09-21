@@ -75,16 +75,16 @@ fn run(file: &PathBuf, check_only: bool) -> Result<()> {
     };
     if check_only {
         if formatted == source {
-            println!("fmt: {} already formatted", file.display());
+            outln!("fmt: {} already formatted", file.display());
             return Ok(());
         }
         return Err(anyhow!("{} is not formatted", file.display()));
     }
     if formatted == source {
-        println!("fmt: {} unchanged", file.display());
+        outln!("fmt: {} unchanged", file.display());
     } else {
         fs::write(file, &formatted).with_context(|| format!("writing {}", file.display()))?;
-        println!("fmt: rewrote {}", file.display());
+        outln!("fmt: rewrote {}", file.display());
     }
     Ok(())
 }

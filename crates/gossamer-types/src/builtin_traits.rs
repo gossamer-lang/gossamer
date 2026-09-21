@@ -188,9 +188,10 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         signature: "{ fn cmp(&self, other: Self) -> i64 }",
         doc: "The `PartialOrd` contract under its total-order spelling; both \
               names reach the same `cmp`, and a sequence's `sort`, `min`, \
-              `max`, and sorted-sequence searches all read it. A heap, a \
-              `BTreeSet`, and a `BTreeMap` order as they store, with no \
-              comparator to call, so they decline such an element (GT0085).",
+              `max`, and sorted-sequence searches all read it, and a \
+              `BTreeSet` or `BTreeMap` seats its entries by it. A heap \
+              orders as it stores, with no comparator to call, so it \
+              declines such an element (GT0085).",
         instead: "",
         example: "impl Ord for Point { fn cmp(&self, other: Point) -> i64 { self.x - other.x } }",
     },

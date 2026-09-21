@@ -10,6 +10,6 @@ pub(crate) fn run(code: &str) -> Result<()> {
             "no explanation registered for `{upper}`. See docs/diagnostics.md for the code catalogue."
         )
     })?;
-    println!("{upper}\n\n{text}");
+    outln!("{upper}\n\n{text}");
     Ok(())
 }

@@ -43,7 +43,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
             &mut removed_files,
         )?;
     } else if dir.is_dir() {
-        println!(
+        outln!(
             "kept {} - no {} stamp and no project.toml here, so `gos build` \
              did not write it",
             dir.display(),
@@ -65,7 +65,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
         dry_run,
     )? {
         let verb = if dry_run { "would remove" } else { "removed" };
-        println!(
+        outln!(
             "{verb} {} cache at {} ({} bytes)",
             entry.class.name(),
             entry.path.display(),
@@ -86,7 +86,7 @@ pub(crate) fn run(options: Options) -> Result<()> {
     }
 
     let verb = if dry_run { "would remove" } else { "removed" };
-    println!("clean: {verb} {removed_files} target(s), {removed_bytes} bytes total");
+    outln!("clean: {verb} {removed_files} target(s), {removed_bytes} bytes total");
     Ok(())
 }
 
@@ -108,15 +108,15 @@ fn remove_dir(
     removed_files: &mut u32,
 ) -> Result<()> {
     if !dir.is_dir() {
-        println!("{label} absent at {}", dir.display());
+        outln!("{label} absent at {}", dir.display());
         return Ok(());
     }
     let bytes = dir_size(dir);
     if dry_run {
-        println!("would remove {label} at {} ({bytes} bytes)", dir.display());
+        outln!("would remove {label} at {} ({bytes} bytes)", dir.display());
     } else {
         fs::remove_dir_all(dir).with_context(|| format!("remove {}", dir.display()))?;
-        println!("removed {label} at {} ({bytes} bytes)", dir.display());
+        outln!("removed {label} at {} ({bytes} bytes)", dir.display());
     }
     *removed_bytes += bytes;
     *removed_files += 1;

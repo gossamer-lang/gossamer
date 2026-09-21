@@ -1,0 +1,101 @@
+// A closure written where a handler is taken is typed as that handler, so an
+// unannotated `|r|` reads `r.path` as a `String` wherever it appears - here as
+// the argument of a call whose result a `match` destructures by a struct
+// variant. Covers `Server::serve`, `http::serve`, a router verb, and a
+// middleware wrapper, on every tier.
+//
+// Self-terminating: the client runs in main and exits explicitly. The
+// addresses come from the harness, which serializes the run under
+// SERVER_PORT_LOCK in `http_handler_closure_params_parity_across_tiers`.
+
+use std::env
+use std::errors
+use std::http
+use std::http::middleware
+use std::http::router
+use std::process
+use std::time
+
+enum Reply {
+    Json { status: i64, body: String }
+    Other
+}
+
+fn respond(path: String) -> Reply {
+    if path.ends_with("/j") {
+        Reply::Json { status: 201, body: "{\"path\":\"" + path + "\"}" }
+    } else {
+        Reply::Other
+    }
+}
+
+fn addr(i: i64, fallback: String) -> String { env::args().get(i).unwrap_or(fallback) }
+
+fn serve_object(s: http::Server) {
+    let _ = s.serve(|r| match respond(r.path) {
+        Reply::Json { status, body } => Ok(http::Response::json(status, body))
+        Reply::Other => Ok(http::Response::text(404, "object miss"))
+    })
+}
+
+fn serve_routed(a: String) {
+    let routes = router::Router::new().get("/r/j", |r| match respond(r.path) {
+        Reply::Json { status, body } => Ok(http::Response::json(status, body))
+        Reply::Other => Ok(http::Response::text(404, "route miss"))
+    })
+    let app = middleware::request_id(routes)
+    if let Err(e) = http::serve(a, app) {
+        eprintln("serve failed: {e}")
+    }
+}
+
+fn serve_free(a: String) {
+    let app = middleware::request_id(|r| match respond(r.path) {
+        Reply::Json { status, body } => Ok(http::Response::json(status, body))
+        Reply::Other => Ok(http::Response::text(404, "free miss"))
+    })
+    if let Err(e) = http::serve(a, app) {
+        eprintln("serve failed: {e}")
+    }
+}
+
+// Polls until the server goroutine accepts connections; binding is
+// asynchronous, so readiness is observable only by connecting.
+fn await_ready(url: String) {
+    let mut tries = 0
+    while tries < 400 {
+        if let Ok(_) = http::get(url, Vec::from([])) {
+            return
+        }
+        time::sleep(25)
+        tries += 1
+    }
+}
+
+fn probe(label: String, url: String) {
+    match http::get(url, Vec::from([])) {
+        Ok(r) => println("{label} status={} body={}", r.status, r.body)
+        Err(e) => println("{label} error: {e}")
+    }
+}
+
+fn main() -> Result<(), errors::Error> {
+    let s = http::Server::new()
+    s.listen("127.0.0.1:0")?
+    let object = "http://" + s.addr()
+    let routed = addr(0, "127.0.0.1:23896")
+    let free = addr(1, "127.0.0.1:23897")
+    spawn(|| serve_object(s))
+    spawn(|| serve_routed(routed))
+    spawn(|| serve_free(free))
+    await_ready(object + "/x")
+    await_ready("http://" + routed + "/r/j")
+    await_ready("http://" + free + "/x")
+    probe("object", object + "/o/j")
+    probe("object", object + "/o/x")
+    probe("routed", "http://" + routed + "/r/j")
+    probe("free", "http://" + free + "/f/j")
+    probe("free", "http://" + free + "/f/x")
+    process::exit(0)
+    Ok(())
+}

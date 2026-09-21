@@ -45,7 +45,7 @@ const RESPONSE_500_CLOSE_BYTES: &[u8] = b"HTTP/1.1 500 Internal Server Error\r\n
 const RESPONSE_400_BYTES: &[u8] =
     b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const RESPONSE_413_BYTES: &[u8] =
-    b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+    b"HTTP/1.1 413 Content Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 const RESPONSE_431_BYTES: &[u8] =
     b"HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
@@ -2260,41 +2260,13 @@ fn drain_stream_chunked<C: HttpIo>(conn: &mut C, handle: i64) -> bool {
     }
 }
 
-/// Maps a status code to its canonical reason phrase.
-/// Falls back to `"OK"` for unknown codes - caller is
-/// expected to use a sensible status; this is best-effort.
-const fn status_reason(status: i64) -> &'static str {
-    match status {
-        100 => "Continue",
-        101 => "Switching Protocols",
-        200 => "OK",
-        201 => "Created",
-        202 => "Accepted",
-        204 => "No Content",
-        206 => "Partial Content",
-        301 => "Moved Permanently",
-        302 => "Found",
-        304 => "Not Modified",
-        307 => "Temporary Redirect",
-        308 => "Permanent Redirect",
-        400 => "Bad Request",
-        401 => "Unauthorized",
-        403 => "Forbidden",
-        404 => "Not Found",
-        405 => "Method Not Allowed",
-        408 => "Request Timeout",
-        409 => "Conflict",
-        413 => "Payload Too Large",
-        414 => "URI Too Long",
-        416 => "Range Not Satisfiable",
-        429 => "Too Many Requests",
-        500 => "Internal Server Error",
-        501 => "Not Implemented",
-        502 => "Bad Gateway",
-        503 => "Service Unavailable",
-        504 => "Gateway Timeout",
-        _ => "OK",
-    }
+/// Reason phrase for the status line: the registered one, or empty for a
+/// code with none, which RFC 9112 permits.
+fn status_reason(status: i64) -> &'static str {
+    u16::try_from(status)
+        .ok()
+        .and_then(crate::http_status::reason_phrase)
+        .unwrap_or("")
 }
 
 #[cfg(test)]

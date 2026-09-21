@@ -246,11 +246,39 @@ pub fn write_terminal(fd: i32, bytes: &[u8]) {
 fn write_terminal_direct(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
 
-    match fd {
+    let written = match fd {
         1 => std::io::stdout().lock().write_all(bytes),
         2 => std::io::stderr().lock().write_all(bytes),
         _ => unreachable!("terminal fd was validated before dispatch"),
+    };
+    if let Err(err) = &written {
+        end_on_closed_stdio(err);
     }
+    written
+}
+
+/// Ends the process when a write to its stdout or stderr found the reader
+/// gone, the way the same write ends a Unix tool whose output was piped into
+/// `head`.
+///
+/// The process ignores `SIGPIPE` so that a closed socket or child pipe is an
+/// error the program can handle; the standard streams are the exception,
+/// since nothing is left to read what the program goes on to write.
+pub fn end_on_closed_stdio(err: &std::io::Error) {
+    if err.kind() != std::io::ErrorKind::BrokenPipe {
+        return;
+    }
+    // SAFETY: restoring a signal's default disposition and raising it are
+    // async-signal-safe libc calls with no memory arguments.
+    #[cfg(all(unix, not(miri)))]
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::raise(libc::SIGPIPE);
+    }
+    // No signal carries this on other hosts, so the process ends with a
+    // failing status of its own.
+    #[cfg(all(not(unix), not(target_arch = "wasm32")))]
+    std::process::exit(1);
 }
 
 /// Drives the process's own stdout buffer out to the descriptor.
@@ -263,11 +291,18 @@ fn write_terminal_direct(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
 fn flush_terminal_stdout() {
     use std::io::Write;
 
+    let flush = || {
+        let flushed = std::io::stdout().lock().flush();
+        if let Err(err) = &flushed {
+            end_on_closed_stdio(err);
+        }
+        flushed
+    };
     if stdout_lock_is_held() {
-        let _ = std::io::stdout().lock().flush();
+        let _ = flush();
         return;
     }
-    let _ = crate::sched_global::run_blocking("stdout-flush", || std::io::stdout().lock().flush());
+    let _ = crate::sched_global::run_blocking("stdout-flush", flush);
 }
 
 pub fn raw_write_stdout(bytes: &[u8]) {

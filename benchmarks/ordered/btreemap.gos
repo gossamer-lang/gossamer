@@ -1,0 +1,148 @@
+// Ordered-container operation costs, in nanoseconds per operation, for the
+// sizes the plan measures. One line per measurement:
+//
+//   <container> <keys> <op> <size> <ns_per_op>
+//
+// `Map` rows stand beside the `BTreeMap` rows so a traversal that once sorted
+// a copy on every read can be compared with one that walks the tree.
+use std::time
+
+fn ns_per_op(start: i64, ops: i64) -> i64 {
+    let elapsed = time::monotonic_nanos() - start
+    if ops <= 0 { 0 } else { elapsed / ops }
+}
+
+fn report(container: String, keys: String, op: String, size: i64, ns: i64) {
+    println("{} {} {} {} {}", container, keys, op, size, ns)
+}
+
+// The keys `0..size` in a scrambled order: dense, so a range of a thousand
+// keys names a thousand entries, and unsorted, so the tree is built the way a
+// program fills one rather than in one ascending run.
+fn int_keys(size: i64) -> Vec<i64> {
+    let mut out: Vec<i64> = Vec::with_capacity(size)
+    for i in 0..size { out.push(i) }
+    let mut x = 12_345
+    for i in 0..size {
+        x = (x *% 6_364_136_223_846_793_005 +% 1_442_695_040_888_963_407) % 1_000_000_007
+        let j = (if x < 0 { -x } else { x }) % size
+        out.swap(i, j)
+    }
+    out
+}
+
+// The same keys as text, zero-padded so their byte order is their numeric
+// order and a range over them names the window it reads as.
+fn text_keys(size: i64) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(size)
+    for k in int_keys(size) { out.push(format("key-{:010}", k)) }
+    out
+}
+
+fn measure_int(size: i64) {
+    let keys = int_keys(size)
+    let mut tree: BTreeMap<i64, i64> = BTreeMap::new()
+    let start = time::monotonic_nanos()
+    for i in 0..size { tree.insert(keys[i], i) }
+    report("BTreeMap", "i64", "insert", size, ns_per_op(start, size))
+
+    let hit = time::monotonic_nanos()
+    let mut found = 0
+    for i in 0..size { if tree.contains_key(keys[i]) { found += 1 } }
+    report("BTreeMap", "i64", "get_hit", size, ns_per_op(hit, size))
+
+    let miss = time::monotonic_nanos()
+    let mut absent = 0
+    for i in 0..size { if !tree.contains_key(-1 - keys[i]) { absent += 1 } }
+    report("BTreeMap", "i64", "get_miss", size, ns_per_op(miss, size))
+
+    let walk = time::monotonic_nanos()
+    let mut sum = 0
+    for (k, v) in tree.iter() { sum +%= k +% v }
+    report("BTreeMap", "i64", "traverse", size, ns_per_op(walk, tree.len()))
+
+    // A window of a thousand keys out of however many the tree holds: the
+    // cost the plan asks to stay near the window rather than the tree.
+    let window = 1000
+    let lo = size / 2
+    let ranged = time::monotonic_nanos()
+    let mut seen = 0
+    for _ in 0..16 {
+        let slice: Vec<(i64, i64)> = tree.range(lo..lo + window).collect()
+        seen += slice.len()
+    }
+    report("BTreeMap", "i64", "range", size, ns_per_op(ranged, 16))
+
+    let drain = time::monotonic_nanos()
+    let mut drained = 0
+    while let Some(entry) = tree.pop_first() { drained += 1 }
+    report("BTreeMap", "i64", "pop_first", size, ns_per_op(drain, drained))
+
+    let mut hash: Map<i64, i64> = Map::new()
+    let hstart = time::monotonic_nanos()
+    for i in 0..size { hash.insert(keys[i], i) }
+    report("Map", "i64", "insert", size, ns_per_op(hstart, size))
+
+    let hhit = time::monotonic_nanos()
+    for i in 0..size { if hash.contains_key(keys[i]) { found += 1 } }
+    report("Map", "i64", "get_hit", size, ns_per_op(hhit, size))
+
+    let hwalk = time::monotonic_nanos()
+    for (k, v) in hash.iter() { sum +%= k +% v }
+    report("Map", "i64", "traverse", size, ns_per_op(hwalk, hash.len()))
+    println("# checks {} {} {} {}", found, absent, seen, sum != 0)
+}
+
+fn measure_text(size: i64) {
+    let keys = text_keys(size)
+    let mut tree: BTreeMap<String, i64> = BTreeMap::new()
+    let start = time::monotonic_nanos()
+    for i in 0..size { tree.insert(keys[i], i) }
+    report("BTreeMap", "String", "insert", size, ns_per_op(start, size))
+
+    let hit = time::monotonic_nanos()
+    let mut found = 0
+    for i in 0..size { if tree.contains_key(keys[i]) { found += 1 } }
+    report("BTreeMap", "String", "get_hit", size, ns_per_op(hit, size))
+
+    let miss = time::monotonic_nanos()
+    for i in 0..size { if !tree.contains_key("absent-" + keys[i]) { found += 1 } }
+    report("BTreeMap", "String", "get_miss", size, ns_per_op(miss, size))
+
+    let walk = time::monotonic_nanos()
+    let mut total = 0
+    for (k, v) in tree.iter() { total +%= v + k.len() }
+    report("BTreeMap", "String", "traverse", size, ns_per_op(walk, tree.len()))
+
+    let ranged = time::monotonic_nanos()
+    let mut seen = 0
+    for _ in 0..16 {
+        let lo = format("key-{:010}", size / 2)
+        let hi = format("key-{:010}", size / 2 + 1000)
+        let slice: Vec<(String, i64)> = tree.range(lo..hi).collect()
+        seen += slice.len()
+    }
+    report("BTreeMap", "String", "range", size, ns_per_op(ranged, 16))
+
+    let drain = time::monotonic_nanos()
+    let mut drained = 0
+    while let Some(entry) = tree.pop_first() { drained += 1 }
+    report("BTreeMap", "String", "pop_first", size, ns_per_op(drain, drained))
+
+    let mut hash: Map<String, i64> = Map::new()
+    let hstart = time::monotonic_nanos()
+    for i in 0..size { hash.insert(keys[i], i) }
+    report("Map", "String", "insert", size, ns_per_op(hstart, size))
+
+    let hwalk = time::monotonic_nanos()
+    for (k, v) in hash.iter() { total +%= v + k.len() }
+    report("Map", "String", "traverse", size, ns_per_op(hwalk, hash.len()))
+    println("# checks {} {} {}", found, seen, total != 0)
+}
+
+fn main() {
+    for size in #[1_000, 100_000, 1_000_000] {
+        measure_int(size)
+        measure_text(size)
+    }
+}

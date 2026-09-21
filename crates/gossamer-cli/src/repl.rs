@@ -104,7 +104,7 @@ fn wrap_repl_line(line: &str, width: usize) -> Vec<String> {
 fn print_repl_output(text: &str) {
     let wrapped = wrap_repl_output(text);
     for line in wrapped.lines() {
-        println!("{}", style_repl_output_line(line));
+        outln!("{}", style_repl_output_line(line));
     }
 }
 
@@ -2150,7 +2150,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
 
     use crate::repl_helper::{GosReplHelper, ReplEnterHandler};
 
-    println!(
+    outln!(
         "gos {version} REPL [{arch}-{os}]\n\
          %help for commands · Enter continues until braces close · Ctrl-D or %q exits",
         version = env!("CARGO_PKG_VERSION"),
@@ -2204,7 +2204,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                     let _ = editor.save_history(path);
                 }
                 gossamer_std::exec::terminate_live_children();
-                println!();
+                outln!();
                 return Ok(());
             }
             Err(err) => {
@@ -2226,7 +2226,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                 match render_repl_history(&transcript, arg) {
                     Ok(entries) => {
                         for entry in entries {
-                            println!("{}", crate::style::repl_meta_accent(&entry));
+                            outln!("{}", crate::style::repl_meta_accent(&entry));
                         }
                     }
                     Err(message) => print_repl_error(&message),
@@ -2256,7 +2256,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                     print_repl_error(&format!("clear history: {err}"));
                     continue;
                 }
-                println!("history cleared");
+                outln!("history cleared");
                 continue;
             }
         }
@@ -2286,7 +2286,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                         }
                     };
                     if bindings.is_empty() {
-                        println!(
+                        outln!(
                             "{}",
                             crate::style::repl_meta_detail("    no `let` bindings yet")
                         );
@@ -2310,7 +2310,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                             })
                             .collect::<Vec<_>>();
                         if matches.is_empty() {
-                            println!(
+                            outln!(
                                 "{}",
                                 crate::style::repl_meta_detail(&format!(
                                     "    no bindings match `{}`",
@@ -2320,7 +2320,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                             continue;
                         }
                         for entry in matches {
-                            println!("{}", crate::style::repl_meta_heading(&entry.line));
+                            outln!("{}", crate::style::repl_meta_heading(&entry.line));
                         }
                     }
                     continue;
@@ -2361,7 +2361,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                                         }
                                         let dropped =
                                             render_dropped_declaration_names(&plan.dropped_names);
-                                        println!(
+                                        outln!(
                                             "{}",
                                             crate::style::repl_meta_accent(&format!(
                                                 "dropped {dropped}"
@@ -2395,7 +2395,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                                 }
                             }
                             let dropped = render_dropped_binding_names(&drop_plan.dropped_names);
-                            println!(
+                            outln!(
                                 "{}",
                                 crate::style::repl_meta_accent(&format!("dropped {dropped}"))
                             );
@@ -2415,7 +2415,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                         }
                     };
                     if declarations.is_empty() {
-                        println!(
+                        outln!(
                             "{}",
                             crate::style::repl_meta_detail("    no declarations yet")
                         );
@@ -2442,7 +2442,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                             })
                             .collect::<Vec<_>>();
                         if matches.is_empty() {
-                            println!(
+                            outln!(
                                 "{}",
                                 crate::style::repl_meta_detail(&format!(
                                     "    no declarations match `{}`",
@@ -2452,7 +2452,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                             continue;
                         }
                         for line in matches {
-                            println!("{}", crate::style::repl_meta_heading(line));
+                            outln!("{}", crate::style::repl_meta_heading(line));
                         }
                     }
                     continue;
@@ -2464,7 +2464,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                     if let Some(helper) = editor.helper_mut() {
                         helper.reset_session();
                     }
-                    println!("{}", crate::style::repl_meta_accent("session cleared"));
+                    outln!("{}", crate::style::repl_meta_accent("session cleared"));
                     continue;
                 }
                 "help" => {
@@ -2557,7 +2557,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                         helper.set_declarations(&declarations);
                     }
                     if verbose {
-                        println!("    added {} declarations", declarations.len());
+                        outln!("    added {} declarations", declarations.len());
                     }
                 }
                 Err(msg) => {
@@ -2607,7 +2607,7 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
                         }
                     }
                     if verbose {
-                        println!("    binding added ({} total)", bindings.len());
+                        outln!("    binding added ({} total)", bindings.len());
                     }
                 }
                 Err(msg) => {
@@ -2684,7 +2684,7 @@ struct ReplValueType {
     /// How a value of this type renders, when the value alone cannot
     /// say: a `Vec` and a fixed array share one runtime representation,
     /// and a `u64` shares a slot with an `i64`. This is the descriptor
-    /// the bytecode compiler builds for a `println!` of the same value,
+    /// the bytecode compiler builds for a `println` of the same value,
     /// so the REPL and a program show one value the same way.
     render_desc: Option<String>,
     references: Vec<gossamer_types::Mutbl>,
@@ -2773,7 +2773,7 @@ fn render_repl_binding_value(value: &gossamer_interp::Value, ty: &ReplValueType)
     // own spelling at every depth and a fixed array keeps the bare
     // brackets - the two share one runtime representation, so the value
     // alone cannot say which it is. This is the descriptor the bytecode
-    // compiler builds for a `println!` of the same value.
+    // compiler builds for a `println` of the same value.
     let mut rendered = match &ty.render_desc {
         Some(desc) => gossamer_interp::value::uint_leaves(value, desc.as_bytes()).repr(),
         None => render_repl_value(value),
@@ -2787,7 +2787,7 @@ fn render_repl_binding_value(value: &gossamer_interp::Value, ty: &ReplValueType)
 /// Prints an expression's value in the spelling its type is written in, the
 /// same one `%bindings` shows for a binding of that type.
 fn print_repl_result(value: &gossamer_interp::Value, ty: &ReplValueType) {
-    println!("{}", render_repl_binding_value(value, ty));
+    outln!("{}", render_repl_binding_value(value, ty));
     std::io::stdout()
         .flush()
         .expect("flush REPL expression result");

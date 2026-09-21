@@ -1205,14 +1205,15 @@ impl TyCtxt {
 
     /// Whether a value of `ty` is one word pointing at a counted heap node that
     /// `gos_rt_rc_retain` / `gos_rt_rc_release` manage: a payload-bearing enum,
-    /// or a callable value's capture environment (null for a callable that
-    /// captures nothing, which both calls treat as a no-op).
+    /// an `errors::Error` cell, or a callable value's capture environment (null
+    /// for a callable that captures nothing, which both calls treat as a
+    /// no-op).
     #[must_use]
     pub fn is_counted_node(&self, ty: Ty) -> bool {
         self.is_payload_enum(ty)
             || matches!(
                 self.kind(ty),
-                Some(TyKind::FnTrait(_) | TyKind::Closure { .. })
+                Some(TyKind::FnTrait(_) | TyKind::Closure { .. } | TyKind::DynError)
             )
     }
 }

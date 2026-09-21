@@ -313,6 +313,10 @@ pub struct Vm {
     /// target. Per-`Vm`: spawned goroutines start at 1 and climb
     /// independently, mirroring the per-`Vm` `ChunkState` ownership.
     pub(crate) globals_generation: Cell<u32>,
+    /// The comparator each key type reaches its own `cmp` through, by the
+    /// identity of the type's tag. An ordered container asks once per key
+    /// type; `None` records a type whose order is the language's own.
+    pub(crate) user_comparators: RefCell<rustc_hash::FxHashMap<u64, Option<&'static str>>>,
     /// Call-stack snapshot for runtime-error diagnostics. Push on
     /// chunk entry, pop on success - on error the frame stays so
     /// `call_stack_snapshot` reports the failing chain.
@@ -1121,6 +1125,7 @@ mod lifecycle;
 mod native_dispatch;
 mod resolve;
 pub(crate) mod run;
+pub(crate) mod user_order;
 
 impl Default for Vm {
     fn default() -> Self {

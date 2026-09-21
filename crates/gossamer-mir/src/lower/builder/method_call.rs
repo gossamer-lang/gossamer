@@ -610,6 +610,42 @@ impl<'a> Builder<'a> {
             }
         }
 
+        // `carrier.map(f)` calls the closure in this frame, so its argument
+        // and answer keep their own types - a float, an aggregate, another
+        // carrier - and the answer is boxed the way a `Some` / `Ok` literal
+        // boxes one, rather than crossing a callback as one integer word.
+        if method.name.as_str() == "map"
+            && args.len() == 1
+            && matches!(receiver_kind_flat, TyKind::Adt { .. })
+            && self.is_result_or_option_adt(receiver_ty)
+            && let Some(mapped_ty) = self.enum_payload_ty(ty, 0)
+            && !matches!(
+                self.tcx.kind_of(mapped_ty),
+                TyKind::Var(_) | TyKind::Error | TyKind::Never
+            )
+        {
+            let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let payload_ty = self.enum_payload_ty(receiver_ty, 0).unwrap_or(i64_ty);
+            let recv = self.lower_expr(receiver)?;
+            let closure = self.lower_iter_closure(&args[0], &[payload_ty], mapped_ty, span)?;
+            return Some(self.lower_map_inline(recv, closure, receiver_ty, mapped_ty, ty, span));
+        }
+
+        // `a.or(b)` on an `Option` receiver answers `a` when it holds a value
+        // and `b` otherwise. The generic table has no row for it, so route it
+        // to the intrinsic the `option::or` free form takes, whose arguments
+        // come data-last: the alternative, then the receiver.
+        if method.name.as_str() == "or"
+            && args.len() == 1
+            && matches!(receiver_kind_flat, TyKind::Adt { .. })
+            && self.is_option_adt(receiver_ty)
+        {
+            let ordered = vec![args[0].clone(), receiver.clone()];
+            if let Some(local) = self.try_lower_combinator_call("option::or", &ordered, ty, span) {
+                return Some(local);
+            }
+        }
+
         // Stage 3 - name-keyed runtime-symbol table; a user impl of the same
         // name shadows a bare-name runtime builtin.
         let mut runtime_symbol = match self.runtime_symbol_by_name(
@@ -2529,7 +2565,7 @@ impl<'a> Builder<'a> {
                     Some("gos_rt_heap_u8_to_string")
                 } else {
                     match &receiver_kind_flat {
-                        TyKind::Int(_) => Some("gos_rt_i64_to_str"),
+                        TyKind::Int(int) => Some(super::int_to_str_symbol(*int)),
                         TyKind::Float(_) => Some("gos_rt_f64_to_str"),
                         // A `char` is a scalar Unicode value, so its String
                         // form is built rather than reinterpreted.
@@ -5441,7 +5477,7 @@ impl<'a> Builder<'a> {
         // into a string render of the i64.
         if matches!(runtime_symbol, Some("")) && method.name.as_str() == "to_string" {
             runtime_symbol = match self.tcx.kind_of(lowered_recv_ty) {
-                TyKind::Int(_) => Some("gos_rt_i64_to_str"),
+                TyKind::Int(int) => Some(super::int_to_str_symbol(*int)),
                 TyKind::Float(_) => Some("gos_rt_f64_to_str"),
                 _ => runtime_symbol,
             };

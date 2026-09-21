@@ -635,6 +635,7 @@ fn reads_arg_as_slot(name: &str) -> bool {
         "gos_rt_map_field_clone"
             | "gos_rt_map_field_release"
             | "gos_rt_option_slot_retain"
+            | "gos_rt_option_slot_retain_ok"
             | "gos_rt_option_slot_release"
     )
 }

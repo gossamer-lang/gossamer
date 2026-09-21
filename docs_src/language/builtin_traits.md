@@ -130,7 +130,7 @@ A bound naming `PartialOrd` licenses `cmp`, `partial_cmp` on a type parameter.
 
 ### `Ord`
 
-The `PartialOrd` contract under its total-order spelling; both names reach the same `cmp`, and a sequence's `sort`, `min`, `max`, and sorted-sequence searches all read it. A heap, a `BTreeSet`, and a `BTreeMap` order as they store, with no comparator to call, so they decline such an element (GT0085).
+The `PartialOrd` contract under its total-order spelling; both names reach the same `cmp`, and a sequence's `sort`, `min`, `max`, and sorted-sequence searches all read it, and a `BTreeSet` or `BTreeMap` seats its entries by it. A heap orders as it stores, with no comparator to call, so it declines such an element (GT0085).
 
 ```gossamer
 impl Ord for Type { fn cmp(&self, other: Self) -> i64 }

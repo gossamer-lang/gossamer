@@ -25,6 +25,6 @@ pub(crate) fn run(file: &Path) -> Result<()> {
         }
         return Err(anyhow!("{} parse error(s)", diags.len()));
     }
-    println!("{sf}");
+    outln!("{sf}");
     Ok(())
 }

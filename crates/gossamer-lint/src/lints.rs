@@ -1385,8 +1385,10 @@ fn lint_empty_else(sf: &SourceFile) -> Vec<Finding> {
             else {
                 return;
             };
+            // A let-chain's failure edges carry a synthesized `else` when
+            // none was written, so only a spelled one is the user's.
             if let ExprKind::Block(block) = &else_branch.kind {
-                if block.stmts.is_empty() && block.tail.is_none() {
+                if !block.synthetic && block.stmts.is_empty() && block.tail.is_none() {
                     out.push((
                         else_branch.span,
                         "empty `else` block".to_string(),

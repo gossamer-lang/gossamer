@@ -99,6 +99,7 @@ impl TypeChecker<'_> {
         self.check_deferred_wrapping_operands();
         self.check_deferred_mutating_receivers();
         self.check_deferred_private_fields();
+        self.check_deferred_field_receivers();
         self.check_deferred_structural();
         self.check_deferred_shared_payloads();
         self.resolve_table();
@@ -757,6 +758,15 @@ struct TypeChecker<'a> {
     /// Field accesses whose receiver was still an inference variable when
     /// the access was checked, re-examined once inference has settled.
     deferred_private_fields: Vec<(Ty, String, Span, Vec<String>)>,
+    /// Field reads from written source whose receiver was an inference
+    /// variable when checked; one still unresolved once inference settles
+    /// names a type nothing decided.
+    deferred_field_receivers: Vec<(Ty, String, Span)>,
+    /// The type variable each unannotated closure parameter starts as.
+    unannotated_closure_params: Vec<Ty>,
+    /// Set while a stdlib signature is read as a template, where each
+    /// catalogue type parameter stands for a `Param` a call binds.
+    catalog_params_as_params: bool,
     /// Assignment mismatches whose outer shapes are already incompatible but
     /// whose literal elements need integer/float defaulting before their
     /// rendered types are useful to the user.
@@ -1138,6 +1148,9 @@ impl<'a> TypeChecker<'a> {
             deferred_structural: Vec::new(),
             deferred_mutating_receivers: Vec::new(),
             deferred_private_fields: Vec::new(),
+            deferred_field_receivers: Vec::new(),
+            unannotated_closure_params: Vec::new(),
+            catalog_params_as_params: false,
             deferred_type_mismatches: Vec::new(),
             deferred_into_conversions: Vec::new(),
             deferred_literal_type_mismatches: Vec::new(),
@@ -6095,6 +6108,10 @@ impl<'a> TypeChecker<'a> {
             self.generic_callee_inputs(callee_ty, args.len())
                 .map(|(inputs, arity)| (inputs, arity, None))
                 .or_else(|| self.generic_assoc_callee_inputs(callee, args.len()))
+                .or_else(|| {
+                    self.generic_stdlib_callee_inputs(callee, args)
+                        .map(|inputs| (inputs, CATALOG_TYPE_PARAM_SLOTS, None))
+                })
         } else {
             None
         };
@@ -6120,6 +6137,52 @@ impl<'a> TypeChecker<'a> {
             self.check_closures_against_params(&inputs, bound, args, &mut tys);
         }
         tys
+    }
+
+    /// The parameter types of a generic stdlib free function taking `args`, in
+    /// the order the arguments arrive, with each catalogue type parameter left
+    /// as a `Param` the other arguments bind. `None` when the function
+    /// declares none, or a closure argument's slot is not one the catalogue
+    /// can spell.
+    fn generic_stdlib_callee_inputs(&mut self, callee: &Expr, args: &[Expr]) -> Option<Vec<Ty>> {
+        let ExprKind::Path(path) = &callee.kind else {
+            return None;
+        };
+        let names = self.resolved_value_path_names(callee.id, path);
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (module, last) = names.split_at(names.len().saturating_sub(1));
+        let name = last.first().copied()?;
+        let shape = crate::stdlib_signatures::internal_shape_for_path(module, name)?;
+        if shape.params.len() != args.len()
+            || !shape.params.iter().any(|param| {
+                crate::stdlib_signatures::split_type_words(param.ty).any(is_catalog_type_param)
+            })
+        {
+            return None;
+        }
+        let prior = std::mem::replace(&mut self.catalog_params_as_params, true);
+        let templates: Vec<Option<Ty>> = shape
+            .params
+            .iter()
+            .map(|param| self.stdlib_signature_ty(param.ty))
+            .collect();
+        self.catalog_params_as_params = prior;
+        let error = self.tcx.error_ty();
+        let mut inputs = Vec::with_capacity(args.len());
+        for (template, arg) in templates.into_iter().zip(args) {
+            let closure = matches!(arg.kind, ExprKind::Closure { .. });
+            match template {
+                // A bare `T` says nothing of a callable's shape; the slot's own
+                // expectation (a middleware's handler) is what types it.
+                Some(ty) if closure && matches!(self.tcx.kind(ty), Some(TyKind::Param { .. })) => {
+                    return None;
+                }
+                Some(ty) => inputs.push(ty),
+                None if closure => return None,
+                None => inputs.push(error),
+            }
+        }
+        Some(inputs)
     }
 
     /// The type arguments of `ty` by position when it is an instantiation of
@@ -6828,6 +6891,33 @@ impl<'a> TypeChecker<'a> {
             && let Some(ty) = self.check_bare_intrinsic_call(last, arg_tys, callee.span)
         {
             return Some(ty);
+        }
+        // `String::name(..)` on a built-in type names one of its constructors
+        // or, written qualified, one of its methods; anything else has no
+        // definition on any tier.
+        if let [owner] | ["std", owner] = module
+            && !matches!(self.tcx.kind(resolved), Some(TyKind::FnDef { .. }))
+            && let Some(constructors) = builtin_type_constructors(owner)
+            && let Some(methods) = core_type_own_method_names(owner)
+            && !constructors.contains(&last)
+            && !methods.contains(&last)
+            && !self.user_methods_for_owner(owner).iter().any(|m| m == last)
+        {
+            let mut declared: Vec<String> = constructors
+                .iter()
+                .chain(methods.iter())
+                .map(|name| (*name).to_string())
+                .collect();
+            declared.dedup();
+            self.emit(
+                TypeError::UnknownAssocItem {
+                    base: (*owner).to_string(),
+                    name: last.to_string(),
+                    declared,
+                },
+                callee.span,
+            );
+            return Some(self.tcx.error_ty());
         }
         None
     }
@@ -8174,9 +8264,6 @@ impl<'a> TypeChecker<'a> {
             }
             "Set" | "BTreeSet" => {
                 let elem = array_source_elem(self);
-                if owner == "BTreeSet" {
-                    self.require_container_reads_the_types_order(elem, owner, span);
-                }
                 Some(self.set_ty(owner, elem))
             }
             "Deque" => {
@@ -9948,11 +10035,23 @@ impl<'a> TypeChecker<'a> {
         if shape.params.len() != n_args {
             return None;
         }
+        // A middleware's `T` slot is the handler it wraps.
+        let is_middleware = matches!(
+            module,
+            ["middleware"] | ["http", "middleware"] | ["std", "http", "middleware"]
+        );
         Some(
             shape
                 .params
                 .iter()
                 .map(|param| {
+                    // A handler slot takes a closure or any type implementing
+                    // `Handler`, so it shapes a closure without pinning the
+                    // argument's type.
+                    let ty = param.ty.trim();
+                    if ty == "http::Handler" || (is_middleware && ty == "T") {
+                        return Expectation::Coerce(self.http_handler_ty());
+                    }
                     self.stdlib_signature_arg_ty(param.ty)
                         .map_or(Expectation::None, Expectation::Coerce)
                 })
@@ -10099,6 +10198,19 @@ impl<'a> TypeChecker<'a> {
         Some(self.tcx.intern(TyKind::FnTrait(FnSig { inputs, output })))
     }
 
+    /// The `Param` a catalogue type parameter stands for while a signature is
+    /// read as a template, one slot per letter.
+    fn catalog_param_template(&mut self, src: &str) -> Option<Ty> {
+        if !self.catalog_params_as_params || !is_catalog_type_param(src) {
+            return None;
+        }
+        let letter = src.bytes().next()?;
+        Some(self.tcx.intern(TyKind::Param {
+            idx: crate::ParamIdx(u32::from(letter - b'A')),
+            name: src.into(),
+        }))
+    }
+
     fn stdlib_signature_ty(&mut self, src: &str) -> Option<Ty> {
         let src = src.trim();
         // A callback slot resolves to the callable shape it declares, so a
@@ -10107,6 +10219,9 @@ impl<'a> TypeChecker<'a> {
         // access then reads dynamically.
         if let Some(sig) = self.stdlib_signature_fn_ty(src) {
             return Some(sig);
+        }
+        if let Some(param) = self.catalog_param_template(src) {
+            return Some(param);
         }
         if src.is_empty()
             || src.contains('|')
@@ -10550,9 +10665,10 @@ impl<'a> TypeChecker<'a> {
     /// element writes its own `cmp`.
     ///
     /// A sequence orders on demand, so its ordering calls route through the
-    /// type's comparator. A heap and a sorted set or map keep their elements
-    /// in the order they were stored in, reached with no comparator to call,
-    /// so the order the type declares would silently not be the one read back.
+    /// type's comparator, and a `BTreeMap` / `BTreeSet` hands the comparator
+    /// to the tree it keeps its entries in. A heap keeps its elements in the
+    /// order they were stored in, reached with no comparator to call, so the
+    /// order the type declares would silently not be the one read back.
     fn require_container_reads_the_types_order(&mut self, elem: Ty, owner: &str, span: Span) {
         let resolved = self.infer.resolve(self.tcx, elem);
         let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
@@ -11055,7 +11171,7 @@ impl<'a> TypeChecker<'a> {
             "sort_by_key" | "min_by_key" | "max_by_key" | "map" | "filter" | "filter_map"
             | "flat_map" | "for_each" | "any" | "all" | "find" | "position" | "find_map"
             | "take_while" | "skip_while" | "partition" | "chunk_by" | "count_by" | "sum_by"
-            | "product_by" => Some(vec![elem]),
+            | "product_by" | "count" | "retain" => Some(vec![elem]),
             _ => None,
         }
     }
@@ -13113,6 +13229,32 @@ impl<'a> TypeChecker<'a> {
         method_substs
     }
 
+    /// Position of the `http::Handler` argument a stdlib handle method takes,
+    /// so a closure written there is typed as the handler it stands for.
+    fn stdlib_handler_arg_slot(
+        &self,
+        receiver_ty: Ty,
+        method: &str,
+        n_args: usize,
+    ) -> Option<usize> {
+        let mut resolved = self.infer.resolve(self.tcx, receiver_ty);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(resolved) {
+            resolved = self.infer.resolve(self.tcx, *inner);
+        }
+        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
+            return None;
+        };
+        match (self.tcx.def_name(*def)?, method, n_args) {
+            ("http::Server", "serve", 1) => Some(0),
+            (
+                "http::Router",
+                "get" | "post" | "put" | "delete" | "patch" | "head" | "options",
+                2,
+            ) => Some(1),
+            _ => None,
+        }
+    }
+
     /// Types a method call's explicit arguments, shaping each by the
     /// method's declared parameter. A closure argument to a Vec/slice
     /// combinator (`xs.sort_by`, `xs.map`) is pinned to the element type
@@ -13160,12 +13302,15 @@ impl<'a> TypeChecker<'a> {
                     .map(|elem| vec![elem[0], elem[0]]),
                 _ => None,
             };
+            let handler_slot = is_closure(arg)
+                && self.stdlib_handler_arg_slot(receiver_ty, method, args.len()) == Some(i);
             let exp = match (
                 accumulator_inputs
                     .as_ref()
                     .or(closure_combinator_inputs.as_ref()),
                 &arg.kind,
             ) {
+                _ if handler_slot => Expectation::Coerce(self.http_handler_ty()),
                 (Some(inputs), ExprKind::Closure { params, .. })
                     if params.len() == inputs.len() =>
                 {
@@ -14459,6 +14604,10 @@ impl<'a> TypeChecker<'a> {
         while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(peeled) {
             peeled = self.infer.resolve(self.tcx, *inner);
         }
+        if self.synthesized_depth == 0 && matches!(self.tcx.kind(peeled), Some(TyKind::Var(_))) {
+            self.deferred_field_receivers
+                .push((receiver_ty, field.to_string(), span));
+        }
         let Some(TyKind::Adt { def, .. }) = self.tcx.kind(peeled) else {
             // The receiver's type is not known yet; a struct it later
             // resolves to still has to satisfy the rule.
@@ -14490,6 +14639,26 @@ impl<'a> TypeChecker<'a> {
             let prior = std::mem::replace(&mut self.current_module, module);
             self.reject_private_field_of(def, &field, span);
             self.current_module = prior;
+        }
+    }
+
+    /// Reports a field read from an unannotated closure parameter no part of
+    /// the program gave a type, which no tier can lay out. Other values of
+    /// undecided type - a flag cell, a binding's struct - are read by name at
+    /// run time.
+    fn check_deferred_field_receivers(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_field_receivers);
+        let params: Vec<Ty> = self
+            .unannotated_closure_params
+            .iter()
+            .map(|ty| self.infer.resolve(self.tcx, *ty))
+            .filter(|ty| matches!(self.tcx.kind(*ty), Some(TyKind::Var(_))))
+            .collect();
+        for (receiver_ty, field, span) in deferred {
+            let resolved = self.infer.resolve(self.tcx, receiver_ty);
+            if params.contains(&resolved) {
+                self.emit(TypeError::FieldReceiverUninferred { field }, span);
+            }
         }
     }
 
@@ -18010,24 +18179,41 @@ impl<'a> TypeChecker<'a> {
         // Without this a field access inside the body (`a.size`) sees the
         // parameter as an unresolved inference var and falls back to the
         // dynamic JSON-field path rather than the struct projection.
-        let expected_inputs: Option<Vec<Ty>> = self
+        let expected_target = self
             .expectation_target(expected)
-            .map(|t| self.infer.resolve(self.tcx, t))
-            .and_then(|t| match self.tcx.kind(t) {
+            .map(|t| self.infer.resolve(self.tcx, t));
+        // A closure standing where an `http::Handler` is taken is the handler
+        // itself, so it takes the handler's request. It answers either a
+        // `Response` or a `Result` of one, so its answer is left to its body.
+        let handler_input = if expected_target.is_some()
+            && expected_target == Some(self.http_handler_ty())
+            && params.len() == 1
+        {
+            Some(vec![self.http_request_ty()])
+        } else {
+            None
+        };
+        let expected_inputs: Option<Vec<Ty>> = match handler_input {
+            Some(inputs) => Some(inputs),
+            None => expected_target.and_then(|t| match self.tcx.kind(t) {
                 Some(TyKind::FnPtr(sig) | TyKind::FnTrait(sig))
                     if sig.inputs.len() == params.len() =>
                 {
                     Some(sig.inputs.clone())
                 }
                 _ => None,
-            });
+            }),
+        };
         let inputs: Vec<Ty> = params
             .iter()
             .enumerate()
             .map(|(i, param)| {
-                let ty = match param.ty.as_ref() {
-                    Some(ty) => self.type_from_ast(ty),
-                    None => self.fresh(),
+                let ty = if let Some(ty) = param.ty.as_ref() {
+                    self.type_from_ast(ty)
+                } else {
+                    let ty = self.fresh();
+                    self.unannotated_closure_params.push(ty);
+                    ty
                 };
                 if let Some(want) = expected_inputs.as_ref().map(|inputs| inputs[i]) {
                     self.unify(ty, want, body.span);
@@ -18792,6 +18978,12 @@ impl<'a> TypeChecker<'a> {
         if let Some((int_ty, _value)) = int_assoc_const(&segments) {
             return self.tcx.int_ty(int_ty);
         }
+        // The empty arm is an `Option` whatever its payload turns out to be,
+        // which is what lets a method on it type against that payload.
+        if matches!(segments.as_slice(), ["None"] | ["Option", "None"]) {
+            let payload = self.fresh();
+            return self.option_adt_ty(payload);
+        }
         // `fs::SEEK_SET` / `SEEK_CUR` / `SEEK_END` name the `whence`
         // selector `File::seek` takes.
         if matches!(
@@ -19330,11 +19522,6 @@ impl<'a> TypeChecker<'a> {
                 } else {
                     (HASH_SET_DEF_LOCAL, "Set")
                 };
-                if name == "BTreeSet"
-                    && let Some(elem) = substs.types().first().copied()
-                {
-                    self.require_container_reads_the_types_order(elem, name, span);
-                }
                 let def = gossamer_resolve::DefId::local(local);
                 self.tcx.register_def_name(def, name);
                 return self.tcx.intern(TyKind::Adt { def, substs });
@@ -19344,7 +19531,6 @@ impl<'a> TypeChecker<'a> {
                 let tys = substs.types();
                 let key = tys.first().copied().unwrap_or_else(|| self.fresh());
                 let value = tys.get(1).copied().unwrap_or_else(|| self.fresh());
-                self.require_container_reads_the_types_order(key, "BTreeMap", span);
                 return self.tcx.intern(TyKind::HashMap {
                     key,
                     value,
@@ -21081,6 +21267,9 @@ fn strip_catalog_wrapper<'a>(src: &'a str, name: &str) -> Option<&'a str> {
         .map(str::trim)
 }
 
+/// One slot per letter a catalogue type parameter can be spelled with.
+const CATALOG_TYPE_PARAM_SLOTS: usize = 26;
+
 fn is_catalog_type_param(src: &str) -> bool {
     let mut chars = src.chars();
     matches!((chars.next(), chars.next()), (Some(ch), None) if ch.is_ascii_uppercase())
@@ -22779,6 +22968,18 @@ const PARALLEL_ADAPTER_METHODS: &[&str] = &[
     "par_reduce",
     "par_sum",
 ];
+
+/// The associated functions a built-in type answers as `Type::name(..)`
+/// besides its methods, or `None` for a type this table does not cover.
+fn builtin_type_constructors(owner: &str) -> Option<&'static [&'static str]> {
+    Some(match owner {
+        "String" => &["new", "from", "with_capacity", "from_utf8"],
+        "Vec" => &["new", "from", "with_capacity"],
+        "Map" | "BTreeMap" => &["new", "from", "with_capacity"],
+        "Set" | "BTreeSet" => &["new", "from", "with_capacity"],
+        _ => return None,
+    })
+}
 
 fn core_type_own_method_names(owner: &str) -> Option<Vec<&'static str>> {
     // A tuple `impl` registers under the arity its receiver carries; the

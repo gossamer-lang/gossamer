@@ -1,0 +1,51 @@
+// A map a function answers inside an `Option` or a `Result` is the caller's
+// own table: one the callee built is handed over, one it read out of another
+// map is copied, and the map it was read from keeps its entries. Every tier
+// reads the same values and frees each table once.
+use std::errors
+
+fn fresh(n: i64) -> Option<Map<String, i64>> {
+    let mut m: Map<String, i64> = Map::new()
+    m.insert("n", n)
+    Some(m)
+}
+
+fn inner_of(outer: Map<String, Map<String, i64>>, key: String) -> Option<Map<String, i64>> {
+    outer.get(key)
+}
+
+fn lent(m: Map<String, i64>) -> Result<Map<String, i64>, errors::Error> {
+    Ok(m)
+}
+
+fn main() {
+    for i in 0..3 {
+        if let Some(m) = fresh(i) { println("{:?} {}", m, m.len()) }
+    }
+    let mut outer: Map<String, Map<String, i64>> = Map::new()
+    let mut a: Map<String, i64> = Map::new()
+    a.insert("x", 1)
+    outer.insert("a", a)
+    for _ in 0..3 {
+        match inner_of(outer, "a") {
+            Some(mut m) => {
+                m.insert("added", 2)
+                println("{:?} {}", m, m.len())
+            }
+            None => println("none")
+        }
+    }
+    println("{:?}", outer)
+    let mut kept: Map<String, i64> = Map::new()
+    kept.insert("k", 7)
+    for _ in 0..2 {
+        match lent(kept) {
+            Ok(mut m) => {
+                m.insert("more", 1)
+                println("{} {}", m.len(), kept.len())
+            }
+            Err(e) => println("{}", e)
+        }
+    }
+    println("{:?}", kept)
+}

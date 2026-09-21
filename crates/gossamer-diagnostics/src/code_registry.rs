@@ -1397,13 +1397,13 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GT0085",
-        "A container that orders its elements as it stores them - a heap, a\n\
-            `BTreeSet`, a `BTreeMap` - named an element or key whose type\n\
-            writes its own `cmp`. Such a container keeps its elements in the\n\
-            order they went in and reads them back with no comparator to call,\n\
-            so the order the type declares would silently not be the order it\n\
+        "A heap - a `MinHeap` or `MaxHeap` - named an element whose type\n\
+            writes its own `cmp`. A heap keeps its elements in the order they\n\
+            went in and reads them back with no comparator to call, so the\n\
+            order the type declares would silently not be the order it\n\
             answers. A sequence orders on demand and does route through the\n\
-            type's `cmp`: sort a `Vec<T>`, or key the container on a value\n\
+            type's `cmp`, and a `BTreeSet` or `BTreeMap` seats its entries by\n\
+            it: sort a `Vec<T>`, use a sorted set, or key the heap on a value\n\
             that carries the order.",
     ),
     (
@@ -1458,6 +1458,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `String` keys, `m.range(lo..=hi)`, `m.range(lo..)`, `m.range(..hi)`, or\n\
             `m.range(..)`. A range stored in a binding carries no bounds a key\n\
             can be compared with, so write the range in place.",
+    ),
+    (
+        "GT0092",
+        "A field was read from a closure parameter with no annotation, and\n\
+            the closure is never handed to anything that says what it takes, so\n\
+            nothing decides the parameter's type. The field's layout depends on\n\
+            that type: annotate the parameter, `|r: http::Request| r.path`, or\n\
+            pass the closure where its parameter type is known.",
     ),
     (
         "GX0001",

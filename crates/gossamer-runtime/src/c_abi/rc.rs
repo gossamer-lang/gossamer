@@ -3938,6 +3938,19 @@ pub unsafe extern "C" fn gos_rt_option_slot_retain(slot: *const i64) {
     }
 }
 
+/// Retain the payload of the by-value `{disc, payload}` Option/Result at
+/// `slot` only when it is `Some` / `Ok` and the payload is a copy-blob owner.
+/// Used when a combinator answers its receiver's value unchanged, so the
+/// answer holds the same blob: an `Err` arm there is the combinator's own
+/// fresh error, which the answer already owns. Null-safe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_option_slot_retain_ok(slot: *const i64) {
+    if slot.is_null() || unsafe { *slot } != 0 {
+        return;
+    }
+    unsafe { gos_rt_option_slot_retain(slot) };
+}
+
 // ---------------------------------------------------------------
 // Trial-deletion cycle collector (Bacon-Rajan, synchronous).
 // ---------------------------------------------------------------

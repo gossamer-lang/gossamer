@@ -38,7 +38,7 @@ pub(crate) fn dispatch(path: Option<PathBuf>, all: bool, format: &str) -> Result
         .ok_or_else(|| anyhow!("gos audit: no project.toml above {}", root.display()))?;
 
     let Some(advisories) = load_advisories(&project_root)? else {
-        println!(
+        outln!(
             "audit: no advisory feed - none at {}, and no `[trusted-publishers]` key to \
              verify a registry feed against",
             project_root.join(LOCAL_FEED).display()
@@ -74,10 +74,10 @@ pub(crate) fn dispatch(path: Option<PathBuf>, all: bool, format: &str) -> Result
     }
 
     if format == "json" {
-        print!("{}", render_json(&hits));
+        out!("{}", render_json(&hits));
     } else {
         for (advisory, package) in &hits {
-            println!(
+            outln!(
                 "advisory[{id}]: {summary}\n  package: {package}\n  severity: {severity}\n  \
                  fixed in: {fixed}",
                 id = advisory.id,
@@ -91,13 +91,13 @@ pub(crate) fn dispatch(path: Option<PathBuf>, all: bool, format: &str) -> Result
         }
     }
     if suppressed > 0 {
-        println!(
+        outln!(
             "audit: {suppressed} advisory(ies) affect a resolved version but name no item this \
              project references; `--all` lists them"
         );
     }
     if hits.is_empty() {
-        println!(
+        outln!(
             "audit: no reachable advisories ({} checked)",
             advisories.len()
         );

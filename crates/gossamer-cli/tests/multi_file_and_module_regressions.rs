@@ -443,6 +443,70 @@ mod tests {
 }
 
 #[test]
+fn a_test_module_import_stays_out_of_a_later_siblings_scope() {
+    // `aa` sorts before `b`, so the test module's `use super::{norm, parse}`
+    // is registered before `b`'s own `use aa::norm`. Both name one item, and
+    // outside `gos test` the test module is not compiled at all.
+    let dir = write_project(
+        "test-import-leak",
+        "example.com/testimportleak",
+        &[
+            (
+                "src/main.gos",
+                "use b::twice\n\nfn main() { println(\"{}\", twice(1)) }\n",
+            ),
+            (
+                "src/aa.gos",
+                "pub fn norm(x: i64) -> i64 { x + 1 }\n\
+                 pub fn parse(s: String) -> i64 { s.len() }\n\n\
+                 #[cfg(test)]\n\
+                 mod tests {\n\
+                 \x20   use super::{norm, parse}\n\n\
+                 \x20   #[test]\n\
+                 \x20   fn norm_of_parse() { assert_eq(norm(parse(\"ab\")), 3) }\n\
+                 }\n",
+            ),
+            (
+                "src/b.gos",
+                "use aa::norm\n\npub fn twice(x: i64) -> i64 { norm(norm(x)) }\n",
+            ),
+        ],
+    );
+    let check = Command::new(gos_bin())
+        .arg("check")
+        .arg(dir.join("src/main.gos"))
+        .output()
+        .expect("gos check");
+    assert!(
+        check.status.success(),
+        "gos check stderr: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+    let vm = project_run_vm(&dir);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0, "3\n", "vm stdout");
+    let native = project_build_run(&dir, "testimportleak");
+    assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+    assert_eq!(native.0, "3\n", "native stdout");
+    let test = Command::new(gos_bin())
+        .arg("test")
+        .current_dir(&dir)
+        .output()
+        .expect("gos test");
+    let stdout = String::from_utf8_lossy(&test.stdout).to_string();
+    assert!(
+        test.status.success(),
+        "gos test stderr: {}",
+        String::from_utf8_lossy(&test.stderr)
+    );
+    assert!(
+        stdout.contains("norm_of_parse"),
+        "test did not run: {stdout}"
+    );
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn cross_file_chained_sibling_module_calls() {
     // Three sibling modules where each call cascades into the next:
     // main → a::foo → b::bar → util::helper. Pins both the qualified-

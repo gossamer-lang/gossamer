@@ -230,9 +230,9 @@ impl BindingRunner {
             })
     }
 
-    /// Idempotently builds the runner. Returns the path to the
-    /// produced binary.
-    pub fn ensure_built(&self) -> Result<PathBuf, BindingRunnerError> {
+    /// Idempotently builds the runner. Returns the produced binary under a
+    /// lease that keeps reclamation off the workdir until it is dropped.
+    pub fn ensure_built(&self) -> Result<WorkdirLease, BindingRunnerError> {
         // The lock comes before the directory: reclamation removes this
         // workdir under the same lock, so taking it first is what keeps a
         // build's files out of a removal already in flight.
@@ -253,7 +253,7 @@ impl BindingRunner {
         let bin_path = self.runner_binary_path();
         let stamp = dir.join("stamp.json");
         if self.is_fresh(&bin_path, &stamp, "runner")? {
-            return Ok(bin_path);
+            return Ok(WorkdirLease::take(&self.workdir, bin_path)?);
         }
         run_cargo_build(
             &cargo_toml,
@@ -276,12 +276,13 @@ impl BindingRunner {
                 Some(&self.workdir),
             );
         }
-        Ok(bin_path)
+        Ok(WorkdirLease::take(&self.workdir, bin_path)?)
     }
 
-    /// Idempotently builds the signatures bin and runs it,
-    /// returning the path to `signatures.json`.
-    pub fn ensure_signatures(&self) -> Result<PathBuf, BindingRunnerError> {
+    /// Idempotently builds the signatures bin and runs it, returning
+    /// `signatures.json` under a lease that keeps reclamation off the workdir
+    /// until it is dropped.
+    pub fn ensure_signatures(&self) -> Result<WorkdirLease, BindingRunnerError> {
         // Reuse the runner's Cargo.toml - the sigs-dump bin lives
         // alongside the runner bin in the same crate.
         let _lock = AdvisoryLock::acquire(&build_lock_path(&self.workdir))?;
@@ -311,7 +312,7 @@ impl BindingRunner {
         let json_path = sigs_dir.join("signatures.json");
         let stamp = sigs_dir.join("stamp.json");
         if self.is_fresh(&json_path, &stamp, "sigs")? && bin_path.exists() {
-            return Ok(json_path);
+            return Ok(WorkdirLease::take(&self.workdir, json_path)?);
         }
         run_cargo_build(
             &cargo_toml,
@@ -354,27 +355,23 @@ impl BindingRunner {
         fs::write(&tmp, buf.as_bytes())?;
         fs::rename(&tmp, &json_path)?;
         write_stamp(&stamp, &self.fingerprint_hex, self.profile, "sigs")?;
-        Ok(json_path)
+        Ok(WorkdirLease::take(&self.workdir, json_path)?)
     }
 
-    /// `execvp` into the runner. On Unix, never returns on success.
-    /// On Windows, spawns a child and propagates its exit code via
-    /// `std::process::exit`.
-    #[must_use]
-    pub fn exec(runner: &Path, argv: &[OsString]) -> BindingRunnerError {
-        // We deliberately don't use `unsafe { libc::execvp }` here -
-        // the workspace forbids unsafe outside binding/native. A
-        // child-process wait + exit produces the same observable
-        // semantics for our callers.
+    /// Runs the runner with this process's arguments and answers its exit
+    /// code, so the caller can give back what it holds before exiting with
+    /// it.
+    ///
+    /// # Errors
+    /// Returns the spawn failure when the runner cannot be started.
+    pub fn exec(runner: &Path, argv: &[OsString]) -> Result<i32, BindingRunnerError> {
+        // A child-process wait keeps the workspace free of `unsafe`
+        // `execvp`, with the same exit status for the caller.
         let mut cmd = Command::new(runner);
         cmd.args(&argv[1..]);
         cmd.env("GOSSAMER_IN_RUNNER", "1");
-        match cmd.status() {
-            Ok(status) => {
-                std::process::exit(status.code().unwrap_or(127));
-            }
-            Err(err) => BindingRunnerError::Io(err),
-        }
+        let status = cmd.status()?;
+        Ok(status.code().unwrap_or(127))
     }
 
     fn render_input(&self, profile: TmplProfile) -> RenderInput<'_> {
@@ -1445,6 +1442,73 @@ impl Drop for AdvisoryLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
+}
+
+/// Prefix of the marker a process leaves in a runner workdir while it uses
+/// what the workdir holds.
+const LEASE_PREFIX: &str = ".gos-lease-";
+
+/// A process's claim on a built artifact in a runner workdir.
+///
+/// A `gos` that re-executes into the runner, or reads its signatures, uses
+/// the workdir after the build lock is released; reclamation removes a
+/// workdir only while no live process holds a lease on it. The lease is
+/// taken under the build lock, so a reclaim either sees it or has already
+/// removed what the lease would have named.
+#[derive(Debug)]
+pub struct WorkdirLease {
+    artifact: PathBuf,
+    marker: PathBuf,
+}
+
+impl WorkdirLease {
+    /// Leases `workdir` for `artifact`. The caller holds the workdir's build
+    /// lock.
+    fn take(workdir: &Path, artifact: PathBuf) -> io::Result<Self> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let marker = workdir.join(format!(
+            "{LEASE_PREFIX}{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::write(&marker, b"")?;
+        Ok(Self { artifact, marker })
+    }
+
+    /// The artifact the lease keeps in place.
+    #[must_use]
+    pub fn artifact(&self) -> &Path {
+        &self.artifact
+    }
+}
+
+impl Drop for WorkdirLease {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.marker);
+    }
+}
+
+/// Whether a live process holds a lease on `workdir`. A lease whose process
+/// has exited is removed as it is found.
+pub(crate) fn has_live_lease(workdir: &Path) -> bool {
+    let Ok(entries) = fs::read_dir(workdir) else {
+        return false;
+    };
+    let mut live = false;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(rest) = name.to_str().and_then(|n| n.strip_prefix(LEASE_PREFIX)) else {
+            continue;
+        };
+        let pid = rest.split('-').next().and_then(|p| p.parse::<u32>().ok());
+        if pid.is_some_and(pid_alive) {
+            live = true;
+        } else {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+    live
 }
 
 // The liveness probe is an unavoidable FFI call (`libc::kill` on unix,

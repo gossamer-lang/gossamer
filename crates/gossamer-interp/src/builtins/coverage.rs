@@ -76,6 +76,11 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          boxed-payload carrier to unpack",
     ),
     (
+        "gos_rt_carrier_own_map",
+        "the VM copies a shared map when a payload is taken out of its carrier \
+         (`payload_own_storage` in `vm/run.rs`), so the binding holds a table of its own",
+    ),
+    (
         "gos_rt_chan_*",
         "the VM implements channels as its `channel` builtins and their send and \
          receive methods, parking a blocked goroutine in its own scheduler",

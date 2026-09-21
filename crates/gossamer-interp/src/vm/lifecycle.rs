@@ -41,6 +41,7 @@ impl Vm {
             chunk_state_map: RefCell::new(HashMap::new()),
             chunk_state_last: Cell::new(None),
             globals_generation: Cell::new(1),
+            user_comparators: RefCell::new(rustc_hash::FxHashMap::default()),
             call_stack: RefCell::new(Vec::new()),
             call_depth: Cell::new(0),
             source_map: None,
@@ -105,6 +106,7 @@ impl Vm {
             chunk_state_map: RefCell::new(HashMap::new()),
             chunk_state_last: Cell::new(None),
             globals_generation: Cell::new(1),
+            user_comparators: RefCell::new(rustc_hash::FxHashMap::default()),
             call_stack: RefCell::new(Vec::new()),
             call_depth: Cell::new(0),
             // Worker VMs run already-compiled chunks; the source map is

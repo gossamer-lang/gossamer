@@ -67,7 +67,7 @@ pub(crate) fn dispatch(
     let mut total_errors = 0u32;
     for file in &files {
         if files.len() > 1 {
-            println!("=== {} ===", file.display());
+            outln!("=== {} ===", file.display());
         }
         match run(file, timings, message_format, fix) {
             Ok(()) => {}
@@ -84,7 +84,7 @@ pub(crate) fn dispatch(
             file_word = if total_errors == 1 { "file" } else { "files" },
         ));
     }
-    println!(
+    outln!(
         "check: {n} {file_word} ok",
         n = files.len(),
         file_word = if files.len() == 1 { "file" } else { "files" },
@@ -144,13 +144,13 @@ pub(crate) fn run(
             &mut edited,
         )?;
         if edited.is_empty() {
-            println!("fix: 0 edit(s) applied");
+            outln!("fix: 0 edit(s) applied");
         } else {
             for (path, count) in &edited {
-                println!("fix: {count} edit(s) applied to {}", display_path(path));
+                outln!("fix: {count} edit(s) applied to {}", display_path(path));
             }
             if edited.len() > 1 {
-                println!("fix: {applied} edit(s) across {} file(s)", edited.len());
+                outln!("fix: {applied} edit(s) across {} file(s)", edited.len());
             }
         }
     }
@@ -167,7 +167,7 @@ pub(crate) fn run(
             outcome.diagnostics.len()
         ));
     }
-    println!("check: ok ({} items typed)", outcome.checked.sf.items.len());
+    outln!("check: ok ({} items typed)", outcome.checked.sf.items.len());
     if timings {
         // The shared gate runs the stages back-to-back, so only the total
         // is meaningful here; the per-stage split is reported as a single

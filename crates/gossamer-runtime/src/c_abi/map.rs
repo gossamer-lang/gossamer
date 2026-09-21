@@ -34,6 +34,7 @@ use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 use super::map_table::{Table, TableOrder};
+use super::slot_key::UserCmp;
 
 /// A mutex whose lock is *biased* to the goroutine that owns the map:
 /// while the map has not escaped to another goroutine it is accessed
@@ -136,6 +137,13 @@ pub struct GosMap {
     /// [`MAP_HASHED`] for a `Map`; for a `BTreeMap`, the order its word keys
     /// take ([`MAP_ORDERED_SIGNED`] or [`MAP_ORDERED_UNSIGNED`]).
     ordered: AtomicU8,
+    /// Address of the key type's own `cmp` for a `BTreeMap` whose key writes
+    /// one, and zero for a key the language orders. A key ordered this way is
+    /// stored as the slots that comparator reads.
+    user_cmp: std::sync::atomic::AtomicUsize,
+    /// Whether that comparator takes its keys by address (an aggregate) or by
+    /// value (a one-word key).
+    user_cmp_by_address: std::sync::atomic::AtomicBool,
 }
 
 const MAP_HASHED: u8 = 0;
@@ -143,9 +151,26 @@ const MAP_ORDERED_SIGNED: u8 = 1;
 const MAP_ORDERED_UNSIGNED: u8 = 2;
 
 impl GosMap {
+    /// The key type's own comparator, for a map ordered by one.
+    fn user_cmp(&self) -> Option<UserCmp> {
+        UserCmp::new(
+            self.user_cmp.load(Ordering::Acquire),
+            self.user_cmp_by_address.load(Ordering::Acquire),
+        )
+    }
+
+    /// Whether this map's aggregate keys are stored as the slots a user
+    /// comparator reads rather than as their content encoding.
+    fn keys_are_slots(&self) -> bool {
+        self.user_cmp().is_some()
+    }
+
     /// The order a table keyed by stored words takes, or `None` for a hashed
     /// map.
     fn word_order(&self) -> Option<TableOrder> {
+        if let Some(cmp) = self.user_cmp() {
+            return Some(TableOrder::User(cmp));
+        }
         let order = match self.ordered.load(Ordering::Acquire) {
             MAP_ORDERED_SIGNED => KeyOrder::Signed,
             MAP_ORDERED_UNSIGNED => KeyOrder::Unsigned,
@@ -156,12 +181,18 @@ impl GosMap {
 
     /// The order a table keyed by bytes takes, or `None` for a hashed map.
     fn byte_order(&self) -> Option<TableOrder> {
+        if let Some(cmp) = self.user_cmp() {
+            return Some(TableOrder::User(cmp));
+        }
         (self.ordered.load(Ordering::Acquire) != MAP_HASHED).then_some(TableOrder::Bytes)
     }
 
     /// The order a table keyed by aggregates encoded under `desc` takes, or
     /// `None` for a hashed map.
     fn skey_order(&self, desc: &[u8]) -> Option<TableOrder> {
+        if let Some(cmp) = self.user_cmp() {
+            return Some(TableOrder::User(cmp));
+        }
         (self.ordered.load(Ordering::Acquire) != MAP_HASHED).then(|| TableOrder::Skey(desc.into()))
     }
 }
@@ -373,10 +404,24 @@ impl MapStorage {
             Self::Empty => Self::Empty,
             Self::I64I64(t) => Self::I64I64(t.window(lo, hi, take, word)),
             Self::StrI64(t) => Self::StrI64(t.window(lo, hi, take, word)),
-            Self::SkeyVal { entries, desc } => Self::SkeyVal {
-                entries: entries.window(lo, hi, take, word),
-                desc: desc.clone(),
-            },
+            Self::SkeyVal { entries, desc } => {
+                let window = entries.window(lo, hi, take, word);
+                if !take && window.keys_own_slots() {
+                    for key in window.keys() {
+                        // A copied entry names the words the source's key
+                        // does, so it takes a share of each; a taken one
+                        // carries the share the source held.
+                        // SAFETY: the slots hold the words `desc` names.
+                        unsafe {
+                            crate::c_abi::slot_key::retain_slots(key.as_slice(), Some(desc), false);
+                        }
+                    }
+                }
+                Self::SkeyVal {
+                    entries: window,
+                    desc: desc.clone(),
+                }
+            }
             Self::StrStr(t) => Self::StrStr(t.window(lo, hi, take, Clone::clone)),
             Self::I64Str(t) => Self::I64Str(t.window(lo, hi, take, Clone::clone)),
             Self::Bytes(t) => Self::Bytes(t.window(lo, hi, take, Clone::clone)),
@@ -826,6 +871,8 @@ pub unsafe extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mu
             value_owner: AtomicU8::new(MAP_VALUE_NONE),
             float_keys: std::sync::atomic::AtomicBool::new(false),
             ordered: AtomicU8::new(MAP_HASHED),
+            user_cmp: std::sync::atomic::AtomicUsize::new(0),
+            user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
         }))
     })
 }
@@ -867,6 +914,8 @@ pub unsafe extern "C" fn gos_rt_map_new_with_capacity(
             value_owner: AtomicU8::new(MAP_VALUE_NONE),
             float_keys: std::sync::atomic::AtomicBool::new(false),
             ordered: AtomicU8::new(MAP_HASHED),
+            user_cmp: std::sync::atomic::AtomicUsize::new(0),
+            user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
         }))
     })
 }
@@ -906,6 +955,8 @@ pub unsafe extern "C" fn gos_rt_map_new_with_capacity_typed(
             value_owner: AtomicU8::new(MAP_VALUE_NONE),
             float_keys: std::sync::atomic::AtomicBool::new(false),
             ordered: AtomicU8::new(MAP_HASHED),
+            user_cmp: std::sync::atomic::AtomicUsize::new(0),
+            user_cmp_by_address: std::sync::atomic::AtomicBool::new(false),
         }))
     })
 }
@@ -1193,6 +1244,32 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
 }
 
 #[allow(dead_code)]
+/// The bytes `m` keys an aggregate by: the slots the key type's own `cmp`
+/// reads for a map ordered by one, and the content encoding that hashes and
+/// compares by value otherwise.
+unsafe fn skey_bytes(m: *const GosMap, key: *const u8, desc: *const c_char) -> Option<Vec<u8>> {
+    if !m.is_null() && unsafe { &*m }.keys_are_slots() {
+        if key.is_null() || desc.is_null() {
+            return None;
+        }
+        let width = unsafe { crate::c_abi::gos_str_arg_len(desc) } * 8;
+        // SAFETY: the key names an aggregate of the slots the descriptor
+        // counts, which is the width the comparator reads.
+        return Some(unsafe { std::slice::from_raw_parts(key, width) }.to_vec());
+    }
+    unsafe { build_skey(key, desc) }
+}
+
+/// The bytes `m` keys an enum by: the node the key type's own `cmp` reads for
+/// a map ordered by one, and the canonical discriminant-and-payload encoding
+/// otherwise.
+unsafe fn ekey_bytes(m: *const GosMap, node: *mut u8, desc: *const i64) -> Option<Vec<u8>> {
+    if !m.is_null() && unsafe { &*m }.keys_are_slots() {
+        return Some((node as usize as i64).to_le_bytes().to_vec());
+    }
+    unsafe { enum_canonical_bytes(node, desc) }
+}
+
 unsafe fn build_skey(key: *const u8, desc: *const c_char) -> Option<Vec<u8>> {
     unsafe { build_skey_for_set(key, desc) }
 }
@@ -1252,7 +1329,7 @@ unsafe fn insert_skey_entry(
     retain_value: bool,
 ) {
     {
-        let Some(k) = (unsafe { build_skey(key, desc) }) else {
+        let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return;
         };
         if m.is_null() {
@@ -1271,9 +1348,18 @@ unsafe fn insert_skey_entry(
         let MapStorage::SkeyVal { entries, .. } = &mut *storage else {
             return;
         };
-        let prev = entries.insert(k.into(), val);
+        let key_slots = map.keys_are_slots();
+        let prev = entries.insert(k.clone().into(), val);
         if prev.is_none() {
             map.len_cache += 1;
+            if key_slots {
+                // The stored key is the caller's slots, so the map takes a
+                // share of each word they name; an equal key already stored
+                // stays, and the slots handed in this time name words the
+                // caller still holds.
+                // SAFETY: the slots hold the words the descriptor names.
+                unsafe { crate::c_abi::slot_key::retain_slots(&k, Some(desc_bytes), false) };
+            }
         }
         // The entry keeps this word, so the map takes a share of it here -
         // the same exchange the scalar- and string-keyed inserts make. The
@@ -1301,7 +1387,7 @@ pub unsafe extern "C" fn gos_rt_map_get_skey_opt(
 ) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
         let none = unsafe { gos_rt_result_new(1, 0) };
-        let Some(k) = (unsafe { build_skey(key, desc) }) else {
+        let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return none;
         };
         if m.is_null() {
@@ -1335,7 +1421,7 @@ pub unsafe extern "C" fn gos_rt_map_contains_skey(
     desc: *const c_char,
 ) -> bool {
     ffi_entry!(false, {
-        let Some(k) = (unsafe { build_skey(key, desc) }) else {
+        let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return false;
         };
         if m.is_null() {
@@ -3439,6 +3525,24 @@ unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
                     // through the buffer's address, so it always points at
                     // storage of its own.
                     let mut key_slots = vec![0i64; slots.max(1)];
+                    // A user-ordered map keys by the slots themselves, which
+                    // the map owns and the reader only looks at.
+                    if entries.keys_own_slots() {
+                        for (index, slot) in key_slots.iter_mut().enumerate() {
+                            *slot = k
+                                .as_slice()
+                                .get(index * 8..index * 8 + 8)
+                                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+                                .map_or(0, i64::from_le_bytes);
+                        }
+                        return Some(DescEntry {
+                            key_slots,
+                            key_by_word: false,
+                            owned_strings: Vec::new(),
+                            owned_vecs: Vec::new(),
+                            value: entries[k],
+                        });
+                    }
                     if !decode_skey_into(k.as_slice(), desc, &mut key_slots) {
                         return None;
                     }
@@ -3725,7 +3829,18 @@ unsafe fn release_storage_entries(owner: u8, storage: &MapStorage) {
     match storage {
         MapStorage::I64I64(inner) => inner.values().for_each(|&v| release(v)),
         MapStorage::StrI64(inner) => inner.values().for_each(|&v| release(v)),
-        MapStorage::SkeyVal { entries, .. } => entries.values().for_each(|&v| release(v)),
+        MapStorage::SkeyVal { entries, desc } => {
+            entries.values().for_each(|&v| release(v));
+            if entries.keys_own_slots() {
+                for key in entries.keys() {
+                    // SAFETY: a user-ordered map's key holds a share of each
+                    // word its slots name, which the map's death gives back.
+                    unsafe {
+                        crate::c_abi::slot_key::release_slots(key.as_slice(), Some(desc), false);
+                    }
+                }
+            }
+        }
         MapStorage::EkeyVal { entries } => {
             for entry in entries.values() {
                 release(entry.value);
@@ -3785,6 +3900,16 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
             if value_owner != MAP_VALUE_NONE {
                 for &v in cloned.values() {
                     unsafe { retain_owned_value_tag(value_owner, v) };
+                }
+            }
+            if cloned.keys_own_slots() {
+                for key in cloned.keys() {
+                    // The copy names the same words the source's keys do, so
+                    // it takes a share of each.
+                    // SAFETY: the slots hold the words the descriptor names.
+                    unsafe {
+                        crate::c_abi::slot_key::retain_slots(key.as_slice(), Some(desc), false);
+                    }
                 }
             }
             MapStorage::SkeyVal {
@@ -3848,6 +3973,10 @@ pub unsafe extern "C" fn gos_rt_map_clone(src: *const GosMap) -> *mut GosMap {
                 source.float_keys.load(Ordering::Acquire),
             ),
             ordered: AtomicU8::new(source.ordered.load(Ordering::Acquire)),
+            user_cmp: std::sync::atomic::AtomicUsize::new(source.user_cmp.load(Ordering::Acquire)),
+            user_cmp_by_address: std::sync::atomic::AtomicBool::new(
+                source.user_cmp_by_address.load(Ordering::Acquire),
+            ),
         }))
     })
 }
@@ -4413,8 +4542,8 @@ pub unsafe extern "C" fn gos_rt_map_range_skey(
     mode: i64,
 ) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
-        let lo = unsafe { build_skey(lo, desc) }.unwrap_or_default();
-        let hi = unsafe { build_skey(hi, desc) }.unwrap_or_default();
+        let lo = unsafe { skey_bytes(m, lo, desc) }.unwrap_or_default();
+        let hi = unsafe { skey_bytes(m, hi, desc) }.unwrap_or_default();
         unsafe {
             map_range(m, mode, |s, low, incl| {
                 s.rank_bytes(if low { &lo } else { &hi }, incl)
@@ -4433,8 +4562,8 @@ pub unsafe extern "C" fn gos_rt_map_range_ekey(
     mode: i64,
 ) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
-        let lo = unsafe { enum_canonical_bytes(lo, desc) }.unwrap_or_default();
-        let hi = unsafe { enum_canonical_bytes(hi, desc) }.unwrap_or_default();
+        let lo = unsafe { ekey_bytes(m, lo, desc) }.unwrap_or_default();
+        let hi = unsafe { ekey_bytes(m, hi, desc) }.unwrap_or_default();
         unsafe {
             map_range(m, mode, |s, low, incl| {
                 s.rank_bytes(if low { &lo } else { &hi }, incl)
@@ -4480,8 +4609,34 @@ pub unsafe extern "C" fn gos_rt_map_window(
             value_owner: AtomicU8::new(owner),
             float_keys: std::sync::atomic::AtomicBool::new(map.float_keys.load(Ordering::Acquire)),
             ordered: AtomicU8::new(map.ordered.load(Ordering::Acquire)),
+            user_cmp: std::sync::atomic::AtomicUsize::new(map.user_cmp.load(Ordering::Acquire)),
+            user_cmp_by_address: std::sync::atomic::AtomicBool::new(
+                map.user_cmp_by_address.load(Ordering::Acquire),
+            ),
         }))
     })
+}
+
+/// Makes `m` a `BTreeMap` ordered by its key type's own `cmp`, at `cmp_addr`,
+/// which takes its keys by address when `by_address` is non-zero. Emitted by
+/// the MIR lowering right after construction, while the map is still empty.
+/// Null-safe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_set_ordered_by(
+    m: *mut GosMap,
+    cmp_addr: i64,
+    by_address: i64,
+    unsigned: i64,
+) {
+    if m.is_null() {
+        return;
+    }
+    let map = unsafe { &*m };
+    map.user_cmp
+        .store(cmp_addr.max(0) as usize, Ordering::Release);
+    map.user_cmp_by_address
+        .store(by_address != 0, Ordering::Release);
+    unsafe { gos_rt_map_set_ordered(m, unsigned) };
 }
 
 unsafe fn map_keys_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
@@ -5070,7 +5225,17 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
             )
         };
         let mut slot_buf = vec![0i64; slots.max(1)];
+        let stored_slots = entries.keys_own_slots();
         for key in keys {
+            if stored_slots {
+                // The map keys by the slots themselves, and the snapshot is a
+                // sequence of its own, so each element takes a share of the
+                // words it names.
+                // SAFETY: the slots hold the words the descriptor names.
+                unsafe { crate::c_abi::slot_key::retain_slots(key, Some(desc), false) };
+                unsafe { gos_rt_vec_push(out, key.as_ptr()) };
+                continue;
+            }
             if !decode_skey_into(key, desc, &mut slot_buf) {
                 continue;
             }
@@ -5511,7 +5676,7 @@ pub unsafe extern "C" fn gos_rt_map_pop_skey(
 ) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
         let none = unsafe { gos_rt_result_new(1, 0) };
-        let Some(k) = (unsafe { build_skey(key, desc) }) else {
+        let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return none;
         };
         if m.is_null() {
@@ -5519,8 +5684,21 @@ pub unsafe extern "C" fn gos_rt_map_pop_skey(
         }
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
+        let key_slots = map.keys_are_slots();
         let popped: Option<i64> = match &mut *storage {
-            MapStorage::SkeyVal { entries, .. } => entries.remove(ByteKeyRef::new(k.as_slice())),
+            MapStorage::SkeyVal { entries, desc } => {
+                let removed = entries.remove_entry(ByteKeyRef::new(k.as_slice()));
+                if let Some((stored, _)) = &removed
+                    && key_slots
+                {
+                    // SAFETY: the key the map held owns a share of each word
+                    // its slots name, which its removal gives back.
+                    unsafe {
+                        crate::c_abi::slot_key::release_slots(stored.as_slice(), Some(desc), false);
+                    }
+                }
+                removed.map(|(_, value)| value)
+            }
             _ => None,
         };
         if popped.is_some() {
@@ -5801,7 +5979,7 @@ unsafe fn with_ekey_entries<R>(
 /// value back from a snapshot. Returns the previous value word, if the key was
 /// already present.
 unsafe fn ekey_insert(m: *mut GosMap, key: *mut u8, desc: *const i64, val: i64) -> Option<i64> {
-    let bytes = unsafe { enum_canonical_bytes(key, desc) }?;
+    let bytes = unsafe { ekey_bytes(m, key, desc) }?;
     unsafe {
         with_ekey_entries(m, true, |entries, len| {
             unsafe { crate::c_abi::rc::gos_rt_rc_retain(key) };
@@ -5826,7 +6004,7 @@ unsafe fn ekey_insert(m: *mut GosMap, key: *mut u8, desc: *const i64, val: i64) 
 
 /// The value word stored under an enum key, or `None` when absent.
 unsafe fn ekey_lookup(m: *const GosMap, key: *mut u8, desc: *const i64) -> Option<i64> {
-    let bytes = unsafe { enum_canonical_bytes(key, desc) }?;
+    let bytes = unsafe { ekey_bytes(m, key, desc) }?;
     if m.is_null() {
         return None;
     }
@@ -5904,7 +6082,7 @@ pub unsafe extern "C" fn gos_rt_map_pop_ekey(
 ) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
         let none = unsafe { gos_rt_result_new(1, 0) };
-        let Some(bytes) = (unsafe { enum_canonical_bytes(key, desc) }) else {
+        let Some(bytes) = (unsafe { ekey_bytes(m, key, desc) }) else {
             return none;
         };
         let popped = unsafe {
@@ -6021,7 +6199,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_ekey(m: *const GosMap) -> *mut GosVec {
 
 /// The raw value word stored under an aggregate key, or `None` when absent.
 unsafe fn skey_lookup(m: *const GosMap, key: *const u8, desc: *const c_char) -> Option<i64> {
-    let k = unsafe { build_skey(key, desc) }?;
+    let k = unsafe { skey_bytes(m, key, desc) }?;
     if m.is_null() {
         return None;
     }

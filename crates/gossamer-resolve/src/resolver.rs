@@ -217,7 +217,7 @@ impl Resolver {
         self.local_item_paths = collect_item_paths(&source.items);
         self.unit_import_names = collect_import_names(&source.uses);
         self.precollect_project_aliases(source);
-        self.collect_imports(&source.uses);
+        self.collect_imports(&source.uses, &source.items);
         self.collect_items(&source.items);
         self.bind_project_imports();
         for item in &source.items {
@@ -385,8 +385,17 @@ impl Resolver {
         }
     }
 
-    fn collect_imports(&mut self, uses: &[UseDecl]) {
+    fn collect_imports(&mut self, uses: &[UseDecl], items: &[Item]) {
+        // A `use` written inside a `mod { }` body is hoisted to the file's
+        // imports, so one written in a module the cfg drops has to be dropped
+        // with it.
+        let inactive = collect_inactive_module_paths(items);
         for use_decl in uses {
+            if (1..=use_decl.module.len())
+                .any(|depth| inactive.contains(&use_decl.module[..depth].join("::")))
+            {
+                continue;
+            }
             self.record_imported_module_head(use_decl);
             match &use_decl.list {
                 Some(list) => self.register_use_list(use_decl, list),
@@ -464,6 +473,7 @@ impl Resolver {
                 .insert_module_alias(name.clone(), named.clone());
         }
         self.record_std_module_alias(&name, &target);
+        let target = self.anchored_import_target(&use_decl.module, target);
         self.define_import(&name, use_decl.id, use_decl.span, &target);
     }
 
@@ -598,6 +608,7 @@ impl Resolver {
                     .insert_module_alias(imported.clone(), named.clone());
             }
             self.record_std_module_alias(&imported, &target);
+            let target = self.anchored_import_target(&use_decl.module, target);
             self.define_import(&imported, use_decl.id, use_decl.span, &target);
         }
     }
@@ -817,6 +828,25 @@ impl Resolver {
         self.relative_candidates(module, &segments)
             .into_iter()
             .find(|path| self.local_module_paths.contains(path))
+    }
+
+    /// A relative `use` target spelled from the unit root, when it names a
+    /// module or an item this unit declares.
+    ///
+    /// Every import lands in one unit-wide table, so a `super::` path kept as
+    /// written would be read against whichever module later consults it, and
+    /// two spellings of one item would look like rival imports.
+    fn anchored_import_target(&self, module: &[String], target: String) -> String {
+        if !crate::diagnostic::is_relative_path(&target) {
+            return target;
+        }
+        let segments: Vec<&str> = target.split("::").collect();
+        self.relative_candidates(module, &segments)
+            .into_iter()
+            .find(|path| {
+                self.local_item_paths.contains(path) || self.local_module_paths.contains(path)
+            })
+            .unwrap_or(target)
     }
 
     /// `true` when `path` names a module or an item this unit declares.
@@ -2906,6 +2936,39 @@ impl Resolver {
 
 /// Every `mod` path declared under `items`, joined with `::`. Nested
 /// modules contribute their full path, so a `use` can name any level.
+/// Every inline module the current cfg drops, keyed by its `::`-joined path
+/// from the unit root. A module nested in a dropped one is not listed; its
+/// path already has a dropped prefix.
+fn collect_inactive_module_paths(
+    items: &[gossamer_ast::Item],
+) -> std::collections::HashSet<String> {
+    fn walk(
+        items: &[gossamer_ast::Item],
+        prefix: &str,
+        out: &mut std::collections::HashSet<String>,
+    ) {
+        for item in items {
+            let ItemKind::Mod(decl) = &item.kind else {
+                continue;
+            };
+            let path = if prefix.is_empty() {
+                decl.name.name.clone()
+            } else {
+                format!("{prefix}::{}", decl.name.name)
+            };
+            if !crate::cfg::item_is_active(&item.attrs) {
+                out.insert(path);
+            } else if let gossamer_ast::ModBody::Inline(inner) = &decl.body {
+                walk(inner, &path, out);
+            }
+        }
+    }
+
+    let mut out = std::collections::HashSet::new();
+    walk(items, "", &mut out);
+    out
+}
+
 fn collect_module_paths(items: &[gossamer_ast::Item]) -> std::collections::HashSet<String> {
     fn walk(
         items: &[gossamer_ast::Item],

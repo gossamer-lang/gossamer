@@ -1,0 +1,63 @@
+// A `BTreeMap` key type and a `BTreeSet` element type that write their own
+// `cmp` seat every entry by that body, while a type the language orders keeps
+// the language's order. Identical on every tier.
+struct Ranked { x: i64 }
+impl Ord for Ranked {
+    fn cmp(&self, other: Ranked) -> i64 { other.x - self.x }
+}
+
+struct Plain { x: i64 }
+
+enum Level { Low, Mid, High }
+impl Level {
+    fn weight(&self) -> i64 {
+        match self {
+            Level::Low => 3
+            Level::Mid => 2
+            Level::High => 1
+        }
+    }
+}
+impl Ord for Level {
+    fn cmp(&self, other: Level) -> i64 { self.weight() - other.weight() }
+}
+
+fn keys(m: BTreeMap<Ranked, i64>) -> Vec<i64> {
+    let mut out = #[]
+    for (k, _) in m.iter() { out.push(k.x) }
+    out
+}
+
+fn main() {
+    let mut ranked: BTreeMap<Ranked, i64> = BTreeMap::new()
+    for n in #[2, 5, 1, 4, 3] { ranked.insert(Ranked { x: n }, n * 10) }
+    println("{:?}", keys(ranked))
+    println("{:?} {:?}", ranked.first_key_value(), ranked.last_key_value())
+    println("{} {}", ranked.len(), ranked.contains_key(Ranked { x: 4 }))
+    println("{:?} {:?}", ranked.pop_first(), ranked.pop_last())
+    println("{:?}", keys(ranked))
+
+    // The language orders a type that writes no `cmp` of its own.
+    let mut plain: BTreeMap<Plain, i64> = BTreeMap::new()
+    for n in #[2, 5, 1] { plain.insert(Plain { x: n }, n) }
+    let mut plain_keys = #[]
+    for (k, _) in plain.iter() { plain_keys.push(k.x) }
+    println("{:?}", plain_keys)
+
+    let mut levels: BTreeMap<Level, String> = BTreeMap::new()
+    levels.insert(Level::Mid, "mid")
+    levels.insert(Level::Low, "low")
+    levels.insert(Level::High, "high")
+    for (k, v) in levels.iter() { println("{:?} {}", k, v) }
+
+    let mut marks: BTreeSet<Ranked> = BTreeSet::new()
+    for n in #[3, 1, 2] { marks.insert(Ranked { x: n }) }
+    let mut mark_keys = #[]
+    for r in marks.iter() { mark_keys.push(r.x) }
+    println("{:?} {} {}", mark_keys, marks.len(), marks.contains(Ranked { x: 2 }))
+
+    let literal: BTreeSet<Ranked> = #{ Ranked { x: 7 }, Ranked { x: 9 }, Ranked { x: 8 } }
+    let mut literal_keys = #[]
+    for r in literal.iter() { literal_keys.push(r.x) }
+    println("{:?}", literal_keys)
+}

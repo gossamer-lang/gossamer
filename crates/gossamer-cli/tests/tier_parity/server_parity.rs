@@ -238,6 +238,37 @@ fn http_plain_fn_handler_parity_across_tiers() {
     );
 }
 
+/// A closure written where a handler is taken is typed as that handler, so an
+/// unannotated parameter's field reads lower on every tier, including as the
+/// argument of a call a `match` destructures.
+#[test]
+fn http_handler_closure_params_parity_across_tiers() {
+    self_terminating_server_parity(
+        "feature-testing-examples/http_handler_closure_params.gos",
+        &[
+            "object status=201 body={\"path\":\"/o/j\"}",
+            "object status=404 body=object miss",
+            "routed status=201 body={\"path\":\"/r/j\"}",
+            "free status=201 body={\"path\":\"/f/j\"}",
+        ],
+    );
+}
+
+/// The status line carries the phrase the code is registered under on every
+/// tier, and an empty one for a code with none - never a borrowed `OK`.
+#[test]
+fn http_status_reason_parity_across_tiers() {
+    self_terminating_server_parity(
+        "feature-testing-examples/http_status_reason.gos",
+        &[
+            "[HTTP/1.1 200 OK]",
+            "[HTTP/1.1 405 Method Not Allowed]",
+            "[HTTP/1.1 422 Unprocessable Content]",
+            "[HTTP/1.1 599 ]",
+        ],
+    );
+}
+
 /// The middleware that are controls rather than response decorations
 /// must decide identically on every tier: a body budget refuses an
 /// oversized request before the handler runs, a credential gate answers

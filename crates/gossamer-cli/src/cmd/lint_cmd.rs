@@ -27,7 +27,7 @@ fn run(path: &PathBuf, deny_warnings: bool, explain: Option<&str>, fix: bool) ->
     if let Some(id) = explain {
         match gossamer_lint::lint_explanation(id) {
             Some(text) => {
-                println!("lint `{id}`\n\n{text}");
+                outln!("lint `{id}`\n\n{text}");
                 return Ok(());
             }
             None => return Err(anyhow!("no lint registered under `{id}`")),
@@ -73,7 +73,7 @@ fn run(path: &PathBuf, deny_warnings: bool, explain: Option<&str>, fix: bool) ->
                 fs::write(&file, &rewritten)
                     .with_context(|| format!("write {}", file.display()))?;
                 edits_applied += candidate_fixes.len();
-                println!(
+                outln!(
                     "fix: {} edit(s) applied to {}",
                     candidate_fixes.len(),
                     file.display()
@@ -92,10 +92,10 @@ fn run(path: &PathBuf, deny_warnings: bool, explain: Option<&str>, fix: bool) ->
         }
     }
     if fix {
-        println!("fix: {edits_applied} total edit(s) applied");
+        outln!("fix: {edits_applied} total edit(s) applied");
         return Ok(());
     }
-    println!("lint: {warnings} warning(s), {errors} error(s)");
+    outln!("lint: {warnings} warning(s), {errors} error(s)");
     if errors > 0 {
         return Err(anyhow!("{errors} lint error(s)"));
     }

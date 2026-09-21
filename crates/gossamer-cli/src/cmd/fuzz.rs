@@ -234,7 +234,7 @@ pub(crate) fn run(targets: &[FuzzTarget], duration: Option<Duration>, seed: u64)
     gossamer_runtime::coverage::set_enabled(true);
     let mut failures = 0usize;
     for target in targets {
-        println!("fuzz: {} ({})", target.name, target.file.display());
+        outln!("fuzz: {} ({})", target.name, target.file.display());
         let mut vm = load(&target.file)?;
 
         // Corpus first: an entry earns its place by covering something,
@@ -250,7 +250,7 @@ pub(crate) fn run(targets: &[FuzzTarget], duration: Option<Duration>, seed: u64)
         let mut covered: HashSet<(String, u32, u32)> = HashSet::new();
         for entry in &corpus {
             if let Run::Crash(report) = run_input(&mut vm, &target.name, entry) {
-                println!("  corpus entry still fails: {report}");
+                outln!("  corpus entry still fails: {report}");
                 failures += 1;
             }
             covered.extend(coverage_keys());
@@ -287,7 +287,7 @@ pub(crate) fn run(targets: &[FuzzTarget], duration: Option<Duration>, seed: u64)
             Some((input, report)) => {
                 let minimal = minimise(&mut vm, &target.name, &input);
                 let path = write_crash(target, &minimal)?;
-                println!(
+                outln!(
                     "  crash after {executed} input(s): {report}\n  \
                      minimised {} -> {} byte(s), written to {}\n  \
                      it now runs as a regression under `gos test`",
@@ -297,7 +297,7 @@ pub(crate) fn run(targets: &[FuzzTarget], duration: Option<Duration>, seed: u64)
                 );
                 failures += 1;
             }
-            None => println!("  {executed} input(s), {found} added to the corpus, no crash"),
+            None => outln!("  {executed} input(s), {found} added to the corpus, no crash"),
         }
     }
     gossamer_runtime::coverage::set_enabled(false);
@@ -339,7 +339,7 @@ pub(crate) fn run_corpus_as_tests(targets: &[FuzzTarget]) -> Result<(usize, usiz
                 Run::Ok => passed += 1,
                 Run::Crash(report) => {
                     failed += 1;
-                    println!(
+                    outln!(
                         "FAIL {}::{} [{}]: {report}",
                         target.file.display(),
                         target.name,

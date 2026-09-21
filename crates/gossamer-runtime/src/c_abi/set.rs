@@ -17,6 +17,7 @@
 
 use crate::c_abi::GosVec;
 use crate::c_abi::set_table::OrdTable;
+use crate::c_abi::slot_key::{CountedWord, UserCmp};
 use std::os::raw::c_char;
 
 /// A membership table keyed by content: in the order elements were added for
@@ -57,16 +58,9 @@ pub struct GosSet {
     /// the table's own order. Set algebra carries the flag onto its result, so
     /// `a.union(b)` reads the way `a` does.
     ordered: bool,
-}
-
-/// How a counted word inside an aggregate element's slots takes and gives back
-/// a share.
-#[derive(Clone, Copy)]
-enum CountedWord {
-    /// A `String` or an enum node: reference counted.
-    Rc,
-    /// A `Vec`: its own share count.
-    Vec,
+    /// The element type's own `cmp` for a `BTreeSet` whose element writes one,
+    /// which its tables then order by.
+    user_cmp: Option<UserCmp>,
 }
 
 impl Clone for GosSet {
@@ -78,6 +72,7 @@ impl Clone for GosSet {
             node_elements: self.node_elements,
             skey_desc: self.skey_desc.clone(),
             ordered: self.ordered,
+            user_cmp: self.user_cmp,
         };
         copy.retain_all_elements();
         copy
@@ -101,6 +96,7 @@ impl GosSet {
         use crate::c_abi::map::KeyOrder;
         use crate::c_abi::map_table::TableOrder;
         self.ordered = true;
+        let user = self.user_cmp.map(TableOrder::User);
         let reorder = |table: &mut SetTable<String>, order: TableOrder| {
             let mut tree = SetTable::ordered(order);
             for k in table.keys() {
@@ -109,10 +105,11 @@ impl GosSet {
             *table = tree;
         };
         if !self.inner.is_ordered() {
-            reorder(&mut self.inner, TableOrder::Bytes);
+            reorder(&mut self.inner, user.clone().unwrap_or(TableOrder::Bytes));
         }
         if !self.i64_inner.is_ordered() {
-            let mut tree = SetTable::ordered(TableOrder::Word(KeyOrder::Signed));
+            let mut tree =
+                SetTable::ordered(user.clone().unwrap_or(TableOrder::Word(KeyOrder::Signed)));
             for k in self.i64_inner.keys() {
                 tree.add(*k);
             }
@@ -129,10 +126,13 @@ impl GosSet {
         if !self.ordered || self.struct_inner.is_ordered() {
             return;
         }
-        let order = match (&self.skey_desc, self.node_elements) {
-            (Some(desc), _) => TableOrder::Skey(desc.clone()),
-            (None, true) => TableOrder::Bytes,
-            (None, false) => return,
+        let order = match (self.user_cmp, &self.skey_desc, self.node_elements) {
+            // The element type's own order reads the slots the set stores,
+            // whatever shape they hold.
+            (Some(cmp), _, _) => TableOrder::User(cmp),
+            (None, Some(desc), _) => TableOrder::Skey(desc.clone()),
+            (None, None, true) => TableOrder::Bytes,
+            (None, None, false) => return,
         };
         let mut tree = AggregateTable::ordered(order);
         for (k, v) in self.struct_inner.iter() {
@@ -141,53 +141,31 @@ impl GosSet {
         self.struct_inner = tree;
     }
 
-    /// The counted words an aggregate element's slots hold: the node of an
-    /// enum element, or each `String` and `Vec` field the descriptor names.
+    /// The counted words an aggregate element's slots hold, under this set's
+    /// element shape.
     fn counted_words(&self, slots: &[u8]) -> Vec<(*mut u8, CountedWord)> {
-        let word_at = |index: usize| -> *mut u8 {
-            let bytes = slots
-                .get(index * 8..index * 8 + 8)
-                .and_then(|b| <[u8; 8]>::try_from(b).ok())
-                .unwrap_or_default();
-            // A slot is eight bytes wide on every target, while a pointer is
-            // the target's own width: read the word, then narrow it.
-            let word = u64::from_le_bytes(bytes);
-            std::ptr::with_exposed_provenance_mut(usize::try_from(word).unwrap_or_default())
-        };
-        if self.node_elements {
-            return vec![(word_at(0), CountedWord::Rc)];
-        }
-        let Some(desc) = &self.skey_desc else {
-            return Vec::new();
-        };
-        desc.iter()
-            .enumerate()
-            .filter_map(|(index, kind)| match kind {
-                b'S' => Some((word_at(index), CountedWord::Rc)),
-                b'V' => Some((word_at(index), CountedWord::Vec)),
-                _ => None,
-            })
-            .filter(|(word, _)| !word.is_null())
-            .collect()
+        crate::c_abi::slot_key::counted_words(slots, self.skey_desc.as_deref(), self.node_elements)
     }
 
     /// Takes a share of every counted word `slots` holds.
     unsafe fn retain_element(&self, slots: &[u8]) {
-        for (word, kind) in self.counted_words(slots) {
-            match kind {
-                CountedWord::Rc => unsafe { crate::c_abi::rc::gos_rt_rc_retain(word) },
-                CountedWord::Vec => unsafe { crate::c_abi::gos_rt_vec_retain(word.cast()) },
-            }
+        unsafe {
+            crate::c_abi::slot_key::retain_slots(
+                slots,
+                self.skey_desc.as_deref(),
+                self.node_elements,
+            );
         }
     }
 
     /// Gives back a share of every counted word `slots` holds.
     unsafe fn release_element(&self, slots: &[u8]) {
-        for (word, kind) in self.counted_words(slots) {
-            match kind {
-                CountedWord::Rc => unsafe { crate::c_abi::rc::gos_rt_rc_release(word) },
-                CountedWord::Vec => unsafe { crate::c_abi::map::gos_rt_vec_free(word.cast()) },
-            }
+        unsafe {
+            crate::c_abi::slot_key::release_slots(
+                slots,
+                self.skey_desc.as_deref(),
+                self.node_elements,
+            );
         }
     }
 
@@ -228,6 +206,11 @@ impl GosSet {
     /// is the order the interpreter reads the same elements in.
     fn sorted_aggregate_keys(&self) -> Vec<&[u8]> {
         let mut keys: Vec<&[u8]> = self.struct_inner.keys().map(AsRef::as_ref).collect();
+        // A tree seats each element as it arrives, so its walk is already the
+        // set's order - the element type's own `cmp` included.
+        if self.struct_inner.is_ordered() {
+            return keys;
+        }
         match &self.skey_desc {
             Some(desc) => {
                 keys.sort_by_cached_key(|key| crate::c_abi::map::skey_order_key(key, desc));
@@ -300,6 +283,21 @@ pub unsafe extern "C" fn gos_rt_btree_set_new() -> *mut GosSet {
         set.make_ordered();
         Box::into_raw(Box::new(set))
     })
+}
+
+/// Makes `s` a `BTreeSet` ordered by its element type's own `cmp`, at
+/// `cmp_addr`, which takes its elements by address when `by_address` is
+/// non-zero. Emitted by the MIR lowering right after construction. Null-safe.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_set_ordered_by(s: *mut GosSet, cmp_addr: i64, by_address: i64) {
+    ffi_entry!((), {
+        if s.is_null() {
+            return;
+        }
+        let set = unsafe { &mut *s };
+        set.user_cmp = UserCmp::new(cmp_addr.max(0) as usize, by_address != 0);
+        set.make_ordered();
+    });
 }
 
 /// Marks a set as reading in sorted order (the `BTreeSet` contract).
@@ -856,6 +854,9 @@ unsafe fn set_combine(
         i64_inner: ints(&a.i64_inner, &b.i64_inner),
         struct_inner: aggregates(&a.struct_inner, &b.struct_inner),
         node_elements: a.node_elements || b.node_elements,
+        // Both operands order their elements the same way, so either side's
+        // comparator is the result's.
+        user_cmp: a.user_cmp.or(b.user_cmp),
         // Both operands hold one element type, so either side's descriptor
         // describes the result's elements.
         skey_desc: a.skey_desc.clone().or_else(|| b.skey_desc.clone()),
@@ -1368,6 +1369,7 @@ unsafe fn set_window(set: &mut GosSet, lo: usize, hi: usize, take: bool) -> GosS
         node_elements: set.node_elements,
         skey_desc: set.skey_desc.clone(),
         ordered: set.ordered,
+        user_cmp: set.user_cmp,
     };
     if !take {
         out.retain_all_elements();

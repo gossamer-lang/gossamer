@@ -1,0 +1,43 @@
+// A YAML integer wider than 64 bits decodes as the nearest float on every
+// tier, the way a JSON decoder reads one, while every integer that fits
+// `i64` or `u64` stays exact. `to_json`, `parse`, and a typed `from_yaml`
+// all go through the one decoder.
+
+use std::encoding::json
+use std::encoding::yaml
+use std::errors
+
+struct Limits {
+    low: f64
+    exact: i64
+}
+
+// Summing in a loop gives the JIT a hot body to compile.
+fn total(xs: [i64]) -> i64 {
+    let mut sum = 0
+    for x in xs {
+        sum += x
+    }
+    sum
+}
+
+fn main() -> Result<(), errors::Error> {
+    let text = """
+    low: -9223372036854776000
+    exact: -9223372036854775808
+    top: 18446744073709551615
+    huge: 99999999999999999999999
+    """
+    println("{}", yaml::to_json(text)?)
+
+    let doc = yaml::parse(text)?
+    let low = doc.get("low").and_then(|v| v.as_f64()).unwrap_or(0.0)
+    let exact = doc.get("exact").and_then(|v| v.as_i64()).unwrap_or(0)
+    let top = doc.get("top").and_then(|v| v.as_u64()).unwrap_or(0)
+    println("low={low} exact={exact} top={top}")
+
+    let limits = from_yaml::<Limits>("low: -9223372036854776000\nexact: 42\n")?
+    println("typed low={} exact={}", limits.low, limits.exact)
+    println("total={}", total([limits.exact, 1, 2]))
+    Ok(())
+}

@@ -27,5 +27,20 @@ println(middle)
 println(m.pop_first())
 ```
 
+A key or element type that writes its own `cmp` is ordered by that body
+instead, so the container reads the way the type says it compares:
+
+```gos
+struct Ranked { x: i64 }
+impl Ord for Ranked {
+    fn cmp(&self, other: Ranked) -> i64 { other.x - self.x }
+}
+
+let mut best: BTreeMap<Ranked, String> = BTreeMap::new()
+best.insert(Ranked { x: 1 }, "one")
+best.insert(Ranked { x: 3 }, "three")
+println(best.first_key_value())
+```
+
 Every tier runs the same tree, so the order and every range answer the same
 entries on the bytecode VM, the JIT, and a compiled build.

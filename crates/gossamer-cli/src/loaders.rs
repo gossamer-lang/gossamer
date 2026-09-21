@@ -60,7 +60,7 @@ pub(crate) fn print_timings(
     exhaust: std::time::Duration,
 ) {
     let total = parse + resolve + typeck + exhaust;
-    println!(
+    outln!(
         "timings: {source_len} bytes source; parse {:>6.2}ms, resolve {:>6.2}ms, typeck {:>6.2}ms, exhaust {:>6.2}ms, total {:>6.2}ms",
         parse.as_secs_f64() * 1000.0,
         resolve.as_secs_f64() * 1000.0,

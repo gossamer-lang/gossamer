@@ -530,6 +530,11 @@ fn reclaim_runner_workdir(path: &Path, root: &Path) -> bool {
     ) else {
         return false;
     };
+    // A process running the runner, or reading what it produced, holds a
+    // lease; the workdir stays until the last one is given back.
+    if crate::binding_runner::has_live_lease(path) {
+        return false;
+    }
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
             let child = entry.path();
@@ -841,6 +846,45 @@ mod tests {
 
         drop(held);
         assert!(reclaim_runner_workdir(&workdir, &root));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A process that re-executed into a runner links and runs out of its
+    /// workdir after the build lock is released, so its lease alone keeps the
+    /// workdir in place.
+    #[test]
+    fn a_leased_runner_workdir_is_not_reclaimed() {
+        let root = scratch("runner-workdir-leased");
+        let _ = fs::remove_dir_all(&root);
+        let workdir = root.join("0ddba11");
+        fs::create_dir_all(workdir.join("runner")).unwrap();
+        let archive = workdir.join("runner").join("libgossamer_runtime.a");
+        fs::write(&archive, b"x").unwrap();
+        fs::write(
+            workdir.join(format!(".gos-lease-{}-0", std::process::id())),
+            b"",
+        )
+        .unwrap();
+
+        assert!(!reclaim_runner_workdir(&workdir, &root));
+        assert!(archive.exists(), "a leased workdir keeps its files");
+
+        fs::remove_file(workdir.join(format!(".gos-lease-{}-0", std::process::id()))).unwrap();
+        assert!(reclaim_runner_workdir(&workdir, &root));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A lease whose process exited must not pin a workdir forever.
+    #[test]
+    fn a_stale_lease_does_not_pin_a_runner_workdir() {
+        let root = scratch("runner-workdir-stale-lease");
+        let _ = fs::remove_dir_all(&root);
+        let workdir = root.join("5ca1ab1e");
+        fs::create_dir_all(workdir.join("runner")).unwrap();
+        fs::write(workdir.join(format!(".gos-lease-{}-0", u32::MAX)), b"").unwrap();
+
+        assert!(reclaim_runner_workdir(&workdir, &root));
+        assert!(!workdir.exists());
         let _ = fs::remove_dir_all(&root);
     }
 

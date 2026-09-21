@@ -121,12 +121,18 @@ impl<K: Clone, V> OrderedTree<K, V> {
         }
     }
 
-    fn take(&mut self, id: u32) -> Node<K, V> {
-        std::mem::replace(&mut self.nodes[id as usize], Node::Free)
-    }
-
-    fn put(&mut self, id: u32, node: Node<K, V>) {
-        self.nodes[id as usize] = node;
+    /// Two nodes at once, which a borrow from a sibling and a merge each
+    /// write in one step. The ids name different nodes.
+    fn pair_mut(&mut self, a: u32, b: u32) -> (&mut Node<K, V>, &mut Node<K, V>) {
+        debug_assert_ne!(a, b, "a node cannot be its own sibling");
+        let (a, b) = (a as usize, b as usize);
+        if a < b {
+            let (head, tail) = self.nodes.split_at_mut(b);
+            (&mut head[a], &mut tail[0])
+        } else {
+            let (head, tail) = self.nodes.split_at_mut(a);
+            (&mut tail[0], &mut head[b])
+        }
     }
 
     fn alloc(&mut self, node: Node<K, V>) -> u32 {
@@ -330,82 +336,108 @@ impl<K: Clone, V> OrderedTree<K, V> {
         val: V,
         cmp: &impl Fn(&K, &K) -> Ordering,
     ) -> Inserted<K, V> {
-        match self.take(id) {
-            Node::Leaf(mut leaf) => match leaf.keys.binary_search_by(|k| cmp(k, &key)) {
-                Ok(i) => {
-                    let old = std::mem::replace(&mut leaf.vals[i], val);
-                    self.put(id, Node::Leaf(leaf));
-                    Inserted::Replaced(old)
-                }
-                Err(i) => {
-                    leaf.keys.insert(i, key);
-                    leaf.vals.insert(i, val);
-                    if leaf.keys.len() <= FANOUT {
-                        self.put(id, Node::Leaf(leaf));
-                        return Inserted::Added(None);
-                    }
-                    let mid = leaf.keys.len() / 2;
-                    let right = Leaf {
-                        keys: leaf.keys.split_off(mid),
-                        vals: leaf.vals.split_off(mid),
-                        prev: id,
-                        next: leaf.next,
-                    };
-                    let sep = right.keys[0].clone();
-                    let after = right.next;
-                    let right_id = self.alloc(Node::Leaf(right));
-                    if after != NIL
-                        && let Node::Leaf(next) = &mut self.nodes[after as usize]
-                    {
-                        next.prev = right_id;
-                    }
-                    leaf.next = right_id;
-                    self.put(id, Node::Leaf(leaf));
-                    Inserted::Added(Some((sep, right_id)))
-                }
-            },
+        // The descent reads the routing keys where they sit, so a node is
+        // never moved out of the arena and back to be written.
+        let descent = match &self.nodes[id as usize] {
             Node::Internal(node) => {
                 let i = node
                     .seps
                     .partition_point(|s| cmp(s, &key) != Ordering::Greater);
-                let child = node.children[i];
-                self.put(id, Node::Internal(node));
-                let result = self.insert_at(child, key, val, cmp);
-                let Node::Internal(mut node) = self.take(id) else {
-                    unreachable!("node {id} changed kind during insert");
-                };
-                let outcome = match result {
-                    Inserted::Replaced(old) => Inserted::Replaced(old),
-                    Inserted::Added(None) => {
-                        node.counts[i] += 1;
-                        Inserted::Added(None)
-                    }
-                    Inserted::Added(Some((sep, right))) => {
-                        node.counts[i] = self.subtree_len(child);
-                        node.seps.insert(i, sep);
-                        node.children.insert(i + 1, right);
-                        node.counts.insert(i + 1, self.subtree_len(right));
-                        if node.children.len() <= FANOUT {
-                            Inserted::Added(None)
-                        } else {
-                            let mid = node.seps.len() / 2;
-                            let mut seps = node.seps.split_off(mid);
-                            let promoted = seps.remove(0);
-                            let sibling = Internal {
-                                seps,
-                                children: node.children.split_off(mid + 1),
-                                counts: node.counts.split_off(mid + 1),
-                            };
-                            let sibling_id = self.alloc(Node::Internal(sibling));
-                            Inserted::Added(Some((promoted, sibling_id)))
-                        }
-                    }
-                };
-                self.put(id, Node::Internal(node));
-                outcome
+                Some((i, node.children[i]))
             }
+            Node::Leaf(_) => None,
             Node::Free => unreachable!("reached a freed node"),
+        };
+        let Some((i, child)) = descent else {
+            return self.insert_into_leaf(id, key, val, cmp);
+        };
+        let result = self.insert_at(child, key, val, cmp);
+        let (sep, right) = match result {
+            Inserted::Replaced(old) => return Inserted::Replaced(old),
+            Inserted::Added(None) => {
+                if let Node::Internal(node) = &mut self.nodes[id as usize] {
+                    node.counts[i] += 1;
+                }
+                return Inserted::Added(None);
+            }
+            Inserted::Added(Some(split)) => split,
+        };
+        let (left_len, right_len) = (self.subtree_len(child), self.subtree_len(right));
+        let split = {
+            let Node::Internal(node) = &mut self.nodes[id as usize] else {
+                unreachable!("node {id} changed kind during insert");
+            };
+            node.counts[i] = left_len;
+            node.seps.insert(i, sep);
+            node.children.insert(i + 1, right);
+            node.counts.insert(i + 1, right_len);
+            if node.children.len() <= FANOUT {
+                None
+            } else {
+                let mid = node.seps.len() / 2;
+                let mut seps = node.seps.split_off(mid);
+                let promoted = seps.remove(0);
+                Some((
+                    promoted,
+                    Internal {
+                        seps,
+                        children: node.children.split_off(mid + 1),
+                        counts: node.counts.split_off(mid + 1),
+                    },
+                ))
+            }
+        };
+        match split {
+            None => Inserted::Added(None),
+            Some((promoted, sibling)) => {
+                let sibling_id = self.alloc(Node::Internal(sibling));
+                Inserted::Added(Some((promoted, sibling_id)))
+            }
         }
+    }
+
+    /// Stores the entry in the leaf `id`, splitting it when it overflows.
+    fn insert_into_leaf(
+        &mut self,
+        id: u32,
+        key: K,
+        val: V,
+        cmp: &impl Fn(&K, &K) -> Ordering,
+    ) -> Inserted<K, V> {
+        let overflow = {
+            let Node::Leaf(leaf) = &mut self.nodes[id as usize] else {
+                unreachable!("node {id} is not a leaf");
+            };
+            match leaf.keys.binary_search_by(|k| cmp(k, &key)) {
+                Ok(i) => return Inserted::Replaced(std::mem::replace(&mut leaf.vals[i], val)),
+                Err(i) => {
+                    leaf.keys.insert(i, key);
+                    leaf.vals.insert(i, val);
+                    if leaf.keys.len() <= FANOUT {
+                        return Inserted::Added(None);
+                    }
+                    let mid = leaf.keys.len() / 2;
+                    Leaf {
+                        keys: leaf.keys.split_off(mid),
+                        vals: leaf.vals.split_off(mid),
+                        prev: id,
+                        next: leaf.next,
+                    }
+                }
+            }
+        };
+        let sep = overflow.keys[0].clone();
+        let after = overflow.next;
+        let right_id = self.alloc(Node::Leaf(overflow));
+        if after != NIL
+            && let Node::Leaf(next) = &mut self.nodes[after as usize]
+        {
+            next.prev = right_id;
+        }
+        if let Node::Leaf(leaf) = &mut self.nodes[id as usize] {
+            leaf.next = right_id;
+        }
+        Inserted::Added(Some((sep, right_id)))
     }
 
     /// Removes the entry stored under the probed key.
@@ -486,120 +518,160 @@ impl<K: Clone, V> OrderedTree<K, V> {
     /// Restores the fill of `parent`'s child `i` by borrowing from a sibling
     /// with entries to spare, or merging with one that has none.
     fn rebalance(&mut self, parent: u32, i: usize) {
-        let Node::Internal(mut p) = self.take(parent) else {
-            unreachable!("rebalance under a leaf");
+        let (children, siblings) = {
+            let Node::Internal(p) = &self.nodes[parent as usize] else {
+                unreachable!("rebalance under a leaf");
+            };
+            (
+                p.children.len(),
+                (
+                    (i > 0).then(|| p.children[i - 1]),
+                    (i + 1 < p.children.len()).then(|| p.children[i + 1]),
+                ),
+            )
         };
-        if p.children.len() < 2 {
-            self.put(parent, Node::Internal(p));
+        if children < 2 {
             return;
         }
-        let left_spare = i > 0 && self.fill(p.children[i - 1]) > MIN_FILL;
-        let right_spare = i + 1 < p.children.len() && self.fill(p.children[i + 1]) > MIN_FILL;
+        let left_spare = siblings.0.is_some_and(|left| self.fill(left) > MIN_FILL);
+        let right_spare = siblings.1.is_some_and(|right| self.fill(right) > MIN_FILL);
         if left_spare {
-            self.borrow_from_left(&mut p, i);
+            self.borrow_from_left(parent, i);
         } else if right_spare {
-            self.borrow_from_right(&mut p, i);
+            self.borrow_from_right(parent, i);
         } else if i > 0 {
-            self.merge(&mut p, i - 1);
+            self.merge(parent, i - 1);
         } else {
-            self.merge(&mut p, i);
-        }
-        self.put(parent, Node::Internal(p));
-    }
-
-    fn borrow_from_left(&mut self, p: &mut Internal<K>, i: usize) {
-        let (left_id, id) = (p.children[i - 1], p.children[i]);
-        let (left, node) = (self.take(left_id), self.take(id));
-        match (left, node) {
-            (Node::Leaf(mut left), Node::Leaf(mut leaf)) => {
-                // Invariant: the left sibling has more than MIN_FILL entries.
-                let (Some(k), Some(v)) = (left.keys.pop(), left.vals.pop()) else {
-                    unreachable!("a spare sibling is empty");
-                };
-                leaf.keys.insert(0, k);
-                leaf.vals.insert(0, v);
-                p.seps[i - 1] = leaf.keys[0].clone();
-                p.counts[i - 1] -= 1;
-                p.counts[i] += 1;
-                self.put(left_id, Node::Leaf(left));
-                self.put(id, Node::Leaf(leaf));
-            }
-            (Node::Internal(mut left), Node::Internal(mut node)) => {
-                let (Some(sep), Some(child), Some(count)) =
-                    (left.seps.pop(), left.children.pop(), left.counts.pop())
-                else {
-                    unreachable!("a spare sibling is empty");
-                };
-                let down = std::mem::replace(&mut p.seps[i - 1], sep);
-                node.seps.insert(0, down);
-                node.children.insert(0, child);
-                node.counts.insert(0, count);
-                p.counts[i - 1] -= count;
-                p.counts[i] += count;
-                self.put(left_id, Node::Internal(left));
-                self.put(id, Node::Internal(node));
-            }
-            _ => unreachable!("siblings at different depths"),
+            self.merge(parent, i);
         }
     }
 
-    fn borrow_from_right(&mut self, p: &mut Internal<K>, i: usize) {
-        let (id, right_id) = (p.children[i], p.children[i + 1]);
-        let (node, right) = (self.take(id), self.take(right_id));
-        match (node, right) {
-            (Node::Leaf(mut leaf), Node::Leaf(mut right)) => {
-                leaf.keys.push(right.keys.remove(0));
-                leaf.vals.push(right.vals.remove(0));
-                p.seps[i] = right.keys[0].clone();
-                p.counts[i] += 1;
-                p.counts[i + 1] -= 1;
-                self.put(id, Node::Leaf(leaf));
-                self.put(right_id, Node::Leaf(right));
-            }
-            (Node::Internal(mut node), Node::Internal(mut right)) => {
-                let up = right.seps.remove(0);
-                let down = std::mem::replace(&mut p.seps[i], up);
-                let count = right.counts.remove(0);
-                node.seps.push(down);
-                node.children.push(right.children.remove(0));
-                node.counts.push(count);
-                p.counts[i] += count;
-                p.counts[i + 1] -= count;
-                self.put(id, Node::Internal(node));
-                self.put(right_id, Node::Internal(right));
-            }
-            _ => unreachable!("siblings at different depths"),
-        }
-    }
-
-    /// Folds `p`'s child `i + 1` into child `i`.
-    fn merge(&mut self, p: &mut Internal<K>, i: usize) {
-        let (left_id, right_id) = (p.children[i], p.children[i + 1]);
-        let sep = p.seps.remove(i);
-        p.children.remove(i + 1);
-        let moved = p.counts.remove(i + 1);
-        p.counts[i] += moved;
-        let (left, right) = (self.take(left_id), self.take(right_id));
-        match (left, right) {
-            (Node::Leaf(mut left), Node::Leaf(right)) => {
-                left.keys.extend(right.keys);
-                left.vals.extend(right.vals);
-                left.next = right.next;
-                if right.next != NIL
-                    && let Node::Leaf(next) = &mut self.nodes[right.next as usize]
-                {
-                    next.prev = left_id;
+    /// Moves the left sibling's last entry into child `i`, which the parent's
+    /// separator then names.
+    fn borrow_from_left(&mut self, parent: u32, i: usize) {
+        let (left_id, id) = {
+            let Node::Internal(p) = &self.nodes[parent as usize] else {
+                unreachable!("rebalance under a leaf");
+            };
+            (p.children[i - 1], p.children[i])
+        };
+        // The separator the parent takes, and the entries the move carries.
+        let (sep, moved) = {
+            let (left, node) = self.pair_mut(left_id, id);
+            match (left, node) {
+                (Node::Leaf(left), Node::Leaf(leaf)) => {
+                    // Invariant: the left sibling has more than MIN_FILL entries.
+                    let (Some(k), Some(v)) = (left.keys.pop(), left.vals.pop()) else {
+                        unreachable!("a spare sibling is empty");
+                    };
+                    leaf.keys.insert(0, k);
+                    leaf.vals.insert(0, v);
+                    (leaf.keys[0].clone(), 1)
                 }
-                self.put(left_id, Node::Leaf(left));
+                (Node::Internal(left), Node::Internal(node)) => {
+                    let (Some(sep), Some(child), Some(count)) =
+                        (left.seps.pop(), left.children.pop(), left.counts.pop())
+                    else {
+                        unreachable!("a spare sibling is empty");
+                    };
+                    node.children.insert(0, child);
+                    node.counts.insert(0, count);
+                    (sep, count)
+                }
+                _ => unreachable!("siblings at different depths"),
             }
-            (Node::Internal(mut left), Node::Internal(right)) => {
-                left.seps.push(sep);
-                left.seps.extend(right.seps);
-                left.children.extend(right.children);
-                left.counts.extend(right.counts);
-                self.put(left_id, Node::Internal(left));
+        };
+        let down = {
+            let Node::Internal(p) = &mut self.nodes[parent as usize] else {
+                unreachable!("rebalance under a leaf");
+            };
+            p.counts[i - 1] -= moved;
+            p.counts[i] += moved;
+            std::mem::replace(&mut p.seps[i - 1], sep)
+        };
+        // An internal child takes the separator the parent held as its own
+        // first one; a leaf routes by its keys and needs none.
+        if let Node::Internal(node) = &mut self.nodes[id as usize] {
+            node.seps.insert(0, down);
+        }
+    }
+
+    /// Moves the right sibling's first entry into child `i`, which the
+    /// parent's separator then names.
+    fn borrow_from_right(&mut self, parent: u32, i: usize) {
+        let (id, right_id) = {
+            let Node::Internal(p) = &self.nodes[parent as usize] else {
+                unreachable!("rebalance under a leaf");
+            };
+            (p.children[i], p.children[i + 1])
+        };
+        let (sep, moved, down_needed) = {
+            let (node, right) = self.pair_mut(id, right_id);
+            match (node, right) {
+                (Node::Leaf(leaf), Node::Leaf(right)) => {
+                    leaf.keys.push(right.keys.remove(0));
+                    leaf.vals.push(right.vals.remove(0));
+                    (right.keys[0].clone(), 1, false)
+                }
+                (Node::Internal(node), Node::Internal(right)) => {
+                    let up = right.seps.remove(0);
+                    let count = right.counts.remove(0);
+                    node.children.push(right.children.remove(0));
+                    node.counts.push(count);
+                    (up, count, true)
+                }
+                _ => unreachable!("siblings at different depths"),
             }
-            _ => unreachable!("siblings at different depths"),
+        };
+        let down = {
+            let Node::Internal(p) = &mut self.nodes[parent as usize] else {
+                unreachable!("rebalance under a leaf");
+            };
+            p.counts[i] += moved;
+            p.counts[i + 1] -= moved;
+            std::mem::replace(&mut p.seps[i], sep)
+        };
+        if down_needed && let Node::Internal(node) = &mut self.nodes[id as usize] {
+            node.seps.push(down);
+        }
+    }
+
+    /// Folds `parent`'s child `i + 1` into child `i`.
+    fn merge(&mut self, parent: u32, i: usize) {
+        let (left_id, right_id, sep) = {
+            let Node::Internal(p) = &mut self.nodes[parent as usize] else {
+                unreachable!("rebalance under a leaf");
+            };
+            let ids = (p.children[i], p.children[i + 1]);
+            let sep = p.seps.remove(i);
+            p.children.remove(i + 1);
+            let moved = p.counts.remove(i + 1);
+            p.counts[i] += moved;
+            (ids.0, ids.1, sep)
+        };
+        let after = {
+            let (left, right) = self.pair_mut(left_id, right_id);
+            match (left, right) {
+                (Node::Leaf(left), Node::Leaf(right)) => {
+                    left.keys.append(&mut right.keys);
+                    left.vals.append(&mut right.vals);
+                    left.next = right.next;
+                    right.next
+                }
+                (Node::Internal(left), Node::Internal(right)) => {
+                    left.seps.push(sep);
+                    left.seps.append(&mut right.seps);
+                    left.children.append(&mut right.children);
+                    left.counts.append(&mut right.counts);
+                    NIL
+                }
+                _ => unreachable!("siblings at different depths"),
+            }
+        };
+        if after != NIL
+            && let Node::Leaf(next) = &mut self.nodes[after as usize]
+        {
+            next.prev = left_id;
         }
         self.release(right_id);
     }

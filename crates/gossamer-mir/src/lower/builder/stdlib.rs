@@ -1566,7 +1566,9 @@ impl<'a> Builder<'a> {
         // reference-counted blob the drop pass can reclaim.
         let aggregate_payload = matches!(
             self.tcx.kind_of(payload_ty),
-            gossamer_types::TyKind::Adt { .. } | gossamer_types::TyKind::Tuple(_)
+            gossamer_types::TyKind::Adt { .. }
+                | gossamer_types::TyKind::Tuple(_)
+                | gossamer_types::TyKind::Array { .. }
         );
         // A one-slot struct is boxed like any other aggregate, so its box owns
         // its heap field the same way.

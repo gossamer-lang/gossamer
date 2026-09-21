@@ -1015,6 +1015,7 @@ pub(crate) fn is_share_neutral_intrinsic(name: &str) -> bool {
                 | "gos_rt_map_retain"
                 | "gos_rt_aggr_retain_children"
                 | "gos_rt_option_slot_retain"
+                | "gos_rt_option_slot_retain_ok"
                 | "gos_rt_result_payload_retain"
         )
 }

@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GT0085]: A container that orders its elements as it stores them - a heap, a - here
+error[GT0085]: A heap - a `MinHeap` or `MaxHeap` - named an element whose type - here
 --- framed ---
-error[GT0085]: A container that orders its elements as it stores them - a heap, a
+error[GT0085]: A heap - a `MinHeap` or `MaxHeap` - named an element whose type
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

@@ -8,6 +8,24 @@
 
 #![forbid(unsafe_code)]
 
+/// `print!` for the toolchain's own output: a reader that has gone away ends
+/// the process the way it ends a Unix tool, rather than panicking.
+macro_rules! out {
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!($($arg)*))
+    };
+}
+
+/// `println!` for the toolchain's own output; see [`out!`].
+macro_rules! outln {
+    () => {
+        $crate::write_stdout(format_args!("\n"))
+    };
+    ($($arg:tt)*) => {
+        $crate::write_stdout(format_args!("{}\n", format_args!($($arg)*)))
+    };
+}
+
 pub mod binding_dispatch;
 pub mod child_processes;
 pub mod cli;
@@ -36,4 +54,18 @@ pub fn run_main() -> std::process::ExitCode {
 #[must_use]
 pub fn run_main_with_args(args: &[std::ffi::OsString]) -> std::process::ExitCode {
     cli::try_fast_run(args).unwrap_or_else(cli::run)
+}
+
+/// Writes the toolchain's own output to stdout.
+///
+/// A reader that has gone away ends the process as it would a compiled
+/// program; any other failure is the panic `print!` raises.
+#[doc(hidden)]
+pub fn write_stdout(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+
+    if let Err(err) = std::io::stdout().lock().write_fmt(args) {
+        gossamer_runtime::c_abi::print::end_on_closed_stdio(&err);
+        panic!("failed printing to stdout: {err}");
+    }
 }

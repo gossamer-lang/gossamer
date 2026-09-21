@@ -606,12 +606,13 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         drop_confined_channels(body);
         clear_region_on_call_results(body);
         free_overwritten_ctor_values(body, tcx, &container_ctor_free);
+        own_returned_map_payloads(body, tcx);
         insert_drops_at_returns(body, tcx);
         complete_ok_or_err_kind(body, tcx);
         insert_rc_releases(body, tcx);
         insert_aggr_copy_drops(body, tcx);
         insert_json_frees(body, tcx, &json_borrowing_fns);
-        insert_vec_elem_metas(body, tcx);
+        insert_vec_elem_metas(body, tcx, &user_fn_names);
         insert_early_releases(body, tcx);
         insert_copied_key_releases(body, tcx);
         drop_unread_map_insert_results(body, tcx);
@@ -620,6 +621,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         own_rebound_enum_parameters(body, tcx);
         release_rebound_rc_locals(body, tcx);
         pair_holder_err_arm_calls(body, tcx);
+        lead_passthrough_shares(body);
         // `insert_*` calls are ownership-acquiring operations: the drop pass
         // emitted a retain for the container's share immediately before the
         // call, and it must retain the source binding's ordinary release.

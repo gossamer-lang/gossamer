@@ -189,11 +189,11 @@ fn a_written_cmp_reaches_the_sites_that_can_read_it() {
                 Expect::Reject("GT0085"),
             ),
             (
-                "a sorted set orders as it stores",
+                "a sorted set hands the type's cmp to its tree",
                 &format!(
                     "use std::collections::BTreeSet\n{ordered}fn main() {{ let s: BTreeSet<P> = BTreeSet::from([P {{ x: 1 }}])\n println(\"{{}}\", s.len()) }}\n"
                 ),
-                Expect::Reject("GT0085"),
+                Expect::Accept,
             ),
             (
                 "a type with no written cmp keeps every container",
@@ -658,4 +658,54 @@ fn refused_serde_targets_report_without_leaking_a_synthesized_name() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// A field read decides its layout from the receiver's type, so a receiver
+/// nothing gave a type is rejected where it is read. A closure written where a
+/// handler is taken is given the handler's parameter type, which is the
+/// control.
+#[test]
+fn a_field_read_needs_a_receiver_of_known_type() {
+    gate(
+        "field receivers",
+        &[
+            (
+                "an unannotated parameter of a closure nothing takes",
+                "struct P { x: i64 }\nfn main() { let f = |p| p.x + 1\n let _ = f }\n",
+                Expect::Reject("GT0092"),
+            ),
+            (
+                "a closure passed as a handler reads the request's fields",
+                "use std::{errors, http}\nenum Reply { Hit { status: i64 }\n Miss }\nfn respond(path: String) -> Reply { if path == \"/\" { Reply::Hit { status: 200 } } else { Reply::Miss } }\nfn run(s: http::Server) -> Result<(), errors::Error> {\n s.serve(|r| match respond(r.path) {\n Reply::Hit { status } => Ok(http::Response::text(status, \"hit\"))\n Reply::Miss => Ok(http::Response::text(404, \"miss\"))\n })\n}\nfn main() { let _ = run(http::Server::new()) }\n",
+                Expect::Accept,
+            ),
+        ],
+    );
+}
+
+/// `Type::name(..)` on a built-in type names a constructor or, written
+/// qualified, a method; a name the type has neither of has no definition on
+/// any tier, so it is rejected where it is written.
+#[test]
+fn a_builtin_type_path_names_a_function_it_has() {
+    gate(
+        "builtin associated functions",
+        &[
+            (
+                "a string function nothing defines",
+                "fn main() { let t = String::from_utf8_lossy(#[104u8])\n println(\"{t}\") }\n",
+                Expect::Reject("GT0060"),
+            ),
+            (
+                "a vec function nothing defines",
+                "fn main() { let v: Vec<i64> = Vec::nope()\n println(\"{:?}\", v) }\n",
+                Expect::Reject("GT0060"),
+            ),
+            (
+                "a constructor and a qualified method",
+                "fn main() { let mut v: Vec<i64> = Vec::with_capacity(2)\n let _ = Vec::insert(&mut v, 0, 1)\n let s = String::from_utf8(#[104u8]).unwrap_or(\"\")\n println(\"{:?} {s}\", v) }\n",
+                Expect::Accept,
+            ),
+        ],
+    );
 }

@@ -8,14 +8,14 @@ pub(crate) fn status(paths_only: bool, scope: CacheScope) -> Result<()> {
     let entries = cache_maintenance::status(&cwd, scope);
     if paths_only {
         for entry in entries {
-            println!("{}\t{}", entry.class.name(), entry.path.display());
+            outln!("{}\t{}", entry.class.name(), entry.path.display());
         }
         return Ok(());
     }
     let mut total = 0;
     for entry in entries {
         total += entry.bytes;
-        println!(
+        outln!(
             "{:<10} {:>12}  {:>8} files  {}",
             entry.class.name(),
             human_bytes(entry.bytes),
@@ -23,7 +23,7 @@ pub(crate) fn status(paths_only: bool, scope: CacheScope) -> Result<()> {
             entry.path.display()
         );
     }
-    println!("total      {:>12}", human_bytes(total));
+    outln!("total      {:>12}", human_bytes(total));
     Ok(())
 }
 
@@ -36,7 +36,7 @@ pub(crate) fn prune(scope: CacheScope, dry_run: bool) -> Result<()> {
     } else {
         "reclaimed"
     };
-    println!(
+    outln!(
         "cache prune ({}): {verb} {} from {files} files (cap={}, max-age={} days)",
         scope.name(),
         human_bytes(bytes),
@@ -53,7 +53,7 @@ pub(crate) fn clear(scope: CacheScope, dry_run: bool) -> Result<()> {
     let removed = cache_maintenance::remove(&cwd, CacheClass::all(), scope, dry_run)?;
     let bytes = removed.iter().map(|entry| entry.bytes).sum::<u64>();
     let verb = if dry_run { "would remove" } else { "removed" };
-    println!(
+    outln!(
         "cache clear ({}): {verb} {} from {} cache roots",
         scope.name(),
         human_bytes(bytes),

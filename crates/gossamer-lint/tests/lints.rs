@@ -160,6 +160,23 @@ fn empty_block_still_fires_on_user_written_empty_else() {
 }
 
 #[test]
+fn empty_else_silent_on_else_less_let_chain() {
+    let diags = lint(
+        "fn main() {\n let a = Some(1i64)\n if let Some(x) = a && x > 0 { let _y: i64 = x }\n}\n",
+    );
+    assert!(!has_code(&diags, "GL0026"), "{:?}", diags_codes(&diags));
+}
+
+#[test]
+fn empty_else_reports_a_written_else_of_a_let_chain_once() {
+    let diags = lint(
+        "fn main() {\n let a = Some(1i64)\n let b = Some(2i64)\n if let Some(x) = a && let Some(y) = b && x > y { let _z: i64 = x } else { }\n}\n",
+    );
+    let count = diags.iter().filter(|d| d.code.as_str() == "GL0026").count();
+    assert_eq!(count, 1, "{:?}", diags_codes(&diags));
+}
+
+#[test]
 fn panic_in_main_fires_on_direct_call() {
     let diags = lint("fn main() { panic(\"bad\") }\n");
     assert!(has_code(&diags, "GL0011"), "{:?}", diags_codes(&diags));

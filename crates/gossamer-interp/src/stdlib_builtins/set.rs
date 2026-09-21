@@ -409,25 +409,30 @@ pub(crate) fn set_display_snapshot(value: &Value) -> Option<Vec<Value>> {
 
 fn set_values(value: &Value, sorted: bool) -> Option<Vec<Value>> {
     let id = set_id_of(value)?;
-    let values: Vec<Value> = SET_REGISTRY.with(|r| {
+    // An element type that writes its own `cmp` seats each element by that
+    // body as it arrives, so the walk is already the set's order.
+    let (values, by_element_order) = SET_REGISTRY.with(|r| {
         r.borrow()
             .get(&id)
             .map(|s| {
+                let by_element_order =
+                    matches!(s.key_order(), Some(crate::vm_map::KeyOrder::User(_)));
                 let mut entries: Vec<(&MapKey, &Value)> = s.iter().collect();
-                if sorted {
+                if sorted && !by_element_order {
                     entries.sort_by_key(|(key, _)| (*key).clone());
                 }
-                entries
+                let values = entries
                     .into_iter()
                     .map(|(_, value)| value.clone())
-                    .collect()
+                    .collect();
+                (values, by_element_order)
             })
             .unwrap_or_default()
     });
     // A stored key orders an element the way the language orders it, except
     // one declared `u64` / `usize`, whose bits order unsigned. A handle the
     // compiler described carries that element descriptor.
-    Some(if sorted {
+    Some(if sorted && !by_element_order {
         crate::value::described_set_order(value, values)
     } else {
         values

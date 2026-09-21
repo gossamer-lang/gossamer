@@ -1239,6 +1239,48 @@ pub(super) fn lower_intrinsic_call_io_math(
             builder.ins().call(fref, &[m]);
             Ok(true)
         }
+        // A marker naming the key type's own comparator: the container, the
+        // comparator's address, and the shapes it reads.
+        "gos_rt_map_set_ordered_by" | "gos_rt_set_ordered_by" => {
+            let container = match args.first() {
+                Some(a) => lower_operand(
+                    module,
+                    builder,
+                    locals,
+                    body,
+                    tcx,
+                    a,
+                    Some(ptr_ty),
+                    intrinsics,
+                )?,
+                None => return Ok(true),
+            };
+            let mut call_args = vec![container];
+            let mut sig_params = vec![ptr_ty];
+            for arg in args.iter().skip(1) {
+                let v = lower_operand(
+                    module,
+                    builder,
+                    locals,
+                    body,
+                    tcx,
+                    arg,
+                    Some(types::I64),
+                    intrinsics,
+                )?;
+                call_args.push(coerce_arg_to(builder, v, types::I64).unwrap_or(v));
+                sig_params.push(types::I64);
+            }
+            let sym: &'static str = if name == "gos_rt_map_set_ordered_by" {
+                "gos_rt_map_set_ordered_by"
+            } else {
+                "gos_rt_set_ordered_by"
+            };
+            let f = intrinsics.extern_fn(module, sym, &sig_params, &[])?;
+            let fref = module.declare_func_in_func(f, builder.func);
+            builder.ins().call(fref, &call_args);
+            Ok(true)
+        }
         // A `BTreeMap`'s handle and whether its word keys order unsigned.
         "gos_rt_map_set_ordered" => {
             let m = match args.first() {
@@ -1269,7 +1311,9 @@ pub(super) fn lower_intrinsic_call_io_math(
             builder.ins().call(fref, &[m, flag]);
             Ok(true)
         }
-        "gos_rt_option_slot_retain" | "gos_rt_option_slot_release" => {
+        "gos_rt_option_slot_retain"
+        | "gos_rt_option_slot_retain_ok"
+        | "gos_rt_option_slot_release" => {
             // The helpers read the payload word beside the discriminant, so
             // they take the carrier's address. A carrier this backend holds by
             // value is spilled to a slot for the call, and a release reads it
@@ -1278,10 +1322,10 @@ pub(super) fn lower_intrinsic_call_io_math(
             let Some(Operand::Copy(place)) = args.first() else {
                 return Ok(true);
             };
-            let sym: &'static str = if name == "gos_rt_option_slot_retain" {
-                "gos_rt_option_slot_retain"
-            } else {
-                "gos_rt_option_slot_release"
+            let sym: &'static str = match name {
+                "gos_rt_option_slot_retain" => "gos_rt_option_slot_retain",
+                "gos_rt_option_slot_retain_ok" => "gos_rt_option_slot_retain_ok",
+                _ => "gos_rt_option_slot_release",
             };
             let f = intrinsics.extern_fn(module, sym, &[ptr_ty], &[])?;
             let fref = module.declare_func_in_func(f, builder.func);

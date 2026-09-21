@@ -6997,8 +6997,8 @@
       "id": "std-http-websocket-accept",
       "name": "std::http::websocket::accept",
       "kind": "function",
-      "signature": "fn accept(request: http::Request) -> Result<http::websocket::Conn, errors::Error>",
-      "description": "Upgrade an incoming Request to a WebSocket (Rust-side).",
+      "signature": "fn accept(request: http::Request) -> Result<http::Response, errors::Error>",
+      "description": "Validate a WebSocket upgrade request and answer the 101 Switching Protocols response that completes the handshake.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

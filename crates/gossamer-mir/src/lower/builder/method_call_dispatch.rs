@@ -344,6 +344,7 @@ impl<'a> Builder<'a> {
             | "gos_rt_str_substring"
             | "gos_rt_heap_u8_to_string"
             | "gos_rt_i64_to_str"
+            | "gos_rt_u64_to_str"
             | "gos_rt_f64_to_str"
             // A `char` / `bool` `to_string` answers a String like every
             // other scalar's does; without the pin the destination keeps an

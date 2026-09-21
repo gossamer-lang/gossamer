@@ -134,7 +134,7 @@ fn worker_user_output(captured: &str) -> String {
 fn print_worker_user_output(captured: &str) {
     for line in captured.lines() {
         if !is_worker_harness_line(line) {
-            println!("{line}");
+            outln!("{line}");
         }
     }
 }
@@ -209,7 +209,7 @@ fn run_fuzz_corpus_regressions(path: Option<&Path>) -> usize {
     }
     match crate::cmd::fuzz::run_corpus_as_tests(&targets) {
         Ok((passed, failed)) => {
-            println!(
+            outln!(
                 "fuzz corpus: {passed} passed, {failed} failed across {} target(s)",
                 targets.len()
             );
@@ -439,7 +439,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
                 } else {
                     ""
                 };
-                println!("{}::{}{suffix}", file.display(), test.name);
+                outln!("{}::{}{suffix}", file.display(), test.name);
             }
             continue;
         }
@@ -476,7 +476,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
                         } else {
                             "IGNORED"
                         };
-                        println!("  {} {}::{}", style.dim(label), file.display(), test.name);
+                        outln!("  {} {}::{}", style.dim(label), file.display(), test.name);
                     }
                     records.push(TestRecord {
                         file: file.to_string_lossy().into_owned(),
@@ -506,7 +506,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_nanos() as u64)
         });
-        println!("test: shuffle seed {seed}");
+        outln!("test: shuffle seed {seed}");
         deterministic_shuffle(&mut discovered, seed);
     }
 
@@ -615,7 +615,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
             std::fs::write(out, &xml)
                 .map_err(|e| anyhow!("write junit xml to {}: {e}", out.display()))?;
         } else {
-            print!("{xml}");
+            out!("{xml}");
         }
     } else {
         if total_passes == 0
@@ -627,7 +627,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
             // can also be 0/0 when nothing matched a `--run`
             // filter) from "the file genuinely has nothing
             // marked `#[test]`".
-            println!(
+            outln!(
                 "test: no #[test] functions found under {}",
                 resolved.display()
             );
@@ -648,7 +648,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
             "{total_assertions} assertion(s), {total_ignored} ignored, {total_skipped} skipped, {total_doc_tests} doc-test(s), across {} file(s), {empty_files} with no tests",
             files.len()
         );
-        println!(
+        outln!(
             "test: {pass_styled}, {fail_styled}, {}",
             style.dim(&trailing)
         );
@@ -658,7 +658,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
                 .as_deref()
                 .is_some_and(|message| message.contains(NO_ASSERTIONS_REASON))
         }) {
-            println!("{}", style.dim(NO_ASSERTIONS_HINT));
+            outln!("{}", style.dim(NO_ASSERTIONS_HINT));
         }
     }
     let total_failures = total_failures + u32::try_from(fuzz_regressions).unwrap_or(u32::MAX);
@@ -1118,7 +1118,7 @@ fn run_tests_filtered_inner(
     let mut records = Vec::new();
     if !quiet && !tests.is_empty() {
         let header = format!("=== {} ===", file.display());
-        println!("{}", style.cyan(&header));
+        outln!("{}", style.cyan(&header));
     }
     for test in tests {
         gossamer_interp::reset_test_tally();
@@ -1202,7 +1202,7 @@ fn run_tests_filtered_inner(
             if passed {
                 let assertion_summary =
                     assertion_elapsed_summary(tally.assertions, elapsed.as_millis());
-                println!(
+                outln!(
                     "  {} {} {}",
                     style.pass(),
                     test.name,
@@ -1210,7 +1210,7 @@ fn run_tests_filtered_inner(
                 );
             } else {
                 let elapsed_str = format!("({}ms)", elapsed.as_millis());
-                println!(
+                outln!(
                     "  {} {} {}: {}",
                     style.fail(),
                     test.name,
@@ -1220,7 +1220,7 @@ fn run_tests_filtered_inner(
                 // The call-chain traceback is additional context - the
                 // failure message above stays byte-identical to before.
                 if !call_trace.is_empty() {
-                    println!("{}", style.dim(&call_trace));
+                    outln!("{}", style.dim(&call_trace));
                 }
             }
         }
@@ -1391,14 +1391,14 @@ fn run_tests_isolated(
                     print_worker_user_output(&captured);
                     let assertion_summary =
                         assertion_elapsed_summary(record.assertions, record.elapsed_ms);
-                    println!(
+                    outln!(
                         "  {} {} {}",
                         style.pass(),
                         record.name,
                         style.dim(&assertion_summary)
                     );
                 } else {
-                    println!(
+                    outln!(
                         "  {} {}: {}",
                         style.fail(),
                         record.name,
@@ -1655,25 +1655,25 @@ fn run_doc_tests_in_file(file: &std::path::Path, style: &TestStyle) -> DocTestFi
         let mut map = gossamer_lex::SourceMap::new();
         let file_id = map.add_file(doc.name.clone(), body.clone());
         let Ok((program, tcx)) = load_and_check(&body, file_id, &map) else {
-            println!("  {} doc-test {} (compile)", style.fail(), doc.name);
+            outln!("  {} doc-test {} (compile)", style.fail(), doc.name);
             failures += 1;
             continue;
         };
         let mut vm = gossamer_interp::Vm::new();
         vm.set_source_map(std::sync::Arc::new(map));
         if vm.load(&program, tcx, false).is_err() {
-            println!("  {} doc-test {} (compile)", style.fail(), doc.name);
+            outln!("  {} doc-test {} (compile)", style.fail(), doc.name);
             failures += 1;
             continue;
         }
         vm.clear_source_map();
         match vm.call("main", Vec::new()) {
             Ok(_) => {
-                println!("  {} doc-test {}", style.pass(), doc.name);
+                outln!("  {} doc-test {}", style.pass(), doc.name);
                 passes += 1;
             }
             Err(err) => {
-                println!("  {} doc-test {} (runtime): {err}", style.fail(), doc.name);
+                outln!("  {} doc-test {} (runtime): {err}", style.fail(), doc.name);
                 failures += 1;
             }
         }
@@ -1766,7 +1766,7 @@ pub(crate) mod tier_parity {
                 .display()
                 .to_string();
             let [vm, cranelift, llvm] = evaluate_fixture(file, budget);
-            println!(
+            outln!(
                 "{name}: vm={} cranelift={} llvm={}",
                 vm.as_deref().unwrap_or("-"),
                 cranelift.as_deref().unwrap_or("-"),
@@ -1795,7 +1795,7 @@ pub(crate) mod tier_parity {
             }
             fs::write(&out_path, render_sidecar(&records))
                 .map_err(|e| anyhow!("writing sidecar {}: {e}", out_path.display()))?;
-            println!(
+            outln!(
                 "feature-status sidecar written to {} ({} records)",
                 out_path.display(),
                 records.len(),
@@ -1818,7 +1818,7 @@ pub(crate) mod tier_parity {
             .filter(|s| [&s.vm, &s.cranelift, &s.llvm].iter().any(|t| t.is_none()))
             .count();
         if undetermined > 0 {
-            println!(
+            outln!(
                 "{undetermined} fixture(s) reached no verdict on at least one tier \
                  (a fixture that runs until it is killed exceeds the per-tier budget)"
             );

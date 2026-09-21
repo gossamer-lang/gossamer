@@ -20,9 +20,11 @@
 #![forbid(unsafe_code)]
 
 use gossamer_ast::visitor::{VisitorMut, walk_expr_mut};
+use std::collections::HashMap;
+
 use gossamer_ast::{
-    BinaryOp, ClosureParam, Expr, ExprKind, Ident, Mutability, NodeIdGenerator, PathExpr, Pattern,
-    PatternKind, SourceFile,
+    BinaryOp, ClosureParam, Expr, ExprKind, Ident, Item, ItemKind, ModBody, Mutability,
+    NodeIdGenerator, PathExpr, Pattern, PatternKind, SourceFile, StructBody,
 };
 use gossamer_resolve::{Resolution, Resolutions};
 
@@ -37,9 +39,12 @@ pub fn expand_std_fn_values(sf: &mut SourceFile, resolutions: &Resolutions) -> u
     while ids.issued() < sf.next_node_id {
         let _ = ids.next();
     }
+    let mut tuple_variants = HashMap::new();
+    collect_tuple_variants(&sf.items, &mut tuple_variants);
     let mut pass = Expand {
         ids: &mut ids,
         resolutions,
+        tuple_variants,
         rewritten: 0,
     };
     pass.visit_source_file(sf);
@@ -51,7 +56,37 @@ pub fn expand_std_fn_values(sf: &mut SourceFile, resolutions: &Resolutions) -> u
 struct Expand<'a> {
     ids: &'a mut NodeIdGenerator,
     resolutions: &'a Resolutions,
+    /// Payload arity of every tuple variant this unit declares, keyed by
+    /// `(enum, variant)`.
+    tuple_variants: HashMap<(String, String), usize>,
     rewritten: usize,
+}
+
+/// Records the payload arity of each tuple variant `items` declare, at any
+/// module depth.
+fn collect_tuple_variants(items: &[Item], out: &mut HashMap<(String, String), usize>) {
+    for item in items {
+        match &item.kind {
+            ItemKind::Enum(decl) => {
+                for variant in &decl.variants {
+                    if let StructBody::Tuple(fields) = &variant.body
+                        && !fields.is_empty()
+                    {
+                        out.insert(
+                            (decl.name.name.clone(), variant.name.name.clone()),
+                            fields.len(),
+                        );
+                    }
+                }
+            }
+            ItemKind::Mod(decl) => {
+                if let ModBody::Inline(inner) = &decl.body {
+                    collect_tuple_variants(inner, out);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Expand<'_> {
@@ -59,6 +94,14 @@ impl Expand<'_> {
     /// is not a catalogued std free function.
     fn std_fn_arity(path: &PathExpr) -> Option<usize> {
         let segments: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
+        // The prelude's one-payload constructors are functions of their
+        // payload wherever a callable is taken: `r.and_then(Ok)`.
+        if matches!(
+            segments.as_slice(),
+            ["Some" | "Ok" | "Err"] | ["Option", "Some"] | ["Result", "Ok" | "Err"]
+        ) {
+            return Some(1);
+        }
         let stripped: &[&str] = match segments.as_slice() {
             ["std", rest @ ..] => rest,
             other => other,
@@ -76,6 +119,17 @@ impl Expand<'_> {
         let (name, modules) = stripped.split_last()?;
         let shape = crate::stdlib_signatures::function_shape_for_path(modules, name)?;
         Some(shape.params.len())
+    }
+
+    /// Payload arity of the tuple variant `path` names as `Enum::Variant`,
+    /// which is a function of its payload wherever a callable is taken.
+    fn tuple_variant_arity(&self, path: &PathExpr) -> Option<usize> {
+        let [.., enum_name, variant] = path.segments.as_slice() else {
+            return None;
+        };
+        self.tuple_variants
+            .get(&(enum_name.name.name.clone(), variant.name.name.clone()))
+            .copied()
     }
 
     /// Whether `expr` names something this compilation unit declares,
@@ -153,10 +207,14 @@ impl VisitorMut for Expand<'_> {
             }
         }
         walk_expr_mut(self, expr);
-        if self.resolves_locally(expr) {
+        let variant_arity = match &expr.kind {
+            ExprKind::Path(path) => self.tuple_variant_arity(path),
+            _ => None,
+        };
+        if variant_arity.is_none() && self.resolves_locally(expr) {
             return;
         }
-        let Some(arity) = (match &expr.kind {
+        let Some(arity) = variant_arity.or_else(|| match &expr.kind {
             ExprKind::Path(path) => Self::std_fn_arity(path),
             _ => None,
         }) else {
@@ -188,6 +246,20 @@ mod tests {
     #[test]
     fn a_std_fn_in_value_position_becomes_a_closure() {
         let (_sf, count) = expand("fn main() { let v = #[1.0].map(math::abs) }");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_prelude_constructor_in_value_position_becomes_a_closure() {
+        let (_sf, count) = expand("fn main() { let v = Some(1).map(Some) }");
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn a_tuple_variant_in_value_position_becomes_a_closure() {
+        let (_sf, count) = expand(
+            "enum Shape { Circle(i64) }\nfn main() { let v = #[1].map(Shape::Circle)\n let c = Shape::Circle(2) }",
+        );
         assert_eq!(count, 1);
     }
 

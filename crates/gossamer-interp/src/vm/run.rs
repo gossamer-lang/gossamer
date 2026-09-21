@@ -28,6 +28,19 @@ fn poll_vm_backedge(countdown: &mut u16) {
 /// (`#[map_value; n]`), and the `clone` builtin - each needs independent
 /// storage, not a second alias of the same `Arc<Mutex<_>>` / `SET_REGISTRY`
 /// entry.
+/// A payload taken out of a carrier, as its own value: a table another
+/// holder still names is copied, so the binding that takes it writes its own
+/// entries, and one the carrier alone holds is handed over as it stands.
+pub(crate) fn payload_own_storage(v: Value) -> Value {
+    let shared = match &v {
+        Value::Map(m) => Arc::strong_count(m) > 1,
+        Value::IntMap(m) => Arc::strong_count(m) > 1,
+        Value::StrIntMap(m) => Arc::strong_count(m) > 1,
+        _ => false,
+    };
+    if shared { map_like_deep_clone(&v) } else { v }
+}
+
 pub(crate) fn map_like_deep_clone(v: &Value) -> Value {
     match v {
         Value::Map(m) => Value::Map(Arc::new(parking_lot::Mutex::new(m.lock().clone()))),
@@ -4160,11 +4173,13 @@ impl Vm {
                 }
                 Op::VariantField { dst, src, idx } => {
                     registers[dst as usize] = match &registers[src as usize] {
-                        Value::Variant(inner) => inner
-                            .fields
-                            .get(idx as usize)
-                            .cloned()
-                            .unwrap_or(Value::Unit),
+                        Value::Variant(inner) => payload_own_storage(
+                            inner
+                                .fields
+                                .get(idx as usize)
+                                .cloned()
+                                .unwrap_or(Value::Unit),
+                        ),
                         Value::NativeEnum(owner) => {
                             crate::value::native_enum_field(owner, idx as usize)
                         }
@@ -4194,12 +4209,16 @@ impl Vm {
                     // or when the value is not a `Variant`.
                     let result = match &mut registers[src as usize] {
                         Value::Variant(arc) => match Arc::get_mut(arc) {
-                            Some(inner) => inner
-                                .fields
-                                .get_mut(idx as usize)
-                                .map(|slot| std::mem::replace(slot, Value::Void))
-                                .unwrap_or(Value::Unit),
-                            None => arc.fields.get(idx as usize).cloned().unwrap_or(Value::Unit),
+                            Some(inner) => payload_own_storage(
+                                inner
+                                    .fields
+                                    .get_mut(idx as usize)
+                                    .map(|slot| std::mem::replace(slot, Value::Void))
+                                    .unwrap_or(Value::Unit),
+                            ),
+                            None => payload_own_storage(
+                                arc.fields.get(idx as usize).cloned().unwrap_or(Value::Unit),
+                            ),
                         },
                         Value::NativeEnum(arc) => match Arc::get_mut(arc) {
                             Some(owner) => {

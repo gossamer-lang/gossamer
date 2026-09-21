@@ -52,7 +52,7 @@ pub(crate) fn run(input: &Path, output: Option<&Path>, module: Option<&str>) -> 
     fs::write(out_dir.join("Cargo.toml"), cargo_toml)?;
     fs::write(out_dir.join("src").join("lib.rs"), lib_rs)?;
 
-    println!(
+    outln!(
         "bindgen: scaffolded {} items ({} unsupported) at {}",
         supported.len(),
         unsupported.len(),
