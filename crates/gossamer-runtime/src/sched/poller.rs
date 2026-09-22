@@ -188,8 +188,11 @@ const INTERRUPT_TOKEN: mio::Token = mio::Token(0);
 /// pending readiness buffer drained between polls.
 #[cfg(not(target_arch = "wasm32"))]
 pub struct OsPoller {
-    poll: mio::Poll,
-    events: mio::Events,
+    /// The kernel poll handle, locked apart from the bookkeeping below so a
+    /// thread blocked in it never holds up a registration.
+    driver: std::sync::Arc<parking_lot::Mutex<PollDriver>>,
+    /// Registers and deregisters sources while another thread polls.
+    registry: mio::Registry,
     /// `mio::Waker` bound to this poll. Calling `.wake()` from any
     /// thread unblocks an in-flight `poll()` call immediately -
     /// used by `register_io` to let a freshly registered source
@@ -236,9 +239,13 @@ impl OsPoller {
     pub fn new() -> io::Result<Self> {
         let poll = mio::Poll::new()?;
         let interrupt = std::sync::Arc::new(mio::Waker::new(poll.registry(), INTERRUPT_TOKEN)?);
+        let registry = poll.registry().try_clone()?;
         Ok(Self {
-            poll,
-            events: mio::Events::with_capacity(1024),
+            driver: std::sync::Arc::new(parking_lot::Mutex::new(PollDriver {
+                poll,
+                events: mio::Events::with_capacity(1024),
+            })),
+            registry,
             interrupt,
             by_source: HashMap::new(),
             pending: Vec::new(),
@@ -293,10 +300,10 @@ impl OsPoller {
                 ));
             }
         };
-        let registered = match self.poll.registry().register(io, token, mio_int) {
+        let registered = match self.registry.register(io, token, mio_int) {
             Ok(()) => true,
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                self.poll.registry().reregister(io, token, mio_int)?;
+                self.registry.reregister(io, token, mio_int)?;
                 false
             }
             Err(e) => return Err(e),
@@ -318,7 +325,7 @@ impl OsPoller {
         if let Some((Some(token), _)) = self.by_source.remove(&(source, interest)) {
             self.by_token.remove(&token);
         }
-        self.poll.registry().deregister(io)
+        self.registry.deregister(io)
     }
 
     /// Adds a one-shot timer that fires at `deadline`. Returns the
@@ -405,10 +412,9 @@ impl Poller for OsPoller {
         // mio's `poll` can return early without events on every
         // platform - spurious wakeups, signal interruption, or
         // simply rounding the remaining timeout down to zero.
-        // Loop until we have an event, an interrupt asks us to release the
-        // poller lock, or the caller-supplied deadline passes. Recompute
-        // `combined` each iteration so the remaining wait shrinks toward
-        // both the user's timeout and the next timer's deadline.
+        // Loop until we have an event, an interrupt asks the caller to
+        // re-read the registrations, or the caller-supplied deadline passes.
+        let driver = self.driver_handle();
         let user_deadline = timeout.map(|t| Instant::now() + t);
         loop {
             self.drain_expired_timers();
@@ -420,32 +426,8 @@ impl Poller for OsPoller {
                 return Ok(self.drain());
             }
             let combined = self.next_timeout(user_remaining);
-            self.poll.poll(&mut self.events, combined)?;
-            let mut interrupted = false;
-            for event in &self.events {
-                let token = event.token();
-                if token == INTERRUPT_TOKEN {
-                    // Interrupt waker fired - drain any expired
-                    // timers + return so the caller can re-poll with
-                    // up-to-date registrations.
-                    interrupted = true;
-                    continue;
-                }
-                if let Some(&(source, interest, gid)) = self.by_token.get(&token) {
-                    let fired = match interest {
-                        Interest::Readable => event.is_readable(),
-                        Interest::Writable => event.is_writable(),
-                        Interest::Timer => false,
-                    };
-                    if fired {
-                        self.pending.push(Readiness {
-                            source,
-                            interest,
-                            gid,
-                        });
-                    }
-                }
-            }
+            let events = driver.lock().wait(combined)?;
+            let interrupted = self.absorb(&events);
             self.drain_expired_timers();
             if !self.pending.is_empty() {
                 return Ok(self.drain());
@@ -465,6 +447,89 @@ impl Poller for OsPoller {
                 return Ok(self.drain());
             }
         }
+    }
+}
+
+/// The kernel poll handle and its event buffer.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct PollDriver {
+    poll: mio::Poll,
+    events: mio::Events,
+}
+
+/// One readiness report from the kernel: the source's token and the
+/// directions it reported.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RawEvent {
+    token: mio::Token,
+    readable: bool,
+    writable: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PollDriver {
+    /// Blocks until a source is ready, the waker fires, or `timeout` passes.
+    pub(crate) fn wait(&mut self, timeout: Option<Duration>) -> io::Result<Vec<RawEvent>> {
+        self.poll.poll(&mut self.events, timeout)?;
+        Ok(self
+            .events
+            .iter()
+            .map(|event| RawEvent {
+                token: event.token(),
+                readable: event.is_readable(),
+                writable: event.is_writable(),
+            })
+            .collect())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OsPoller {
+    /// The kernel poll handle, for a thread that waits on it without holding
+    /// this poller's bookkeeping.
+    pub(crate) fn driver_handle(&self) -> std::sync::Arc<parking_lot::Mutex<PollDriver>> {
+        std::sync::Arc::clone(&self.driver)
+    }
+
+    /// How long a wait may block before the earliest timer is due, or `None`
+    /// when no timer is pending.
+    pub(crate) fn timer_timeout(&self) -> Option<Duration> {
+        self.next_timeout(None)
+    }
+
+    /// Records the readiness a wait reported and every timer now due, and
+    /// answers what became ready. The waker's own event only ends a wait.
+    pub(crate) fn settle(&mut self, events: &[RawEvent]) -> Vec<Readiness> {
+        self.absorb(events);
+        self.drain_expired_timers();
+        self.drain()
+    }
+
+    /// Queues the readiness `events` report; answers whether the waker fired.
+    fn absorb(&mut self, events: &[RawEvent]) -> bool {
+        let mut interrupted = false;
+        for event in events {
+            if event.token == INTERRUPT_TOKEN {
+                interrupted = true;
+                continue;
+            }
+            if let Some(&(source, interest, gid)) = self.by_token.get(&event.token) {
+                let fired = match interest {
+                    Interest::Readable => event.readable,
+                    Interest::Writable => event.writable,
+                    Interest::Timer => false,
+                };
+                if fired {
+                    self.pending.push(Readiness {
+                        source,
+                        interest,
+                        gid,
+                    });
+                }
+            }
+        }
+        interrupted
     }
 }
 

@@ -832,6 +832,11 @@ fn raw_peer_socket(
 pub(crate) struct GoroutineTcpConn {
     stream: mio::net::TcpStream,
     registration: Option<crate::netpoll::Registration>,
+    /// The last read came back short, so the socket's receive queue was empty
+    /// then. The registration is edge-triggered and keeps any edge that lands
+    /// meanwhile, so the next read waits for readiness first rather than
+    /// spending a system call to be told there is nothing yet.
+    drained: bool,
     read_timeout: Option<std::time::Duration>,
     write_timeout: Option<std::time::Duration>,
 }
@@ -847,6 +852,7 @@ impl GoroutineTcpConn {
         Ok(Self {
             stream,
             registration: Some(registration),
+            drained: false,
             read_timeout: bound(read_ms),
             write_timeout: bound(write_ms),
         })
@@ -884,9 +890,19 @@ impl Drop for GoroutineTcpConn {
 impl std::io::Read for GoroutineTcpConn {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut deadline = None;
+        if std::mem::take(&mut self.drained) && !buf.is_empty() {
+            let at = *deadline.get_or_insert_with(|| {
+                self.read_timeout
+                    .map(|t| crate::platform::Instant::now() + t)
+            });
+            self.wait(crate::netpoll::Direction::Read, at)?;
+        }
         loop {
             match std::io::Read::read(&mut self.stream, buf) {
-                Ok(n) => return Ok(n),
+                Ok(n) => {
+                    self.drained = n > 0 && n < buf.len();
+                    return Ok(n);
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     // The bound runs from the first time the read had to wait,
                     // as a socket receive timeout does.

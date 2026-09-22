@@ -350,17 +350,26 @@ impl WorkerSlot {
     }
 }
 
+/// Shards of the parked table: every park and unpark touches one, so a busy
+/// server's workers do not all contend for a single lock.
+const PARK_SHARDS: usize = 64;
+
+/// The parked goroutines whose gid falls in one shard, and the gids of that
+/// shard whose `unpark(gid)` arrived *before* the suspending worker inserted
+/// them. The worker's Yield→park path checks `early` under the same lock and,
+/// if its gid is there, runs the task again at once. Closes the
+/// wake-before-park race window.
+#[derive(Default)]
+struct ParkShard {
+    entries: HashMap<Gid, ParkedEntry>,
+    early: std::collections::HashSet<Gid>,
+}
+
 /// State shared across every worker thread plus user-facing handles.
 struct Shared {
     injector: Injector<SendTask>,
     workers: Mutex<Vec<Arc<WorkerSlot>>>,
-    parked: Mutex<HashMap<Gid, ParkedEntry>>,
-    /// Gids whose `unpark(gid)` arrived *before* the suspending
-    /// worker had a chance to insert them into `parked`. The
-    /// worker's Yield→park path checks this set and, if the gid
-    /// is present, immediately re-ejects the task to the
-    /// injector. Closes the wake-before-park race window.
-    pre_unpark: Mutex<std::collections::HashSet<Gid>>,
+    parked: Box<[Mutex<ParkShard>]>,
     /// Live (spawned but not yet finished) goroutine count. The
     /// scheduler refuses new spawns above `max_live`.
     live_goroutines: AtomicUsize,
@@ -371,6 +380,11 @@ struct Shared {
     stats: AtomicStats,
     park_wait: AtomicParkWaitStats,
     trace: Mutex<Option<Vec<ExecutionTraceEvent>>>,
+    /// Whether an execution trace is being captured, read before `trace`'s
+    /// lock so a park or unpark with no capture takes no lock for it.
+    tracing: AtomicBool,
+    /// Threads waiting on `idle_cv`; a worker only signals it when one is.
+    idle_waiters: AtomicUsize,
     /// Set to `true` when [`MultiScheduler::shutdown`] is called.
     /// Workers exit once their local deque is drained.
     stopping: AtomicBool,
@@ -422,7 +436,7 @@ impl fmt::Debug for Shared {
                 "target_workers",
                 &self.target_workers.load(Ordering::Relaxed),
             )
-            .field("parked", &self.parked.lock().len())
+            .field("parked", &self.parked_len())
             .field("stats", &self.stats.snapshot())
             .finish_non_exhaustive()
     }
@@ -452,13 +466,17 @@ impl MultiScheduler {
         let shared = Arc::new(Shared {
             injector: Injector::new(),
             workers: Mutex::new(Vec::new()),
-            parked: Mutex::new(HashMap::new()),
-            pre_unpark: Mutex::new(std::collections::HashSet::new()),
+            parked: (0..PARK_SHARDS)
+                .map(|_| Mutex::new(ParkShard::default()))
+                .collect(),
+
             live_goroutines: AtomicUsize::new(0),
             max_live: AtomicUsize::new(default_max_live()),
             stats: AtomicStats::default(),
             park_wait: AtomicParkWaitStats::default(),
             trace: Mutex::new(None),
+            tracing: AtomicBool::new(false),
+            idle_waiters: AtomicUsize::new(0),
             stopping: AtomicBool::new(false),
             live_workers: AtomicUsize::new(0),
             target_workers: AtomicUsize::new(n),
@@ -667,7 +685,7 @@ impl MultiScheduler {
     /// indicates which worker should pick the task back up; values
     /// outside the worker count fall through to the injector.
     pub fn park(&self, gid: Gid, reason: ParkReason, home: usize, task: SendTask) {
-        self.inner.parked.lock().insert(
+        self.inner.park_shard(gid).lock().entries.insert(
             gid,
             ParkedEntry {
                 task,
@@ -702,14 +720,12 @@ impl MultiScheduler {
         // gid parked indefinitely. (Windows surfaces the race more
         // often because of the coarser timer-wake granularity that
         // widens the netpoller's deliver→worker park interleaving.)
-        let mut parked = self.inner.parked.lock();
-        let entry = parked.remove(&gid);
-        let Some(entry) = entry else {
-            self.inner.pre_unpark.lock().insert(gid);
-            drop(parked);
+        let mut shard = self.inner.park_shard(gid).lock();
+        let Some(entry) = shard.entries.remove(&gid) else {
+            shard.early.insert(gid);
             return false;
         };
-        drop(parked);
+        drop(shard);
         self.inner
             .park_wait
             .add(entry.reason, entry.parked_at.elapsed());
@@ -754,20 +770,22 @@ impl MultiScheduler {
     /// tests and introspection.
     #[must_use]
     pub fn parked_count(&self) -> usize {
-        self.inner.parked.lock().len()
+        self.inner.parked_len()
     }
 
     /// Returns a snapshot of currently parked goroutines grouped by reason.
     #[must_use]
     pub fn parked_reason_counts(&self) -> ParkedReasonCounts {
         let mut counts = ParkedReasonCounts::default();
-        for entry in self.inner.parked.lock().values() {
-            match entry.reason {
-                ParkReason::Other => counts.other += 1,
-                ParkReason::Chan => counts.chan += 1,
-                ParkReason::Sync => counts.sync += 1,
-                ParkReason::Io => counts.io += 1,
-                ParkReason::Timer => counts.timer += 1,
+        for shard in &self.inner.parked {
+            for entry in shard.lock().entries.values() {
+                match entry.reason {
+                    ParkReason::Other => counts.other += 1,
+                    ParkReason::Chan => counts.chan += 1,
+                    ParkReason::Sync => counts.sync += 1,
+                    ParkReason::Io => counts.io += 1,
+                    ParkReason::Timer => counts.timer += 1,
+                }
             }
         }
         counts
@@ -783,23 +801,18 @@ impl MultiScheduler {
     /// any prior unfinished capture.
     pub fn start_execution_trace(&self) {
         *self.inner.trace.lock() = Some(Vec::new());
+        self.inner.tracing.store(true, Ordering::Release);
     }
 
     /// Stops capture and returns scheduler spawn, park, and unpark events.
     #[must_use]
     pub fn finish_execution_trace(&self) -> Vec<ExecutionTraceEvent> {
+        self.inner.tracing.store(false, Ordering::Release);
         self.inner.trace.lock().take().unwrap_or_default()
     }
 
     fn trace_event(&self, name: &'static str, gid: Gid, reason: Option<ParkReason>) {
-        if let Some(events) = self.inner.trace.lock().as_mut() {
-            events.push(ExecutionTraceEvent {
-                timestamp_micros: now_micros_since_start(),
-                name,
-                gid: gid.as_u32(),
-                reason,
-            });
-        }
+        self.inner.trace_event(name, gid, reason);
     }
 
     /// Asks every running goroutine to reach a safepoint at its next
@@ -928,6 +941,7 @@ impl MultiScheduler {
     pub fn wait_quiescent(&self, timeout: Duration) -> bool {
         let deadline = Instant::now() + timeout;
         let mut g = self.inner.idle_mu.lock();
+        let _waiting = IdleWaiter::enter(&self.inner);
         loop {
             let stats = self.inner.stats.snapshot();
             if self.live_goroutines() == 0 && stats.spawned == stats.finished {
@@ -944,6 +958,7 @@ impl MultiScheduler {
 
     fn wait_until_idle(&self) {
         let mut g = self.inner.idle_mu.lock();
+        let _waiting = IdleWaiter::enter(&self.inner);
         loop {
             if self.is_idle_snapshot() {
                 return;
@@ -961,7 +976,7 @@ impl MultiScheduler {
 
     fn is_idle_snapshot(&self) -> bool {
         let injector_empty = self.inner.injector.is_empty();
-        let parked_empty = self.inner.parked.lock().is_empty();
+        let parked_empty = self.inner.parked_len() == 0;
         let workers = self.inner.workers.lock();
         let all_parked = !workers.is_empty()
             && workers
@@ -1077,8 +1092,7 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                 // The exiting worker may have been the last one
                 // holding wait_until_idle awake. Notify in case
                 // shutdown is in progress.
-                let _g = shared.idle_mu.lock();
-                shared.idle_cv.notify_all();
+                shared.notify_idle();
                 return;
             }
             // About to park: tell wait_until_idle to re-snapshot.
@@ -1115,8 +1129,8 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                 // wakeup source unparks it, instead of busy-
                 // looping back through the run queue.
                 if let Some((gid, reason)) = crate::sched_global::take_pending_park() {
-                    let mut parked = shared.parked.lock();
-                    parked.insert(
+                    let mut parked = shared.park_shard(gid).lock();
+                    parked.entries.insert(
                         gid,
                         ParkedEntry {
                             task,
@@ -1126,36 +1140,20 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                         },
                     );
                     shared.stats.parks.fetch_add(1, Ordering::Relaxed);
-                    if let Some(events) = shared.trace.lock().as_mut() {
-                        events.push(ExecutionTraceEvent {
-                            timestamp_micros: now_micros_since_start(),
-                            name: "park",
-                            gid: gid.as_u32(),
-                            reason: Some(reason),
-                        });
-                    }
+                    shared.trace_event("park", gid, Some(reason));
                     // Race-window protection: if `unpark(gid)`
                     // already fired (poller delivery between
                     // `arm()` and the park insertion), the gid is
                     // queued in `pre_unpark`. Drain that and, if
                     // our gid is in it, immediately re-eject the
                     // task.
-                    let mut pre = shared.pre_unpark.lock();
-                    if pre.remove(&gid) {
-                        if let Some(entry) = parked.remove(&gid) {
-                            drop(pre);
+                    if parked.early.remove(&gid) {
+                        if let Some(entry) = parked.entries.remove(&gid) {
                             drop(parked);
                             shared
                                 .park_wait
                                 .add(entry.reason, entry.parked_at.elapsed());
-                            if let Some(events) = shared.trace.lock().as_mut() {
-                                events.push(ExecutionTraceEvent {
-                                    timestamp_micros: now_micros_since_start(),
-                                    name: "unpark",
-                                    gid: gid.as_u32(),
-                                    reason: None,
-                                });
-                            }
+                            shared.trace_event("unpark", gid, None);
                             // Back onto this worker's own deque, never the
                             // global injector. This goroutine parked on this
                             // OS thread, and a suspended stackful coroutine
@@ -1180,6 +1178,62 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                     .store(now_micros_since_start(), Ordering::Release);
             }
         }
+    }
+}
+
+impl Shared {
+    fn park_shard(&self, gid: Gid) -> &Mutex<ParkShard> {
+        &self.parked[gid.as_u32() as usize % PARK_SHARDS]
+    }
+
+    fn parked_len(&self) -> usize {
+        self.parked
+            .iter()
+            .map(|shard| shard.lock().entries.len())
+            .sum()
+    }
+
+    fn trace_event(&self, name: &'static str, gid: Gid, reason: Option<ParkReason>) {
+        if !self.tracing.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(events) = self.trace.lock().as_mut() {
+            events.push(ExecutionTraceEvent {
+                timestamp_micros: now_micros_since_start(),
+                name,
+                gid: gid.as_u32(),
+                reason,
+            });
+        }
+    }
+
+    /// Wakes the threads waiting for the pool to go idle, if there are any.
+    /// A waiter registers before it reads the state it waits on, and a
+    /// worker changes that state before it reads the count, so with both
+    /// sequentially consistent one of them always sees the other.
+    fn notify_idle(&self) {
+        if self.idle_waiters.load(Ordering::SeqCst) > 0 {
+            let _g = self.idle_mu.lock();
+            self.idle_cv.notify_all();
+        }
+    }
+}
+
+/// Counts a thread among `idle_cv`'s waiters for as long as it lives.
+struct IdleWaiter<'a> {
+    shared: &'a Shared,
+}
+
+impl<'a> IdleWaiter<'a> {
+    fn enter(shared: &'a Shared) -> Self {
+        shared.idle_waiters.fetch_add(1, Ordering::SeqCst);
+        Self { shared }
+    }
+}
+
+impl Drop for IdleWaiter<'_> {
+    fn drop(&mut self) {
+        self.shared.idle_waiters.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -1417,8 +1471,7 @@ fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) {
     // Wake any orchestrator waiting in `wait_until_idle`: now that
     // this worker is parked, the snapshot may show all-idle.
     {
-        let _g = shared.idle_mu.lock();
-        shared.idle_cv.notify_all();
+        shared.notify_idle();
     }
     let mut g = slot.cv_mu.lock();
     // `parked` is the condition this wait is for, and a waker clears it
@@ -1447,8 +1500,7 @@ fn park_worker_in_poller(
     slot.polling.store(true, Ordering::SeqCst);
     slot.parked.store(true, Ordering::SeqCst);
     {
-        let _g = shared.idle_mu.lock();
-        shared.idle_cv.notify_all();
+        shared.notify_idle();
     }
     // A waker clears `parked` and then signals the poller. Work queued before
     // `parked` was published is found here; work queued after it comes with a

@@ -6,6 +6,16 @@ use std::encoding::json
 use std::encoding::yaml
 use std::errors
 
+// Summing in a loop gives the JIT a hot body; a `json::Value` itself stays on
+// the bytecode VM.
+fn total(xs: [i64]) -> i64 {
+    let mut sum = 0
+    for x in xs {
+        sum += x
+    }
+    sum
+}
+
 fn describe(doc: json::Value, key: String) -> String {
     match json::get(doc, key) {
         Some(v) => json::render(v)
@@ -27,10 +37,13 @@ fn main() -> Result<(), errors::Error> {
     tags: [a, b]
     """)?
     let paths = json::get(doc, "paths").unwrap_or(doc)
+    let mut method_counts = #[]
     for path in json::keys(paths).unwrap_or(#[]) {
         let methods = json::get(paths, path).and_then(json::keys).unwrap_or(#[])
         println("{path}: {}", methods.join(","))
+        method_counts.push(methods.len())
     }
+    println("methods in total: {}", total(method_counts))
     for key in #["count", "ratio", "big", "tags", "absent"] {
         println("{key} = {}", describe(doc, key))
     }

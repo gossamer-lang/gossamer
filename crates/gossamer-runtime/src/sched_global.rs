@@ -32,7 +32,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use parking_lot::{Mutex, MutexGuard};
+use parking_lot::Mutex;
 
 use crate::platform::Instant;
 use crate::sched::{Gid, MultiScheduler, OsPoller, ParkReason, Poller, Readiness, Step};
@@ -116,24 +116,20 @@ fn ensure_poller_thread(g: &'static Globals) {
 
 fn poller_loop() {
     let g = globals();
+    let driver = g.poller.lock().driver_handle();
     loop {
         if g.poller_shutdown.load(Ordering::Acquire) {
             break;
         }
-        let events = {
-            let mut poller = g.poller.lock();
-            // Blocks until a registered source is ready, the earliest timer
-            // is due, or a registrar or shutdown wakes it to take the lock.
-            let events = poller.poll(None).unwrap_or_default();
-            // On Windows a nominal 1 ms mio timeout may sleep for a full
-            // scheduler quantum. Reacquiring an unfair mutex immediately
-            // afterward can starve timer registration long enough to strand
-            // thousands of goroutines behind the netpoller. Hand the lock to
-            // a waiting registrar before beginning the next poll cycle.
-            MutexGuard::unlock_fair(poller);
-            events
-        };
-        for ev in events {
+        // The wait holds only the kernel handle, never the bookkeeping, so a
+        // registrar is never queued behind it. A registration made after the
+        // timeout is read wakes the handle, and that wake stays pending until
+        // the wait below consumes it, so none is lost.
+        let timeout = g.poller.lock().timer_timeout();
+        // An interrupted or refused wait reports nothing; timers still settle.
+        let events = driver.lock().wait(timeout).unwrap_or_default();
+        let ready = g.poller.lock().settle(&events);
+        for ev in ready {
             deliver_event(ev);
         }
     }
@@ -238,12 +234,6 @@ pub fn with_poller<R>(f: impl FnOnce(&mut OsPoller) -> R) -> R {
     // The thread exists only once something registers with the poller, so a
     // program that never does carries no thread polling for it.
     ensure_poller_thread(g);
-    // Interrupt an in-flight poll before waiting for the mutex. Waking only
-    // after registration is too late: the registering worker may already be
-    // blocked behind the poller thread, which holds this mutex across poll().
-    // This is especially expensive on Windows, where a 1 ms timeout can be
-    // rounded up to a full scheduler quantum.
-    let _ = g.poller_interrupt.wake();
     let result = {
         let mut poller = g.poller.lock();
         f(&mut poller)
