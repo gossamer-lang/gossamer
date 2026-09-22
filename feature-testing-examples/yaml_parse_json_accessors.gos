@@ -1,0 +1,41 @@
+// A document `yaml::parse` answers is a `json::Value` on every tier, so the
+// free `json::` accessors read it exactly as they read one `json::parse`
+// answers.
+
+use std::encoding::json
+use std::encoding::yaml
+use std::errors
+
+fn describe(doc: json::Value, key: String) -> String {
+    match json::get(doc, key) {
+        Some(v) => json::render(v)
+        None => "missing"
+    }
+}
+
+fn main() -> Result<(), errors::Error> {
+    let doc = yaml::parse("""
+    paths:
+      /models:
+        get: {}
+        post: {summary: create}
+      /models/{id}:
+        delete: {}
+    count: 3
+    ratio: 2.0
+    big: 18446744073709551615
+    tags: [a, b]
+    """)?
+    let paths = json::get(doc, "paths").unwrap_or(doc)
+    for path in json::keys(paths).unwrap_or(#[]) {
+        let methods = json::get(paths, path).and_then(json::keys).unwrap_or(#[])
+        println("{path}: {}", methods.join(","))
+    }
+    for key in #["count", "ratio", "big", "tags", "absent"] {
+        println("{key} = {}", describe(doc, key))
+    }
+    let second = json::get(doc, "tags").map(|t| json::at(t, 1)).and_then(json::as_str)
+    println("second tag = {:?}", second)
+    println("same as json::parse: {}", json::render(doc) == json::render(json::parse(json::render(doc))?))
+    Ok(())
+}

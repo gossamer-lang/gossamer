@@ -845,8 +845,39 @@ pub mod server {
         let _ = crate::sched_global::wait_io(listener, gossamer_sched::Interest::Readable);
     }
 
+    /// Whether a `Connection` header carries `token` in its comma-separated
+    /// list.
+    fn connection_has(headers: &super::Headers, token: &str) -> bool {
+        headers
+            .get("connection")
+            .is_some_and(|v| v.split(',').any(|t| t.trim().eq_ignore_ascii_case(token)))
+    }
+
     fn wants_close(headers: &super::Headers) -> bool {
-        matches!(headers.get("connection"), Some(v) if v.eq_ignore_ascii_case("close"))
+        connection_has(headers, "close")
+    }
+
+    /// Whether a request leaves its connection open: HTTP/1.1 unless it
+    /// says `close`, HTTP/1.0 only when it asks for `keep-alive`.
+    fn request_persists(http10: bool, headers: &super::Headers) -> bool {
+        if wants_close(headers) {
+            return false;
+        }
+        !http10 || connection_has(headers, "keep-alive")
+    }
+
+    /// Settles a response's connection: an HTTP/1.1 connection persists by
+    /// default, so only a close is announced there, while an HTTP/1.0 one
+    /// persists only when the response says so.
+    fn announce_connection(response: &mut super::Response, http10: bool, keep_alive: bool) {
+        if response.headers.contains("connection") {
+            return;
+        }
+        if !keep_alive {
+            response.headers.insert("connection", "close");
+        } else if http10 {
+            response.headers.insert("connection", "keep-alive");
+        }
     }
 
     /// Reads the request body. Honours `Transfer-Encoding: chunked`
@@ -1061,14 +1092,8 @@ pub mod server {
                     match result {
                         Ok(mut response) => {
                             let handler_close = wants_close(&response.headers);
-                            let keep_alive = !http10 && !client_close && !handler_close;
-                            if keep_alive {
-                                if !response.headers.contains("connection") {
-                                    response.headers.insert("connection", "keep-alive");
-                                }
-                            } else if !response.headers.contains("connection") {
-                                response.headers.insert("connection", "close");
-                            }
+                            let keep_alive = !client_close && !handler_close;
+                            announce_connection(&mut response, http10, keep_alive);
                             // Switch the per-syscall write timeout
                             // to the response-write phase.
                             if let Some(t) = config.effective_write_timeout() {
@@ -1490,7 +1515,7 @@ pub mod server {
             config,
             body_deadline,
         )?;
-        let client_close = wants_close(&head.headers);
+        let client_close = !request_persists(head.http10, &head.headers);
         // Per-request cancellable context. Parented on
         // background - the worker_loop cancels via the Cancel
         // handle when the connection closes or the server
@@ -1855,14 +1880,8 @@ pub mod server {
                     match result {
                         Ok(mut response) => {
                             let handler_close = wants_close(&response.headers);
-                            let keep_alive = !http10 && !client_close && !handler_close;
-                            if keep_alive {
-                                if !response.headers.contains("connection") {
-                                    response.headers.insert("connection", "keep-alive");
-                                }
-                            } else if !response.headers.contains("connection") {
-                                response.headers.insert("connection", "close");
-                            }
+                            let keep_alive = !client_close && !handler_close;
+                            announce_connection(&mut response, http10, keep_alive);
                             if write_response_generic(
                                 reader.get_mut(),
                                 &mut response,

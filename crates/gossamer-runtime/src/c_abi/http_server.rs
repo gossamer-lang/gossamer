@@ -391,6 +391,7 @@ where
         if crate::sched_global::is_shutdown_requested() {
             break;
         }
+        crate::mark_thread_idle();
         let stream = match listener.accept() {
             Ok((s, _)) => {
                 backoff.reset();
@@ -487,6 +488,7 @@ where
         if shutdown.load(Ordering::Acquire) || crate::sched_global::is_shutdown_requested() {
             break;
         }
+        crate::mark_thread_idle();
         let stream = match listener.accept() {
             Ok((s, _)) => {
                 backoff.reset();
@@ -852,13 +854,14 @@ impl GoroutineTcpConn {
 
     /// Waits for `direction`, answering `TimedOut` once `deadline` passed.
     fn wait(
-        &self,
+        &mut self,
         direction: crate::netpoll::Direction,
         deadline: Option<crate::platform::Instant>,
     ) -> std::io::Result<()> {
-        let Some(registration) = self.registration.as_ref() else {
+        let Some(registration) = self.registration.as_mut() else {
             return Err(std::io::Error::from(std::io::ErrorKind::NotConnected));
         };
+        registration.follow(&mut self.stream);
         if registration.wait(direction, deadline) {
             Ok(())
         } else {
@@ -1123,14 +1126,18 @@ fn handle_http_conn_limited<C: HttpIo>(
                 return;
             }
 
-            keep_alive = {
+            let (persists, http_1_0) = {
                 let head: &[u8] = match &chunked_req {
                     Some(c) => &c.canonical[..c.header_end],
                     None => &accum[..header_end],
                 };
                 let request_line = head.split(|b| *b == b'\n').next().unwrap_or(head);
-                !request_ends_connection(request_line, &scratch.request.headers)
+                (
+                    !request_ends_connection(request_line, &scratch.request.headers),
+                    request_is_http_1_0(request_line),
+                )
             };
+            keep_alive = persists;
 
             // Chunked trailer headers (RFC 7230 §4.1.2) need no
             // extra promotion here: `splice_canonical` splices them
@@ -1197,7 +1204,12 @@ fn handle_http_conn_limited<C: HttpIo>(
                 continue_sent = false;
                 continue;
             }
-            if !extract_response_into(result_ptr, &mut scratch.response_buf, &mut keep_alive) {
+            if !extract_response_into(
+                result_ptr,
+                &mut scratch.response_buf,
+                &mut keep_alive,
+                http_1_0,
+            ) {
                 report_request_error(result_ptr, &scratch.request);
                 scratch.response_buf.extend_from_slice(if keep_alive {
                     RESPONSE_500_BYTES
@@ -2082,16 +2094,22 @@ pub(crate) fn request_ends_connection(request_line: &[u8], headers: &[(String, S
     if close {
         return true;
     }
-    let http_1_0 = request_line
+    request_is_http_1_0(request_line) && !keep
+}
+
+/// Whether a request line names HTTP/1.0, whose connection persists only
+/// when a response says so.
+pub(crate) fn request_is_http_1_0(request_line: &[u8]) -> bool {
+    request_line
         .windows(8)
-        .any(|w| w.eq_ignore_ascii_case(b"HTTP/1.0"));
-    http_1_0 && !keep
+        .any(|w| w.eq_ignore_ascii_case(b"HTTP/1.0"))
 }
 
 pub(crate) fn extract_response_into(
     result: i128,
     out: &mut Vec<u8>,
     keep_alive: &mut bool,
+    http_1_0: bool,
 ) -> bool {
     if super::vec::gos_rt_result_disc(result) != 0 {
         return false;
@@ -2195,12 +2213,14 @@ pub(crate) fn extract_response_into(
         out.extend_from_slice(buf.format(body_bytes.len()).as_bytes());
         out.extend_from_slice(b"\r\n");
     }
+    // An HTTP/1.1 connection persists by default, so only a close is
+    // announced there; an HTTP/1.0 one persists only when the response says so.
     if !has_connection {
-        out.extend_from_slice(if *keep_alive {
-            b"connection: keep-alive\r\n".as_slice()
-        } else {
-            b"connection: close\r\n".as_slice()
-        });
+        if !*keep_alive {
+            out.extend_from_slice(b"connection: close\r\n");
+        } else if http_1_0 {
+            out.extend_from_slice(b"connection: keep-alive\r\n");
+        }
     }
     out.extend_from_slice(b"\r\n");
     out.extend_from_slice(body_bytes);
@@ -2339,7 +2359,7 @@ fn extract_stream_head_into(result: i128, out: &mut Vec<u8>) {
         }
         out.extend_from_slice(b"\r\n");
     }
-    out.extend_from_slice(b"transfer-encoding: chunked\r\nconnection: keep-alive\r\n\r\n");
+    out.extend_from_slice(b"transfer-encoding: chunked\r\n\r\n");
 }
 
 /// Drains the pending stream for `handle` to `conn` as chunked
@@ -2541,7 +2561,7 @@ mod tests {
 
     fn rendered(result: i128) -> String {
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true));
+        assert!(extract_response_into(result, &mut out, &mut true, false));
         unsafe { drop_handler_result(result) };
         String::from_utf8_lossy(&out).to_ascii_lowercase()
     }
@@ -2569,7 +2589,7 @@ mod tests {
         unsafe { (*resp).body_bytes = Some(vec![0x41, 0x00, 0x42, 0x00, 0x43]) };
         let result = super::super::vec::pack_result(0, resp as i64);
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true));
+        assert!(extract_response_into(result, &mut out, &mut true, false));
         unsafe { drop_handler_result(result) };
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(
@@ -2595,7 +2615,7 @@ mod tests {
         }
         let result = super::super::vec::pack_result(0, resp as i64);
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true));
+        assert!(extract_response_into(result, &mut out, &mut true, false));
         unsafe { drop_handler_result(result) };
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(
@@ -3371,15 +3391,37 @@ mod tests {
         }
         let result = super::super::vec::pack_result(0, resp as i64);
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true));
+        assert!(extract_response_into(result, &mut out, &mut true, false));
         unsafe { drop_handler_result(result) };
         // Raw bytes - no case folding before the assertions.
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(text.contains("x-custom-thing: v\r\n"), "wire: {text}");
         assert!(!text.contains("X-Custom-Thing"), "wire: {text}");
         assert!(text.contains("content-type: text/plain; charset=utf-8\r\n"));
-        assert!(text.contains("connection: keep-alive\r\n"));
+        assert!(
+            !text.contains("connection:"),
+            "HTTP/1.1 persists by default: {text}"
+        );
         assert!(text.contains("content-length: 2\r\n"));
+    }
+
+    #[test]
+    fn a_response_announces_only_what_the_request_version_does_not_imply() {
+        let head_for = |keep_alive: bool, http_1_0: bool| {
+            let resp = unsafe {
+                gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok"))
+            };
+            let result = super::super::vec::pack_result(0, resp as i64);
+            let mut out = Vec::new();
+            let mut keep = keep_alive;
+            assert!(extract_response_into(result, &mut out, &mut keep, http_1_0));
+            unsafe { drop_handler_result(result) };
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        assert!(!head_for(true, false).contains("connection:"));
+        assert!(head_for(false, false).contains("connection: close\r\n"));
+        assert!(head_for(true, true).contains("connection: keep-alive\r\n"));
+        assert!(head_for(false, true).contains("connection: close\r\n"));
     }
 
     #[test]
@@ -3412,7 +3454,10 @@ mod tests {
         let text = String::from_utf8_lossy(&head).into_owned();
         assert!(text.contains("x-mixed: v\r\n"), "head: {text}");
         assert!(!text.contains("X-MiXeD"), "head: {text}");
-        assert!(text.contains("transfer-encoding: chunked\r\nconnection: keep-alive\r\n"));
+        assert!(
+            text.contains("transfer-encoding: chunked\r\n\r\n"),
+            "head: {text}"
+        );
         assert!(text.contains("content-type: text/csv\r\n"));
     }
 

@@ -73,9 +73,12 @@ pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
         } else {
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
-        match crate::yaml_node::parse(text) {
-            Ok(yaml_val) => {
-                let json_val = yaml_val.into_json();
+        match crate::yaml_node::decode_json(
+            text,
+            crate::yaml_node::DEFAULT_MAX_DEPTH,
+            crate::yaml_node::DEFAULT_MAX_SIZE,
+        ) {
+            Ok(json_val) => {
                 let ptr = crate::c_abi::json::GosJson::into_raw(json_val);
                 unsafe { gos_rt_result_new(0, ptr as i64) }
             }
@@ -95,8 +98,12 @@ pub unsafe extern "C" fn gos_rt_yaml_to_json(s: *const c_char) -> i128 {
         } else {
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
-        let json_val = match crate::yaml_node::parse(text) {
-            Ok(v) => v.into_json(),
+        let json_val = match crate::yaml_node::decode_json(
+            text,
+            crate::yaml_node::DEFAULT_MAX_DEPTH,
+            crate::yaml_node::DEFAULT_MAX_SIZE,
+        ) {
+            Ok(v) => v,
             Err(e) => return yaml_result_err(&format!("yaml::to_json: {e}")),
         };
         match serde_json::to_string(&json_val) {

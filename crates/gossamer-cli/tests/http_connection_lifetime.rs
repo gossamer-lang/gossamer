@@ -113,12 +113,38 @@ fn check(addr: SocketAddr, tier: &str) {
     assert!(closed, "{tier}: asked to close and did not");
 
     let (header, closed) = answer(addr, "GET /health HTTP/1.1\r\nHost: localhost\r\n\r\n");
-    assert_eq!(header, "connection: keep-alive", "{tier}: HTTP/1.1 default");
+    assert_eq!(
+        header, "<none>",
+        "{tier}: HTTP/1.1 persists without saying so"
+    );
     assert!(!closed, "{tier}: closed an HTTP/1.1 connection unasked");
 
     let (header, closed) = answer(addr, "GET /health HTTP/1.0\r\nHost: localhost\r\n\r\n");
     assert_eq!(header, "connection: close", "{tier}: HTTP/1.0 default");
     assert!(closed, "{tier}: left an HTTP/1.0 connection open");
+
+    let (header, closed) = answer(
+        addr,
+        "GET /health HTTP/1.0\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n",
+    );
+    assert_eq!(
+        header, "connection: keep-alive",
+        "{tier}: HTTP/1.0 asked to persist"
+    );
+    assert!(
+        !closed,
+        "{tier}: closed an HTTP/1.0 connection asked to persist"
+    );
+
+    let (header, closed) = answer(
+        addr,
+        "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive, close\r\n\r\n",
+    );
+    assert_eq!(
+        header, "connection: close",
+        "{tier}: close among the tokens"
+    );
+    assert!(closed, "{tier}: a close token left the connection open");
 }
 
 #[test]

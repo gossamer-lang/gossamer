@@ -171,17 +171,14 @@ fn widen(value: impl Into<i64>) -> i64 {
 
 /// Default mimalloc purge delay for release programs, in milliseconds.
 ///
-/// How long a freed page waits before its memory is handed back to the
-/// kernel. This is mimalloc's own default, which the runtime keeps: the
-/// delay has to outlast an allocate-and-free cycle, or a loop that builds
-/// and drops a container pays an `madvise` round trip per iteration.
-///
-/// Resident memory does not pay for the wait. What a program holds is
-/// decided by its live set and by the segments mimalloc keeps whole, and
-/// neither moves with this delay - a burst allocated and dropped holds the
-/// same bytes a second later whatever it is set to. Set
-/// `GOS_ALLOC_PURGE_DELAY` to another millisecond value to tune it, or to
-/// `0` for immediate return-to-OS behaviour.
+/// How long memory handed back to the arena stays committed before it is
+/// returned to the kernel: mimalloc's own default, the decay window in which a
+/// freed large block is reused without a page fault per allocation. The
+/// allocator applies an expired delay only when it is next called, so the
+/// scheduler's watchdog calls it once per window
+/// ([`purge_expired_allocator_memory`]) for a process that has gone quiet. Set
+/// `GOS_ALLOC_PURGE_DELAY` to another millisecond value to tune it, or to `0`
+/// to return memory the moment it is freed.
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 fn configured_purge_delay() -> std::os::raw::c_long {
     std::env::var("GOS_ALLOC_PURGE_DELAY")
@@ -248,6 +245,55 @@ pub fn init_process_allocator() {
             }
         }
     }
+}
+
+/// The allocator's purge delay: how long freed arena memory stays committed.
+#[must_use]
+pub fn allocator_purge_delay() -> std::time::Duration {
+    #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+    {
+        // SAFETY: option reads are thread-safe once the allocator initialised.
+        let ms = unsafe { libmimalloc_sys::mi_option_get(MI_OPTION_PURGE_DELAY) };
+        std::time::Duration::from_millis(u64::try_from(ms).unwrap_or(0))
+    }
+    #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
+    {
+        std::time::Duration::ZERO
+    }
+}
+
+/// Returns to the kernel the freed memory whose purge delay has expired.
+///
+/// The allocator applies an expired delay only from inside an allocation or a
+/// free, so a process that has stopped allocating would hold memory it freed
+/// indefinitely; a background thread calls this to apply it. A no-op in builds
+/// that do not use mimalloc.
+pub fn purge_expired_allocator_memory() {
+    collect_process_allocator(false);
+}
+
+/// Hands the calling thread's freed allocator pages back to the arena before
+/// the thread blocks on a wait of unbounded length, at most once per purge
+/// window: `TCMalloc`'s `MarkThreadIdle`. Pages a thread's heap holds are
+/// released only by that thread, so one that did its allocating and then
+/// waits - a server's accept loop after startup, a worker between requests -
+/// would otherwise hold them for as long as it waits. The arena returns them
+/// to the kernel once their purge delay expires.
+pub fn mark_thread_idle() {
+    let window = allocator_purge_delay();
+    if window.is_zero() {
+        return;
+    }
+    thread_local! {
+        static LAST_IDLE_COLLECT: std::cell::Cell<Option<std::time::Instant>> =
+            const { std::cell::Cell::new(None) };
+    }
+    LAST_IDLE_COLLECT.with(|last| {
+        if last.get().is_none_or(|at| at.elapsed() >= window) {
+            collect_process_allocator(true);
+            last.set(Some(std::time::Instant::now()));
+        }
+    });
 }
 
 /// Forces the process allocator to collect abandoned heaps and purge eligible

@@ -1846,6 +1846,7 @@ const SPECS: &[Spec] = &[
     // A YAML integer wider than 64 bits decodes as the nearest float, one
     // that fits `i64` or `u64` stays exact.
     spec("feature-testing-examples/yaml_wide_integers.gos"),
+    spec("feature-testing-examples/yaml_parse_json_accessors.gos"),
     // A handle read out of a container, a field, or a live `Option` and handed
     // on leaves the container's own share intact.
     spec("feature-testing-examples/container_handle_reads.gos"),

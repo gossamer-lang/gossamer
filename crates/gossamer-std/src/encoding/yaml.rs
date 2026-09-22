@@ -13,8 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use thiserror::Error;
 
-const DEFAULT_MAX_DEPTH: usize = 128;
-const DEFAULT_MAX_SIZE: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_DEPTH: usize = gossamer_runtime::yaml_node::DEFAULT_MAX_DEPTH;
+const DEFAULT_MAX_SIZE: usize = gossamer_runtime::yaml_node::DEFAULT_MAX_SIZE;
 
 static MAX_DEPTH: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_DEPTH);
 static MAX_SIZE: AtomicUsize = AtomicUsize::new(DEFAULT_MAX_SIZE);
@@ -262,8 +262,42 @@ fn to_serde(value: &Value) -> serde_norway::Value {
 /// JSON. The shape mirrors `encoding::toml::to_json` so callers can
 /// chain into `json::parse` or auto-derived `<Type>::from_yaml`.
 pub fn to_json(yaml_text: &str) -> Result<String, String> {
-    let node = decode(yaml_text).map_err(|e| e.message)?;
-    serde_json::to_string(&node.into_json()).map_err(|e| e.to_string())
+    let value = gossamer_runtime::yaml_node::decode_json(yaml_text, max_depth(), max_size())?;
+    serde_json::to_string(&value).map_err(|e| e.to_string())
+}
+
+/// Parses `yaml_text` as a single YAML document into the JSON value
+/// [`crate::json::parse`] answers for the text [`to_json`] renders, without
+/// rendering that text.
+pub fn parse_json(yaml_text: &str) -> Result<crate::json::Value, String> {
+    let value = gossamer_runtime::yaml_node::decode_json(yaml_text, max_depth(), max_size())?;
+    Ok(json_from_serde(value))
+}
+
+fn json_from_serde(value: serde_json::Value) -> crate::json::Value {
+    use crate::json::Value as J;
+    match value {
+        serde_json::Value::Null => J::Null,
+        serde_json::Value::Bool(b) => J::Bool(b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                J::Int(i)
+            } else if let Some(u) = n.as_u64() {
+                J::Uint(u)
+            } else {
+                J::Number(n.as_f64().unwrap_or(f64::NAN))
+            }
+        }
+        serde_json::Value::String(s) => J::String(s),
+        serde_json::Value::Array(items) => {
+            J::Array(items.into_iter().map(json_from_serde).collect())
+        }
+        serde_json::Value::Object(map) => J::Object(
+            map.into_iter()
+                .map(|(k, v)| (k, json_from_serde(v)))
+                .collect(),
+        ),
+    }
 }
 
 /// Renders a JSON document as YAML. Round-trips through the dynamic

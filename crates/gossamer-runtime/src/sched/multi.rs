@@ -222,6 +222,8 @@ impl AtomicStats {
 /// Per-worker shared handles published into [`Shared`] so peers can
 /// steal from this worker and so the scheduler can wake it.
 struct WorkerSlot {
+    /// This worker's position in the pool, which names its poller.
+    index: usize,
     /// Steal half of this worker's deque. Used by other workers when
     /// their local deque is empty.
     stealer: Stealer<SendTask>,
@@ -235,6 +237,13 @@ struct WorkerSlot {
     /// `true` while the OS thread for this worker is parked on the
     /// `cv` waiting for new work.
     parked: AtomicBool,
+    /// `true` while the parked worker waits in its poller rather than on
+    /// `cv`, so a wake reaches it through the poller's waker.
+    polling: AtomicBool,
+    /// Goroutines placed on this worker that have not finished. A goroutine
+    /// runs on the worker it was placed on for its whole life, so this is the
+    /// load a new placement weighs.
+    homed: Arc<AtomicUsize>,
     /// Mutex/condvar pair - workers park here when their deque is
     /// empty; spawn / unpark calls notify this condvar.
     cv: Condvar,
@@ -285,6 +294,11 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+/// The pool index of the scheduler worker running on this thread, if any.
+pub(crate) fn current_worker_index() -> Option<usize> {
+    CURRENT_SLOT.with(|current| current.borrow().as_ref().map(|slot| slot.index))
+}
+
 /// Marks this worker as inside a blocking system call until the guard drops.
 /// Off a worker thread it does nothing.
 #[must_use]
@@ -317,7 +331,17 @@ impl Drop for SyscallGuard {
 
 impl WorkerSlot {
     fn wake(&self) {
-        if self.parked.swap(false, Ordering::AcqRel) {
+        if self.parked.swap(false, Ordering::SeqCst) {
+            // The worker counts as running from here; its idle time is not a
+            // goroutine overstaying.
+            self.last_yield_micros
+                .store(now_micros_since_start(), Ordering::Release);
+            if self.polling.load(Ordering::SeqCst)
+                && let Some(poller) = crate::netpoll::worker_poller(self.index)
+            {
+                poller.wake();
+                return;
+            }
             // Notify; the lock is held briefly only as the condvar
             // contract requires.
             let _g = self.cv_mu.lock();
@@ -472,10 +496,40 @@ impl MultiScheduler {
         // thread-local before each `step` and clears it after. This
         // is a no-op when the race detector is disabled (the only
         // cost is one TLS write per step).
-        let stamped = GidStamped { gid, inner: task };
-        self.inner.injector.push(Box::new(stamped));
         self.inner.stats.spawned.fetch_add(1, Ordering::Relaxed);
-        self.wake_any();
+        // A goroutine never leaves the worker it first runs on, so where it
+        // starts is the only balancing it gets: it goes to the live worker
+        // with the fewest goroutines of its own. Left to the shared injector,
+        // a busy worker that polls it between steps would take every new
+        // goroutine before an idle one woke to.
+        let workers = self.inner.workers.lock();
+        let target = workers
+            .iter()
+            .filter(|slot| !slot.retired.load(Ordering::Acquire))
+            .min_by_key(|slot| slot.homed.load(Ordering::Relaxed))
+            .cloned();
+        if let Some(slot) = target {
+            slot.homed.fetch_add(1, Ordering::Relaxed);
+            let stamped = GidStamped {
+                gid,
+                inner: task,
+                homed: Some(Arc::clone(&slot.homed)),
+            };
+            // Pushed under the `workers` lock after observing the slot live,
+            // as the retired-inbox handoff in `unpark` requires.
+            slot.inbox.push(Box::new(stamped));
+            drop(workers);
+            slot.wake();
+        } else {
+            drop(workers);
+            let stamped = GidStamped {
+                gid,
+                inner: task,
+                homed: None,
+            };
+            self.inner.injector.push(Box::new(stamped));
+            self.wake_any();
+        }
         Some(gid)
     }
 
@@ -798,9 +852,12 @@ impl MultiScheduler {
         let deque: Deque<SendTask> = Deque::new_fifo();
         let stealer = deque.stealer();
         let slot = Arc::new(WorkerSlot {
+            index,
             stealer,
             inbox: Injector::new(),
             parked: AtomicBool::new(false),
+            polling: AtomicBool::new(false),
+            homed: Arc::new(AtomicUsize::new(0)),
             cv: Condvar::new(),
             cv_mu: Mutex::new(()),
             retired: AtomicBool::new(false),
@@ -821,9 +878,12 @@ impl MultiScheduler {
                     // Pad: if for some reason we're spawning out of
                     // order, fill with retired placeholders.
                     let placeholder = Arc::new(WorkerSlot {
+                        index: workers.len(),
                         stealer: Deque::<SendTask>::new_fifo().stealer(),
                         inbox: Injector::new(),
                         parked: AtomicBool::new(false),
+                        polling: AtomicBool::new(false),
+                        homed: Arc::new(AtomicUsize::new(0)),
                         cv: Condvar::new(),
                         cv_mu: Mutex::new(()),
                         retired: AtomicBool::new(true),
@@ -957,6 +1017,10 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
     };
     slot.last_yield_micros
         .store(now_micros_since_start(), Ordering::Release);
+    // A worker that always has a goroutine to run never parks in its poller,
+    // so it reads readiness on a fixed cadence of steps instead.
+    let mut steps_since_poll = 0u32;
+    let mut polled: Vec<u32> = Vec::new();
     loop {
         if slot.retired.load(Ordering::Acquire) {
             // Hand off every task still queued for this worker
@@ -1022,10 +1086,22 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
             // parked flag is set so the snapshot sees a consistent
             // view.
             park_worker(&slot, &shared);
+            // The watchdog measures a goroutine's run from here, not from
+            // the step this worker took before it went idle.
+            slot.last_yield_micros
+                .store(now_micros_since_start(), Ordering::Release);
             continue;
         };
         let step = task.step();
         shared.stats.steps.fetch_add(1, Ordering::Relaxed);
+        steps_since_poll += 1;
+        if steps_since_poll >= POLL_EVERY_STEPS {
+            steps_since_poll = 0;
+            if let Some(poller) = crate::netpoll::worker_poller(index) {
+                poller.turn(Some(Duration::ZERO), &mut polled);
+                crate::netpoll::unpark_all(&mut polled);
+            }
+        }
         match step {
             Step::Yield => {
                 shared.stats.yields.fetch_add(1, Ordering::Relaxed);
@@ -1177,9 +1253,31 @@ fn start_workers_for_blocked_syscalls(shared: &Arc<Shared>, now_micros: u64) {
     }
 }
 
+/// Takes a non-blocking pass over the poller of every worker index no live
+/// worker occupies: a worker that retired leaves its sockets and timers
+/// registered there, and their goroutines move to other workers when woken.
+fn drive_vacant_pollers(shared: &Arc<Shared>) {
+    let mut woken = Vec::new();
+    for (index, poller) in crate::netpoll::worker_poller_indices() {
+        let vacant = shared
+            .workers
+            .lock()
+            .get(index)
+            .is_none_or(|slot| slot.retired.load(Ordering::Acquire));
+        if vacant {
+            poller.turn(Some(Duration::ZERO), &mut woken);
+        }
+    }
+    crate::netpoll::unpark_all(&mut woken);
+}
+
 fn watchdog_loop(shared: Arc<Shared>) {
     let preempt_threshold = Duration::from_millis(10);
     let kill_threshold = Duration::from_millis(100);
+    // The allocator's decay window, which this thread applies for workers
+    // that have stopped allocating.
+    let purge_every = crate::allocator_purge_delay();
+    let mut last_purge = Instant::now();
     loop {
         if shared.stopping.load(Ordering::Acquire) {
             // One last bump so any spinning thread observes the
@@ -1197,14 +1295,22 @@ fn watchdog_loop(shared: Arc<Shared>) {
         // Acquire the workers list briefly to walk the slot vector;
         // each slot's `last_yield_micros` is then read with an
         // atomic load, with no mutex held across the comparison.
-        let snapshot: Vec<u64> = {
+        // A parked worker runs no goroutine, so the time since its last
+        // yield says nothing about one overstaying.
+        let snapshot: Vec<Option<u64>> = {
             let workers = shared.workers.lock();
             workers
                 .iter()
-                .map(|s| s.last_yield_micros.load(Ordering::Acquire))
+                .map(|s| {
+                    (!s.parked.load(Ordering::Acquire))
+                        .then(|| s.last_yield_micros.load(Ordering::Acquire))
+                })
                 .collect()
         };
         for (i, ts) in snapshot.iter().enumerate() {
+            let Some(ts) = ts else {
+                continue;
+            };
             let elapsed = now_micros.saturating_sub(*ts);
             if elapsed > preempt_micros {
                 needs_preempt = true;
@@ -1214,6 +1320,11 @@ fn watchdog_loop(shared: Arc<Shared>) {
             }
         }
         start_workers_for_blocked_syscalls(&shared, now_micros);
+        drive_vacant_pollers(&shared);
+        if !purge_every.is_zero() && last_purge.elapsed() >= purge_every {
+            crate::purge_expired_allocator_memory();
+            last_purge = Instant::now();
+        }
         if needs_preempt || shared.request_safepoint.load(Ordering::Acquire) {
             crate::preempt::request_yield_all();
             crate::preempt::bump_pressure();
@@ -1251,11 +1362,11 @@ fn next_task(
     shared: &Arc<Shared>,
     steal_cursor: &mut usize,
 ) -> Option<SendTask> {
-    // 1) own inbox - unparked goroutines pinned to this worker.
+    // 1) own inbox - goroutines placed on this worker and unparked ones
+    // pinned to it; `unpark` counts the latter where it resurrects them.
     loop {
         match self_slot.inbox.steal_batch_and_pop(deque) {
             Steal::Success(task) => {
-                shared.stats.unparks.fetch_add(1, Ordering::Relaxed);
                 return Some(task);
             }
             Steal::Empty => break,
@@ -1297,6 +1408,11 @@ fn next_task(
 }
 
 fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) {
+    crate::mark_thread_idle();
+    if let Some(poller) = crate::netpoll::worker_poller(slot.index) {
+        park_worker_in_poller(slot, shared, poller);
+        return;
+    }
     slot.parked.store(true, Ordering::Release);
     // Wake any orchestrator waiting in `wait_until_idle`: now that
     // this worker is parked, the snapshot may show all-idle.
@@ -1320,6 +1436,47 @@ fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) {
     slot.parked.store(false, Ordering::Release);
 }
 
+/// Parks a worker whose goroutines wait on sockets or timers in its own
+/// poller, so the readiness that ends the wait makes them runnable on this
+/// thread with no other thread in between.
+fn park_worker_in_poller(
+    slot: &Arc<WorkerSlot>,
+    shared: &Arc<Shared>,
+    poller: &crate::netpoll::Poller,
+) {
+    slot.polling.store(true, Ordering::SeqCst);
+    slot.parked.store(true, Ordering::SeqCst);
+    {
+        let _g = shared.idle_mu.lock();
+        shared.idle_cv.notify_all();
+    }
+    // A waker clears `parked` and then signals the poller. Work queued before
+    // `parked` was published is found here; work queued after it comes with a
+    // signal that ends the pass below.
+    if slot.parked.load(Ordering::SeqCst) && slot.inbox.is_empty() && shared.injector.is_empty() {
+        let mut woken = Vec::new();
+        // The bound lets an idle worker notice retirement and shutdown; a wake
+        // never waits on it. A pass another thread holds is waited out on the
+        // condition variable instead.
+        if !poller.turn(Some(Duration::from_millis(50)), &mut woken) {
+            let mut g = slot.cv_mu.lock();
+            slot.polling.store(false, Ordering::SeqCst);
+            if slot.parked.load(Ordering::SeqCst) {
+                let _ = slot.cv.wait_for(&mut g, Duration::from_millis(1));
+            }
+        }
+        slot.parked.store(false, Ordering::SeqCst);
+        slot.polling.store(false, Ordering::SeqCst);
+        crate::netpoll::unpark_all(&mut woken);
+        return;
+    }
+    slot.parked.store(false, Ordering::SeqCst);
+    slot.polling.store(false, Ordering::SeqCst);
+}
+
+/// Steps a busy worker runs between the non-blocking passes over its poller.
+const POLL_EVERY_STEPS: u32 = 61;
+
 /// Task adapter that publishes the goroutine's `gid` into the
 /// race-detector thread-local for the duration of each `step`,
 /// so `crate::race::current_gid` returns the right
@@ -1329,6 +1486,17 @@ fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) {
 struct GidStamped<T> {
     gid: Gid,
     inner: T,
+    /// The placement count of the worker this goroutine was placed on,
+    /// released when the goroutine is.
+    homed: Option<Arc<AtomicUsize>>,
+}
+
+impl<T> Drop for GidStamped<T> {
+    fn drop(&mut self) {
+        if let Some(homed) = &self.homed {
+            homed.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
 }
 
 impl<T: Task> Task for GidStamped<T> {
@@ -1447,9 +1615,12 @@ mod tests {
         let sched = MultiScheduler::new(1);
         let deque: Deque<SendTask> = Deque::new_fifo();
         let slot = Arc::new(WorkerSlot {
+            index: 0,
             stealer: deque.stealer(),
             inbox: Injector::new(),
             parked: AtomicBool::new(false),
+            polling: AtomicBool::new(false),
+            homed: Arc::new(AtomicUsize::new(0)),
             cv: Condvar::new(),
             cv_mu: Mutex::new(()),
             retired: AtomicBool::new(false),
@@ -1471,6 +1642,54 @@ mod tests {
             started.elapsed()
         );
         assert!(!slot.parked.load(Ordering::Acquire));
+    }
+
+    /// Yields until `release` is set, so it stays placed while the test looks.
+    struct HeldTask {
+        release: Arc<AtomicBool>,
+    }
+
+    impl Task for HeldTask {
+        fn step(&mut self) -> Step {
+            if self.release.load(Ordering::Acquire) {
+                Step::Done
+            } else {
+                std::thread::yield_now();
+                Step::Yield
+            }
+        }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)] // starts worker threads that sigaltstack; Miri has no signals
+    fn new_goroutines_are_placed_on_the_least_loaded_worker() {
+        let sched = MultiScheduler::new(4);
+        sched.start();
+        let release = Arc::new(AtomicBool::new(false));
+        for _ in 0..8 {
+            sched.spawn(HeldTask {
+                release: Arc::clone(&release),
+            });
+        }
+        let homed: Vec<usize> = sched
+            .inner
+            .workers
+            .lock()
+            .iter()
+            .map(|slot| slot.homed.load(Ordering::Relaxed))
+            .collect();
+        assert_eq!(homed, vec![2, 2, 2, 2]);
+        release.store(true, Ordering::Release);
+        assert!(sched.wait_quiescent(Duration::from_secs(10)));
+        let homed: usize = sched
+            .inner
+            .workers
+            .lock()
+            .iter()
+            .map(|slot| slot.homed.load(Ordering::Relaxed))
+            .sum();
+        assert_eq!(homed, 0, "a finished goroutine releases its placement");
+        sched.shutdown();
     }
 
     #[test]

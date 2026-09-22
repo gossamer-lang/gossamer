@@ -1,22 +1,27 @@
-//! Socket readiness and sleep timers for goroutines, delivered without a lock
-//! shared with the goroutines that wait.
+//! Socket readiness and sleep timers for goroutines, delivered on the worker
+//! thread that runs the goroutine waiting for them.
 //!
-//! A socket is registered once, edge-triggered, for both directions, and owns a
-//! [`PollDesc`] holding one waiter word per direction. A goroutine whose read or
-//! write would block parks with its gid in that word; the poll thread swaps the
-//! word to `READY` when the kernel reports readiness and unparks whoever was
-//! there. Waiting and waking touch that word and the scheduler and nothing else,
-//! so connections do not queue behind one another on a registry lock.
+//! A goroutine stays on the worker it first ran on, so each worker index owns
+//! a [`Poller`]: the sockets its goroutines registered, and the timers they
+//! sleep on. A worker with nothing to run blocks in its own poller instead of
+//! on a condition variable, and readiness it reads there makes its own
+//! goroutines runnable with no other thread involved. A busy worker takes a
+//! non-blocking pass every few dozen steps, the scheduler's watchdog drives
+//! the poller of an index no worker occupies, and code outside the scheduler
+//! gets a poller driven by a thread of its own.
 //!
-//! The same thread keeps a heap of sleep deadlines and sleeps in the kernel
-//! until the earliest, and sweeps I/O deadlines on a short fixed cadence: an
-//! I/O deadline bounds a stalled peer, where seconds matter and a few
-//! milliseconds of slack do not.
+//! A socket is registered once, edge-triggered, for both directions, and owns
+//! a [`PollDesc`] holding one waiter word per direction. A goroutine whose read
+//! or write would block parks with its gid in that word; the pass that sees the
+//! readiness swaps the word to `READY` and unparks whoever was there.
+//!
+//! I/O deadlines are swept on a short fixed cadence: a deadline bounds a
+//! stalled peer, where seconds matter and a few milliseconds of slack do not.
 
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::io;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -35,7 +40,7 @@ const WAITER: u64 = 2;
 /// How often I/O deadlines are checked.
 const SWEEP: Duration = Duration::from_millis(10);
 
-/// Token reserved for the poll thread's own waker.
+/// Token reserved for a poller's own waker.
 const WAKER_TOKEN: mio::Token = mio::Token(usize::MAX);
 
 /// A direction a goroutine waits on a socket for.
@@ -67,25 +72,41 @@ impl PollDesc {
     }
 }
 
-struct NetPoll {
+/// The kernel poll handle and its event buffer, held by whichever thread is
+/// taking a pass.
+struct Driver {
+    poll: mio::Poll,
+    events: mio::Events,
+}
+
+/// Registered sockets and sleep timers for one worker index, or for the
+/// threads outside the scheduler.
+pub(crate) struct Poller {
+    driver: Mutex<Driver>,
     registry: mio::Registry,
     waker: mio::Waker,
     descs: Mutex<Slab>,
     timers: Mutex<BinaryHeap<Reverse<Timer>>>,
-    /// Deadline, in nanoseconds past [`epoch`], the poll thread sleeps until.
+    /// Deadline, in nanoseconds past [`epoch`], a blocked pass sleeps until,
+    /// or 0 while no pass is blocked.
     sleeping_until: AtomicU64,
     /// Waits currently carrying an I/O deadline; the sweep is skipped at 0.
     armed_deadlines: AtomicUsize,
+    /// When the next deadline sweep is due, in nanoseconds past [`epoch`].
+    next_sweep: AtomicU64,
+    /// The worker index this poller belongs to, or `None` for the one the
+    /// threads outside the scheduler share.
+    index: Option<usize>,
 }
 
-/// One sleeping goroutine. `claimed` is taken by whichever of the poll thread
-/// (the deadline came) and the sleeper (it woke for another reason, a
-/// cancellation) gets there first, so a sleep that ended early never unparks
-/// its goroutine later, in the middle of some other wait.
+/// One sleeping goroutine. `claimed` is taken by whichever of the poller (the
+/// deadline came) and the sleeper (it woke for another reason, a cancellation)
+/// gets there first, so a sleep that ended early never unparks its goroutine
+/// later, in the middle of some other wait.
 struct Timer {
     at: u64,
     gid: u32,
-    claimed: Arc<std::sync::atomic::AtomicBool>,
+    claimed: Arc<AtomicBool>,
 }
 
 impl PartialEq for Timer {
@@ -150,99 +171,148 @@ fn now_nanos() -> u64 {
     nanos_at(Instant::now())
 }
 
-fn netpoll() -> io::Result<&'static NetPoll> {
-    static NETPOLL: OnceLock<Result<NetPoll, String>> = OnceLock::new();
-    let state = NETPOLL.get_or_init(|| {
-        let start = || -> io::Result<(NetPoll, mio::Poll)> {
-            let poll = mio::Poll::new()?;
-            let registry = poll.registry().try_clone()?;
-            let waker = mio::Waker::new(poll.registry(), WAKER_TOKEN)?;
-            Ok((
-                NetPoll {
-                    registry,
-                    waker,
-                    descs: Mutex::new(Slab::default()),
-                    timers: Mutex::new(BinaryHeap::new()),
-                    sleeping_until: AtomicU64::new(u64::MAX),
-                    armed_deadlines: AtomicUsize::new(0),
-                },
+impl Poller {
+    fn new(index: Option<usize>) -> io::Result<Self> {
+        let poll = mio::Poll::new()?;
+        let registry = poll.registry().try_clone()?;
+        let waker = mio::Waker::new(poll.registry(), WAKER_TOKEN)?;
+        let _ = epoch();
+        Ok(Self {
+            driver: Mutex::new(Driver {
                 poll,
-            ))
-        };
-        match start() {
-            Ok((netpoll, poll)) => {
-                let _ = epoch();
-                std::thread::Builder::new()
-                    .name("gos-netpoll".to_string())
-                    .spawn(move || poll_loop(poll))
-                    .map_err(|e| e.to_string())?;
-                Ok(netpoll)
-            }
-            Err(e) => Err(e.to_string()),
-        }
-    });
-    state.as_ref().map_err(|e| io::Error::other(e.clone()))
-}
+                events: mio::Events::with_capacity(256),
+            }),
+            registry,
+            waker,
+            descs: Mutex::new(Slab::default()),
+            timers: Mutex::new(BinaryHeap::new()),
+            sleeping_until: AtomicU64::new(0),
+            armed_deadlines: AtomicUsize::new(0),
+            next_sweep: AtomicU64::new(0),
+            index,
+        })
+    }
 
-fn poll_loop(mut poll: mio::Poll) {
-    let mut events = mio::Events::with_capacity(1024);
-    let mut woken: Vec<u32> = Vec::with_capacity(64);
-    let mut next_sweep = now_nanos() + SWEEP.as_nanos() as u64;
-    // Blocks until the thread that started this loop has published the
-    // state it is reached through.
-    let Ok(np) = netpoll() else {
-        return;
-    };
-    loop {
+    /// Ends a blocked pass early, or makes the next one return at once.
+    pub(crate) fn wake(&self) {
+        let _ = self.waker.wake();
+    }
+
+    /// Takes one pass: fires due timers and deadlines, then waits for socket
+    /// readiness up to `max_wait` (`None` for as long as nothing is due),
+    /// pushing the gids that became runnable onto `woken`.
+    ///
+    /// Answers `false`, having done nothing, while another thread holds the
+    /// pass.
+    pub(crate) fn turn(&self, max_wait: Option<Duration>, woken: &mut Vec<u32>) -> bool {
+        let Some(mut driver) = self.driver.try_lock() else {
+            return false;
+        };
         let now = now_nanos();
-        fire_timers(np, now, &mut woken);
-        if now >= next_sweep {
-            if np.armed_deadlines.load(Ordering::Acquire) > 0 {
-                sweep_deadlines(np, now, &mut woken);
+        self.fire_due(now, woken);
+        let timeout = if woken.is_empty() && max_wait != Some(Duration::ZERO) {
+            let wake_at = self.next_due();
+            self.sleeping_until.store(wake_at, Ordering::Release);
+            // A timer added between reading the heap and publishing the store
+            // above saw no sleeping pass and did not wake this one; look once
+            // more now that it is published.
+            let wake_at = wake_at.min(self.next_due());
+            let until_due = (wake_at != u64::MAX)
+                .then(|| Duration::from_nanos(wake_at.saturating_sub(now_nanos())));
+            match (max_wait, until_due) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
             }
-            next_sweep = now + SWEEP.as_nanos() as u64;
-        }
-        for gid in woken.drain(..) {
-            crate::sched_global::scheduler().unpark(Gid(gid));
-        }
-        let next_timer = np.timers.lock().peek().map_or(u64::MAX, |Reverse(t)| t.at);
-        let wake_at = next_timer.min(if np.armed_deadlines.load(Ordering::Acquire) > 0 {
-            next_sweep
         } else {
-            u64::MAX
-        });
-        np.sleeping_until.store(wake_at, Ordering::Release);
-        // A timer added between the peek and the store above saw the old,
-        // later deadline and did not wake the thread; look once more.
-        let next_timer = np.timers.lock().peek().map_or(u64::MAX, |Reverse(t)| t.at);
-        let wake_at = wake_at.min(next_timer);
-        let timeout = (wake_at != u64::MAX)
-            .then(|| Duration::from_nanos(wake_at.saturating_sub(now_nanos())));
-        if poll.poll(&mut events, timeout).is_err() {
-            // Interrupted by a signal, or a transient kernel refusal: the
-            // next pass polls again.
-            continue;
-        }
-        np.sleeping_until.store(0, Ordering::Release);
-        let descs = np.descs.lock();
-        for event in &events {
-            if event.token() == WAKER_TOKEN {
-                continue;
-            }
-            let Some(Some(desc)) = descs.entries.get(event.token().0) else {
-                continue;
-            };
-            let failed = event.is_error();
-            if failed || event.is_readable() || event.is_read_closed() {
-                notify(&desc.read, &mut woken);
-            }
-            if failed || event.is_writable() || event.is_write_closed() {
-                notify(&desc.write, &mut woken);
+            Some(Duration::ZERO)
+        };
+        let Driver { poll, events } = &mut *driver;
+        // An interrupted or refused poll delivers nothing; the next pass
+        // polls again.
+        let polled = poll.poll(events, timeout).is_ok();
+        self.sleeping_until.store(0, Ordering::Release);
+        if polled {
+            let descs = self.descs.lock();
+            for event in events.iter() {
+                if event.token() == WAKER_TOKEN {
+                    continue;
+                }
+                let Some(Some(desc)) = descs.entries.get(event.token().0) else {
+                    continue;
+                };
+                let failed = event.is_error();
+                if failed || event.is_readable() || event.is_read_closed() {
+                    notify(&desc.read, woken);
+                }
+                if failed || event.is_writable() || event.is_write_closed() {
+                    notify(&desc.write, woken);
+                }
             }
         }
-        drop(descs);
-        for gid in woken.drain(..) {
-            crate::sched_global::scheduler().unpark(Gid(gid));
+        drop(driver);
+        self.fire_due(now_nanos(), woken);
+        true
+    }
+
+    /// The earliest moment a timer or a deadline sweep is due.
+    fn next_due(&self) -> u64 {
+        let next_timer = self
+            .timers
+            .lock()
+            .peek()
+            .map_or(u64::MAX, |Reverse(t)| t.at);
+        if self.armed_deadlines.load(Ordering::Acquire) > 0 {
+            next_timer.min(self.next_sweep.load(Ordering::Acquire))
+        } else {
+            next_timer
+        }
+    }
+
+    fn fire_due(&self, now: u64, woken: &mut Vec<u32>) {
+        {
+            let mut timers = self.timers.lock();
+            while timers.peek().is_some_and(|Reverse(t)| t.at <= now) {
+                let Some(Reverse(timer)) = timers.pop() else {
+                    break;
+                };
+                if !timer.claimed.swap(true, Ordering::AcqRel) {
+                    woken.push(timer.gid);
+                }
+            }
+        }
+        if self.armed_deadlines.load(Ordering::Acquire) == 0
+            || now < self.next_sweep.load(Ordering::Acquire)
+        {
+            return;
+        }
+        self.next_sweep
+            .store(now + SWEEP.as_nanos() as u64, Ordering::Release);
+        let descs = self.descs.lock();
+        for desc in descs.entries.iter().flatten() {
+            for (slot, deadline) in [
+                (&desc.read, &desc.read_deadline),
+                (&desc.write, &desc.write_deadline),
+            ] {
+                let at = deadline.load(Ordering::Acquire);
+                if at == 0 || at > now {
+                    continue;
+                }
+                let waiter = slot.load(Ordering::Acquire);
+                if waiter >= WAITER
+                    && slot
+                        .compare_exchange(waiter, EMPTY, Ordering::AcqRel, Ordering::Acquire)
+                        .is_ok()
+                {
+                    woken.push(u32::try_from(waiter - WAITER).unwrap_or(u32::MAX));
+                }
+            }
+        }
+    }
+
+    fn arm_deadline(&self) {
+        if self.armed_deadlines.fetch_add(1, Ordering::AcqRel) == 0 {
+            self.next_sweep
+                .store(now_nanos() + SWEEP.as_nanos() as u64, Ordering::Release);
         }
     }
 }
@@ -254,70 +324,147 @@ fn notify(slot: &AtomicU64, woken: &mut Vec<u32>) {
     }
 }
 
-fn fire_timers(np: &NetPoll, now: u64, woken: &mut Vec<u32>) {
-    let mut timers = np.timers.lock();
-    while timers.peek().is_some_and(|Reverse(t)| t.at <= now) {
-        let Some(Reverse(timer)) = timers.pop() else {
-            break;
-        };
-        if !timer.claimed.swap(true, Ordering::AcqRel) {
-            woken.push(timer.gid);
-        }
+/// Unparks every gid in `woken`, leaving it empty.
+pub(crate) fn unpark_all(woken: &mut Vec<u32>) {
+    for gid in woken.drain(..) {
+        crate::sched_global::scheduler().unpark(Gid(gid));
     }
 }
 
-fn sweep_deadlines(np: &NetPoll, now: u64, woken: &mut Vec<u32>) {
-    let descs = np.descs.lock();
-    for desc in descs.entries.iter().flatten() {
-        for (slot, deadline) in [
-            (&desc.read, &desc.read_deadline),
-            (&desc.write, &desc.write_deadline),
-        ] {
-            let at = deadline.load(Ordering::Acquire);
-            if at == 0 || at > now {
-                continue;
-            }
-            let waiter = slot.load(Ordering::Acquire);
-            if waiter >= WAITER
-                && slot
-                    .compare_exchange(waiter, EMPTY, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
-                woken.push(u32::try_from(waiter - WAITER).unwrap_or(u32::MAX));
-            }
-        }
-    }
+/// A worker index's poller, created the first time it is needed, or why it
+/// could not be.
+type PollerSlot = OnceLock<Result<Arc<Poller>, String>>;
+
+/// One slot per worker index the scheduler can reach, each filled the first
+/// time a goroutine on that worker registers a socket or sleeps.
+fn worker_pollers() -> &'static [PollerSlot] {
+    static POLLERS: OnceLock<Box<[PollerSlot]>> = OnceLock::new();
+    POLLERS.get_or_init(|| {
+        (0..crate::sched::MultiScheduler::worker_count_cap())
+            .map(|_| OnceLock::new())
+            .collect()
+    })
 }
 
-/// A socket registered with the poll thread for as long as this lives.
+/// The poller of worker `index`, if one of its goroutines has needed it.
+pub(crate) fn worker_poller(index: usize) -> Option<&'static Arc<Poller>> {
+    worker_pollers().get(index)?.get()?.as_ref().ok()
+}
+
+/// Every worker index that has a poller, for the watchdog's pass over the
+/// ones no worker occupies.
+pub(crate) fn worker_poller_indices() -> impl Iterator<Item = (usize, &'static Arc<Poller>)> {
+    worker_pollers()
+        .iter()
+        .enumerate()
+        .filter_map(|(index, cell)| Some((index, cell.get()?.as_ref().ok()?)))
+}
+
+/// The poller shared by threads outside the scheduler, driven by a thread of
+/// its own that it starts the first time it is needed.
+fn thread_poller() -> io::Result<&'static Arc<Poller>> {
+    static POLLER: OnceLock<Result<Arc<Poller>, String>> = OnceLock::new();
+    let state = POLLER.get_or_init(|| {
+        let poller = Arc::new(Poller::new(None).map_err(|e| e.to_string())?);
+        let driven = Arc::clone(&poller);
+        std::thread::Builder::new()
+            .name("gos-netpoll".to_string())
+            .spawn(move || {
+                let mut woken = Vec::with_capacity(64);
+                loop {
+                    driven.turn(None, &mut woken);
+                    unpark_all(&mut woken);
+                }
+            })
+            .map_err(|e| e.to_string())?;
+        Ok(poller)
+    });
+    state.as_ref().map_err(|e| io::Error::other(e.clone()))
+}
+
+/// The poller for the calling thread: its worker's, or the shared one.
+fn current_poller() -> io::Result<&'static Arc<Poller>> {
+    let Some(index) = crate::sched::multi::current_worker_index() else {
+        return thread_poller();
+    };
+    let Some(cell) = worker_pollers().get(index) else {
+        return thread_poller();
+    };
+    cell.get_or_init(|| {
+        Poller::new(Some(index))
+            .map(Arc::new)
+            .map_err(|e| e.to_string())
+    })
+    .as_ref()
+    .map_err(|e| io::Error::other(e.clone()))
+}
+
+/// A socket registered for readiness for as long as this lives.
 pub struct Registration {
     desc: Arc<PollDesc>,
     token: usize,
+    poller: &'static Arc<Poller>,
 }
 
 impl Registration {
-    /// Registers `source` for readiness in both directions.
+    /// Registers `source` for readiness in both directions with the calling
+    /// worker's poller.
     pub fn new(source: &mut impl mio::event::Source) -> io::Result<Self> {
-        let np = netpoll()?;
+        let poller = current_poller()?;
         let desc = Arc::new(PollDesc::default());
-        let token = np.descs.lock().insert(Arc::clone(&desc));
-        if let Err(e) = np.registry.register(
+        let token = Self::register(poller, source, &desc)?;
+        Ok(Self {
+            desc,
+            token,
+            poller,
+        })
+    }
+
+    fn register(
+        poller: &Poller,
+        source: &mut impl mio::event::Source,
+        desc: &Arc<PollDesc>,
+    ) -> io::Result<usize> {
+        let token = poller.descs.lock().insert(Arc::clone(desc));
+        if let Err(e) = poller.registry.register(
             source,
             mio::Token(token),
             mio::Interest::READABLE | mio::Interest::WRITABLE,
         ) {
-            np.descs.lock().remove(token);
+            poller.descs.lock().remove(token);
             return Err(e);
         }
-        Ok(Self { desc, token })
+        Ok(token)
+    }
+
+    /// Moves `source` to the calling worker's poller when its goroutine now
+    /// runs on another worker than the one that registered it, so its
+    /// readiness is read where the goroutine waits for it.
+    pub fn follow(&mut self, source: &mut impl mio::event::Source) {
+        let Some(index) = crate::sched::multi::current_worker_index() else {
+            return;
+        };
+        if self.poller.index == Some(index) {
+            return;
+        }
+        let Ok(poller) = current_poller() else {
+            return;
+        };
+        let _ = self.poller.registry.deregister(source);
+        self.poller.descs.lock().remove(self.token);
+        // The descriptor moves whole, so a readiness recorded before the move
+        // is still there for the next wait; registering reports a socket that
+        // is already ready again.
+        if let Ok(token) = Self::register(poller, source, &self.desc) {
+            self.token = token;
+            self.poller = poller;
+        }
     }
 
     /// Removes `source`, which must be the one this was made for.
     pub fn deregister(self, source: &mut impl mio::event::Source) {
-        if let Ok(np) = netpoll() {
-            let _ = np.registry.deregister(source);
-            np.descs.lock().remove(self.token);
-        }
+        let _ = self.poller.registry.deregister(source);
+        self.poller.descs.lock().remove(self.token);
     }
 
     /// Parks the calling goroutine until the socket is ready in `direction`
@@ -341,9 +488,7 @@ impl Registration {
                 return false;
             }
             deadline_slot.store(nanos_at(at), Ordering::Release);
-            if let Ok(np) = netpoll() {
-                np.armed_deadlines.fetch_add(1, Ordering::AcqRel);
-            }
+            self.poller.arm_deadline();
         }
         crate::sched_global::park(ParkReason::Io, |parker| {
             let me = u64::from(parker.gid.as_u32()) + WAITER;
@@ -359,9 +504,7 @@ impl Registration {
         slot.store(EMPTY, Ordering::Release);
         if deadline.is_some() {
             deadline_slot.store(0, Ordering::Release);
-            if let Ok(np) = netpoll() {
-                np.armed_deadlines.fetch_sub(1, Ordering::AcqRel);
-            }
+            self.poller.armed_deadlines.fetch_sub(1, Ordering::AcqRel);
         }
         deadline.is_none_or(|at| Instant::now() < at)
     }
@@ -370,24 +513,25 @@ impl Registration {
 /// Parks the calling goroutine until `deadline`, or until something else
 /// unparks it first (a cancellation).
 ///
-/// Answers `false`, having done nothing, when the poll thread cannot run.
+/// Answers `false`, having done nothing, when no poller can run.
 #[must_use]
 pub fn sleep_until(deadline: Instant) -> bool {
-    let Ok(np) = netpoll() else {
+    let Ok(poller) = current_poller() else {
         return false;
     };
     let at = nanos_at(deadline);
-    let claimed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let claimed = Arc::new(AtomicBool::new(false));
     crate::sched_global::park(ParkReason::Timer, |parker| {
-        np.timers.lock().push(Reverse(Timer {
+        poller.timers.lock().push(Reverse(Timer {
             at,
             gid: parker.gid.as_u32(),
             claimed: Arc::clone(&claimed),
         }));
-        // The thread is woken only when this deadline comes before the one it
-        // is already sleeping until.
-        if at < np.sleeping_until.load(Ordering::Acquire) {
-            let _ = np.waker.wake();
+        // A pass blocked past this deadline is ended early; one not blocked
+        // reads the heap before it next blocks.
+        let sleeping_until = poller.sleeping_until.load(Ordering::Acquire);
+        if sleeping_until != 0 && at < sleeping_until {
+            poller.wake();
         }
     });
     // Woken early, the entry still in the heap must not wake this goroutine

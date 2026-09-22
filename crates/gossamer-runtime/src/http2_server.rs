@@ -294,7 +294,7 @@ async fn serve_one_stream(
         // HTTP/2 frames each stream itself and carries no connection
         // header, so the h1 writer is asked for its keep-alive form and
         // the header is dropped with the rest of the h1 head below.
-        let ok = extract_response_into(result_ptr, &mut wire_buf, &mut true);
+        let ok = extract_response_into(result_ptr, &mut wire_buf, &mut true, false);
         // SAFETY: drop_handler_result frees the GosResult* the
         // handler returned. result_ptr is non-null and owned by
         // this frame (extracted above without taking ownership).

@@ -235,16 +235,13 @@ fn json_value_to_yaml(v: &gossamer_std::json::Value) -> gossamer_std::encoding::
 
 pub(crate) fn builtin_yaml_parse(args: &[Value]) -> RuntimeResult<Value> {
     let src = args.first().and_then(as_str).unwrap_or("");
-    // Project YAML onto the JSON value tree so `yaml::parse` returns a
-    // `json::Value` - the same dynamic-document type the compiled tier
-    // produces (`gos_rt_yaml_parse`), keeping the surface bit-identical.
-    match gossamer_std::encoding::yaml::to_json(src) {
-        Ok(json_text) => match gossamer_std::json::parse(&json_text) {
-            Ok(v) => Ok(ok_variant(
-                crate::stdlib_builtins::json_builtins::json_std_to_value(v),
-            )),
-            Err(e) => Ok(err_variant(format!("yaml::parse: {e}"))),
-        },
+    // The document is a `json::Value` exactly as `json::parse` answers one,
+    // so every `json::` accessor reads it, as on the compiled tier
+    // (`gos_rt_yaml_parse`).
+    match gossamer_std::encoding::yaml::parse_json(src) {
+        Ok(v) => Ok(ok_variant(Value::Json(Arc::new(
+            crate::value::JsonInner::new(v),
+        )))),
         Err(e) => Ok(err_variant(format!("yaml::parse: {e}"))),
     }
 }

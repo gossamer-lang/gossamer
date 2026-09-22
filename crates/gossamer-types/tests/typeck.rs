@@ -4496,6 +4496,27 @@ fn json_value_accessor_methods_typecheck_clean() {
     assert!(d.is_empty(), "the json accessor surface types: {d:?}");
 }
 
+/// A `json::Value` and a `DynValue` answer their own tables and nothing else,
+/// so a name neither declares is unresolved at the call site.
+#[test]
+fn a_method_neither_dynamic_value_declares_is_unresolved() {
+    for source in [
+        "use std::encoding::json\nfn main() { let v = json::parse(\"[1]\").unwrap()\n let _ = json::at(v, 0).and_then(json::as_str) }\n",
+        "use std::encoding::json\nfn main() { let v = json::parse(\"{}\").unwrap()\n let _ = v.frobnicate() }\n",
+        "fn main() { let d = DynValue::int(7)\n let _ = d.frobnicate() }\n",
+    ] {
+        let d = diagnostics_for(source);
+        assert!(has_code(&d, "GT0002"), "{source} -> {d:?}");
+    }
+    let d = diagnostics_for(
+        "use std::encoding::json\nfn main() { let v = json::parse(\"{}\").unwrap()\n let _ = v.clone()\n let _ = v.to_string() }\n",
+    );
+    assert!(
+        d.is_empty(),
+        "every value answers clone and to_string: {d:?}"
+    );
+}
+
 /// A callable declares no methods, so a method reached on a named function,
 /// a closure binding, or an `Fn(..)` parameter is unresolved rather than
 /// silently answering against the function's own name.

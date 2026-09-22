@@ -9711,6 +9711,50 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Types a method call on a `json::Value` or `DynValue` receiver from its
+    /// table, or reports a name the table does not declare. `None` for any
+    /// other receiver, and for a name every value answers.
+    fn opaque_value_method(
+        &mut self,
+        resolved: Ty,
+        method: &str,
+        arg_count: usize,
+        span: Span,
+    ) -> Option<Ty> {
+        if let Some(ty) = self.opaque_value_method_ret(resolved, method, arg_count) {
+            return Some(ty);
+        }
+        self.reject_unknown_opaque_value_method(resolved, method, span)
+            .then(|| self.tcx.error_ty())
+    }
+
+    /// Rejects a method a `json::Value` or `DynValue` receiver does not
+    /// answer. Their tables above are each receiver's whole surface: a name
+    /// neither declares has no binding on any tier, so the VM would read it
+    /// as a no-op and a native build would end on an undefined symbol.
+    fn reject_unknown_opaque_value_method(
+        &mut self,
+        resolved: Ty,
+        method: &str,
+        span: Span,
+    ) -> bool {
+        let owner = match self.tcx.kind(resolved) {
+            Some(TyKind::JsonValue) => "json::Value",
+            Some(TyKind::DynValue) => "DynValue",
+            _ => return false,
+        };
+        // The conversions every value answers, and any name a user impl or
+        // trait declares, keep their own resolution.
+        if matches!(method, "clone" | "into" | "try_into" | "to_string")
+            || self.user_method_owners.contains_key(method)
+        {
+            return false;
+        }
+        let error = self.unresolved_method(owner.to_string(), method, resolved);
+        self.emit(error, span);
+        true
+    }
+
     /// Return type of a method call on a `DynValue` receiver. `None` leaves
     /// the call to the later dispatch arms, which report it as unknown.
     fn dyn_value_method_ret(&mut self, method: &str, arg_count: usize) -> Option<Ty> {
@@ -11591,7 +11635,7 @@ impl<'a> TypeChecker<'a> {
         // JsonValue tag - leaving a chained `.set(..).set(..)` receiver
         // untagged for the compiled tiers - and would let a document read
         // bind to any annotation the caller wrote.
-        if let Some(ty) = self.opaque_value_method_ret(resolved, method, arg_count) {
+        if let Some(ty) = self.opaque_value_method(resolved, method, arg_count, receiver.span) {
             return ty;
         }
         if method != "clone"

@@ -98,13 +98,10 @@ fn default_workers() -> usize {
     thread::available_parallelism().map_or(1, std::num::NonZero::get)
 }
 
-/// Returns a handle to the process-wide scheduler. The first caller
-/// boots both the scheduler and the poller thread.
+/// Returns a handle to the process-wide scheduler, booting it on first use.
 #[must_use]
 pub fn scheduler() -> &'static MultiScheduler {
-    let g = globals();
-    ensure_poller_thread(g);
-    &g.scheduler
+    &globals().scheduler
 }
 
 fn ensure_poller_thread(g: &'static Globals) {
@@ -117,16 +114,6 @@ fn ensure_poller_thread(g: &'static Globals) {
         .expect("spawn netpoller thread");
 }
 
-/// Short poll cycle for the netpoller. Bounds the worst-case
-/// time a registering goroutine waits for `g.poller.lock()`:
-/// any registration arriving while the netpoller is mid-syscall
-/// waits at most `POLL_TICK_MS` ms before the mutex unlocks.
-/// The mio waker (fired by [`with_poller`]) is the first line
-/// of defence - most cycles end instantly when a registration
-/// fires it - but the ceiling keeps idle CPU bounded if the
-/// waker mechanism is ever broken or bypassed.
-const POLL_TICK_MS: u64 = 1;
-
 fn poller_loop() {
     let g = globals();
     loop {
@@ -135,9 +122,9 @@ fn poller_loop() {
         }
         let events = {
             let mut poller = g.poller.lock();
-            let events = poller
-                .poll(Some(Duration::from_millis(POLL_TICK_MS)))
-                .unwrap_or_default();
+            // Blocks until a registered source is ready, the earliest timer
+            // is due, or a registrar or shutdown wakes it to take the lock.
+            let events = poller.poll(None).unwrap_or_default();
             // On Windows a nominal 1 ms mio timeout may sleep for a full
             // scheduler quantum. Reacquiring an unfair mutex immediately
             // afterward can starve timer registration long enough to strand
@@ -164,8 +151,7 @@ pub fn request_shutdown() {
     // Only an already-booted runtime has a poller to wake.
     let Some(g) = GLOBALS.get() else { return };
     g.poller_shutdown.store(true, Ordering::Release);
-    // Wake the poller so it doesn't sit on a 1ms tick before
-    // observing the flag.
+    // Wake the poller so it observes the flag instead of sleeping on.
     let _ = g.poller_interrupt.wake();
 }
 
@@ -248,8 +234,10 @@ pub fn add_timer(deadline: Instant) -> Gid {
 /// Borrows the netpoller for a closure. Used by the I/O bridge code
 /// in `gossamer-std::net` and the runtime's own HTTP plumbing.
 pub fn with_poller<R>(f: impl FnOnce(&mut OsPoller) -> R) -> R {
-    let _ = scheduler();
     let g = globals();
+    // The thread exists only once something registers with the poller, so a
+    // program that never does carries no thread polling for it.
+    ensure_poller_thread(g);
     // Interrupt an in-flight poll before waiting for the mutex. Waking only
     // after registration is too late: the registering worker may already be
     // blocked behind the poller thread, which holds this mutex across poll().

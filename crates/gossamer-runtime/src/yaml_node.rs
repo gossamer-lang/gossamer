@@ -7,7 +7,15 @@
 
 use std::fmt;
 
-use serde::de::{self, Deserialize, Deserializer, EnumAccess, MapAccess, SeqAccess, Visitor};
+use serde::de::{
+    self, Deserialize, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, Visitor,
+};
+
+/// Deepest nesting of sequences and mappings a YAML document may have.
+pub const DEFAULT_MAX_DEPTH: usize = 128;
+
+/// Largest YAML document, in bytes, a decoder accepts.
+pub const DEFAULT_MAX_SIZE: usize = 16 * 1024 * 1024;
 
 /// A decoded YAML value with tags dropped and mapping order preserved.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +98,177 @@ impl Node {
 /// Returns the parser's message when `text` is not a single YAML document.
 pub fn parse(text: &str) -> Result<Node, serde_norway::Error> {
     serde_norway::from_str(text)
+}
+
+/// Why [`parse_json`] refused a document.
+#[derive(Debug)]
+pub enum JsonDecodeError {
+    /// The text is not a single YAML document.
+    Parse(serde_norway::Error),
+    /// Sequences and mappings nest deeper than the cap allowed.
+    TooDeep,
+}
+
+/// Decodes one YAML document straight into the JSON value
+/// [`Node::into_json`] answers for it, refusing sequences and mappings nested
+/// deeper than `max_depth`.
+///
+/// No intermediate [`Node`] tree is built, so a large document costs the
+/// parser's events and the JSON value, not a second copy of the tree beside
+/// them.
+///
+/// # Errors
+/// Returns why the document was refused.
+pub fn parse_json(text: &str, max_depth: usize) -> Result<serde_json::Value, JsonDecodeError> {
+    let too_deep = std::cell::Cell::new(false);
+    let seed = JsonSeed {
+        depth_left: max_depth,
+        too_deep: &too_deep,
+    };
+    seed.deserialize(serde_norway::Deserializer::from_str(text))
+        .map_err(|e| {
+            if too_deep.get() {
+                JsonDecodeError::TooDeep
+            } else {
+                JsonDecodeError::Parse(e)
+            }
+        })
+}
+
+/// Decodes one YAML document as a JSON value under a size and a depth cap,
+/// answering the message a refused document reports on every tier.
+///
+/// # Errors
+/// Returns the size cap's, the depth cap's, or the parser's message.
+pub fn decode_json(
+    text: &str,
+    max_depth: usize,
+    max_size: usize,
+) -> Result<serde_json::Value, String> {
+    if text.len() > max_size {
+        return Err(format!(
+            "input exceeds max_size ({} > {max_size})",
+            text.len()
+        ));
+    }
+    parse_json(text, max_depth).map_err(|e| match e {
+        JsonDecodeError::Parse(e) => e.to_string(),
+        JsonDecodeError::TooDeep => format!("nesting depth exceeds max_depth ({max_depth})"),
+    })
+}
+
+/// Decodes one value as JSON with `depth_left` levels of nesting to spend.
+#[derive(Clone, Copy)]
+struct JsonSeed<'a> {
+    depth_left: usize,
+    too_deep: &'a std::cell::Cell<bool>,
+}
+
+impl JsonSeed<'_> {
+    /// The seed for a value nested one level inside this one, or the error
+    /// that ends decoding when no level is left.
+    fn nested<E: de::Error>(self) -> Result<Self, E> {
+        if self.depth_left == 0 {
+            self.too_deep.set(true);
+            return Err(E::custom("nesting depth exceeds max_depth"));
+        }
+        Ok(Self {
+            depth_left: self.depth_left - 1,
+            too_deep: self.too_deep,
+        })
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for JsonSeed<'_> {
+    type Value = serde_json::Value;
+
+    fn deserialize<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+impl<'de> Visitor<'de> for JsonSeed<'_> {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("any YAML value")
+    }
+
+    fn visit_unit<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_none<E>(self) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D: Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        self.deserialize(deserializer)
+    }
+
+    fn visit_bool<E>(self, b: bool) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::Bool(b))
+    }
+
+    fn visit_i64<E: de::Error>(self, n: i64) -> Result<Self::Value, E> {
+        Ok(NodeVisitor.visit_i64::<E>(n)?.into_json())
+    }
+
+    fn visit_u64<E: de::Error>(self, n: u64) -> Result<Self::Value, E> {
+        Ok(NodeVisitor.visit_u64::<E>(n)?.into_json())
+    }
+
+    fn visit_i128<E: de::Error>(self, n: i128) -> Result<Self::Value, E> {
+        Ok(NodeVisitor.visit_i128::<E>(n)?.into_json())
+    }
+
+    fn visit_u128<E: de::Error>(self, n: u128) -> Result<Self::Value, E> {
+        Ok(NodeVisitor.visit_u128::<E>(n)?.into_json())
+    }
+
+    fn visit_f64<E>(self, f: f64) -> Result<Self::Value, E> {
+        Ok(Node::Float(f).into_json())
+    }
+
+    fn visit_str<E>(self, s: &str) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(s.to_string()))
+    }
+
+    fn visit_string<E>(self, s: String) -> Result<Self::Value, E> {
+        Ok(serde_json::Value::String(s))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        let inner = self.nested()?;
+        let mut items = Vec::with_capacity(seq.size_hint().unwrap_or(0));
+        while let Some(item) = seq.next_element_seed(inner)? {
+            items.push(item);
+        }
+        Ok(serde_json::Value::Array(items))
+    }
+
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let inner = self.nested()?;
+        let mut entries = serde_json::Map::new();
+        // A key is small and usually a string; decoding it as a node keeps
+        // the rendering of a non-string key the one `into_json` gives it.
+        while let Some(key) = map.next_key::<Node>()? {
+            if key.depth() > inner.depth_left {
+                inner.too_deep.set(true);
+                return Err(de::Error::custom("nesting depth exceeds max_depth"));
+            }
+            let value = map.next_value_seed(inner)?;
+            entries.insert(key.key_text(), value);
+        }
+        Ok(serde_json::Value::Object(entries))
+    }
+
+    // A `!tag value` arrives as an enum whose variant is the tag; the tag
+    // carries no meaning here, so the value stands for itself.
+    fn visit_enum<A: EnumAccess<'de>>(self, data: A) -> Result<Self::Value, A::Error> {
+        let (_tag, variant) = data.variant::<String>()?;
+        de::VariantAccess::newtype_variant_seed(variant, self)
+    }
 }
 
 /// Decodes every document of a multi-document YAML stream.
@@ -204,7 +383,7 @@ impl<'de> Visitor<'de> for NodeVisitor {
 
 #[cfg(test)]
 mod tests {
-    use super::{Node, parse, parse_all};
+    use super::{JsonDecodeError, Node, decode_json, parse, parse_all, parse_json};
 
     #[test]
     fn integers_that_fit_64_bits_stay_exact() {
@@ -240,6 +419,60 @@ mod tests {
                 ),
             ])
         );
+    }
+
+    #[test]
+    fn decoding_straight_to_json_matches_the_node_tree_projection() {
+        let docs = [
+            "b: !custom 1\na: [x, ~, 2.5, -9223372036854776000]\n",
+            "1: one\ntrue: yes\n~: none\n2.5: half\n",
+            "? [a, b]\n: pair\n",
+            "top:\n  mid:\n    - {k: v, n: 18446744073709551615}\n    - 99999999999999999999999\n",
+            "plain scalar",
+            "[]",
+        ];
+        for doc in docs {
+            let want = parse(doc).unwrap().into_json();
+            let got = parse_json(doc, 128).unwrap();
+            assert_eq!(got, want, "{doc}");
+            assert_eq!(
+                serde_json::to_string(&got).unwrap(),
+                serde_json::to_string(&want).unwrap(),
+                "{doc}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_depth_cap_refuses_exactly_what_the_tree_depth_exceeds() {
+        let docs = [
+            "a",
+            "[a]",
+            "[[a]]",
+            "{a: [{b: c}]}",
+            "? [[x]]\n: y\n",
+            "[[[[1]]], 2]",
+        ];
+        for doc in docs {
+            let depth = parse(doc).unwrap().depth();
+            for cap in 0..6 {
+                let refused = matches!(parse_json(doc, cap), Err(JsonDecodeError::TooDeep));
+                assert_eq!(refused, depth > cap, "{doc} at cap {cap}");
+            }
+        }
+    }
+
+    #[test]
+    fn decode_json_reports_each_refusal_in_the_shared_wording() {
+        assert_eq!(
+            decode_json("[[1]]", 1, 64).unwrap_err(),
+            "nesting depth exceeds max_depth (1)"
+        );
+        assert_eq!(
+            decode_json("abcdef", 8, 4).unwrap_err(),
+            "input exceeds max_size (6 > 4)"
+        );
+        assert!(decode_json("a: [", 8, 64).is_err());
     }
 
     #[test]
