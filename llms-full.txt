@@ -915,7 +915,7 @@ Full path spelling is validated (GR0005); discover signatures with
 - Misc: `sort`, `math::{rand, big}`, `crypto::{rand, sha256, sha512,
   hmac, blake3, aead, ed25519, ecdsa, x509, kdf, password
   (Argon2id), subtle}` (`crypto::insecure` = MD5/SHA1 compat only),
-  `hash::{fnv, crc32, adler32}`, `uuid` (v4/v7), `jwt`,
+  `hash::{fnv, crc32, crc32c, adler32}`, `uuid` (v4/v7), `jwt`,
   `compress::{gzip, flate, zlib, zstd, bzip2}`, `archive::{zip,
   tar}`, `metrics`, `trace`, `slog`, `lifecycle`, `validate`,
   `testing`, `runtime` (`collect_cycles`, `set_panic_hook`, `cohorts()` -

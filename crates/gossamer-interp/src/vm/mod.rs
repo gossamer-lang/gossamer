@@ -1679,7 +1679,7 @@ fn adaptive_add(
         }
         bytecode::ARITH_STRING_STRING => {
             if let (Value::String(x), Value::String(y)) = (a, b) {
-                let mut s = String::with_capacity(x.len() + y.len());
+                let mut s = String::with_capacity(x.byte_len() + y.byte_len());
                 s.push_str(x);
                 s.push_str(y);
                 return Ok(Value::String(s.into()));
@@ -1689,7 +1689,7 @@ fn adaptive_add(
     }
     record_shape(state, cache_idx, classify_pair(a, b, true));
     if let (Value::String(x), Value::String(y)) = (a, b) {
-        let mut s = String::with_capacity(x.len() + y.len());
+        let mut s = String::with_capacity(x.byte_len() + y.byte_len());
         s.push_str(x);
         s.push_str(y);
         return Ok(Value::String(s.into()));

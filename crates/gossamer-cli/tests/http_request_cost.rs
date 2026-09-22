@@ -135,6 +135,8 @@ fn measure_cpu_per_request(label: &str, binary: &Path, arg: String, port: u16) -
     drive(port, 200);
 
     let before = common::proc_cpu_ticks(pid).expect("read the server's CPU");
+    let switches_before = common::proc_context_switches(pid);
+    let faults_before = common::proc_minor_faults(pid);
     let start = Instant::now();
     std::thread::scope(|scope| {
         for _ in 0..WORKERS {
@@ -144,8 +146,16 @@ fn measure_cpu_per_request(label: &str, binary: &Path, arg: String, port: u16) -
     let wall = start.elapsed();
     let after = common::proc_cpu_ticks(pid).expect("read the server's CPU");
 
+    let switches = common::proc_context_switches(pid) - switches_before;
+    let faults = common::proc_minor_faults(pid) - faults_before;
     let micros = common::cpu_micros_per_request(after - before, TOTAL);
-    println!("{label}: {micros:.2} us cpu/request over {TOTAL} requests in {wall:?}");
+    let per = |n: u64| n as f64 / TOTAL as f64;
+    println!(
+        "{label}: {micros:.2} us cpu/request over {TOTAL} requests in {wall:?} \
+         ({:.2} context switches, {:.2} minor faults per request)",
+        per(switches),
+        per(faults)
+    );
     micros
 }
 

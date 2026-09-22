@@ -2131,7 +2131,7 @@ fn small_variant_key(name: &TypeTag, fields: &[Value]) -> Option<SmallVariantKey
         [Value::Bool(b)] => Some(SmallVariantKey::Bool(name.clone(), *b)),
         // A single short string payload: immutable, so sharing one node
         // across all identical occurrences is sound exactly as for scalars.
-        [Value::String(s)] if s.len() <= SMALL_VARIANT_STR_MAX => {
+        [Value::String(s)] if s.byte_len() <= SMALL_VARIANT_STR_MAX => {
             Some(SmallVariantKey::Str(name.clone(), s.clone()))
         }
         _ => None,

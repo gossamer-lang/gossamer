@@ -373,6 +373,10 @@ struct Shared {
     /// Live (spawned but not yet finished) goroutine count. The
     /// scheduler refuses new spawns above `max_live`.
     live_goroutines: AtomicUsize,
+    /// Live goroutines the runtime runs on the program's behalf, such as one
+    /// serving an accepted connection. Counted in `live_goroutines` as well;
+    /// process exit does not wait for them.
+    service_goroutines: Arc<AtomicUsize>,
     /// Maximum live goroutines this scheduler will admit. Honours
     /// `runtime::set_max_procs` and `GOSSAMER_MAX_PROCS`. Default is
     /// `1_000_000`.
@@ -471,6 +475,7 @@ impl MultiScheduler {
                 .collect(),
 
             live_goroutines: AtomicUsize::new(0),
+            service_goroutines: Arc::new(AtomicUsize::new(0)),
             max_live: AtomicUsize::new(default_max_live()),
             stats: AtomicStats::default(),
             park_wait: AtomicParkWaitStats::default(),
@@ -496,6 +501,16 @@ impl MultiScheduler {
     /// exceeded - surface the refusal to user code instead of
     /// silently overcommitting kernel resources.
     pub fn try_spawn<T: SchedTask + 'static>(&self, task: T) -> Option<Gid> {
+        self.try_spawn_as(task, false)
+    }
+
+    /// [`Self::try_spawn`] for a goroutine the runtime runs on the program's
+    /// behalf, which process exit does not wait for.
+    pub fn try_spawn_service<T: SchedTask + 'static>(&self, task: T) -> Option<Gid> {
+        self.try_spawn_as(task, true)
+    }
+
+    fn try_spawn_as<T: SchedTask + 'static>(&self, task: T, service: bool) -> Option<Gid> {
         let max = self.inner.max_live.load(Ordering::Relaxed);
         let prev = self.inner.live_goroutines.fetch_add(1, Ordering::AcqRel);
         if prev >= max {
@@ -514,6 +529,10 @@ impl MultiScheduler {
         // thread-local before each `step` and clears it after. This
         // is a no-op when the race detector is disabled (the only
         // cost is one TLS write per step).
+        let service = service.then(|| {
+            self.inner.service_goroutines.fetch_add(1, Ordering::AcqRel);
+            Arc::clone(&self.inner.service_goroutines)
+        });
         self.inner.stats.spawned.fetch_add(1, Ordering::Relaxed);
         // A goroutine never leaves the worker it first runs on, so where it
         // starts is the only balancing it gets: it goes to the live worker
@@ -532,6 +551,7 @@ impl MultiScheduler {
                 gid,
                 inner: task,
                 homed: Some(Arc::clone(&slot.homed)),
+                service,
             };
             // Pushed under the `workers` lock after observing the slot live,
             // as the retired-inbox handoff in `unpark` requires.
@@ -544,6 +564,7 @@ impl MultiScheduler {
                 gid,
                 inner: task,
                 homed: None,
+                service,
             };
             self.inner.injector.push(Box::new(stamped));
             self.wake_any();
@@ -929,8 +950,8 @@ impl MultiScheduler {
         }
     }
 
-    /// Blocks until every spawned task has finished (`live == 0` and
-    /// `spawned == finished`), or `timeout` passes. Returns whether the
+    /// Blocks until every spawned task other than a service goroutine has
+    /// finished, or `timeout` passes. Returns whether the
     /// pool quiesced. The bound is a liveness guarantee for process
     /// exit: a goroutine blocked forever (say, on a channel nobody
     /// sends to) must not wedge the process. Waits on `idle_cv` - the
@@ -943,8 +964,12 @@ impl MultiScheduler {
         let mut g = self.inner.idle_mu.lock();
         let _waiting = IdleWaiter::enter(&self.inner);
         loop {
+            // Service first: it is released before the goroutine leaves
+            // `live`, so a stale read can only undercount what may be ignored.
+            let service = self.inner.service_goroutines.load(Ordering::Acquire);
             let stats = self.inner.stats.snapshot();
-            if self.live_goroutines() == 0 && stats.spawned == stats.finished {
+            if self.live_goroutines() == service && stats.spawned == stats.finished + service as u64
+            {
                 return true;
             }
             let now = Instant::now();
@@ -1541,6 +1566,8 @@ struct GidStamped<T> {
     /// The placement count of the worker this goroutine was placed on,
     /// released when the goroutine is.
     homed: Option<Arc<AtomicUsize>>,
+    /// The scheduler's service count, when this is a service goroutine.
+    service: Option<Arc<AtomicUsize>>,
 }
 
 impl<T> Drop for GidStamped<T> {
@@ -1569,6 +1596,9 @@ impl<T: Task> Task for GidStamped<T> {
             // finished one is never dumped again, and retaining it would grow
             // the table for the lifetime of the process.
             crate::sigquit::unregister(self.gid.as_u32());
+            if let Some(service) = self.service.take() {
+                service.fetch_sub(1, Ordering::AcqRel);
+            }
         }
         result
     }

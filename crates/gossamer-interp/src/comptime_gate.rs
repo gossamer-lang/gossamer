@@ -119,6 +119,7 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     ("Context", None),
     ("Counter", None),
     ("crc32", None),
+    ("crc32c", None),
     ("crypto", None),
     ("csv", None),
     ("deque", None),

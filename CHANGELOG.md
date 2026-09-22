@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.63.1 - Faster numeric and JSON text, in-place appends, smaller resident stores
+## 0.63.1 - Faster numeric and JSON text, in-place appends, smaller resident stores, http performance
 
 - `f64` renders through a shortest-digit formatter laid out as `Display` lays it out, so `x.to_string()`, `{}`, and `format` on a float skip the general formatting machinery, with the same text on every tier.
 - `s.push_json_quoted(buf, start, end)` appends a byte window as a quoted JSON string, escaped exactly as `json::encode` escapes one (`<`, `>`, `&`, U+2028, and U+2029 included), in a single pass that copies plain ASCII between its quotes at once and checks UTF-8 only where a wide byte appears. It answers whether it appended, as `push_utf8` does.
@@ -28,6 +28,21 @@
 - `fs::read` reads a file straight into the `Vec` it answers, so a program holding a file's bytes holds them once rather than briefly twice, and a store that keeps its data file resident no longer carries the second copy's pages for the rest of its run.
 - Two files of one project may each import a same-named module of their own (`use super::scan` in `kv/compact.gos` and in `engine/stmt.gos`); each file's paths, constants, and variants read its own import, where the second was rejected as imported twice.
 - A `Map` moved out of a by-value parameter's field into a returned struct is cloned once for the struct, where the struct and the parameter shared one table and freed it twice.
+- An HTTP server's accept loop waits for connections on the readiness poller instead of inside `accept` on its scheduler worker, so a connection goroutine started on that worker runs at once; on a machine with few CPUs a server could stop answering a connection until the next one arrived.
+- A program that returns from `main` while HTTP keep-alive connections are open exits at once, where it waited up to five seconds for connections that were only waiting for another request.
+- `http::Server::shutdown` waits for requests being answered, not for open connections, as on the bytecode VM: a keep-alive connection between requests no longer makes a compiled build's drain wait out its deadline and answer `false`, and once shutdown begins a connection closes after the response it is writing.
+- On the compiled tiers, `net::TcpListener::accept`, `net::TcpStream` reads and writes, and the `net::UnixListener` / `net::UnixStream` equivalents wait on the blocking pool when a goroutine calls them, so goroutines started on the same worker keep running; a TCP read or write that can complete at once still does so without leaving the goroutine.
+- The blocking pool starts a thread for every queued job beyond the threads waiting for one, where two jobs submitted together could both be handed to one idle thread and the second wait for as long as the first did.
+- On the bytecode VM, a `net::TcpListener` answers `local_addr` and its other methods while another goroutine waits in its `accept`, where the call waited for the next connection.
+- On Windows, an HTTP connection reads until the socket reports it would block before it waits for readiness, since Windows signals new data only after that; a connection could stall and be reset.
+- `s.clear()` and `s.truncate(n)` on a `String` held alone shorten it in place and keep its capacity on the compiled tiers, so a buffer cleared and refilled per row or per request allocates nothing once it has grown; each call used to allocate a fresh string and drop the reserved space.
+- `s.truncate(n)` with a negative `n` panics on every tier with `truncate: length must be non-negative`, as `Vec::truncate` does on the compiled tiers; the compiled tiers truncated to empty and the bytecode VM reported a type error, which it also did for a `Vec`.
+- On the bytecode VM, `s.truncate(n)` on a string holding multi-byte characters cuts at the character boundary at or before byte `n`, where it could cut inside a character and stop the program.
+- On the bytecode VM, `json::len` of a string answers its byte count, as on the compiled tiers.
+- A compiled function no longer calls into the runtime at each return to release a `Result` or `Option` it never filled on that path, or a `String` still empty from its entry, so an early return from a function with several fallible branches costs no calls for the branches it skipped.
+- Appending to a `String` held alone whose text is ASCII takes one pass and no runtime bookkeeping in more cases: `s.push_json_quoted(..)` checks and copies a plain-ASCII window word by word, `s.push_utf8(..)` copies an ASCII window straight in, integer, float, and `bool` appends write their digits in place, and a release build copies a short `String` piece (`s.push_str(t)`, `s += t`) with a few word moves instead of a `memcpy` call.
+- A struct whose fields are containers, read out of a field and handed to a function that only reads it, is lent without counting each container in and out, as a lone container already was; wrapping a function's lookup tables in one struct no longer adds two runtime calls per container to every call.
+- `std::hash::crc32c` computes CRC-32C (Castagnoli) with `checksum`, `checksum_string`, `update`, and `update_window`, as `std::hash::crc32` does for CRC-32, using the CPU's CRC instruction on x86-64 and aarch64 and a table otherwise.
 
 ## 0.63.0 - Leak-free result shapes, borrowed std buffers, module-path fixes, generic BTreeMap
 

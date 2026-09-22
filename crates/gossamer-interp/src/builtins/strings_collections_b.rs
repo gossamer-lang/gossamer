@@ -312,7 +312,7 @@ fn builtin_truncate(args: &[Value]) -> RuntimeResult<Value> {
     let cap = match args.get(1) {
         Some(Value::Int(n)) if *n >= 0 => *n as usize,
         Some(Value::Int(_)) => {
-            return Err(RuntimeError::Type(
+            return Err(RuntimeError::Panic(
                 "truncate: length must be non-negative".to_string(),
             ));
         }
@@ -338,7 +338,7 @@ fn builtin_truncate(args: &[Value]) -> RuntimeResult<Value> {
             let end = s
                 .char_indices()
                 .map(|(idx, _)| idx)
-                .chain(std::iter::once(s.len()))
+                .chain(std::iter::once(s.as_str().len()))
                 .take_while(|idx| *idx <= cap)
                 .last()
                 .unwrap_or(0);

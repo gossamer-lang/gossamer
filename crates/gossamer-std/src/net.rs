@@ -88,6 +88,17 @@ impl TcpListener {
             .map_err(|e| IoError::from_std(e, "local_addr"))
     }
 
+    /// A second listener on the same socket, which waits for connections
+    /// on its own poller registration.
+    pub fn try_clone(&self) -> Result<Self, IoError> {
+        let inner = self
+            .inner
+            .try_clone()
+            .map_err(|e| IoError::from_std(e, "try_clone"))?;
+        let mirror = inner.try_clone().map(mio::net::TcpListener::from_std).ok();
+        Ok(Self { inner, mio: mirror })
+    }
+
     /// Accepts a single incoming connection. Parks the caller on the
     /// poller when no connection is currently pending.
     pub fn accept(&mut self) -> Result<(TcpStream, SocketAddr), IoError> {

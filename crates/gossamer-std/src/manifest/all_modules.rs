@@ -158,6 +158,7 @@ pub const ALL_MODULES: &[StdModule] = &[
     ENCODING_ASCII85,
     HASH_FNV,
     HASH_CRC32,
+    HASH_CRC32C,
     HASH_ADLER32,
     MATH_BIG,
     CRYPTO_INSECURE,

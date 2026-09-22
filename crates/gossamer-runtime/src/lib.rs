@@ -318,6 +318,7 @@ pub mod comptime_inputs;
 pub mod comptime_paths;
 pub mod comptime_policy;
 pub mod coverage;
+pub mod crc32c;
 pub mod fs_mode;
 pub mod http_status;
 pub mod listen;

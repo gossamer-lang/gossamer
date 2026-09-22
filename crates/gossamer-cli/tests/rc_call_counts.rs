@@ -183,7 +183,7 @@ fn aggregate_walk_rc_calls_are_pinned() {
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 16,
+                    release: 15,
                     clone: 4,
                 },
             ),
@@ -200,7 +200,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "render",
                 RcCounts {
                     retain: 0,
-                    release: 4,
+                    release: 2,
                     clone: 0,
                 },
             ),
@@ -208,7 +208,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "page",
                 RcCounts {
                     retain: 0,
-                    release: 6,
+                    release: 4,
                     clone: 0,
                 },
             ),
@@ -216,7 +216,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 10,
+                    release: 7,
                     clone: 0,
                 },
             ),
@@ -290,4 +290,29 @@ fn a_parameter_buffer_reaches_std_readers_uncopied() {
             "{function} copies a buffer a standard-library reader only reads"
         );
     }
+}
+
+#[test]
+fn struct_field_borrow_rc_calls_are_pinned() {
+    expect(
+        "benchmarks/uniqueness/struct_field_borrow.gos",
+        &[
+            (
+                "Statement::render",
+                RcCounts {
+                    retain: 0,
+                    release: 0,
+                    clone: 0,
+                },
+            ),
+            (
+                "write_row",
+                RcCounts {
+                    retain: 0,
+                    release: 0,
+                    clone: 0,
+                },
+            ),
+        ],
+    );
 }

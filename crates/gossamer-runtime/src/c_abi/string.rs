@@ -1252,11 +1252,119 @@ pub unsafe extern "C" fn gos_rt_str_is_empty(s: *const c_char) -> bool {
     ffi_entry!(false, { unsafe { gos_rt_str_len(s) == 0 } })
 }
 
-/// `s.clear()` for compiled String method lowering. Strings are immutable at
-/// the ABI boundary, so this returns a fresh empty string for caller writeback.
+/// The capacity and length of `s` when it is a heap builder this reference
+/// holds alone, so its bytes may be rewritten in place.
+///
+/// SAFETY: `s` is null or a Gossamer string body.
+unsafe fn unique_builder_cap_len(s: *const c_char) -> Option<(usize, usize)> {
+    if !unsafe { is_typed_builder(s) } {
+        return None;
+    }
+    let hdr = unsafe { s.cast::<u8>().sub(13) };
+    let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
+    if rc != 1 {
+        return None;
+    }
+    let cap = u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] });
+    let len = u32::from_le_bytes(unsafe { [*hdr.add(8), *hdr.add(9), *hdr.add(10), *hdr.add(11)] });
+    Some((cap as usize, len as usize))
+}
+
+/// Sets the length of the unique builder `s` to `len`, which must not exceed
+/// its current length and must fall on a character boundary.
+///
+/// SAFETY: `unique_builder_cap_len(s)` answered `Some((cap, _))`.
+unsafe fn shorten_unique_builder(s: *mut c_char, len: usize, cap: usize) {
+    unsafe {
+        *s.cast::<u8>().add(len) = 0;
+        let hdr = s.cast::<u8>().sub(13);
+        std::ptr::copy_nonoverlapping((len as u32).to_le_bytes().as_ptr(), hdr.add(8), 4);
+        let footer = s.cast::<u8>().add(cap + 1).cast::<u32>();
+        // A prefix of ASCII content is ASCII; anything else is re-indexed.
+        if len == 0 || footer.read_unaligned() == STR_INDEX_ASCII {
+            footer.write_unaligned(STR_INDEX_ASCII);
+        } else {
+            rebuild_str_index(s, len, cap);
+        }
+    }
+}
+
+/// Appends ASCII `parts` to `acc` in place when `acc` is a builder this
+/// reference holds alone, its content is ASCII, and it has room: the copy and
+/// the new length, with the character index left saying every byte is one
+/// character. Answers whether it appended; `acc` is untouched otherwise.
+///
+/// SAFETY: `acc` is null or a Gossamer string body, and every part is ASCII.
+#[inline]
+unsafe fn append_ascii_in_place(acc: *const c_char, parts: &[&[u8]]) -> bool {
+    let Some((cap, len)) = (unsafe { unique_builder_cap_len(acc) }) else {
+        return false;
+    };
+    let added: usize = parts.iter().map(|p| p.len()).sum();
+    if len + added > cap {
+        return false;
+    }
+    unsafe {
+        let footer = acc.cast::<u8>().add(cap + 1).cast::<u32>();
+        if footer.read_unaligned() != STR_INDEX_ASCII {
+            return false;
+        }
+        let dst = acc.cast_mut().cast::<u8>().add(len);
+        let mut at = 0;
+        for part in parts {
+            copy_small_bytes(part.as_ptr(), dst.add(at), part.len());
+            at += part.len();
+        }
+        *dst.add(added) = 0;
+        let hdr = acc.cast_mut().cast::<u8>().sub(13);
+        std::ptr::copy_nonoverlapping(((len + added) as u32).to_le_bytes().as_ptr(), hdr.add(8), 4);
+    }
+    true
+}
+
+/// The window `buf[start..end]` of a buffer whose slots are bytes, or `None`
+/// for a wide buffer or a window that does not lie within it.
+///
+/// SAFETY: `buf` is null or a live `GosVec` whose storage outlives the slice.
+#[inline]
+unsafe fn packed_byte_window<'a>(
+    buf: *const crate::c_abi::vec::GosVec,
+    start: i64,
+    end: i64,
+) -> Option<&'a [u8]> {
+    if buf.is_null() || start < 0 || end < start {
+        return None;
+    }
+    let header = unsafe { &*buf };
+    if header.elem_bytes != 1 || end > header.len || header.ptr.is_null() {
+        return None;
+    }
+    let (lo, hi) = (start as usize, end as usize);
+    Some(unsafe { std::slice::from_raw_parts(header.ptr.as_const_ptr().add(lo), hi - lo) })
+}
+
+/// `s.clear()` for compiled String method lowering. Consumes `s` and answers
+/// the cleared string: `s` itself, emptied in place and keeping its capacity,
+/// when this reference holds it alone; otherwise a fresh empty string with
+/// the same capacity, and `s` is released.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_str_clear() -> *mut c_char {
-    alloc_cstring(b"")
+pub unsafe extern "C" fn gos_rt_str_clear(s: *const c_char) -> *mut c_char {
+    // Bare (no `ffi_entry!`), as `gos_rt_str_concat_drop_a` is: a buffer
+    // cleared per request sits on the hot path, and nothing here unwinds -
+    // header reads and writes, and an allocation whose failure aborts.
+    if let Some((cap, _)) = unsafe { unique_builder_cap_len(s) } {
+        unsafe { shorten_unique_builder(s.cast_mut(), 0, cap) };
+        return s.cast_mut();
+    }
+    let cleared = if unsafe { is_typed_builder(s) } {
+        alloc_growable(&[], unsafe { typed_str_cap(s) }.unwrap_or(0))
+    } else {
+        alloc_cstring(b"")
+    };
+    if is_managed_string(s) {
+        unsafe { gos_rt_str_free(s.cast_mut()) };
+    }
+    cleared
 }
 
 /// Allocates an empty owned string with at least `capacity` writable bytes.
@@ -1275,27 +1383,52 @@ pub extern "C" fn gos_rt_str_with_capacity(capacity: i64) -> *mut c_char {
 /// `s.truncate(n)` for compiled String method lowering. The public method takes
 /// a byte length; if `n` lands inside a UTF-8 scalar, truncate to the preceding
 /// valid boundary so the returned Gossamer String remains well-formed.
+///
+/// Consumes `s` and answers the truncated string: `s` itself, shortened in
+/// place, when this reference holds it alone; otherwise a copy of the kept
+/// prefix, and `s` is released.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_truncate(s: *const c_char, n: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if s.is_null() || n <= 0 {
+        if n < 0 {
+            crate::c_abi::panic::panic_text("truncate: length must be non-negative");
+        }
+        if s.is_null() {
             return alloc_cstring(b"");
         }
         let len = unsafe { gos_str_arg_len(s) };
-        let cap = (n as usize).min(len);
+        let limit = usize::try_from(n).unwrap_or(0).min(len);
         let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
-        let end = match std::str::from_utf8(bytes) {
-            Ok(text) => text
-                .char_indices()
-                .map(|(idx, _)| idx)
-                .chain(std::iter::once(text.len()))
-                .take_while(|idx| *idx <= cap)
-                .last()
-                .unwrap_or(0),
-            Err(_) => cap,
+        let end = if limit == len {
+            len
+        } else {
+            utf8_boundary_at_or_before(bytes, limit)
         };
-        alloc_cstring_from_slices(&[&bytes[..end]])
+        if let Some((cap, _)) = unsafe { unique_builder_cap_len(s) } {
+            if end < len {
+                unsafe { shorten_unique_builder(s.cast_mut(), end, cap) };
+            }
+            return s.cast_mut();
+        }
+        let kept = alloc_cstring_from_slices(&[&bytes[..end]]);
+        if is_managed_string(s) {
+            unsafe { gos_rt_str_free(s.cast_mut()) };
+        }
+        kept
     })
+}
+
+/// The largest character boundary of `bytes` at or before `limit`; `limit`
+/// itself for bytes that are not UTF-8.
+fn utf8_boundary_at_or_before(bytes: &[u8], limit: usize) -> usize {
+    if std::str::from_utf8(bytes).is_err() {
+        return limit;
+    }
+    // A continuation byte is `10xxxxxx`; a boundary is any other position.
+    (0..=limit)
+        .rev()
+        .find(|&i| i == bytes.len() || (bytes[i] & 0xC0) != 0x80)
+        .unwrap_or(0)
 }
 
 /// `String::from_utf8(bytes) -> Result<String, errors::Error>`.
@@ -1813,7 +1946,20 @@ pub unsafe extern "C" fn gos_rt_str_append_i64(acc: *const c_char, n: i64) -> *m
     // machinery; this is the hot fused path for `s += format!("{}", i)`.
     let mut buf = itoa::Buffer::new();
     let digits = buf.format(n);
-    unsafe { gos_rt_str_append_bytes(acc, digits.as_ptr(), digits.len() as i64) }
+    unsafe { append_ascii_text(acc, digits.as_bytes()) }
+}
+
+/// Appends the ASCII `text` a scalar renders as onto `acc`: in place when an
+/// exclusively held ASCII builder has room, through the general append
+/// otherwise.
+///
+/// SAFETY: as [`gos_rt_str_append_bytes`], with `text` ASCII.
+#[inline]
+unsafe fn append_ascii_text(acc: *const c_char, text: &[u8]) -> *mut c_char {
+    if unsafe { append_ascii_in_place(acc, &[text]) } {
+        return acc.cast_mut();
+    }
+    unsafe { gos_rt_str_append_bytes(acc, text.as_ptr(), text.len() as i64) }
 }
 
 /// Appends the decimal form of the unsigned `n` onto growable string `acc`:
@@ -1823,7 +1969,7 @@ pub unsafe extern "C" fn gos_rt_str_append_i64(acc: *const c_char, n: i64) -> *m
 pub unsafe extern "C" fn gos_rt_str_append_u64(acc: *const c_char, n: u64) -> *mut c_char {
     let mut buf = itoa::Buffer::new();
     let digits = buf.format(n);
-    unsafe { gos_rt_str_append_bytes(acc, digits.as_ptr(), digits.len() as i64) }
+    unsafe { append_ascii_text(acc, digits.as_bytes()) }
 }
 
 /// Appends `true` or `false` (`b` nonzero is `true`) onto growable string
@@ -1831,7 +1977,7 @@ pub unsafe extern "C" fn gos_rt_str_append_u64(acc: *const c_char, n: u64) -> *m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_append_bool(acc: *const c_char, b: i32) -> *mut c_char {
     let text: &[u8] = if b == 0 { b"false" } else { b"true" };
-    unsafe { gos_rt_str_append_bytes(acc, text.as_ptr(), text.len() as i64) }
+    unsafe { append_ascii_text(acc, text) }
 }
 
 /// Appends the text `x.to_string()` answers for an `f64` straight onto
@@ -1840,7 +1986,7 @@ pub unsafe extern "C" fn gos_rt_str_append_bool(acc: *const c_char, b: i32) -> *
 pub unsafe extern "C" fn gos_rt_str_append_f64(acc: *const c_char, x: f64) -> *mut c_char {
     let mut text = crate::builtins::FloatText::new();
     let digits = crate::builtins::f64_display(x, &mut text);
-    unsafe { gos_rt_str_append_bytes(acc, digits.as_ptr(), digits.len() as i64) }
+    unsafe { append_ascii_text(acc, digits) }
 }
 
 #[unsafe(no_mangle)]
@@ -3485,6 +3631,14 @@ pub unsafe extern "C" fn gos_rt_str_push_utf8(
     start: i64,
     end: i64,
 ) -> i128 {
+    // An ASCII window is valid UTF-8 and keeps an ASCII builder's index, so
+    // it is appended with one scan and one copy ahead of the general path.
+    if let Some(window) = unsafe { packed_byte_window(buf, start, end) }
+        && window.is_ascii()
+        && unsafe { append_ascii_in_place(s, &[window]) }
+    {
+        return unsafe { crate::c_abi::vec::gos_rt_result_new(0, s as i64) };
+    }
     ffi_entry!(0i128, {
         let unchanged =
             |ok: bool| unsafe { crate::c_abi::vec::gos_rt_result_new(i64::from(!ok), s as i64) };
@@ -3586,22 +3740,38 @@ const fn json_escaped_byte(b: u8) -> bool {
     b < 0x20 || matches!(b, b'"' | b'\\' | b'<' | b'>' | b'&')
 }
 
+/// The high bit of each byte lane of `w` that a JSON string escapes or that is
+/// not ASCII. Lanes above the lowest flagged one may be flagged spuriously; the
+/// word is clean exactly when the answer is zero.
+#[inline]
+const fn json_word_flags(w: u64) -> u64 {
+    const ONES: u64 = 0x0101_0101_0101_0101;
+    const HIGHS: u64 = 0x8080_8080_8080_8080;
+    const fn has_zero(w: u64) -> u64 {
+        w.wrapping_sub(ONES) & !w & HIGHS
+    }
+    (w | w.wrapping_sub(ONES * 0x20)) & HIGHS
+        | has_zero(w ^ (ONES * b'"' as u64))
+        | has_zero(w ^ (ONES * b'\\' as u64))
+        | has_zero(w ^ (ONES * b'<' as u64))
+        | has_zero(w ^ (ONES * b'>' as u64))
+        | has_zero(w ^ (ONES * b'&' as u64))
+}
+
+/// Whether any byte of `w` is one a JSON string escapes or is not ASCII.
+#[inline]
+const fn json_word_has_special(w: u64) -> bool {
+    json_word_flags(w) != 0
+}
+
 /// Offset of the first byte of `bytes` that a JSON string escapes or that is
 /// not ASCII, or `bytes.len()` when there is none. Eight bytes are tested at a
 /// time.
 fn first_json_special(bytes: &[u8]) -> usize {
-    const ONES: u64 = 0x0101_0101_0101_0101;
-    const HIGHS: u64 = 0x8080_8080_8080_8080;
-    let has_zero = |w: u64| w.wrapping_sub(ONES) & !w & HIGHS;
     // A borrow only ever carries into a higher byte, so the lowest flag marks
     // the first special byte exactly even where flags above it are spurious.
     let first_flag = |w: u64| {
-        let flagged = (w | w.wrapping_sub(ONES * 0x20)) & HIGHS
-            | has_zero(w ^ (ONES * u64::from(b'"')))
-            | has_zero(w ^ (ONES * u64::from(b'\\')))
-            | has_zero(w ^ (ONES * u64::from(b'<')))
-            | has_zero(w ^ (ONES * u64::from(b'>')))
-            | has_zero(w ^ (ONES * u64::from(b'&')));
+        let flagged = json_word_flags(w);
         (flagged != 0).then(|| flagged.trailing_zeros() as usize / 8)
     };
     let mut chunks = bytes.chunks_exact(8);
@@ -3694,6 +3864,88 @@ pub fn json_escape_into(text: &[u8], out: &mut Vec<u8>) {
 /// Answers the carrier [`gos_rt_str_push_utf8`] answers.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_push_json_quoted(
+    s: *const c_char,
+    buf: *const crate::c_abi::vec::GosVec,
+    start: i64,
+    end: i64,
+) -> i128 {
+    // Plain ASCII onto an exclusively held ASCII builder with room is the
+    // common shape: the window is checked and copied in one pass. Nothing on
+    // this path unwinds, so it stays out of the frame the general path needs.
+    if let Some(window) = unsafe { packed_byte_window(buf, start, end) }
+        && unsafe { json_quote_ascii_in_place(s, window) }
+    {
+        return unsafe { crate::c_abi::vec::gos_rt_result_new(0, s as i64) };
+    }
+    unsafe { push_json_quoted_general(s, buf, start, end) }
+}
+
+/// Appends `window` to `acc` as a quoted JSON string in place, when `acc` is
+/// an exclusively held ASCII builder with room and `window` holds no byte
+/// JSON escapes and nothing wider than ASCII. Answers whether it appended; the
+/// length is published only on success, so bytes written past it before a
+/// special byte turned up are not part of the string.
+///
+/// SAFETY: `acc` is null or a Gossamer string body.
+#[inline]
+unsafe fn json_quote_ascii_in_place(acc: *const c_char, window: &[u8]) -> bool {
+    let Some((cap, len)) = (unsafe { unique_builder_cap_len(acc) }) else {
+        return false;
+    };
+    let n = window.len();
+    if len + n + 2 > cap {
+        return false;
+    }
+    unsafe {
+        let footer = acc.cast::<u8>().add(cap + 1).cast::<u32>();
+        if footer.read_unaligned() != STR_INDEX_ASCII {
+            return false;
+        }
+        let dst = acc.cast_mut().cast::<u8>().add(len);
+        *dst = b'"';
+        let body = dst.add(1);
+        let mut at = 0;
+        while at + 8 <= n {
+            let word = window.as_ptr().add(at).cast::<u64>().read_unaligned();
+            if json_word_has_special(word) {
+                return false;
+            }
+            body.add(at).cast::<u64>().write_unaligned(word);
+            at += 8;
+        }
+        if at < n && n >= 8 {
+            // The last whole word ends at the window's end and overlaps bytes
+            // already found clean, so it covers the tail in one test and store.
+            let word = window.as_ptr().add(n - 8).cast::<u64>().read_unaligned();
+            if json_word_has_special(word) {
+                return false;
+            }
+            body.add(n - 8).cast::<u64>().write_unaligned(word);
+            at = n;
+        }
+        while at < n {
+            let b = *window.get_unchecked(at);
+            if json_escaped_byte(b) || b >= 0x80 {
+                return false;
+            }
+            *body.add(at) = b;
+            at += 1;
+        }
+        *body.add(n) = b'"';
+        *body.add(n + 1) = 0;
+        let hdr = acc.cast_mut().cast::<u8>().sub(13);
+        std::ptr::copy_nonoverlapping(((len + n + 2) as u32).to_le_bytes().as_ptr(), hdr.add(8), 4);
+    }
+    true
+}
+
+/// The general `push_json_quoted`: a wide buffer, text that needs escaping or
+/// is not ASCII, or a builder that is shared, full, or not ASCII.
+///
+/// SAFETY: as [`gos_rt_str_push_json_quoted`].
+#[cold]
+#[inline(never)]
+unsafe fn push_json_quoted_general(
     s: *const c_char,
     buf: *const crate::c_abi::vec::GosVec,
     start: i64,
@@ -4423,6 +4675,44 @@ mod parse_i64_bytes_tests {
 #[cfg(test)]
 mod json_quote_tests {
     use super::{first_json_special, json_escape_into, json_escaped_byte};
+
+    #[test]
+    fn push_json_quoted_matches_the_escaper_for_every_length_and_special_position() {
+        for len in 0..40 {
+            for at in 0..=len {
+                for special in [b'"', b'<', 0x1f, 0xc3] {
+                    let mut bytes = vec![b'x'; len];
+                    if at < len {
+                        bytes[at] = special;
+                        if special == 0xc3 && at + 1 < len {
+                            bytes[at + 1] = 0xa9;
+                        } else if special == 0xc3 {
+                            bytes[at] = b'y';
+                        }
+                    }
+                    let mut want = b"ab\"".to_vec();
+                    json_escape_into(&bytes, &mut want);
+                    want.push(b'"');
+                    unsafe {
+                        let buf = crate::c_abi::encoding::bytes_to_gosvec(&bytes);
+                        let acc = super::gos_rt_str_with_capacity(128);
+                        let acc = super::gos_rt_str_append_bytes(acc, b"ab".as_ptr(), 2);
+                        let answer = super::gos_rt_str_push_json_quoted(acc, buf, 0, len as i64);
+                        assert_eq!(crate::c_abi::vec::gos_rt_result_disc(answer), 0);
+                        let out = crate::c_abi::vec::gos_rt_result_payload(answer) as usize
+                            as *mut std::ffi::c_char;
+                        assert_eq!(
+                            super::typed_str_bytes(out),
+                            &want[..],
+                            "len {len} special {special:#x} at {at}"
+                        );
+                        super::gos_rt_str_free(out);
+                        crate::c_abi::gos_rt_vec_free(buf);
+                    }
+                }
+            }
+        }
+    }
 
     fn quoted(text: &str) -> String {
         let mut out = vec![b'"'];

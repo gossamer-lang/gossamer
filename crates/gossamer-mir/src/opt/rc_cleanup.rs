@@ -543,6 +543,8 @@ fn helper_reads_only(name: &str, index: usize) -> bool {
                 | "gos_rt_str_is_empty"
                 | "gos_rt_hash_crc32_checksum"
                 | "gos_rt_hash_crc32_checksum_string"
+                | "gos_rt_hash_crc32c_checksum"
+                | "gos_rt_hash_crc32c_checksum_string"
                 // A two-word carrier reaches these by value, so reading a
                 // word out of one cannot write anything the caller holds.
                 | "gos_rt_result_disc"
@@ -556,6 +558,8 @@ fn helper_reads_only(name: &str, index: usize) -> bool {
             name,
             "gos_rt_hash_crc32_update"
                 | "gos_rt_hash_crc32_update_window"
+                | "gos_rt_hash_crc32c_update"
+                | "gos_rt_hash_crc32c_update_window"
                 | "gos_rt_str_push_utf8"
                 | "gos_rt_str_push_json_quoted"
                 | "gos_rt_str_concat_drop_a"
@@ -2169,9 +2173,13 @@ enum ZeroedWords {
     OptionSlot,
     /// A counted pointer local, zeroed by a whole-local zero store at entry or
     /// where its share moved to another holder, and released by
-    /// `gos_rt_rc_release` or `gos_rt_vec_free`, which do nothing with a null
-    /// pointer.
+    /// `gos_rt_rc_release`, `gos_rt_vec_free`, or a `String` free, which do
+    /// nothing with a null pointer.
     Counted,
+    /// A `Result` / `Option` carrier holding no payload: the `Err` with a null
+    /// payload word the lowering stores at entry and after a move, or the zero
+    /// carrier. The carrier payload helpers act only on a non-null payload word.
+    EmptyCarrier,
 }
 
 impl ZeroedWords {
@@ -2187,6 +2195,23 @@ impl ZeroedWords {
                     place,
                     rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
                 } if place.projection.is_empty() => Some(place.local),
+                _ => None,
+            },
+            Self::EmptyCarrier => match &stmt.kind {
+                StatementKind::Assign { place, rvalue } if place.projection.is_empty() => {
+                    let empty = match rvalue {
+                        Rvalue::Use(Operand::Const(ConstValue::Int(0))) => true,
+                        Rvalue::CallIntrinsic {
+                            name: "gos_rt_result_new",
+                            args,
+                        } => matches!(
+                            args.as_slice(),
+                            [Operand::Const(ConstValue::Int(_)), Operand::Const(ConstValue::Int(0))]
+                        ),
+                        _ => false,
+                    };
+                    empty.then_some(place.local)
+                }
                 _ => None,
             },
         }
@@ -2218,10 +2243,38 @@ impl ZeroedWords {
                 else {
                     return None;
                 };
-                if !matches!(*name, "gos_rt_rc_release" | "gos_rt_rc_retain" | "gos_rt_vec_free") {
+                if !matches!(
+                    *name,
+                    "gos_rt_rc_release"
+                        | "gos_rt_rc_retain"
+                        | "gos_rt_vec_free"
+                        | "gos_rt_str_free"
+                        | "gos_rt_str_free_typed"
+                ) {
                     return None;
                 }
                 Some((name, rc_bare_local_arg(args)?))
+            }
+            Self::EmptyCarrier => {
+                let StatementKind::Assign {
+                    rvalue: Rvalue::CallIntrinsic { name, args },
+                    ..
+                } = &stmt.kind
+                else {
+                    return None;
+                };
+                if !matches!(
+                    *name,
+                    "gos_rt_result_payload_release"
+                        | "gos_rt_result_ok_payload_release"
+                        | "gos_rt_result_payload_retain"
+                ) {
+                    return None;
+                }
+                match args.first() {
+                    Some(Operand::Copy(p)) if p.projection.is_empty() => Some((name, p.local)),
+                    _ => None,
+                }
             }
         }
     }
@@ -2233,9 +2286,20 @@ impl ZeroedWords {
             Self::OptionSlot => {
                 matches!(name, "gos_rt_option_slot_release" | "gos_rt_option_slot_retain")
             }
-            Self::Counted => {
-                matches!(name, "gos_rt_rc_release" | "gos_rt_rc_retain" | "gos_rt_vec_free")
-            }
+            Self::Counted => matches!(
+                name,
+                "gos_rt_rc_release"
+                    | "gos_rt_rc_retain"
+                    | "gos_rt_vec_free"
+                    | "gos_rt_str_free"
+                    | "gos_rt_str_free_typed"
+            ),
+            Self::EmptyCarrier => matches!(
+                name,
+                "gos_rt_result_payload_release"
+                    | "gos_rt_result_ok_payload_release"
+                    | "gos_rt_result_payload_retain"
+            ),
         }
     }
 }
@@ -2262,7 +2326,12 @@ pub(crate) fn elide_settled_guarded_walks(body: &mut Body) {
         .map(|b| successor_indices(&b.terminator))
         .collect();
 
-    for kind in [ZeroedWords::Guarded, ZeroedWords::OptionSlot, ZeroedWords::Counted] {
+    for kind in [
+        ZeroedWords::Guarded,
+        ZeroedWords::OptionSlot,
+        ZeroedWords::Counted,
+        ZeroedWords::EmptyCarrier,
+    ] {
         let entry_state = zeroed_entry_states(body, &succs, kind);
         let mut dead: Vec<(usize, usize)> = Vec::new();
         for (b, block) in body.blocks.iter().enumerate() {
@@ -2532,6 +2601,15 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt) {
     }
 }
 
+/// How many counted fields a struct books a share on one at a time; zero for
+/// any other type.
+fn counted_field_count(tcx: &TyCtxt, ty: Ty) -> usize {
+    if !matches!(tcx.kind_of(ty), TyKind::Adt { .. }) || is_guarded_option(tcx, ty) {
+        return 0;
+    }
+    crate::lower::aggregate_rc_field_paths(tcx, ty).len()
+}
+
 /// Qualifies a class and, when it holds, removes every member's accounting.
 /// Answers whether it did.
 fn try_elide_class(
@@ -2558,10 +2636,15 @@ fn try_elide_class(
         ) else {
             return false;
         };
-        // A lone holder is bracketed by one retain at its one definition. A
-        // class's brackets are spread over its members, and only the total is
-        // what the root's own share has to cover.
-        if class.members.len() == 1 && uses.retains != 1 {
+        // A lone holder is bracketed by one retain at its one definition, or
+        // by one per counted field where a struct's share is spelled field by
+        // field. A class's brackets are spread over its members, and only the
+        // total is what the root's own share has to cover.
+        if class.members.len() == 1
+            && uses.retains != 1
+            && !(uses.defs.len() == 1
+                && uses.retains == counted_field_count(tcx, body.locals[member.0 as usize].ty))
+        {
             return false;
         }
         retains += uses.retains;

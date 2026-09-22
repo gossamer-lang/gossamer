@@ -1802,6 +1802,22 @@ impl<'a> Builder<'a> {
                 "gos_rt_hash_crc32_update_window",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),
             ),
+            "hash::crc32c::checksum" => (
+                "gos_rt_hash_crc32c_checksum",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
+            "hash::crc32c::checksum_string" => (
+                "gos_rt_hash_crc32c_checksum_string",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
+            "hash::crc32c::update" => (
+                "gos_rt_hash_crc32c_update",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
+            "hash::crc32c::update_window" => (
+                "gos_rt_hash_crc32c_update_window",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
             "hash::adler32::checksum" => (
                 "gos_rt_hash_adler32_checksum",
                 self.tcx.int_ty(gossamer_types::IntTy::I64),

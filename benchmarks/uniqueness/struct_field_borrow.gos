@@ -1,0 +1,43 @@
+// A reader handed a struct of containers that lives in a field of its
+// caller's receiver borrows it: the receiver keeps every container alive for
+// the length of the call, so no container is counted on the way in or out.
+
+struct Plan {
+    keys: Vec<String>
+    words: Vec<String>
+}
+
+struct Statement {
+    plan: Plan
+    uses: i64
+}
+
+impl Statement {
+    fn render(&mut self, id: i64, out: &mut String) {
+        self.uses += 1
+        write_row(out, self.plan, id)
+    }
+}
+
+fn write_row(out: &mut String, plan: Plan, id: i64) {
+    out.push_str(id.to_string())
+    for i in 0..plan.keys.len() {
+        out.push_str(plan.keys[i])
+        out.push_str(plan.words[i])
+    }
+}
+
+fn main() {
+    let mut st = Statement {
+        plan: Plan { keys: #[",a=", ",b="], words: #["x", "y"] },
+        uses: 0,
+    }
+    let mut out = String::with_capacity(64)
+    let mut total = 0
+    for id in 0..100000 {
+        out.clear()
+        st.render(id, &mut out)
+        total += out.byte_len()
+    }
+    println("{} {} {}", out, total, st.uses)
+}

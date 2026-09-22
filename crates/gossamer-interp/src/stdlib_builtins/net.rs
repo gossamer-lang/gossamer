@@ -247,7 +247,12 @@ pub(crate) fn builtin_tcp_listener_accept(args: &[Value]) -> RuntimeResult<Value
     let Some(listener) = fetch_socket(&TCP_LISTENER_REGISTRY, id) else {
         return Ok(err_variant("TcpListener::accept: stale handle"));
     };
-    let res = listener.lock().accept().map_err(|e| e.to_string());
+    // Accept on a clone so the handle is not locked while the goroutine is
+    // parked waiting for a connection; another goroutine may use it meanwhile.
+    let cloned = listener.lock().try_clone();
+    let res = cloned
+        .and_then(|mut l| l.accept())
+        .map_err(|e| e.to_string());
     match res {
         Ok((stream, addr)) => {
             // Nagle off, as Go leaves a `TCPConn`: a request/response protocol

@@ -1054,6 +1054,26 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         signature: "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
     },
     StdFunctionSignature {
+        module_path: "std::hash::crc32c",
+        name: "checksum",
+        signature: "fn checksum(data: Vec<u8>) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::hash::crc32c",
+        name: "checksum_string",
+        signature: "fn checksum_string(text: String) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::hash::crc32c",
+        name: "update",
+        signature: "fn update(seed: i64, data: Vec<u8>) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::hash::crc32c",
+        name: "update_window",
+        signature: "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
+    },
+    StdFunctionSignature {
         module_path: "std::hash::fnv",
         name: "hash32",
         signature: "fn hash32(data: Vec<u8>) -> i64",

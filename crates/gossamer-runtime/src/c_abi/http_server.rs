@@ -362,11 +362,75 @@ pub(crate) enum ConnHome {
 /// `false` when nothing could be started, having run nothing.
 fn start_connection(home: ConnHome, task: Box<dyn FnOnce() + Send + 'static>) -> bool {
     match home {
-        ConnHome::Goroutine => crate::sched_global::try_spawn(task).is_some(),
+        ConnHome::Goroutine => crate::sched_global::try_spawn_service(task).is_some(),
         ConnHome::Thread => std::thread::Builder::new()
             .name("gos-http-conn".to_string())
             .spawn(task)
             .is_ok(),
+    }
+}
+
+/// Source of accepted connections for an accept loop.
+///
+/// A goroutine is pinned to its worker for life, so one held in `accept` would
+/// strand every goroutine placed behind it on the same worker. On a goroutine
+/// the listener is non-blocking and registered with the netpoller, and a wait
+/// parks the goroutine instead; off the scheduler the accept blocks as usual.
+struct ConnAcceptor {
+    listener: mio::net::TcpListener,
+    registration: Option<crate::netpoll::Registration>,
+}
+
+impl ConnAcceptor {
+    fn new(listener: TcpListener) -> std::io::Result<Self> {
+        let on_goroutine = crate::sched_global::current_gid().is_some();
+        listener.set_nonblocking(on_goroutine)?;
+        let mut listener = mio::net::TcpListener::from_std(listener);
+        let registration = if on_goroutine {
+            Some(crate::netpoll::Registration::new(&mut listener)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            listener,
+            registration,
+        })
+    }
+
+    /// The next connection, in blocking mode whatever the listener's mode.
+    fn accept(&mut self) -> std::io::Result<TcpStream> {
+        loop {
+            if self.registration.is_none() {
+                crate::mark_thread_idle();
+            }
+            match self.listener.accept() {
+                Ok((stream, _)) => {
+                    let stream = TcpStream::from(stream);
+                    // An accepted socket inherits the listener's non-blocking
+                    // mode on some platforms and not others; every consumer
+                    // starts from blocking and chooses for itself.
+                    stream.set_nonblocking(false)?;
+                    return Ok(stream);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let Some(registration) = self.registration.as_mut() else {
+                        return Err(e);
+                    };
+                    registration.follow(&mut self.listener);
+                    // No deadline, so the wait answers only on readiness.
+                    let _ = registration.wait(crate::netpoll::Direction::Read, None);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl Drop for ConnAcceptor {
+    fn drop(&mut self) {
+        if let Some(registration) = self.registration.take() {
+            registration.deregister(&mut self.listener);
+        }
     }
 }
 
@@ -386,14 +450,16 @@ where
     // The loop itself can still admit a connection whose handler reaches a
     // channel, so it counts as an actor while it runs.
     let _actor = crate::sched_global::ExternalActor::enter();
+    let Ok(mut acceptor) = ConnAcceptor::new(listener) else {
+        return;
+    };
     let mut backoff = crate::accept::AcceptBackoff::new();
     loop {
         if crate::sched_global::is_shutdown_requested() {
             break;
         }
-        crate::mark_thread_idle();
-        let stream = match listener.accept() {
-            Ok((s, _)) => {
+        let stream = match acceptor.accept() {
+            Ok(s) => {
                 backoff.reset();
                 s
             }
@@ -468,7 +534,6 @@ pub(crate) fn accept_serve_with<F>(
     listener: TcpListener,
     limits: &ServerLimits,
     shutdown: &std::sync::Arc<std::sync::atomic::AtomicBool>,
-    in_flight: &std::sync::Arc<AtomicUsize>,
     serve_conn: F,
 ) -> bool
 where
@@ -483,14 +548,16 @@ where
     // The loop itself can still admit a connection whose handler reaches a
     // channel, so it counts as an actor while it runs.
     let _actor = crate::sched_global::ExternalActor::enter();
+    let Ok(mut acceptor) = ConnAcceptor::new(listener) else {
+        return false;
+    };
     let mut backoff = crate::accept::AcceptBackoff::new();
     loop {
         if shutdown.load(Ordering::Acquire) || crate::sched_global::is_shutdown_requested() {
             break;
         }
-        crate::mark_thread_idle();
-        let stream = match listener.accept() {
-            Ok((s, _)) => {
+        let stream = match acceptor.accept() {
+            Ok(s) => {
                 backoff.reset();
                 s
             }
@@ -522,20 +589,15 @@ where
             .peer_addr()
             .map_or_else(|_| String::new(), |a| a.to_string());
         live.fetch_add(1, Ordering::AcqRel);
-        in_flight.fetch_add(1, Ordering::AcqRel);
         let serve = serve_conn.clone();
         let conn_limits = limits.clone();
         let live_for_thread = std::sync::Arc::clone(&live);
-        let in_flight_for_thread = std::sync::Arc::clone(in_flight);
         let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(stream)));
         let task_slot = std::sync::Arc::clone(&slot);
         let spawned = start_connection(
             ConnHome::Goroutine,
             Box::new(move || {
-                let _counts = ConnCounts {
-                    live: live_for_thread,
-                    in_flight: in_flight_for_thread,
-                };
+                let _live = LiveConn(live_for_thread);
                 let Some(stream) = task_slot.lock().take() else {
                     return;
                 };
@@ -547,7 +609,6 @@ where
         );
         if !spawned {
             live.fetch_sub(1, Ordering::AcqRel);
-            in_flight.fetch_sub(1, Ordering::AcqRel);
             if let Some(mut stream) = slot.lock().take() {
                 use std::io::Write;
                 let _ = stream.write_all(RESPONSE_503_BYTES);
@@ -558,18 +619,44 @@ where
     true
 }
 
-/// Decrements a connection's live and in-flight counts on every exit path,
-/// including an unwind, so a shutdown drain cannot wait on a thread that
-/// already ended.
-struct ConnCounts {
-    live: std::sync::Arc<AtomicUsize>,
-    in_flight: std::sync::Arc<AtomicUsize>,
+/// Holds one place in a server's live-connection count, released on every
+/// exit path including an unwind.
+struct LiveConn(std::sync::Arc<AtomicUsize>);
+
+impl Drop for LiveConn {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
-impl Drop for ConnCounts {
+/// A configured server's shutdown flag and count of requests being answered.
+///
+/// A request counts from its handler's start until its response is written,
+/// so a keep-alive connection waiting between requests is not work a
+/// shutdown drains; once shutdown begins, a connection closes after the
+/// response it is writing.
+pub(crate) struct RequestGate {
+    pub(crate) shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub(crate) in_flight: std::sync::Arc<AtomicUsize>,
+}
+
+impl RequestGate {
+    fn enter(&self) -> InFlightRequest<'_> {
+        self.in_flight.fetch_add(1, Ordering::AcqRel);
+        InFlightRequest(&self.in_flight)
+    }
+
+    fn closing(&self) -> bool {
+        self.shutdown.load(Ordering::Acquire) || crate::sched_global::is_shutdown_requested()
+    }
+}
+
+/// One request counted in a [`RequestGate`], released on every exit path.
+struct InFlightRequest<'a>(&'a AtomicUsize);
+
+impl Drop for InFlightRequest<'_> {
     fn drop(&mut self) {
-        self.live.fetch_sub(1, Ordering::AcqRel);
-        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.0.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -579,6 +666,7 @@ pub(crate) fn serve_one_connection(
     stream: TcpStream,
     peer: String,
     limits: &ServerLimits,
+    gate: &RequestGate,
     env_addr: usize,
     fn_addr: usize,
 ) {
@@ -590,7 +678,7 @@ pub(crate) fn serve_one_connection(
     let Ok(mut conn) = GoroutineTcpConn::new(stream, read_ms, limits.write_timeout_ms) else {
         return;
     };
-    handle_http_conn_limited(&mut conn, env_addr, fn_addr, &peer, limits);
+    handle_http_conn_limited(&mut conn, env_addr, fn_addr, &peer, limits, Some(gate));
 }
 
 struct HttpWakeAddrGuard(SocketAddr);
@@ -833,9 +921,11 @@ pub(crate) struct GoroutineTcpConn {
     stream: mio::net::TcpStream,
     registration: Option<crate::netpoll::Registration>,
     /// The last read came back short, so the socket's receive queue was empty
-    /// then. The registration is edge-triggered and keeps any edge that lands
-    /// meanwhile, so the next read waits for readiness first rather than
-    /// spending a system call to be told there is nothing yet.
+    /// then. Where a new arrival raises a readiness edge of its own, the next
+    /// read waits for one rather than spending a system call to be told there
+    /// is nothing yet. Windows re-arms a source only once a read has reported
+    /// `WouldBlock`, so the read happens there.
+    #[cfg(not(windows))]
     drained: bool,
     read_timeout: Option<std::time::Duration>,
     write_timeout: Option<std::time::Duration>,
@@ -852,6 +942,7 @@ impl GoroutineTcpConn {
         Ok(Self {
             stream,
             registration: Some(registration),
+            #[cfg(not(windows))]
             drained: false,
             read_timeout: bound(read_ms),
             write_timeout: bound(write_ms),
@@ -890,6 +981,7 @@ impl Drop for GoroutineTcpConn {
 impl std::io::Read for GoroutineTcpConn {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut deadline = None;
+        #[cfg(not(windows))]
         if std::mem::take(&mut self.drained) && !buf.is_empty() {
             let at = *deadline.get_or_insert_with(|| {
                 self.read_timeout
@@ -900,7 +992,10 @@ impl std::io::Read for GoroutineTcpConn {
         loop {
             match std::io::Read::read(&mut self.stream, buf) {
                 Ok(n) => {
-                    self.drained = n > 0 && n < buf.len();
+                    #[cfg(not(windows))]
+                    {
+                        self.drained = n > 0 && n < buf.len();
+                    }
                     return Ok(n);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -987,7 +1082,14 @@ fn handle_http_conn<C: HttpIo>(conn: &mut C, env_addr: usize, fn_addr: usize) {
 /// [`handle_http_conn_limited`] under the default server limits, with
 /// the peer address every request on this connection is stamped with.
 fn handle_http_conn_from<C: HttpIo>(conn: &mut C, env_addr: usize, fn_addr: usize, peer: &str) {
-    handle_http_conn_limited(conn, env_addr, fn_addr, peer, &ServerLimits::default());
+    handle_http_conn_limited(
+        conn,
+        env_addr,
+        fn_addr,
+        peer,
+        &ServerLimits::default(),
+        None,
+    );
 }
 
 /// [`handle_http_conn_from`] under one server's own limits.
@@ -997,6 +1099,7 @@ fn handle_http_conn_limited<C: HttpIo>(
     fn_addr: usize,
     peer: &str,
     limits: &ServerLimits,
+    gate: Option<&RequestGate>,
 ) {
     let mut scratch = ConnScratch::new();
     let mut accum: Vec<u8> = Vec::with_capacity(8192);
@@ -1014,6 +1117,9 @@ fn handle_http_conn_limited<C: HttpIo>(
     // request completes (a pipelined successor may also expect it).
     let mut continue_sent = false;
     loop {
+        if accum.is_empty() && gate.is_some_and(RequestGate::closing) {
+            return;
+        }
         let Some(header_end) = find_header_end(&accum) else {
             // Bound the request head: a slow client that never sends the
             // terminating CRLFCRLF cannot grow `accum` without limit.
@@ -1088,6 +1194,7 @@ fn handle_http_conn_limited<C: HttpIo>(
         // closes any raw regions it left open on every exit path below,
         // including write timeout, peer shutdown, and unwinding.
         let _request_arena = crate::c_abi::rc::RequestArenaGuard::new();
+        let _in_flight = gate.map(RequestGate::enter);
 
         // A request the connection outlives keeps it; one that names its
         // own end closes it once the answer is written.
@@ -3509,13 +3616,11 @@ mod tests {
         let addr = listener.local_addr().expect("local addr");
         let limits = ServerLimits::default();
         let shutdown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let in_flight = std::sync::Arc::new(AtomicUsize::new(0));
         let (tx, rx) = std::sync::mpsc::channel();
         let acceptor = {
             let shutdown = std::sync::Arc::clone(&shutdown);
-            let in_flight = std::sync::Arc::clone(&in_flight);
             std::thread::spawn(move || {
-                accept_serve_with(listener, &limits, &shutdown, &in_flight, |_, _, _| {});
+                accept_serve_with(listener, &limits, &shutdown, |_, _, _| {});
                 let _ = tx.send(());
             })
         };

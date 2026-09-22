@@ -179,6 +179,53 @@ pub fn proc_cpu_ticks(pid: u32) -> Option<u64> {
 /// `/proc` reports CPU in clock ticks, 100 per second on every Linux target
 /// this runs on.
 #[cfg(target_os = "linux")]
+/// Context switches every thread of `pid` has made, voluntary and not, read
+/// from `/proc/<pid>/task/*/status`. A server that waits for readiness and is
+/// woken makes one per request; what a machine charges for one is what a
+/// per-request CPU figure turns on.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn proc_context_switches(pid: u32) -> u64 {
+    let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+        return 0;
+    };
+    let mut total = 0;
+    for task in tasks.flatten() {
+        let Ok(status) = std::fs::read_to_string(task.path().join("status")) else {
+            continue;
+        };
+        for line in status.lines() {
+            if line.starts_with("voluntary_ctxt_switches")
+                || line.starts_with("nonvoluntary_ctxt_switches")
+            {
+                total += line
+                    .split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0);
+            }
+        }
+    }
+    total
+}
+
+/// Minor page faults `pid` has taken, field 10 of `/proc/<pid>/stat`.
+#[cfg(target_os = "linux")]
+#[must_use]
+pub fn proc_minor_faults(pid: u32) -> u64 {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return 0;
+    };
+    let Some(rest) = stat.rsplit_once(')') else {
+        return 0;
+    };
+    rest.1
+        .split_whitespace()
+        .nth(7)
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
 pub fn cpu_micros_per_request(ticks: u64, requests: usize) -> f64 {
     ticks as f64 * 10_000.0 / requests as f64
 }

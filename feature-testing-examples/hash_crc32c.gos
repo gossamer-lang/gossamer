@@ -1,0 +1,32 @@
+// `std::hash::crc32c` computes CRC-32C (Castagnoli) on every tier: the
+// standard check value, the empty input, a running value continued over a
+// second part, and a window checked where it lies inside a larger buffer.
+
+use std::hash::crc32c
+
+// Every split of `data` continued from its prefix agrees with the whole.
+fn splits_agree(data: Vec<u8>) -> bool {
+    let whole = crc32c::checksum(data)
+    let mut ok = true
+    for split in 0..data.len() + 1 {
+        let head = crc32c::update_window(0, data, 0, split)
+        if crc32c::update_window(head, data, split, data.len()) != whole {
+            ok = false
+        }
+    }
+    ok
+}
+
+fn main() {
+    let check = crc32c::checksum_string("123456789")
+    println("check {} ok={}", check, check == 0xE3069283)
+    println("empty {}", crc32c::checksum(#[]))
+    let whole = "the quick brown fox jumps over the lazy dog".as_bytes()
+    let head = crc32c::checksum("the quick brown fox ".as_bytes())
+    let rest = crc32c::update(head, "jumps over the lazy dog".as_bytes())
+    println("parts agree={}", crc32c::checksum(whole) == rest)
+    println("splits agree={}", splits_agree(whole))
+    let framed = "xx123456789yy".as_bytes()
+    println("window agree={}", crc32c::update_window(0, framed, 2, 11) == check)
+    println("window refused {}", crc32c::update_window(7, framed, 5, 2))
+}

@@ -1857,7 +1857,10 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/f64_display.gos"),
     // A byte window appends as a quoted JSON string escaped as `json::encode`
     // escapes one.
+    spec("feature-testing-examples/string_clear_truncate.gos"),
     spec("feature-testing-examples/string_push_json_quoted.gos"),
+    spec("feature-testing-examples/string_window_appends_mixed.gos"),
+    spec("feature-testing-examples/hash_crc32c.gos"),
     // A scalar's text appends in place, whatever its width or spelling.
     spec("feature-testing-examples/string_append_scalars.gos"),
     // ASCII and multi-byte appends interleaved keep character indexing right.

@@ -126,7 +126,7 @@ fn builtin_json_len(args: &[Value]) -> RuntimeResult<Value> {
         },
         Some(Value::Array(a)) => a.len() as i64,
         Some(Value::Struct(s)) => s.fields.len() as i64,
-        Some(Value::String(s)) => s.len() as i64,
+        Some(Value::String(s)) => s.byte_len() as i64,
         _ => 0,
     };
     Ok(Value::Int(n))

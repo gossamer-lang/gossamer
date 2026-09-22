@@ -1,0 +1,60 @@
+// `s.clear()` and `s.truncate(n)` change only the binding they are called on:
+// a copy taken before keeps its text, whether the receiver is a local, a
+// struct field, or reached through `&mut String`. `truncate` takes a byte
+// length and cuts at the character boundary at or before it.
+
+struct Doc { text: String, n: i64 }
+
+fn refill(out: &mut String, word: String) {
+    out.clear()
+    out.push_str(word)
+}
+
+fn cut(out: &mut String, n: i64) {
+    out.truncate(n)
+}
+
+fn main() {
+    let mut a = String::with_capacity(16)
+    a.push_str("hello")
+    let b = a
+    a.clear()
+    a.push_str("x")
+    println("{} {}", a, b)
+
+    let mut lit = "h\u{e9}llo w\u{f6}rld"
+    lit.truncate(2)
+    println("[{}] {}", lit, lit.byte_len())
+    let mut lit2 = "abc"
+    lit2.clear()
+    println("[{}] {}", lit2, lit2.is_empty())
+
+    let mut d = Doc { text: String::with_capacity(8), n: 1 }
+    d.text.push_str("field text")
+    let keep = d.text
+    d.text.truncate(5)
+    d.text.push_str("!")
+    println("{} | {} | {}", d.text, keep, d.n)
+    d.text.clear()
+    println("[{}]", d.text)
+
+    let mut buf = String::with_capacity(32)
+    let mut total = 0
+    for i in 0..1000 {
+        refill(&mut buf, format("w{}", i))
+        total += buf.byte_len()
+    }
+    println("{} {}", buf, total)
+
+    let mut m = "caf\u{e9}s"
+    cut(&mut m, 4)
+    println("[{}]", m)
+    cut(&mut m, 100)
+    println("[{}]", m)
+
+    let mut u = String::new()
+    u.push_str("\u{e9}\u{e9}\u{e9}")
+    u.truncate(4)
+    u.push_str("a")
+    println("[{}] {} {}", u, u.len(), u[2])
+}

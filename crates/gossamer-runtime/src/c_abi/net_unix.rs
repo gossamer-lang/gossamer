@@ -56,6 +56,17 @@ mod imp {
     // call surfaces as a stale handle rather than touching a live socket.
     static UNIX_BASE: LazyLock<i64> = LazyLock::new(|| 1 << 40);
 
+    /// Runs `transfer`, which may block, where it cannot hold a scheduler
+    /// worker: a goroutine is pinned to the worker it started on, so one held
+    /// in a system call would strand every goroutine placed behind it. Inline
+    /// off the scheduler, on the blocking pool from a goroutine.
+    fn off_worker<T: Send + 'static>(
+        label: &'static str,
+        transfer: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+    ) -> std::io::Result<T> {
+        crate::sched_global::run_blocking(label, transfer).map_err(std::io::Error::other)?
+    }
+
     fn next_handle() -> i64 {
         *UNIX_BASE + NEXT_UNIX_HANDLE.fetch_add(1, Ordering::Relaxed)
     }
@@ -102,7 +113,7 @@ mod imp {
         let Some(listener) = listener_clone(h) else {
             return super::unix_err("UnixListener::accept: stale handle");
         };
-        match listener.accept() {
+        match off_worker("unix-accept", move || listener.accept()) {
             Ok((stream, addr)) => {
                 let sh = insert_stream(stream);
                 let addr_str = addr
@@ -145,15 +156,17 @@ mod imp {
         let Some(stream) = stream_clone(h) else {
             return super::unix_err("UnixStream::read: stale handle");
         };
-        let mut reader: &UnixStream = &stream;
-        match reader.read(&mut buf) {
-            Ok(n) => {
+        let read = off_worker("unix-stream-read", move || {
+            (&*stream).read(&mut buf).map(|n| {
                 buf.truncate(n);
-                super::super::vec::gos_rt_result_new(
-                    0,
-                    super::super::encoding::bytes_to_gosvec(&buf) as i64,
-                )
-            }
+                buf
+            })
+        });
+        match read {
+            Ok(buf) => super::super::vec::gos_rt_result_new(
+                0,
+                super::super::encoding::bytes_to_gosvec(&buf) as i64,
+            ),
             Err(e) => super::unix_err(&format!("{e}")),
         }
     }
@@ -162,16 +175,14 @@ mod imp {
         let Some(stream) = stream_clone(h) else {
             return super::unix_err("UnixStream::read_to_string: stale handle");
         };
-        let mut out = Vec::new();
-        let mut chunk = [0u8; 4096];
-        let mut reader: &UnixStream = &stream;
-        loop {
-            match reader.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(n) => out.extend_from_slice(&chunk[..n]),
-                Err(e) => return super::unix_err(&format!("{e}")),
-            }
-        }
+        let read = off_worker("unix-stream-read-string", move || {
+            let mut out = Vec::new();
+            (&*stream).read_to_end(&mut out).map(|_| out)
+        });
+        let out = match read {
+            Ok(out) => out,
+            Err(e) => return super::unix_err(&format!("{e}")),
+        };
         let s = String::from_utf8_lossy(&out);
         super::super::vec::gos_rt_result_new(
             0,
@@ -184,9 +195,9 @@ mod imp {
         let Some(stream) = stream_clone(h) else {
             return super::unix_err("UnixStream::write: stale handle");
         };
-        let mut writer: &UnixStream = &stream;
-        match writer.write_all(&bytes) {
-            Ok(()) => super::super::vec::gos_rt_result_new(0, bytes.len() as i64),
+        let len = bytes.len() as i64;
+        match off_worker("unix-stream-write", move || (&*stream).write_all(&bytes)) {
+            Ok(()) => super::super::vec::gos_rt_result_new(0, len),
             Err(e) => super::unix_err(&format!("{e}")),
         }
     }

@@ -1,0 +1,60 @@
+// Window and scalar appends onto builders in every state: holding only ASCII,
+// holding a wider character, shared with another binding, and full. Each
+// append keeps the text and its character positions, so `s[i]` and `s.len()`
+// agree with the characters written whatever path the append took.
+
+fn show(label: String, s: String) {
+    println("{}: [{}] len={} bytes={} last={}", label, s, s.len(), s.byte_len(), s[s.len() - 1])
+}
+
+// A builder refilled per round keeps its capacity and its ASCII index, and
+// takes each window in place.
+fn refill_rounds(plain: Vec<u8>, rounds: i64) -> String {
+    let mut out = String::with_capacity(32)
+    let mut total = 0
+    for round in 0..rounds {
+        out.clear()
+        let _ = out.push_json_quoted(plain, 0, 3)
+        out.push_str(round.to_string())
+        total += out.byte_len()
+    }
+    format("{} {}", out, total)
+}
+
+fn main() {
+    let plain = "abc<".as_bytes()
+    let wide = "h\u{e9}llo".as_bytes()
+
+    let mut ascii = String::with_capacity(64)
+    let _ = ascii.push_json_quoted(plain, 0, 3)
+    let _ = ascii.push_utf8(plain, 0, 3)
+    ascii.push_str(42.to_string())
+    ascii.push_str(1.5.to_string())
+    ascii.push_str(true.to_string())
+    show("ascii", ascii)
+
+    let mut mixed = String::with_capacity(64)
+    mixed.push_str("\u{e9}")
+    let _ = mixed.push_json_quoted(plain, 0, 3)
+    let _ = mixed.push_utf8(wide, 0, 6)
+    let _ = mixed.push_json_quoted(plain, 0, 4)
+    mixed.push_str((0 - 7).to_string())
+    mixed.push_str(2.25.to_string())
+    show("mixed", mixed)
+    println("mixed[1]={} mixed[6]={}", mixed[1], mixed[6])
+
+    let mut first = String::with_capacity(64)
+    first.push_str("x")
+    let kept = first
+    let _ = first.push_json_quoted(plain, 0, 2)
+    first.push_str(9.to_string())
+    show("first", first)
+    show("kept", kept)
+
+    let mut tight = String::with_capacity(2)
+    let _ = tight.push_json_quoted(plain, 0, 3)
+    let _ = tight.push_utf8(plain, 1, 3)
+    tight.push_str(123456789.to_string())
+    show("tight", tight)
+    println("rounds {}", refill_rounds(plain, 5))
+}

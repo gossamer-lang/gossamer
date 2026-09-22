@@ -287,6 +287,10 @@ const UNOWNED_STRING_RETURNS: &[(&str, &str)] = &[
         "answers its accumulator, grown in place",
     ),
     (
+        "gos_rt_str_clear",
+        "answers its receiver, emptied in place when held alone",
+    ),
+    (
         "gos_rt_str_clone",
         "answers its argument with the retain already taken",
     ),
@@ -297,6 +301,10 @@ const UNOWNED_STRING_RETURNS: &[(&str, &str)] = &[
     (
         "gos_rt_str_push_byte",
         "answers its accumulator, grown in place",
+    ),
+    (
+        "gos_rt_str_truncate",
+        "answers its receiver, shortened in place when held alone",
     ),
     (
         "gos_rt_str_push_char",

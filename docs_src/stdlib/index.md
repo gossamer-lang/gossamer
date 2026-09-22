@@ -49,6 +49,7 @@ For receiver methods on built-in types, see [`Methods by type`](../method_suppor
 | [`std::fs`](fs.md) | Filesystem reading, writing, and traversal (Rust std::fs shape). |
 | [`std::hash::adler32`](hash_adler32.md) | Adler-32 checksums. |
 | [`std::hash::crc32`](hash_crc32.md) | CRC-32 (IEEE) checksums. |
+| [`std::hash::crc32c`](hash_crc32c.md) | CRC-32C (Castagnoli) checksums, computed with the CPU's CRC instruction where there is one. |
 | [`std::hash::fnv`](hash_fnv.md) | FNV-1a non-cryptographic hash (32-bit, 64-bit). |
 | [`std::html`](html.md) | HTML text escaping and unescaping. |
 | [`std::html::template`](html_template.md) | Context-aware HTML templates with auto-escape (text/attr/URL/JS). The context classifier is heuristic - sound for typical server-rendered responses but NOT a content-security-policy substitute; sanitize untrusted HTML fragments with a dedicated sanitizer. |

@@ -1816,27 +1816,6 @@ impl<'a> Builder<'a> {
         );
     }
 
-    /// Releases the String a receiver's slot currently holds. The push family
-    /// hands its receiver to a helper that consumes it, so the replacement
-    /// carries that share on; `clear` and `truncate` only read the receiver,
-    /// which leaves the displaced value for the writeback to account for.
-    fn release_receiver_slot(&mut self, recv_local: Local, span: Span) {
-        if self.mut_slot_pointee_of_local(recv_local).is_none() {
-            return;
-        }
-        let place = self.receiver_slot_place(recv_local);
-        let unit_ty = self.tcx.unit();
-        let rel = self.fresh(unit_ty);
-        self.emit_assign(
-            Place::local(rel),
-            Rvalue::CallIntrinsic {
-                name: "gos_rt_rc_release",
-                args: vec![Operand::Copy(place)],
-            },
-            span,
-        );
-    }
-
     /// Pointee of a local typed `&mut <scalar / String>`.
     fn mut_slot_pointee_of_local(&self, local: Local) -> Option<Ty> {
         self.mut_slot_pointee(self.locals[local.0 as usize].ty)
@@ -2139,28 +2118,37 @@ impl<'a> Builder<'a> {
                 return MethodLowering::Handled(Some(self.lower_unit(span)));
             }
         }
-        // `s.clear()` / `s.truncate(n)` on a String receiver. Strings are
-        // immutable runtime byte buffers, so mutation is modeled as a fresh
-        // string plus receiver-local writeback, matching the push family.
+        // `s.clear()` / `s.truncate(n)` on a String receiver. Same
+        // receiver-rebind contract as the push family: the runtime consumes
+        // the receiver, shortening it in place when it holds the buffer alone,
+        // and the answer is written back.
         if matches!(method.name.as_str(), "clear" | "truncate")
             && (method.name.as_str() == "clear" && args.is_empty()
                 || method.name.as_str() == "truncate" && args.len() == 1)
             && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
             {
-                let Some(recv_place) = self.string_receiver_place(receiver) else {
-                    return MethodLowering::Handled(None);
-                };
-                let mut call_args = vec![Operand::Copy(recv_place.clone())];
-                let rt = if method.name.as_str() == "clear" {
-                    call_args.clear();
-                    "gos_rt_str_clear"
-                } else {
+                let arg_local = if method.name.as_str() == "truncate" {
                     let Some(arg_local) = self.lower_expr(&args[0]) else {
                         return MethodLowering::Handled(None);
                     };
-                    call_args.push(Operand::Copy(Place::local(arg_local)));
-                    "gos_rt_str_truncate"
+                    Some(arg_local)
+                } else {
+                    None
+                };
+                let Some(recv_place) = self.string_receiver_place(receiver) else {
+                    return MethodLowering::Handled(None);
+                };
+                if projected {
+                    self.retain_string_place(&recv_place, span);
+                }
+                let mut call_args = vec![Operand::Copy(recv_place.clone())];
+                let rt = match arg_local {
+                    Some(arg_local) => {
+                        call_args.push(Operand::Copy(Place::local(arg_local)));
+                        "gos_rt_str_truncate"
+                    }
+                    None => "gos_rt_str_clear",
                 };
                 let dest = self.fresh(peeled);
                 let next = self.new_block(span);
@@ -2171,14 +2159,6 @@ impl<'a> Builder<'a> {
                     target: Some(next),
                 });
                 self.set_current(next);
-                // A place the holding aggregate owns has its displaced value
-                // released by the projected-store schedule; a `&mut` slot has
-                // no such schedule, so the release is written here.
-                if !projected {
-                    if let Some(recv_local) = self.receiver_local_from_path(receiver) {
-                        self.release_receiver_slot(recv_local, span);
-                    }
-                }
                 self.emit_assign(
                     recv_place,
                     Rvalue::Use(Operand::Copy(Place::local(dest))),

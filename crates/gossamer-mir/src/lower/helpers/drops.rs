@@ -199,6 +199,8 @@ fn is_self_consuming_append(name: &str) -> bool {
             | "gos_rt_str_append_bytes"
             | "gos_rt_str_push_char"
             | "gos_rt_str_push_byte"
+            | "gos_rt_str_clear"
+            | "gos_rt_str_truncate"
             // Appends through `gos_rt_str_append_bytes` and answers the
             // accumulator in the carrier's payload.
             | "gos_rt_str_push_utf8"

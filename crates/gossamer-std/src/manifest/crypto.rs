@@ -327,6 +327,34 @@ pub const HASH_CRC32: StdModule = StdModule {
     ],
 };
 
+pub const HASH_CRC32C: StdModule = StdModule {
+    path: "std::hash::crc32c",
+    summary: "CRC-32C (Castagnoli) checksums, computed with the CPU's CRC instruction where there is one.",
+    items: &[
+        StdItem {
+            name: "checksum",
+            kind: StdItemKind::Function,
+            doc: "CRC-32C checksum of a byte slice.",
+        },
+        StdItem {
+            name: "checksum_string",
+            kind: StdItemKind::Function,
+            doc: "CRC-32C checksum of a String.",
+        },
+        StdItem {
+            name: "update",
+            kind: StdItemKind::Function,
+            doc: "Continues a CRC-32C from a running value over more bytes.",
+        },
+        StdItem {
+            name: "update_window",
+            kind: StdItemKind::Function,
+            doc: "Continues a CRC-32C over `data[start..end]`, checking a record \
+                  where it lies rather than copying the window out first.",
+        },
+    ],
+};
+
 pub const HASH_ADLER32: StdModule = StdModule {
     path: "std::hash::adler32",
     summary: "Adler-32 checksums.",

@@ -762,6 +762,20 @@ pub fn try_spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid> {
     })
 }
 
+/// [`try_spawn`] for a goroutine the runtime runs on the program's behalf,
+/// such as one serving an accepted connection, which process exit does not
+/// wait for.
+#[must_use]
+pub fn try_spawn_service(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid> {
+    let coro = gossamer_coro::Goroutine::try_new(task).ok()?;
+    scheduler().try_spawn_service(GoroutineTask {
+        coro,
+        arena: crate::c_abi::rc::ArenaState::empty(),
+        isolated_faults: false,
+        joinable: false,
+    })
+}
+
 /// Spawns `task` on the M:N pool. Panics if the live-goroutine cap
 /// would be exceeded. Use [`try_spawn`] for graceful refusal.
 ///

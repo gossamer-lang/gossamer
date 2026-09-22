@@ -249,13 +249,18 @@ pub unsafe extern "C" fn gos_rt_http_server_serve(
         let limits = server.limits.lock().clone();
         let env_addr = handler_env as usize;
         let fn_addr = handler_fn as usize;
+        let gate = std::sync::Arc::new(super::http_server::RequestGate {
+            shutdown: Arc::clone(&server.shutdown),
+            in_flight: Arc::clone(&server.in_flight),
+        });
         let served = super::http_server::accept_serve_with(
             listener,
             &limits,
             &server.shutdown,
-            &server.in_flight,
             move |stream, peer, limits| {
-                super::http_server::serve_one_connection(stream, peer, limits, env_addr, fn_addr);
+                super::http_server::serve_one_connection(
+                    stream, peer, limits, &gate, env_addr, fn_addr,
+                );
             },
         );
         if !served {
@@ -266,7 +271,8 @@ pub unsafe extern "C" fn gos_rt_http_server_serve(
 }
 
 /// `server.shutdown(deadline_ms) -> bool` - stops accepting, then waits
-/// for in-flight requests to finish.
+/// for in-flight requests to finish. A keep-alive connection waiting
+/// between requests is not one.
 ///
 /// Answers whether the drain completed: `false` means the deadline
 /// elapsed with requests still running, which is the caller's cue to

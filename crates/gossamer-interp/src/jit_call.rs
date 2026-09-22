@@ -83,7 +83,7 @@ fn build_native_arg(kind: JitKind, value: &Value) -> Option<i64> {
             (JitKind::NativeVecF64, Value::Array(values)) => values.len().saturating_mul(8),
             (JitKind::NativeVecTupleIF, Value::Array(values)) => values.len().saturating_mul(16),
             (JitKind::NativeVecU8, _) => value.byte_slice().map_or(0, |bytes| bytes.len()),
-            (JitKind::NativeStr, Value::String(value)) => value.len(),
+            (JitKind::NativeStr, Value::String(value)) => value.byte_len(),
             (JitKind::U8VecHandle, _) => {
                 crate::builtins::u8vec_snapshot_bytes(value).map_or(0, |bytes| bytes.len())
             }

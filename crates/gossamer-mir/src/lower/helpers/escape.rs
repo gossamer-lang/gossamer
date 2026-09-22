@@ -877,8 +877,8 @@ pub fn collect_shareable_params(
 /// Standard-library modules whose functions keep nothing they are handed:
 /// each answers from its arguments alone and stores none of them.
 const STATELESS_STD_MODULES: &[&str] = &[
-    "adler32", "ascii85", "base32", "base64", "binary", "bits", "blake3", "crc32", "fnv", "hex",
-    "hmac", "math", "sha256", "sha512", "strconv", "strings", "subtle", "unicode", "utf8",
+    "adler32", "ascii85", "base32", "base64", "binary", "bits", "blake3", "crc32", "crc32c", "fnv",
+    "hex", "hmac", "math", "sha256", "sha512", "strconv", "strings", "subtle", "unicode", "utf8",
 ];
 
 /// Whether a call reads its container arguments without keeping them: the

@@ -63,6 +63,7 @@
   {"name":"std::fs","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::hash::adler32","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::hash::crc32","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
+  {"name":"std::hash::crc32c","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::hash::fnv","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::html","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},
   {"name":"std::http","tiers":{"vm":"pass","cranelift":"pass","llvm":"pass"}},

@@ -150,6 +150,54 @@ pub unsafe extern "C" fn gos_rt_hash_crc32_update_window(
     })
 }
 
+/// `hash::crc32c::checksum(data) -> i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_hash_crc32c_checksum(data: *const super::vec::GosVec) -> i64 {
+    ffi_entry!(0, {
+        i64::from(crate::crc32c::update(0, &unsafe { vec_u8(data) }))
+    })
+}
+
+/// `hash::crc32c::checksum_string(s) -> i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_hash_crc32c_checksum_string(s: *const c_char) -> i64 {
+    ffi_entry!(0, {
+        i64::from(crate::crc32c::update(0, unsafe { cstr_bytes(s) }))
+    })
+}
+
+/// `hash::crc32c::update(crc, data) -> i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_hash_crc32c_update(
+    crc: i64,
+    data: *const super::vec::GosVec,
+) -> i64 {
+    ffi_entry!(0, {
+        i64::from(crate::crc32c::update(crc as u32, &unsafe { vec_u8(data) }))
+    })
+}
+
+/// `hash::crc32c::update_window(crc, data, start, end) -> i64`: the CRC-32C
+/// counterpart of [`gos_rt_hash_crc32_update_window`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_hash_crc32c_update_window(
+    crc: i64,
+    data: *const super::vec::GosVec,
+    start: i64,
+    end: i64,
+) -> i64 {
+    ffi_entry!(0, {
+        if start < 0 || end < start {
+            return i64::from(crc as u32);
+        }
+        let (lo, hi) = (start as usize, end as usize);
+        let Some(bytes) = (unsafe { crate::c_abi::vec::vec_bytes_window(data, lo, hi) }) else {
+            return i64::from(crc as u32);
+        };
+        i64::from(crate::crc32c::update(crc as u32, &bytes))
+    })
+}
+
 // ---------------------------------------------------------------
 // Adler-32 (zlib / RFC 1950)
 // ---------------------------------------------------------------

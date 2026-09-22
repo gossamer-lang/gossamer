@@ -63,6 +63,7 @@ Receiver methods on built-in types such as `String`, `Vec`, `Map`, `Option`, and
 | [`std::fs`](#stdfs) | 35 | Filesystem reading, writing, and traversal (Rust std::fs shape). |
 | [`std::hash::adler32`](#stdhashadler32) | 3 | Adler-32 checksums. |
 | [`std::hash::crc32`](#stdhashcrc32) | 4 | CRC-32 (IEEE) checksums. |
+| [`std::hash::crc32c`](#stdhashcrc32c) | 4 | CRC-32C (Castagnoli) checksums, computed with the CPU's CRC instruction where there is one. |
 | [`std::hash::fnv`](#stdhashfnv) | 3 | FNV-1a non-cryptographic hash (32-bit, 64-bit). |
 | [`std::html`](#stdhtml) | 2 | HTML text escaping and unescaping. |
 | [`std::html::template`](#stdhtmltemplate) | 1 | Context-aware HTML templates with auto-escape (text/attr/URL/JS). The context classifier is heuristic - sound for typical server-rendered responses but NOT a content-security-policy substitute; sanitize untrusted HTML fragments with a dedicated sanitizer. |
@@ -682,6 +683,17 @@ CRC-32 (IEEE) checksums.
 | `checksum_string` | fn | CRC-32 checksum of a String. |
 | `update` | fn | Continues a CRC-32 from a running value over more bytes. |
 | `update_window` | fn | Continues a CRC-32 over `data[start..end]`, checking a record where it lies rather than copying the window out first. |
+
+## `std::hash::crc32c`
+
+CRC-32C (Castagnoli) checksums, computed with the CPU's CRC instruction where there is one.
+
+| Item | Kind | Doc |
+|------|------|-----|
+| `checksum` | fn | CRC-32C checksum of a byte slice. |
+| `checksum_string` | fn | CRC-32C checksum of a String. |
+| `update` | fn | Continues a CRC-32C from a running value over more bytes. |
+| `update_window` | fn | Continues a CRC-32C over `data[start..end]`, checking a record where it lies rather than copying the window out first. |
 
 ## `std::hash::fnv`
 

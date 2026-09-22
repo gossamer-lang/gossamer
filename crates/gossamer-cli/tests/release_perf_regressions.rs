@@ -155,9 +155,13 @@ fn server_cpu_per_request(label: &str, binary: &Path, arg: String, port: u16) ->
     assert!(warmed > 0, "no request was answered");
 
     let before = common::proc_cpu_ticks(server.id()).expect("read the server's CPU");
+    let switches_before = common::proc_context_switches(server.id());
+    let faults_before = common::proc_minor_faults(server.id());
     let handles: Vec<_> = (0..workers).map(|_| drive(per_worker)).collect();
     let answered: usize = handles.into_iter().map(|h| h.join().unwrap_or(0)).sum();
     let after = common::proc_cpu_ticks(server.id()).expect("read the server's CPU");
+    let switches = common::proc_context_switches(server.id()) - switches_before;
+    let faults = common::proc_minor_faults(server.id()) - faults_before;
     let _ = server.kill();
     let _ = server.wait();
 
@@ -167,7 +171,13 @@ fn server_cpu_per_request(label: &str, binary: &Path, arg: String, port: u16) ->
         "every worker must finish its requests"
     );
     let micros = common::cpu_micros_per_request(after - before, answered);
-    eprintln!("{label}: {answered} requests, {micros:.2} us of CPU each");
+    let per = |n: u64| n as f64 / answered.max(1) as f64;
+    eprintln!(
+        "{label}: {answered} requests, {micros:.2} us of CPU each, \
+         {:.2} context switches and {:.2} minor faults per request",
+        per(switches),
+        per(faults)
+    );
     micros
 }
 

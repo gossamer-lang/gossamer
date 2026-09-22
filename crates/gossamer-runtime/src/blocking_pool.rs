@@ -73,9 +73,11 @@ pub fn submit(job: Job) -> Result<(), String> {
     state.queue.push_back(job);
     if state.idle > 0 {
         POOL.work.notify_one();
-        return Ok(());
     }
-    if state.threads >= CAP.load(Ordering::Relaxed) {
+    // A woken thread counts as idle until it runs, so compare waiting jobs
+    // with waiting threads: a job beyond them needs a thread of its own, or it
+    // queues behind one that may wait on the OS indefinitely.
+    if state.queue.len() <= state.idle || state.threads >= CAP.load(Ordering::Relaxed) {
         return Ok(());
     }
     state.threads += 1;

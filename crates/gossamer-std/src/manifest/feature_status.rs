@@ -6253,6 +6253,10 @@ pub const ITEM_FIXTURES: &[(&str, &[&str])] = &[
         ],
     ),
     (
+        "std::hash::crc32c",
+        &["feature-testing-examples/hash_crc32c.gos"],
+    ),
+    (
         "std::hash::fnv",
         &[
             "feature-testing-examples/nul_in_strings.gos",

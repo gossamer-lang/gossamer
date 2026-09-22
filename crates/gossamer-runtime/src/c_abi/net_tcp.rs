@@ -23,9 +23,15 @@
 //! `local_addr` take `&self`, so no `&mut` ownership is needed past the
 //! `Arc` - the registry never hands out exclusive access.
 //!
-//! Cross-platform: built entirely on `std::net` (Linux / macOS /
-//! Windows). `std` performs `WSAStartup` lazily on Windows; there is no
-//! libc / raw-fd / unix-only surface here.
+//! A goroutine never runs its blocking `accept` / `read` / `write` on its
+//! scheduler worker: goroutines are pinned to the worker they start on, so
+//! one held in a system call would strand every goroutine placed behind it.
+//! The call runs on the blocking pool while the goroutine parks, after a
+//! Unix transfer has first taken whatever the socket can move without
+//! waiting.
+//!
+//! Cross-platform: built on `std::net` (Linux / macOS / Windows). `std`
+//! performs `WSAStartup` lazily on Windows.
 //!
 //! Result shapes (packed `i128` via `gos_rt_result_new`):
 //! - `bind` / `connect`  -> `Result<TcpListener|TcpStream, Error>` (Ok payload = i64 handle)
@@ -97,6 +103,120 @@ fn transfer_error(err: &std::io::Error, context: &str, timed_out: &str) -> Strin
         ErrorKind::WouldBlock | ErrorKind::TimedOut => format!("io: {context}: {timed_out}"),
         _ => socket_error(err, context),
     }
+}
+
+/// Runs `transfer`, which may block on `stream`, where it cannot hold a
+/// scheduler worker: inline off the scheduler, on the blocking pool from a
+/// goroutine.
+fn off_worker<T: Send + 'static>(
+    label: &'static str,
+    transfer: impl FnOnce() -> std::io::Result<T> + Send + 'static,
+) -> std::io::Result<T> {
+    crate::sched_global::run_blocking(label, transfer).map_err(std::io::Error::other)?
+}
+
+/// Reads what `stream` has queued into `buf` without waiting, or `None`
+/// when nothing is queued yet.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "a non-waiting receive on a blocking socket needs a raw recv"
+)]
+fn recv_queued(stream: &TcpStream, buf: &mut [u8]) -> Option<std::io::Result<usize>> {
+    use std::os::fd::AsRawFd;
+    // SAFETY: the caller's `Arc` keeps the socket open for the call, and
+    // `buf` is valid for `buf.len()` writable bytes.
+    let n = unsafe {
+        libc::recv(
+            stream.as_raw_fd(),
+            buf.as_mut_ptr().cast(),
+            buf.len(),
+            libc::MSG_DONTWAIT,
+        )
+    };
+    if let Ok(n) = usize::try_from(n) {
+        return Some(Ok(n));
+    }
+    let err = std::io::Error::last_os_error();
+    match err.kind() {
+        ErrorKind::WouldBlock | ErrorKind::Interrupted => None,
+        _ => Some(Err(err)),
+    }
+}
+
+/// Sends as much of `bytes` as `stream` takes without waiting, answering
+/// how many it took.
+#[cfg(unix)]
+#[allow(
+    unsafe_code,
+    reason = "a non-waiting send on a blocking socket needs a raw send"
+)]
+fn send_queued(stream: &TcpStream, bytes: &[u8]) -> std::io::Result<usize> {
+    use std::os::fd::AsRawFd;
+    // Linux raises SIGPIPE on a send to a closed peer unless asked not to;
+    // Apple platforms carry `SO_NOSIGPIPE` on every socket `std` opens.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    const FLAGS: libc::c_int = libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL;
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    const FLAGS: libc::c_int = libc::MSG_DONTWAIT;
+    let mut sent = 0;
+    while sent < bytes.len() {
+        let rest = &bytes[sent..];
+        // SAFETY: the caller's `Arc` keeps the socket open for the call, and
+        // `rest` is valid for `rest.len()` readable bytes.
+        let n = unsafe { libc::send(stream.as_raw_fd(), rest.as_ptr().cast(), rest.len(), FLAGS) };
+        if let Ok(n) = usize::try_from(n) {
+            sent += n;
+            continue;
+        }
+        let err = std::io::Error::last_os_error();
+        match err.kind() {
+            ErrorKind::WouldBlock => break,
+            ErrorKind::Interrupted => {}
+            _ => return Err(err),
+        }
+    }
+    Ok(sent)
+}
+
+/// Reads one chunk from `stream` into `buf` without holding a scheduler
+/// worker while it waits.
+fn read_stream(stream: Arc<TcpStream>, buf: &mut [u8]) -> std::io::Result<usize> {
+    if crate::sched_global::current_gid().is_none() {
+        return (&*stream).read(buf);
+    }
+    #[cfg(unix)]
+    if let Some(done) = recv_queued(&stream, buf) {
+        return done;
+    }
+    let window = buf.len();
+    let bytes = off_worker("tcp-stream-read", move || {
+        let mut owned = vec![0u8; window];
+        (&*stream).read(&mut owned).map(|n| {
+            owned.truncate(n);
+            owned
+        })
+    })?;
+    buf[..bytes.len()].copy_from_slice(&bytes);
+    Ok(bytes.len())
+}
+
+/// Writes all of `bytes` to `stream` without holding a scheduler worker
+/// while the peer's window is full.
+fn write_stream(stream: Arc<TcpStream>, bytes: Vec<u8>) -> std::io::Result<()> {
+    if crate::sched_global::current_gid().is_none() {
+        return (&*stream).write_all(&bytes);
+    }
+    #[cfg(unix)]
+    let sent = send_queued(&stream, &bytes)?;
+    #[cfg(not(unix))]
+    let sent = 0;
+    if sent == bytes.len() {
+        return Ok(());
+    }
+    off_worker("tcp-stream-write", move || {
+        (&*stream).write_all(&bytes[sent..])
+    })
 }
 
 fn listener_clone(h: i64) -> Option<Arc<TcpListener>> {
@@ -380,7 +500,7 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
         let Some(listener) = listener_clone(h) else {
             return tcp_err("TcpListener::accept: stale handle");
         };
-        match listener.accept() {
+        match off_worker("tcp-accept", move || listener.accept()) {
             Ok((stream, peer)) => {
                 // Nagle off, as Go leaves a `TCPConn`: a request/response
                 // protocol writes a reply as a few small writes, and holding
@@ -473,8 +593,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read(h: i64, max: i64) -> i128 {
             }
         } else if let Some(stream) = stream_clone(h) {
             let mut buf = vec![0u8; cap];
-            let mut reader: &TcpStream = &stream;
-            match reader.read(&mut buf) {
+            match read_stream(stream, &mut buf) {
                 Ok(n) => {
                     buf.truncate(n);
                     buf
@@ -534,8 +653,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, m
                 Err(e) => return tcp_err(&e),
             }
         } else if let Some(stream) = stream_clone(h) {
-            let mut reader: &TcpStream = &stream;
-            match reader.read(slot) {
+            match read_stream(stream, slot) {
                 Ok(n) => n,
                 Err(e) => {
                     return tcp_err(&transfer_error(
@@ -577,14 +695,14 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_to_string(h: i64) -> i128 {
                 Err(e) => return tcp_err(&e),
             }
         } else if let Some(stream) = stream_clone(h) {
-            let mut reader: &TcpStream = &stream;
-            loop {
-                match reader.read(&mut chunk) {
-                    Ok(0) => break,
-                    Ok(n) => out.extend_from_slice(&chunk[..n]),
-                    Err(e) => {
-                        return tcp_err(&transfer_error(&e, "TcpStream::read", "read timed out"));
-                    }
+            let read = off_worker("tcp-stream-read-string", move || {
+                let mut out = Vec::new();
+                (&*stream).read_to_end(&mut out).map(|_| out)
+            });
+            match read {
+                Ok(bytes) => out = bytes,
+                Err(e) => {
+                    return tcp_err(&transfer_error(&e, "TcpStream::read", "read timed out"));
                 }
             }
         } else {
@@ -623,9 +741,8 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_write(h: i64, data: *const super::vec
                 Err(e) => tcp_err(&e),
             }
         } else if let Some(stream) = stream_clone(h) {
-            let mut writer: &TcpStream = &stream;
-            match writer.write_all(&bytes) {
-                Ok(()) => super::vec::gos_rt_result_new(0, bytes.len() as i64),
+            match write_stream(stream, bytes) {
+                Ok(()) => super::vec::gos_rt_result_new(0, bytes_len),
                 Err(e) => tcp_err(&transfer_error(
                     &e,
                     "TcpStream::write_all",

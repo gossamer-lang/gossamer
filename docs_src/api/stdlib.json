@@ -4809,6 +4809,82 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-hash-crc32c-checksum",
+      "name": "std::hash::crc32c::checksum",
+      "kind": "function",
+      "signature": "fn checksum(data: Vec<u8>) -> i64",
+      "description": "CRC-32C checksum of a byte slice.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-hash-crc32c-checksum-string",
+      "name": "std::hash::crc32c::checksum_string",
+      "kind": "function",
+      "signature": "fn checksum_string(text: String) -> i64",
+      "description": "CRC-32C checksum of a String.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-hash-crc32c-update",
+      "name": "std::hash::crc32c::update",
+      "kind": "function",
+      "signature": "fn update(seed: i64, data: Vec<u8>) -> i64",
+      "description": "Continues a CRC-32C from a running value over more bytes.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-hash-crc32c-update-window",
+      "name": "std::hash::crc32c::update_window",
+      "kind": "function",
+      "signature": "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
+      "description": "Continues a CRC-32C over `data[start..end]`, checking a record where it lies rather than copying the window out first.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-hash-fnv-hash32",
       "name": "std::hash::fnv::hash32",
       "kind": "function",

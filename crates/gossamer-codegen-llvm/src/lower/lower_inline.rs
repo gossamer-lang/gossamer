@@ -3848,11 +3848,18 @@ impl<'a> Lowerer<'a> {
             "  {dst} = getelementptr i8, ptr {acc}, i64 {len64}"
         )
         .unwrap();
-        writeln!(
-            self.out,
-            "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {piece}, i64 {piece_len64}, i1 false)"
-        )
-        .unwrap();
+        // A literal's length is a constant LLVM expands itself; a string
+        // piece's is not, and the pieces a builder appends are mostly short.
+        let fast_end = if literal_len.is_some() {
+            writeln!(
+                self.out,
+                "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {piece}, i64 {piece_len64}, i1 false)"
+            )
+            .unwrap();
+            fast.clone()
+        } else {
+            self.emit_short_copy(&dst, &piece, &piece_len64, id)
+        };
         let nul = self.fresh();
         writeln!(
             self.out,
@@ -3883,7 +3890,7 @@ impl<'a> Lowerer<'a> {
         let res = self.fresh();
         writeln!(
             self.out,
-            "  {res} = phi ptr [ {acc}, %{fast} ], [ {called}, %{slow} ]"
+            "  {res} = phi ptr [ {acc}, %{fast_end} ], [ {called}, %{slow} ]"
         )
         .unwrap();
         if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
@@ -3892,5 +3899,83 @@ impl<'a> Lowerer<'a> {
         }
         emit_terminator_branch(&mut self.out, target);
         Ok(())
+    }
+
+    /// Copies `n` bytes from `src` to `dst`, answering the label of the block
+    /// the copy ends in. Up to sixteen bytes move as two overlapping loads and
+    /// stores of the widest word that fits, with both loads ahead of both
+    /// stores; a longer run calls `memcpy`.
+    fn emit_short_copy(&mut self, dst: &str, src: &str, n: &str, id: u32) -> String {
+        let label = |name: &str| format!("sc_{name}_{id}");
+        let done = label("done");
+        let small = self.fresh();
+        writeln!(self.out, "  {small} = icmp ule i64 {n}, 16").unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {small}, label %{}, label %{}",
+            label("w8c"),
+            label("big")
+        )
+        .unwrap();
+        // Widths from the widest down, each covering [width, 2 * width).
+        let widths: [(u32, &str); 4] = [(8, "i64"), (4, "i32"), (2, "i16"), (1, "i8")];
+        for (k, (width, ty)) in widths.iter().enumerate() {
+            let check = label(&format!("w{width}c"));
+            let body = label(&format!("w{width}"));
+            let next = widths
+                .get(k + 1)
+                .map_or_else(|| done.clone(), |(w, _)| label(&format!("w{w}c")));
+            writeln!(self.out, "{check}:").unwrap();
+            let fits = self.fresh();
+            writeln!(self.out, "  {fits} = icmp uge i64 {n}, {width}").unwrap();
+            writeln!(self.out, "  br i1 {fits}, label %{body}, label %{next}").unwrap();
+            writeln!(self.out, "{body}:").unwrap();
+            let tail = self.fresh();
+            writeln!(self.out, "  {tail} = sub i64 {n}, {width}").unwrap();
+            let src_tail = self.fresh();
+            writeln!(
+                self.out,
+                "  {src_tail} = getelementptr i8, ptr {src}, i64 {tail}"
+            )
+            .unwrap();
+            let head_word = self.fresh();
+            writeln!(
+                self.out,
+                "  {head_word} = load {ty}, ptr {src}, align 1{TBAA_DATA}"
+            )
+            .unwrap();
+            let tail_word = self.fresh();
+            writeln!(
+                self.out,
+                "  {tail_word} = load {ty}, ptr {src_tail}, align 1{TBAA_DATA}"
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "  store {ty} {head_word}, ptr {dst}, align 1{TBAA_DATA}"
+            )
+            .unwrap();
+            let dst_tail = self.fresh();
+            writeln!(
+                self.out,
+                "  {dst_tail} = getelementptr i8, ptr {dst}, i64 {tail}"
+            )
+            .unwrap();
+            writeln!(
+                self.out,
+                "  store {ty} {tail_word}, ptr {dst_tail}, align 1{TBAA_DATA}"
+            )
+            .unwrap();
+            writeln!(self.out, "  br label %{done}").unwrap();
+        }
+        writeln!(self.out, "{}:", label("big")).unwrap();
+        writeln!(
+            self.out,
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {src}, i64 {n}, i1 false)"
+        )
+        .unwrap();
+        writeln!(self.out, "  br label %{done}").unwrap();
+        writeln!(self.out, "{done}:").unwrap();
+        done
     }
 }
