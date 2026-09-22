@@ -1647,6 +1647,46 @@ impl Vm {
                     // for every non-wide op.
                     let wide = unsafe { chunk.wide_ops.get_unchecked(idx as usize) };
                     match wide {
+                        crate::bytecode::WideOp::PlaceSet { root, path, value } => {
+                            let new_value = registers[*value as usize].clone();
+                            let indices = place_indices(path, registers)?;
+                            place_set(
+                                &mut registers[*root as usize],
+                                path,
+                                &indices,
+                                &chunk.consts,
+                                new_value,
+                            )?;
+                        }
+                        crate::bytecode::WideOp::PlaceVecResize {
+                            root,
+                            path,
+                            len,
+                            fill,
+                        } => {
+                            let Some(new_len) =
+                                crate::builtins::value_to_int(&registers[*len as usize])
+                            else {
+                                return Err(RuntimeError::Type(
+                                    "resize: length must be an integer".to_string(),
+                                ));
+                            };
+                            if new_len < 0 {
+                                return Err(RuntimeError::Panic(
+                                    "resize: length must be non-negative".to_string(),
+                                ));
+                            }
+                            let fill_value = registers[*fill as usize].clone();
+                            let indices = place_indices(path, registers)?;
+                            let target = place_mut(
+                                &mut registers[*root as usize],
+                                path,
+                                &indices,
+                                &chunk.consts,
+                            )?;
+                            crate::stdlib_builtins::iter::note_vec_structural_mutation(target);
+                            vec_resize_value(target, new_len as usize, fill_value)?;
+                        }
                         crate::bytecode::WideOp::StrConcatPadI64 {
                             dst,
                             prefix,
@@ -2000,101 +2040,7 @@ impl Vm {
                         raw,
                         &new_value,
                     );
-                    let b = &mut registers[base as usize];
-                    // An `[f64]` vec whose elements so far were all
-                    // integer-valued sits in `IntArray` storage (an `[i64]`
-                    // can never receive a float store); widen it to flat
-                    // float storage before the store below.
-                    if let (Value::IntArray(data), Value::Float(_)) = (&*b, &new_value) {
-                        *b = Value::FloatVec(Arc::new(data.iter().map(|n| *n as f64).collect()));
-                    }
-                    match b {
-                        Value::Array(items) | Value::Tuple(items) => {
-                            if raw < 0 || raw as usize >= items.len() {
-                                return Err(crate::vm::index_oob_panic(raw, items.len()));
-                            }
-                            Arc::make_mut(items)[raw as usize] = new_value;
-                        }
-                        Value::IntArray(data) => {
-                            if raw < 0 || raw as usize >= data.len() {
-                                return Err(crate::vm::index_oob_panic(raw, data.len()));
-                            }
-                            match new_value {
-                                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n,
-                                _ => {
-                                    return Err(RuntimeError::Type(
-                                        "IndexSet on IntArray expects i64 value".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        Value::ByteArray(data) => {
-                            if raw < 0 || raw as usize >= data.len() {
-                                return Err(crate::vm::index_oob_panic(raw, data.len()));
-                            }
-                            match new_value {
-                                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n as u8,
-                                _ => {
-                                    return Err(RuntimeError::Type(
-                                        "IndexSet on ByteArray expects u8 value".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        Value::InlineByteArray(data) => {
-                            if raw < 0 || raw as usize >= data.len() {
-                                return Err(crate::vm::index_oob_panic(raw, data.len()));
-                            }
-                            match new_value {
-                                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n as u8,
-                                _ => {
-                                    return Err(RuntimeError::Type(
-                                        "IndexSet on byte array expects u8 value".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        Value::ByteVec(data) => {
-                            if raw < 0 || raw as usize >= data.len() {
-                                return Err(crate::vm::index_oob_panic(raw, data.len()));
-                            }
-                            match new_value {
-                                Value::Int(n) => {
-                                    Arc::make_mut(data)[raw as usize] =
-                                        u8::try_from(n).map_err(|_| {
-                                            RuntimeError::Type(
-                                                "IndexSet on byte vector expects u8 value"
-                                                    .to_string(),
-                                            )
-                                        })?;
-                                }
-                                _ => {
-                                    return Err(RuntimeError::Type(
-                                        "IndexSet on byte vector expects u8 value".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        Value::FloatVec(data) => {
-                            if raw < 0 || raw as usize >= data.len() {
-                                return Err(crate::vm::index_oob_panic(raw, data.len()));
-                            }
-                            match new_value {
-                                Value::Float(f) => Arc::make_mut(data)[raw as usize] = f,
-                                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n as f64,
-                                _ => {
-                                    return Err(RuntimeError::Type(
-                                        "IndexSet on FloatVec expects f64 value".to_string(),
-                                    ));
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(RuntimeError::Type(format!(
-                                "value of kind `{b}` is not indexable"
-                            )));
-                        }
-                    }
+                    index_set_value(&mut registers[base as usize], raw, new_value)?;
                 }
                 Op::FieldGet {
                     dst,
@@ -2198,6 +2144,32 @@ impl Vm {
                     );
                     let recv = &mut registers[receiver as usize];
                     vec_push_value(recv, new_value);
+                }
+                Op::VecResize {
+                    receiver,
+                    len,
+                    fill,
+                } => {
+                    let Some(new_len) = crate::builtins::value_to_int(&registers[len as usize])
+                    else {
+                        return Err(RuntimeError::Type(
+                            "resize: length must be an integer".to_string(),
+                        ));
+                    };
+                    if new_len < 0 {
+                        return Err(RuntimeError::Panic(
+                            "resize: length must be non-negative".to_string(),
+                        ));
+                    }
+                    let fill_value = registers[fill as usize].clone();
+                    crate::stdlib_builtins::iter::note_vec_structural_mutation(
+                        &registers[receiver as usize],
+                    );
+                    vec_resize_value(
+                        &mut registers[receiver as usize],
+                        new_len as usize,
+                        fill_value,
+                    )?;
                 }
                 Op::StrAppend { receiver, value } => {
                     // Read the RHS first (a cheap SmolStr clone: an Arc
@@ -4694,6 +4666,268 @@ fn promote_scalar_push(recv: &Value, new_value: &Value) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// The index each `Index` step of `path` names, read before the place is
+/// borrowed for writing.
+fn place_indices(
+    path: &[crate::bytecode::PlaceStep],
+    registers: &[Value],
+) -> RuntimeResult<smallvec::SmallVec<[i64; 4]>> {
+    let mut out = smallvec::SmallVec::new();
+    for step in path {
+        if let crate::bytecode::PlaceStep::Index(reg) = step {
+            out.push(super::index_value(&registers[*reg as usize])?);
+        }
+    }
+    Ok(out)
+}
+
+fn place_field_name(consts: &[Value], name_idx: u16) -> RuntimeResult<&str> {
+    match consts.get(usize::from(name_idx)) {
+        Some(Value::String(name)) => Ok(name.as_str()),
+        _ => Err(RuntimeError::Panic(
+            "place field name must be a string const".to_string(),
+        )),
+    }
+}
+
+/// The slot `path` names under `cur`, each level made unique on the way down
+/// so a write through it lands where the value lives. Every step must reach
+/// a boxed struct, tuple, or element; [`place_set`] handles the rest.
+fn place_mut<'a>(
+    mut cur: &'a mut Value,
+    path: &[crate::bytecode::PlaceStep],
+    indices: &[i64],
+    consts: &[Value],
+) -> RuntimeResult<&'a mut Value> {
+    use crate::bytecode::PlaceStep;
+    let mut next_index = 0;
+    for step in path {
+        cur = match (step, cur) {
+            (PlaceStep::Field(name_idx), Value::Struct(inner)) => {
+                let name = place_field_name(consts, *name_idx)?;
+                let inner = Arc::make_mut(inner);
+                let Some((_, slot)) = inner.fields.iter_mut().find(|(ident, _)| **ident == name)
+                else {
+                    return Err(RuntimeError::Type(format!(
+                        "unknown field `{name}` on struct value"
+                    )));
+                };
+                slot
+            }
+            (PlaceStep::Index(_), Value::Array(items) | Value::Tuple(items)) => {
+                let raw = indices[next_index];
+                next_index += 1;
+                let len = items.len();
+                if raw < 0 || raw as usize >= len {
+                    return Err(crate::vm::index_oob_panic(raw, len));
+                }
+                &mut Arc::make_mut(items)[raw as usize]
+            }
+            (PlaceStep::Tuple(n), Value::Tuple(items) | Value::Array(items)) => {
+                let Some(slot) = Arc::make_mut(items).get_mut(*n as usize) else {
+                    return Err(RuntimeError::Arithmetic(
+                        "tuple index out of bounds".to_string(),
+                    ));
+                };
+                slot
+            }
+            (PlaceStep::Tuple(n), Value::Struct(inner)) => {
+                let Some((_, slot)) = Arc::make_mut(inner).fields.get_mut(*n as usize) else {
+                    return Err(RuntimeError::Arithmetic(
+                        "tuple index out of bounds".to_string(),
+                    ));
+                };
+                slot
+            }
+            (_, other) => {
+                return Err(RuntimeError::Type(format!(
+                    "a place step cannot reach into `{other}`"
+                )));
+            }
+        };
+    }
+    Ok(cur)
+}
+
+/// `cur.path = value`. Levels that hold their elements boxed are made unique
+/// and descended in place; a level in packed storage (a flat numeric array, a
+/// struct array stored by field) is read out, written, and stored back, the
+/// same steps the separate get and set ops take.
+fn place_set(
+    cur: &mut Value,
+    path: &[crate::bytecode::PlaceStep],
+    indices: &[i64],
+    consts: &[Value],
+    value: Value,
+) -> RuntimeResult<()> {
+    use crate::bytecode::PlaceStep;
+    let Some((step, rest)) = path.split_first() else {
+        *cur = value;
+        return Ok(());
+    };
+    let (index, rest_indices) = match step {
+        PlaceStep::Index(_) => (indices.first().copied(), indices.get(1..).unwrap_or(&[])),
+        _ => (None, indices),
+    };
+    match (step, &mut *cur) {
+        (PlaceStep::Field(name_idx), Value::Struct(_)) if !rest.is_empty() => {
+            let child = place_mut(cur, std::slice::from_ref(step), &[], consts)?;
+            place_set(child, rest, rest_indices, consts, value)
+        }
+        (PlaceStep::Field(name_idx), _) => {
+            let name = place_field_name(consts, *name_idx)?;
+            if rest.is_empty() {
+                return super::field_set(cur, name, value);
+            }
+            let mut child = super::field_get(cur, name)?;
+            place_set(&mut child, rest, rest_indices, consts, value)?;
+            super::field_set(cur, name, child)
+        }
+        (PlaceStep::Index(_), Value::Array(_) | Value::Tuple(_)) if !rest.is_empty() => {
+            let raw = index.unwrap_or(0);
+            let child = place_mut(cur, std::slice::from_ref(step), &[raw], consts)?;
+            place_set(child, rest, rest_indices, consts, value)
+        }
+        (PlaceStep::Index(_), _) => {
+            let raw = index.unwrap_or(0);
+            if rest.is_empty() {
+                crate::stdlib_builtins::iter::note_vec_element_replacement(cur, raw, &value);
+                return index_set_value(cur, raw, value);
+            }
+            let mut child = super::index_get(cur, &Value::Int(raw))?;
+            place_set(&mut child, rest, rest_indices, consts, value)?;
+            index_set_value(cur, raw, child)
+        }
+        (PlaceStep::Tuple(_), _) => {
+            let child = place_mut(cur, std::slice::from_ref(step), &[], consts)?;
+            place_set(child, rest, rest_indices, consts, value)
+        }
+    }
+}
+
+/// `base[raw] = new_value` on an indexable value held in place: the element
+/// store every indexed write reaches, whatever storage the sequence uses.
+pub(super) fn index_set_value(b: &mut Value, raw: i64, new_value: Value) -> RuntimeResult<()> {
+    // An `[f64]` vec whose elements so far were all
+    // integer-valued sits in `IntArray` storage (an `[i64]`
+    // can never receive a float store); widen it to flat
+    // float storage before the store below.
+    if let (Value::IntArray(data), Value::Float(_)) = (&*b, &new_value) {
+        *b = Value::FloatVec(Arc::new(data.iter().map(|n| *n as f64).collect()));
+    }
+    match b {
+        Value::Array(items) | Value::Tuple(items) => {
+            if raw < 0 || raw as usize >= items.len() {
+                return Err(crate::vm::index_oob_panic(raw, items.len()));
+            }
+            Arc::make_mut(items)[raw as usize] = new_value;
+        }
+        Value::IntArray(data) => {
+            if raw < 0 || raw as usize >= data.len() {
+                return Err(crate::vm::index_oob_panic(raw, data.len()));
+            }
+            match new_value {
+                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n,
+                _ => {
+                    return Err(RuntimeError::Type(
+                        "IndexSet on IntArray expects i64 value".to_string(),
+                    ));
+                }
+            }
+        }
+        Value::ByteArray(data) => {
+            if raw < 0 || raw as usize >= data.len() {
+                return Err(crate::vm::index_oob_panic(raw, data.len()));
+            }
+            match new_value {
+                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n as u8,
+                _ => {
+                    return Err(RuntimeError::Type(
+                        "IndexSet on ByteArray expects u8 value".to_string(),
+                    ));
+                }
+            }
+        }
+        Value::InlineByteArray(data) => {
+            if raw < 0 || raw as usize >= data.len() {
+                return Err(crate::vm::index_oob_panic(raw, data.len()));
+            }
+            match new_value {
+                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n as u8,
+                _ => {
+                    return Err(RuntimeError::Type(
+                        "IndexSet on byte array expects u8 value".to_string(),
+                    ));
+                }
+            }
+        }
+        Value::ByteVec(data) => {
+            if raw < 0 || raw as usize >= data.len() {
+                return Err(crate::vm::index_oob_panic(raw, data.len()));
+            }
+            match new_value {
+                Value::Int(n) => {
+                    Arc::make_mut(data)[raw as usize] = u8::try_from(n).map_err(|_| {
+                        RuntimeError::Type("IndexSet on byte vector expects u8 value".to_string())
+                    })?;
+                }
+                _ => {
+                    return Err(RuntimeError::Type(
+                        "IndexSet on byte vector expects u8 value".to_string(),
+                    ));
+                }
+            }
+        }
+        Value::FloatVec(data) => {
+            if raw < 0 || raw as usize >= data.len() {
+                return Err(crate::vm::index_oob_panic(raw, data.len()));
+            }
+            match new_value {
+                Value::Float(f) => Arc::make_mut(data)[raw as usize] = f,
+                Value::Int(n) => Arc::make_mut(data)[raw as usize] = n as f64,
+                _ => {
+                    return Err(RuntimeError::Type(
+                        "IndexSet on FloatVec expects f64 value".to_string(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(RuntimeError::Type(format!(
+                "value of kind `{b}` is not indexable"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Resizes the Vec in `recv` to `new_len` in its own storage, filling new
+/// slots with `fill`. A representation that cannot hold `fill` as it stands
+/// is rebuilt through the generic builtin, which picks one that can.
+pub(super) fn vec_resize_value(recv: &mut Value, new_len: usize, fill: Value) -> RuntimeResult<()> {
+    match (&mut *recv, &fill) {
+        (Value::Array(items), _) if !items.is_empty() => {
+            Arc::make_mut(items).resize(new_len, fill);
+            return Ok(());
+        }
+        (Value::IntArray(data), Value::Int(n)) => {
+            Arc::make_mut(data).resize(new_len, *n);
+            return Ok(());
+        }
+        (Value::FloatVec(data), Value::Float(f)) => {
+            Arc::make_mut(data).resize(new_len, *f);
+            return Ok(());
+        }
+        (Value::ByteVec(data), Value::Int(n)) => {
+            Arc::make_mut(data).resize(new_len, *n as u8);
+            return Ok(());
+        }
+        _ => {}
+    }
+    *recv = crate::builtins::builtin_resize(&[recv.clone(), Value::Int(new_len as i64), fill])?;
+    Ok(())
 }
 
 pub(super) fn vec_push_value(recv: &mut Value, new_value: Value) {

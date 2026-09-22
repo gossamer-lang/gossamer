@@ -293,6 +293,43 @@ fn builtin_str_push_utf8(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(true))
 }
 
+/// `s.push_json_quoted(buf, start, end)` - append the `[start, end)` byte
+/// window of `buf` as a quoted, escaped JSON string when it is valid UTF-8,
+/// answering whether it was appended. The receiver crosses as a write-back
+/// cell, as for `push_utf8`.
+fn builtin_str_push_json_quoted(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(Value::MutCell(cell)) = args.first() else {
+        return Ok(Value::Bool(false));
+    };
+    let start = args.get(2).and_then(value_to_int).unwrap_or(-1);
+    let end = args.get(3).and_then(value_to_int).unwrap_or(-1);
+    if start < 0 || end < start {
+        return Ok(Value::Bool(false));
+    }
+    let Some(bytes) = args
+        .get(1)
+        .and_then(|buf| buf.byte_window(start as usize, end as usize))
+    else {
+        return Ok(Value::Bool(false));
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(Value::Bool(false));
+    };
+    let mut guard = cell.lock();
+    let mut out = match &*guard {
+        Value::String(existing) => existing.clone(),
+        _ => return Ok(Value::Bool(false)),
+    };
+    let mut quoted = Vec::with_capacity(text.len() + 2);
+    quoted.push(b'"');
+    gossamer_runtime::c_abi::json_escape_into(text.as_bytes(), &mut quoted);
+    quoted.push(b'"');
+    // Escaping keeps the text UTF-8: it only replaces ASCII bytes.
+    out.push_str(&String::from_utf8_lossy(&quoted));
+    *guard = Value::String(out);
+    Ok(Value::Bool(true))
+}
+
 /// `s.push_str(t)` - append a string slice, returning the new String.
 /// See `builtin_str_push` for the writeback contract.
 fn builtin_str_push_str(args: &[Value]) -> RuntimeResult<Value> {

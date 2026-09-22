@@ -385,6 +385,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     base: base_reg,
                     index: idx_reg,
                 });
+                self.release_chain_temp(base, base_reg);
                 Ok(TypedReg {
                     reg: dst,
                     kind: RegKind::Value,
@@ -420,6 +421,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     base: base_reg,
                     index: idx_reg,
                 });
+                self.release_chain_temp(base, base_reg);
                 Ok(TypedReg {
                     reg: dst,
                     kind: RegKind::Value,
@@ -721,6 +723,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     base: base_reg,
                     index: idx_reg,
                 });
+                self.release_chain_temp(base, base_reg);
                 Ok(dst)
             }
             // Native struct-field read.
@@ -738,6 +741,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     name_idx,
                     cache_idx,
                 });
+                self.release_chain_temp(receiver, recv_reg);
                 Ok(dst)
             }
             // Native tuple / positional-field read.
@@ -749,6 +753,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     receiver: recv_reg,
                     index: *index,
                 });
+                self.release_chain_temp(receiver, recv_reg);
                 Ok(dst)
             }
             // Cast - delegate to the typed compile path so the
@@ -2311,6 +2316,24 @@ impl<'tcx> FnBuilder<'tcx> {
     /// wrap and lands directly in the float register file -
     /// critical for nbody's inner loop, where every
     /// `bodies[i].x` read feeds straight into f64 math.
+    /// Releases `reg` once the read that consumed it has run, when `expr` is a
+    /// field, index, or tuple read whose value is a temporary of this chain.
+    ///
+    /// Each step of a read like `st.tables[t].slots.len()` leaves the level it
+    /// read in a register. Held there, those levels are shared with the place
+    /// they came from, and the next write through that place would copy them.
+    pub(crate) fn release_chain_temp(&mut self, expr: &HirExpr, reg: Reg) {
+        if matches!(
+            expr.kind,
+            HirExprKind::Field { .. } | HirExprKind::Index { .. } | HirExprKind::TupleIndex { .. }
+        ) {
+            self.emit(Op::ClearRegs {
+                start: reg,
+                count: 1,
+            });
+        }
+    }
+
     pub(crate) fn compile_field_ex(
         &mut self,
         receiver: &HirExpr,
@@ -2366,6 +2389,7 @@ impl<'tcx> FnBuilder<'tcx> {
                                 offset,
                             });
                         }
+                        self.release_chain_temp(base, base_reg);
                         return Ok(TypedReg {
                             reg: dst,
                             kind: RegKind::F64,
@@ -2379,6 +2403,7 @@ impl<'tcx> FnBuilder<'tcx> {
                         index: idx_reg,
                         offset,
                     });
+                    self.release_chain_temp(base, base_reg);
                     return Ok(TypedReg {
                         reg: dst,
                         kind: RegKind::F64,
@@ -2392,6 +2417,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     index: idx_reg,
                     name_idx,
                 });
+                self.release_chain_temp(base, base_reg);
                 return Ok(TypedReg {
                     reg: dst,
                     kind: RegKind::F64,
@@ -2405,6 +2431,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 index: idx_reg,
                 name_idx,
             });
+            self.release_chain_temp(base, base_reg);
             return Ok(TypedReg {
                 reg: dst,
                 kind: RegKind::Value,
@@ -2430,6 +2457,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     name_idx,
                 });
             }
+            self.release_chain_temp(receiver, recv_reg);
             return Ok(TypedReg {
                 reg: dst,
                 kind: RegKind::I64,
@@ -2443,6 +2471,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     receiver: recv_reg,
                     offset,
                 });
+                self.release_chain_temp(receiver, recv_reg);
                 return Ok(TypedReg {
                     reg: dst,
                     kind: RegKind::F64,
@@ -2454,6 +2483,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 receiver: recv_reg,
                 name_idx,
             });
+            self.release_chain_temp(receiver, recv_reg);
             return Ok(TypedReg {
                 reg: dst,
                 kind: RegKind::F64,
@@ -2467,6 +2497,7 @@ impl<'tcx> FnBuilder<'tcx> {
             name_idx,
             cache_idx,
         });
+        self.release_chain_temp(receiver, recv_reg);
         Ok(TypedReg {
             reg: dst,
             kind: RegKind::Value,
@@ -2506,6 +2537,53 @@ impl<'tcx> FnBuilder<'tcx> {
         Ok(result)
     }
 
+    /// [`Self::try_compile_inplace_vec_stmt`] for a Vec reached through a
+    /// field or an index rooted at a local (`st.tables[t].slots.resize(n, 0)`).
+    /// The Vec is grown where it lies, each level on the way made unique from
+    /// the root, where the generic builtin would rebuild every element on each
+    /// call.
+    fn try_compile_inplace_vec_place_stmt(
+        &mut self,
+        receiver: &HirExpr,
+        name: &Ident,
+        args: &[HirExpr],
+    ) -> RuntimeResult<bool> {
+        if !matches!(
+            receiver.kind,
+            HirExprKind::Field { .. } | HirExprKind::Index { .. } | HirExprKind::TupleIndex { .. }
+        ) || !self.place_root_is_local(receiver)
+            || !matches!(self.tcx.kind(receiver.ty), Some(TyKind::Vec(_)))
+        {
+            return Ok(false);
+        }
+        match (name.name.as_str(), args.len()) {
+            ("resize", 2) => {
+                let len = self.compile_expr(&args[0])?;
+                let fill = self.compile_expr(&args[1])?;
+                if let Some((root, path)) = self.compile_place_path(receiver, 1)? {
+                    let idx = u16::try_from(self.wide_ops.len()).expect("wide_ops index overflow");
+                    self.wide_ops.push(crate::bytecode::WideOp::PlaceVecResize {
+                        root,
+                        path,
+                        len,
+                        fill,
+                    });
+                    self.emit(Op::Wide { idx });
+                    return Ok(true);
+                }
+                let vec_reg = self.compile_expr(receiver)?;
+                self.emit(Op::VecResize {
+                    receiver: vec_reg,
+                    len,
+                    fill,
+                });
+                self.compile_place_store(receiver, vec_reg)?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
+    }
+
     /// Emits a dedicated in-place Vec op (`VecPush` / `VecInsert` /
     /// `VecRemove`) for a bare-local Vec receiver whose mutating
     /// method's result is discarded (statement position). Returns
@@ -2521,6 +2599,9 @@ impl<'tcx> FnBuilder<'tcx> {
         name: &Ident,
         args: &[HirExpr],
     ) -> RuntimeResult<bool> {
+        if !matches!(receiver.kind, HirExprKind::Path { .. }) {
+            return self.try_compile_inplace_vec_place_stmt(receiver, name, args);
+        }
         let HirExprKind::Path { segments, .. } = &receiver.kind else {
             return Ok(false);
         };
@@ -2579,6 +2660,16 @@ impl<'tcx> FnBuilder<'tcx> {
                 self.emit(Op::VecRemove {
                     receiver: target_reg,
                     index,
+                });
+                Ok(true)
+            }
+            ("resize", 2) => {
+                let len = self.compile_expr(&args[0])?;
+                let fill = self.compile_expr(&args[1])?;
+                self.emit(Op::VecResize {
+                    receiver: target_reg,
+                    len,
+                    fill,
                 });
                 Ok(true)
             }
@@ -3280,7 +3371,7 @@ impl<'tcx> FnBuilder<'tcx> {
         // bool, so the receiver crosses as a write-back cell: the replacement
         // protocol below has only the return value to thread back, and here
         // that value is the flag rather than the new string.
-        if name.name.as_str() == "push_utf8"
+        if matches!(name.name.as_str(), "push_utf8" | "push_json_quoted")
             && args.len() == 3
             && {
                 let mut peeled = receiver.ty;
@@ -3309,7 +3400,11 @@ impl<'tcx> FnBuilder<'tcx> {
                 self.ensure_reg_slot(slot);
                 self.emit(Op::Move { dst: slot, src: a });
             }
-            let name_idx = self.global_idx("String::push_utf8");
+            let name_idx = self.global_idx(if name.name.as_str() == "push_utf8" {
+                "String::push_utf8"
+            } else {
+                "String::push_json_quoted"
+            });
             let dst = self.alloc_reg();
             let cache_idx = self.alloc_cache_idx();
             self.emit(Op::MethodCall {
@@ -3645,6 +3740,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 _ => {}
             }
         }
+        self.release_chain_temp(receiver, receiver_reg);
         let returns_unit = match self.tcx.kind(resolved_receiver_ty) {
             Some(TyKind::String) => matches!(
                 name.name.as_str(),

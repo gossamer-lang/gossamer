@@ -1250,7 +1250,7 @@ pub fn bind_and_run_h2c<H>(addr: &str, handler: H, config: Config) -> Result<(),
 where
     H: Handler + Clone,
 {
-    let listener = std::net::TcpListener::bind(addr).map_err(Error::Io)?;
+    let listener = gossamer_runtime::listen::bind_tcp(addr).map_err(Error::Io)?;
     run_h2c(listener, handler, config)
 }
 
@@ -1507,7 +1507,7 @@ pub fn bind_and_run_h2c_streaming<H>(addr: &str, handler: H, config: Config) -> 
 where
     H: StreamingHandler + Clone,
 {
-    let listener = std::net::TcpListener::bind(addr).map_err(Error::Io)?;
+    let listener = gossamer_runtime::listen::bind_tcp(addr).map_err(Error::Io)?;
     listener.set_nonblocking(false).map_err(Error::Io)?;
     loop {
         let (stream, _peer) = listener.accept().map_err(Error::Io)?;

@@ -275,7 +275,15 @@ const UNOWNED_STRING_RETURNS: &[(&str, &str)] = &[
         "answers its accumulator, grown in place",
     ),
     (
+        "gos_rt_str_append_bool",
+        "answers its accumulator, grown in place",
+    ),
+    (
         "gos_rt_str_append_i64",
+        "answers its accumulator, grown in place",
+    ),
+    (
+        "gos_rt_str_append_u64",
         "answers its accumulator, grown in place",
     ),
     (

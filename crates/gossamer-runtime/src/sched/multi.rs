@@ -1305,7 +1305,17 @@ fn park_worker(slot: &Arc<WorkerSlot>, shared: &Arc<Shared>) {
         shared.idle_cv.notify_all();
     }
     let mut g = slot.cv_mu.lock();
-    // Brief timeout so a missed wake doesn't strand the worker forever.
+    // `parked` is the condition this wait is for, and a waker clears it
+    // before taking `cv_mu` to notify. Read under the lock, a cleared flag
+    // means the wake already happened; work queued before the flag was
+    // published is picked up here rather than slept past.
+    if !slot.parked.load(Ordering::Acquire) || !slot.inbox.is_empty() || !shared.injector.is_empty()
+    {
+        slot.parked.store(false, Ordering::Release);
+        return;
+    }
+    // The timeout lets an idle worker notice retirement and shutdown; a wake
+    // never waits on it.
     let _ = slot.cv.wait_for(&mut g, Duration::from_millis(50));
     slot.parked.store(false, Ordering::Release);
 }
@@ -1426,6 +1436,41 @@ mod tests {
         assert_eq!(counter.load(Ordering::Relaxed), 256 * 8);
         assert_eq!(stats.finished, 256);
         assert!(stats.steps >= 256 * 8);
+    }
+
+    /// A worker whose inbox received a task before it published `parked`
+    /// takes that task at once instead of sleeping on the condvar, which no
+    /// waker will signal: the waker saw the worker still running.
+    #[test]
+    #[cfg_attr(miri, ignore)] // condvar timeouts
+    fn a_worker_with_queued_work_does_not_sleep() {
+        let sched = MultiScheduler::new(1);
+        let deque: Deque<SendTask> = Deque::new_fifo();
+        let slot = Arc::new(WorkerSlot {
+            stealer: deque.stealer(),
+            inbox: Injector::new(),
+            parked: AtomicBool::new(false),
+            cv: Condvar::new(),
+            cv_mu: Mutex::new(()),
+            retired: AtomicBool::new(false),
+            thread_handle: AtomicU64::new(0),
+            last_yield_micros: AtomicU64::new(0),
+            last_signal_micros: AtomicU64::new(0),
+            syscall_since_micros: AtomicU64::new(0),
+            handed_off: AtomicBool::new(false),
+        });
+        slot.inbox.push(Box::new(CountTask {
+            counter: Arc::new(AtomicUsize::new(0)),
+            budget: 1,
+        }));
+        let started = Instant::now();
+        park_worker(&slot, &sched.inner);
+        assert!(
+            started.elapsed() < Duration::from_millis(25),
+            "a worker with a task in its inbox slept {:?} before taking it",
+            started.elapsed()
+        );
+        assert!(!slot.parked.load(Ordering::Acquire));
     }
 
     #[test]

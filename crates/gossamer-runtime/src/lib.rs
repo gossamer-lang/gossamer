@@ -122,6 +122,8 @@ unsafe impl std::alloc::GlobalAlloc for SamplingAllocator {
 // v3 build, so they are pinned by value and guarded against a future mimalloc
 // enum shift by `allocator_tests` below.
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
+const MI_OPTION_ARENA_EAGER_COMMIT: libmimalloc_sys::mi_option_t = 4;
+#[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 const MI_OPTION_PURGE_DELAY: libmimalloc_sys::mi_option_t = 15;
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
 const MI_OPTION_MAX_SEGMENT_RECLAIM: libmimalloc_sys::mi_option_t = 21;
@@ -137,12 +139,13 @@ const MI_OPTION_ALLOW_THP: libmimalloc_sys::mi_option_t = 43;
 // before the first set makes the guard observe the true defaults regardless
 // of ordering.
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-static MIMALLOC_OPTION_DEFAULTS: std::sync::OnceLock<(i64, i64, i64)> = std::sync::OnceLock::new();
+static MIMALLOC_OPTION_DEFAULTS: std::sync::OnceLock<(i64, i64, i64, i64)> =
+    std::sync::OnceLock::new();
 
 /// Pristine defaults of the two pinned mimalloc options, snapshotted once
 /// before the first `init_process_allocator` call mutates them.
 #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
-fn mimalloc_option_defaults() -> (i64, i64, i64) {
+fn mimalloc_option_defaults() -> (i64, i64, i64, i64) {
     *MIMALLOC_OPTION_DEFAULTS.get_or_init(|| {
         // SAFETY: option get is thread-safe; the global allocator is mimalloc
         // in this build, initialised before any code reaches here.
@@ -153,6 +156,7 @@ fn mimalloc_option_defaults() -> (i64, i64, i64) {
                     MI_OPTION_MAX_SEGMENT_RECLAIM,
                 )),
                 widen(libmimalloc_sys::mi_option_get(MI_OPTION_ALLOW_THP)),
+                widen(libmimalloc_sys::mi_option_get(MI_OPTION_ARENA_EAGER_COMMIT)),
             )
         }
     })
@@ -234,6 +238,14 @@ pub fn init_process_allocator() {
             libmimalloc_sys::mi_option_set(MI_OPTION_PURGE_DELAY, configured_purge_delay());
             libmimalloc_sys::mi_option_set(MI_OPTION_MAX_SEGMENT_RECLAIM, 100);
             libmimalloc_sys::mi_option_set(MI_OPTION_ALLOW_THP, 0);
+            // Commit arena memory as pages are first used rather than all at
+            // once. Eager commit on an overcommitting kernel leaves every
+            // thread's heap resident a whole page per size class it touches,
+            // which a server with a thread per blocking task pays per thread.
+            // A deployment that set the option itself keeps its own value.
+            if std::env::var_os("MIMALLOC_ARENA_EAGER_COMMIT").is_none() {
+                libmimalloc_sys::mi_option_set(MI_OPTION_ARENA_EAGER_COMMIT, 0);
+            }
         }
     }
 }
@@ -262,6 +274,13 @@ pub mod comptime_policy;
 pub mod coverage;
 pub mod fs_mode;
 pub mod http_status;
+pub mod listen;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod netpoll;
+// musl's own routines are replaced there; the tests run on every x86_64
+// host. Inline assembly is not something Miri interprets.
+#[cfg(all(target_arch = "x86_64", not(miri), any(target_env = "musl", test)))]
+mod mem_x86_64;
 pub mod ordered;
 pub mod platform;
 pub mod pprof;
@@ -332,7 +351,8 @@ mod allocator_tests {
     /// allocator.
     #[test]
     fn allocator_option_indices_are_pinned_and_settable() {
-        let (purge_default, reclaim_default, thp_default) = super::mimalloc_option_defaults();
+        let (purge_default, reclaim_default, thp_default, eager_default) =
+            super::mimalloc_option_defaults();
         assert_eq!(
             purge_default, 1000,
             "mimalloc option 15 default is {purge_default}, expected the 1000 ms \
@@ -350,6 +370,12 @@ mod allocator_tests {
             "mimalloc option 43 default is {thp_default}, expected the allow_thp \
              default of 1 - the enum likely shifted; re-verify the \
              mi_option_allow_thp index for the current mimalloc version",
+        );
+        assert_eq!(
+            eager_default, 2,
+            "mimalloc option 4 default is {eager_default}, expected the arena_eager_commit \
+             default of 2 - the enum likely shifted; re-verify the \
+             mi_option_arena_eager_commit index for the current mimalloc version",
         );
         super::init_process_allocator();
         // SAFETY: option get is thread-safe; the global allocator is mimalloc

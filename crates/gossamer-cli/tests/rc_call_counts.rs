@@ -200,7 +200,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "render",
                 RcCounts {
                     retain: 0,
-                    release: 6,
+                    release: 4,
                     clone: 0,
                 },
             ),
@@ -208,7 +208,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "page",
                 RcCounts {
                     retain: 0,
-                    release: 8,
+                    release: 6,
                     clone: 0,
                 },
             ),
@@ -216,7 +216,7 @@ fn string_builder_rc_calls_are_pinned() {
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 12,
+                    release: 10,
                     clone: 0,
                 },
             ),

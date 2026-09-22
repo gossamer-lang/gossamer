@@ -117,15 +117,19 @@ pub unsafe extern "C-unwind" fn gos_rt_ws_serve(
         } else {
             unsafe { crate::c_abi::gos_str_arg_string(addr) }
         };
-        let listener = match std::net::TcpListener::bind(&addr_s) {
+        let listener = match crate::listen::bind_tcp(&addr_s) {
             Ok(l) => l,
             Err(e) => return ws_err(&format!("websocket::serve: {e}")),
         };
         let env_addr = handler_env as usize;
         let fn_addr = handler_fn as usize;
-        super::http_server::accept_serve(listener, move |stream| {
-            serve_ws_conn(stream, env_addr, fn_addr);
-        });
+        super::http_server::accept_serve(
+            listener,
+            super::http_server::ConnHome::Thread,
+            move |stream| {
+                serve_ws_conn(stream, env_addr, fn_addr);
+            },
+        );
     }
     super::vec::gos_rt_result_new(0, 0)
 }

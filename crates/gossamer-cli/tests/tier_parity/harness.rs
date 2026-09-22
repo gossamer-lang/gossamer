@@ -1852,6 +1852,17 @@ const SPECS: &[Spec] = &[
     // A combinator that hands its receiver's payload on leaves it whole, and
     // `map` keeps a float, aggregate, or nested carrier answer typed.
     spec("feature-testing-examples/carrier_combinator_payloads.gos"),
+    // An `f64` renders its shortest round-trip digits as a plain decimal.
+    spec("feature-testing-examples/f64_display.gos"),
+    // A byte window appends as a quoted JSON string escaped as `json::encode`
+    // escapes one.
+    spec("feature-testing-examples/string_push_json_quoted.gos"),
+    // A scalar's text appends in place, whatever its width or spelling.
+    spec("feature-testing-examples/string_append_scalars.gos"),
+    // ASCII and multi-byte appends interleaved keep character indexing right.
+    spec("feature-testing-examples/string_append_index_mixed.gos"),
+    // Writes through places several steps deep land where the value lives.
+    spec("feature-testing-examples/nested_place_writes.gos"),
 ];
 
 const DEDICATED_FEATURE_TESTING_EXAMPLES: &[&str] = &[

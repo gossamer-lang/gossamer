@@ -137,6 +137,20 @@ pub struct GosHttpRequest {
     /// substituted here, so a deployment behind a proxy resolves the
     /// forwarded chain itself against its own trusted-proxy list.
     pub peer: String,
+    /// Where the context of a request the server is serving comes from,
+    /// `None` for every other request.
+    pub context_site: Option<RequestContextSite>,
+}
+
+/// The deadline a served request's context expires at, and the peer-watch
+/// slot a context opened for it is published into so a client that leaves
+/// still cancels it.
+#[derive(Clone)]
+pub struct RequestContextSite {
+    /// When the request's context is cancelled by time, if ever.
+    pub deadline: Option<crate::platform::Instant>,
+    /// The connection's peer-watch slot.
+    pub watch: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Body slice of a request: past `body_offset` when the h1 server
@@ -169,6 +183,7 @@ impl GosHttpRequest {
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: 0,
         }
     }
@@ -336,6 +351,7 @@ unsafe fn client_pending_request(
         values: Vec::new(),
         agent,
         peer: String::new(),
+        context_site: None,
         context: 0,
     }))
 }
@@ -516,6 +532,7 @@ pub unsafe extern "C" fn gos_rt_http_request_send(req: *mut GosHttpRequest) -> i
             values: _,
             agent,
             peer: _,
+            context_site: _,
             context: _,
         } = *unsafe { Box::from_raw(req) };
         // Reuse the originating client's agent (cookie jar / proxy /
@@ -565,7 +582,7 @@ pub unsafe extern "C" fn gos_rt_http_request_context(
         // A served request opens its context here, the first time its handler
         // asks for one: a handler that never does costs neither the allocation
         // nor the two turns of the live-request registry it would take.
-        match crate::c_abi::http_server::open_current_request_context() {
+        match crate::c_abi::http_server::open_served_request_context(request) {
             Some(ctx) => {
                 request.context = ctx;
                 ctx as *mut crate::c_abi::context::GosCtx
@@ -2297,6 +2314,7 @@ mod tests {
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: 0,
         };
         let v = unsafe { gos_rt_http_request_headers(std::ptr::from_ref(&req)) };
@@ -2345,6 +2363,7 @@ mod tests {
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: 0,
         };
         let cases = [

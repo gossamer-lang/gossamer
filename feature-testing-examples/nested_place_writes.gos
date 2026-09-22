@@ -1,0 +1,72 @@
+// Writes through places several steps deep - fields, indices, and tuple
+// positions - land where the value lives, on every tier, including a Vec grown
+// by `resize` through a place and a place read just before it is written.
+
+struct Table { slots: Vec<i64>, live: i64, top: i64, name: String }
+struct Store { tables: Vec<Table>, pairs: Vec<(i64, String)>, total: i64 }
+struct Pair(i64, Vec<i64>)
+
+fn slot_for(st: &mut Store, t: i64, rid: i64) -> i64 {
+    let want = 3 * rid + 3
+    if st.tables[t].slots.len() < want { st.tables[t].slots.resize(want, 0) }
+    3 * rid
+}
+
+fn place(st: &mut Store, t: i64, rid: i64, v: i64) {
+    let s = slot_for(st, t, rid)
+    if st.tables[t].slots[s + 1] == 0 { st.tables[t].live += 1 }
+    st.tables[t].slots[s] = v
+    st.tables[t].slots[s + 1] = v * 2
+    if rid > st.tables[t].top { st.tables[t].top = rid }
+    st.total += v
+}
+
+fn rename(st: &mut Store, t: i64, name: String) {
+    st.tables[t].name = name
+}
+
+fn grow_tail(st: &mut Store, t: i64) {
+    st.tables[t].slots.resize(st.tables[t].slots.len() + 2, 7)
+}
+
+fn main() {
+    let mut st = Store {
+        tables: #[
+            Table { slots: #[], live: 0, top: 0, name: "a" }
+            Table { slots: #[], live: 0, top: 0, name: "b" }
+        ]
+        pairs: #[(1, "one"), (2, "two")]
+        total: 0
+    }
+    for rid in 1..40 {
+        place(&mut st, rid % 2, rid, rid * 10)
+    }
+    place(&mut st, 0, 4, 99)
+    rename(&mut st, 1, "renamed")
+    grow_tail(&mut st, 0)
+    st.pairs[1].1 = "deux"
+    st.pairs[0].0 += 100
+    let copy = st.tables[0].slots.clone()
+    st.tables[0].slots[0] = -1
+    println("live={} {} top={} {} total={}", st.tables[0].live, st.tables[1].live, st.tables[0].top, st.tables[1].top, st.total)
+    println("a={} len={} tail={} {}", st.tables[0].name, st.tables[0].slots.len(), st.tables[0].slots[st.tables[0].slots.len() - 1], st.tables[0].slots[12])
+    println("b={} slots={}", st.tables[1].name, st.tables[1].slots.len())
+    println("pairs={:?}", st.pairs)
+    println("copy_head={} now_head={}", copy[0], st.tables[0].slots[0])
+
+    let mut grid = #[#[0; 3], #[0; 3]]
+    grid[1][2] = 5
+    grid[0][0] += 3
+    let mut p = Pair(1, #[1, 2, 3])
+    p.1[2] = 30
+    p.0 += 1
+    let mut nest = #[(0, #[#[1]])]
+    nest[0].1[0].push(2)
+    nest[0].1[0][0] = 9
+    println("grid={:?} p={} {:?} nest={:?}", grid, p.0, p.1, nest)
+
+    // An index the place reads before writing sees the value it had.
+    let mut v = #[#[1, 2, 3]]
+    v[0][v[0][0]] = v[0][2] * 10
+    println("v={:?}", v)
+}

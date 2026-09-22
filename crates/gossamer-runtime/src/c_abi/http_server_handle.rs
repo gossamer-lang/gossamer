@@ -207,7 +207,7 @@ pub unsafe extern "C" fn gos_rt_http_server_listen(handle: i64, addr: *const c_c
         } else {
             unsafe { crate::c_abi::gos_str_arg_string(addr) }
         };
-        let listener = match std::net::TcpListener::bind(&addr_s) {
+        let listener = match crate::listen::bind_tcp(&addr_s) {
             Ok(l) => l,
             Err(e) => return err_result(&format!("http::Server::listen: {e}")),
         };

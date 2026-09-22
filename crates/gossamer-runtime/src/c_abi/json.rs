@@ -1557,7 +1557,11 @@ impl JsonTokenWriter {
     }
 
     fn write_escaped(&mut self, text: &str) {
-        let _ = serde_json::to_writer(&mut self.sink, text);
+        let mut quoted = Vec::with_capacity(text.len() + 2);
+        quoted.push(b'"');
+        crate::c_abi::string::json_escape_into(text.as_bytes(), &mut quoted);
+        quoted.push(b'"');
+        self.sink.append(&quoted);
     }
 }
 

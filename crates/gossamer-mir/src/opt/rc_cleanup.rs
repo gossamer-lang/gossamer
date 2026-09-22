@@ -557,6 +557,7 @@ fn helper_reads_only(name: &str, index: usize) -> bool {
             "gos_rt_hash_crc32_update"
                 | "gos_rt_hash_crc32_update_window"
                 | "gos_rt_str_push_utf8"
+                | "gos_rt_str_push_json_quoted"
                 | "gos_rt_str_concat_drop_a"
                 | "gos_rt_str_concat"
         ),

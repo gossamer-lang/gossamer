@@ -93,6 +93,10 @@ pub struct Resolutions {
     definitions: HashMap<DefId, DefKind>,
     project_aliases: HashMap<String, String>,
     module_aliases: HashMap<String, String>,
+    /// The same bindings keyed by the `::`-joined path of the module whose
+    /// `use` introduced each, so two modules may bind one name to different
+    /// modules.
+    scoped_module_aliases: HashMap<String, HashMap<String, String>>,
     import_defs: HashMap<NodeId, DefId>,
 }
 
@@ -129,7 +133,11 @@ impl Resolutions {
     /// module roots are inlined packages, which is what `pub(package)`
     /// reachability is defined against; a module import says nothing
     /// about packages.
-    pub fn insert_module_alias(&mut self, alias: String, module: String) {
+    pub fn insert_module_alias(&mut self, scope: &[String], alias: String, module: String) {
+        self.scoped_module_aliases
+            .entry(scope.join("::"))
+            .or_default()
+            .insert(alias.clone(), module.clone());
         self.module_aliases.insert(alias, module);
     }
 
@@ -139,6 +147,22 @@ impl Resolutions {
     #[must_use]
     pub fn module_alias(&self, alias: &str) -> Option<&str> {
         self.module_aliases.get(alias).map(String::as_str)
+    }
+
+    /// The module `alias` leads to for a path written in module `scope`: the
+    /// innermost enclosing module that imported the name decides, and a name
+    /// no enclosing module imported falls back to [`Self::module_alias`].
+    #[must_use]
+    pub fn module_alias_in(&self, scope: &[String], alias: &str) -> Option<&str> {
+        (0..=scope.len())
+            .rev()
+            .find_map(|depth| {
+                self.scoped_module_aliases
+                    .get(&scope[..depth].join("::"))
+                    .and_then(|aliases| aliases.get(alias))
+            })
+            .map(String::as_str)
+            .or_else(|| self.module_alias(alias))
     }
 
     /// Records that the `use`-imported name at `node` ultimately refers

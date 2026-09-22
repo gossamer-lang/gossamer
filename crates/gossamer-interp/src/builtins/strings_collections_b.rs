@@ -141,7 +141,7 @@ fn builtin_copy_from_slice(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// `xs.resize(new_len, value)` - truncate, or append copies of `value`.
-fn builtin_resize(args: &[Value]) -> RuntimeResult<Value> {
+pub(crate) fn builtin_resize(args: &[Value]) -> RuntimeResult<Value> {
     let Some(receiver) = args.first() else {
         return Ok(Value::Unit);
     };

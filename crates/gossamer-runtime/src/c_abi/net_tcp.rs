@@ -356,7 +356,7 @@ impl ServerCertVerifier for NoCertVerify {
 pub unsafe extern "C" fn gos_rt_tcp_listener_bind(addr: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         let a = cstr_to_str(addr);
-        match TcpListener::bind(&a) {
+        match crate::listen::bind_tcp(&a) {
             Ok(l) => {
                 let h = next_handle();
                 TCP_LISTENERS

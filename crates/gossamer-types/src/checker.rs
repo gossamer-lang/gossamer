@@ -7365,7 +7365,7 @@ impl<'a> TypeChecker<'a> {
             "push_byte" | "truncate" => {
                 vec![receiver, self.tcx.int_ty(IntTy::I64)]
             }
-            "push_utf8" => {
+            "push_utf8" | "push_json_quoted" => {
                 let u8_ty = self.tcx.int_ty(IntTy::U8);
                 let bytes = self.tcx.intern(TyKind::Vec(u8_ty));
                 let idx = self.tcx.int_ty(IntTy::I64);
@@ -11899,7 +11899,7 @@ impl<'a> TypeChecker<'a> {
             // from `check_strings_arity`.
             "clear" | "len" | "is_empty" | "as_bytes" => Some(0),
             "truncate" | "push" | "push_str" | "push_char" | "push_byte" => Some(1),
-            "push_utf8" => Some(3),
+            "push_utf8" | "push_json_quoted" => Some(3),
             _ => None,
         };
         if let Some(expected_arity) = expected_arity
@@ -11920,7 +11920,7 @@ impl<'a> TypeChecker<'a> {
                 "push" | "push_char" => Some(self.tcx.intern(TyKind::Char)),
                 "push_str" => Some(self.tcx.string_ty()),
                 "push_byte" | "truncate" => Some(self.tcx.int_ty(IntTy::I64)),
-                "push_utf8" => {
+                "push_utf8" | "push_json_quoted" => {
                     let u8_ty = self.tcx.int_ty(IntTy::U8);
                     Some(self.tcx.intern(TyKind::Vec(u8_ty)))
                 }
@@ -13957,7 +13957,7 @@ impl<'a> TypeChecker<'a> {
                 self.tcx.unit()
             }
             // Answers whether the window was valid UTF-8 and therefore appended.
-            "push_utf8" => self.tcx.bool_ty(),
+            "push_utf8" | "push_json_quoted" => self.tcx.bool_ty(),
             // Methods that return a fresh `String` (runtime `*mut c_char`):
             // pinning the result type so chained calls (`s.trim().len()`) and
             // typed bindings lower from a known type instead of an inference
@@ -22193,6 +22193,7 @@ const STRING_METHODS: &[&str] = &[
     "push_char",
     "push_byte",
     "push_utf8",
+    "push_json_quoted",
     "parse",
 ];
 

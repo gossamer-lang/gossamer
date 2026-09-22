@@ -1527,7 +1527,7 @@ pub mod server {
     where
         H: FnMut(Request) -> Response,
     {
-        let listener = TcpListener::bind(addr)?;
+        let listener = gossamer_runtime::listen::bind_tcp(addr)?;
         run(listener, config, handle)
     }
 
@@ -1536,7 +1536,7 @@ pub mod server {
     where
         H: FnMut(Request, ResponseSink),
     {
-        let listener = TcpListener::bind(addr)?;
+        let listener = gossamer_runtime::listen::bind_tcp(addr)?;
         run_dispatch(listener, config, dispatch)
     }
 
@@ -1578,7 +1578,7 @@ pub mod server {
         use std::io::ErrorKind;
         use std::sync::mpsc::{RecvTimeoutError, sync_channel};
 
-        let listener = TcpListener::bind(addr)?;
+        let listener = gossamer_runtime::listen::bind_tcp(addr)?;
         let bound = listener.local_addr()?;
         let _ = listener.set_nonblocking(false);
 
@@ -1678,7 +1678,8 @@ pub mod server {
         H: crate::http_h2::Handler + Clone,
     {
         let server_arc = ensure_alpn_h2(tls_config.rustls());
-        let listener = std::net::TcpListener::bind(addr).map_err(crate::http_h2::Error::Io)?;
+        let listener =
+            gossamer_runtime::listen::bind_tcp(addr).map_err(crate::http_h2::Error::Io)?;
         listener
             .set_nonblocking(false)
             .map_err(crate::http_h2::Error::Io)?;

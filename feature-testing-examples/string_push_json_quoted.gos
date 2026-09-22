@@ -1,0 +1,59 @@
+// `s.push_json_quoted(buf, start, end)` appends a byte window of a buffer as a
+// quoted, escaped JSON string, escaped exactly as `json::encode` escapes a
+// string - HTML-significant characters and U+2028 / U+2029 included. It answers whether the window was appended: an out-of-range window
+// or one that is not valid UTF-8 leaves the receiver untouched.
+
+use std::encoding::json
+
+fn check(label: String, text: String) {
+    let bytes = text.as_bytes()
+    let mut s = String::with_capacity(8)
+    let ok = s.push_json_quoted(bytes, 0, bytes.len())
+    let want = json::encode(text)
+    println("{} ok={} same={} {}", label, ok, s == want, s)
+}
+
+fn main() {
+    check("ascii", "hello world")
+    check("empty", "")
+    check("quote", "say \"hi\"")
+    check("backslash", "a\\b")
+    check("newline", "line\nnext\ttab\rret")
+    check("wide", "héllo wörld ✓")
+    check("wide_escape", "é\"ü\\ß\n")
+    let mut controls = String::new()
+    let mut b = 0
+    while b < 32 {
+        controls.push(b as u8 as char)
+        b += 1
+    }
+    check("controls", controls)
+    check("del", "\u{7f}")
+    check("html", "</script> & <b>")
+    check("line_breaks", "a\u{2028}b\u{2029}c\u{2027}")
+
+    let bytes = "{\"k\": \"v\"}".as_bytes()
+    let mut out = String::from("[")
+    println("window={}", out.push_json_quoted(bytes, 2, 3))
+    out.push_str(",")
+    println("whole={}", out.push_json_quoted(bytes, 0, bytes.len()))
+    out.push_str("]")
+    println("out={} chars={} bytes={}", out, out.len(), out.byte_len())
+
+    println("past_end={}", out.push_json_quoted(bytes, 0, 99))
+    println("reversed={}", out.push_json_quoted(bytes, 3, 2))
+    println("negative={}", out.push_json_quoted(bytes, -1, 2))
+    let wide = "héllo".as_bytes()
+    println("split={}", out.push_json_quoted(wide, 0, 2))
+    let mut raw = #[104u8, 255u8, 105u8]
+    println("invalid={}", out.push_json_quoted(raw, 0, 3))
+    raw[1] = 34
+    println("patched={}", out.push_json_quoted(raw, 0, 3))
+    println("out={} chars={}", out, out.len())
+
+    // An ASCII builder that takes a wide window indexes by character after.
+    let mut mixed = String::with_capacity(4)
+    let _ = mixed.push_json_quoted("ab".as_bytes(), 0, 2)
+    let _ = mixed.push_json_quoted("é✓".as_bytes(), 0, "é✓".byte_len())
+    println("mixed={} len={} at5={}", mixed, mixed.len(), mixed[5])
+}

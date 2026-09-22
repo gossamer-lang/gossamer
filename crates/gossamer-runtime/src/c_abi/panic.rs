@@ -195,6 +195,14 @@ impl Drop for IsolatedFaults {
     }
 }
 
+/// Installs `isolated` as this thread's fault domain and answers the one it
+/// replaces. A worker swaps a goroutine's own value in around each step, so
+/// goroutines sharing the worker never see one another's domain.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn swap_isolated_faults(isolated: bool) -> bool {
+    ISOLATED_FAULTS.replace(isolated)
+}
+
 thread_local! {
     /// Whether a fault on this thread is held for a caller to re-raise.
     ///

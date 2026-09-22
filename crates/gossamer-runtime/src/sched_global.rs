@@ -546,6 +546,9 @@ pub fn sleep_until(deadline: Instant) {
         crate::platform::sleep(deadline - now);
         return;
     }
+    if crate::netpoll::sleep_until(deadline) {
+        return;
+    }
     park(ParkReason::Timer, |parker| {
         let gid = parker.gid;
         register_waker(
@@ -776,6 +779,8 @@ pub fn try_spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid> {
     scheduler().try_spawn(GoroutineTask {
         coro,
         arena: crate::c_abi::rc::ArenaState::empty(),
+        isolated_faults: false,
+        joinable: false,
     })
 }
 
@@ -793,6 +798,8 @@ pub fn spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Gid {
     scheduler().spawn(GoroutineTask {
         coro,
         arena: crate::c_abi::rc::ArenaState::empty(),
+        isolated_faults: false,
+        joinable: false,
     })
 }
 
@@ -809,6 +816,11 @@ struct GoroutineTask {
     /// worker. See `c_abi::rc::ArenaState` for why a worker-local arena is
     /// unsound when a parked task is resumed after worker retirement.
     arena: crate::c_abi::rc::ArenaState,
+    /// The goroutine's own fault domain and joinable-body flag. Each lives in
+    /// a worker thread-local while the goroutine runs and here while it is
+    /// parked, since several goroutines take turns on one worker.
+    isolated_faults: bool,
+    joinable: bool,
 }
 
 impl crate::sched::Task for GoroutineTask {
@@ -824,7 +836,11 @@ impl crate::sched::Task for GoroutineTask {
         if !yielder_ptr.is_null() {
             gossamer_coro::set_current_yielder(yielder_ptr);
         }
+        let worker_faults = crate::c_abi::panic::swap_isolated_faults(self.isolated_faults);
+        let worker_joinable = gossamer_coro::swap_joinable_spawn(self.joinable);
         let done = self.coro.resume();
+        self.isolated_faults = crate::c_abi::panic::swap_isolated_faults(worker_faults);
+        self.joinable = gossamer_coro::swap_joinable_spawn(worker_joinable);
         self.arena = crate::c_abi::rc::take_arena_state();
         gossamer_coro::clear_current_yielder();
         if done { Step::Done } else { Step::Yield }

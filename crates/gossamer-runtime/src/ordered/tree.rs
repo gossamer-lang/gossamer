@@ -870,13 +870,18 @@ mod tests {
         assert_eq!(walked, want);
     }
 
+    // Each step's rank oracle walks the model, so the step count sets the
+    // test's cost quadratically; Miri interprets every step, and a count that
+    // still splits and merges nodes keeps it to the structure's invariants.
+    const RANDOM_STEPS: i64 = if cfg!(miri) { 400 } else { 60_000 };
+
     #[test]
     fn random_operations_match_std_btreemap() {
         for (seed, span) in [(1, 50), (2, 5_000), (3, 200_000)] {
             let mut rng = Lcg(seed);
             let mut tree = OrderedTree::new();
             let mut model = BTreeMap::new();
-            for step in 0..60_000 {
+            for step in 0..RANDOM_STEPS {
                 let key = rng.below(span) as i64 - (span / 2) as i64;
                 match rng.below(10) {
                     0..=4 => assert_eq!(tree.insert(key, step, cmp), model.insert(key, step)),

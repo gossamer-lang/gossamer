@@ -482,6 +482,26 @@ impl<'a> Lowerer<'a> {
             self.lower_str_push_char_inline(args, destination, target)?;
             return Ok(());
         }
+        // An ASCII literal appended to a builder keeps its index sentinel
+        // true, so the append is a copy the compiler knows the length of.
+        if name == "gos_rt_str_append_bytes"
+            && args.len() == 3
+            && let Some(text) = self.const_string_text(&args[1])
+            && text.is_ascii()
+            && !text.is_empty()
+            && matches!(
+                &args[2],
+                Operand::Const(gossamer_mir::ConstValue::Int(n)) if *n == text.len() as i128
+            )
+        {
+            let piece_len = text.len();
+            self.lower_str_append_inline(args, destination, target, Some(piece_len))?;
+            return Ok(());
+        }
+        if name == "gos_rt_str_concat_drop_a" && args.len() == 2 {
+            self.lower_str_append_inline(args, destination, target, None)?;
+            return Ok(());
+        }
         if name == "gos_rt_str_len" && args.len() == 1 {
             self.lower_str_len_inline(&args[0], destination, target)?;
             return Ok(());

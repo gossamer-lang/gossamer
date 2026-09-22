@@ -933,6 +933,15 @@ pub(crate) fn validate_chunk(chunk: &FnChunk) -> Result<(), ValidationError> {
                 check_v(op_idx, receiver)?;
                 check_v(op_idx, value)?;
             }
+            Op::VecResize {
+                receiver,
+                len,
+                fill,
+            } => {
+                check_v(op_idx, receiver)?;
+                check_v(op_idx, len)?;
+                check_v(op_idx, fill)?;
+            }
             Op::StrAppend { receiver, value }
             | Op::StrPush {
                 receiver, value, ..
@@ -2131,6 +2140,11 @@ pub(crate) fn register_effects(
         | Op::StrPush {
             receiver, value, ..
         } => effect.v_reads.extend([receiver, value]),
+        Op::VecResize {
+            receiver,
+            len,
+            fill,
+        } => effect.v_reads.extend([receiver, len, fill]),
         Op::StrConcatI64 {
             dst,
             prefix,
@@ -2447,6 +2461,19 @@ pub(crate) fn register_effects(
                 add_v_span(&mut effect.v_reads, *first_v, *elem_count);
                 effect.v_writes.push(*dst_v);
             }
+            WideOp::PlaceSet { root, path, value } => {
+                effect.v_reads.extend([*root, *value]);
+                effect.v_reads.extend(place_index_regs(path));
+            }
+            WideOp::PlaceVecResize {
+                root,
+                path,
+                len,
+                fill,
+            } => {
+                effect.v_reads.extend([*root, *len, *fill]);
+                effect.v_reads.extend(place_index_regs(path));
+            }
         },
         Op::ClearRegs { start, count } => add_v_span(&mut effect.v_clears, start, count),
     }
@@ -2474,8 +2501,13 @@ fn validate_wide_op(
     consts_len: usize,
     chunk: &FnChunk,
 ) -> Result<(), ValidationError> {
+    if validate_place_wide_op(op_idx, wide, check_v, consts_len)? {
+        return Ok(());
+    }
     let f_count = u32::from(chunk.float_count);
     match *wide {
+        // Checked above.
+        WideOp::PlaceSet { .. } | WideOp::PlaceVecResize { .. } => {}
         WideOp::StrConcatPadI64 {
             dst,
             prefix,
@@ -2566,6 +2598,50 @@ fn validate_wide_op(
         }
     }
     Ok(())
+}
+
+/// Validates a [`WideOp::PlaceSet`] or [`WideOp::PlaceVecResize`], answering
+/// whether `wide` was one.
+fn validate_place_wide_op(
+    op_idx: usize,
+    wide: &WideOp,
+    check_v: &dyn Fn(usize, Reg) -> Result<(), ValidationError>,
+    consts_len: usize,
+) -> Result<bool, ValidationError> {
+    let (regs, path): (Vec<Reg>, &[crate::bytecode::PlaceStep]) = match wide {
+        WideOp::PlaceSet { root, path, value } => (vec![*root, *value], path),
+        WideOp::PlaceVecResize {
+            root,
+            path,
+            len,
+            fill,
+        } => (vec![*root, *len, *fill], path),
+        _ => return Ok(false),
+    };
+    for reg in regs.into_iter().chain(place_index_regs(path)) {
+        check_v(op_idx, reg)?;
+    }
+    for step in path {
+        if let crate::bytecode::PlaceStep::Field(name_idx) = step
+            && (u32::from(*name_idx) as usize) >= consts_len
+        {
+            return Err(ValidationError::ConstantOutOfBounds {
+                op_idx,
+                idx: u32::from(*name_idx),
+                len: consts_len,
+                pool: PoolKind::Consts,
+            });
+        }
+    }
+    Ok(true)
+}
+
+/// Registers a place path reads its indices from.
+fn place_index_regs(path: &[crate::bytecode::PlaceStep]) -> impl Iterator<Item = Reg> + '_ {
+    path.iter().filter_map(|step| match step {
+        crate::bytecode::PlaceStep::Index(reg) => Some(*reg),
+        _ => None,
+    })
 }
 
 #[cfg(test)]

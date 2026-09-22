@@ -532,6 +532,7 @@ impl<'a> Builder<'a> {
             "{symbol} dispatches a carrier-returning handler, so it belongs in \
              I128_HANDLER_REGISTRATIONS at address index {addr_index}"
         );
+        self.mark_handler_shared(handler_local, span);
         let mut args: Vec<Operand> = leading
             .iter()
             .map(|local| Operand::Copy(Place::local(*local)))
@@ -548,6 +549,48 @@ impl<'a> Builder<'a> {
         });
         self.set_current(next);
         dest
+    }
+
+    /// Marks what a handler holds as shared before a server is handed it.
+    ///
+    /// A server runs the handler for each connection on a goroutine of its
+    /// own, so the values it reaches are counted from several workers at once
+    /// and have to count their shares atomically. The mark runs here, on the
+    /// thread that built the handler, before any connection exists. A closure
+    /// is its environment, a counted node; a struct handler marks its counted
+    /// fields; a runtime handler (a router, a middleware) marks what it holds
+    /// when the handler it wraps is registered.
+    fn mark_handler_shared(&mut self, handler_local: Local, span: Span) {
+        let handler_ty = self.locals[handler_local.0 as usize].ty;
+        if self
+            .local_runtime_kind
+            .get(&handler_local)
+            .copied()
+            .or_else(|| self.runtime_kind_from_ty(handler_ty))
+            .is_some()
+            || self.local_fn_name.contains_key(&handler_local)
+        {
+            return;
+        }
+        let is_closure = self.local_closure.contains_key(&handler_local)
+            || matches!(
+                self.tcx.kind_of(handler_ty),
+                gossamer_types::TyKind::FnTrait(_) | gossamer_types::TyKind::Closure { .. }
+            );
+        if !is_closure {
+            self.emit_mark_shared_if_rc(handler_local, span);
+            return;
+        }
+        let unit_ty = self.tcx.unit();
+        let dest = self.fresh(unit_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_rc_mark_shared".to_string())),
+            args: vec![Operand::Copy(Place::local(handler_local))],
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
     }
 
     /// Resolves a handler value's dispatch method (`method`) to a

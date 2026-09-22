@@ -88,10 +88,9 @@ pub unsafe extern "C" fn gos_rt_concat_u64(n: u64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_concat_f64(x: f64) {
     ffi_entry!((), {
-        use std::io::Write;
-        CONCAT_BUF.with(|b| {
-            let _ = write!(&mut *b.borrow_mut(), "{x}");
-        });
+        let mut text = crate::builtins::FloatText::new();
+        let digits = crate::builtins::f64_display(x, &mut text);
+        CONCAT_BUF.with(|b| b.borrow_mut().extend_from_slice(digits));
     });
 }
 

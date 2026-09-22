@@ -163,6 +163,7 @@ impl ConnScratch {
                 values: Vec::new(),
                 agent: None,
                 peer: String::new(),
+                context_site: None,
                 context: 0,
             },
             response_buf: Vec::with_capacity(512),
@@ -183,11 +184,18 @@ static HTTP_ACTIVE_CONNS: AtomicUsize = AtomicUsize::new(0);
 /// the actors that can still reach a channel for as long as it serves.
 /// Created inside the thread closure so both run even if
 /// `handle_http_conn` panics.
-struct HttpConnGuard(crate::sched_global::ExternalActor);
+/// Counts a live connection for as long as its task runs. A connection on a
+/// thread of its own also counts as an actor that can reach a channel; a
+/// goroutine is one already.
+struct HttpConnGuard {
+    _actor: Option<crate::sched_global::ExternalActor>,
+}
 
 impl HttpConnGuard {
-    fn enter() -> Self {
-        Self(crate::sched_global::ExternalActor::enter())
+    fn enter(home: ConnHome) -> Self {
+        Self {
+            _actor: (home == ConnHome::Thread).then(crate::sched_global::ExternalActor::enter),
+        }
     }
 }
 
@@ -303,7 +311,7 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve(
         } else {
             unsafe { crate::c_abi::gos_str_arg_string(addr) }
         };
-        let listener = match TcpListener::bind(&addr_s) {
+        let listener = match crate::listen::bind_tcp(&addr_s) {
             Ok(l) => l,
             Err(e) => {
                 // Startup-time failure: hand back `Err` with the
@@ -318,11 +326,17 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve(
         // Keep that wait local to the connection: routing every ready socket
         // through the scheduler's one global poller serializes high-throughput
         // traffic on the poller lock. Admission remains bounded below.
-        accept_serve(listener, move |stream| {
+        accept_serve(listener, ConnHome::Goroutine, move |stream| {
             let peer = stream
                 .peer_addr()
                 .map_or_else(|_| String::new(), |a| a.to_string());
-            let mut conn = BlockingTcpConn(stream);
+            let Ok(mut conn) = GoroutineTcpConn::new(
+                stream,
+                http_read_timeout_ms().unwrap_or(0),
+                http_write_timeout_ms().unwrap_or(0),
+            ) else {
+                return;
+            };
             handle_http_conn_from(&mut conn, env_addr, fn_addr, &peer);
         });
     }
@@ -332,12 +346,35 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve(
     super::vec::pack_result(0, 0)
 }
 
+/// Where an accepted connection runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConnHome {
+    /// A goroutine of its own. The connection's transfers must park the
+    /// goroutine rather than block ([`GoroutineTcpConn`]), and a connection
+    /// waiting on its peer holds no thread and no allocator heap of its own.
+    Goroutine,
+    /// An OS thread of its own, with the socket's deadlines applied, for a
+    /// transport whose I/O blocks.
+    Thread,
+}
+
+/// Starts `task` for one accepted connection where `home` says. Answers
+/// `false` when nothing could be started, having run nothing.
+fn start_connection(home: ConnHome, task: Box<dyn FnOnce() + Send + 'static>) -> bool {
+    match home {
+        ConnHome::Goroutine => crate::sched_global::try_spawn(task).is_some(),
+        ConnHome::Thread => std::thread::Builder::new()
+            .name("gos-http-conn".to_string())
+            .spawn(task)
+            .is_ok(),
+    }
+}
+
 /// Accept loop shared by compiled HTTP, TLS, and WebSocket servers. Each
-/// accepted socket runs on a dedicated OS thread with read and write deadlines.
-/// `HTTP_ACTIVE_CONNS` caps the live thread count at `GOSSAMER_HTTP_MAX_CONN`
-/// (default 4096), replying 503 past the cap so a client flood cannot exhaust
-/// file descriptors or threads.
-pub(crate) fn accept_serve<F>(listener: TcpListener, serve_conn: F)
+/// accepted socket is served where `home` says. `HTTP_ACTIVE_CONNS` caps the
+/// live connection count at `GOSSAMER_HTTP_MAX_CONN` (default 4096), replying
+/// 503 past the cap so a client flood cannot exhaust file descriptors.
+pub(crate) fn accept_serve<F>(listener: TcpListener, home: ConnHome, serve_conn: F)
 where
     F: Fn(TcpStream) + Send + Sync + Clone + 'static,
 {
@@ -375,7 +412,9 @@ where
             break;
         }
         let _ = stream.set_nodelay(true);
-        configure_socket_timeouts(&stream);
+        if home == ConnHome::Thread {
+            configure_socket_timeouts(&stream);
+        }
         let cap = http_max_conn();
         let current = HTTP_ACTIVE_CONNS.fetch_add(1, Ordering::AcqRel);
         if current >= cap {
@@ -388,25 +427,26 @@ where
             let _ = stream.flush();
             continue;
         }
-        // Keep the socket outside the thread closure until creation succeeds,
-        // so an OS thread limit reports a truthful 503 instead of resetting
-        // the accepted connection.
+        // Keep the socket outside the task until it starts, so a thread or
+        // goroutine limit reports a truthful 503 instead of resetting the
+        // accepted connection.
         let serve = serve_conn.clone();
         let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(stream)));
         let task_slot = std::sync::Arc::clone(&slot);
-        let spawned = std::thread::Builder::new()
-            .name("gos-http-conn".to_string())
-            .spawn(move || {
+        let spawned = start_connection(
+            home,
+            Box::new(move || {
                 let Some(stream) = task_slot.lock().take() else {
                     return;
                 };
-                let _guard = HttpConnGuard::enter();
+                let _guard = HttpConnGuard::enter(home);
                 // One connection is one fault domain: a handler panic ends
                 // that request, not the server.
                 let _faults = crate::c_abi::panic::IsolatedFaults::enter();
                 serve(stream);
-            });
-        if spawned.is_err() {
+            }),
+        );
+        if !spawned {
             HTTP_ACTIVE_CONNS.fetch_sub(1, Ordering::AcqRel);
             if let Some(mut stream) = slot.lock().take() {
                 use std::io::Write;
@@ -469,7 +509,6 @@ where
             break;
         }
         let _ = stream.set_nodelay(true);
-        apply_socket_timeouts(&stream, limits);
         if live.load(Ordering::Acquire) >= limits.max_connections {
             let mut stream = stream;
             use std::io::Write;
@@ -488,13 +527,12 @@ where
         let in_flight_for_thread = std::sync::Arc::clone(in_flight);
         let slot = std::sync::Arc::new(parking_lot::Mutex::new(Some(stream)));
         let task_slot = std::sync::Arc::clone(&slot);
-        let spawned = std::thread::Builder::new()
-            .name("gos-http-conn".to_string())
-            .spawn(move || {
+        let spawned = start_connection(
+            ConnHome::Goroutine,
+            Box::new(move || {
                 let _counts = ConnCounts {
                     live: live_for_thread,
                     in_flight: in_flight_for_thread,
-                    _actor: crate::sched_global::ExternalActor::enter(),
                 };
                 let Some(stream) = task_slot.lock().take() else {
                     return;
@@ -503,8 +541,9 @@ where
                 // that request, not the server.
                 let _faults = crate::c_abi::panic::IsolatedFaults::enter();
                 serve(stream, peer, &conn_limits);
-            });
-        if spawned.is_err() {
+            }),
+        );
+        if !spawned {
             live.fetch_sub(1, Ordering::AcqRel);
             in_flight.fetch_sub(1, Ordering::AcqRel);
             if let Some(mut stream) = slot.lock().take() {
@@ -523,8 +562,6 @@ where
 struct ConnCounts {
     live: std::sync::Arc<AtomicUsize>,
     in_flight: std::sync::Arc<AtomicUsize>,
-    /// Counts this handler among the actors that can still reach a channel.
-    _actor: crate::sched_global::ExternalActor,
 }
 
 impl Drop for ConnCounts {
@@ -534,7 +571,8 @@ impl Drop for ConnCounts {
     }
 }
 
-/// Serves one accepted connection under `limits`.
+/// Serves one accepted connection under `limits`, on the goroutine
+/// [`accept_serve_with`] started for it.
 pub(crate) fn serve_one_connection(
     stream: TcpStream,
     peer: String,
@@ -542,22 +580,15 @@ pub(crate) fn serve_one_connection(
     env_addr: usize,
     fn_addr: usize,
 ) {
-    let mut conn = BlockingTcpConn(stream);
-    handle_http_conn_limited(&mut conn, env_addr, fn_addr, &peer, limits);
-}
-
-/// Applies one server's read and write deadlines to an accepted socket.
-fn apply_socket_timeouts(stream: &TcpStream, limits: &ServerLimits) {
-    let millis = |ms: u64| (ms != 0).then(|| std::time::Duration::from_millis(ms));
-    // The socket deadline is the longer of the two read phases; the header
+    // Each read is bounded by the longer of the two read phases; the header
     // phase's own, shorter bound is enforced against the accumulator.
-    let read = millis(
-        limits
-            .read_header_timeout_ms
-            .max(limits.read_body_timeout_ms),
-    );
-    let _ = stream.set_read_timeout(read);
-    let _ = stream.set_write_timeout(millis(limits.write_timeout_ms));
+    let read_ms = limits
+        .read_header_timeout_ms
+        .max(limits.read_body_timeout_ms);
+    let Ok(mut conn) = GoroutineTcpConn::new(stream, read_ms, limits.write_timeout_ms) else {
+        return;
+    };
+    handle_http_conn_limited(&mut conn, env_addr, fn_addr, &peer, limits);
 }
 
 struct HttpWakeAddrGuard(SocketAddr);
@@ -652,13 +683,13 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve_tls(
             Ok(c) => c,
             Err(e) => return http_serve_err_result(&format!("http::serve_tls: {e}")),
         };
-        let listener = match TcpListener::bind(&addr_s) {
+        let listener = match crate::listen::bind_tcp(&addr_s) {
             Ok(l) => l,
             Err(e) => return http_serve_err_result(&format!("http::serve_tls: {e}")),
         };
         let env_addr = handler_env as usize;
         let fn_addr = handler_fn as usize;
-        accept_serve(listener, move |stream| {
+        accept_serve(listener, ConnHome::Goroutine, move |stream| {
             serve_tls_conn(stream, env_addr, fn_addr, server_config.clone());
         });
     }
@@ -668,7 +699,7 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve_tls(
 /// rustls-terminated server connection. The accepted socket has the same
 /// read/write deadlines and bounded admission as plaintext HTTP.
 struct TlsServerConn {
-    inner: rustls::StreamOwned<rustls::ServerConnection, TcpStream>,
+    inner: rustls::StreamOwned<rustls::ServerConnection, GoroutineTcpConn>,
 }
 
 impl HttpIo for TlsServerConn {
@@ -696,8 +727,15 @@ fn serve_tls_conn(
     let peer = stream
         .peer_addr()
         .map_or_else(|_| String::new(), |a| a.to_string());
+    let Ok(transport) = GoroutineTcpConn::new(
+        stream,
+        http_read_timeout_ms().unwrap_or(0),
+        http_write_timeout_ms().unwrap_or(0),
+    ) else {
+        return;
+    };
     let mut tls = TlsServerConn {
-        inner: rustls::StreamOwned::new(conn, stream),
+        inner: rustls::StreamOwned::new(conn, transport),
     };
     handle_http_conn_from(&mut tls, env_addr, fn_addr, &peer);
 }
@@ -764,25 +802,138 @@ trait HttpIo {
     /// where there is no descriptor to peek - a TLS session's plaintext is
     /// not the wire, and an in-memory transport has no peer at all.
     #[cfg(any(unix, windows))]
-    fn peer_socket(&self) -> Option<&TcpStream> {
+    fn peer_socket(&self) -> Option<RawPeerSocket> {
         None
     }
 }
 
-/// Blocking accepted-connection transport. Its socket has deadlines applied
-/// before this wrapper is constructed by [`accept_serve`].
-struct BlockingTcpConn(TcpStream);
+/// The raw socket behind `socket`, as a peer probe reads it.
+#[cfg(any(unix, windows))]
+fn raw_peer_socket(
+    #[cfg(unix)] socket: &impl std::os::fd::AsRawFd,
+    #[cfg(windows)] socket: &impl std::os::windows::io::AsRawSocket,
+) -> RawPeerSocket {
+    #[cfg(unix)]
+    {
+        socket.as_raw_fd()
+    }
+    #[cfg(windows)]
+    {
+        socket.as_raw_socket()
+    }
+}
 
-impl HttpIo for BlockingTcpConn {
+/// Accepted-connection transport for a connection served on a goroutine. The
+/// socket is non-blocking and registered with the netpoller once; a transfer
+/// that would block parks the goroutine until the socket is ready or the
+/// transfer's deadline passes, so a waiting connection holds no thread.
+pub(crate) struct GoroutineTcpConn {
+    stream: mio::net::TcpStream,
+    registration: Option<crate::netpoll::Registration>,
+    read_timeout: Option<std::time::Duration>,
+    write_timeout: Option<std::time::Duration>,
+}
+
+impl GoroutineTcpConn {
+    /// Takes `stream` over, with `read_ms` and `write_ms` bounding each read
+    /// and each write (zero for no bound).
+    pub(crate) fn new(stream: TcpStream, read_ms: u64, write_ms: u64) -> std::io::Result<Self> {
+        stream.set_nonblocking(true)?;
+        let mut stream = mio::net::TcpStream::from_std(stream);
+        let registration = crate::netpoll::Registration::new(&mut stream)?;
+        let bound = |ms: u64| (ms != 0).then(|| std::time::Duration::from_millis(ms));
+        Ok(Self {
+            stream,
+            registration: Some(registration),
+            read_timeout: bound(read_ms),
+            write_timeout: bound(write_ms),
+        })
+    }
+
+    /// Waits for `direction`, answering `TimedOut` once `deadline` passed.
+    fn wait(
+        &self,
+        direction: crate::netpoll::Direction,
+        deadline: Option<crate::platform::Instant>,
+    ) -> std::io::Result<()> {
+        let Some(registration) = self.registration.as_ref() else {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotConnected));
+        };
+        if registration.wait(direction, deadline) {
+            Ok(())
+        } else {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "HTTP connection timed out",
+            ))
+        }
+    }
+}
+
+impl Drop for GoroutineTcpConn {
+    fn drop(&mut self) {
+        if let Some(registration) = self.registration.take() {
+            registration.deregister(&mut self.stream);
+        }
+    }
+}
+
+impl std::io::Read for GoroutineTcpConn {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        std::io::Read::read(&mut self.0, buf)
+        let mut deadline = None;
+        loop {
+            match std::io::Read::read(&mut self.stream, buf) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    // The bound runs from the first time the read had to wait,
+                    // as a socket receive timeout does.
+                    let at = *deadline.get_or_insert_with(|| {
+                        self.read_timeout
+                            .map(|t| crate::platform::Instant::now() + t)
+                    });
+                    self.wait(crate::netpoll::Direction::Read, at)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+}
+
+impl std::io::Write for GoroutineTcpConn {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut deadline = None;
+        loop {
+            match std::io::Write::write(&mut self.stream, buf) {
+                Ok(n) => return Ok(n),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    let at = *deadline.get_or_insert_with(|| {
+                        self.write_timeout
+                            .map(|t| crate::platform::Instant::now() + t)
+                    });
+                    self.wait(crate::netpoll::Direction::Write, at)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl HttpIo for GoroutineTcpConn {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        std::io::Read::read(self, buf)
     }
     fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
-        std::io::Write::write_all(&mut self.0, buf)
+        std::io::Write::write_all(self, buf)
     }
     #[cfg(any(unix, windows))]
-    fn peer_socket(&self) -> Option<&TcpStream> {
-        Some(&self.0)
+    fn peer_socket(&self) -> Option<RawPeerSocket> {
+        Some(raw_peer_socket(&self.stream))
     }
 }
 
@@ -949,7 +1100,10 @@ fn handle_http_conn_limited<C: HttpIo>(
                 crate::platform::Instant::now()
                     + std::time::Duration::from_millis(limits.request_timeout_ms)
             });
-            set_request_context_site(request_deadline, &watch_ctx);
+            scratch.request.context_site = Some(crate::c_abi::http_client::RequestContextSite {
+                deadline: request_deadline,
+                watch: std::sync::Arc::clone(&watch_ctx),
+            });
 
             // Chunked requests parse from the canonical de-chunked
             // rewrite; everything else parses straight from the
@@ -1240,19 +1394,9 @@ static PEER_WATCH_WAKE: parking_lot::Condvar = parking_lot::Condvar::new();
 /// the server is serving.
 #[cfg(any(unix, windows))]
 fn watch_for_disconnect(
-    stream: &TcpStream,
+    socket: RawPeerSocket,
     ctx: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 ) -> Option<DisconnectWatch> {
-    #[cfg(unix)]
-    let socket = {
-        use std::os::fd::AsRawFd;
-        stream.as_raw_fd()
-    };
-    #[cfg(windows)]
-    let socket = {
-        use std::os::windows::io::AsRawSocket;
-        stream.as_raw_socket()
-    };
     let mut state = PEER_WATCH.lock();
     if !state.watcher_running {
         // Started on the first watched request, so a program that serves
@@ -1335,45 +1479,14 @@ impl Drop for DisconnectWatch {
     }
 }
 
-// The in-flight request's deadline and the peer-watch slot a context created
-// for it must be published into, on the thread serving it. A connection thread
-// serves one request at a time, so the site is a thread-local rather than
-// something the handler has to be handed.
-thread_local! {
-    static REQUEST_CONTEXT_SITE: std::cell::RefCell<
-        Option<(
-            Option<crate::platform::Instant>,
-            std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        )>,
-    > = const { std::cell::RefCell::new(None) };
-}
-
-/// Names the request the calling thread is serving, so a handler that asks
-/// for `req.context` gets one that expires with the request.
-fn set_request_context_site(
-    deadline: Option<crate::platform::Instant>,
-    watch_ctx: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
-) {
-    REQUEST_CONTEXT_SITE.with_borrow_mut(|site| {
-        *site = Some((deadline, std::sync::Arc::clone(watch_ctx)));
-    });
-}
-
-/// Forgets the request the calling thread was serving.
-fn clear_request_context_site() {
-    REQUEST_CONTEXT_SITE.with_borrow_mut(|site| *site = None);
-}
-
-/// Opens the in-flight request's context on first use, publishing it to the
-/// peer watch so a client that leaves still cancels it. `None` off a
-/// connection thread, where there is no request to bound.
-pub(crate) fn open_current_request_context() -> Option<usize> {
-    REQUEST_CONTEXT_SITE.with_borrow(|site| {
-        let (deadline, watch_ctx) = site.as_ref()?;
-        let ctx = crate::c_abi::context::open_request_context_at(*deadline);
-        watch_ctx.store(ctx, std::sync::atomic::Ordering::Release);
-        Some(ctx)
-    })
+/// Opens `request`'s context on first use, publishing it to the peer watch
+/// so a client that leaves still cancels it. `None` for a request the server
+/// is not serving, which has nothing to bound it.
+pub(crate) fn open_served_request_context(request: &GosHttpRequest) -> Option<usize> {
+    let site = request.context_site.as_ref()?;
+    let ctx = crate::c_abi::context::open_request_context_at(site.deadline);
+    site.watch.store(ctx, std::sync::atomic::Ordering::Release);
+    Some(ctx)
 }
 
 /// Cancels and retires the request's context.
@@ -1394,7 +1507,7 @@ fn cancel_request_context(request: &mut GosHttpRequest) {
 /// call is about to close.
 fn end_request_context(request: &mut GosHttpRequest, watch_ctx: &std::sync::atomic::AtomicUsize) {
     watch_ctx.store(0, std::sync::atomic::Ordering::Release);
-    clear_request_context_site();
+    request.context_site = None;
     cancel_request_context(request);
 }
 
@@ -2582,6 +2695,7 @@ mod tests {
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: 0,
         };
         assert!(parse_request_into(&raw, header_end, &mut request));
@@ -2619,6 +2733,7 @@ mod tests {
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: 0,
         };
         assert!(parse_request_into(raw, header_end, &mut request));
@@ -2794,6 +2909,7 @@ mod tests {
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: 0,
         }
     }
@@ -3234,6 +3350,7 @@ mod tests {
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: 0,
         };
         assert!(parse_request_into(&raw, header_end, &mut request));

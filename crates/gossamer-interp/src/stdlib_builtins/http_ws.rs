@@ -107,7 +107,7 @@ pub(crate) fn native_websocket_serve(
         Value::Struct(inner) => format!("{}::handle", inner.name),
         _ => "handle".to_string(),
     };
-    let listener = match TcpListener::bind(&addr) {
+    let listener = match gossamer_runtime::listen::bind_tcp(&addr) {
         Ok(l) => l,
         Err(e) => return Ok(err_variant(format!("websocket::serve: {e}"))),
     };

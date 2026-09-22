@@ -1724,7 +1724,14 @@ impl<'a> Builder<'a> {
     fn rebinds_receiver_place(method: &Ident) -> bool {
         matches!(
             method.name.as_str(),
-            "push_str" | "push" | "push_char" | "push_byte" | "push_utf8" | "clear" | "truncate"
+            "push_str"
+                | "push"
+                | "push_char"
+                | "push_byte"
+                | "push_utf8"
+                | "push_json_quoted"
+                | "clear"
+                | "truncate"
         )
     }
 
@@ -1885,7 +1892,15 @@ impl<'a> Builder<'a> {
                     }
                     _ => None,
                 };
-                let Some(arg_local) = self.lower_expr(&args[0]) else {
+                // `s.push_str(n.to_string())` appends the scalar's text in
+                // place; the `String` the argument names is never built.
+                let (append, appended) = match self.fused_append_piece(&args[0]) {
+                    Some((symbol, value)) if symbol != "gos_rt_str_concat_drop_a" => {
+                        (symbol, value)
+                    }
+                    _ => ("gos_rt_str_concat_drop_a", &args[0]),
+                };
+                let Some(arg_local) = self.lower_expr(appended) else {
                     return MethodLowering::Handled(None);
                 };
                 let Some(recv_place) = self.string_receiver_place(receiver) else {
@@ -1906,7 +1921,7 @@ impl<'a> Builder<'a> {
                         ],
                     ),
                     None => (
-                        "gos_rt_str_concat_drop_a",
+                        append,
                         vec![
                             Operand::Copy(recv_place.clone()),
                             Operand::Copy(Place::local(arg_local)),
@@ -1929,10 +1944,16 @@ impl<'a> Builder<'a> {
             }
         }
         // `s.push_utf8(buf, start, end)` appends a validated UTF-8 window of a
-        // byte buffer straight onto the receiver's storage. The shim answers a
-        // carrier: the payload is the pointer the receiver takes, and the
-        // discriminant is the `bool` the call evaluates to.
-        if method.name.as_str() == "push_utf8"
+        // byte buffer straight onto the receiver's storage, and
+        // `s.push_json_quoted(..)` appends it as a quoted JSON string. The shim
+        // answers a carrier: the payload is the pointer the receiver takes,
+        // and the discriminant is the `bool` the call evaluates to.
+        let window_append = match method.name.as_str() {
+            "push_utf8" => Some("gos_rt_str_push_utf8"),
+            "push_json_quoted" => Some("gos_rt_str_push_json_quoted"),
+            _ => None,
+        };
+        if let Some(window_append) = window_append
             && args.len() == 3
             && let Some((peeled, projected)) = self.string_receiver_shape(receiver)
         {
@@ -1957,7 +1978,7 @@ impl<'a> Builder<'a> {
                 let carrier = self.fresh(carrier_ty);
                 let next = self.new_block(span);
                 self.terminate(Terminator::Call {
-                    callee: Operand::Const(ConstValue::Str("gos_rt_str_push_utf8".to_string())),
+                    callee: Operand::Const(ConstValue::Str(window_append.to_string())),
                     args: vec![
                         Operand::Copy(recv_place.clone()),
                         Operand::Copy(Place::local(lowered[0])),

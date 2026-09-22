@@ -1,0 +1,36 @@
+// `{}` and `to_string` on an `f64` answer the shortest digits that read back
+// as the value, laid out as a plain decimal with no exponent, on every tier.
+//
+// An `f32` is computed and rendered as an `f64` on every tier today, so the
+// `f32` lines below expect the `f64` text of the widened value.
+
+fn show(x: f64) {
+    println("{} | {} | {}", x, x.to_string(), format("<{}>", x))
+}
+
+fn main() {
+    let values = #[
+        0.0, -0.0, 1.0, -1.0, 1.5, 0.1, 0.3, 0.1 + 0.2, 2.5, 100.0, 123456.789
+        1e15, 1e16, 1e17, 1e21, 1e22, 1e-5, 1e-7, 1.25e-10, 9007199254740992.0
+        9007199254740993.0, 662936471232937.25, 1658206780088562.25, 0.125, 1e300
+        1e-300
+    ]
+    for x in values { show(x) }
+    show(f64::MAX)
+    show(f64::MIN)
+    show(f64::MIN_POSITIVE)
+    show(f64::EPSILON)
+    show(f64::NAN)
+    show(f64::INFINITY)
+    show(-f64::INFINITY)
+    let mut acc = 0.0
+    let mut i = 0
+    while i < 20 {
+        acc += 0.1
+        show(acc)
+        i += 1
+    }
+    let tenth: f32 = 0.1
+    let fifth: f32 = 0.2
+    println("f32 {}", tenth + fifth)
+}

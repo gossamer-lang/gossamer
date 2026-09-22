@@ -952,3 +952,150 @@ fn main() {
         "a callee that writes its by-value parameter needs exactly one copy"
     );
 }
+
+/// Resident kibibytes of process `pid`, from `/proc`.
+#[cfg(target_os = "linux")]
+fn resident_kib(pid: u32) -> u64 {
+    std::fs::read_to_string(format!("/proc/{pid}/status"))
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find(|line| line.starts_with("VmRSS:"))
+                .and_then(|line| line.split_whitespace().nth(1))
+                .and_then(|kib| kib.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// A keep-alive connection waiting for its next request costs a few tens of
+/// kibibytes: its goroutine's touched stack and its read buffers. It holds no
+/// thread and no allocator heap of its own, which cost several times that
+/// each.
+#[cfg(target_os = "linux")]
+#[test]
+fn an_idle_keep_alive_connection_costs_tens_of_kibibytes() {
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+
+    let binary = build_release(
+        "idle_connection_memory",
+        r#"
+use std::{env, http}
+
+fn main() {
+    let server = http::Server::new()
+    let _ = server.listen("127.0.0.1:" + env::args()[0])
+    let _ = server.serve(|_r| Ok(http::Response::text(200, "ok")))
+}
+"#,
+    );
+    let port = free_port();
+    let mut server = Command::new(&binary)
+        .arg(port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn the server");
+    let addr = format!("127.0.0.1:{port}");
+    let mut ready = false;
+    for _ in 0..600 {
+        if TcpStream::connect(&addr).is_ok() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(ready, "the server never accepted a connection");
+
+    let request = b"GET /ping HTTP/1.1\r\nHost: x\r\n\r\n";
+    let open = |count: usize| -> Vec<TcpStream> {
+        (0..count)
+            .map(|_| {
+                let mut sock = TcpStream::connect(&addr).expect("connect");
+                sock.write_all(request).expect("send");
+                let mut buf = [0u8; 512];
+                let n = sock.read(&mut buf).expect("answer");
+                assert!(n > 0, "the server closed a keep-alive connection");
+                sock
+            })
+            .collect()
+    };
+    // A first batch settles the scheduler's workers and the allocator's
+    // pools, so the measured batch is what connections cost on their own.
+    let warm = open(64);
+    std::thread::sleep(Duration::from_millis(300));
+    let before = resident_kib(server.id());
+    let held = open(400);
+    std::thread::sleep(Duration::from_millis(300));
+    let after = resident_kib(server.id());
+    drop(held);
+    drop(warm);
+    let _ = server.kill();
+    let _ = server.wait();
+
+    let per_connection = after.saturating_sub(before) / 400;
+    assert!(
+        per_connection <= 64,
+        "an idle keep-alive connection holds {per_connection} KiB (bound 64 KiB): \
+         {before} KiB before 400 connections, {after} KiB after"
+    );
+}
+
+/// A write through a place several steps deep costs the path on the bytecode
+/// VM, not a copy of the containers the path passes through: growing a Vec
+/// held in a struct held in a Vec, one row at a time, scales with the rows.
+#[test]
+fn nested_place_writes_scale_with_the_writes_on_the_vm() {
+    const SOURCE: &str = r#"
+use std::{env, time}
+
+struct Table { slots: Vec<i64>, live: i64 }
+struct Store { tables: Vec<Table> }
+
+fn place(st: &mut Store, rid: i64) {
+    let want = 3 * rid + 3
+    if st.tables[0].slots.len() < want { st.tables[0].slots.resize(want, 0) }
+    if st.tables[0].slots[3 * rid + 1] == 0 { st.tables[0].live += 1 }
+    st.tables[0].slots[3 * rid] = rid
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or("1000").to_i64().unwrap_or(1000)
+    let mut st = Store { tables: #[Table { slots: #[], live: 0 }] }
+    let start = time::monotonic_ms()
+    for rid in 1..n { place(&mut st, rid) }
+    println("{} {}", time::monotonic_ms() - start, st.tables[0].live)
+}
+"#;
+    let (dir, source_path) = fixture("nested_place_cost", SOURCE);
+    let run_ms = |n: &str| -> i64 {
+        let output = Command::new(env!("CARGO_BIN_EXE_gos"))
+            .env("GOS_JIT", "0")
+            .arg("run")
+            .arg(&source_path)
+            .arg(n)
+            .output()
+            .expect("run the nested place fixture on the interpreter");
+        assert!(
+            output.status.success(),
+            "nested place fixture failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|ms| ms.parse::<i64>().ok())
+            .expect("fixture must report the milliseconds its loop took")
+    };
+    let small = run_ms("10000");
+    let large = run_ms("40000");
+    let _ = fs::remove_dir_all(&dir);
+    // Four times the rows: linear work takes about four times as long, and a
+    // copy of the growing Vec per row would take sixteen.
+    assert!(
+        large <= small.max(10) * 8,
+        "nested place writes scaled with the Vec rather than the writes: \
+         10000 rows={small}ms, 40000 rows={large}ms"
+    );
+}

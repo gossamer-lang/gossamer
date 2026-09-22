@@ -13,8 +13,6 @@
 
 #![forbid(unsafe_code)]
 
-#[cfg(not(target_arch = "wasm32"))]
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -386,7 +384,8 @@ fn format_f64(v: f64) -> String {
 /// so it is unavailable in the wasm playground.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn serve_metrics(addr: &str, registry: Registry) -> Result<(), Error> {
-    let listener = TcpListener::bind(addr).map_err(|e| Error::new(format!("bind {addr}: {e}")))?;
+    let listener = gossamer_runtime::listen::bind_tcp(addr)
+        .map_err(|e| Error::new(format!("bind {addr}: {e}")))?;
     let config = server::Config::default();
     let result = server::run(listener, &config, move |req: Request| -> Response {
         if req.path() == "/metrics" {

@@ -54,6 +54,7 @@ collapsible_if = "allow"
 # shim is gated out, so they stay in the unconditional table.
 [dependencies]
 itoa = "1"
+zmij = "1"
 num-bigint = "0.4"
 num-integer = "0.1"
 num-traits = "0.2"
@@ -165,6 +166,9 @@ signal-hook = { workspace = true }
 libloading = "0.8"
 crossbeam-deque = { workspace = true }
 mio = { workspace = true }
+# `listen(2)` with the system's full accept queue, which `std::net` does
+# not expose.
+socket2 = "0.6"
 # `gos_rt_http_stream` uses ureq for the wire request so the
 # compiled tier matches the interp's `http::stream` semantics.
 # Same feature set as gossamer-std (TLS via rustls, gzip, cookies)

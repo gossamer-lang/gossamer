@@ -78,6 +78,85 @@ fn make() -> String {
     );
 }
 
+/// A scalar's `to_string()` appended to a `String` appends the scalar's text
+/// in place: no conversion builds a `String` of its own for the piece.
+#[test]
+fn scalar_to_string_appends_in_place_without_a_temporary_string() {
+    let (bodies, _) = build(
+        r"
+fn render(id: i64, n: u32, score: f64, ok: bool, c: char) -> String {
+    let mut out = String::with_capacity(64)
+    out.push_str(id.to_string())
+    out.push_str(n.to_string())
+    out += score.to_string()
+    out = out + ok.to_string()
+    out.push_str(c.to_string())
+    out
+}
+",
+    );
+    let body = bodies.iter().find(|body| body.name == "render").expect("body");
+    let names = call_symbol_names(body);
+    for fused in [
+        "gos_rt_str_append_i64",
+        "gos_rt_str_append_u64",
+        "gos_rt_str_append_f64",
+        "gos_rt_str_append_bool",
+        "gos_rt_str_push_char",
+    ] {
+        assert!(
+            names.iter().any(|name| name == fused),
+            "each scalar appends through its in-place helper: missing {fused} in {names:?}"
+        );
+    }
+    for temporary in [
+        "gos_rt_i64_to_str",
+        "gos_rt_u64_to_str",
+        "gos_rt_f64_to_str",
+        "gos_rt_bool_to_str",
+        "gos_rt_char_to_str",
+    ] {
+        assert!(
+            !names.iter().any(|name| name == temporary),
+            "no appended scalar becomes a String of its own: found {temporary} in {names:?}"
+        );
+    }
+}
+
+/// A handler handed to a server has its counted fields marked shared first:
+/// the server runs it for each connection on a goroutine of its own, so what
+/// it holds is counted from several workers at once.
+#[test]
+fn a_served_handler_is_marked_shared_before_the_server_takes_it() {
+    let (bodies, _) = build(
+        r#"
+use std::http
+
+struct App { name: String }
+
+impl http::Handler for App {
+    fn serve(&self, _r: http::Request) -> http::Response {
+        http::Response::text(200, self.name)
+    }
+}
+
+fn main() {
+    let _ = http::serve("127.0.0.1:8080", App { name: "app" })
+}
+"#,
+    );
+    let body = bodies.iter().find(|body| body.name == "main").expect("body");
+    let names = call_symbol_names(body);
+    let marked = names
+        .iter()
+        .position(|name| name == "gos_rt_aggr_mark_shared_children" || name == "gos_rt_rc_mark_shared");
+    let served = names.iter().position(|name| name == "gos_rt_http_serve");
+    assert!(
+        matches!((marked, served), (Some(m), Some(s)) if m < s),
+        "the handler is marked shared before the server takes it: {names:?}"
+    );
+}
+
 #[test]
 fn padded_integer_formatting_avoids_an_intermediate_string() {
     let (bodies, _) = build(

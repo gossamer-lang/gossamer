@@ -54,6 +54,8 @@ struct DeferredProjectUse {
     /// actually emitted for it can be found by id.
     project_id: String,
     module_name: String,
+    /// Module the `use` was written in, from the unit root.
+    module: Vec<String>,
     use_id: NodeId,
     span: Span,
 }
@@ -120,6 +122,11 @@ struct Resolver {
     /// Path each imported name is bound to, so a repeated import of the
     /// same path is distinguished from two paths claiming one name.
     imported_targets: std::collections::HashMap<String, String>,
+    /// Path each imported name is bound to in the module whose `use` bound
+    /// it, keyed by that module's `::`-joined path. Two files may each import
+    /// one name for different items; a path written in a module reads its
+    /// own module's import first.
+    module_imports: std::collections::HashMap<(String, String), String>,
     /// alias -> inlined dependency module name, for `use "id" as
     /// alias` bindings that resolved to a bundled module. Qualified
     /// item paths are registered under the module's real name, so
@@ -194,6 +201,7 @@ impl Resolver {
             defs: DefIdGenerator::new(),
             deferred_project_uses: Vec::new(),
             imported_targets: std::collections::HashMap::new(),
+            module_imports: std::collections::HashMap::new(),
             project_alias_modules: std::collections::HashMap::new(),
             module_scopes: std::collections::HashMap::new(),
             collect_mod_stack: Vec::new(),
@@ -275,7 +283,9 @@ impl Resolver {
                         .insert_project_alias(du.alias.clone(), du.module_name.clone());
                     self.project_alias_modules.insert(du.alias, du.module_name);
                 }
-                None => self.define_import(&du.alias, du.use_id, du.span, &du.module_name),
+                None => {
+                    self.define_import(&du.alias, du.use_id, du.span, &du.module_name, &du.module);
+                }
             }
         }
     }
@@ -419,7 +429,7 @@ impl Resolver {
     /// import binds it under a name other than the module's own. Paths the
     /// name heads are respelled to the module before any name-keyed dispatch,
     /// which keys stdlib items by the module path without its `std` root.
-    fn record_std_module_alias(&mut self, name: &str, target: &str) {
+    fn record_std_module_alias(&mut self, scope: &[String], name: &str, target: &str) {
         let Some(module) = target.strip_prefix("std::") else {
             return;
         };
@@ -428,7 +438,7 @@ impl Resolver {
         }
         if module.rsplit("::").next() != Some(name) {
             self.resolutions
-                .insert_module_alias(name.to_string(), module.to_string());
+                .insert_module_alias(scope, name.to_string(), module.to_string());
         }
     }
 
@@ -451,6 +461,7 @@ impl Resolver {
                 alias: name,
                 project_id: id.clone(),
                 module_name: project_dep_module_name(id),
+                module: use_decl.module.clone(),
                 use_id: use_decl.id,
                 span: use_decl.span,
             });
@@ -470,11 +481,11 @@ impl Resolver {
             .unwrap_or_else(|| target.clone());
         if self.local_module_paths.contains(&named) && name != named {
             self.resolutions
-                .insert_module_alias(name.clone(), named.clone());
+                .insert_module_alias(&use_decl.module, name.clone(), named.clone());
         }
-        self.record_std_module_alias(&name, &target);
+        self.record_std_module_alias(&use_decl.module, &name, &target);
         let target = self.anchored_import_target(&use_decl.module, target);
-        self.define_import(&name, use_decl.id, use_decl.span, &target);
+        self.define_import(&name, use_decl.id, use_decl.span, &target, &use_decl.module);
     }
 
     /// Validates `use` module paths against the canonical module table. Stdlib
@@ -604,12 +615,21 @@ impl Resolver {
                 .anchored_local_module(&use_decl.module, &target)
                 .unwrap_or_else(|| target.clone());
             if self.local_module_paths.contains(&named) && imported != named {
-                self.resolutions
-                    .insert_module_alias(imported.clone(), named.clone());
+                self.resolutions.insert_module_alias(
+                    &use_decl.module,
+                    imported.clone(),
+                    named.clone(),
+                );
             }
-            self.record_std_module_alias(&imported, &target);
+            self.record_std_module_alias(&use_decl.module, &imported, &target);
             let target = self.anchored_import_target(&use_decl.module, target);
-            self.define_import(&imported, use_decl.id, use_decl.span, &target);
+            self.define_import(
+                &imported,
+                use_decl.id,
+                use_decl.span,
+                &target,
+                &use_decl.module,
+            );
         }
     }
 
@@ -929,12 +949,47 @@ impl Resolver {
         (!home.module.is_empty() && home.visibility.is_public()).then(|| home.module.join("::"))
     }
 
-    fn define_import(&mut self, name: &str, use_id: NodeId, span: Span, target: &str) {
+    /// The path `name` was imported as, read from the module a path is being
+    /// resolved in: the innermost enclosing module that imported the name
+    /// decides, and otherwise the unit-wide binding does.
+    fn import_target(&self, name: &str) -> Option<&String> {
+        (0..=self.current_module.len())
+            .rev()
+            .find_map(|depth| {
+                self.module_imports
+                    .get(&(self.current_module[..depth].join("::"), name.to_string()))
+            })
+            .or_else(|| self.imported_targets.get(name))
+    }
+
+    fn define_import(
+        &mut self,
+        name: &str,
+        use_id: NodeId,
+        span: Span,
+        target: &str,
+        written_in: &[String],
+    ) {
+        // Imports are scoped to the module that writes them: one module
+        // binding a name twice to two paths is ambiguous, while two modules
+        // each binding it to their own item is not.
+        let key = (written_in.join("::"), name.to_string());
+        if let Some(prev) = self.module_imports.get(&key) {
+            if prev != target {
+                self.emit(
+                    ResolveError::DuplicateImport {
+                        name: name.to_string(),
+                    },
+                    span,
+                );
+            }
+            return;
+        }
+        self.module_imports.insert(key, target.to_string());
         let module = self.scopes.module_mut();
         // Allow imports to shadow prelude entries (Gossamer's
         // `use std::collections::{HashMap, ...}` style imports
-        // re-introduce names already in the prelude). A
-        // collision with a non-prelude binding stays an error.
+        // re-introduce names already in the prelude).
         let existing_kind = module
             .lookup_type(name)
             .or_else(|| module.lookup_value(name))
@@ -970,30 +1025,11 @@ impl Resolver {
                 .insert(name.to_string(), target.to_string());
             return;
         }
+        // Every `use` in a compilation unit lands in this one module scope,
+        // including those written inside a `mod { }` body. A name another
+        // module already imported keeps that binding there; this module's
+        // paths read their own target through `import_target`.
         if !is_prelude_only {
-            // Every `use` in a compilation unit lands in this one module
-            // scope, including those written inside a `mod { }` body and
-            // those injected alongside synthesized code. Binding one name
-            // to one path twice leaves nothing ambiguous; only two paths
-            // competing for the same name do. A `super::` / `crate::` /
-            // `self::` path names an item of this same unit, so it spells
-            // out where an existing binding comes from rather than
-            // introducing a rival one.
-            let names_this_unit =
-                matches!(target.split("::").next(), Some("super" | "crate" | "self"));
-            if !names_this_unit
-                && self
-                    .imported_targets
-                    .get(name)
-                    .is_none_or(|prev| prev != target)
-            {
-                self.emit(
-                    ResolveError::DuplicateImport {
-                        name: name.to_string(),
-                    },
-                    span,
-                );
-            }
             return;
         }
         self.imported_targets
@@ -1376,7 +1412,7 @@ impl Resolver {
     /// its `mod::name` path, so the import's target text finds the very
     /// definition it names and the reference can be checked like any other.
     fn imported_definition(&self, name: &str) -> Option<DefId> {
-        let target = self.imported_targets.get(name)?;
+        let target = self.import_target(name)?;
         let qualified: Vec<&str> = target
             .split("::")
             .skip_while(|segment| matches!(*segment, "crate" | "root" | "self"))
@@ -1875,7 +1911,7 @@ impl Resolver {
             // that whole path. The value side already respells such a head;
             // a type named in a signature has to reach the same declaration
             // or it becomes a second, unrelated one.
-            if let Some(target) = self.imported_targets.get(effective[0]).cloned() {
+            if let Some(target) = self.import_target(effective[0]).cloned() {
                 let mut rejoined: Vec<&str> = target.split("::").collect();
                 rejoined.extend_from_slice(&effective[1..]);
                 if let Some(resolution) = self.lookup_qualified_type(&rejoined) {
@@ -2201,7 +2237,7 @@ impl Resolver {
     /// unbound at run time.
     fn resolve_through_import_head(&self, effective: &[&str]) -> Option<Resolution> {
         let head = effective.first()?;
-        let target = self.imported_targets.get(*head)?;
+        let target = self.import_target(head)?;
         // Items register under their path from the unit root, so a `crate::`,
         // `self::`, or `super::` target is anchored before the rest is joined.
         let bases = if crate::diagnostic::is_relative_path(target) {
@@ -2305,7 +2341,7 @@ impl Resolver {
         if self.local_module_paths.contains(&written) {
             return Some(written);
         }
-        if let Some(target) = self.imported_targets.get(prefix[0]) {
+        if let Some(target) = self.import_target(prefix[0]) {
             let mut rejoined = target.clone();
             for seg in &prefix[1..] {
                 rejoined.push_str("::");

@@ -141,13 +141,9 @@ fn builtin_os_read_file(args: &[Value]) -> RuntimeResult<Value> {
     match gossamer_runtime::sched_global::run_blocking("os-read-file", move || {
         os_std::read_file(&path)
     }) {
-        Ok(Ok(bytes)) => {
-            let values: Vec<Value> = bytes
-                .into_iter()
-                .map(|b| Value::Int(i64::from(b)))
-                .collect();
-            Ok(ok_variant(Value::Array(Arc::new(values))))
-        }
+        // A file's bytes are held packed, one byte each, as every other
+        // `Vec<u8>` the VM builds is.
+        Ok(Ok(bytes)) => Ok(ok_variant(Value::ByteVec(Arc::new(bytes)))),
         Ok(Err(e)) => Ok(err_variant(e.to_string())),
         Err(e) => Ok(err_variant(e)),
     }

@@ -3095,41 +3095,88 @@ impl<'a> Builder<'a> {
         p.ty
     }
 
+    /// The in-place append that adds `piece`'s text to a `String`, and the
+    /// expression whose value it appends.
+    ///
+    /// A `String` piece appends its bytes. A scalar piece, and a scalar's
+    /// `.to_string()`, append the scalar's text straight onto the accumulator,
+    /// so the text never becomes a `String` of its own. The integer symbol
+    /// follows the value's signedness as `to_string` does. `None` for any other
+    /// piece.
+    pub(crate) fn fused_append_piece<'e>(
+        &self,
+        piece: &'e HirExpr,
+    ) -> Option<(&'static str, &'e HirExpr)> {
+        use gossamer_types::{IntTy, TyKind};
+        let scalar_symbol = |this: &Self, ty: Ty| -> Option<&'static str> {
+            let mut cur = ty;
+            while let TyKind::Ref { inner, .. } = this.tcx.kind_of(cur) {
+                cur = *inner;
+            }
+            match this.tcx.kind_of(cur) {
+                TyKind::Int(IntTy::U8 | IntTy::U16 | IntTy::U32 | IntTy::U64 | IntTy::Usize) => {
+                    Some("gos_rt_str_append_u64")
+                }
+                TyKind::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64 | IntTy::Isize) => {
+                    Some("gos_rt_str_append_i64")
+                }
+                TyKind::Float(_) => Some("gos_rt_str_append_f64"),
+                TyKind::Bool => Some("gos_rt_str_append_bool"),
+                TyKind::Char => Some("gos_rt_str_push_char"),
+                _ => None,
+            }
+        };
+        if let HirExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &piece.kind
+            && name.name.as_str() == "to_string"
+            && args.is_empty()
+            && let Some(symbol) = scalar_symbol(self, self.resolved_piece_ty(receiver))
+        {
+            return Some((symbol, receiver));
+        }
+        let ty = self.resolved_piece_ty(piece);
+        if let Some(symbol) = scalar_symbol(self, ty) {
+            return Some((symbol, piece));
+        }
+        let mut cur = ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(cur) {
+            cur = *inner;
+        }
+        matches!(self.tcx.kind_of(cur), TyKind::String)
+            .then_some(("gos_rt_str_concat_drop_a", piece))
+    }
+
     /// Lowers `acc += __concat(pieces...)` to one in-place append per piece
     /// (`acc = gos_rt_str_append_*(acc, piece)`), each copying its piece a
     /// single time into the accumulator. Returns `false` without emitting
     /// anything when a piece is not a `String` / `i64` / `f64`, so the caller
     /// falls back to the buffered concat path.
     fn try_lower_append_fused(&mut self, acc: Local, pieces: &[&HirExpr], span: Span) -> bool {
-        use gossamer_types::{FloatTy, IntTy, TyKind};
+        use gossamer_types::TyKind;
         if pieces.is_empty() {
             return false;
         }
-        let append_fn = |this: &Self, ty: Ty| -> Option<&'static str> {
-            let mut cur = ty;
-            while let TyKind::Ref { inner, .. } = this.tcx.kind_of(cur) {
-                cur = *inner;
-            }
-            match this.tcx.kind_of(cur) {
-                TyKind::String => Some("gos_rt_str_concat_drop_a"),
-                TyKind::Int(IntTy::I64) => Some("gos_rt_str_append_i64"),
-                TyKind::Float(FloatTy::F64) => Some("gos_rt_str_append_f64"),
-                _ => None,
-            }
-        };
         // The accumulator must itself be a `String` for the append result to
         // type-check back into its slot.
-        if append_fn(self, self.locals[acc.0 as usize].ty) != Some("gos_rt_str_concat_drop_a") {
+        let mut acc_ty = self.locals[acc.0 as usize].ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(acc_ty) {
+            acc_ty = *inner;
+        }
+        if !matches!(self.tcx.kind_of(acc_ty), TyKind::String) {
             return false;
         }
-        let mut fns = Vec::with_capacity(pieces.len());
+        let mut fused = Vec::with_capacity(pieces.len());
         for p in pieces {
-            match append_fn(self, self.resolved_piece_ty(p)) {
-                Some(f) => fns.push(f),
+            match self.fused_append_piece(p) {
+                Some(f) => fused.push(f),
                 None => return false,
             }
         }
-        for (&p, fname) in pieces.iter().zip(fns) {
+        for (fname, p) in fused {
             let literal_len = match &p.kind {
                 HirExprKind::Literal(gossamer_hir::HirLiteral::String(s))
                     if fname == "gos_rt_str_concat_drop_a" =>
@@ -3289,19 +3336,6 @@ impl<'a> Builder<'a> {
         piece: &HirExpr,
         span: Span,
     ) -> bool {
-        use gossamer_types::{FloatTy, IntTy, TyKind};
-        let append_fn = |this: &Self, ty: Ty| -> Option<&'static str> {
-            let mut cur = ty;
-            while let TyKind::Ref { inner, .. } = this.tcx.kind_of(cur) {
-                cur = *inner;
-            }
-            match this.tcx.kind_of(cur) {
-                TyKind::String => Some("gos_rt_str_concat_drop_a"),
-                TyKind::Int(IntTy::I64) => Some("gos_rt_str_append_i64"),
-                TyKind::Float(FloatTy::F64) => Some("gos_rt_str_append_f64"),
-                _ => None,
-            }
-        };
         let pieces: &[HirExpr] = if let HirExprKind::Call { callee, args } = &piece.kind
             && matches!(
                 &callee.kind,
@@ -3324,16 +3358,11 @@ impl<'a> Builder<'a> {
         // keeps the deref accumulator on the correct in-place path instead of
         // falling through to the general `*s + piece` lowering, which reads the
         // `&mut String` slot pointer as string bytes.
-        let per_piece: Option<Vec<&'static str>> = pieces
-            .iter()
-            .map(|p| append_fn(self, self.resolved_piece_ty(p)))
-            .collect();
-        let (emit_pieces, fns): (Vec<&HirExpr>, Vec<&'static str>) = match per_piece {
-            Some(fns) => (pieces.iter().collect(), fns),
-            None => (vec![piece], vec!["gos_rt_str_concat_drop_a"]),
-        };
+        let per_piece: Option<Vec<(&'static str, &HirExpr)>> =
+            pieces.iter().map(|p| self.fused_append_piece(p)).collect();
+        let fused = per_piece.unwrap_or_else(|| vec![("gos_rt_str_concat_drop_a", piece)]);
         let string_ty = self.tcx.string_ty();
-        for (p, fname) in emit_pieces.into_iter().zip(fns) {
+        for (fname, p) in fused {
             // A string-literal piece carries a compile-time byte length, so it
             // appends through `gos_rt_str_append_bytes` (length-counted, no
             // per-call strlen) which the LLVM tier inlines to a capacity-check

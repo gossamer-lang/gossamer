@@ -813,6 +813,18 @@ pub enum Op {
         /// Register holding the value to append.
         value: Reg,
     },
+    /// `receiver.resize(len, fill)` - resizes the Vec in `receiver` in its
+    /// own storage via `Arc::make_mut`, keeping spare capacity, so a Vec
+    /// grown a few elements at a time costs the elements added rather than
+    /// a copy of every element per call.
+    VecResize {
+        /// Register holding the Vec, mutated in place.
+        receiver: Reg,
+        /// Register holding the new length.
+        len: Reg,
+        /// Register holding the value new elements take.
+        fill: Reg,
+    },
     /// `place += rhs` for a `String` place - in-place append. Grows
     /// the receiver register's `String` via `Arc::make_mut` +
     /// `push_str`, retaining spare capacity for amortized O(1)
@@ -1720,6 +1732,18 @@ pub(crate) struct CacheSlot {
     pub fn_chunk: Option<std::sync::Arc<FnChunk>>,
 }
 
+/// One step of the place a [`WideOp::PlaceSet`] writes through, from the
+/// root register outward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaceStep {
+    /// `.name`, the const-pool index of the field name.
+    Field(ConstIdx),
+    /// `[index]`, the register holding the index.
+    Index(Reg),
+    /// `.N` on a tuple or tuple struct.
+    Tuple(u32),
+}
+
 /// Side-table-backed payload for [`Op::Wide`]. Members carry the
 /// payload of the rare 6-field ops (`MapIncAt`, `BuildFloatArray`)
 /// so the in-line `Op` enum can stay narrow on the hot path.
@@ -1794,6 +1818,31 @@ pub enum WideOp {
         name_idx: ConstIdx,
         /// Const-pool index of field names in declaration order.
         fields_idx: ConstIdx,
+    },
+    /// `root.path = value` - a write through a place two or more steps deep
+    /// (`st.tables[t].slots[s] = v`). Each level is made unique in turn from
+    /// the root and the leaf is written where it lies, so the write costs
+    /// the path rather than a copy of every container the path passes
+    /// through.
+    PlaceSet {
+        /// Register holding the root local.
+        root: Reg,
+        /// The steps from the root to the written slot.
+        path: Box<[PlaceStep]>,
+        /// Register holding the value to store.
+        value: Reg,
+    },
+    /// `root.path.resize(len, fill)` for a Vec reached through `path`, grown
+    /// in its own storage for the same reason as [`Self::PlaceSet`].
+    PlaceVecResize {
+        /// Register holding the root local.
+        root: Reg,
+        /// The steps from the root to the Vec.
+        path: Box<[PlaceStep]>,
+        /// Register holding the new length.
+        len: Reg,
+        /// Register holding the value new elements take.
+        fill: Reg,
     },
 }
 

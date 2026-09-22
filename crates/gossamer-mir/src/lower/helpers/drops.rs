@@ -193,6 +193,8 @@ fn is_self_consuming_append(name: &str) -> bool {
         name,
         "gos_rt_str_concat_drop_a"
             | "gos_rt_str_append_i64"
+            | "gos_rt_str_append_u64"
+            | "gos_rt_str_append_bool"
             | "gos_rt_str_append_f64"
             | "gos_rt_str_append_bytes"
             | "gos_rt_str_push_char"
@@ -200,6 +202,7 @@ fn is_self_consuming_append(name: &str) -> bool {
             // Appends through `gos_rt_str_append_bytes` and answers the
             // accumulator in the carrier's payload.
             | "gos_rt_str_push_utf8"
+            | "gos_rt_str_push_json_quoted"
     )
 }
 
@@ -3829,15 +3832,18 @@ pub(crate) fn insert_rc_releases(body: &mut Body, tcx: &gossamer_types::TyCtxt) 
                             }
                         }
                     }
-                    // A bare `Map` operand whose source is a call's own answer:
-                    // that source frees the table it holds, so the field takes
-                    // one of its own rather than a second owner of the same.
+                    // A bare `Map` operand whose source keeps its table - a
+                    // call's own answer, a parameter, or a word read out of an
+                    // owned aggregate's field - still frees that table, so the
+                    // field takes one of its own rather than a second owner of
+                    // the same.
                     if place.projection.is_empty() {
                         for (idx, op) in operands.iter().enumerate() {
                             let Operand::Copy(src) = op else { continue };
                             if !src.projection.is_empty()
                                 || (src.local.0 as usize) >= n_locals
-                                || !container_source_keeps_own(body, src.local, &call_dest)
+                                || !(container_source_keeps_own(body, src.local, &call_dest)
+                                    || borrows_owned_field[src.local.0 as usize])
                             {
                                 continue;
                             }

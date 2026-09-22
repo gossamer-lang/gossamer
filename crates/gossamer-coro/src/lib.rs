@@ -104,6 +104,14 @@ impl Drop for JoinableScope {
     }
 }
 
+/// Installs `joinable` as the running body's flag and answers the one it
+/// replaces. A worker swaps a goroutine's own value in around each resume, so
+/// goroutines sharing the worker never see one another's.
+#[must_use]
+pub fn swap_joinable_spawn(joinable: bool) -> bool {
+    IN_JOINABLE_SPAWN.with(|c| c.replace(joinable))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 use corosensei::stack::DefaultStack;
 #[cfg(not(target_arch = "wasm32"))]

@@ -1,0 +1,57 @@
+// Appends that interleave ASCII and multi-byte text keep a String's character
+// index right: `s[i]` and `s.len()` count characters after every append, on a
+// builder that crosses from ASCII to non-ASCII in the middle of a run of
+// literal and non-literal appends.
+
+fn show(label: String, s: String) {
+    let mut picks = String::new()
+    let mut i = 0
+    while i < s.len() {
+        picks.push(s[i])
+        i += 3
+    }
+    println("{} len={} bytes={} picks={} last={}", label, s.len(), s.byte_len(), picks, s[s.len() - 1])
+}
+
+fn main() {
+    let wide = "é✓"
+    let plain = "abc"
+    let mut s = String::with_capacity(256)
+    s.push_str("start-")
+    s.push_str(plain)
+    show("ascii", s.clone())
+    s.push_str(wide)
+    show("crossed", s.clone())
+    s.push_str("-tail")
+    s += plain
+    s.push_str("日本")
+    s += "-end"
+    show("mixed", s.clone())
+
+    // Literal appends after the crossing still land on the index.
+    let mut t = String::with_capacity(64)
+    let mut k = 0
+    while k < 20 {
+        t.push_str("xy")
+        if k == 7 { t.push_str(wide) }
+        t += plain
+        k += 1
+    }
+    show("loop", t)
+
+    // A shared builder is not written in place.
+    let mut base = String::with_capacity(64)
+    base.push_str("base")
+    let other = base.clone()
+    base.push_str("+more")
+    base += plain
+    println("base={} other={}", base, other)
+
+    // Appending a string to itself.
+    let mut twice = String::with_capacity(64)
+    twice.push_str("ab✓")
+    let copy = twice.clone()
+    twice += copy
+    twice.push_str(twice.clone())
+    show("self", twice)
+}

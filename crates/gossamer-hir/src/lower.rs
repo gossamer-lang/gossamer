@@ -3749,7 +3749,10 @@ impl Lowerer<'_> {
             && let Some(real) = self
                 .resolutions
                 .project_alias(&segments[0].name)
-                .or_else(|| self.resolutions.module_alias(&segments[0].name))
+                .or_else(|| {
+                    self.resolutions
+                        .module_alias_in(&self.current_module, &segments[0].name)
+                })
         {
             let real = real.to_string();
             let mut rest = segments.split_off(1);

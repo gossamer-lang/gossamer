@@ -55,6 +55,7 @@ fn gos_request_from_wire(req: H3Request) -> GosHttpRequest {
         values: Vec::new(),
         agent: None,
         peer: String::new(),
+        context_site: None,
         context: 0,
     }
 }

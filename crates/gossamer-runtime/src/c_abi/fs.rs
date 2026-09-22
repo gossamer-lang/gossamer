@@ -595,25 +595,8 @@ pub unsafe extern "C" fn gos_rt_fs_read_bytes_result(path: *const c_char) -> i12
         }
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
-        match crate::sched_global::run_blocking("fs-read-bytes", move || std::fs::read(p)) {
-            Ok(Ok(bytes)) => {
-                let len_i64 = bytes.len() as i64;
-                let v = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(1, len_i64) };
-                if !bytes.is_empty() {
-                    let vref = unsafe { &mut *v };
-                    if !vref.ptr.is_null() {
-                        unsafe {
-                            std::ptr::copy_nonoverlapping(
-                                bytes.as_ptr(),
-                                vref.ptr.as_ptr(),
-                                bytes.len(),
-                            );
-                        }
-                        vref.len = len_i64;
-                    }
-                }
-                unsafe { gos_rt_result_new(0, v as i64) }
-            }
+        match read_file_into_vec(p) {
+            Ok(Ok(v)) => unsafe { gos_rt_result_new(0, v as i64) },
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
@@ -622,6 +605,85 @@ pub unsafe extern "C" fn gos_rt_fs_read_bytes_result(path: *const c_char) -> i12
             Err(e) => fs_err(&e),
         }
     })
+}
+
+/// Reads the file at `p` into a fresh byte Vec sized from its metadata, so
+/// the bytes are written once, into the buffer the program holds.
+///
+/// The syscalls run on the blocking pool and the Vec is allocated on the
+/// calling goroutine. A file that grows between the size query and the read
+/// has its tail appended; one that shrinks leaves the Vec at what was read.
+fn read_file_into_vec(p: String) -> Result<std::io::Result<*mut GosVec>, String> {
+    let opened = crate::sched_global::run_blocking("fs-read-bytes", move || {
+        let file = std::fs::File::open(&p)?;
+        let len = file.metadata().map_or(0, |m| m.len());
+        Ok::<_, std::io::Error>((file, len))
+    })?;
+    let (mut file, len) = match opened {
+        Ok(opened) => opened,
+        Err(e) => return Ok(Err(e)),
+    };
+    let cap = i64::try_from(len).unwrap_or(i64::MAX);
+    let v = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(1, cap) };
+    // SAFETY: `gos_rt_vec_with_capacity` answers a live header.
+    let buf = SyncRawPtr::new(unsafe { (*v).ptr.as_ptr() });
+    let room = if buf.as_ptr().is_null() {
+        0
+    } else {
+        usize::try_from(cap).unwrap_or(0)
+    };
+    let read = crate::sched_global::run_blocking("fs-read-bytes", move || {
+        let window: &mut [u8] = if room == 0 {
+            &mut []
+        } else {
+            // SAFETY: the Vec owns `room` bytes at `buf`, and nothing else
+            // reaches them while its goroutine waits on this closure. They
+            // are zeroed before a slice is formed over them.
+            unsafe {
+                std::ptr::write_bytes(buf.as_ptr(), 0, room);
+                std::slice::from_raw_parts_mut(buf.as_ptr(), room)
+            }
+        };
+        let mut filled = 0;
+        while filled < window.len() {
+            match file.read(&mut window[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let mut tail = Vec::new();
+        if filled == window.len() {
+            file.read_to_end(&mut tail)?;
+        }
+        Ok((filled, tail))
+    });
+    let (filled, tail) = match read {
+        Ok(Ok(read)) => read,
+        Ok(Err(e)) => {
+            unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+            return Ok(Err(e));
+        }
+        Err(e) => {
+            unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+            return Err(e);
+        }
+    };
+    let filled_len = i64::try_from(filled).unwrap_or(0);
+    // SAFETY: `v` is the live header allocated above, owned here alone.
+    unsafe { (*v).len = filled_len };
+    if !tail.is_empty() {
+        let total = filled_len + i64::try_from(tail.len()).unwrap_or(0);
+        unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(v, total) };
+        // SAFETY: the reserve left room for `tail` past `len`.
+        let vref = unsafe { &mut *v };
+        unsafe {
+            std::ptr::copy_nonoverlapping(tail.as_ptr(), vref.ptr.as_ptr().add(filled), tail.len());
+        }
+        vref.len = total;
+    }
+    Ok(Ok(v))
 }
 
 /// `os::mkdir_all(path) -> Result<(), IoError>` - Result shape, for

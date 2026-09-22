@@ -1,0 +1,81 @@
+// A scalar appended to a `String` - through `push_str(x.to_string())`,
+// `+= x.to_string()`, `s = s + x.to_string()`, or a `format` piece - appends
+// the text `to_string` answers, for every integer width at its limits, both
+// float widths, `bool`, and `char`, on every tier.
+//
+// An `f32` is computed and rendered as an `f64` on every tier today, so the
+// `f32` lines expect the `f64` text of the widened value.
+
+fn all_ways(label: String, piece: String) {
+    println("{}: {}", label, piece)
+}
+
+fn main() {
+    let i8s: [i8; 3] = [i8::MIN, -1, i8::MAX]
+    let i16s: [i16; 2] = [i16::MIN, i16::MAX]
+    let i32s: [i32; 2] = [i32::MIN, i32::MAX]
+    let i64s: [i64; 3] = [i64::MIN, 0, i64::MAX]
+    let u8s: [u8; 2] = [0, u8::MAX]
+    let u16s: [u16; 1] = [u16::MAX]
+    let u32s: [u32; 1] = [u32::MAX]
+    let u64s: [u64; 3] = [0, 9223372036854775808, u64::MAX]
+    let usizes: [usize; 1] = [usize::MAX]
+
+    let mut s = String::with_capacity(8)
+    for v in i8s { s.push_str(v.to_string()); s.push_str(",") }
+    for v in i16s { s += v.to_string(); s += "," }
+    for v in i32s { s = s + v.to_string() + "," }
+    for v in i64s { s.push_str(v.to_string()); s += "," }
+    all_ways("signed", s)
+
+    let mut u = String::new()
+    for v in u8s { u.push_str(v.to_string()); u.push_str(",") }
+    for v in u16s { u += v.to_string(); u += "," }
+    for v in u32s { u = u + v.to_string() + "," }
+    for v in u64s { u.push_str(v.to_string()); u += format(";{};", v) }
+    for v in usizes { u += v.to_string() }
+    all_ways("unsigned", u)
+
+    let floats = #[0.0, -0.0, 1.5, 0.1 + 0.2, 1e21, 1e-7, f64::MAX, f64::NAN, f64::INFINITY]
+    let mut f = String::new()
+    for v in floats { f.push_str(v.to_string()); f += "|"; f += v.to_string(); f += "|" }
+    let tenth: f32 = 0.1
+    let fifth: f32 = 0.2
+    f.push_str((tenth + fifth).to_string())
+    f += format("|{}", tenth)
+    all_ways("floats", f)
+
+    let mut b = String::new()
+    let yes = true
+    let no = false
+    b.push_str(yes.to_string())
+    b += no.to_string()
+    b = b + yes.to_string()
+    b += format("<{}{}>", yes, no)
+    all_ways("bools", b)
+
+    let mut c = String::new()
+    for ch in #['a', 'é', '✓', '😀'] { c.push_str(ch.to_string()); c += ch.to_string() }
+    c += format("[{}]", 'z')
+    println("chars: {} len={} bytes={} at3={}", c, c.len(), c.byte_len(), c[3])
+
+    // A receiver shared by a clone keeps the clone untouched.
+    let mut base = String::with_capacity(64)
+    base.push_str("n=")
+    let copy = base.clone()
+    base.push_str(42.to_string())
+    base += 7.5.to_string()
+    println("base={} copy={}", base, copy)
+
+    // A receiver at exactly full capacity grows.
+    let mut full = String::with_capacity(4)
+    full.push_str("abcd")
+    full.push_str(123456789.to_string())
+    full += 2.25.to_string()
+    println("full={} len={}", full, full.len())
+
+    // An empty receiver.
+    let mut empty = String::new()
+    empty.push_str(u64::MAX.to_string())
+    println("empty={}", empty)
+}

@@ -830,11 +830,89 @@ impl<'tcx> FnBuilder<'tcx> {
     /// through `Arc::make_mut`), then writes the updated receiver back to
     /// its own place so value-aggregate aliasing semantics match the
     /// compiled tiers.
+    /// The root register and steps of a place at least `min_steps` deep rooted
+    /// at a plain local (`st.tables[t].slots[s]`), with each index evaluated
+    /// into a register in the order the place reads them. `None` for any other
+    /// place, which the recursive store handles.
+    ///
+    /// A write through the steps makes each level unique from the root, where
+    /// storing level by level holds a second reference to every container on
+    /// the way and copies each one it writes into.
+    pub(crate) fn compile_place_path(
+        &mut self,
+        place: &HirExpr,
+        min_steps: usize,
+    ) -> RuntimeResult<Option<(Reg, Box<[crate::bytecode::PlaceStep]>)>> {
+        let mut chain: Vec<&HirExpr> = Vec::new();
+        let mut cur = place;
+        let root_name = loop {
+            match &cur.kind {
+                HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                    chain.push(cur);
+                    cur = receiver;
+                }
+                HirExprKind::Index { base, .. } => {
+                    chain.push(cur);
+                    cur = base;
+                }
+                HirExprKind::Path { segments, .. } if segments.len() == 1 => {
+                    break segments[0].name.clone();
+                }
+                _ => return Ok(None),
+            }
+        };
+        if chain.len() < min_steps || self.capture_cell_names.contains(&root_name) {
+            return Ok(None);
+        }
+        let Some(root) = self.lookup_local(&root_name) else {
+            return Ok(None);
+        };
+        if root.kind != RegKind::Value
+            || self.reference_alias_regs.contains(&root.reg)
+            || self.flat_locals.contains_key(&root.reg)
+            || self.flat_int_locals.contains(&root.reg)
+            || self.flat_float_locals.contains(&root.reg)
+        {
+            return Ok(None);
+        }
+        let mut path = Vec::with_capacity(chain.len());
+        for step in chain.iter().rev() {
+            match &step.kind {
+                HirExprKind::Field { name, .. } => {
+                    let name_idx = self.const_idx(
+                        ConstKey::String(name.name.clone()),
+                        Value::String(SmolStr::from(name.name.clone())),
+                    );
+                    path.push(crate::bytecode::PlaceStep::Field(name_idx));
+                }
+                HirExprKind::TupleIndex { index, .. } => {
+                    path.push(crate::bytecode::PlaceStep::Tuple(*index));
+                }
+                HirExprKind::Index { index, .. } => {
+                    let reg = self.compile_expr(index)?;
+                    path.push(crate::bytecode::PlaceStep::Index(reg));
+                }
+                _ => return Ok(None),
+            }
+        }
+        Ok(Some((root.reg, path.into_boxed_slice())))
+    }
+
     pub(crate) fn compile_place_store(
         &mut self,
         place: &HirExpr,
         value_reg: Reg,
     ) -> RuntimeResult<()> {
+        if let Some((root, path)) = self.compile_place_path(place, 2)? {
+            let idx = u16::try_from(self.wide_ops.len()).expect("wide_ops index overflow");
+            self.wide_ops.push(crate::bytecode::WideOp::PlaceSet {
+                root,
+                path,
+                value: value_reg,
+            });
+            self.emit(Op::Wide { idx });
+            return Ok(());
+        }
         match &place.kind {
             HirExprKind::Path { segments, .. } => {
                 let Some(first) = segments.first() else {

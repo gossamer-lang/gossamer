@@ -343,6 +343,11 @@ Write clear, low-complexity, concise code.
   (`s.byte_at(i) >= b'0'`), render with `as char`; prefer it over a
   per-step `substring`. Do not mix the two: `s[i]` is not the byte at
   byte offset `i` for any non-ASCII string.
+- **Append text out of a byte buffer in place**: `s.push_utf8(buf, a, b)`
+  appends the `[a, b)` window when it is valid UTF-8, and
+  `s.push_json_quoted(buf, a, b)` appends it as a quoted JSON string
+  escaped as `json::encode` escapes one. Both answer whether they appended,
+  so a renderer never copies the window into a `String` of its own first.
 - **Format captures walk field paths**: `println("{name}:
   {a.balance} {t.0} {o.inner.hits} {a.balance:>8} {f.0:.2}")`.
   `{:?}` renders any nesting of collections, tuples, structs, enums,

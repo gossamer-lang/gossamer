@@ -2644,3 +2644,62 @@ fn main() {
         "the String at word 0 and the Vec at word 2 are marked"
     );
 }
+
+/// Map tables `body` cloned minus those it released, across all locals. A
+/// release of a field the same block zeroed and has not written since frees
+/// nothing, so it is not counted.
+fn map_field_tables_handed_out(body: &gossamer_mir::Body) -> i64 {
+    let mut net = 0i64;
+    for block in &body.blocks {
+        let mut zeroed: Vec<(Local, Vec<gossamer_mir::Projection>)> = Vec::new();
+        for stmt in &block.stmts {
+            let StatementKind::Assign { place, rvalue } = &stmt.kind else {
+                continue;
+            };
+            match rvalue {
+                Rvalue::CallIntrinsic { name, args } if *name == "gos_rt_map_field_clone" => {
+                    net += 1;
+                    if let Some(Operand::Copy(p)) = args.first() {
+                        zeroed.retain(|(l, _)| *l != p.local);
+                    }
+                }
+                Rvalue::CallIntrinsic { name, args } if *name == "gos_rt_map_field_release" => {
+                    let frees_nothing = matches!(
+                        args.first(),
+                        Some(Operand::Copy(p)) if zeroed.contains(&(p.local, p.projection.clone()))
+                    );
+                    if !frees_nothing {
+                        net -= 1;
+                    }
+                }
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))) if !place.projection.is_empty() => {
+                    zeroed.push((place.local, place.projection.clone()));
+                }
+                _ => zeroed.retain(|(l, _)| *l != place.local),
+            }
+        }
+    }
+    net
+}
+
+/// A `Map` moved out of a by-value parameter's field into a returned struct
+/// leaves the body holding exactly one more table than it released: the one
+/// the caller receives.
+#[test]
+fn map_field_moved_from_param_into_returned_struct_is_owned_once() {
+    let source = r"
+struct Config { responses: Map<i64, i64> }
+struct App { responses: Map<i64, i64> }
+
+fn build(config: Config) -> App {
+    App { responses: config.responses }
+}
+";
+    let (bodies, _) = build(source);
+    let body = bodies.iter().find(|b| b.name == "build").expect("body");
+    assert_eq!(
+        map_field_tables_handed_out(body),
+        1,
+        "build hands exactly one Map table to its caller"
+    );
+}

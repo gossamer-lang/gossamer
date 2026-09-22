@@ -154,7 +154,7 @@ impl<F> Drop for Deadline<F> {
 /// child goroutines so a slow handler doesn't block other streams
 /// on the same connection.
 pub fn serve_h2c_with_handler(addr: &str, env_addr: usize, fn_addr: usize) -> std::io::Result<()> {
-    let listener = std::net::TcpListener::bind(addr)?;
+    let listener = crate::listen::bind_tcp(addr)?;
     let _ = listener.set_nonblocking(false);
     let mut backoff = crate::accept::AcceptBackoff::new();
     loop {

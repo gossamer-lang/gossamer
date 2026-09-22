@@ -479,7 +479,17 @@ pub fn compile_fn(
         };
         builder.install_capture_cell(&name, typed, ty);
     }
-    let result = builder.compile_block(&body.block)?;
+    // A function that answers nothing compiles its tail as a statement, so a
+    // closing in-place mutation (`self.items.push(x)`) takes its dedicated op
+    // rather than the value-returning builtin that copies the collection.
+    let answers_unit = decl.ret.is_none_or(
+        |ret| matches!(builder.tcx.kind(ret), Some(TyKind::Tuple(elems)) if elems.is_empty()),
+    );
+    let result = if answers_unit {
+        builder.compile_block_inner(&body.block, true)?
+    } else {
+        builder.compile_block(&body.block)?
+    };
     if matches!(result, BlockResult::ValueIn(_)) {
         let BlockResult::ValueIn(reg) = result else {
             unreachable!()

@@ -69,7 +69,8 @@ fn duration_millis(timeout: Option<Duration>) -> u64 {
 impl TcpListener {
     /// Binds the listener to `addr`.
     pub fn bind(addr: &str) -> Result<Self, IoError> {
-        let inner = StdTcpListener::bind(addr).map_err(|e| IoError::from_std(e, addr))?;
+        let inner =
+            gossamer_runtime::listen::bind_tcp(addr).map_err(|e| IoError::from_std(e, addr))?;
         inner
             .set_nonblocking(true)
             .map_err(|e| IoError::from_std(e, addr))?;

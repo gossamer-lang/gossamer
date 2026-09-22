@@ -957,6 +957,7 @@ const READ_ONLY_ARG_METHODS: &[&str] = &[
     "ends_with",
     "extend",
     "index_of",
+    "push_json_quoted",
     "push_str",
     "push_utf8",
     "starts_with",

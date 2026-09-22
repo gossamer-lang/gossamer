@@ -1074,7 +1074,7 @@ fn native_http2_bind_and_run_h2c(
     // Bind synchronously so a bind failure is the caller's `Err`
     // value (native-tier parity), then hand the listener to the
     // accept thread.
-    let listener = match std::net::TcpListener::bind(&addr) {
+    let listener = match gossamer_runtime::listen::bind_tcp(&addr) {
         Ok(l) => l,
         Err(e) => return Ok(err_variant(format!("http::serve_h2c: {e}"))),
     };

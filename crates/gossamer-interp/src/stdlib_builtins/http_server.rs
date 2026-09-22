@@ -189,7 +189,7 @@ fn builtin_listen(args: &[Value]) -> RuntimeResult<Value> {
     let Some(server) = server_at(handle) else {
         return Ok(err_variant("http::Server::listen: stale server handle"));
     };
-    match std::net::TcpListener::bind(&addr) {
+    match gossamer_runtime::listen::bind_tcp(&addr) {
         Ok(listener) => {
             let bound = listener
                 .local_addr()

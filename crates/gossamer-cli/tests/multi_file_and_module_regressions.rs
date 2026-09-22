@@ -369,6 +369,71 @@ fn module_relative_paths_reach_child_and_sibling_modules() {
 }
 
 #[test]
+fn sibling_modules_each_import_their_own_same_named_module() {
+    // `use super::scan` in `kv/compact.gos` and in `engine/stmt.gos` name two
+    // different modules. Each file's paths, constants, and variants read the
+    // import its own module wrote.
+    let dir = write_project(
+        "per-module-imports",
+        "example.com/permod",
+        &[
+            (
+                "src/main.gos",
+                "fn main() { println(\"{} {}\", kv::compact::go(), engine::stmt::go()) }\n",
+            ),
+            ("src/kv/mod.gos", "pub fn open() -> i64 { 0 }\n"),
+            (
+                "src/kv/scan.gos",
+                "pub enum Want { A, B }\npub const K: i64 = 10\npub fn keys() -> i64 { 1 }\n",
+            ),
+            (
+                "src/kv/compact.gos",
+                "use super::scan\npub fn go() -> String { \
+                 format(\"{} {} {:?}\", scan::keys(), scan::K, scan::Want::B) }\n",
+            ),
+            ("src/engine/mod.gos", "pub fn open() -> i64 { 0 }\n"),
+            (
+                "src/engine/scan.gos",
+                "pub enum Want { X, Y, Z }\npub const K: i64 = 20\npub fn keys() -> i64 { 2 }\n",
+            ),
+            (
+                "src/engine/stmt.gos",
+                "use super::scan\npub fn go() -> String {\n    let w: scan::Want = scan::Want::Z\n    \
+                 format(\"{} {} {:?}\", scan::keys(), scan::K, w)\n}\n",
+            ),
+        ],
+    );
+    let expected = "1 10 B 2 20 Z\n";
+    let vm = project_run_vm(&dir);
+    assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
+    assert_eq!(vm.0, expected, "vm stdout");
+    let native = project_build_run(&dir, "permod");
+    assert_eq!(native.2, Some(0), "native stderr: {}", native.1);
+    assert_eq!(native.0, expected, "native stdout");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_module_importing_a_name_from_two_paths_is_rejected() {
+    let dir = write_project(
+        "same-module-dup-import",
+        "example.com/dupimp",
+        &[
+            (
+                "src/main.gos",
+                "use a::f\nuse b::f\nfn main() { println(\"{}\", f()) }\n",
+            ),
+            ("src/a.gos", "pub fn f() -> i64 { 1 }\n"),
+            ("src/b.gos", "pub fn f() -> i64 { 2 }\n"),
+        ],
+    );
+    let vm = project_run_vm(&dir);
+    assert_ne!(vm.2, Some(0), "a name imported from two paths must not run");
+    assert!(vm.1.contains("GR0004"), "stderr: {}", vm.1);
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn every_sibling_file_may_declare_its_own_test_module() {
     // A module belongs to the file that declares it, so each sibling in a
     // project writes the same `mod tests` without the three of them

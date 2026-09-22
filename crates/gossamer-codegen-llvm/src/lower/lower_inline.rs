@@ -2168,8 +2168,14 @@ impl<'a> Lowerer<'a> {
     /// character count rather than to the byte length its Rust `str` reports;
     /// the two differ for every literal outside ASCII.
     fn const_string_len(&self, arg: &Operand) -> Option<usize> {
+        self.const_string_text(arg).map(|text| text.chars().count())
+    }
+
+    /// The text of a string operand known here: a constant, or an immutable
+    /// local assigned one constant and nothing else.
+    pub(crate) fn const_string_text<'s>(&'s self, arg: &'s Operand) -> Option<&'s str> {
         match arg {
-            Operand::Const(gossamer_mir::ConstValue::Str(text)) => Some(text.chars().count()),
+            Operand::Const(gossamer_mir::ConstValue::Str(text)) => Some(text.as_str()),
             Operand::Copy(place) if place.projection.is_empty() => {
                 let decl = self.body.locals.get(place.local.0 as usize)?;
                 if decl.mutable {
@@ -2189,7 +2195,7 @@ impl<'a> Lowerer<'a> {
                             continue;
                         };
                         if assigned.local == place.local && assigned.projection.is_empty() {
-                            if found.replace(text.chars().count()).is_some() {
+                            if found.replace(text.as_str()).is_some() {
                                 return None;
                             }
                         }
@@ -3645,101 +3651,239 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    pub(crate) fn lower_str_append_bytes_inline(
+    /// Inline an append of ASCII text to an exclusively held builder with
+    /// room for it: `s.push_str("literal")` and `s += "literal"`, whose length
+    /// and ASCII-ness are known here (`literal_len`), and `s.push_str(t)` /
+    /// `s += t` for a typed string `t`, whose length and all-ASCII index are
+    /// read from its header.
+    ///
+    /// Appending ASCII bytes to a string whose character index holds the
+    /// all-ASCII sentinel leaves the sentinel true, so the append is the copy
+    /// and the new length and nothing else. Every other shape - a shared or
+    /// full builder, text whose index holds real offsets, a string that is not
+    /// a builder, a piece that is not a typed string - keeps the shim.
+    pub(crate) fn lower_str_append_inline(
         &mut self,
         args: &[Operand],
         destination: &Place,
         target: Option<&gossamer_mir::BlockId>,
+        literal_len: Option<usize>,
     ) -> Result<(), BuildError> {
-        let acc = self.lower_operand(&args[0])?;
-        let piece = self.lower_operand(&args[1])?;
-        let len_raw = self.lower_operand(&args[2])?;
-        let len = self.widen_to_i64(&args[2], &len_raw);
-        declare_rt(&mut self.runtime_refs, "gos_rt_str_append_bytes");
-
-        let tagchk = self.fresh_label("ab_tag");
-        let hdr = self.fresh_label("ab_hdr");
-        let fast = self.fresh_label("ab_fast");
-        let slow = self.fresh_label("ab_slow");
-        let done = self.fresh_label("ab_done");
-
-        let isnull = self.fresh();
-        writeln!(self.out, "  {isnull} = icmp eq ptr {acc}, null").unwrap();
-        writeln!(self.out, "  br i1 {isnull}, label %{slow}, label %{tagchk}").unwrap();
-
-        writeln!(self.out, "{tagchk}:").unwrap();
-        let tagp = self.fresh();
-        writeln!(self.out, "  {tagp} = getelementptr i8, ptr {acc}, i64 -1").unwrap();
+        use gossamer_abi::string_layout as sl;
+        let shim = if literal_len.is_some() {
+            "gos_rt_str_append_bytes"
+        } else {
+            "gos_rt_str_concat_drop_a"
+        };
+        declare_rt(&mut self.runtime_refs, shim);
+        let acc = self.vec_operand_ptr(&args[0])?;
+        let piece = if literal_len.is_some() {
+            self.lower_operand(&args[1])?
+        } else {
+            self.vec_operand_ptr(&args[1])?
+        };
+        let id = self.next_ssa;
+        self.next_ssa += 1;
+        let (typed, room, ascii, fast, slow, done) = (
+            format!("ab_typed_{id}"),
+            format!("ab_room_{id}"),
+            format!("ab_ascii_{id}"),
+            format!("ab_fast_{id}"),
+            format!("ab_slow_{id}"),
+            format!("ab_done_{id}"),
+        );
+        let piece_len = match literal_len {
+            Some(n) => n.to_string(),
+            None => {
+                let piece_typed = format!("ab_piece_{id}");
+                self.emit_typed_string_guard(&piece, &piece_typed, &slow);
+                writeln!(self.out, "{piece_typed}:").unwrap();
+                let plen_ptr = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {plen_ptr} = getelementptr i8, ptr {piece}, i64 {}",
+                    sl::LEN_OFFSET
+                )
+                .unwrap();
+                let plen = self.fresh();
+                writeln!(self.out, "  {plen} = load i32, ptr {plen_ptr}{TBAA_HEADER}").unwrap();
+                let pcap_ptr = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {pcap_ptr} = getelementptr i8, ptr {piece}, i64 {}",
+                    sl::CAP_OFFSET
+                )
+                .unwrap();
+                let pcap = self.fresh();
+                writeln!(self.out, "  {pcap} = load i32, ptr {pcap_ptr}{TBAA_HEADER}").unwrap();
+                let pcap64 = self.fresh();
+                writeln!(self.out, "  {pcap64} = zext i32 {pcap} to i64").unwrap();
+                let pfoot_off = self.fresh();
+                writeln!(self.out, "  {pfoot_off} = add i64 {pcap64}, 1").unwrap();
+                let pfoot = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {pfoot} = getelementptr i8, ptr {piece}, i64 {pfoot_off}"
+                )
+                .unwrap();
+                let pchars = self.fresh();
+                writeln!(self.out, "  {pchars} = load i32, ptr {pfoot}{TBAA_HEADER}").unwrap();
+                let pascii = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {pascii} = icmp eq i32 {pchars}, {}",
+                    sl::INDEX_ASCII
+                )
+                .unwrap();
+                let acc_check = format!("ab_acc_{id}");
+                writeln!(
+                    self.out,
+                    "  br i1 {pascii}, label %{acc_check}, label %{slow}"
+                )
+                .unwrap();
+                writeln!(self.out, "{acc_check}:").unwrap();
+                plen
+            }
+        };
+        let piece_len64 = match literal_len {
+            Some(n) => n.to_string(),
+            None => {
+                let wide = self.fresh();
+                writeln!(self.out, "  {wide} = zext i32 {piece_len} to i64").unwrap();
+                wide
+            }
+        };
+        self.emit_typed_string_guard(&acc, &typed, &slow);
+        writeln!(self.out, "{typed}:").unwrap();
+        let tag_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {tag_ptr} = getelementptr i8, ptr {acc}, i64 {}",
+            sl::TAG_OFFSET
+        )
+        .unwrap();
         let tag = self.fresh();
-        writeln!(self.out, "  {tag} = load i8, ptr {tagp}{TBAA_HEADER}").unwrap();
-        let isbuilder = self.fresh();
-        // STR_BUILDER_TAG = 0xAB.
-        writeln!(self.out, "  {isbuilder} = icmp eq i8 {tag}, -85").unwrap();
-        writeln!(self.out, "  br i1 {isbuilder}, label %{hdr}, label %{slow}").unwrap();
-
-        writeln!(self.out, "{hdr}:").unwrap();
-        let rcp = self.fresh();
-        writeln!(self.out, "  {rcp} = getelementptr i8, ptr {acc}, i64 -13").unwrap();
+        writeln!(self.out, "  {tag} = load i8, ptr {tag_ptr}{TBAA_HEADER}").unwrap();
+        let tag_z = self.fresh();
+        writeln!(self.out, "  {tag_z} = zext i8 {tag} to i32").unwrap();
+        let is_builder = self.fresh();
+        writeln!(
+            self.out,
+            "  {is_builder} = icmp eq i32 {tag_z}, {}",
+            sl::TAG_BUILDER
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {is_builder}, label %{room}, label %{slow}"
+        )
+        .unwrap();
+        writeln!(self.out, "{room}:").unwrap();
+        let rc_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {rc_ptr} = getelementptr i8, ptr {acc}, i64 -13"
+        )
+        .unwrap();
         let rc = self.fresh();
-        writeln!(self.out, "  {rc} = load i32, ptr {rcp}{TBAA_HEADER}").unwrap();
-        let capp = self.fresh();
-        writeln!(self.out, "  {capp} = getelementptr i8, ptr {acc}, i64 -9").unwrap();
+        writeln!(self.out, "  {rc} = load i32, ptr {rc_ptr}{TBAA_HEADER}").unwrap();
+        let cap_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {cap_ptr} = getelementptr i8, ptr {acc}, i64 {}",
+            sl::CAP_OFFSET
+        )
+        .unwrap();
         let cap = self.fresh();
-        writeln!(self.out, "  {cap} = load i32, ptr {capp}{TBAA_HEADER}").unwrap();
-        let lenp = self.fresh();
-        writeln!(self.out, "  {lenp} = getelementptr i8, ptr {acc}, i64 -5").unwrap();
-        let curlen = self.fresh();
-        writeln!(self.out, "  {curlen} = load i32, ptr {lenp}{TBAA_HEADER}").unwrap();
-        let lentr = self.fresh();
-        writeln!(self.out, "  {lentr} = trunc i64 {len} to i32").unwrap();
+        writeln!(self.out, "  {cap} = load i32, ptr {cap_ptr}{TBAA_HEADER}").unwrap();
+        let len_ptr = self.fresh();
+        writeln!(
+            self.out,
+            "  {len_ptr} = getelementptr i8, ptr {acc}, i64 {}",
+            sl::LEN_OFFSET
+        )
+        .unwrap();
+        let len = self.fresh();
+        writeln!(self.out, "  {len} = load i32, ptr {len_ptr}{TBAA_HEADER}").unwrap();
         let newlen = self.fresh();
-        writeln!(self.out, "  {newlen} = add i32 {curlen}, {lentr}").unwrap();
+        writeln!(self.out, "  {newlen} = add i32 {len}, {piece_len}").unwrap();
         let fits = self.fresh();
         writeln!(self.out, "  {fits} = icmp ule i32 {newlen}, {cap}").unwrap();
         let sole = self.fresh();
         writeln!(self.out, "  {sole} = icmp eq i32 {rc}, 1").unwrap();
-        let okc = self.fresh();
-        writeln!(self.out, "  {okc} = and i1 {fits}, {sole}").unwrap();
-        writeln!(self.out, "  br i1 {okc}, label %{fast}, label %{slow}").unwrap();
-
+        let ok = self.fresh();
+        writeln!(self.out, "  {ok} = and i1 {fits}, {sole}").unwrap();
+        writeln!(self.out, "  br i1 {ok}, label %{ascii}, label %{slow}").unwrap();
+        writeln!(self.out, "{ascii}:").unwrap();
+        let cap64 = self.fresh();
+        writeln!(self.out, "  {cap64} = zext i32 {cap} to i64").unwrap();
+        let footer_off = self.fresh();
+        writeln!(self.out, "  {footer_off} = add i64 {cap64}, 1").unwrap();
+        let footer = self.fresh();
+        writeln!(
+            self.out,
+            "  {footer} = getelementptr i8, ptr {acc}, i64 {footer_off}"
+        )
+        .unwrap();
+        let chars = self.fresh();
+        writeln!(self.out, "  {chars} = load i32, ptr {footer}{TBAA_HEADER}").unwrap();
+        let all_ascii = self.fresh();
+        writeln!(
+            self.out,
+            "  {all_ascii} = icmp eq i32 {chars}, {}",
+            sl::INDEX_ASCII
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  br i1 {all_ascii}, label %{fast}, label %{slow}"
+        )
+        .unwrap();
         writeln!(self.out, "{fast}:").unwrap();
-        let curlen64 = self.fresh();
-        writeln!(self.out, "  {curlen64} = zext i32 {curlen} to i64").unwrap();
+        let len64 = self.fresh();
+        writeln!(self.out, "  {len64} = zext i32 {len} to i64").unwrap();
         let dst = self.fresh();
         writeln!(
             self.out,
-            "  {dst} = getelementptr i8, ptr {acc}, i64 {curlen64}"
+            "  {dst} = getelementptr i8, ptr {acc}, i64 {len64}"
         )
         .unwrap();
         writeln!(
             self.out,
-            "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {piece}, i64 {len}, i1 false)"
+            "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {piece}, i64 {piece_len64}, i1 false)"
         )
         .unwrap();
-        let nulp = self.fresh();
+        let nul = self.fresh();
         writeln!(
             self.out,
-            "  {nulp} = getelementptr i8, ptr {dst}, i64 {len}"
+            "  {nul} = getelementptr i8, ptr {dst}, i64 {piece_len64}"
         )
         .unwrap();
-        writeln!(self.out, "  store i8 0, ptr {nulp}{TBAA_DATA}").unwrap();
-        writeln!(self.out, "  store i32 {newlen}, ptr {lenp}{TBAA_HEADER}").unwrap();
+        writeln!(self.out, "  store i8 0, ptr {nul}{TBAA_DATA}").unwrap();
+        writeln!(self.out, "  store i32 {newlen}, ptr {len_ptr}{TBAA_HEADER}").unwrap();
         writeln!(self.out, "  br label %{done}").unwrap();
-
+        let cold_start = self.out.len();
         writeln!(self.out, "{slow}:").unwrap();
-        let r = self.fresh();
-        writeln!(
-            self.out,
-            "  {r} = call ptr @gos_rt_str_append_bytes(ptr {acc}, ptr {piece}, i64 {len})"
-        )
-        .unwrap();
+        let called = self.fresh();
+        match literal_len {
+            Some(n) => writeln!(
+                self.out,
+                "  {called} = call ptr @gos_rt_str_append_bytes(ptr {acc}, ptr {piece}, i64 {n})"
+            )
+            .unwrap(),
+            None => writeln!(
+                self.out,
+                "  {called} = call ptr @gos_rt_str_concat_drop_a(ptr {acc}, ptr {piece})"
+            )
+            .unwrap(),
+        }
         writeln!(self.out, "  br label %{done}").unwrap();
-
+        self.mark_cold(cold_start);
         writeln!(self.out, "{done}:").unwrap();
         let res = self.fresh();
         writeln!(
             self.out,
-            "  {res} = phi ptr [ {acc}, %{fast} ], [ {r}, %{slow} ]"
+            "  {res} = phi ptr [ {acc}, %{fast} ], [ {called}, %{slow} ]"
         )
         .unwrap();
         if !is_unit(self.tcx, self.body.local_ty(destination.local)) {

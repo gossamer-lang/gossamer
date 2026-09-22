@@ -189,6 +189,7 @@ pub unsafe extern "C" fn gos_rt_httptest_record(
             values: Vec::new(),
             agent: None,
             peer: String::new(),
+            context_site: None,
             context: crate::c_abi::context::open_request_context(0),
         };
         type HandlerFn = unsafe extern "C-unwind" fn(
