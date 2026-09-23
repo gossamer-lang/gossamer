@@ -1065,6 +1065,8 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/deque_drain_scaling.gos"),
     spec("feature-testing-examples/nested_vec_place_index.gos"),
     spec("feature-testing-examples/heap_word_tuple_order.gos"),
+    spec("feature-testing-examples/word_tuple_equality.gos"),
+    spec("feature-testing-examples/inlined_aggregate_ref_param.gos"),
     spec("feature-testing-examples/wrapping_arithmetic_operators.gos"),
     spec("feature-testing-examples/const_generic_values.gos"),
     spec("feature-testing-examples/const_generic_struct.gos"),

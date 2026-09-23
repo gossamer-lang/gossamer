@@ -41,7 +41,7 @@ use gossamer_types::{Ty, TyCtxt};
 
 use crate::ir::{
     AssertMessage, BasicBlock, BinOp, BlockId, Body, ConstValue, Local, LocalDecl, Operand, Place,
-    Rvalue, Statement, StatementKind, Terminator, UnOp,
+    Projection, Rvalue, Statement, StatementKind, Terminator, UnOp,
 };
 
 use super::*;
@@ -1689,7 +1689,7 @@ impl<'a> Builder<'a> {
                 .tuple_cmp_tags(lhs.ty)
                 .or_else(|| self.tuple_cmp_tags(self.locals[lhs_local.0 as usize].ty))
             {
-                return Some(self.lower_tuple_cmp(op, lhs_local, rhs_local, &tags, span));
+                return Some(self.lower_tuple_cmp(op, lhs_local, rhs_local, tags, span));
             }
         }
         // Sequence ordering: a `Vec` or a slice orders lexicographically, each
@@ -2671,7 +2671,7 @@ impl<'a> Builder<'a> {
             .tuple_cmp_tags(ty)
             .or_else(|| self.tuple_cmp_tags(lhs_ty))
         {
-            return self.lower_tuple_cmp(HirBinaryOp::Eq, lhs_local, rhs_local, &tags, span);
+            return self.lower_tuple_cmp(HirBinaryOp::Eq, lhs_local, rhs_local, tags, span);
         }
         if let Some(local) =
             self.lower_carrier_eq(HirBinaryOp::Eq, lhs_local, rhs_local, &[ty, lhs_ty], span)
@@ -2751,27 +2751,35 @@ impl<'a> Builder<'a> {
             if self.tcx.def_name(*def).is_some_and(|name| matches!(name, "Set" | "BTreeSet")))
     }
 
-    /// Per-element tags for a flat-buffer aggregate of scalar/string elements:
-    /// a tuple (`(A, B)`) or a fixed-size array (`[T; N]`, a flat `[N x i64]`
-    /// buffer like a tuple). `None` for a non-flat or aggregate-element type.
-    fn tuple_cmp_tags(&self, ty: Ty) -> Option<Vec<u8>> {
+    /// Top-level element count and tag stream for comparing a tuple (`(A, B)`)
+    /// or a fixed-size array (`[T; N]`, a flat `[N x i64]` buffer like a
+    /// tuple). A tuple with a nested tuple, struct, or ordered handle element
+    /// streams it the way the runtime walks nested slots. `None` for a type
+    /// with no such stream.
+    fn tuple_cmp_tags(&self, ty: Ty) -> Option<(usize, Vec<u8>)> {
         use gossamer_types::{ArrayLen, TyKind};
         let mut t = ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(t) {
             t = *inner;
         }
         match self.tcx.kind_of(t) {
-            TyKind::Tuple(elems) => elems
-                .clone()
-                .iter()
-                .map(|e| self.scalar_cmp_tag(*e))
-                .collect(),
+            TyKind::Tuple(elems) => {
+                let flat: Option<Vec<u8>> = elems
+                    .clone()
+                    .iter()
+                    .map(|e| self.scalar_cmp_tag(*e))
+                    .collect();
+                match flat {
+                    Some(tags) => Some((tags.len(), tags)),
+                    None => self.tuple_element_stream(t),
+                }
+            }
             TyKind::Array {
                 elem,
                 len: ArrayLen::Concrete(n),
             } => {
                 let n = *n;
-                self.scalar_cmp_tag(*elem).map(|tag| vec![tag; n])
+                self.scalar_cmp_tag(*elem).map(|tag| (n, vec![tag; n]))
             }
             _ => None,
         }
@@ -2820,20 +2828,109 @@ impl<'a> Builder<'a> {
         op: HirBinaryOp,
         lhs_local: Local,
         rhs_local: Local,
-        tags: &[u8],
+        (count, tags): (usize, Vec<u8>),
         span: Span,
     ) -> Local {
+        if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne)
+            && let Some(dest) = self.lower_word_tuple_eq(op, lhs_local, rhs_local, span)
+        {
+            return dest;
+        }
         let tag_str: String = tags.iter().map(|&b| b as char).collect();
         let args = vec![
             Operand::Copy(Place::local(lhs_local)),
             Operand::Copy(Place::local(rhs_local)),
-            Operand::Const(ConstValue::Int(tags.len() as i128)),
+            Operand::Const(ConstValue::Int(count as i128)),
             Operand::Const(ConstValue::Str(tag_str)),
         ];
         if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
             return self.lower_equality_call(op, "gos_rt_tuple_eq", args, span);
         }
         self.lower_ordering_call(op, "gos_rt_tuple_cmp", args, span)
+    }
+
+    /// `==` / `!=` over two tuples whose elements are all integer, `bool`, or
+    /// `char` words, lowered as one comparison per element, or `None` when
+    /// either operand is not such a tuple (held directly or behind one
+    /// reference). A word's equality is its bits', so no runtime walk of the
+    /// element tags is needed.
+    fn lower_word_tuple_eq(
+        &mut self,
+        op: HirBinaryOp,
+        lhs_local: Local,
+        rhs_local: Local,
+        span: Span,
+    ) -> Option<Local> {
+        let (lhs, arity) = self.word_tuple_base(lhs_local)?;
+        let (rhs, rhs_arity) = self.word_tuple_base(rhs_local)?;
+        if arity != rhs_arity {
+            return None;
+        }
+        let (elem_op, join_op) = if matches!(op, HirBinaryOp::Ne) {
+            (BinOp::Ne, BinOp::BitOr)
+        } else {
+            (BinOp::Eq, BinOp::BitAnd)
+        };
+        let bool_ty = self.tcx.bool_ty();
+        let mut acc: Option<Local> = None;
+        for i in 0..arity as u32 {
+            let field = |base: &Place| {
+                let mut place = base.clone();
+                place.projection.push(Projection::Field(i));
+                Operand::Copy(place)
+            };
+            let elem = self.fresh(bool_ty);
+            self.emit_assign(
+                Place::local(elem),
+                Rvalue::BinaryOp {
+                    op: elem_op,
+                    lhs: field(&lhs),
+                    rhs: field(&rhs),
+                },
+                span,
+            );
+            acc = Some(match acc {
+                None => elem,
+                Some(prev) => {
+                    let joined = self.fresh(bool_ty);
+                    self.emit_assign(
+                        Place::local(joined),
+                        Rvalue::BinaryOp {
+                            op: join_op,
+                            lhs: Operand::Copy(Place::local(prev)),
+                            rhs: Operand::Copy(Place::local(elem)),
+                        },
+                        span,
+                    );
+                    joined
+                }
+            });
+        }
+        acc
+    }
+
+    /// The place a word-element tuple operand's fields are read through (the
+    /// local itself, or its referent when it holds one reference to the
+    /// tuple) and the tuple's arity.
+    fn word_tuple_base(&self, local: Local) -> Option<(Place, usize)> {
+        use gossamer_types::TyKind;
+        let mut place = Place::local(local);
+        let mut ty = self.locals[local.0 as usize].ty;
+        if let TyKind::Ref { inner, .. } = self.tcx.kind_of(ty) {
+            place.projection.push(Projection::Deref);
+            ty = *inner;
+        }
+        let TyKind::Tuple(elems) = self.tcx.kind_of(ty) else {
+            return None;
+        };
+        let words = !elems.is_empty()
+            && elems.iter().all(|e| {
+                matches!(
+                    self.tcx.kind_of(*e),
+                    TyKind::Int(_) | TyKind::Bool | TyKind::Char
+                )
+            });
+        words.then_some((place, elems.len()))
     }
 
     /// Emits a call to a runtime equality answering `1` / `0`, mapped to a

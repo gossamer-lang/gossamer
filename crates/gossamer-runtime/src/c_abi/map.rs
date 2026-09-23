@@ -3826,11 +3826,14 @@ unsafe fn release_owned_value_tag(owner: u8, word: i64) {
 /// its values are owned.
 unsafe fn release_storage_entries(owner: u8, storage: &MapStorage) {
     let release = |word: i64| unsafe { release_owned_value_tag(owner, word) };
+    let values_owned = owner != MAP_VALUE_NONE;
     match storage {
-        MapStorage::I64I64(inner) => inner.values().for_each(|&v| release(v)),
-        MapStorage::StrI64(inner) => inner.values().for_each(|&v| release(v)),
+        MapStorage::I64I64(inner) if values_owned => inner.values().for_each(|&v| release(v)),
+        MapStorage::StrI64(inner) if values_owned => inner.values().for_each(|&v| release(v)),
         MapStorage::SkeyVal { entries, desc } => {
-            entries.values().for_each(|&v| release(v));
+            if values_owned {
+                entries.values().for_each(|&v| release(v));
+            }
             if entries.keys_own_slots() {
                 for key in entries.keys() {
                     // SAFETY: a user-ordered map's key holds a share of each

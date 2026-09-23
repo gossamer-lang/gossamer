@@ -88,11 +88,18 @@ impl TableKey for ByteKey {
 }
 
 /// A map's entries, hashed or ordered.
+///
+/// The ordered arm is boxed so a hashed map, the common case, is no larger
+/// than the hash table it holds.
 #[derive(Clone)]
 pub(crate) enum Table<K, V> {
     Hash(FxHashMap<K, V>),
-    Tree(OrderedTree<K, V>, TableOrder),
+    Tree(Box<OrderedEntries<K, V>>),
 }
+
+/// An ordered table's tree and the order its keys are compared under.
+#[derive(Clone)]
+pub(crate) struct OrderedEntries<K, V>(pub(crate) OrderedTree<K, V>, pub(crate) TableOrder);
 
 impl<K, V> Default for Table<K, V> {
     fn default() -> Self {
@@ -113,7 +120,7 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     /// when there is none.
     pub(crate) fn for_order(order: Option<TableOrder>) -> Self {
         match order {
-            Some(order) => Self::Tree(OrderedTree::new(), order),
+            Some(order) => Self::Tree(Box::new(OrderedEntries(OrderedTree::new(), order))),
             None => Self::default(),
         }
     }
@@ -122,14 +129,14 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     pub(crate) fn empty_like(&self) -> Self {
         match self {
             Self::Hash(_) => Self::default(),
-            Self::Tree(_, order) => Self::Tree(OrderedTree::new(), order.clone()),
+            Self::Tree(o) => Self::Tree(Box::new(OrderedEntries(OrderedTree::new(), o.1.clone()))),
         }
     }
 
     /// Whether the keys are the slots a user comparator reads, which the
     /// table owns a share of each counted word of.
     pub(crate) fn keys_own_slots(&self) -> bool {
-        matches!(self, Self::Tree(_, TableOrder::User(_)))
+        matches!(self, Self::Tree(o) if matches!(o.1, TableOrder::User(_)))
     }
 
     /// Whether traversal already yields key order.
@@ -137,13 +144,18 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
         matches!(self, Self::Tree(..))
     }
 
+    #[inline]
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Hash(h) => h.len(),
-            Self::Tree(t, _) => t.len(),
+            Self::Tree(o) => o.0.len(),
         }
     }
 
+    // The hashed arm of each lookup is inlined into its caller; the ordered
+    // arm lives out of line, so a tree search does not make every hashed
+    // lookup too large to inline.
+    #[inline]
     pub(crate) fn get<Q>(&self, key: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -151,10 +163,11 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     {
         match self {
             Self::Hash(h) => h.get(key),
-            Self::Tree(t, order) => t.get(|k| k.borrow().table_cmp(key, order)),
+            Self::Tree(o) => tree_get(&o.0, &o.1, key),
         }
     }
 
+    #[inline]
     pub(crate) fn get_mut<Q>(&mut self, key: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -162,10 +175,14 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     {
         match self {
             Self::Hash(h) => h.get_mut(key),
-            Self::Tree(t, order) => t.get_mut(|k| k.borrow().table_cmp(key, order)),
+            Self::Tree(o) => {
+                let OrderedEntries(t, order) = &mut **o;
+                tree_get_mut(t, order, key)
+            }
         }
     }
 
+    #[inline]
     pub(crate) fn contains_key<Q>(&self, key: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -173,16 +190,20 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     {
         match self {
             Self::Hash(h) => h.contains_key(key),
-            Self::Tree(t, order) => t.contains_key(|k| k.borrow().table_cmp(key, order)),
+            Self::Tree(o) => tree_get(&o.0, &o.1, key).is_some(),
         }
     }
 
     /// Stores `val` under `key`, answering the value it replaced; an equal
     /// key already stored is kept.
+    #[inline]
     pub(crate) fn insert(&mut self, key: K, val: V) -> Option<V> {
         match self {
             Self::Hash(h) => h.insert(key, val),
-            Self::Tree(t, order) => t.insert(key, val, |a, b| a.table_cmp(b, order)),
+            Self::Tree(o) => {
+                let OrderedEntries(t, order) = &mut **o;
+                tree_insert(t, order, key, val)
+            }
         }
     }
 
@@ -194,6 +215,7 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
         self.remove_entry(key).map(|(_, v)| v)
     }
 
+    #[inline]
     pub(crate) fn remove_entry<Q>(&mut self, key: &Q) -> Option<(K, V)>
     where
         K: Borrow<Q>,
@@ -201,7 +223,10 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     {
         match self {
             Self::Hash(h) => h.remove_entry(key),
-            Self::Tree(t, order) => t.remove(|k| k.borrow().table_cmp(key, order)),
+            Self::Tree(o) => {
+                let OrderedEntries(t, order) = &mut **o;
+                tree_remove(t, order, key)
+            }
         }
     }
 
@@ -209,7 +234,8 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     pub(crate) fn get_or_insert_with(&mut self, key: K, make: impl FnOnce() -> V) -> &mut V {
         match self {
             Self::Hash(h) => h.entry(key).or_insert_with(make),
-            Self::Tree(t, order) => {
+            Self::Tree(o) => {
+                let OrderedEntries(t, order) = &mut **o;
                 if !t.contains_key(|k| k.table_cmp(&key, order)) {
                     t.insert(key.clone(), make(), |a, b| a.table_cmp(b, order));
                 }
@@ -229,15 +255,16 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     {
         match self {
             Self::Hash(_) => 0,
-            Self::Tree(t, order) => t.rank(inclusive, |k| k.borrow().table_cmp(key, order)),
+            Self::Tree(o) => o.0.rank(inclusive, |k| k.borrow().table_cmp(key, &o.1)),
         }
     }
 
     /// The keys ranked `lo..hi` in an ordered table, in key order.
     pub(crate) fn keys_between(&self, lo: usize, hi: usize) -> Vec<K> {
-        let Self::Tree(t, order) = self else {
+        let Self::Tree(o) = self else {
             return Vec::new();
         };
+        let OrderedEntries(t, order) = &**o;
         let mut cursor = Cursor::new(t, lo, hi);
         std::iter::from_fn(|| {
             cursor
@@ -257,13 +284,15 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
         copy: impl Fn(&V) -> V,
     ) -> Self {
         let mut out = self.empty_like();
-        let Self::Tree(t, order) = self else {
+        let Self::Tree(src) = self else {
             return out;
         };
+        let OrderedEntries(t, order) = &mut **src;
         let hi = hi.min(t.len());
-        let Self::Tree(dst, _) = &mut out else {
+        let Self::Tree(dst) = &mut out else {
             return out;
         };
+        let dst = &mut dst.0;
         if take {
             for _ in lo..hi.max(lo) {
                 if let Some((k, v)) = t.remove_at(lo) {
@@ -284,7 +313,7 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     pub(crate) fn iter(&self) -> TableIter<'_, K, V> {
         match self {
             Self::Hash(h) => TableIter::Hash(h.iter()),
-            Self::Tree(t, _) => TableIter::Tree(t.iter()),
+            Self::Tree(o) => TableIter::Tree(o.0.iter()),
         }
     }
 
@@ -300,13 +329,54 @@ impl<K: Hash + Eq + Clone + TableKey, V> Table<K, V> {
     pub(crate) fn iter_mut(&mut self) -> Box<dyn Iterator<Item = (&K, &mut V)> + '_> {
         match self {
             Self::Hash(h) => Box::new(h.iter_mut()),
-            Self::Tree(t, _) => Box::new(t.iter_mut()),
+            Self::Tree(o) => Box::new(o.0.iter_mut()),
         }
     }
 
     pub(crate) fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
         self.iter_mut().map(|(_, v)| v)
     }
+}
+
+#[inline(never)]
+fn tree_get<'a, K, V, Q>(t: &'a OrderedTree<K, V>, order: &TableOrder, key: &Q) -> Option<&'a V>
+where
+    K: Clone + Borrow<Q>,
+    Q: TableKey + ?Sized,
+{
+    t.get(|k| k.borrow().table_cmp(key, order))
+}
+
+#[inline(never)]
+fn tree_get_mut<'a, K, V, Q>(
+    t: &'a mut OrderedTree<K, V>,
+    order: &TableOrder,
+    key: &Q,
+) -> Option<&'a mut V>
+where
+    K: Clone + Borrow<Q>,
+    Q: TableKey + ?Sized,
+{
+    t.get_mut(|k| k.borrow().table_cmp(key, order))
+}
+
+#[inline(never)]
+fn tree_insert<K: Clone + TableKey, V>(
+    t: &mut OrderedTree<K, V>,
+    order: &TableOrder,
+    key: K,
+    val: V,
+) -> Option<V> {
+    t.insert(key, val, |a, b| a.table_cmp(b, order))
+}
+
+#[inline(never)]
+fn tree_remove<K, V, Q>(t: &mut OrderedTree<K, V>, order: &TableOrder, key: &Q) -> Option<(K, V)>
+where
+    K: Clone + Borrow<Q>,
+    Q: TableKey + ?Sized,
+{
+    t.remove(|k| k.borrow().table_cmp(key, order))
 }
 
 impl<K, V, Q> std::ops::Index<&Q> for Table<K, V>

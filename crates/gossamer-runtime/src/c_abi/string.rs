@@ -3808,6 +3808,12 @@ fn first_json_special(bytes: &[u8]) -> usize {
 /// enclosing HTML `<script>` block or read as a JavaScript line break. Every
 /// other byte, UTF-8 included, is copied as it is.
 pub fn json_escape_into(text: &[u8], out: &mut Vec<u8>) {
+    json_escape_with(text, |bytes| out.extend_from_slice(bytes));
+}
+
+/// Hands `text`, escaped as [`json_escape_into`] escapes it, to `emit` as a
+/// sequence of byte runs: each unescaped span whole, then each escape.
+pub fn json_escape_with(text: &[u8], mut emit: impl FnMut(&[u8])) {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut run = 0;
     let mut i = 0;
@@ -3820,9 +3826,11 @@ pub fn json_escape_into(text: &[u8], out: &mut Vec<u8>) {
             i += 1;
             continue;
         }
-        out.extend_from_slice(&text[run..i]);
+        if run < i {
+            emit(&text[run..i]);
+        }
         let consumed = if line_break {
-            out.extend_from_slice(if text[i + 2] == 0xa8 {
+            emit(if text[i + 2] == 0xa8 {
                 b"\\u2028"
             } else {
                 b"\\u2029"
@@ -3830,14 +3838,14 @@ pub fn json_escape_into(text: &[u8], out: &mut Vec<u8>) {
             3
         } else {
             match b {
-                b'"' => out.extend_from_slice(b"\\\""),
-                b'\\' => out.extend_from_slice(b"\\\\"),
-                0x08 => out.extend_from_slice(b"\\b"),
-                0x0c => out.extend_from_slice(b"\\f"),
-                b'\n' => out.extend_from_slice(b"\\n"),
-                b'\r' => out.extend_from_slice(b"\\r"),
-                b'\t' => out.extend_from_slice(b"\\t"),
-                _ => out.extend_from_slice(&[
+                b'"' => emit(b"\\\""),
+                b'\\' => emit(b"\\\\"),
+                0x08 => emit(b"\\b"),
+                0x0c => emit(b"\\f"),
+                b'\n' => emit(b"\\n"),
+                b'\r' => emit(b"\\r"),
+                b'\t' => emit(b"\\t"),
+                _ => emit(&[
                     b'\\',
                     b'u',
                     b'0',
@@ -3851,7 +3859,9 @@ pub fn json_escape_into(text: &[u8], out: &mut Vec<u8>) {
         i += consumed;
         run = i;
     }
-    out.extend_from_slice(&text[run..]);
+    if run < text.len() {
+        emit(&text[run..]);
+    }
 }
 
 /// `s.push_json_quoted(buf, start, end) -> bool` - appends the `[start, end)`

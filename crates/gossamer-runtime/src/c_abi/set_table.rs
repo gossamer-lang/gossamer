@@ -8,14 +8,17 @@ use std::hash::Hash;
 use indexmap::IndexMap;
 use rustc_hash::FxBuildHasher;
 
-use super::map_table::{TableKey, TableOrder};
+use super::map_table::{OrderedEntries, TableKey, TableOrder};
 use crate::ordered::{Cursor, OrderedTree};
 
 /// Entries keyed by `K`, in insertion order or in key order.
+///
+/// The ordered arm is boxed so an insertion-ordered set, the common case, is
+/// no larger than the index map it holds.
 #[derive(Clone)]
 pub(crate) enum OrdTable<K, V> {
     Hash(IndexMap<K, V, FxBuildHasher>),
-    Tree(OrderedTree<K, V>, TableOrder),
+    Tree(Box<OrderedEntries<K, V>>),
 }
 
 impl<K, V> Default for OrdTable<K, V> {
@@ -27,14 +30,14 @@ impl<K, V> Default for OrdTable<K, V> {
 impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
     /// An empty ordered table under `order`.
     pub(crate) fn ordered(order: TableOrder) -> Self {
-        Self::Tree(OrderedTree::new(), order)
+        Self::Tree(Box::new(OrderedEntries(OrderedTree::new(), order)))
     }
 
     /// An empty table of the same kind and order.
     pub(crate) fn empty_like(&self) -> Self {
         match self {
             Self::Hash(_) => Self::default(),
-            Self::Tree(_, order) => Self::ordered(order.clone()),
+            Self::Tree(o) => Self::ordered(o.1.clone()),
         }
     }
 
@@ -46,7 +49,7 @@ impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
     pub(crate) fn len(&self) -> usize {
         match self {
             Self::Hash(h) => h.len(),
-            Self::Tree(t, _) => t.len(),
+            Self::Tree(o) => o.0.len(),
         }
     }
 
@@ -57,7 +60,7 @@ impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
     {
         match self {
             Self::Hash(h) => h.get(key),
-            Self::Tree(t, order) => t.get(|k| k.borrow().table_cmp(key, order)),
+            Self::Tree(o) => o.0.get(|k| k.borrow().table_cmp(key, &o.1)),
         }
     }
 
@@ -73,7 +76,10 @@ impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
     pub(crate) fn insert(&mut self, key: K, val: V) -> Option<V> {
         match self {
             Self::Hash(h) => h.insert(key, val),
-            Self::Tree(t, order) => t.insert(key, val, |a, b| a.table_cmp(b, order)),
+            Self::Tree(o) => {
+                let OrderedEntries(t, order) = &mut **o;
+                t.insert(key, val, |a, b| a.table_cmp(b, order))
+            }
         }
     }
 
@@ -86,9 +92,11 @@ impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
     {
         match self {
             Self::Hash(h) => h.shift_remove(key),
-            Self::Tree(t, order) => t
-                .remove(|k| k.borrow().table_cmp(key, order))
-                .map(|(_, v)| v),
+            Self::Tree(o) => {
+                let OrderedEntries(t, order) = &mut **o;
+                t.remove(|k| k.borrow().table_cmp(key, order))
+                    .map(|(_, v)| v)
+            }
         }
     }
 
@@ -100,7 +108,7 @@ impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
     pub(crate) fn iter(&self) -> Box<dyn Iterator<Item = (&K, &V)> + '_> {
         match self {
             Self::Hash(h) => Box::new(h.iter()),
-            Self::Tree(t, _) => Box::new(t.iter()),
+            Self::Tree(o) => Box::new(o.0.iter()),
         }
     }
 
@@ -121,7 +129,7 @@ impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
     {
         match self {
             Self::Hash(_) => 0,
-            Self::Tree(t, order) => t.rank(inclusive, |k| k.borrow().table_cmp(key, order)),
+            Self::Tree(o) => o.0.rank(inclusive, |k| k.borrow().table_cmp(key, &o.1)),
         }
     }
 
@@ -135,9 +143,11 @@ impl<K: Hash + Eq + Clone + TableKey, V> OrdTable<K, V> {
         copy: impl Fn(&K, &V) -> V,
     ) -> Self {
         let mut out = self.empty_like();
-        let (Self::Tree(src, order), Self::Tree(dst, _)) = (&mut *self, &mut out) else {
+        let (Self::Tree(src), Self::Tree(dst)) = (&mut *self, &mut out) else {
             return out;
         };
+        let OrderedEntries(src, order) = &mut **src;
+        let dst = &mut dst.0;
         let hi = hi.min(src.len());
         if take {
             for _ in lo..hi.max(lo) {

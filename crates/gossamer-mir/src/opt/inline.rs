@@ -139,7 +139,7 @@ struct InlineableCallee {
 /// - The call destination place has no projections.
 ///
 /// Run before `optimise` so the per-body passes see the flattened graph.
-pub fn inline_small_callees(bodies: &mut [Body]) {
+pub fn inline_small_callees(bodies: &mut [Body], tcx: &TyCtxt) {
     if !inlining_enabled() {
         return;
     }
@@ -154,7 +154,7 @@ pub fn inline_small_callees(bodies: &mut [Body]) {
     }
     let def_to_name = def_to_name_map(bodies);
     for body in bodies.iter_mut() {
-        inline_into_body(body, &inlineables, &def_to_name);
+        inline_into_body(body, &inlineables, &def_to_name, tcx);
     }
 }
 
@@ -257,6 +257,7 @@ fn inline_into_body(
     body: &mut Body,
     inlineables: &HashMap<String, InlineableCallee>,
     def_to_name: &HashMap<u32, String>,
+    tcx: &TyCtxt,
 ) {
     // Iterate over block indices because we mutate `body.locals` (to
     // add callee temps) during the loop. The block list itself does
@@ -326,10 +327,19 @@ fn inline_into_body(
         // local is what makes the read-only case free, and is exactly
         // what a written parameter must not do: `fn f(mut n: i64)`
         // takes the caller's value, not the caller's variable.
+        // A reference parameter handed a value that is not itself a
+        // reference holds that value's address, not the value, so it also
+        // gets a local of its own, bound to the reference the call took.
         let mut param_copies: Vec<(u32, Local)> = Vec::new();
         let mut bindings: Vec<crate::ir::Statement> = Vec::new();
-        for &idx in &ic.written_params {
+        for idx in 1..=ic.arity {
             let decl = ic.param_locals[(idx - 1) as usize].clone();
+            let arg = &args[(idx - 1) as usize];
+            let rvalue = match param_binding(tcx, decl.ty, arg, &body.locals) {
+                Some(reference) => reference,
+                None if ic.written_params.contains(&idx) => Rvalue::Use(arg.clone()),
+                None => continue,
+            };
             let copy = Local(body.locals.len() as u32);
             body.locals.push(decl);
             bindings.push(crate::ir::Statement {
@@ -338,7 +348,7 @@ fn inline_into_body(
                         local: copy,
                         projection: Vec::new(),
                     },
-                    rvalue: Rvalue::Use(args[(idx - 1) as usize].clone()),
+                    rvalue,
                 },
                 span: body.blocks[bi].span,
                 inlined: body.blocks[bi].terminator_inlined.clone(),
@@ -512,7 +522,7 @@ fn try_build_general(body: &Body) -> Option<GeneralCallee> {
 /// self-recursive call is never inlined. Spliced blocks are rescanned
 /// within the same caller (bounded by the budget), so a chain
 /// `top -> mid -> lo` flattens in one pass.
-pub fn inline_general(bodies: &mut [Body]) {
+pub fn inline_general(bodies: &mut [Body], tcx: &TyCtxt) {
     if !inlining_enabled() {
         return;
     }
@@ -538,7 +548,7 @@ pub fn inline_general(bodies: &mut [Body]) {
         return;
     }
     for body in bodies.iter_mut() {
-        inline_general_into(body, &callees, &def_to_name);
+        inline_general_into(body, &callees, &def_to_name, tcx);
     }
 }
 
@@ -546,6 +556,7 @@ fn inline_general_into(
     body: &mut Body,
     callees: &HashMap<String, GeneralCallee>,
     def_to_name: &HashMap<u32, String>,
+    tcx: &TyCtxt,
 ) {
     let mut budget = INLINE_CALLER_BUDGET;
     // The block list grows as callees are spliced; scanning the
@@ -598,7 +609,7 @@ fn inline_general_into(
             continue;
         }
         budget -= gc.cost;
-        splice_callee(body, bi, &gc.body, &args, &destination, continuation);
+        splice_callee(body, bi, &gc.body, &args, &destination, continuation, tcx);
         if promoted {
             const_fold(body);
         }
@@ -618,8 +629,10 @@ fn splice_callee(
     args: &[Operand],
     destination: &Place,
     continuation: BlockId,
+    tcx: &TyCtxt,
 ) {
     let site = call_site_chain(&body.blocks[call_block], &callee.name);
+    let caller_locals = body.locals.clone();
     let caller_chain = body.blocks[call_block].terminator_inlined.clone();
     let base_local = body.locals.len() as u32;
     for decl in &callee.locals {
@@ -682,7 +695,13 @@ fn splice_callee(
                     local: remap_local(Local(i + 1)),
                     projection: Vec::new(),
                 },
-                rvalue: Rvalue::Use(args[i as usize].clone()),
+                rvalue: param_binding(
+                    tcx,
+                    callee.locals[(i + 1) as usize].ty,
+                    &args[i as usize],
+                    &caller_locals,
+                )
+                .unwrap_or_else(|| Rvalue::Use(args[i as usize].clone())),
             },
             span: callee.span,
             inlined: caller_chain.clone(),
@@ -693,6 +712,39 @@ fn splice_callee(
 }
 
 use crate::ir::{InlineChain, InlineFrame};
+
+/// The reference a parameter of type `param_ty` is bound to when the call
+/// passes `arg`, or `None` when the argument is bound as it is. A reference
+/// to a tuple, fixed array, or struct held in a local's own storage is passed
+/// as that local, while the callee's parameter holds the storage's address,
+/// so the inlined parameter takes the reference the call took rather than
+/// the value.
+fn param_binding(
+    tcx: &TyCtxt,
+    param_ty: Ty,
+    arg: &Operand,
+    caller_locals: &[crate::ir::LocalDecl],
+) -> Option<Rvalue> {
+    let TyKind::Ref { mutability, inner } = tcx.kind_of(param_ty) else {
+        return None;
+    };
+    let Operand::Copy(place) = arg else {
+        return None;
+    };
+    let arg_ty = caller_locals.get(place.local.0 as usize)?.ty;
+    let inline_aggregate = match tcx.kind_of(*inner) {
+        TyKind::Tuple(_) | TyKind::Array { .. } => true,
+        TyKind::Adt { def, .. } => tcx.struct_field_tys(*def).is_some(),
+        _ => false,
+    };
+    if !place.projection.is_empty() || arg_ty != *inner || !inline_aggregate {
+        return None;
+    }
+    Some(Rvalue::Ref {
+        place: place.clone(),
+        mutable: matches!(mutability, gossamer_types::Mutbl::Mut),
+    })
+}
 
 /// The chain a callee's code carries once inlined at `call_block`'s call:
 /// the call block's own chain, then the call itself.

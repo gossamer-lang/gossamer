@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.63.2 - Faster maps and tuple comparisons, leaner JSON encoding, reference and tuple fixes
+
+- `Map` lookups, inserts, and removals on the compiled tiers reach the hash table directly again: the ordered `BTreeMap` search no longer rides along on every hashed lookup, which had made a map-heavy loop up to a quarter slower.
+- Dropping a `Map` whose values are plain numbers frees its table without visiting each entry.
+- A `Map` or `Set` value takes 64 bytes less, since the `BTreeMap` / `BTreeSet` tree lives behind a pointer of its own; a program holding many small maps holds correspondingly less memory.
+- `==` and `!=` on a tuple of integers, `bool`s, or `char`s compile to one comparison per element on the compiled tiers and the JIT instead of a runtime call, so a search loop testing `(y, x) == target` runs several times faster.
+- `==`, `!=`, `<`, `<=`, `>`, and `>=` on a tuple holding a nested tuple, a struct, an `Option`, or a `Vec` compare element by element on the compiled tiers and under `gos run`, as the bytecode VM always did; `((1, 2), 3) == ((1, 2), 3)` answered `false` there.
+- `json::encode` writes each key and string straight into its output instead of building a temporary copy first, so encoding a document with many short strings runs faster and peaks at less memory.
+- A release build inlining a small function that takes a tuple or a struct by `&` or `&mut` reads and writes the caller's value, where `let t = *p` inside such a function could crash the program.
+- On the bytecode VM and under `gos run`, a function writing to a tuple through a `&mut (A, B)` parameter (`a.0 += 1`, `*a = (x, y)`) changes the caller's tuple, as the compiled tiers always did; the write was lost when the call returned.
+
 ## 0.63.1 - Faster numeric and JSON text, in-place appends, smaller resident stores, http performance
 
 - `f64` renders through a shortest-digit formatter laid out as `Display` lays it out, so `x.to_string()`, `{}`, and `format` on a float skip the general formatting machinery, with the same text on every tier.

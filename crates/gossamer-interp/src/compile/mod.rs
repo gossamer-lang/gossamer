@@ -136,7 +136,7 @@ pub(crate) fn is_mut_ref_vec(tcx: &TyCtxt, ty: Ty) -> bool {
 /// / `&mut [T]` (the cell-protocol shapes above), `&mut <scalar
 /// primitive>` (`i*` / `u*` / `f*` / `bool` / `char`), `&mut String`
 /// (a flat `*mut c_char` whose pointer IS the value), and `&mut <struct
-/// / enum>` (the compiled tiers pass an aggregate `&mut` by pointer, so
+/// / enum / tuple>` (the compiled tiers pass an aggregate `&mut` by pointer, so
 /// a field write or `*p = v` reaches the caller - the VM must match, or
 /// a free function mutating a `&mut Struct` param silently no-ops under
 /// `gos` while writing back under `gos build`). Used to decide that
@@ -179,6 +179,7 @@ pub(crate) fn is_writeback_pointee(tcx: &TyCtxt, ty: Ty) -> bool {
                 | TyKind::Duration
                 | TyKind::Instant
                 | TyKind::Array { .. }
+                | TyKind::Tuple(_)
                 | TyKind::HashMap { .. }
                 | TyKind::Adt { .. }
                 | TyKind::Param { .. }

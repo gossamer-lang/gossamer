@@ -211,6 +211,7 @@ feature-testing-examples/httptest_record_and_clock.gos	no hot body
 feature-testing-examples/httptest_static_server.gos	no hot body
 feature-testing-examples/inferred_map_dispatch.gos	bytecode-only local
 feature-testing-examples/inline_index_remap.gos	admission gate
+feature-testing-examples/inlined_aggregate_ref_param.gos	&mut aggregate param
 feature-testing-examples/instant_methods.gos	no hot body
 feature-testing-examples/integer_overflow_edges.gos	no hot body
 feature-testing-examples/iter_zip_advances.gos	no hot body

@@ -1,0 +1,48 @@
+// Small callees taking a tuple or struct by reference read and write the
+// caller's value once inlined.
+
+struct Point { x: i64, y: i64 }
+
+fn sum_pair(a: &mut (i64, i64)) -> i64 {
+    let t = *a
+    t.0 + t.1
+}
+
+fn bump_pair(a: &mut (i64, i64)) {
+    a.0 += 1
+    a.1 -= 1
+}
+
+fn set_first(a: &mut (i64, i64)) { a.0 = 9 }
+
+fn replace(a: &mut (i64, i64)) { *a = (7, 7) }
+
+fn norm1(p: &mut Point) -> i64 {
+    let q = *p
+    q.x + q.y
+}
+
+fn shift(p: &mut Point, dx: i64) {
+    if dx > 0 {
+        p.x += dx
+    } else {
+        p.y -= dx
+    }
+}
+
+fn main() {
+    let mut w = (40, 2)
+    println("sum {}", sum_pair(&mut w))
+    bump_pair(&mut w)
+    println("bumped {} {}", w.0, w.1)
+    set_first(&mut w)
+    println("set {:?}", w)
+    replace(&mut w)
+    println("replaced {:?}", w)
+
+    let mut p = Point { x: 3, y: 4 }
+    println("norm {}", norm1(&mut p))
+    shift(&mut p, 5)
+    shift(&mut p, -2)
+    println("shifted {} {}", p.x, p.y)
+}

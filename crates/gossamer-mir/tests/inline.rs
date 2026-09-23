@@ -56,7 +56,7 @@ fn small_callee_is_inlined_today() {
          fn use_it(n: i64) -> i64 { dbl(n) + 1 }\n",
     );
     inline_trivial_wrappers(&mut bodies);
-    inline_small_callees(&mut bodies);
+    inline_small_callees(&mut bodies, &tcx);
     for b in &mut bodies {
         optimise(b, &tcx);
     }
@@ -74,7 +74,7 @@ fn inliner_is_behaviour_neutral_smoke() {
                fn main() { let _ = add(2, 3)\n }\n";
     let (mut on, tcx) = lower(src);
     let (off, _) = lower(src);
-    inline_small_callees(&mut on);
+    inline_small_callees(&mut on, &tcx);
     for b in &mut on {
         optimise(b, &tcx);
     }
@@ -96,7 +96,7 @@ fn six_stmt_leaf_callee_inlines_under_cost_model() {
          }\n\
          fn caller(n: i64) -> i64 { poly(n) + poly(n + 1) }\n",
     );
-    inline_small_callees(&mut bodies);
+    inline_small_callees(&mut bodies, &tcx);
     for b in &mut bodies {
         optimise(b, &tcx);
     }
@@ -114,7 +114,7 @@ fn callee_that_calls_another_fn_is_inlined() {
          fn mid(x: i64) -> i64 { if x > 0 { lo(x) } else { lo(-x) } }\n\
          fn top(n: i64) -> i64 { mid(n) * 2 }\n",
     );
-    gossamer_mir::inline_general(&mut bodies);
+    gossamer_mir::inline_general(&mut bodies, &tcx);
     for b in &mut bodies {
         optimise(b, &tcx);
     }
@@ -146,7 +146,7 @@ fn intcode_style_indexed_helpers_inline_into_the_hot_loop() {
            }\n\
          }\n",
     );
-    gossamer_mir::inline_general(&mut bodies);
+    gossamer_mir::inline_general(&mut bodies, &tcx);
     for body in &mut bodies {
         optimise(body, &tcx);
     }
@@ -164,7 +164,7 @@ fn aggregate_returning_callee_inlines_and_keeps_field_types() {
          fn mk(a: i64, b: i64) -> P { P { x: a, y: b } }\n\
          fn use_p(n: i64) -> i64 { let p = mk(n, n + 1)\n p.x + p.y }\n",
     );
-    gossamer_mir::inline_general(&mut bodies);
+    gossamer_mir::inline_general(&mut bodies, &tcx);
     for b in &mut bodies {
         optimise(b, &tcx);
     }
@@ -181,7 +181,7 @@ fn self_recursive_callee_is_not_inlined() {
         "fn fac(n: i64) -> i64 { if n <= 0 { 1 } else { n * fac(n - 1) } }\n\
          fn run(n: i64) -> i64 { fac(n) + 1 }\n",
     );
-    gossamer_mir::inline_general(&mut bodies);
+    gossamer_mir::inline_general(&mut bodies, &tcx);
     for b in &mut bodies {
         optimise(b, &tcx);
     }
@@ -199,7 +199,7 @@ fn callee_with_const_and_indexed_args_inlines() {
         "fn pick(xs: [i64], i: i64, bias: i64) -> i64 { xs[i] + bias }\n\
          fn run(xs: [i64]) -> i64 { pick(xs, 0, 100) + pick(xs, 1, 200) }\n",
     );
-    gossamer_mir::inline_general(&mut bodies);
+    gossamer_mir::inline_general(&mut bodies, &tcx);
     for b in &mut bodies {
         optimise(b, &tcx);
     }

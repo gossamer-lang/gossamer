@@ -1,0 +1,44 @@
+// Tuples of integer, bool, and char words compare element by element.
+
+fn same(a: (i64, i64), b: (i64, i64)) -> bool { a == b }
+
+fn differ(a: (u8, bool, char), b: (u8, bool, char)) -> bool { a != b }
+
+fn through_ref(a: &mut (i32, u64), b: (i32, u64)) -> bool { *a == b }
+
+fn main() {
+    let target = (3, -4)
+    let mut hits = 0
+    for y in -5..5 {
+        for x in -5..5 {
+            if (y, x) == target { hits += 1 }
+            if (y, x) != target { hits += 2 }
+        }
+    }
+    println("hits {}", hits)
+
+    println("same {} {}", same((1, 2), (1, 2)), same((1, 2), (2, 1)))
+    println("differ {} {}", differ((7, true, 'a'), (7, true, 'a')), differ((7, true, 'a'), (7, false, 'a')))
+
+    let mut w: (i32, u64) = (-1, u64::MAX)
+    println("ref {} {}", through_ref(&mut w, (-1, u64::MAX)), through_ref(&mut w, (-1, 0)))
+
+    let wide = (i64::MIN, i64::MAX, 0, 1)
+    println("wide {} {}", wide == (i64::MIN, i64::MAX, 0, 1), wide == (i64::MIN, i64::MAX, 1, 0))
+
+    let nested = ((1, 2), 3)
+    println("nested {} {}", nested == ((1, 2), 3), nested == ((1, 3), 3))
+    println("nested order {} {}", nested < ((1, 3), 0), nested > ((1, 2), 4))
+
+    let held = (#[1, 2], 'x')
+    println("held {} {}", held == (#[1, 2], 'x'), held == (#[1], 'x'))
+
+    let maybe = (Some(4), 1)
+    println("maybe {} {}", maybe == (Some(4), 1), maybe == (None, 1))
+
+    let floats = (0.5, 1.0)
+    println("floats {} {}", floats == (0.5, 1.0), floats != (0.5, 2.0))
+
+    let named = ("a", 1)
+    println("strings {} {}", named == ("a", 1), named == ("b", 1))
+}

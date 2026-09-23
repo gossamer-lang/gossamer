@@ -1048,8 +1048,8 @@ impl Vm {
                 // separate static cell.
                 if !jit_bodies_access_mut_static(&bodies) {
                     gossamer_mir::inline_trivial_wrappers(&mut bodies);
-                    gossamer_mir::inline_small_callees(&mut bodies);
-                    gossamer_mir::inline_general(&mut bodies);
+                    gossamer_mir::inline_small_callees(&mut bodies, &jit_tcx);
+                    gossamer_mir::inline_general(&mut bodies, &jit_tcx);
                 }
                 // Same post-inline cleanup the AOT pipeline runs: the
                 // cranelift lowering is shared with `gos build`, so the

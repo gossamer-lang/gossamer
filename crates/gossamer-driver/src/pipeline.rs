@@ -318,8 +318,8 @@ fn lower_to_mir_reporting_prune(
         // language-level ownership and bounds-check shapes before IR emission.
         MirProfile::Release => {
             inline_trivial_wrappers(&mut bodies);
-            inline_small_callees(&mut bodies);
-            inline_general(&mut bodies);
+            inline_small_callees(&mut bodies, &tcx);
+            inline_general(&mut bodies, &tcx);
             for body in &mut bodies {
                 optimise(body, &tcx);
             }
