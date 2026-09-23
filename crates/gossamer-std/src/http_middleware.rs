@@ -1457,8 +1457,9 @@ mod tests {
 pub use gossamer_runtime::c_abi::http_middleware::{
     Before, RequestParts, ResponseParts, apply, apply_request, apply_with_request,
     cache_control_immutable_for, cache_control_no_store, cors_config, cors_permissive,
-    hsts_safe_default, hsts_strict, middleware_kind as kind, rate_limit_allow, rate_limit_config,
-    rate_limit_reset, security_headers_off, security_headers_strict, sequential_request_id,
+    hsts_safe_default, hsts_strict, middleware_kind as kind, rate_limit_allow, rate_limit_allow_at,
+    rate_limit_config, rate_limit_reset, security_headers_off, security_headers_strict,
+    sequential_request_id,
 };
 
 #[cfg(test)]
@@ -1531,12 +1532,14 @@ mod transform_tests {
     fn rate_limit_refills_over_time() {
         let config = "1|1000";
         let client = "rate_limit_refills_over_time";
-        assert!(rate_limit_allow(config, client));
-        assert!(!rate_limit_allow(config, client));
-        // A thousand tokens a second puts one back within a millisecond;
-        // waiting five covers scheduling jitter without a fixed ceiling.
-        gossamer_runtime::platform::sleep(std::time::Duration::from_millis(5));
-        assert!(rate_limit_allow(config, client));
+        let start = gossamer_runtime::platform::Instant::now();
+        assert!(rate_limit_allow_at(config, client, start));
+        // A second draw at the same instant finds the bucket empty.
+        assert!(!rate_limit_allow_at(config, client, start));
+        // A thousand tokens a second puts one back after a millisecond.
+        let later = start + std::time::Duration::from_millis(1);
+        assert!(rate_limit_allow_at(config, client, later));
+        assert!(!rate_limit_allow_at(config, client, later));
     }
 
     #[test]

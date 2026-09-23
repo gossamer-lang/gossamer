@@ -357,6 +357,13 @@ const RATE_LIMIT_MAX_KEYS: usize = 100_000;
 /// a rate limit rather than a lifetime quota.
 #[must_use]
 pub fn rate_limit_allow(config: &str, client: &str) -> bool {
+    rate_limit_allow_at(config, client, crate::platform::Instant::now())
+}
+
+/// [`rate_limit_allow`] with the time of the request supplied, so a bucket's
+/// refill is a function of the instants it is asked at.
+#[must_use]
+pub fn rate_limit_allow_at(config: &str, client: &str, now: crate::platform::Instant) -> bool {
     let mut fields = config.split('|');
     let capacity = fields
         .next()
@@ -368,7 +375,6 @@ pub fn rate_limit_allow(config: &str, client: &str) -> bool {
         .and_then(|c| c.parse::<f64>().ok())
         .unwrap_or(0.0)
         .max(0.0);
-    let now = crate::platform::Instant::now();
     let mut guard = BUCKETS.lock();
     let table = guard.get_or_insert_with(std::collections::HashMap::new);
     if table.len() >= RATE_LIMIT_MAX_KEYS {
