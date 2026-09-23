@@ -197,6 +197,7 @@ fn is_self_consuming_append(name: &str) -> bool {
             | "gos_rt_str_append_bool"
             | "gos_rt_str_append_f64"
             | "gos_rt_str_append_bytes"
+            | "gos_rt_str_push_substring"
             | "gos_rt_str_push_char"
             | "gos_rt_str_push_byte"
             | "gos_rt_str_clear"

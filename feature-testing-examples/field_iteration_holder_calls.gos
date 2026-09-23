@@ -1,0 +1,55 @@
+// Iterating a Vec field while the loop calls methods on the same receiver: a
+// `&self` call only reads, and a `&mut self` call may replace the field while
+// the loop still walks the Vec it started with.
+
+struct P { x: i64, y: i64 }
+
+struct Holder { items: Vec<P>, total: i64, swaps: i64 }
+
+impl Holder {
+    fn weight(&self, p: P) -> i64 { p.x * p.y + self.items.len() }
+
+    fn replace_items(&mut self) {
+        self.items = #[P { x: 100, y: 1 }]
+        self.swaps += 1
+    }
+
+    fn read_only(&mut self, rounds: i64) {
+        for _ in 0..rounds {
+            for p in self.items {
+                self.total += self.weight(p)
+            }
+        }
+    }
+
+    fn replacing(&mut self) {
+        for p in self.items {
+            self.total += p.x
+            if p.x == 2 { self.replace_items() }
+        }
+    }
+
+    fn nested(&self) -> i64 {
+        let mut acc = 0
+        for a in self.items {
+            for b in self.items { acc += self.weight(a) - b.y }
+        }
+        acc
+    }
+}
+
+fn main() {
+    let mut h = Holder {
+        items: #[P { x: 1, y: 2 }, P { x: 2, y: 3 }, P { x: 3, y: 4 }]
+        total: 0
+        swaps: 0
+    }
+    h.read_only(1000)
+    println("read_only {}", h.total)
+    println("nested {}", h.nested())
+    h.total = 0
+    h.replacing()
+    println("replacing {} swaps {} now {}", h.total, h.swaps, h.items.len())
+    h.read_only(3)
+    println("after {}", h.total)
+}

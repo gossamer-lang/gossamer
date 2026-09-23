@@ -676,10 +676,11 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
                 crate::opt::record_uniqueness(&body.name, report);
             }
         }
+        let callees = crate::opt::CalleeParams::compute(bodies, tcx);
         for body in &mut bodies[start..] {
             crate::opt::elide_null_rc_accounting(body);
             crate::opt::elide_redundant_rc_pairs(body, tcx);
-            crate::opt::elide_borrowed_holder_rc(body, tcx);
+            crate::opt::elide_borrowed_holder_rc(body, tcx, &callees);
             crate::opt::elide_moved_aggregate_shares(body, tcx);
             crate::opt::move_stored_rc_shares(body, tcx);
             crate::opt::elide_settled_guarded_walks(body);

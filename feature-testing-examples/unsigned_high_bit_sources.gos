@@ -1,0 +1,59 @@
+// Narrow unsigned values with the top bit of their width set, reached from
+// every kind of source, shift and compare as unsigned numbers on every tier.
+
+use std::hash::crc32
+
+struct Packet { tag: u8, word: u16, id: u32 }
+
+fn make_id(seed: i64) -> u32 { (seed * 2654435761) as u32 }
+
+fn big_byte() -> u8 { 200 }
+
+fn main() {
+    let neg: i64 = -1
+    let cast32 = neg as u32
+    let cast16 = neg as u16
+    let cast8 = neg as u8
+    println("cast {} {} {} | {} {} {}", cast32, cast16, cast8, cast32 >> 31, cast16 >> 15, cast8 >> 7)
+    println("cmp {} {} {}", cast32 > 1, cast16 > 1, cast8 > 1)
+
+    let words: Vec<u32> = #[0xFFFFFFFF, 0x80000000, 7, 0x7FFFFFFF]
+    let mut above = 0
+    for w in words { if w > 0x7FFFFFFF { above += 1 } }
+    println("vec {} {} {}", above, words[0] >> 16, words[1] >= words[3])
+
+    let bytes: [u8; 4] = [255, 128, 127, 0]
+    println("arr {} {} {}", bytes[0] > bytes[2], bytes[1] >> 7, bytes[0] < bytes[3])
+
+    let p = Packet { tag: 0xF0, word: 0xFFFE, id: 0xDEADBEEF }
+    println("field {} {} {} {}", p.tag >> 4, p.word > 0x8000, p.id >> 28, p.id > 0x7FFFFFFF)
+
+    let h = make_id(12345)
+    println("ret {} {} {}", h, h >> 24, h > 2147483647)
+    println("fn8 {} {}", big_byte() >> 1, big_byte() > 127)
+
+    let mut acc: u32 = 0
+    acc -%= 3
+    acc *%= 5
+    println("wrap {} {} {}", acc, acc >> 30, acc < 0xFFFFFFF0)
+    let mut sh: u32 = 0x40000000
+    sh <<= 1
+    println("shl {} {} {}", sh, sh >> 31, sh > 1)
+    let inv = !(5 as u32)
+    println("not {} {} {}", inv, inv >> 29, inv > 5)
+
+    let c = crc32::checksum("gossamer".as_bytes())
+    println("crc {} {} {}", c, c >> 16, c > 0x7FFFFFFF)
+
+    let text = "Zed"
+    let b = text.byte_at(0) as u8
+    println("byte {} {}", b >> 4, b > 64)
+
+    let mut sorted: Vec<u32> = #[0xF0000000, 3, 0x80000001, 0x7FFFFFFF]
+    sorted.sort()
+    println("sort {:?}", sorted)
+    let mx = sorted.iter().max().unwrap_or(0)
+    println("max {} {}", mx, mx >> 31)
+    let parsed = "4000000000".to_i64().unwrap_or(0) as u32
+    println("parse {} {}", parsed, parsed > 3000000000)
+}

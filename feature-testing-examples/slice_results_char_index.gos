@@ -1,0 +1,41 @@
+// Strings cut from another string - substring, trim, split, lines, regex
+// matches - index characters correctly whether the source is ASCII, a
+// literal, or built at run time, and keep doing so after later appends.
+
+use std::regex
+
+fn describe(label: String, s: String) {
+    let mut chars = String::new()
+    for i in 0..s.len() { chars.push_char(s[i]) }
+    println("{}: len={} bytes={} chars=[{}] last={}", label, s.len(), s.byte_len(), chars
+        if s.len() > 0 { s[s.len() - 1] } else { '-' })
+}
+
+fn main() {
+    let lit = "  héllo, wörld; ✓ ok  "
+    let ascii = "  plain, text; ok  "
+    let built = format("{}|{}", "añb", "abc")
+
+    describe("trim-lit", lit.trim())
+    describe("trim-ascii", ascii.trim())
+    describe("sub-lit", lit.substring(2, 8))
+    describe("sub-built", built.substring(1, 6))
+    for piece in lit.split(",") { describe("split-lit", piece) }
+    for piece in built.split("|") { describe("split-built", piece) }
+    for line in "α\nbeta\nγδ".lines() { describe("line", line) }
+
+    let re = regex::compile("w.rld|[a-z]+").unwrap()
+    for (start, end, m) in re.find_all(lit) { describe(format("re {}..{}", start, end), m) }
+
+    let mut grown = ascii.trim()
+    grown.push_str("→ü")
+    describe("grown", grown)
+    let mut from_split = ascii.split(",")[0]
+    from_split += "✓"
+    describe("split-grown", from_split)
+    let once = lit.split_once(";")
+    match once {
+        Some((a, b)) => { describe("once-a", a); describe("once-b", b) }
+        None => println("no split")
+    }
+}

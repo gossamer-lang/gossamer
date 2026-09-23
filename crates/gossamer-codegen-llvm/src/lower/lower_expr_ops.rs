@@ -479,15 +479,15 @@ impl<'a> Lowerer<'a> {
         // negative as an `i64`; narrower unsigned operands compare the
         // same under signed and unsigned division after widening.
         let op_signed = int_signed;
-        // `< <= > >=` and `>>` use unsigned instructions (`icmp u*` /
-        // `lshr`) only for the unsigned families that can exceed
-        // `i64::MAX` - `u64` / `usize` / `u128`; every other ≤64-bit type
-        // (including `u8`/`u16`/`u32`, which mask below 2^63) keeps the
-        // signed `icmp s*` / `ashr`. This matches the VM, which routes
-        // only `u64`/`usize` operands through its unsigned compare/shift
-        // opcodes. A constant operand carries no signedness, so derive it
-        // from the place operand when one side is constant; two constants
-        // default to signed.
+        // `< <= > >=` and `>>` follow the declared signedness: unsigned
+        // types use `icmp u*` / `lshr`. A narrow unsigned value is always
+        // held zero-extended within its range, so for `u8` / `u16` / `u32`
+        // the unsigned and signed forms give the same answer, as the VM's
+        // signed opcodes do; the unsigned form states what the operation is,
+        // which is what LLVM's value-range and idiom analyses (a reflected
+        // CRC loop among them) match on. A constant operand carries no
+        // signedness, so derive it from the place operand when one side is
+        // constant; two constants default to signed.
         let cmp_shift_signed = {
             let pick = |o: &Operand| -> Option<gossamer_types::IntTy> {
                 if let Operand::Copy(_) = o
@@ -498,14 +498,14 @@ impl<'a> Lowerer<'a> {
                 None
             };
             match pick(lhs).or_else(|| pick(rhs)) {
-                Some(i) => int_signed(i) || int_width(i) < 64,
+                Some(i) => int_signed(i),
                 // Both operands are constants (a const-folded `u64`, e.g.
                 // `a >> 1` where `a` folded to a literal, carries no operand
                 // signedness). Fall back to the operation's own int type so a
                 // `u64`/`usize` still compares and shifts unsigned per its
                 // declared type instead of defaulting to signed.
                 None => match kind {
-                    NumericKind::Int(i) => int_signed(i) || int_width(i) < 64,
+                    NumericKind::Int(i) => int_signed(i),
                     _ => true,
                 },
             }

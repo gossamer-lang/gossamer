@@ -562,6 +562,7 @@ fn helper_reads_only(name: &str, index: usize) -> bool {
                 | "gos_rt_hash_crc32c_update_window"
                 | "gos_rt_str_push_utf8"
                 | "gos_rt_str_push_json_quoted"
+                | "gos_rt_str_push_substring"
                 | "gos_rt_str_concat_drop_a"
                 | "gos_rt_str_concat"
         ),
@@ -1013,6 +1014,73 @@ fn callee_kind(callee: &Operand) -> CalleeKind<'_> {
     }
 }
 
+/// Which parameters of each user body are `&mut`, the one parameter shape a
+/// callee can write the caller's value through: a by-value parameter receives
+/// a value of its own and a shared `&` parameter only reads.
+pub(crate) struct CalleeParams {
+    mut_params: HashMap<String, Vec<bool>>,
+    def_to_name: HashMap<u32, String>,
+}
+
+impl CalleeParams {
+    /// Records the parameter shapes of every body in `bodies`.
+    pub(crate) fn compute(bodies: &[Body], tcx: &TyCtxt) -> Self {
+        let mut_params = bodies
+            .iter()
+            .map(|body| {
+                let arity = body.arity as usize;
+                let params = body
+                    .locals
+                    .iter()
+                    .skip(1)
+                    .take(arity)
+                    .map(|decl| {
+                        matches!(
+                            tcx.kind_of(decl.ty),
+                            TyKind::Ref {
+                                mutability: gossamer_types::Mutbl::Mut,
+                                ..
+                            }
+                        )
+                    })
+                    .collect();
+                (body.name.clone(), params)
+            })
+            .collect();
+        let def_to_name = bodies
+            .iter()
+            .filter_map(|b| b.def.map(|d| (d.local, b.name.clone())))
+            .collect();
+        Self {
+            mut_params,
+            def_to_name,
+        }
+    }
+
+    /// A table that knows no callee, so every user call keeps the rule that
+    /// holds without a signature.
+    #[cfg(test)]
+    pub(crate) fn unknown() -> Self {
+        Self {
+            mut_params: HashMap::new(),
+            def_to_name: HashMap::new(),
+        }
+    }
+
+    /// Whether `callee`'s parameter `index` is `&mut`, or `None` when the
+    /// callee's body is not in the table.
+    fn param_is_mut(&self, callee: &Operand, index: usize) -> Option<bool> {
+        let name = match callee {
+            Operand::Const(ConstValue::Str(name)) => name.as_str(),
+            Operand::FnRef { def, substs } if substs.is_empty() => {
+                self.def_to_name.get(&def.local)?.as_str()
+            }
+            _ => return None,
+        };
+        self.mut_params.get(name)?.get(index).copied()
+    }
+}
+
 /// `true` when a call passing `place` at argument `index` to `callee` could
 /// write the value the place reaches. A user function is handed by-value
 /// arguments as borrows or as clones and can write only through a reference,
@@ -1021,12 +1089,19 @@ fn callee_kind(callee: &Operand) -> CalleeKind<'_> {
 fn call_arg_may_write(
     body: &Body,
     tcx: &TyCtxt,
+    callees: &CalleeParams,
+    callee_op: &Operand,
     callee: &CalleeKind<'_>,
     index: usize,
     place: &Place,
 ) -> bool {
     match callee {
         CalleeKind::User => {
+            // A callee whose parameter is not `&mut` cannot write through it,
+            // whatever reference the caller holds.
+            if callees.param_is_mut(callee_op, index) == Some(false) {
+                return false;
+            }
             place.projection.is_empty()
                 && matches!(
                     tcx.kind_of(body.locals[place.local.0 as usize].ty),
@@ -1103,6 +1178,7 @@ fn stmt_disturbs_chain(
 fn term_disturbs_chain(
     body: &Body,
     tcx: &TyCtxt,
+    callees: &CalleeParams,
     t: &Terminator,
     chain: &[bool],
     root: Local,
@@ -1127,7 +1203,9 @@ fn term_disturbs_chain(
                 return true;
             }
             args.iter().enumerate().any(|(i, a)| match a {
-                Operand::Copy(p) if reaches(p) => call_arg_may_write(body, tcx, &kind, i, p),
+                Operand::Copy(p) if reaches(p) => {
+                    call_arg_may_write(body, tcx, callees, callee, &kind, i, p)
+                }
                 _ => false,
             })
         }
@@ -1278,6 +1356,7 @@ impl Class {
 fn holder_window_is_clean(
     body: &Body,
     tcx: &TyCtxt,
+    callees: &CalleeParams,
     succs: &[Vec<usize>],
     def: HolderDef,
     holder: Local,
@@ -1328,7 +1407,7 @@ fn holder_window_is_clean(
         if term_writes_bare(t, holder) {
             continue;
         }
-        if term_disturbs_chain(body, tcx, t, chain, root, &outside) {
+        if term_disturbs_chain(body, tcx, callees, t, chain, root, &outside) {
             dirty = true;
         }
         for &s in &succs[b] {
@@ -2526,7 +2605,7 @@ fn zeroed_words_are_unread(
 /// changes. A guarded member's `zero_guarded` goes with them: it exists so an
 /// early release reads a dead payload word, and every release that could read
 /// it is one of the calls being removed.
-pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt) {
+pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt, callees: &CalleeParams) {
     let n_blocks = body.blocks.len();
     let n_locals = body.locals.len();
     if n_blocks == 0 || n_locals == 0 {
@@ -2578,7 +2657,7 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt) {
         for &m in &class.members {
             seen[m.0 as usize] = true;
         }
-        if try_elide_class(body, tcx, &succs, &share, &eligible, &class) {
+        if try_elide_class(body, tcx, callees, &succs, &share, &eligible, &class) {
             elided += class.members.len();
             continue;
         }
@@ -2590,7 +2669,7 @@ pub(crate) fn elide_borrowed_holder_rc(body: &mut Body, tcx: &TyCtxt) {
                 let Some(single) = singleton_class(&rcs, &roots, &paths, member) else {
                     continue;
                 };
-                if try_elide_class(body, tcx, &succs, &share, &eligible, &single) {
+                if try_elide_class(body, tcx, callees, &succs, &share, &eligible, &single) {
                     elided += 1;
                 }
             }
@@ -2615,6 +2694,7 @@ fn counted_field_count(tcx: &TyCtxt, ty: Ty) -> usize {
 fn try_elide_class(
     body: &mut Body,
     tcx: &TyCtxt,
+    callees: &CalleeParams,
     succs: &[Vec<usize>],
     share: &crate::ownership::ShareFacts,
     eligible: &[bool],
@@ -2656,7 +2736,7 @@ fn try_elide_class(
     }
     if !sites
         .iter()
-        .all(|&(member, def)| holder_window_is_clean(body, tcx, succs, def, member, class))
+        .all(|&(member, def)| holder_window_is_clean(body, tcx, callees, succs, def, member, class))
     {
         return false;
     }

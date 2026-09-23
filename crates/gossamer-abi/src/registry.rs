@@ -1756,6 +1756,7 @@ pub const REGISTRY: &[RuntimeEntry] = &[
     rt!("gos_rt_str_push_byte", (Ptr, I32) -> Ptr, Both, "Append a byte (Unicode codepoint, ASCII for 0-127) to a string, returning the new string."),
     rt!("gos_rt_str_push_char", (Ptr, I32) -> Ptr, Both, "Append a Unicode codepoint to a string, returning the new string."),
     rt!("gos_rt_str_push_json_quoted", (Ptr, Ptr, I64, I64) -> I128, Both, "String::push_json_quoted(s, buf, start, end): append the [start, end) byte window of buf as a quoted, escaped JSON string when it is valid UTF-8. Ok carries the string pointer the receiver takes; Err carries it unchanged."),
+    rt!("gos_rt_str_push_substring", (Ptr, Ptr, I64, I64) -> Ptr, Both, "Append the characters `src.substring(start, end)` answers onto a growable string in place, without building the substring."),
     rt!("gos_rt_str_push_utf8", (Ptr, Ptr, I64, I64) -> I128, Both, "String::push_utf8(s, buf, start, end): append the [start, end) byte window of buf when it is valid UTF-8. Ok carries the string pointer the receiver takes; Err carries it unchanged."),
     rt_str!("gos_rt_str_repeat", (Ptr, I64) -> Ptr, Cranelift, "Repeat a string N times and return the result."),
     rt_str!("gos_rt_str_replace", (Ptr, Ptr, Ptr) -> Ptr, Cranelift, "Replace the first occurrence of a pattern in a string."),

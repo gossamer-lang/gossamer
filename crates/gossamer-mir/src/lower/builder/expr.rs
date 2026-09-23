@@ -2046,6 +2046,9 @@ impl<'a> Builder<'a> {
             let Some(value_local) = self.lower_expr(value) else {
                 return;
             };
+            // Every goroutine reads a static, so a counted value stored in one
+            // switches to atomic counting before any other thread can copy it.
+            self.emit_mark_shared_if_rc(value_local, span);
             self.emit_static_store(sref, Operand::Copy(Place::local(value_local)), span);
             return;
         }
@@ -3247,6 +3250,71 @@ impl<'a> Builder<'a> {
             .then_some(("gos_rt_str_concat_drop_a", piece))
     }
 
+    /// The receiver and bounds of `src.substring(start, end)` on a `String`,
+    /// so an append can copy that slice straight out of `src` instead of
+    /// building the substring first.
+    pub(crate) fn substring_append_piece<'e>(
+        &self,
+        piece: &'e HirExpr,
+    ) -> Option<(&'e HirExpr, &'e HirExpr, &'e HirExpr)> {
+        let HirExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &piece.kind
+        else {
+            return None;
+        };
+        let receiver_ty = self.peel_ref_ty(self.resolved_piece_ty(receiver));
+        (name.name.as_str() == "substring"
+            && args.len() == 2
+            && matches!(
+                self.tcx.kind_of(receiver_ty),
+                gossamer_types::TyKind::String
+            ))
+        .then(|| (&**receiver, &args[0], &args[1]))
+    }
+
+    /// Lowers the receiver and bounds of a piece
+    /// [`Self::substring_append_piece`] matched, in source order, or `None`
+    /// when one of them diverged.
+    pub(crate) fn lower_substring_operands(
+        &mut self,
+        (src, start, end): (&HirExpr, &HirExpr, &HirExpr),
+        span: Span,
+    ) -> Option<[Local; 3]> {
+        let src_local = self.lower_expr(src)?;
+        let src_local = self.auto_deref_cell(src_local, span);
+        let start_local = self.lower_expr(start)?;
+        let end_local = self.lower_expr(end)?;
+        Some([src_local, start_local, end_local])
+    }
+
+    /// Emits `dest = gos_rt_str_push_substring(acc, src, start, end)` over
+    /// operands [`Self::lower_substring_operands`] produced.
+    pub(crate) fn emit_substring_append(
+        &mut self,
+        acc: Operand,
+        dest: Place,
+        [src, start, end]: [Local; 3],
+        span: Span,
+    ) {
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_str_push_substring".to_string())),
+            args: vec![
+                acc,
+                Operand::Copy(Place::local(src)),
+                Operand::Copy(Place::local(start)),
+                Operand::Copy(Place::local(end)),
+            ],
+            destination: dest,
+            target: Some(next),
+        });
+        self.set_current(next);
+    }
+
     /// Lowers `acc += __concat(pieces...)` to one in-place append per piece
     /// (`acc = gos_rt_str_append_*(acc, piece)`), each copying its piece a
     /// single time into the accumulator. Returns `false` without emitting
@@ -3274,6 +3342,18 @@ impl<'a> Builder<'a> {
             }
         }
         for (fname, p) in fused {
+            if let Some(slice) = self.substring_append_piece(p) {
+                let Some(operands) = self.lower_substring_operands(slice, span) else {
+                    return true;
+                };
+                self.emit_substring_append(
+                    Operand::Copy(Place::local(acc)),
+                    Place::local(acc),
+                    operands,
+                    span,
+                );
+                continue;
+            }
             let literal_len = match &p.kind {
                 HirExprKind::Literal(gossamer_hir::HirLiteral::String(s))
                     if fname == "gos_rt_str_concat_drop_a" =>

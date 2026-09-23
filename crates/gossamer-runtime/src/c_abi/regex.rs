@@ -128,7 +128,9 @@ pub unsafe extern "C" fn gos_rt_regex_find(
         }
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
         match unsafe { (*re).inner.find(s) } {
-            Some(m) => alloc_cstring(m.as_str().as_bytes()),
+            Some(m) => unsafe {
+                crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
+            },
             None => alloc_cstring(b""),
         }
     })
@@ -153,7 +155,9 @@ pub unsafe extern "C" fn gos_rt_regex_find_opt(re: *const GosRegex, text: *const
                     end: i64,
                     text: i64,
                 }
-                let cstr = alloc_cstring(m.as_str().as_bytes());
+                let cstr = unsafe {
+                    crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
+                };
                 let triple = Box::into_raw(Box::new(Triple {
                     start: m.start() as i64,
                     end: m.end() as i64,
@@ -182,9 +186,9 @@ pub unsafe extern "C" fn gos_rt_regex_captures(re: *const GosRegex, text: *const
                 let inner = unsafe { gos_rt_vec_new(16) };
                 for i in 0..caps.len() {
                     let opt: i128 = match caps.get(i) {
-                        Some(m) => {
-                            gos_rt_result_new(0, alloc_cstring(m.as_str().as_bytes()) as i64)
-                        }
+                        Some(m) => gos_rt_result_new(0, unsafe {
+                            crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
+                        } as i64),
                         None => gos_rt_result_new(1, 0),
                     };
                     unsafe { gos_rt_vec_push(inner, std::ptr::addr_of!(opt).cast::<u8>()) };
@@ -218,7 +222,8 @@ pub unsafe extern "C" fn gos_rt_regex_find_all(
         }
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
         for m in unsafe { (*re).inner.find_iter(s) } {
-            let cstr = alloc_cstring(m.as_str().as_bytes());
+            let cstr =
+                unsafe { crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes()) };
             #[repr(C)]
             struct Tup {
                 start: i64,
@@ -302,7 +307,7 @@ pub unsafe extern "C" fn gos_rt_regex_split(
         }
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
         for piece in unsafe { (*re).inner.split(s) } {
-            let cstr = alloc_cstring(piece.as_bytes());
+            let cstr = unsafe { crate::c_abi::string::alloc_slice_cstring(text, piece.as_bytes()) };
             let ptr_val = cstr as i64;
             unsafe {
                 gos_rt_vec_push(vec, std::ptr::addr_of!(ptr_val).cast::<u8>());
@@ -339,7 +344,9 @@ pub unsafe extern "C" fn gos_rt_regex_captures_all(
             let inner = unsafe { gos_rt_vec_new(16) };
             for i in 0..caps.len() {
                 let opt: i128 = match caps.get(i) {
-                    Some(m) => gos_rt_result_new(0, alloc_cstring(m.as_str().as_bytes()) as i64),
+                    Some(m) => gos_rt_result_new(0, unsafe {
+                        crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
+                    } as i64),
                     None => gos_rt_result_new(1, 0),
                 };
                 unsafe {

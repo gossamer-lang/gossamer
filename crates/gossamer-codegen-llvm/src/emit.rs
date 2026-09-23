@@ -1953,7 +1953,8 @@ pub fn set_opt_profile(profile: OptProfile) {
 
 /// Records whether the final artifact uses the static-musl linker path.
 ///
-/// This affects a narrowly scoped LLVM workaround for tiny-copy loops. It is
+/// This affects a narrowly scoped LLVM workaround for tiny-copy loops on
+/// targets whose static-musl link keeps musl's memory routines. It is
 /// part of the object-cache fingerprint, so a dynamic object can never be
 /// reused for a static-musl link or vice versa.
 pub fn set_static_musl_link(enabled: bool) {
@@ -1964,8 +1965,13 @@ fn static_musl_link_enabled() -> bool {
     STATIC_MUSL_LINK.load(std::sync::atomic::Ordering::Acquire)
 }
 
+// A static-musl program on `x86_64` links the runtime's own `memcpy`,
+// `memmove`, and `memset`, sized for short moves, so a loop LLVM turns into
+// one of those calls costs no more than the loop did. Elsewhere those calls
+// reach musl's routines, whose startup outweighs a short copy.
 fn disable_loop_idiom_for_target_with_static_musl(static_musl: bool, triple: &str) -> bool {
-    static_musl || triple.contains("-unknown-linux-musl")
+    (static_musl || triple.contains("-unknown-linux-musl"))
+        && target_arch_from_triple(triple) != "x86_64"
 }
 
 fn disable_loop_idiom_for_target(triple: &str) -> bool {
@@ -3986,15 +3992,21 @@ mod host_triple_tests {
     }
 
     #[test]
-    fn loop_idiom_workaround_is_scoped_to_static_musl() {
+    fn loop_idiom_workaround_is_scoped_to_static_musl_without_runtime_mem_routines() {
         assert!(disable_loop_idiom_for_target_with_static_musl(
             true,
-            "x86_64-unknown-linux-gnu"
+            "aarch64-unknown-linux-gnu"
         ));
         assert!(disable_loop_idiom_for_target_with_static_musl(
             false,
-            "x86_64-unknown-linux-musl"
+            "aarch64-unknown-linux-musl"
         ));
+        for triple in ["x86_64-unknown-linux-gnu", "x86_64-unknown-linux-musl"] {
+            assert!(
+                !disable_loop_idiom_for_target_with_static_musl(true, triple),
+                "{triple} links the runtime's memory routines and keeps loop idiom recognition"
+            );
+        }
         for triple in [
             "x86_64-unknown-linux-gnu",
             "aarch64-apple-macosx15.0.0",

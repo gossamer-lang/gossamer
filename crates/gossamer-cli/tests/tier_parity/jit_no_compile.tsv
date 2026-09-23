@@ -161,6 +161,7 @@ feature-testing-examples/exec_pipeline.gos	no hot body
 feature-testing-examples/exec_signal_group.gos	no hot body
 feature-testing-examples/exec_wait_timeout.gos	no hot body
 feature-testing-examples/fast_string_path_scan.gos	no hot body
+feature-testing-examples/field_iteration_callee_shapes.gos	&mut aggregate param
 feature-testing-examples/fixed_array_mut_param_copy.gos	&mut aggregate param
 feature-testing-examples/flag_cell_duration.gos	no hot body
 feature-testing-examples/fmt_struct_enum.gos	entry shape
@@ -325,6 +326,7 @@ feature-testing-examples/spawn_join.gos	no hot body
 feature-testing-examples/spawn_operand_order.gos	cross-goroutine
 feature-testing-examples/static_mut_basic.gos	no hot body
 feature-testing-examples/static_mut_goroutines.gos	bytecode-only local
+feature-testing-examples/static_values_across_threads.gos	cross-goroutine
 feature-testing-examples/stdlib_encoding_crypto.gos	no hot body
 feature-testing-examples/stdlib_env_portable.gos	no hot body
 feature-testing-examples/stdlib_fs_ops.gos	no hot body

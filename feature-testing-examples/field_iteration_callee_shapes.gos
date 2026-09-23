@@ -1,0 +1,70 @@
+// A loop over a Vec field keeps walking the Vec it started with whatever the
+// calls in its body do: a free function taking the holder by value, by `mut`
+// value, or by `&mut`, a callee handed `&mut` to the field itself, a trait
+// method reached through a generic, and a closure that grows a Vec it captured.
+
+struct P { x: i64 }
+
+struct Holder { items: Vec<P>, log: Vec<i64>, total: i64 }
+
+trait Scorer { fn score(&self, p: P) -> i64 }
+
+impl Scorer for Holder {
+    fn score(&self, p: P) -> i64 { p.x + self.log.len() }
+}
+
+fn peek(h: Holder) -> i64 { h.items.len() + h.total }
+
+fn clobber(mut h: Holder) -> i64 {
+    h.items = #[P { x: -1 }]
+    h.items.push(P { x: -2 })
+    h.total + h.items.len()
+}
+
+fn swap_out(h: &mut Holder) {
+    h.items = #[P { x: 1000 }, P { x: 2000 }]
+    h.total += 1
+}
+
+fn refill(items: &mut Vec<P>) {
+    items.clear()
+    items.push(P { x: 7 })
+}
+
+fn via_trait<S: Scorer>(s: S, p: P) -> i64 { s.score(p) }
+
+fn main() {
+    let mut h = Holder { items: #[P { x: 1 }, P { x: 2 }, P { x: 3 }], log: #[], total: 0 }
+
+    let mut seen = 0
+    for p in h.items { seen += p.x + peek(h) }
+    println("peek {}", seen)
+
+    seen = 0
+    for p in h.items { seen += p.x + clobber(h) }
+    println("clobber {} still {:?}", seen, h.items.map(|p| p.x))
+
+    seen = 0
+    for p in h.items {
+        seen += p.x
+        if p.x == 1 { swap_out(&mut h) }
+    }
+    println("swap {} now {:?}", seen, h.items.map(|p| p.x))
+
+    seen = 0
+    for p in h.items {
+        seen += p.x
+        refill(&mut h.items)
+    }
+    println("refill {} now {:?}", seen, h.items.map(|p| p.x))
+
+    h.items = #[P { x: 4 }, P { x: 5 }]
+    seen = 0
+    for p in h.items { seen += via_trait(h, p) }
+    println("trait {}", seen)
+
+    let mut log = h.log
+    let record = |v: i64| log.push(v)
+    for p in h.items { record(p.x) }
+    println("closure {:?} {:?}", log, h.log)
+}

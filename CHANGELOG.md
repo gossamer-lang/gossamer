@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.63.3 - Faster CRC and unsigned math, cheaper field loops and struct pushes, in-place substring appends, shared statics
+
+- `>>` and `<`, `<=`, `>`, `>=` on `u8`, `u16`, and `u32` compile to unsigned instructions in release builds, as they already did for `u64`, so LLVM sees what the code computes: a bitwise CRC loop (`if crc & 1 != 0 { crc = (crc >> 1) ^ poly } else { crc >>= 1 }`) becomes a byte-at-a-time table lookup, several times faster. Results are unchanged on every tier.
+- A static-musl release build on `x86_64` keeps LLVM's loop idiom recognition, which the runtime's own short-move `memcpy`, `memmove`, and `memset` make safe to use; other static-musl targets still link musl's routines and keep it off.
+- `s.push_str(t.substring(a, b))` and `s += t.substring(a, b)` on the compiled tiers copy the slice straight out of `t` into `s`, where each built the substring as a `String` of its own and then copied it again.
+- A regex match, capture, or `split` piece, and the result of `trim`, `trim_start`, `trim_end`, `split`, `split_once`, `rsplit_once`, and `lines`, takes the character index of the `String` it was cut from when that text is ASCII, instead of scanning the bytes it was just written.
+- Pushing a tuple or struct of up to eight words onto a `Vec` or a `Deque` in a release build writes its fields straight into the new slot, where the value was assembled on the stack and read back at a wider width than its fields were stored at, a load the core has to wait on; building a `Vec` of small structs by `push` runs about a third faster.
+- A loop over a `Vec` field (`for s in self.spheres`) no longer takes and returns a share of the `Vec` on every entry when its body only calls methods that take `&self` or by-value parameters; only a call that can write through a `&mut` parameter can replace the field under the loop. A ray tracer that walks its scene list once per pixel runs about 30% faster.
+- A `String`, `Vec`, map, or other counted value assigned to a `static mut` is marked shared as it is stored, so goroutines on different threads that read the static take and return their copies with atomic counts; the count was updated without synchronisation, and concurrent readers could lose updates and free the value while it was still in use.
+
 ## 0.63.2 - Faster maps and tuple comparisons, leaner JSON encoding, reference and tuple fixes
 
 - `Map` lookups, inserts, and removals on the compiled tiers reach the hash table directly again: the ordered `BTreeMap` search no longer rides along on every hashed lookup, which had made a map-heavy loop up to a quarter slower.

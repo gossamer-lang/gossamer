@@ -1,0 +1,43 @@
+// Pushing structs and tuples whose fields are narrower than a word keeps every
+// field, into a Vec with and without spare capacity and into a Deque.
+
+struct Rec { flag: bool, tag: u8, ch: char, weight: f64, id: i64 }
+
+fn rec(i: i64) -> Rec {
+    Rec { flag: i % 2 == 0, tag: (i * 37) as u8, ch: if i % 3 == 0 { 'é' } else { 'z' }, weight: i as f64 / 4.0, id: i * 1000 }
+}
+
+fn main() {
+    let mut grow: Vec<Rec> = #[]
+    let mut roomy: Vec<Rec> = Vec::with_capacity(64)
+    let mut q = Deque::new()
+    let mut pairs: Vec<(bool, i64)> = #[]
+    for i in 0..40 {
+        grow.push(rec(i))
+        roomy.push(rec(i))
+        q.push_back((i % 5 == 0, i as u8, 'q'))
+        pairs.push((i % 4 == 1, i - 20))
+    }
+    let mut sum = 0.0
+    let mut flags = 0
+    let mut tags = 0
+    let mut accents = 0
+    for r in grow {
+        sum += r.weight
+        if r.flag { flags += 1 }
+        tags += r.tag as i64
+        if r.ch == 'é' { accents += 1 }
+    }
+    println("grow {} {} {} {} last={}", sum, flags, tags, accents, grow[39].id)
+    let same = grow.len() == roomy.len() && (0..40).all(|i| grow[i].id == roomy[i].id && grow[i].tag == roomy[i].tag && grow[i].flag == roomy[i].flag && grow[i].ch == roomy[i].ch)
+    println("roomy same {}", same)
+    let mut qflags = 0
+    let mut qsum = 0
+    while let Some((f, t, c)) = q.pop_front() {
+        if f { qflags += 1 }
+        qsum += t as i64
+        if c != 'q' { qsum = -1000000 }
+    }
+    println("deque {} {}", qflags, qsum)
+    println("pairs {:?} {:?}", pairs[1], pairs[38])
+}

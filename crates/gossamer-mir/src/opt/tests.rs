@@ -455,7 +455,7 @@ mod elision_tests {
     fn elides_share_of_holder_that_borrows_a_field() {
         let mut tcx = TyCtxt::new();
         let mut body = holder_body(&mut tcx, vec![]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert!(is_nop(&body.blocks[0].stmts[1]), "retain of the holder should go");
         assert!(is_nop(&body.blocks[1].stmts[0]), "release of the holder should go");
         assert!(
@@ -477,7 +477,7 @@ mod elision_tests {
             Rvalue::Use(Operand::Copy(Place::local(Local(6)))),
         );
         let mut body = holder_body(&mut tcx, vec![overwrite]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert_eq!(intrinsic_name(&body.blocks[0].stmts[1]), Some("gos_rt_vec_retain"));
         assert_eq!(intrinsic_name(&body.blocks[1].stmts[0]), Some("gos_rt_vec_free"));
     }
@@ -867,7 +867,7 @@ mod elision_tests {
     fn elides_the_guarded_walk_of_a_holder_copied_out_of_a_parameter() {
         let mut tcx = TyCtxt::new();
         let mut body = guarded_holder_body(&mut tcx, "gos_rc_meta_copyblob_1");
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert!(
             is_nop(&body.blocks[0].stmts[1]),
             "the copy's walk over the children should go"
@@ -882,7 +882,7 @@ mod elision_tests {
     fn keeps_a_guarded_walk_whose_release_names_another_copy_blob() {
         let mut tcx = TyCtxt::new();
         let mut body = guarded_holder_body(&mut tcx, "gos_rc_meta_copyblob_2");
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert_eq!(
             intrinsic_name(&body.blocks[0].stmts[1]),
             Some("gos_rt_aggr_retain_children")
@@ -993,7 +993,7 @@ mod elision_tests {
     fn elides_both_shares_of_a_payload_extracted_out_of_a_borrowed_carrier() {
         let mut tcx = TyCtxt::new();
         let mut body = payload_holder_body(&mut tcx, vec![]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert!(is_nop(&body.blocks[0].stmts[1]), "the slot retain should go");
         assert!(is_nop(&body.blocks[0].stmts[3]), "the walk retain should go");
         assert!(
@@ -1019,7 +1019,7 @@ mod elision_tests {
             Rvalue::Use(Operand::Copy(Place::local(Local(9)))),
         );
         let mut body = payload_holder_body(&mut tcx, vec![overwrite]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert_eq!(
             intrinsic_name(&body.blocks[0].stmts[1]),
             Some("gos_rt_option_slot_retain")
@@ -1135,7 +1135,7 @@ mod elision_tests {
     fn elides_every_share_in_a_cursor_class_rooted_at_a_parameter() {
         let mut tcx = TyCtxt::new();
         let mut body = cursor_class_body(&mut tcx, vec![]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         let live: Vec<&str> = body
             .blocks
             .iter()
@@ -1154,7 +1154,7 @@ mod elision_tests {
         // A bare write of the root replaces the tree the whole class views.
         let overwrite = copy(1, 3);
         let mut body = cursor_class_body(&mut tcx, vec![overwrite]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         let live: Vec<&str> = body
             .blocks
             .iter()
@@ -1170,7 +1170,7 @@ mod elision_tests {
     fn elides_field_share_of_a_struct_holder_read_through_a_reference() {
         let mut tcx = TyCtxt::new();
         let mut body = field_holder_body(&mut tcx, vec![]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert!(
             is_nop(&body.blocks[0].stmts[1]),
             "the copy's share of the Vec field should go"
@@ -1194,7 +1194,7 @@ mod elision_tests {
             Rvalue::Use(Operand::Copy(Place::local(Local(6)))),
         );
         let mut body = field_holder_body(&mut tcx, vec![overwrite]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert_eq!(
             intrinsic_name(&body.blocks[0].stmts[1]),
             Some("gos_rt_vec_retain")
@@ -1221,7 +1221,7 @@ mod elision_tests {
             destination: Place::local(Local(7)),
             target: Some(BlockId(1)),
         };
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert!(
             is_nop(&body.blocks[0].stmts[1]),
             "an element store leaves the receiver's count alone, so the retain should go"
@@ -1248,7 +1248,7 @@ mod elision_tests {
             },
         );
         let mut body = holder_body(&mut tcx, vec![push]);
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert_eq!(
             intrinsic_name(&body.blocks[0].stmts[1]),
             Some("gos_rt_vec_retain")
@@ -1268,7 +1268,7 @@ mod elision_tests {
             destination: Place::local(Local(3)),
             target: Some(BlockId(1)),
         };
-        elide_borrowed_holder_rc(&mut body, &tcx);
+        elide_borrowed_holder_rc(&mut body, &tcx, &crate::opt::CalleeParams::unknown());
         assert_eq!(intrinsic_name(&body.blocks[0].stmts[1]), Some("gos_rt_vec_retain"));
     }
 

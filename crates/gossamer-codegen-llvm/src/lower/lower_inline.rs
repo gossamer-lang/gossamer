@@ -2593,11 +2593,7 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  {off} = mul i64 {len}, {bytes}").unwrap();
         let ea = self.elem_addr(&data, &off);
         match elem_kind {
-            DequePushElem::Slots => writeln!(
-                self.out,
-                "  call void @llvm.memcpy.p0.p0.i64(ptr {ea}, ptr {elem}, i64 {bytes}, i1 false)"
-            )
-            .unwrap(),
+            DequePushElem::Slots => self.emit_small_aggregate_copy(&ea, &elem, bytes),
             DequePushElem::Word => {
                 writeln!(self.out, "  store i64 {elem}, ptr {ea}{TBAA_DATA}").unwrap();
             }
@@ -3035,6 +3031,47 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  store i64 {next}, ptr {addr}{TBAA_HEADER}").unwrap();
     }
 
+    /// Copies an inline aggregate of `bytes` bytes from the slot at `src` to
+    /// `dst`. A few words move as word loads and stores, which the optimiser
+    /// forwards from the stores that just built the value, so the element is
+    /// written straight to `dst` and never re-read at a width its fields were
+    /// not stored at. A larger value keeps the bulk copy.
+    fn emit_small_aggregate_copy(&mut self, dst: &str, src: &str, bytes: i64) {
+        const MAX_WORD_COPY_BYTES: i64 = 64;
+        if bytes % 8 != 0 || bytes > MAX_WORD_COPY_BYTES {
+            writeln!(
+                self.out,
+                "  call void @llvm.memcpy.p0.p0.i64(ptr {dst}, ptr {src}, i64 {bytes}, i1 false)"
+            )
+            .unwrap();
+            return;
+        }
+        for word in 0..bytes / 8 {
+            let (from, to) = if word == 0 {
+                (src.to_string(), dst.to_string())
+            } else {
+                let from = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {from} = getelementptr i8, ptr {src}, i64 {}",
+                    word * 8
+                )
+                .unwrap();
+                let to = self.fresh();
+                writeln!(
+                    self.out,
+                    "  {to} = getelementptr i8, ptr {dst}, i64 {}",
+                    word * 8
+                )
+                .unwrap();
+                (from, to)
+            };
+            let value = self.fresh();
+            writeln!(self.out, "  {value} = load i64, ptr {from}").unwrap();
+            writeln!(self.out, "  store i64 {value}, ptr {to}").unwrap();
+        }
+    }
+
     /// Emits the spare-capacity path of an aggregate-element push: the
     /// element's bytes move into the slot past the end and the length grows
     /// by one. Growth, and a null receiver, stay with the runtime shim.
@@ -3068,11 +3105,7 @@ impl<'a> Lowerer<'a> {
         let off = self.fresh();
         writeln!(self.out, "  {off} = mul i64 {len}, {bytes}").unwrap();
         let ea = self.elem_addr(&data, &off);
-        writeln!(
-            self.out,
-            "  call void @llvm.memcpy.p0.p0.i64(ptr {ea}, ptr {val_addr}, i64 {bytes}, i1 false)"
-        )
-        .unwrap();
+        self.emit_small_aggregate_copy(&ea, val_addr, bytes);
         let len1 = self.fresh();
         writeln!(self.out, "  {len1} = add i64 {len}, 1").unwrap();
         writeln!(self.out, "  store i64 {len1}, ptr {vec_ptr}{TBAA_HEADER}").unwrap();

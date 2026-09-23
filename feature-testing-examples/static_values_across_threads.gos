@@ -1,0 +1,30 @@
+// A String or Vec stored in a `static mut` is read by goroutines on several
+// OS threads at once; the copies they take and give back are counted
+// atomically, so the static keeps its value.
+
+
+static mut NAME: String = ""
+static mut ITEMS: Vec<i64> = #[]
+
+fn reader(rounds: i64) -> i64 {
+    let mut total = 0
+    for _ in 0..rounds {
+        let s = NAME
+        let v = ITEMS
+        total += s.byte_len() + v.len()
+    }
+    total
+}
+
+fn main() {
+    NAME = format("shared-{}", 42)
+    ITEMS = #[1, 2, 3]
+    let r = cohort(isolation: Isolation::Thread) {
+        let a = spawn(|| reader(20000))
+        let b = spawn(|| reader(20000))
+        let c = spawn(|| reader(20000))
+        let d = spawn(|| reader(20000))
+        println("{}", a.join().unwrap_or(0) + b.join().unwrap_or(0) + c.join().unwrap_or(0) + d.join().unwrap_or(0))
+    }
+    match r { Ok(_) => println("ok {} {}", NAME, ITEMS.len()), Err(e) => println("err {}", e) }
+}

@@ -1871,6 +1871,32 @@ impl<'a> Builder<'a> {
                     }
                     _ => None,
                 };
+                // `s.push_str(t.substring(a, b))` copies the slice straight
+                // out of `t`; the substring is never built.
+                if let Some(slice) = self.substring_append_piece(&args[0]) {
+                    let Some(operands) = self.lower_substring_operands(slice, span) else {
+                        return MethodLowering::Handled(None);
+                    };
+                    let Some(recv_place) = self.string_receiver_place(receiver) else {
+                        return MethodLowering::Handled(None);
+                    };
+                    if projected {
+                        self.retain_string_place(&recv_place, span);
+                    }
+                    let dest = self.fresh(peeled);
+                    self.emit_substring_append(
+                        Operand::Copy(recv_place.clone()),
+                        Place::local(dest),
+                        operands,
+                        span,
+                    );
+                    self.emit_assign(
+                        recv_place,
+                        Rvalue::Use(Operand::Copy(Place::local(dest))),
+                        span,
+                    );
+                    return MethodLowering::Handled(Some(self.lower_unit(span)));
+                }
                 // `s.push_str(n.to_string())` appends the scalar's text in
                 // place; the `String` the argument names is never built.
                 let (append, appended) = match self.fused_append_piece(&args[0]) {

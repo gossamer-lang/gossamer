@@ -862,6 +862,23 @@ fn alloc_ascii_cstring(bytes: &[u8]) -> *mut c_char {
     })
 }
 
+/// Copies `bytes`, a slice of the string `source`, into a fresh string. A slice
+/// of ASCII text is ASCII, so when `source`'s index says it is the copy takes
+/// that index instead of scanning the bytes it was just written.
+///
+/// # Safety
+///
+/// `source` is null or a Gossamer string body, and `bytes` holds text copied
+/// from within its content.
+#[inline]
+pub(crate) unsafe fn alloc_slice_cstring(source: *const c_char, bytes: &[u8]) -> *mut c_char {
+    if unsafe { typed_str_is_ascii(source) } {
+        alloc_ascii_cstring(bytes)
+    } else {
+        alloc_cstring(bytes)
+    }
+}
+
 /// [`alloc_growable_with_fill`], told whether the filled content is known to
 /// be ASCII.
 fn alloc_growable_filled<F>(
@@ -1686,23 +1703,63 @@ pub unsafe extern "C" fn gos_rt_str_substring(
         if s.is_null() {
             return alloc_cstring(b"");
         }
-        // O(1) length from the string's length header (every runtime-built
-        // string carries one); an untagged rodata literal falls back to
-        // strlen. Sizing the slice from the header keeps `substring`
-        // proportional to the slice length, not the source length, so a
-        // sliding-window scan over one string stays linear.
-        let byte_len = unsafe { typed_str_len(s) };
-        let len_i = byte_len as i64;
-        let lo = start.clamp(0, len_i) as usize;
-        let hi = end.clamp(0, len_i).max(start.clamp(0, len_i)) as usize;
-        let lo_byte = unsafe { typed_str_next_char_boundary(s, lo) }.unwrap_or(byte_len);
-        let hi_byte = unsafe { typed_str_next_char_boundary(s, hi) }.unwrap_or(byte_len);
-        let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), byte_len) };
-        // Every slice of ASCII content is ASCII.
-        if unsafe { typed_str_is_ascii(s) } {
-            return alloc_ascii_cstring(&bytes[lo_byte..hi_byte]);
-        }
-        alloc_cstring_from_slices(&[&bytes[lo_byte..hi_byte]])
+        let bytes = unsafe { substring_bytes(s, start, end) };
+        unsafe { alloc_slice_cstring(s, bytes) }
+    })
+}
+
+/// The bytes `s.substring(start, end)` answers: the offsets clamped into the
+/// string, the end no earlier than the start, each moved forward to the next
+/// character boundary.
+///
+/// # Safety
+///
+/// `s` is a non-null Gossamer string body that stays alive while the slice is
+/// in use.
+#[allow(
+    clippy::inline_always,
+    reason = "shared by `substring` and `push_substring`, each called once per slice a program cuts: left to the heuristic, LLVM keeps it out of line and every substring pays a call"
+)]
+#[inline(always)]
+unsafe fn substring_bytes<'a>(s: *const c_char, start: i64, end: i64) -> &'a [u8] {
+    // O(1) length from the string's length header (every runtime-built
+    // string carries one); an untagged rodata literal falls back to
+    // strlen. Sizing the slice from the header keeps `substring`
+    // proportional to the slice length, not the source length, so a
+    // sliding-window scan over one string stays linear.
+    let byte_len = unsafe { typed_str_len(s) };
+    let len_i = byte_len as i64;
+    let lo = start.clamp(0, len_i) as usize;
+    let hi = end.clamp(0, len_i).max(start.clamp(0, len_i)) as usize;
+    let lo_byte = unsafe { typed_str_next_char_boundary(s, lo) }.unwrap_or(byte_len);
+    let hi_byte = unsafe { typed_str_next_char_boundary(s, hi) }.unwrap_or(byte_len);
+    let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), byte_len) };
+    &bytes[lo_byte..hi_byte]
+}
+
+/// `acc.push_str(src.substring(start, end))` without the intermediate
+/// `String`: appends the characters `substring` would answer straight from
+/// `src`, taking and answering the accumulator as
+/// [`gos_rt_str_append_bytes`] does. `src` may be `acc` itself: an append in
+/// place copies from below the current length, and a regrowth reads both
+/// before the old buffer is freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_str_push_substring(
+    acc: *const c_char,
+    src: *const c_char,
+    start: i64,
+    end: i64,
+) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        let bytes: &[u8] = if src.is_null() {
+            &[]
+        } else {
+            unsafe { substring_bytes(src, start, end) }
+        };
+        // A slice of ASCII text is ASCII, so the accumulator's index is
+        // extended without scanning the bytes appended.
+        let ascii = unsafe { typed_str_is_ascii(src) };
+        unsafe { str_append_parts(acc, &[bytes], ascii) }
     })
 }
 
@@ -1998,7 +2055,7 @@ pub unsafe extern "C" fn gos_rt_str_trim(s: *const c_char) -> *mut c_char {
             unsafe { gos_str_arg_bytes(s) }
         };
         let st = std::str::from_utf8(bytes).unwrap_or("");
-        alloc_cstring(st.trim().as_bytes())
+        unsafe { alloc_slice_cstring(s, st.trim().as_bytes()) }
     })
 }
 
@@ -2013,7 +2070,7 @@ pub unsafe extern "C" fn gos_rt_str_trim_start(s: *const c_char) -> *mut c_char 
             unsafe { gos_str_arg_bytes(s) }
         };
         let st = std::str::from_utf8(bytes).unwrap_or("");
-        alloc_cstring(st.trim_start().as_bytes())
+        unsafe { alloc_slice_cstring(s, st.trim_start().as_bytes()) }
     })
 }
 
@@ -2028,7 +2085,7 @@ pub unsafe extern "C" fn gos_rt_str_trim_end(s: *const c_char) -> *mut c_char {
             unsafe { gos_str_arg_bytes(s) }
         };
         let st = std::str::from_utf8(bytes).unwrap_or("");
-        alloc_cstring(st.trim_end().as_bytes())
+        unsafe { alloc_slice_cstring(s, st.trim_end().as_bytes()) }
     })
 }
 
@@ -2329,6 +2386,7 @@ pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_c
         if s.is_null() || sep.is_null() {
             return unsafe { gos_rt_result_new(1, 0) };
         }
+        let source = s;
         let s = unsafe { gos_str_arg_text(s) };
         let sep = unsafe { gos_str_arg_text(sep) };
         if sep.is_empty() {
@@ -2343,8 +2401,8 @@ pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_c
                     b: i64,
                 }
                 let pair = Box::into_raw(Box::new(Pair {
-                    a: alloc_cstring(a.as_bytes()) as i64,
-                    b: alloc_cstring(b.as_bytes()) as i64,
+                    a: unsafe { alloc_slice_cstring(source, a.as_bytes()) } as i64,
+                    b: unsafe { alloc_slice_cstring(source, b.as_bytes()) } as i64,
                 }));
                 unsafe { gos_rt_result_new(0, pair as i64) }
             }
@@ -2360,6 +2418,7 @@ pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_
         if s.is_null() || sep.is_null() {
             return unsafe { gos_rt_result_new(1, 0) };
         }
+        let source = s;
         let s = unsafe { gos_str_arg_text(s) };
         let sep = unsafe { gos_str_arg_text(sep) };
         if sep.is_empty() {
@@ -2374,8 +2433,8 @@ pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_
                     b: i64,
                 }
                 let pair = Box::into_raw(Box::new(Pair {
-                    a: alloc_cstring(a.as_bytes()) as i64,
-                    b: alloc_cstring(b.as_bytes()) as i64,
+                    a: unsafe { alloc_slice_cstring(source, a.as_bytes()) } as i64,
+                    b: unsafe { alloc_slice_cstring(source, b.as_bytes()) } as i64,
                 }));
                 unsafe { gos_rt_result_new(0, pair as i64) }
             }
@@ -2590,6 +2649,7 @@ pub unsafe extern "C" fn gos_rt_str_slice(s: *const c_char, start: i64, end: i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_split(s: *const c_char, sep: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        let source = s;
         let s = if s.is_null() {
             ""
         } else {
@@ -2600,7 +2660,10 @@ pub unsafe extern "C" fn gos_rt_str_split(s: *const c_char, sep: *const c_char) 
         } else {
             unsafe { gos_str_arg_text(sep) }
         };
-        let parts: Vec<*mut c_char> = s.split(sep).map(|p| alloc_cstring(p.as_bytes())).collect();
+        let parts: Vec<*mut c_char> = s
+            .split(sep)
+            .map(|p| unsafe { alloc_slice_cstring(source, p.as_bytes()) })
+            .collect();
         // STRING-typed: the vec owns the pieces, so `gos_rt_vec_free`
         // reclaims them even when a consumer loop breaks early.
         let vec = unsafe {
@@ -2783,12 +2846,16 @@ pub unsafe extern "C" fn gos_rt_vec_join_char(v: *const GosVec, sep: *const c_ch
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_lines(s: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        let source = s;
         let s = if s.is_null() {
             ""
         } else {
             unsafe { gos_str_arg_text(s) }
         };
-        let parts: Vec<*mut c_char> = s.lines().map(|l| alloc_cstring(l.as_bytes())).collect();
+        let parts: Vec<*mut c_char> = s
+            .lines()
+            .map(|l| unsafe { alloc_slice_cstring(source, l.as_bytes()) })
+            .collect();
         // STRING-typed - same ownership contract as `gos_rt_str_split`.
         let vec = unsafe {
             crate::c_abi::vec::gos_rt_vec_with_capacity_typed(

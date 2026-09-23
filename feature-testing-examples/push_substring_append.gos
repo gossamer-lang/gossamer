@@ -1,0 +1,36 @@
+// Appending a substring copies the slice straight from its source, with the
+// bounds `substring` itself applies.
+
+struct Doc { text: String }
+
+fn main() {
+    let text = "alpha {{beta}} gamma"
+    let mut out = String::new()
+    out.push_str(text.substring(0, 6))
+    out.push_str(text.substring(8, 12))
+    out += text.substring(14, 99)
+    println("[{}]", out)
+
+    let mut grow = "ab"
+    for _ in 0..5 { grow.push_str(grow.substring(0, grow.byte_len())) }
+    println("self {} {}", grow.byte_len(), grow.substring(0, 6))
+
+    let wide = "héllo wörld ✓"
+    let mut picked = String::new()
+    picked.push_str(wide.substring(0, 2))
+    picked.push_str(wide.substring(1, 3))
+    picked += wide.substring(12, 16)
+    println("wide [{}] {}", picked, picked.byte_len())
+
+    let mut edges = String::new()
+    edges.push_str(text.substring(-5, 3))
+    edges.push_str(text.substring(10, 4))
+    edges.push_str(text.substring(50, 60))
+    edges += text.substring(3, 3)
+    println("edges [{}]", edges)
+
+    let mut doc = Doc { text: "x" }
+    let src = "0123456789"
+    for i in 0..4 { doc.text.push_str(src.substring(i, i + 2)) }
+    println("field [{}]", doc.text)
+}

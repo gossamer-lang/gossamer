@@ -1,0 +1,50 @@
+// Unsigned shifts and comparisons at the edges of each width, and a bitwise
+// CRC-32 whose loop a release build computes a byte at a time.
+
+fn crc32(data: [u8]) -> u32 {
+    let mut crc: u32 = 0xFFFFFFFF
+    for byte in data {
+        crc ^= byte as u32
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xEDB88320
+            } else {
+                crc >>= 1
+            }
+        }
+    }
+    crc ^ 0xFFFFFFFF
+}
+
+fn crc16(data: [u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF
+    for byte in data {
+        crc ^= byte as u16
+        for _ in 0..8 {
+            if crc & 1 != 0 {
+                crc = (crc >> 1) ^ 0xA001
+            } else {
+                crc >>= 1
+            }
+        }
+    }
+    crc
+}
+
+fn main() {
+    let big8: u8 = 255
+    let big16: u16 = 65535
+    let big32: u32 = 4294967295
+    let one32: u32 = 1
+    println("shr {} {} {} {}", big8 >> 1, big16 >> 15, big32 >> 31, big32 >> 1)
+    println("cmp {} {} {} {}", big32 > one32, big8 > 1, big16 >= big16, one32 < big32)
+    let mut wrapped: u32 = 0
+    wrapped -%= 1
+    println("wrapped {} {} {}", wrapped, wrapped >> 28, wrapped > 1)
+
+    let text = "The quick brown fox jumps over the lazy dog"
+    println("crc32 {}", crc32(text.as_bytes()))
+    println("crc16 {}", crc16(text.as_bytes()))
+    let zeros: Vec<u8> = #[0; 4096]
+    println("crc32 zeros {}", crc32(zeros))
+}
