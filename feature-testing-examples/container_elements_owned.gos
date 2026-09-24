@@ -1,0 +1,72 @@
+// A container stored in another container is the holder's own: storing one
+// keeps a copy, copying the holder copies it, and a later write through the
+// binding it came from leaves the stored element alone. Deques, queues,
+// stacks, heaps, and sets held in maps, vectors, and structs included.
+use std::collections::{Deque, Queue, Stack, MinHeap}
+
+struct Bag { tags: Set<String>, q: Deque<i64>, n: i64 }
+
+fn make(i: i64) -> Bag {
+    let mut q = Deque::new()
+    q.push_back(i)
+    Bag { tags: #{ i.to_string() }, q: q, n: i }
+}
+
+fn fill(m: &mut Map<String, Deque<i64>>, k: String) {
+    let mut d = Deque::new()
+    d.push_back(1)
+    d.push_back(2)
+    let _ = m.insert(k, d)
+}
+
+fn main() {
+    let mut m: Map<String, Deque<i64>> = Map::new()
+    for i in 0..10 { fill(&mut m, i.to_string()) }
+    let m2 = m
+    m.or_insert("3", Deque::new()).push_back(9)
+    println("{:?} {:?}", m.get("3"), m2.get("3"))
+
+    let mut vs = #[Stack::new()]
+    vs[0].push(1)
+    let vs2 = vs
+    vs[0].push(2)
+    println("{} {}", vs[0].len(), vs2[0].len())
+
+    let mut hq: Map<i64, MinHeap<i64>> = Map::new()
+    hq.insert(1, MinHeap::from([3, 1, 2]))
+    let hq2 = hq
+    hq.or_insert(1, MinHeap::new()).push(0)
+    let mut h = hq.get(1).unwrap()
+    h.push(-1)
+    println("{} {} {}", hq.get(1).unwrap().len(), hq2.get(1).unwrap().len(), h.len())
+
+    let mut bags: Map<i64, Bag> = Map::new()
+    for i in 0..20 { bags.insert(i, make(i)) }
+    let bags2 = bags
+    bags.or_insert(5, make(0)).q.push_back(99)
+    println("{} {} {}", bags.get(5).unwrap().q.len(), bags2.get(5).unwrap().q.len(), bags.get(7).unwrap().tags.len())
+
+    let mut s = #{ 1 }
+    let mut stored = #[]
+    stored.push(s)
+    s.insert(2)
+    let mut q = Queue::new()
+    q.push("a")
+    let mut qm: Map<String, Queue<String>> = Map::new()
+    qm.insert("x", q)
+    q.push("b")
+    let mut v = #[1]
+    let mut vv = #[]
+    vv.push(v)
+    v.push(2)
+    let pair = (s, v)
+    s.insert(3)
+    println("{:?} {:?} {} {:?} {:?}", stored, qm.get("x"), vv, pair, s)
+
+    let mut deques = #[]
+    for i in 0..20 { let mut d = Deque::new(); d.push_back(i); deques.push(d) }
+    let mut words: Set<String> = Set::new()
+    for i in 0..20 { words.insert(i.to_string()) }
+    let lits: Set<String> = #{ (7).to_string(), "x" }
+    println("{} {} {}", deques.len(), words.len(), lits.len())
+}

@@ -43,7 +43,18 @@ pub(crate) fn payload_own_storage(v: Value) -> Value {
 
 pub(crate) fn map_like_deep_clone(v: &Value) -> Value {
     match v {
-        Value::Map(m) => Value::Map(Arc::new(parking_lot::Mutex::new(m.lock().clone()))),
+        // A value that is itself a table (`Map<K, Map<..>>`, `Map<K, Set<..>>`)
+        // takes storage of its own too, or a write through one map's entry
+        // lands in the other's.
+        Value::Map(m) => {
+            let mut copy = m.lock().clone();
+            for value in copy.values_mut() {
+                if holds_shared_storage(value) {
+                    *value = map_like_deep_clone(value);
+                }
+            }
+            Value::Map(Arc::new(parking_lot::Mutex::new(copy)))
+        }
         Value::IntMap(m) => Value::IntMap(Arc::new(parking_lot::Mutex::new(m.lock().clone()))),
         Value::StrIntMap(m) => {
             Value::StrIntMap(Arc::new(parking_lot::Mutex::new(m.lock().clone())))

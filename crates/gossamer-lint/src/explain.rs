@@ -245,7 +245,11 @@ pub fn lint_explanation(id: &str) -> Option<&'static str> {
             A newline followed by `-`, `*`, or `&` starts a NEW statement, so\n\
             a continuation meant as part of the line above becomes one of\n\
             these. Join it to that line (end the previous line with the\n\
-            operator, or parenthesise), or bind what it computes."
+            operator, or parenthesise), or bind what it computes.\n\
+            A builtin method that answers a new value and writes nothing -\n\
+            `v.dedup()`, `s.trim()`, `s.to_uppercase()` - is reported the same\n\
+            way when its result is dropped: the receiver is unchanged, so bind\n\
+            the result (`v = v.dedup()`)."
         }
         _ => return None,
     })

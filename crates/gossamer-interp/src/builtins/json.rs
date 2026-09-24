@@ -543,6 +543,9 @@ pub(crate) fn gossamer_to_json_value(value: &Value) -> json_std::Value {
         Value::Unit | Value::Void | Value::Weak(_) => json_std::Value::Null,
         Value::Bool(b) => json_std::Value::Bool(*b),
         Value::Int(n) => json_std::Value::Int(*n),
+        // JSON has no NaN or infinity, so such a float is `null`, as the
+        // compiled tiers build it.
+        Value::Float(f) if !f.is_finite() => json_std::Value::Null,
         Value::Float(f) => json_std::Value::Number(*f),
         Value::Char(c) => json_std::Value::String(c.to_string()),
         Value::String(s) => json_std::Value::String(s.as_str().to_string()),

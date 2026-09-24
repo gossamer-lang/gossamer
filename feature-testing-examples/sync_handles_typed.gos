@@ -1,0 +1,81 @@
+// Every `std::sync` handle carries a type of its own, with a closed method
+// table: an atomic holds a word of its own width, `Once::call` answers a
+// `bool`, and a qualified call `sync::T::method(h, ..)` is the method.
+
+use std::sync
+
+struct Stats {
+    hits: sync::AtomicU64
+    wg: sync::WaitGroup
+}
+
+fn bump(a: sync::AtomicI64, n: i64) -> i64 {
+    a.fetch_add(n)
+}
+
+fn guarded(m: sync::Mutex, count: sync::AtomicI32) {
+    m.lock()
+    count.fetch_add(1)
+    m.unlock()
+}
+
+fn rendezvous(b: sync::Barrier, c: sync::AtomicI64) {
+    c.fetch_add(10)
+    b.wait()
+}
+
+fn main() {
+    let a = sync::AtomicI64::new(5)
+    println("{} {} {}", a.fetch_add(2), a.fetch_sub(1), a.load())
+    a.store(-3)
+    println("{} {}", a.compare_exchange(-3, 9), a.load())
+    println("{} {}", bump(a, 4), sync::AtomicI64::load(a))
+
+    let i = sync::AtomicI32::new(i32::MAX)
+    println("{} {}", i.fetch_add(1), i.load())
+    println("{} {}", i.fetch_sub(1), i.load())
+    println("{} {}", i.compare_exchange(i32::MAX, 0), i.load())
+
+    let u = sync::AtomicU64::new(u64::MAX)
+    println("{}", u.load())
+    println("{} {}", u.fetch_add(1), u.load())
+    println("{} {}", u.fetch_sub(1), u.compare_exchange(u64::MAX, 7))
+
+    let flag = sync::AtomicBool::new(false)
+    flag.store(true)
+    println("{} {}", flag.load(), sync::AtomicBool::compare_exchange(flag, true, false))
+
+    let lock = sync::RwLock::new(10)
+    lock.write(11)
+    println("{} {}", lock.read(), lock.with_write(|v| v * 2))
+
+    let once = sync::Once::new()
+    let first = once.call(|| println("once"))
+    let second = once.call(|| println("twice"))
+    println("{} {}", first, second)
+
+    let s = Stats {
+        hits: sync::AtomicU64::new(3)
+        wg: sync::WaitGroup::new()
+    }
+    s.hits.fetch_add(2)
+    s.wg.add(1)
+    s.wg.done()
+    s.wg.wait()
+    println("{}", s.hits.load())
+
+    let m = sync::Mutex::new()
+    let count = sync::AtomicI32::new(0)
+    let _ = cohort {
+        for _ in 0..4 {
+            spawn(|| guarded(m, count))
+        }
+    }
+    println("{}", count.load())
+
+    let b = sync::Barrier::new(2)
+    let c = sync::AtomicI64::new(0)
+    spawn(|| rendezvous(b, c))
+    b.wait()
+    println("{}", c.load())
+}

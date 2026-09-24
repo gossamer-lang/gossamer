@@ -477,7 +477,7 @@ Shared access is the runtime's business, not a marker's: reach for `sync::Mutex`
 Instead: Remove the block.
 
 ```gossamer
-let guard = sync::Mutex::new(0)
+let guard = sync::Mutex::new()
 ```
 
 ### `Drop`

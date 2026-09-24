@@ -706,10 +706,8 @@ fn main() {
 
 #[test]
 fn aot_atomic_bool() {
-    // AtomicBool is bit-equivalent to AtomicI64 in the compiled
-    // tier; `store(true)` stores 1 and `load()` returns the i64
-    // representation. The test asserts truthiness via `!= 0` so
-    // both tiers (VM bool, compiled i64) round-trip identically.
+    // `load()` answers the `bool` an `AtomicBool` holds, which renders as
+    // one on every tier.
     assert_release_stdout_eq(
         "atomic_bool",
         r#"
@@ -718,10 +716,10 @@ fn main() {
     let a = sync::AtomicBool::new(false)
     a.store(true)
     let v = a.load()
-    if v != 0 { println("v=true") } else { println("v=false") }
+    if v { println("v=true {}", v) } else { println("v=false") }
 }
 "#,
-        "v=true\n",
+        "v=true true\n",
     );
 }
 

@@ -452,6 +452,10 @@ impl<'a> Lowerer<'a> {
             name,
             "gos_rt_map_set_blob_values"
                 | "gos_rt_map_set_vec_values"
+                | "gos_rt_map_set_map_values"
+                | "gos_rt_map_set_set_values"
+                | "gos_rt_map_set_deque_values"
+                | "gos_rt_map_set_heap_values"
                 | "gos_rt_map_set_float_keys"
                 | "gos_rt_map_set_ordered"
                 | "gos_rt_map_set_ordered_by"

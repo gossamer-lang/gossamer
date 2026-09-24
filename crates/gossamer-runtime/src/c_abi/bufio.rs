@@ -76,6 +76,27 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_scan(s: *mut GosScanner) -> bool {
     })
 }
 
+/// `scanner.next() -> Option<String>`: advances to the next line and answers
+/// it, or `None` at the end of input. The line is also the scanner's current
+/// text, as a `scan` would leave it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_bufio_scanner_next(s: *mut GosScanner) -> i128 {
+    ffi_entry!(0i128, {
+        if s.is_null() {
+            return gos_rt_result_new(1, 0);
+        }
+        let scanner = unsafe { &mut *s };
+        if let Some(line) = scanner.lines.next() {
+            let text = alloc_cstring(line.as_bytes()) as i64;
+            scanner.current = Some(line);
+            gos_rt_result_new(0, text)
+        } else {
+            scanner.current = None;
+            gos_rt_result_new(1, 0)
+        }
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bufio_scanner_text(s: *const GosScanner) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {

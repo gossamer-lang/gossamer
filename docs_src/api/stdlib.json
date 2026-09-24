@@ -14560,7 +14560,7 @@
       "name": "std::strings::find",
       "kind": "function",
       "signature": "fn find(text: String, needle: String | char) -> Option<i64>",
-      "description": "Returns the byte position of the first match.",
+      "description": "Returns the character index of the first match, or None.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -14731,7 +14731,7 @@
       "name": "std::strings::rfind",
       "kind": "function",
       "signature": "fn rfind(text: String, needle: String | char) -> Option<i64>",
-      "description": "Byte index of the last occurrence of a needle, or -1.",
+      "description": "Returns the character index of the last match, or None.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15320,7 +15320,7 @@
       "name": "std::sync::Mutex",
       "kind": "type",
       "signature": null,
-      "description": "Mutual-exclusion lock.",
+      "description": "Mutual-exclusion lock: `lock()` / `unlock()` around the code it guards.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15354,11 +15354,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-sync-Receiver",
+      "name": "std::sync::Receiver",
+      "kind": "type",
+      "signature": null,
+      "description": "The receiving end of a channel: `recv() -> Option<T>`, `None` once it is closed and drained.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdsync",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-sync-RwLock",
       "name": "std::sync::RwLock",
       "kind": "type",
       "signature": null,
-      "description": "Reader-writer lock.",
+      "description": "Reader-writer lock guarding an `i64`: `read`, `write`, `with_read`, `with_write`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdsync",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-sync-Sender",
+      "name": "std::sync::Sender",
+      "kind": "type",
+      "signature": null,
+      "description": "The sending end of a channel: `send(v)`, `close()`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

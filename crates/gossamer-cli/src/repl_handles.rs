@@ -33,15 +33,25 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     ),
     (
         "AtomicI32",
-        "fetch_add",
-        "fn fetch_add(self: sync::AtomicI32, delta: i64) -> i64",
+        "compare_exchange",
+        "fn compare_exchange(self: sync::AtomicI32, current: i32, new: i32) -> bool",
     ),
-    ("AtomicI32", "load", "fn load(self: sync::AtomicI32) -> i64"),
-    ("AtomicI32", "new", "fn new(value: i64) -> sync::AtomicI32"),
+    (
+        "AtomicI32",
+        "fetch_add",
+        "fn fetch_add(self: sync::AtomicI32, delta: i32) -> i32",
+    ),
+    (
+        "AtomicI32",
+        "fetch_sub",
+        "fn fetch_sub(self: sync::AtomicI32, delta: i32) -> i32",
+    ),
+    ("AtomicI32", "load", "fn load(self: sync::AtomicI32) -> i32"),
+    ("AtomicI32", "new", "fn new(value: i32) -> sync::AtomicI32"),
     (
         "AtomicI32",
         "store",
-        "fn store(self: sync::AtomicI32, value: i64) -> ()",
+        "fn store(self: sync::AtomicI32, value: i32) -> ()",
     ),
     (
         "AtomicI64",
@@ -68,19 +78,24 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     (
         "AtomicU64",
         "compare_exchange",
-        "fn compare_exchange(self: sync::AtomicU64, current: i64, new: i64) -> bool",
+        "fn compare_exchange(self: sync::AtomicU64, current: u64, new: u64) -> bool",
     ),
     (
         "AtomicU64",
         "fetch_add",
-        "fn fetch_add(self: sync::AtomicU64, delta: i64) -> i64",
+        "fn fetch_add(self: sync::AtomicU64, delta: u64) -> u64",
     ),
-    ("AtomicU64", "load", "fn load(self: sync::AtomicU64) -> i64"),
-    ("AtomicU64", "new", "fn new(value: i64) -> sync::AtomicU64"),
+    (
+        "AtomicU64",
+        "fetch_sub",
+        "fn fetch_sub(self: sync::AtomicU64, delta: u64) -> u64",
+    ),
+    ("AtomicU64", "load", "fn load(self: sync::AtomicU64) -> u64"),
+    ("AtomicU64", "new", "fn new(value: u64) -> sync::AtomicU64"),
     (
         "AtomicU64",
         "store",
-        "fn store(self: sync::AtomicU64, value: i64) -> ()",
+        "fn store(self: sync::AtomicU64, value: u64) -> ()",
     ),
     ("Barrier", "new", "fn new(parties: i64) -> sync::Barrier"),
     ("Barrier", "wait", "fn wait(self: sync::Barrier) -> ()"),
@@ -566,22 +581,13 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
         "fn serve(self: http::middleware::Middleware, request: http::Request) \
          -> Result<http::Response, errors::Error>",
     ),
-    ("Mutex", "lock", "fn lock<T>(self: sync::Mutex<T>) -> ()"),
-    ("Mutex", "new", "fn new<T>(value: T) -> sync::Mutex<T>"),
-    (
-        "Mutex",
-        "store",
-        "fn store<T>(self: sync::Mutex<T>, value: T) -> ()",
-    ),
-    (
-        "Mutex",
-        "unlock",
-        "fn unlock<T>(self: sync::Mutex<T>) -> ()",
-    ),
+    ("Mutex", "lock", "fn lock(self: sync::Mutex) -> ()"),
+    ("Mutex", "new", "fn new() -> sync::Mutex"),
+    ("Mutex", "unlock", "fn unlock(self: sync::Mutex) -> ()"),
     (
         "Once",
         "call",
-        "fn call(self: sync::Once, f: Fn() -> ()) -> bool",
+        "fn call<T>(self: sync::Once, f: Fn() -> T) -> bool",
     ),
     ("Once", "new", "fn new() -> sync::Once"),
     (
@@ -774,12 +780,12 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     ),
     ("Rng", "new", "fn new(seed: i64) -> rand::Rng"),
     ("Rng", "next_f64", "fn next_f64(self: rand::Rng) -> f64"),
-    ("Rng", "next_u32", "fn next_u32(self: rand::Rng) -> i64"),
-    ("Rng", "next_u64", "fn next_u64(self: rand::Rng) -> i64"),
+    ("Rng", "next_u32", "fn next_u32(self: rand::Rng) -> u32"),
+    ("Rng", "next_u64", "fn next_u64(self: rand::Rng) -> u64"),
     (
         "Rng",
         "range_u64",
-        "fn range_u64(self: rand::Rng, low: i64, high: i64) -> i64",
+        "fn range_u64(self: rand::Rng, low: u64, high: u64) -> u64",
     ),
     (
         "Router",
@@ -837,22 +843,22 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
         "fn serve(self: http::router::Router, request: http::Request) \
          -> Result<http::Response, errors::Error>",
     ),
-    ("RwLock", "new", "fn new(value: i64) -> sync::RwLock<i64>"),
-    ("RwLock", "read", "fn read(self: sync::RwLock<i64>) -> i64"),
+    ("RwLock", "new", "fn new(value: i64) -> sync::RwLock"),
+    ("RwLock", "read", "fn read(self: sync::RwLock) -> i64"),
     (
         "RwLock",
         "with_read",
-        "fn with_read<T>(self: sync::RwLock<i64>, f: Fn(i64) -> T) -> T",
+        "fn with_read(self: sync::RwLock, f: Fn(i64) -> i64) -> i64",
     ),
     (
         "RwLock",
         "with_write",
-        "fn with_write<T>(self: sync::RwLock<i64>, f: Fn(i64) -> T) -> T",
+        "fn with_write(self: sync::RwLock, f: Fn(i64) -> i64) -> i64",
     ),
     (
         "RwLock",
         "write",
-        "fn write(self: sync::RwLock<i64>, value: i64) -> ()",
+        "fn write(self: sync::RwLock, value: i64) -> ()",
     ),
     (
         "Scanner",

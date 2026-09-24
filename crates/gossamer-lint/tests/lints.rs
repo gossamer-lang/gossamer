@@ -491,3 +491,31 @@ fn nested_ternary_if_silent_without_a_closing_else() {
 fn diags_codes(diags: &[Diagnostic]) -> Vec<&str> {
     diags.iter().map(|d| d.code.as_str()).collect()
 }
+
+#[test]
+fn no_effect_statement_fires_on_a_dropped_value_only_method() {
+    let diags = lint(
+        "fn main() {\n    let v = #[1, 1, 2]\n    v.dedup()\n    let s = \" a \"\n    s.trim()\n    println(\"{:?} {}\", v, s)\n}\n",
+    );
+    assert_eq!(
+        diags.iter().filter(|d| d.code.as_str() == "GL0056").count(),
+        2,
+        "{diags:?}"
+    );
+}
+
+#[test]
+fn no_effect_statement_silent_on_a_user_method_of_the_same_name() {
+    let diags = lint(
+        "struct Bag { xs: Vec<i64> }\nimpl Bag {\n    fn dedup(&mut self) { self.xs.clear() }\n}\nfn main() {\n    let mut b = Bag { xs: #[1] }\n    b.dedup()\n    println(\"{}\", b.xs.len())\n}\n",
+    );
+    assert!(!has_code(&diags, "GL0056"), "{diags:?}");
+}
+
+#[test]
+fn no_effect_statement_silent_on_in_place_writers() {
+    let diags = lint(
+        "fn main() {\n    let mut v = #[2, 1]\n    v.sort()\n    v.reverse()\n    println(\"{:?}\", v)\n}\n",
+    );
+    assert!(!has_code(&diags, "GL0056"), "{diags:?}");
+}

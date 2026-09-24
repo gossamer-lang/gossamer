@@ -590,6 +590,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         // unrelated). Without the binding's concrete (RC-managed) type the drop
         // pass cannot tell it owns a `String` and never releases it (a leak).
         propagate_copy_types(body, tcx);
+        copy_stored_containers(body, tcx);
         rewrite_str_concat_consuming(body);
         crate::opt::elide_vec_clone_in_three_way_swaps(body);
         crate::opt::reserve_vecs_for_counted_push_loops(body);

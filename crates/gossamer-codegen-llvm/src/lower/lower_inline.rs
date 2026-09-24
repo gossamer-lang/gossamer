@@ -394,6 +394,28 @@ impl<'a> Lowerer<'a> {
     /// (`Vec<u8>` from `fs::read` / `crypto::rand_bytes` / HTTP
     /// `raw_bytes`) and `Vec<bool>` are stride 1, so anything narrower
     /// keeps the header-driven element-size load in the get/set paths.
+    /// Whether `op` is a vector whose element is a `Set`, a deque, or a heap:
+    /// a handle the vector owns a copy of per slot.
+    pub(crate) fn vec_operand_has_handle_container_elem(&self, op: &Operand) -> bool {
+        let Operand::Copy(pl) = op else {
+            return false;
+        };
+        let mut ty = self.place_leaf_ty(pl);
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        let Some(TyKind::Vec(elem) | TyKind::Slice(elem)) = self.tcx.kind(ty) else {
+            return false;
+        };
+        matches!(
+            self.tcx.kind(*elem),
+            Some(TyKind::Adt { def, .. })
+                if [u32::MAX - 7, u32::MAX - 18, u32::MAX - 19, u32::MAX - 28, u32::MAX - 30,
+                    u32::MAX - 31, u32::MAX - 32]
+                    .contains(&def.local)
+        )
+    }
+
     pub(crate) fn vec_operand_has_word_elem(&self, op: &Operand) -> bool {
         let Operand::Copy(pl) = op else {
             return false;
@@ -3265,6 +3287,29 @@ impl<'a> Lowerer<'a> {
             }
             _ => val_v,
         };
+        // A `Set`, deque, or heap element is copied into its slot by the
+        // runtime push, which owns that copy; a store of the handle alone
+        // would leave the slot naming the caller's value.
+        if self.vec_operand_has_handle_container_elem(&args[0]) {
+            declare_rt(&mut self.runtime_refs, "gos_rt_vec_push_i64");
+            writeln!(
+                self.out,
+                "  call void @gos_rt_vec_push_i64(ptr {vec_ptr}, i64 {val_i64})"
+            )
+            .unwrap();
+            if !is_unit(self.tcx, self.body.local_ty(destination.local)) {
+                let dest_ty = render_ty(self.tcx, self.body.local_ty(destination.local));
+                let dslot = local_slot(destination.local);
+                let zero = match dest_ty.as_str() {
+                    "ptr" => "null",
+                    "double" | "float" => "0.0",
+                    _ => "0",
+                };
+                writeln!(self.out, "  store {dest_ty} {zero}, ptr {dslot}").unwrap();
+            }
+            emit_terminator_branch(&mut self.out, target);
+            return Ok(());
+        }
         // Static element stride, derived from the operand type exactly as the
         // get/set paths do. A `Vec<i64/f64/ptr/Vec>` is word-stride, a
         // `Vec<bool>` is byte-stride; an erased element type stays unknown and

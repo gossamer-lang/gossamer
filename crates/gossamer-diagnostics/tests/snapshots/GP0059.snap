@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0059]: A range pattern bound is a literal, or a primitive integer limit such - here
+--- framed ---
+error[GP0059]: A range pattern bound is a literal, or a primitive integer limit such
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

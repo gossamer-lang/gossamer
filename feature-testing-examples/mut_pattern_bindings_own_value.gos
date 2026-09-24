@@ -1,0 +1,57 @@
+// A `mut` binding a pattern introduces is a value of its own, as a `let mut`
+// binding is: a write through it leaves the value it was matched out of, and
+// the value that one was built from, alone. A binding written without `mut`
+// through a `&mut` scrutinee still names the enum's own payload.
+
+enum Shape { Items(Vec<i64>), Table(Map<String, i64>), Empty }
+
+impl Shape {
+    fn add(&mut self, v: i64) {
+        match self {
+            Shape::Items(xs) => xs.push(v)
+            Shape::Table(m) => { let _ = m.insert(v.to_string(), v) }
+            Shape::Empty => {}
+        }
+    }
+    fn add_to_copy(&mut self, v: i64) -> i64 {
+        match self {
+            Shape::Items(mut xs) => { xs.push(v); xs.len() }
+            _ => 0
+        }
+    }
+}
+
+fn total(xs: Vec<i64>) -> i64 { xs.iter().sum() }
+
+fn main() {
+    let v1 = #[1, 2]
+    let o = Some(v1)
+    if let Some(mut w) = o { w.push(3); println("{}", w) }
+    println("{} {:?}", v1, o)
+
+    let m1 = { "a": 1 }
+    let om = Some(m1)
+    if let Some(mut w) = om { let _ = w.insert("b", 2); println("{}", w.len()) }
+    println("{} {:?}", m1, om)
+
+    let e = Shape::Items(#[5])
+    match e { Shape::Items(mut xs) => { xs.push(6); println("{}", xs) } _ => {} }
+    println("{}", match e { Shape::Items(xs) => total(xs), _ => 0 })
+
+    let t = (#[1], { "a": 1 })
+    let mut tv, mut tm = t
+    tv.push(2)
+    let _ = tm.insert("b", 2)
+    println("{} {} {:?}", tv, tm.len(), t)
+
+    let mut mv: Map<String, Vec<i64>> = { "x": #[1] }
+    if let Some(mut w) = mv.get("x") { w.push(9) }
+    println("{}", mv)
+
+    let mut s = Shape::Items(#[])
+    s.add(1)
+    println("{} {}", s.add_to_copy(2), match s { Shape::Items(xs) => xs.len(), _ => 0 })
+    let mut tab = Shape::Table(Map::new())
+    tab.add(4)
+    println("{:?}", match tab { Shape::Table(m) => m.len(), _ => 0 })
+}

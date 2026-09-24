@@ -1349,13 +1349,11 @@ impl<'a> Lowerer<'a> {
             "  {map} = call ptr @gos_rt_map_new_with_capacity_typed(i32 {key_kind}, i32 {val_kind}, i64 {count})"
         )
         .unwrap();
-        if self.hashmap_value_is_vec(*val_ty) {
-            declare_rt(&mut self.runtime_refs, "gos_rt_map_set_vec_values");
-            writeln!(
-                self.out,
-                "  call void @gos_rt_map_set_vec_values(ptr {map})"
-            )
-            .unwrap();
+        // The ownership tag goes on before the entries do, so each insert
+        // takes the share (or, for a table, the copy) the tag says it keeps.
+        if let Some(marker) = self.hashmap_value_owner_marker(*val_ty) {
+            declare_rt(&mut self.runtime_refs, marker);
+            writeln!(self.out, "  call void @{marker}(ptr {map})").unwrap();
         }
         let base = match arg {
             Operand::Copy(place) => self.lower_place_address(place),
@@ -1449,11 +1447,29 @@ impl<'a> Lowerer<'a> {
 
     /// True when a map value is a `Vec` handle, so the map owns one Vec
     /// share per entry and releases it when an entry or the map dies.
-    fn hashmap_value_is_vec(&self, ty: Ty) -> bool {
-        matches!(
-            self.tcx.kind(self.unwrap_ref(ty)),
-            Some(TyKind::Vec(_) | TyKind::Slice(_))
-        )
+    /// The runtime marker naming how a map holding `ty` values owns them, or
+    /// `None` for a value the map stores as plain words or bytes.
+    fn hashmap_value_owner_marker(&self, ty: Ty) -> Option<&'static str> {
+        match self.tcx.kind(self.unwrap_ref(ty)) {
+            Some(TyKind::Vec(_) | TyKind::Slice(_)) => Some("gos_rt_map_set_vec_values"),
+            Some(TyKind::HashMap { .. }) => Some("gos_rt_map_set_map_values"),
+            Some(TyKind::Adt { def, .. })
+                if def.local == u32::MAX - 7 || def.local == u32::MAX - 18 =>
+            {
+                Some("gos_rt_map_set_set_values")
+            }
+            Some(TyKind::Adt { def, .. })
+                if [u32::MAX - 19, u32::MAX - 31, u32::MAX - 32].contains(&def.local) =>
+            {
+                Some("gos_rt_map_set_deque_values")
+            }
+            Some(TyKind::Adt { def, .. })
+                if [u32::MAX - 28, u32::MAX - 30].contains(&def.local) =>
+            {
+                Some("gos_rt_map_set_heap_values")
+            }
+            _ => None,
+        }
     }
 
     fn load_hashmap_from_slot(

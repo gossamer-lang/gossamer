@@ -132,15 +132,10 @@ fn main() {
     println("{:?}", edge)
 }
 "#;
-    if cfg!(debug_assertions) {
-        let error = try_run_main(src).expect_err("debug open range must overflow");
-        assert!(error.contains("attempt to add with overflow"), "{error}");
-    } else {
-        assert_eq!(
-            try_run_main(src).expect("release open range wraps"),
-            "#[9223372036854775805, 9223372036854775806, 9223372036854775807, -9223372036854775808]\n"
-        );
-    }
+    // The bytecode VM is a checked tier whichever profile built it; only a
+    // release native build wraps.
+    let error = try_run_main(src).expect_err("an open range past i64::MAX must overflow");
+    assert!(error.contains("attempt to add with overflow"), "{error}");
 }
 
 #[test]

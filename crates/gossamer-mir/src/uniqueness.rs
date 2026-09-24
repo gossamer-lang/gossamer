@@ -463,7 +463,7 @@ pub fn analyze<'b>(
 ) -> UniquenessFacts<'b> {
     let n_locals = body.locals.len();
     let n_blocks = body.blocks.len();
-    let liveness = Liveness::compute(body);
+    let liveness = Liveness::compute(body, tcx);
     let share = crate::ownership::ShareFacts::compute(body);
     let goroutine_shared = (0..n_locals)
         .map(|i| share.is_goroutine_shared(Local(u32::try_from(i).unwrap_or(u32::MAX))))
@@ -1086,7 +1086,13 @@ fn runtime_answers_fresh(name: &str) -> bool {
 pub(crate) fn runtime_arg_kept_no_handle(name: &str, index: usize) -> bool {
     let receiver_only = matches!(
         name,
-        "gos_rt_vec_len"
+        // Tagging a vector's element kind writes its header and keeps nothing.
+        "gos_rt_vec_mark_rc_elems"
+            | "gos_rt_vec_mark_str_elems"
+            | "gos_rt_vec_mark_vec_elems"
+            | "gos_rt_vec_set_elem_meta"
+            | "gos_rt_vec_set_slot_children"
+            | "gos_rt_vec_len"
             | "gos_rt_len"
             | "gos_rt_len_is_zero"
             | "gos_rt_vec_capacity"
@@ -1182,11 +1188,25 @@ struct Liveness {
     n_locals: usize,
     live_in: Vec<LocalSet>,
     live_out: Vec<LocalSet>,
+    /// Locals whose storage is the value itself - a tuple, an array, or a
+    /// struct or enum that is not reference counted - so writing one of
+    /// their fields reads nothing.
+    inline: LocalSet,
 }
 
 impl Liveness {
-    fn compute(body: &Body) -> Self {
+    fn compute(body: &Body, tcx: &TyCtxt) -> Self {
         let n_locals = body.locals.len();
+        let mut inline = LocalSet::new(n_locals);
+        for (i, decl) in body.locals.iter().enumerate() {
+            let value = matches!(
+                tcx.kind_of(decl.ty),
+                TyKind::Tuple(_) | TyKind::Array { .. } | TyKind::Adt { .. }
+            ) && !tcx.is_rc_managed(decl.ty);
+            if value {
+                inline.insert(Local(u32::try_from(i).unwrap_or(u32::MAX)));
+            }
+        }
         let n_blocks = body.blocks.len();
         let mut live_in = vec![LocalSet::new(n_locals); n_blocks];
         let mut live_out = vec![LocalSet::new(n_locals); n_blocks];
@@ -1205,7 +1225,7 @@ impl Liveness {
             let block = &body.blocks[bi];
             terminator_liveness(&block.terminator, &mut live);
             for stmt in block.stmts.iter().rev() {
-                statement_liveness(stmt, &mut live);
+                statement_liveness(stmt, &inline, &mut live);
             }
             live_out[bi] = out;
             if live != live_in[bi] {
@@ -1222,6 +1242,7 @@ impl Liveness {
             n_locals,
             live_in,
             live_out,
+            inline,
         }
     }
 
@@ -1235,7 +1256,7 @@ impl Liveness {
         terminator_liveness(&block.terminator, &mut live);
         for (si, stmt) in block.stmts.iter().enumerate().rev() {
             out[si] = live.clone();
-            statement_liveness(stmt, &mut live);
+            statement_liveness(stmt, &self.inline, &mut live);
         }
         out
     }
@@ -1254,7 +1275,7 @@ impl Liveness {
             return live;
         }
         let mut live = self.live_after(body, point);
-        statement_liveness(&block.stmts[point.stmt], &mut live);
+        statement_liveness(&block.stmts[point.stmt], &self.inline, &mut live);
         live
     }
 }
@@ -1286,12 +1307,13 @@ fn gen_operand(op: &Operand, live: &mut LocalSet) {
     }
 }
 
-/// The local a release names, when every argument is rooted at it.
-fn released_local(rvalue: &Rvalue) -> Option<Local> {
+/// The local a retain or a release names, when every argument is rooted at
+/// it. Adjusting a count observes nothing, so neither is a read.
+fn count_adjusted_local(rvalue: &Rvalue) -> Option<Local> {
     let Rvalue::CallIntrinsic { name, args } = rvalue else {
         return None;
     };
-    if !is_release_intrinsic(name) {
+    if !is_share_neutral_intrinsic(name) {
         return None;
     }
     let mut root = None;
@@ -1317,15 +1339,23 @@ fn released_local(rvalue: &Rvalue) -> Option<Local> {
     root
 }
 
-fn statement_liveness(stmt: &Statement, live: &mut LocalSet) {
+fn statement_liveness(stmt: &Statement, inline: &LocalSet, live: &mut LocalSet) {
     match &stmt.kind {
         StatementKind::Assign { place, rvalue } => {
             if place.projection.is_empty() {
                 live.remove(place.local);
-            } else {
+            } else if !(inline.contains(place.local)
+                && place
+                    .projection
+                    .iter()
+                    .all(|step| matches!(step, Projection::Field(_))))
+            {
+                // A write through a handle or a reference reads that handle.
+                // A field of a value held in place is written without reading
+                // the value, and the write does not end the rest of it either.
                 gen_place(place, live);
             }
-            if released_local(rvalue).is_some() {
+            if count_adjusted_local(rvalue).is_some() {
                 return;
             }
             rvalue_liveness(rvalue, live);

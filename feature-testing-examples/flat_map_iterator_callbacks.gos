@@ -1,0 +1,29 @@
+// `flat_map` concatenates what each callback answers, whether that is a
+// `Vec` or an iterator the callback built from its element.
+
+use std::iter
+
+fn main() {
+    let nested = #[#[1, 2], #[3]]
+    let a: Vec<i64> = nested.iter().flat_map(|v| v.iter()).collect()
+    let b: Vec<i64> = nested.iter().flat_map(|v| v).collect()
+    let c = nested.flat_map(|v| v)
+    let d: Vec<i64> = nested.iter().flat_map(|v| v.clone()).collect()
+    let e: Vec<i64> = (0..3).flat_map(|i| #[i, i * 10]).collect()
+    let f: Vec<i64> = nested.iter().flat_map(|v| v.iter().map(|x| x + 1)).collect()
+    println("{:?} {:?} {:?} {:?} {:?} {:?}", a, b, c, d, e, f)
+    more()
+}
+
+fn doubled(v: Vec<i64>) -> Vec<i64> {
+    v.map(|x| x * 2)
+}
+
+fn more() {
+    let nested = #[#[1, 2], #[3]]
+    let g = iter::flat_map(nested, |v| v.iter())
+    let h = nested.flat_map(doubled)
+    let words = #["ab", "c"]
+    let k: Vec<char> = words.iter().flat_map(|w| w.chars()).collect()
+    println("{:?} {:?} {:?}", g, h, k)
+}

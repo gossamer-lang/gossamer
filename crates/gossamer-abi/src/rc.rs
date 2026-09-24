@@ -98,6 +98,13 @@ pub const RC_CHILD_ERROR_FIELDS: i64 = 6;
 /// Child entry naming a `Set` the blob owns outright: a set carries no
 /// reference count, so a copy takes a table of its own.
 pub const RC_CHILD_SET: i64 = 7;
+/// Child entry naming a `Deque` / `Queue` / `Stack` the blob owns outright:
+/// the header carries no reference count, so a copy takes a store of its own.
+pub const RC_CHILD_DEQUE: i64 = 8;
+/// Child entry naming a `MinHeap` / `MaxHeap` the blob owns outright. A heap
+/// is a counted vector, but a heap write reaches its store in place, so a copy
+/// takes a heap of its own rather than a share.
+pub const RC_CHILD_HEAP: i64 = 9;
 
 /// The copy-blob child kind for a carrier field whose payload is a blob under
 /// discriminant `gate` (0, 1, or negative for both arms).

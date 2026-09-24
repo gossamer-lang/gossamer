@@ -77,25 +77,25 @@ fn a_freshly_built_vector_is_unique() {
 }
 
 #[test]
-fn a_vector_stored_in_a_container_is_shared() {
+fn a_vector_stored_in_a_container_it_is_read_after_stays_unique() {
     let u = uniqueness_of(
         "fn f() -> i64 {\n let xs = #[1, 2, 3]\n let outer = #[xs]\n outer.len() + xs.len()\n}\n",
         "f",
         "xs",
         return_point,
     );
-    assert_eq!(u, Uniqueness::Shared);
+    assert_eq!(u, Uniqueness::Unique);
 }
 
 #[test]
-fn a_vector_read_after_it_is_stored_leaves_the_container_shared() {
+fn a_container_holding_a_copy_of_a_vector_read_after_it_stays_unique() {
     let u = uniqueness_of(
         "fn f() -> i64 {\n let xs = #[1, 2, 3]\n let outer = #[xs]\n outer.len() + xs.len()\n}\n",
         "f",
         "outer",
         |body| call_point(body, "gos_rt_len"),
     );
-    assert_eq!(u, Uniqueness::Shared);
+    assert_eq!(u, Uniqueness::Unique);
 }
 
 #[test]
@@ -161,14 +161,14 @@ fn a_value_returned_from_a_function_that_keeps_no_handle_stays_unique() {
 }
 
 #[test]
-fn a_value_a_function_also_stores_elsewhere_is_shared() {
+fn a_value_a_function_also_stores_elsewhere_stays_unique() {
     let u = uniqueness_of(
         "struct Keep { items: Vec<Vec<i64>> }\nfn build(k: &mut Keep) -> Vec<i64> {\n let v = #[1, 2]\n k.items.push(v)\n v\n}\nfn f() -> i64 {\n let mut k = Keep { items: #[] }\n let xs = build(&mut k)\n xs.len() + k.items.len()\n}\n",
         "f",
         "xs",
         return_point,
     );
-    assert_eq!(u, Uniqueness::Shared);
+    assert_eq!(u, Uniqueness::Unique);
 }
 
 #[test]

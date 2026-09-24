@@ -15,7 +15,7 @@
 //! argument of another method that declares one, which is asking for the
 //! reference rather than for the value behind it.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gossamer_types::{IntTy, Ty, TyCtxt, TyKind};
 
@@ -24,34 +24,96 @@ use crate::ir::{
     Terminator,
 };
 
-/// Rewrites every body whose receiver is a reference to a scalar so each read
-/// of that receiver loads the value it names.
+/// Rewrites every body whose receiver is a reference to a scalar, or that
+/// takes a `&mut` payload enum, so each read of that parameter loads the value
+/// it names.
 ///
 /// Only `bodies[start..]` are rewritten; every body counts toward which
 /// methods take a reference receiver.
 pub(crate) fn load_reference_receiver_reads(bodies: &mut [Body], start: usize, tcx: &mut TyCtxt) {
-    let takes_reference_receiver = reference_receiver_methods(bodies, tcx);
+    let address_params = AddressParams::compute(bodies, tcx);
     for index in start..bodies.len() {
-        let Some(pointee) = scalar_reference_receiver(&bodies[index], tcx) else {
-            continue;
-        };
-        rewrite_body(&mut bodies[index], pointee, &takes_reference_receiver, tcx);
+        for (param, pointee) in loaded_reference_params(&bodies[index], tcx) {
+            rewrite_body(&mut bodies[index], param, pointee, &address_params, tcx);
+        }
     }
 }
 
-/// Names of the method bodies whose own receiver is an address, so a call to
-/// one wants the reference rather than the value behind it.
-fn reference_receiver_methods(bodies: &[Body], tcx: &TyCtxt) -> HashSet<String> {
-    bodies
-        .iter()
-        .filter(|body| is_method(body))
-        .filter(|body| {
-            body.locals
-                .get(1)
-                .is_some_and(|recv| receiver_is_address(recv.ty, tcx))
-        })
-        .map(|body| body.name.clone())
-        .collect()
+/// Which parameters of each body carry an address, so a call passing one of
+/// them on hands over the reference rather than the value behind it.
+struct AddressParams {
+    by_name: HashMap<String, Vec<bool>>,
+    def_to_name: HashMap<u32, String>,
+}
+
+impl AddressParams {
+    fn compute(bodies: &[Body], tcx: &TyCtxt) -> Self {
+        let by_name = bodies
+            .iter()
+            .map(|body| {
+                let params = body
+                    .locals
+                    .iter()
+                    .skip(1)
+                    .take(body.arity as usize)
+                    .map(|decl| receiver_is_address(decl.ty, tcx))
+                    .collect();
+                (body.name.clone(), params)
+            })
+            .collect();
+        let def_to_name = bodies
+            .iter()
+            .filter_map(|body| body.def.map(|def| (def.local, body.name.clone())))
+            .collect();
+        Self {
+            by_name,
+            def_to_name,
+        }
+    }
+
+    /// Whether `callee`'s parameter `index` takes an address.
+    fn takes_address(&self, callee: &Operand, index: usize) -> bool {
+        let name = match callee {
+            Operand::Const(ConstValue::Str(name)) => name.as_str(),
+            Operand::FnRef { def, .. } => match self.def_to_name.get(&def.local) {
+                Some(name) => name.as_str(),
+                None => return false,
+            },
+            _ => return false,
+        };
+        self.by_name
+            .get(name)
+            .and_then(|params| params.get(index))
+            .copied()
+            .unwrap_or(false)
+    }
+}
+
+/// The parameters of `body` a bare read has to load through, with the value
+/// each refers to: a reference receiver [`scalar_reference_receiver`] names,
+/// and every `&mut` payload-enum parameter, which names the caller's slot the
+/// way a `&mut self` receiver does.
+fn loaded_reference_params(body: &Body, tcx: &TyCtxt) -> Vec<(Local, Ty)> {
+    let mut params: Vec<(Local, Ty)> = scalar_reference_receiver(body, tcx)
+        .map(|pointee| (Local(1), pointee))
+        .into_iter()
+        .collect();
+    let first = if is_method(body) { 2 } else { 1 };
+    for index in first..=body.arity as usize {
+        let Some(decl) = body.locals.get(index) else {
+            continue;
+        };
+        if let TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner,
+        } = tcx.kind_of(decl.ty)
+            && tcx.is_payload_enum(*inner)
+        {
+            let local = Local(u32::try_from(index).expect("parameter index fits in u32"));
+            params.push((local, *inner));
+        }
+    }
+    params
 }
 
 /// Whether a receiver of type `ty` carries an address rather than a value.
@@ -94,15 +156,17 @@ fn scalar_reference_receiver(body: &Body, tcx: &TyCtxt) -> Option<Ty> {
     .then_some(inner)
 }
 
-/// Whether `operand` reads the whole receiver, rather than a projection of it.
-fn reads_receiver(operand: &Operand) -> bool {
-    matches!(operand, Operand::Copy(place) if place.local == Local(1) && place.projection.is_empty())
+/// Whether `operand` reads the whole of `param`, rather than a projection of
+/// it.
+fn reads_param(operand: &Operand, param: Local) -> bool {
+    matches!(operand, Operand::Copy(place) if place.local == param && place.projection.is_empty())
 }
 
 fn rewrite_body(
     body: &mut Body,
+    param: Local,
     pointee: Ty,
-    takes_reference_receiver: &HashSet<String>,
+    address_params: &AddressParams,
     tcx: &mut TyCtxt,
 ) {
     let zero_ty = tcx.int_ty(IntTy::I64);
@@ -115,12 +179,18 @@ fn rewrite_body(
         for mut statement in statements {
             let mut loaded: Option<Local> = None;
             visit_statement_operands(&mut statement.kind, &mut |operand| {
-                if !reads_receiver(operand) {
+                if !reads_param(operand, param) {
                     return None;
                 }
                 Some(*loaded.get_or_insert_with(|| {
-                    let local =
-                        emit_receiver_load(&mut rewritten, body, pointee, zero_ty, statement.span);
+                    let local = emit_receiver_load(
+                        &mut rewritten,
+                        body,
+                        param,
+                        pointee,
+                        zero_ty,
+                        statement.span,
+                    );
                     local
                 }))
             });
@@ -132,12 +202,12 @@ fn rewrite_body(
             &mut body.blocks[block_index].terminator,
             Terminator::Unreachable,
         );
-        visit_terminator_operands(&mut terminator, takes_reference_receiver, &mut |operand| {
-            if !reads_receiver(operand) {
+        visit_terminator_operands(&mut terminator, address_params, &mut |operand| {
+            if !reads_param(operand, param) {
                 return None;
             }
             Some(*loaded.get_or_insert_with(|| {
-                emit_receiver_load(&mut rewritten, body, pointee, zero_ty, span)
+                emit_receiver_load(&mut rewritten, body, param, pointee, zero_ty, span)
             }))
         });
         body.blocks[block_index].terminator = terminator;
@@ -145,13 +215,14 @@ fn rewrite_body(
     }
 }
 
-/// Appends `tmp = gos_load(self, 0)` and answers the local holding the value.
+/// Appends `tmp = gos_load(param, 0)` and answers the local holding the value.
 ///
 /// The same intrinsic the explicit `*self` spelling lowers to, so both
 /// spellings reach the backends as one shape.
 fn emit_receiver_load(
     statements: &mut Vec<Statement>,
     body: &mut Body,
+    param: Local,
     pointee: Ty,
     zero_ty: Ty,
     span: gossamer_lex::Span,
@@ -172,7 +243,7 @@ fn emit_receiver_load(
             rvalue: Rvalue::CallIntrinsic {
                 name: "gos_load",
                 args: vec![
-                    Operand::Copy(Place::local(Local(1))),
+                    Operand::Copy(Place::local(param)),
                     Operand::Copy(Place::local(zero)),
                 ],
             },
@@ -238,7 +309,7 @@ fn visit_rvalue_operands(rvalue: &mut Rvalue, f: &mut impl FnMut(&Operand) -> Op
 
 fn visit_terminator_operands(
     terminator: &mut Terminator,
-    takes_reference_receiver: &HashSet<String>,
+    address_params: &AddressParams,
     f: &mut impl FnMut(&Operand) -> Option<Local>,
 ) {
     match terminator {
@@ -250,14 +321,10 @@ fn visit_terminator_operands(
             }
         }
         Terminator::Call { callee, args, .. } => {
-            // A callee that declares a reference receiver is asking for the
+            // A callee that declares a reference parameter is asking for the
             // reference this body holds, not for the value behind it.
-            let keeps_reference = matches!(
-                callee,
-                Operand::Const(ConstValue::Str(name)) if takes_reference_receiver.contains(name)
-            );
             for (index, operand) in args.iter_mut().enumerate() {
-                if index == 0 && keeps_reference {
+                if address_params.takes_address(callee, index) {
                     continue;
                 }
                 replace_operand(operand, f);

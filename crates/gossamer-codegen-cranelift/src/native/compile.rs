@@ -688,7 +688,7 @@ pub(crate) fn lower_program_full(
     //   1. Every symbol in the ABI registry (covers all gos_rt_* helpers
     //      including the cleanup free-functions).
     //   2. C standard-library symbols used by codegen helpers directly
-    //      (malloc, strlen, calloc).
+    //      (malloc, strlen, calloc, fmod).
     //   3. Infrastructure strings and all ConstValue::Str literals from
     //      bodies; shape thunks whose names encode Fn-trait signatures.
     let ptr_ty = module.target_config().pointer_type();
@@ -698,6 +698,7 @@ pub(crate) fn lower_program_full(
     intrinsics.extern_fn(module, "malloc", &[ptr_ty], &[ptr_ty])?;
     intrinsics.extern_fn(module, "strlen", &[ptr_ty], &[types::I64])?;
     intrinsics.extern_fn(module, "calloc", &[ptr_ty, ptr_ty], &[ptr_ty])?;
+    intrinsics.extern_fn(module, "fmod", &[types::F64, types::F64], &[types::F64])?;
     // Helper-emitted string literals. These are produced by the
     // codegen itself (bounds-check labels, fallback placeholders,
     // common format separators) rather than appearing in any

@@ -157,6 +157,56 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_sub(a: *mut GosAtomicI64, delta
     })
 }
 
+/// Atomically add to an `AtomicI32` and answer the previous value. The
+/// cell is i64 storage holding an i32, so the sum wraps at 32 bits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_atomic_i32_fetch_add(a: *mut GosAtomicI64, delta: i64) -> i64 {
+    ffi_entry!(-1, {
+        if a.is_null() {
+            return 0;
+        }
+        let a = unsafe { &*a };
+        let prior = atomic_i32_update(a, |v| v.wrapping_add(narrow_i32(delta)));
+        record_atomic_acquire(a);
+        record_atomic_release(a);
+        prior
+    })
+}
+
+/// Atomically subtract from an `AtomicI32` and answer the previous value,
+/// wrapping at 32 bits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_atomic_i32_fetch_sub(a: *mut GosAtomicI64, delta: i64) -> i64 {
+    ffi_entry!(-1, {
+        if a.is_null() {
+            return 0;
+        }
+        let a = unsafe { &*a };
+        let prior = atomic_i32_update(a, |v| v.wrapping_sub(narrow_i32(delta)));
+        record_atomic_acquire(a);
+        record_atomic_release(a);
+        prior
+    })
+}
+
+/// The i32 an operand word carries; the checker types it `i32`, so the low
+/// half is the whole value.
+fn narrow_i32(word: i64) -> i32 {
+    word as i32
+}
+
+/// Applies `step` to the i32 an `AtomicI32` cell holds and answers the
+/// previous value.
+fn atomic_i32_update(a: &GosAtomicI64, step: impl Fn(i32) -> i32) -> i64 {
+    let prior = a
+        .inner
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| {
+            Some(i64::from(step(narrow_i32(v))))
+        })
+        .unwrap_or_else(|v| v);
+    i64::from(narrow_i32(prior))
+}
+
 /// Compare-and-swap an atomic boolean with sequentially-consistent
 /// ordering. Separate from the i64 form because a Gossamer `bool`
 /// crosses the C-ABI as an `i8`, and reading the i64 form's operands

@@ -105,6 +105,25 @@ impl<'tcx> FnBuilder<'tcx> {
         self.ty_holds_shared_container(self.unwrap_ref(expr.ty), 0)
     }
 
+    /// The register a value stored into another value reads from. A binding
+    /// that names a `Map`, a `Set`, a slot container, or an aggregate holding
+    /// one reaches that storage through a shared handle, so the stored value
+    /// takes a copy and a later write through the binding leaves it alone.
+    pub(crate) fn stored_value_reg(&mut self, expr: &gossamer_hir::HirExpr, reg: Reg) -> Reg {
+        if !super::is_path_expr(expr)
+            || matches!(self.tcx.kind(expr.ty), Some(TyKind::Ref { .. }))
+            || !(self.expr_is_map(expr)
+                || self.expr_is_hashset(expr)
+                || self.expr_is_slot_container(expr)
+                || self.expr_is_aggregate_with_container(expr))
+        {
+            return reg;
+        }
+        let dst = self.alloc_reg();
+        self.emit(crate::bytecode::Op::CloneMapLike { dst, src: reg });
+        dst
+    }
+
     /// The register a function answers with, cloned when the answer is a map
     /// read straight out of an aggregate's field.
     ///

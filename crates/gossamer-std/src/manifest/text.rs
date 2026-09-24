@@ -280,7 +280,7 @@ pub const STRINGS: StdModule = StdModule {
         StdItem {
             name: "find",
             kind: StdItemKind::Function,
-            doc: "Returns the byte position of the first match.",
+            doc: "Returns the character index of the first match, or None.",
         },
         StdItem {
             name: "replace",
@@ -376,7 +376,7 @@ pub const STRINGS: StdModule = StdModule {
         StdItem {
             name: "rfind",
             kind: StdItemKind::Function,
-            doc: "Byte index of the last occurrence of a needle, or -1.",
+            doc: "Returns the character index of the last match, or None.",
         },
         StdItem {
             name: "trim_start_matches",

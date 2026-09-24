@@ -249,8 +249,15 @@ impl<'a> Lowerer<'a> {
         } else {
             render_const(&sref.init)
         };
+        let comdat = match crate::emit::coff_comdat_decl("linkonce_odr", &sref.symbol) {
+            Some(decl) => {
+                self.runtime_refs.insert(decl);
+                ", comdat"
+            }
+            None => "",
+        };
         self.runtime_refs.insert(format!(
-            "@{sym} = linkonce_odr global {llvm_ty} {init}",
+            "@{sym} = linkonce_odr global {llvm_ty} {init}{comdat}",
             sym = sref.symbol,
         ));
     }

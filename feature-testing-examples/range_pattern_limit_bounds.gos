@@ -1,0 +1,34 @@
+fn classify(n: i64) -> String {
+    match n {
+        i64::MIN..=-1 => "neg"
+        0 => "zero"
+        1..=i64::MAX => "pos"
+        _ => "unreachable"
+    }
+}
+
+fn byte(b: u8) -> String {
+    match b {
+        0..=127 => "ascii"
+        128..=u8::MAX => "high"
+        _ => "unreachable"
+    }
+}
+
+fn edge(n: i32) -> String {
+    match n {
+        i32::MAX => "max"
+        i32::MIN => "min"
+        ..0 => "neg"
+        _ => "other"
+    }
+}
+
+fn main() {
+    for n in #[i64::MIN, -5, 0, 3, i64::MAX] {
+        print("{} ", classify(n))
+    }
+    println("")
+    println("{} {}", byte(200), byte(7))
+    println("{} {} {} {}", edge(i32::MAX), edge(i32::MIN), edge(-3), edge(4))
+}

@@ -2572,7 +2572,12 @@ impl Parser<'_> {
                 )
             })
             .count();
-        if expected != rest.len() {
+        // A malformed placeholder has no arity of its own, so its diagnostic
+        // stands alone rather than beside a count that miscounts it.
+        let has_invalid = segments
+            .iter()
+            .any(|segment| matches!(segment, FormatSegment::Invalid(_)));
+        if expected != rest.len() && !has_invalid {
             self.record(
                 ParseError::FormatArgumentCount {
                     expected,
@@ -3340,6 +3345,13 @@ fn parse_format_template(template: &str) -> Vec<FormatSegment> {
                     }
                 } else if let Some(seg) = parse_format_spec(inner) {
                     segments.push(seg);
+                } else if inner.split_once(':').is_some_and(|(head, _)| {
+                    let head = head.trim();
+                    head.is_empty() || is_capture_name(head)
+                }) {
+                    // A placeholder with a spec the grammar does not take
+                    // (`{:+}`, `{:e}`) is reported rather than printed as text.
+                    segments.push(FormatSegment::Invalid(inner.to_string()));
                 } else {
                     segments.push(FormatSegment::Literal(format!("{{{inner}}}")));
                 }

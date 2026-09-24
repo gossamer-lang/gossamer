@@ -1186,6 +1186,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "A string literal handed to `sql::statement` is not a well-formed statement: it is empty, or its parentheses do not balance. The statement is checked while the program is parsed.",
     ),
     (
+        "GP0059",
+        "Parser",
+        "range pattern bound that is not a literal",
+        "A range pattern bound is a literal, or a primitive integer limit such as `i64::MIN` or `u8::MAX`, which stands for its literal. Any other path - a `const`, a static, an enum variant - is not a bound: match it with a guard instead (`n if n >= LOW => ..`).",
+    ),
+    (
         "GP0053",
         "Parser",
         "`Display` rendering declared as `to_string`",

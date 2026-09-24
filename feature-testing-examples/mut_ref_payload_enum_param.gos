@@ -1,0 +1,47 @@
+// A function taking a `&mut` payload enum reads the enum through the
+// reference, as a `&mut self` method does: it can match on it, hand the
+// reference on, and rebind it.
+
+enum Tree { Leaf(Vec<i64>), Node(Map<String, i64>), Empty }
+
+impl Tree {
+    fn size(&self) -> i64 {
+        match self { Tree::Leaf(xs) => xs.len(), Tree::Node(m) => m.len(), Tree::Empty => 0 }
+    }
+}
+
+fn bump(t: &mut Tree) {
+    match t {
+        Tree::Leaf(xs) => xs.push(7)
+        Tree::Node(m) => { let _ = m.insert("n", 1) }
+        Tree::Empty => {}
+    }
+}
+
+fn forward(t: &mut Tree, n: i64) {
+    for _ in 0..n { bump(t) }
+    println("inside {} {}", t.size(), describe(*t))
+}
+
+fn describe(t: Tree) -> String { format("{:?}", t) }
+
+fn reset(t: &mut Tree) { *t = Tree::Empty }
+
+fn fill_empty(t: &mut Tree, fresh: Tree) {
+    match t { Tree::Empty => { *t = fresh } _ => {} }
+}
+
+fn main() {
+    let mut a = Tree::Leaf(#[1])
+    bump(&mut a)
+    forward(&mut a, 2)
+    let mut b = Tree::Node({ "a": 1 })
+    forward(&mut b, 1)
+    reset(&mut b)
+    fill_empty(&mut b, Tree::Leaf(#[9]))
+    let mut trees = #[Tree::Leaf(#[]), Tree::Empty]
+    bump(&mut trees[0])
+    let mut total = 0
+    for _ in 0..100 { let mut t = Tree::Leaf(#[]); bump(&mut t); total += t.size() }
+    println("{:?} {:?} {:?} {}", a, b, trees, total)
+}

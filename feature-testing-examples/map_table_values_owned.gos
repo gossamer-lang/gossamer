@@ -1,0 +1,60 @@
+// A map whose values are maps or sets owns a table of its own per entry:
+// an insert stores a copy, a read hands out a copy, a copy of the outer map
+// copies every inner table, and nothing the caller frees is still reachable
+// through the map.
+
+fn fill_maps(mm: &mut Map<String, Map<String, i64>>, key: String, n: i64) {
+    let inner = { "a": n, "b": n + 1 }
+    let _ = mm.insert(key, inner)
+}
+
+fn fill_sets(ms: &mut Map<String, Set<i64>>, key: String, n: i64) {
+    let mut inner = #{ n }
+    inner.insert(n + 1)
+    let _ = ms.insert(key, inner)
+}
+
+fn table_sizes(mm: Map<String, Map<String, i64>>) -> i64 {
+    let mut total = 0
+    for (_, v) in mm { total += v.len() }
+    total
+}
+
+fn main() {
+    let mut mm: Map<String, Map<String, i64>> = Map::new()
+    for i in 0..20 { fill_maps(&mut mm, i.to_string(), i) }
+    let mut ms: Map<String, Set<i64>> = Map::new()
+    for i in 0..20 { fill_sets(&mut ms, i.to_string(), i * 100) }
+    let mut churn = #[]
+    for i in 0..40 { churn.push({ "x": i }) }
+    println("{} {} {}", table_sizes(mm), ms.get("3").unwrap_or(#{}), churn.len())
+    println("{:?}", mm.get("7"))
+
+    let mut got = mm.get("1").unwrap_or(Map::new())
+    got.insert("w", 5)
+    println("{} {}", got.len(), mm.get("1").unwrap_or(Map::new()).len())
+
+    let copy = mm
+    mm.or_insert("1", Map::new()).insert("z", 9)
+    mm.or_insert("new", Map::new()).insert("q", 1)
+    println("{} {} {}", mm.get("1").unwrap_or(Map::new()).len(), copy.get("1").unwrap_or(Map::new()).len(), copy.len())
+
+    let mut set_got = ms.get("2").unwrap_or(#{})
+    set_got.insert(99)
+    ms.or_insert("2", #{}).insert(7)
+    println("{} {}", set_got.len(), ms.get("2").unwrap_or(#{}).len())
+
+    let mut literal: Map<String, Map<String, i64>> = { "x": { "y": 1 } }
+    let literal_copy = literal
+    literal.or_insert("x", Map::new()).insert("z", 2)
+    println("{} {}", literal, literal_copy)
+
+    let mut total = 0
+    for i in 0..200 {
+        let mut scratch: Map<i64, Map<String, i64>> = Map::new()
+        scratch.insert(i, { "v": i })
+        scratch.insert(i, { "v": i + 1 })
+        total += scratch.len()
+    }
+    println("{}", total)
+}

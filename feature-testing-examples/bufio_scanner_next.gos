@@ -1,0 +1,17 @@
+// `Scanner::next` hands over each line as an `Option<String>` and leaves it
+// as the scanner's current text, the same on every tier; `scan` and `text`
+// read the rest of the input.
+
+use std::{bufio, io}
+
+fn main() {
+    let s = bufio::Scanner::new(io::stdin())
+    if let Some(first) = s.next() {
+        println("first [{}] current [{}]", first, s.text())
+    }
+    let mut rest = 0
+    while s.scan() {
+        rest += s.text().len()
+    }
+    println("rest {} next {:?}", rest, s.next())
+}

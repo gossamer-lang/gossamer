@@ -598,6 +598,12 @@ unsafe fn mark_shared_child(kind: i64, child: *mut u8) {
         gossamer_abi::rc::RC_CHILD_SET => unsafe {
             crate::c_abi::set::gos_rt_set_mark_shared(child.cast());
         },
+        gossamer_abi::rc::RC_CHILD_DEQUE => unsafe {
+            crate::c_abi::deque::deque_mark_shared(child.cast());
+        },
+        gossamer_abi::rc::RC_CHILD_HEAP => unsafe {
+            crate::c_abi::vec::gos_rt_vec_mark_shared(child.cast());
+        },
         _ => {}
     }
 }
@@ -2496,6 +2502,8 @@ unsafe fn release_rc_children(payload: *mut u8) {
             RC_CHILD_VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
             RC_CHILD_MAP => queue_map_child(child),
             gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
+            gossamer_abi::rc::RC_CHILD_DEQUE => queue_deque_child(child),
+            gossamer_abi::rc::RC_CHILD_HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
             gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => drop(Box::from_raw(
                 child.cast::<crate::c_abi::errors::ErrorFields>(),
             )),
@@ -2854,6 +2862,8 @@ unsafe fn release_child_of_kind(kind: i64, child: *mut u8, worklist: &mut Vec<*m
         RC_CHILD_VEC => queue_vec_child(child),
         RC_CHILD_MAP => queue_map_child(child),
         gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
+        gossamer_abi::rc::RC_CHILD_DEQUE => queue_deque_child(child),
+        gossamer_abi::rc::RC_CHILD_HEAP => queue_vec_child(child),
         gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => {
             drop(unsafe { Box::from_raw(child.cast::<crate::c_abi::errors::ErrorFields>()) });
         }
@@ -2882,6 +2892,10 @@ thread_local! {
     /// [`PENDING_MAP_FREES`].
     static PENDING_SET_FREES: std::cell::RefCell<Vec<*mut u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Owned `Deque` / `Queue` / `Stack` children of dead nodes, on the same
+    /// terms as [`PENDING_MAP_FREES`].
+    static PENDING_DEQUE_FREES: std::cell::RefCell<Vec<*mut u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Nesting depth of teardown frames (release walks / collection
     /// slices) on this thread; pending Vec frees drain when it reaches 0.
     static TEARDOWN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -2903,6 +2917,12 @@ fn queue_map_child(m: *mut u8) {
 /// teardown exit.
 fn queue_set_child(s: *mut u8) {
     PENDING_SET_FREES.with(|q| q.borrow_mut().push(s));
+}
+
+/// Queue a dead node's owned deque child for release at the outermost
+/// teardown exit.
+fn queue_deque_child(d: *mut u8) {
+    PENDING_DEQUE_FREES.with(|q| q.borrow_mut().push(d));
 }
 
 /// Enter a teardown frame (release walk or collection slice).
@@ -2936,6 +2956,11 @@ unsafe fn teardown_exit() {
         let next = PENDING_SET_FREES.with(|q| q.borrow_mut().pop());
         let Some(s) = next else { break };
         unsafe { crate::c_abi::map::gos_rt_set_free(s.cast()) };
+    }
+    loop {
+        let next = PENDING_DEQUE_FREES.with(|q| q.borrow_mut().pop());
+        let Some(d) = next else { break };
+        unsafe { crate::c_abi::deque::gos_rt_deque_free(d.cast()) };
     }
 }
 
@@ -2981,9 +3006,10 @@ unsafe fn visit_children_raw(payload: *mut u8, mut raw_f: impl FnMut(*mut u8)) {
     }
 }
 
-/// Replaces every owned `Map` and `Set` child of `payload` with a table of its
-/// own. Neither carries a reference count, so a copy that kept the source's
-/// handle would leave one table under two owners.
+/// Replaces every owned `Map`, `Set`, deque, and heap child of `payload` with
+/// one of its own. A map, a set, and a deque carry no reference count, and a
+/// heap is written in place, so a copy that kept the source's handle would
+/// leave one store under two owners.
 unsafe fn clone_map_children(payload: *mut u8) {
     unsafe {
         visit_entry_slots(payload, |kind, slot, child| {
@@ -2996,6 +3022,12 @@ unsafe fn clone_map_children(payload: *mut u8) {
                 }
                 gossamer_abi::rc::RC_CHILD_SET => {
                     crate::c_abi::set::gos_rt_set_clone(child.cast()).cast()
+                }
+                gossamer_abi::rc::RC_CHILD_DEQUE => {
+                    crate::c_abi::deque::gos_rt_deque_clone(child.cast()).cast()
+                }
+                gossamer_abi::rc::RC_CHILD_HEAP => {
+                    crate::c_abi::gos_rt_vec_clone(child.cast()).cast()
                 }
                 _ => return,
             };
@@ -3034,6 +3066,8 @@ unsafe fn visit_slot_children_meta(
             Ok(vec_elem_kind::VEC) => RC_CHILD_VEC,
             Ok(vec_elem_kind::MAP) => RC_CHILD_MAP,
             Ok(vec_elem_kind::SET) => RC_CHILD_SET,
+            Ok(vec_elem_kind::DEQUE) => gossamer_abi::rc::RC_CHILD_DEQUE,
+            Ok(vec_elem_kind::HEAP) => gossamer_abi::rc::RC_CHILD_HEAP,
             _ => continue,
         };
         let slot = unsafe { payload.add(usize::try_from(word).unwrap_or(0) * 8) };
@@ -3443,7 +3477,14 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
         let count = usize::try_from(unsafe { *meta.add(1) }).unwrap_or(0);
         return (0..count).any(|i| {
             let child = unsafe { *meta.add(2 + i * 4 + 3) };
-            child == i64::from(vec_elem_kind::MAP) || child == i64::from(vec_elem_kind::SET)
+            [
+                vec_elem_kind::MAP,
+                vec_elem_kind::SET,
+                vec_elem_kind::DEQUE,
+                vec_elem_kind::HEAP,
+            ]
+            .iter()
+            .any(|kind| child == i64::from(*kind))
         });
     }
     if unsafe { *meta } != RC_KIND_STRUCT {
@@ -3455,7 +3496,13 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
         let count = usize::try_from(unsafe { *meta.add(idx + 1) }).unwrap_or(0);
         for j in 0..count {
             let entry = unsafe { *meta.add(idx + 2 + j) };
-            if entry >> RC_CHILD_KIND_SHIFT == RC_CHILD_MAP {
+            if matches!(
+                entry >> RC_CHILD_KIND_SHIFT,
+                RC_CHILD_MAP
+                    | gossamer_abi::rc::RC_CHILD_SET
+                    | gossamer_abi::rc::RC_CHILD_DEQUE
+                    | gossamer_abi::rc::RC_CHILD_HEAP
+            ) {
                 return true;
             }
         }

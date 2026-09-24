@@ -606,42 +606,27 @@ pub(crate) static SET_REGISTRY: GlobalReg<StdHashMap<i64, SetEntries>> =
 /// tier's `gos_rt_mutex_lock`/`gos_rt_mutex_unlock`. Acquisition parks
 /// the contending goroutine's worker thread on the condvar (the same
 /// blocking discipline `Channel::recv` uses) rather than spinning.
+#[derive(Default)]
 pub(crate) struct MutexCell {
     /// `true` while a goroutine holds the lock.
     held: parking_lot::Mutex<bool>,
     /// Signalled by `unlock()` so one parked acquirer can proceed.
     available: parking_lot::Condvar,
-    /// Protected payload, readable on `lock()` and writable via
-    /// `store()`. Guarded by its own short-held lock so it never
-    /// contends with the held mutual-exclusion lock.
-    value: parking_lot::Mutex<Value>,
 }
 
 impl MutexCell {
-    /// Creates an unlocked cell protecting `value`.
-    pub(crate) fn new(value: Value) -> Self {
-        Self {
-            held: parking_lot::Mutex::new(false),
-            available: parking_lot::Condvar::new(),
-            value: parking_lot::Mutex::new(value),
-        }
-    }
-
     /// Whether a `lock` entered now would have to park.
     pub(crate) fn would_block(&self) -> bool {
         *self.held.lock()
     }
 
-    /// Acquires the lock, parking until it is free, and returns a
-    /// clone of the protected value.
-    pub(crate) fn lock(&self) -> Value {
+    /// Acquires the lock, parking until it is free.
+    pub(crate) fn lock(&self) {
         let mut held = self.held.lock();
         while *held {
             self.available.wait(&mut held);
         }
         *held = true;
-        drop(held);
-        self.value.lock().clone()
     }
 
     /// Releases the lock and wakes one parked acquirer.
@@ -650,11 +635,6 @@ impl MutexCell {
         *held = false;
         drop(held);
         self.available.notify_one();
-    }
-
-    /// Overwrites the protected value.
-    pub(crate) fn store(&self, value: Value) {
-        *self.value.lock() = value;
     }
 }
 pub(crate) static ONCE_REGISTRY: GlobalReg<StdHashMap<i64, Arc<parking_lot::Once>>> =

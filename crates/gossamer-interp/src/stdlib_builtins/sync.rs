@@ -114,10 +114,12 @@ pub(crate) fn install_sync_extras(globals: &mut Vec<(&'static str, Value)>) {
         ("AtomicI64::fetch_add", builtin_atomic_i64_fetch_add),
         ("AtomicI64::fetch_sub", builtin_atomic_i64_fetch_sub),
         ("AtomicI64::compare_exchange", builtin_atomic_i64_cas),
-        ("AtomicI32::new", builtin_atomic_i64_new),
-        ("AtomicI32::load", builtin_atomic_i64_load),
-        ("AtomicI32::store", builtin_atomic_i64_store),
-        ("AtomicI32::fetch_add", builtin_atomic_i64_fetch_add),
+        ("AtomicI32::new", builtin_atomic_i32_new),
+        ("AtomicI32::load", builtin_atomic_i32_load),
+        ("AtomicI32::store", builtin_atomic_i32_store),
+        ("AtomicI32::fetch_add", builtin_atomic_i32_fetch_add),
+        ("AtomicI32::fetch_sub", builtin_atomic_i32_fetch_sub),
+        ("AtomicI32::compare_exchange", builtin_atomic_i32_cas),
         ("AtomicBool::new", builtin_atomic_bool_new),
         ("AtomicBool::load", builtin_atomic_bool_load),
         ("AtomicBool::store", builtin_atomic_bool_store),
@@ -125,7 +127,6 @@ pub(crate) fn install_sync_extras(globals: &mut Vec<(&'static str, Value)>) {
         ("Mutex::new", builtin_mutex_new),
         ("Mutex::lock", builtin_mutex_lock),
         ("Mutex::unlock", builtin_mutex_unlock),
-        ("Mutex::store", builtin_mutex_store),
         ("Once::new", builtin_once_new),
         ("Map::new", builtin_sync_map_new),
         ("Map::insert", builtin_sync_map_set),
@@ -326,6 +327,79 @@ pub(crate) fn builtin_atomic_i64_cas(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(ok))
 }
 
+/// `AtomicI32::new(v)`: an i64 cell holding an i32, under a handle name of
+/// its own so its arithmetic wraps at 32 bits.
+pub(crate) fn builtin_atomic_i32_new(args: &[Value]) -> RuntimeResult<Value> {
+    let init = args.first().and_then(value_to_int).unwrap_or(0);
+    let id = next_atomic_id();
+    ATOMIC_I64_REGISTRY.with(|r| {
+        r.borrow_mut().insert(id, Arc::new(StdAtomicI64::new(init)));
+    });
+    Ok(atomic_handle("sync::AtomicI32", id))
+}
+
+fn with_atomic_i32<R>(value: &Value, f: impl FnOnce(&Arc<StdAtomicI64>) -> R) -> Option<R> {
+    let id = atomic_id_of(value, "sync::AtomicI32")?;
+    ATOMIC_I64_REGISTRY.with(|r| r.borrow().get(&id).map(f))
+}
+
+pub(crate) fn builtin_atomic_i32_load(args: &[Value]) -> RuntimeResult<Value> {
+    let n = args
+        .first()
+        .and_then(|v| with_atomic_i32(v, |a| a.load(Ordering::SeqCst)))
+        .unwrap_or(0);
+    Ok(Value::Int(n))
+}
+
+pub(crate) fn builtin_atomic_i32_store(args: &[Value]) -> RuntimeResult<Value> {
+    let val = args.get(1).and_then(value_to_int).unwrap_or(0);
+    if let Some(handle) = args.first() {
+        let _ = with_atomic_i32(handle, |a| a.store(val, Ordering::SeqCst));
+    }
+    Ok(Value::Unit)
+}
+
+/// Applies `step` to the i32 the handle's cell holds, answering the prior
+/// value.
+fn atomic_i32_update(args: &[Value], step: impl Fn(i32, i32) -> i32) -> RuntimeResult<Value> {
+    let delta = args.get(1).and_then(value_to_int).unwrap_or(0) as i32;
+    let prev = args
+        .first()
+        .and_then(|v| {
+            with_atomic_i32(v, |a| {
+                a.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |cur| {
+                    Some(i64::from(step(cur as i32, delta)))
+                })
+                .unwrap_or_else(|cur| cur)
+            })
+        })
+        .unwrap_or(0);
+    Ok(Value::Int(i64::from(prev as i32)))
+}
+
+pub(crate) fn builtin_atomic_i32_fetch_add(args: &[Value]) -> RuntimeResult<Value> {
+    atomic_i32_update(args, i32::wrapping_add)
+}
+
+pub(crate) fn builtin_atomic_i32_fetch_sub(args: &[Value]) -> RuntimeResult<Value> {
+    atomic_i32_update(args, i32::wrapping_sub)
+}
+
+pub(crate) fn builtin_atomic_i32_cas(args: &[Value]) -> RuntimeResult<Value> {
+    let current = args.get(1).and_then(value_to_int).unwrap_or(0);
+    let new = args.get(2).and_then(value_to_int).unwrap_or(0);
+    let ok = args
+        .first()
+        .and_then(|v| {
+            with_atomic_i32(v, |a| {
+                a.compare_exchange(current, new, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok()
+            })
+        })
+        .unwrap_or(false);
+    Ok(Value::Bool(ok))
+}
+
 pub(crate) fn builtin_atomic_bool_new(args: &[Value]) -> RuntimeResult<Value> {
     let init = matches!(args.first(), Some(Value::Bool(true)));
     let id = next_atomic_id();
@@ -375,11 +449,10 @@ pub(crate) fn builtin_atomic_bool_cas(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(ok))
 }
 
-pub(crate) fn builtin_mutex_new(args: &[Value]) -> RuntimeResult<Value> {
-    let init = args.first().cloned().unwrap_or(Value::Unit);
+pub(crate) fn builtin_mutex_new(_args: &[Value]) -> RuntimeResult<Value> {
     let id = next_atomic_id();
     MUTEX_REGISTRY.with(|r| {
-        r.borrow_mut().insert(id, Arc::new(MutexCell::new(init)));
+        r.borrow_mut().insert(id, Arc::new(MutexCell::default()));
     });
     Ok(Value::struct_(
         "sync::Mutex",
@@ -416,10 +489,7 @@ pub(crate) fn builtin_mutex_lock(args: &[Value]) -> RuntimeResult<Value> {
         if !gossamer_runtime::platform::CAN_BLOCK && cell.would_block() {
             return Err(crate::value::RuntimeError::WouldNeverWake("Mutex::lock"));
         }
-        // Acquiring answers with the lock, not with what the mutex guards:
-        // the compiled tiers carry no value back through this call, so a
-        // guarded value returned here would read differently per tier.
-        let _ = cell.lock();
+        cell.lock();
     }
     Ok(Value::Unit)
 }
@@ -431,18 +501,6 @@ pub(crate) fn builtin_mutex_unlock(args: &[Value]) -> RuntimeResult<Value> {
     let arc = MUTEX_REGISTRY.with(|r| r.borrow().get(&id).cloned());
     if let Some(cell) = arc {
         cell.unlock();
-    }
-    Ok(Value::Unit)
-}
-
-pub(crate) fn builtin_mutex_store(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(id) = args.first().and_then(mutex_id_of) else {
-        return Ok(Value::Unit);
-    };
-    let new_val = args.get(1).cloned().unwrap_or(Value::Unit);
-    let arc = MUTEX_REGISTRY.with(|r| r.borrow().get(&id).cloned());
-    if let Some(cell) = arc {
-        cell.store(new_val);
     }
     Ok(Value::Unit)
 }

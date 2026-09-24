@@ -804,6 +804,34 @@ fn inclusive_value_range_requires_an_upper_bound() {
 }
 
 #[test]
+fn range_pattern_bounds_take_primitive_limits() {
+    let valid = "fn f(n: i64) -> i64 { match n { i64::MIN..=-1 => 0, 1..=i64::MAX => 1, _ => 2 } }";
+    let mut map = SourceMap::new();
+    let file = map.add_file("limit_bounds.gos", valid.to_string());
+    let (_sf, diags) = parse_source_file(valid, file);
+    assert!(diags.is_empty(), "limit bounds should parse: {diags:?}");
+}
+
+#[test]
+fn range_pattern_path_bound_is_one_diagnostic() {
+    for source in [
+        "fn f(n: i64) -> i64 { match n { LOW..=9 => 0, _ => 1 } }",
+        "fn f(n: i64) -> i64 { match n { 0..=LOW => 0, _ => 1 } }",
+        "fn f(n: i64) -> i64 { match n { ..=m::LOW => 0, _ => 1 } }",
+    ] {
+        let mut map = SourceMap::new();
+        let file = map.add_file("path_bound.gos", source.to_string());
+        let (_sf, diags) = parse_source_file(source, file);
+        assert_eq!(
+            diags.len(),
+            1,
+            "expected one diagnostic for {source}: {diags:?}"
+        );
+        assert_eq!(diags[0].to_diagnostic().code.as_str(), "GP0059");
+    }
+}
+
+#[test]
 fn open_end_range_stops_before_for_body() {
     let source = "fn main() { for i in 3.. { println(i) } }";
     let mut map = SourceMap::new();

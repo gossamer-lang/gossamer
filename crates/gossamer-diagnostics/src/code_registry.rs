@@ -657,6 +657,13 @@ pub const REGISTRY: &[(&str, &str)] = &[
             statement is checked while the program is parsed.",
     ),
     (
+        "GP0059",
+        "A range pattern bound is a literal, or a primitive integer limit such\n\
+            as `i64::MIN` or `u8::MAX`, which stands for its literal. Any other\n\
+            path - a `const`, a static, an enum variant - is not a bound: match\n\
+            it with a guard instead (`n if n >= LOW => ..`).",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\

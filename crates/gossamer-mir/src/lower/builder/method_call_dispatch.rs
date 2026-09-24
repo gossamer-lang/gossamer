@@ -419,7 +419,7 @@ impl<'a> Builder<'a> {
                 let s = self.tcx.string_ty();
                 self.tcx.intern(gossamer_types::TyKind::Vec(s))
             }
-            "gos_rt_sync_map_get" => self.option_string_adt_ty(),
+            "gos_rt_sync_map_get" | "gos_rt_bufio_scanner_next" => self.option_string_adt_ty(),
             "gos_rt_map_keys_i64"
             | "gos_rt_map_values_i64"
             | "gos_rt_map_keys_u64"

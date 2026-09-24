@@ -104,6 +104,15 @@ pub mod vec_elem_kind {
     /// one back - without it a vector of children keeps the whole document
     /// alive for as long as the program runs.
     pub const JSON: u8 = 12;
+    /// Slot-child kind: the slot word holds a `*mut GosDeque` (a `Deque`,
+    /// `Queue`, or `Stack`). The header carries no count of its holders, so a
+    /// copied slot takes a store of its own via `gos_rt_deque_clone` and the
+    /// vec's teardown frees the one it holds via `gos_rt_deque_free`.
+    pub const DEQUE: u8 = 13;
+    /// Slot-child kind: the slot word holds a heap (`MinHeap` / `MaxHeap`), a
+    /// `GosVec` written in place, so a copied slot takes a heap of its own via
+    /// `gos_rt_vec_clone` and the vec's teardown frees the one it holds.
+    pub const HEAP: u8 = 14;
 }
 
 #[repr(C)]
@@ -665,6 +674,14 @@ pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
                 let cloned = crate::c_abi::set::gos_rt_set_clone(child.cast());
                 slot_write_word(word, cloned as *mut u8);
             }
+            vec_elem_kind::DEQUE => {
+                let cloned = crate::c_abi::deque::gos_rt_deque_clone(child.cast());
+                slot_write_word(word, cloned.cast::<u8>());
+            }
+            vec_elem_kind::HEAP => {
+                let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
+                slot_write_word(word, cloned.cast::<u8>());
+            }
             _ => {}
         });
     }
@@ -731,6 +748,8 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
             vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
             vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(child.cast()),
             vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
+            vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
+            vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_release(child),
             _ => {}
         });
@@ -816,6 +835,8 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
                 vec_elem_kind::VEC => crate::c_abi::map::gos_rt_vec_free(child.cast()),
                 vec_elem_kind::MAP => crate::c_abi::map::gos_rt_map_free(child.cast()),
                 vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
+                vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
+                vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
                 vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_release(child),
                 _ => {}
             });
@@ -1061,6 +1082,14 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                             vec_elem_kind::SET => {
                                 let cloned = crate::c_abi::set::gos_rt_set_clone(child.cast());
                                 slot_write_word(word, cloned as *mut u8);
+                            }
+                            vec_elem_kind::DEQUE => {
+                                let cloned = crate::c_abi::deque::gos_rt_deque_clone(child.cast());
+                                slot_write_word(word, cloned.cast::<u8>());
+                            }
+                            vec_elem_kind::HEAP => {
+                                let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
+                                slot_write_word(word, cloned.cast::<u8>());
                             }
                             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_retain(child),
                             _ => {}
@@ -3036,6 +3065,25 @@ pub extern "C" fn gos_rt_result_unwrap_or_vec(r: i128, default: i64) -> i64 {
         unsafe { crate::c_abi::vec::gos_rt_vec_retain(default as usize as *mut GosVec) };
     }
     default
+}
+
+/// `unwrap_or` where the value is a `Map`.
+///
+/// A carrier never owns a table: an `Option<Map>` from a map read lends the
+/// stored table, and the fallback belongs to its own binding, which frees it.
+/// The answer is therefore a table of the caller's own either way.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_result_unwrap_or_map(r: i128, default: i64) -> i64 {
+    let chosen = if result_disc_of(r) == 0 {
+        result_payload_of(r)
+    } else {
+        default
+    };
+    // SAFETY: a `Map` word is null or a live `GosMap` the carrier or the
+    // fallback's binding holds for the length of this call.
+    let copy =
+        unsafe { crate::c_abi::gos_rt_map_clone(chosen as usize as *const crate::c_abi::GosMap) };
+    copy as i64
 }
 
 /// `unwrap_or` where the value is a `String`.

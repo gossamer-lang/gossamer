@@ -541,6 +541,7 @@ fn fold_unary(op: crate::ir::UnOp, operand: &ConstValue) -> Option<ConstValue> {
 /// retain bindings whose RHS is a `Const` or `Copy(simple-local)`.
 pub fn copy_propagate(body: &mut Body, tcx: &TyCtxt) {
     let aggregate_locals = aggregate_locals(body, tcx);
+    let unsigned_words = unsigned_word_locals(body, tcx);
     for block in &mut body.blocks {
         let mut bindings: HashMap<Local, Operand> = HashMap::new();
         for stmt in &mut block.stmts {
@@ -551,7 +552,7 @@ pub fn copy_propagate(body: &mut Body, tcx: &TyCtxt) {
             if let StatementKind::Assign { place, rvalue } = &mut stmt.kind {
                 // Substitute reads first (covers `Use` and every other
                 // rvalue shape uniformly).
-                substitute_rvalue(rvalue, &bindings);
+                substitute_rvalue(rvalue, &bindings, &unsigned_words);
                 if !place.is_simple() {
                     // A projected write (`*p`, `p.field`) does not
                     // reassign the local's own value; leave bindings.
@@ -598,15 +599,73 @@ pub fn copy_propagate(body: &mut Body, tcx: &TyCtxt) {
     }
 }
 
-fn substitute_rvalue(rvalue: &mut Rvalue, bindings: &HashMap<Local, Operand>) {
+/// Which locals hold a `u64` / `usize`: the one integer shape whose value a
+/// bare `ConstValue::Int` cannot carry, since the backends read an untyped
+/// constant as a signed `i64`.
+fn unsigned_word_locals(body: &Body, tcx: &TyCtxt) -> Vec<bool> {
+    body.locals
+        .iter()
+        .map(|decl| {
+            matches!(
+                tcx.kind(decl.ty),
+                Some(TyKind::Int(
+                    gossamer_types::IntTy::U64
+                        | gossamer_types::IntTy::Usize
+                        | gossamer_types::IntTy::U128
+                ))
+            )
+        })
+        .collect()
+}
+
+/// `true` when `op`'s result depends on whether its operands are signed.
+fn binop_reads_signedness(op: BinOp) -> bool {
+    matches!(
+        op,
+        BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Shr | BinOp::Div | BinOp::Rem
+    )
+}
+
+/// [`substitute_operand`], except that a constant never replaces a `u64` /
+/// `usize` local: the operand's place is what tells the backend to convert,
+/// compare, shift, or divide the value as unsigned.
+fn substitute_typed_operand(
+    operand: &mut Operand,
+    bindings: &HashMap<Local, Operand>,
+    unsigned_words: &[bool],
+) {
+    if let Operand::Copy(place) = operand
+        && place.projection.is_empty()
+        && unsigned_words
+            .get(place.local.0 as usize)
+            .copied()
+            .unwrap_or(false)
+        && matches!(bindings.get(&place.local), Some(Operand::Const(_)))
+    {
+        return;
+    }
+    substitute_operand(operand, bindings);
+}
+
+fn substitute_rvalue(
+    rvalue: &mut Rvalue,
+    bindings: &HashMap<Local, Operand>,
+    unsigned_words: &[bool],
+) {
     match rvalue {
         Rvalue::Use(op) => substitute_operand(op, bindings),
+        Rvalue::BinaryOp { op, lhs, rhs } if binop_reads_signedness(*op) => {
+            substitute_typed_operand(lhs, bindings, unsigned_words);
+            substitute_typed_operand(rhs, bindings, unsigned_words);
+        }
         Rvalue::BinaryOp { lhs, rhs, .. } => {
             substitute_operand(lhs, bindings);
             substitute_operand(rhs, bindings);
         }
         Rvalue::UnaryOp { operand, .. } => substitute_operand(operand, bindings),
-        Rvalue::Cast { operand, .. } => substitute_operand(operand, bindings),
+        Rvalue::Cast { operand, .. } => {
+            substitute_typed_operand(operand, bindings, unsigned_words);
+        }
         Rvalue::Aggregate { operands, .. } => {
             for op in operands {
                 substitute_operand(op, bindings);

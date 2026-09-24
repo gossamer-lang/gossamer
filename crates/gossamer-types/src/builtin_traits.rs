@@ -473,7 +473,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         "Shared access is the runtime's business, not a marker's: reach for \
          `sync::Mutex` or a channel when goroutines share state.",
         "Remove the block.",
-        "let guard = sync::Mutex::new(0)",
+        "let guard = sync::Mutex::new()",
     ),
     automatic(
         "Drop",

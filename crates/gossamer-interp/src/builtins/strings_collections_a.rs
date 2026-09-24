@@ -970,8 +970,10 @@ fn builtin_map_get(args: &[Value]) -> RuntimeResult<Value> {
                 return Ok(none_variant());
             };
             let key = MapKey::from_value(v);
+            // A value read out of the map is the caller's own: a table it
+            // holds is copied, so a write through the result leaves the entry.
             match map.lock().get(&key) {
-                Some(v) => Ok(some_variant(v.clone())),
+                Some(v) => Ok(some_variant(crate::vm::run::map_like_deep_clone(v))),
                 None => Ok(none_variant()),
             }
         }
@@ -1005,8 +1007,8 @@ fn builtin_map_get_or(args: &[Value]) -> RuntimeResult<Value> {
                 return Ok(default);
             };
             let key = MapKey::from_value(v);
-            match map.lock().get(&key).cloned() {
-                Some(v) => Ok(v),
+            match map.lock().get(&key) {
+                Some(v) => Ok(crate::vm::run::map_like_deep_clone(v)),
                 None => Ok(default),
             }
         }
@@ -1388,7 +1390,7 @@ fn builtin_map_values(args: &[Value]) -> RuntimeResult<Value> {
                 .lock()
                 .sorted()
                 .into_iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), crate::vm::run::map_like_deep_clone(v)))
                 .collect();
             out.extend(entries.into_iter().map(|(_, v)| v));
         }
@@ -1433,7 +1435,7 @@ pub(crate) fn builtin_map_iter(args: &[Value]) -> RuntimeResult<Value> {
                 .lock()
                 .sorted()
                 .into_iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
+                .map(|(k, v)| (k.clone(), crate::vm::run::map_like_deep_clone(v)))
                 .collect();
             let out: Vec<Value> = entries
                 .into_iter()

@@ -327,7 +327,7 @@ impl<'a> Builder<'a> {
             // / `json::Value`), promote the scrutinee local to
             // `json::Value` so chained `j.field` accesses route
             // through the json runtime helpers.
-            if let Some((bname, _mutable, variant_name)) = binding {
+            if let Some((bname, mutable, variant_name)) = binding {
                 let scrut_ty = self.locals[scrutinee_local.0 as usize].ty;
                 if let Some(name) = variant_name.as_deref() {
                     // Generalised happy-path payload pin: for
@@ -349,6 +349,9 @@ impl<'a> Builder<'a> {
                     }
                 }
                 self.bind_local(&bname.name, scrutinee_local);
+                if mutable {
+                    self.own_mut_binding(&bname.name, span);
+                }
             }
             if let Some(value_local) = self.lower_expr(body) {
                 let value_local = self.branch_result_value(value_local, result_local, span);
@@ -524,6 +527,7 @@ impl<'a> Builder<'a> {
                 }
                 _ => {}
             }
+            self.own_mut_pattern_bindings(&arm.pattern, span);
             if let Some(value_local) = self.lower_expr(&arm.body) {
                 let value_local = self.branch_result_value(value_local, result_local, span);
                 // The arm's own value carries the shape the match answers
@@ -559,6 +563,103 @@ impl<'a> Builder<'a> {
         }
         self.set_current(join_block);
         Some(result_local)
+    }
+
+    /// Gives every `mut` binding `pattern` introduced a value of its own, as a
+    /// `let` binding takes one: the pattern binds a view of the matched value,
+    /// and a write through a `mut` binding must not reach that value. A
+    /// binding under a `&mut` pattern names the matched place and keeps it.
+    fn own_mut_pattern_bindings(&mut self, pattern: &HirPat, span: Span) {
+        match &pattern.kind {
+            HirPatKind::Binding {
+                name,
+                mutable: true,
+            } => self.own_mut_binding(&name.name, span),
+            HirPatKind::At { name, mutable, sub } => {
+                self.own_mut_pattern_bindings(sub, span);
+                if *mutable {
+                    self.own_mut_binding(&name.name, span);
+                }
+            }
+            HirPatKind::Tuple(subs) | HirPatKind::Variant { fields: subs, .. } => {
+                for sub in subs {
+                    self.own_mut_pattern_bindings(sub, span);
+                }
+            }
+            HirPatKind::Struct { fields, .. } => {
+                for field in fields {
+                    if let Some(sub) = &field.pattern {
+                        self.own_mut_pattern_bindings(sub, span);
+                    }
+                }
+            }
+            HirPatKind::Slice {
+                prefix,
+                rest,
+                suffix,
+            } => {
+                for sub in prefix.iter().chain(suffix) {
+                    self.own_mut_pattern_bindings(sub, span);
+                }
+                if let Some(rest) = rest {
+                    self.own_mut_pattern_bindings(rest, span);
+                }
+            }
+            // An or-pattern binds the same names in each branch; the one that
+            // matched is what the names hold, and the first branch names them.
+            HirPatKind::Or(branches) => {
+                if let Some(first) = branches.first() {
+                    self.own_mut_pattern_bindings(first, span);
+                }
+            }
+            HirPatKind::Binding { .. }
+            | HirPatKind::Ref { .. }
+            | HirPatKind::Wildcard
+            | HirPatKind::Literal(_)
+            | HirPatKind::Rest
+            | HirPatKind::Range { .. } => {}
+        }
+    }
+
+    /// Rebinds `name` to a copy of the value it names when that value holds a
+    /// container a write would reach through a shared handle.
+    fn own_mut_binding(&mut self, name: &str, span: Span) {
+        use gossamer_types::TyKind;
+        let Some(view) = self.lookup_local(name) else {
+            return;
+        };
+        let ty = self.locals[view.0 as usize].ty;
+        let holds_container = match self.tcx.kind_of(ty) {
+            TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. } => true,
+            TyKind::Adt { .. } | TyKind::Tuple(_) | TyKind::Array { .. } => {
+                self.map_or_set_clone_symbol(ty).is_some()
+                    || crate::lower::aggregate_rc_field_paths(self.tcx, ty)
+                        .iter()
+                        .any(|(_, kind)| {
+                            matches!(
+                                kind,
+                                crate::lower::FieldRcKind::Vec
+                                    | crate::lower::FieldRcKind::Map
+                                    | crate::lower::FieldRcKind::Set
+                                    | crate::lower::FieldRcKind::Deque
+                                    | crate::lower::FieldRcKind::Heap
+                            )
+                        })
+            }
+            _ => self.set_clone_symbol_for_local(view).is_some(),
+        };
+        if !holds_container {
+            return;
+        }
+        let own = self.push_local(ty, Some(Ident::new(name)), true);
+        if let Some(rk) = self.local_runtime_kind.get(&view).copied() {
+            self.local_runtime_kind.insert(own, rk);
+        }
+        if let Some(struct_name) = self.local_struct.get(&view).cloned() {
+            self.local_struct.insert(own, struct_name);
+        }
+        self.emit_owned_clone_binding(view, own, span);
+        self.bind_local(name, own);
     }
 
     pub(crate) fn lower_match_with_guards(
@@ -642,6 +743,7 @@ impl<'a> Builder<'a> {
             }
 
             self.set_current(arm_block);
+            self.own_mut_pattern_bindings(&arm.pattern, span);
             if let Some(value_local) = self.lower_expr(&arm.body) {
                 let value_local = self.branch_result_value(value_local, result_local, span);
                 use gossamer_types::TyKind;

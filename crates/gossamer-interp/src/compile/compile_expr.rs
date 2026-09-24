@@ -228,8 +228,18 @@ impl<'tcx> FnBuilder<'tcx> {
             } => {
                 let dst_kind = self.expr_kind(expr);
                 let src_kind = self.expr_kind(value);
+                let unsigned_word = |kind: Option<&TyKind>| {
+                    matches!(
+                        kind,
+                        Some(TyKind::Int(
+                            gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize
+                        ))
+                    )
+                };
+                let src_unsigned_word = unsigned_word(self.tcx.kind(value.ty));
+                let dst_unsigned_word = unsigned_word(self.tcx.kind(*target_ty));
                 match (dst_kind, src_kind) {
-                    (RegKind::F64, RegKind::I64) => {
+                    (RegKind::F64, RegKind::I64) if !src_unsigned_word => {
                         let src_tr = self.compile_expr_ex(value)?;
                         let src_i = self.as_i64(src_tr);
                         let dst_f = self.alloc_float();
@@ -244,17 +254,18 @@ impl<'tcx> FnBuilder<'tcx> {
                     // target saturates at its own range instead, so it takes
                     // the general cast rather than a second op here.
                     (RegKind::I64, RegKind::F64)
-                        if !matches!(
-                            self.tcx.kind(*target_ty),
-                            Some(TyKind::Int(
-                                gossamer_types::IntTy::I8
-                                    | gossamer_types::IntTy::I16
-                                    | gossamer_types::IntTy::I32
-                                    | gossamer_types::IntTy::U8
-                                    | gossamer_types::IntTy::U16
-                                    | gossamer_types::IntTy::U32
-                            ))
-                        ) =>
+                        if !dst_unsigned_word
+                            && !matches!(
+                                self.tcx.kind(*target_ty),
+                                Some(TyKind::Int(
+                                    gossamer_types::IntTy::I8
+                                        | gossamer_types::IntTy::I16
+                                        | gossamer_types::IntTy::I32
+                                        | gossamer_types::IntTy::U8
+                                        | gossamer_types::IntTy::U16
+                                        | gossamer_types::IntTy::U32
+                                ))
+                            ) =>
                     {
                         let src_tr = self.compile_expr_ex(value)?;
                         let src_f = self.as_f64(src_tr);
@@ -333,6 +344,7 @@ impl<'tcx> FnBuilder<'tcx> {
                             .tcx
                             .kind(*target_ty)
                             .and_then(crate::cast::CastTarget::of)
+                            .map(|target| target.read_from(self.tcx.kind(value.ty)))
                             // `as` only typechecks (passes the GT0005
                             // whitelist) for scalar targets, so a resolved
                             // cast always maps to a `CastTarget`. Reaching
@@ -563,6 +575,15 @@ impl<'tcx> FnBuilder<'tcx> {
                 }) => self.compile_path(&target, None),
                 _ => self.compile_path(segments, *def),
             },
+            // `-x` and `!x` wrap at the operand's declared width, which the
+            // typed path applies.
+            HirExprKind::Unary {
+                op: op @ (HirUnaryOp::Neg | HirUnaryOp::Not),
+                operand,
+            } => {
+                let tr = self.compile_unary_ex(*op, operand)?;
+                Ok(self.as_value(tr))
+            }
             HirExprKind::Unary { op, operand } => self.compile_unary(*op, operand),
             HirExprKind::Binary { op, lhs, rhs } => self.compile_binary(*op, lhs, rhs),
             HirExprKind::Assign { place, value } => self.compile_assign(place, value),
@@ -793,6 +814,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 }
                 for (i, elem) in elems.iter().enumerate() {
                     let r = self.compile_expr(elem)?;
+                    let r = self.stored_value_reg(elem, r);
                     let slot = first + i as u16;
                     if r != slot {
                         self.emit(Op::Move { dst: slot, src: r });
@@ -884,6 +906,7 @@ impl<'tcx> FnBuilder<'tcx> {
         }
         for (i, elem) in elems.iter().enumerate() {
             let r = self.compile_expr(elem)?;
+            let r = self.stored_value_reg(elem, r);
             let slot = first + i as u16;
             if r != slot {
                 self.emit(Op::Move { dst: slot, src: r });
@@ -982,7 +1005,15 @@ impl<'tcx> FnBuilder<'tcx> {
         }
         let mut wrote_any = false;
         for (i, field) in fields.iter().enumerate() {
-            let HirPatKind::Binding { name, .. } = &field.kind else {
+            // A `mut` binding declared a value of its own, which the arm's
+            // writes stay in; only a name the checker let the arm write
+            // without `mut` - one reached through a `&mut` scrutinee - is the
+            // enum's own payload.
+            let HirPatKind::Binding {
+                name,
+                mutable: false,
+            } = &field.kind
+            else {
                 continue;
             };
             if !self.name_is_written(&arm.body, &name.name) {
@@ -1312,14 +1343,18 @@ impl<'tcx> FnBuilder<'tcx> {
     ) -> RuntimeResult<()> {
         match &pat.kind {
             HirPatKind::Wildcard | HirPatKind::Rest => {}
-            HirPatKind::Binding { name, .. } => {
+            HirPatKind::Binding { name, mutable } => {
                 // Copy into a fresh reg so a `let mut`-style rebind in
                 // the arm body can't clobber the scrutinee register.
                 // Under `consume` the scrutinee is a read-once uniquely
-                // owned value, so hand it over instead of cloning.
+                // owned value, so hand it over instead of cloning. A `mut`
+                // binding is a value of its own: a table it holds sits
+                // behind a shared handle, so it takes a copy of that too.
                 let r = self.alloc_reg();
                 if consume {
                     self.emit(Op::MoveConsume { dst: r, src: scrut });
+                } else if *mutable {
+                    self.emit(Op::CloneMapLike { dst: r, src: scrut });
                 } else {
                     self.emit(Op::Move { dst: r, src: scrut });
                 }
@@ -1422,10 +1457,14 @@ impl<'tcx> FnBuilder<'tcx> {
             HirPatKind::Ref { inner, .. } => {
                 self.emit_pattern_test_ex(scrut, inner, fails, consume)?;
             }
-            HirPatKind::At { name, sub, .. } => {
+            HirPatKind::At { name, sub, mutable } => {
                 self.emit_pattern_test(scrut, sub, fails)?;
                 let r = self.alloc_reg();
-                self.emit(Op::Move { dst: r, src: scrut });
+                if *mutable {
+                    self.emit(Op::CloneMapLike { dst: r, src: scrut });
+                } else {
+                    self.emit(Op::Move { dst: r, src: scrut });
+                }
                 self.bind_local(
                     &name.name,
                     TypedReg {
@@ -2249,8 +2288,8 @@ impl<'tcx> FnBuilder<'tcx> {
                 }
             }
         };
-        let Some((shift, signed)) = narrow
-            .filter(|_| matches!(op, HirUnaryOp::Neg | HirUnaryOp::Not) && kind == RegKind::I64)
+        let Some((shift, signed)) =
+            narrow.filter(|_| matches!(op, HirUnaryOp::Neg | HirUnaryOp::Not))
         else {
             return Ok(wide);
         };
@@ -2637,6 +2676,7 @@ impl<'tcx> FnBuilder<'tcx> {
         match (name.name.as_str(), args.len()) {
             ("push", 1) => {
                 let value = self.compile_expr(&args[0])?;
+                let value = self.stored_value_reg(&args[0], value);
                 self.emit(Op::VecPush {
                     receiver: target_reg,
                     value,
@@ -2646,6 +2686,7 @@ impl<'tcx> FnBuilder<'tcx> {
             ("insert", 2) => {
                 let index = self.compile_expr(&args[0])?;
                 let value = self.compile_expr(&args[1])?;
+                let value = self.stored_value_reg(&args[1], value);
                 let dst = self.alloc_reg();
                 self.emit(Op::VecInsert {
                     dst,
@@ -3475,7 +3516,18 @@ impl<'tcx> FnBuilder<'tcx> {
                 }
                 arg_regs.push(cell);
             } else {
-                arg_regs.push(self.compile_expr(arg)?);
+                let reg = self.compile_expr(arg)?;
+                // The value a storing method keeps is a value of its own.
+                let stores = matches!(
+                    name.name.as_str(),
+                    "push" | "push_back" | "push_front" | "insert" | "or_insert"
+                ) && i + 1 == args.len();
+                let reg = if stores {
+                    self.stored_value_reg(arg, reg)
+                } else {
+                    reg
+                };
+                arg_regs.push(reg);
             }
         }
         for (i, r) in arg_regs.iter().enumerate() {

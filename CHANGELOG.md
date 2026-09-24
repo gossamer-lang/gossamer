@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.64.0 - Correctness and soundness fixes
+
+- The `std::sync` handles (`Mutex`, `RwLock`, `Once`, `WaitGroup`, `Barrier`, `AtomicI64`, `AtomicI32`, `AtomicU64`, `AtomicBool`) and the `I64Vec` / `U8Vec` buffers are typed, each with its own method table: a wrong annotation (`let s: String = m.lock()`), a wrong argument, or a method the handle lacks is a type error, where the program checked and then printed differently on each tier.
+- The `context::Context`, `metrics` (`Counter`, `Gauge`, `Histogram`, `Registry`), `trace` (`Tracer`, `Span`, `EndedSpan`), `math::rand::Rng`, `bufio::Scanner`, and `sync::Map` handles are typed the same way, constructors and qualified calls included, and an unknown method on a `sync::Shared` is reported. `rand::Rng::seeded`, which checked and then failed at run time, is reported as unknown.
+- `Rng::next_u64` and `range_u64` answer a `u64` and `next_u32` a `u32`, so a draw above `i64::MAX` prints unsigned rather than negative.
+- `bufio::Scanner::next()` runs on the compiled tiers; it failed to link there.
+- `sync::Mutex::new()` takes no value: a mutex guards the code between `lock()` and `unlock()`, and the value `Mutex::new(v)` accepted could never be read back. The VM-only `Mutex::store` is gone.
+- `b.wait()` on a `sync::Barrier` waits at the barrier on the compiled tiers; it reached the `WaitGroup` wait and returned at once.
+- `Once::call` answers `true` / `false` on the compiled tiers, where it printed `1` / `0`, and an `AtomicU64` read renders unsigned on every tier (`u64::MAX` printed `-1`).
+- `AtomicI32::fetch_add` / `fetch_sub` wrap at 32 bits on every tier, and `AtomicI32` and `AtomicU64` answer `fetch_sub` and `compare_exchange` on the VM as they do compiled.
+- A qualified `sync` call such as `sync::AtomicBool::compare_exchange(flag, a, b)` builds on the compiled tiers; several of those spellings failed to link.
+- `flat_map` whose callback answers an iterator (`xs.iter().flat_map(|v| v.iter())`) concatenates what each iterator yields on the compiled tiers, where it answered an empty vector.
+- `gos lint` (GL0056) reports a dropped result of a builtin method that answers a new value and changes nothing - `v.dedup()`, `s.trim()`, `s.to_uppercase()` - which leaves the receiver as it was.
+- A `Map` whose values are maps or sets owns each one: `insert` and `or_insert` store a copy, a binding read out of it takes a copy, and overwriting, removing, or dropping an entry frees its table. On the compiled tiers the map kept the caller's table, which the caller then freed, so reading the map afterwards could show garbage keys, crash, or hang at exit, and every inner table leaked.
+- Copying a `Map` whose values are `Vec`s (`let m2 = m`, a by-value argument) copies each `Vec`, as copying a `Vec<Vec<_>>` already did; `m.or_insert(k, #[]).push(x)` on the copy's source also changed the copy on the compiled tiers. `m.values()` on such a map answers vectors of its own, where a write through one (`vals[0].push(x)`) reached the map.
+- A `Deque`, `Queue`, `Stack`, `MinHeap`, or `MaxHeap` held in a map, in a vector, or in a struct stored in either is owned by its holder on the compiled tiers, as a `Map` or `Set` is: storing one keeps a copy, copying the holder copies it, and dropping the holder frees it. The holder kept the caller's handle, which the caller then freed, so a deque stored by a helper function crashed the program; a struct with a `Set` or deque field stored in a map crashed or hung at exit.
+- Storing a container a binding still names - `v.push(x)`, `m.insert(k, x)`, `xs[i] = x`, a tuple or array literal - stores a copy on every tier, so a later write through the binding (`x.push(1)`) no longer changes the stored element. A binding the store is the last use of hands its value over without a copy.
+- `Set<String>` inserts and set literals of computed strings (`#{i.to_string()}`) free the string the set copied on the compiled tiers; every element leaked.
+- Copying a map with enum keys and counted values takes a share of each value; both copies released the same values when they were dropped.
+- On the bytecode VM, copying a `Map` copies the maps and sets stored in it, and `get`, `get_or`, `values`, and `iter` hand out copies of stored tables, so a write through one no longer reaches the map or its copies.
+- A `mut` binding in a pattern (`if let Some(mut v) = o`, `E::A(mut xs) =>`, `let mut a, mut b = pair`) is a value of its own on every tier, as a `let mut` binding is: a write through it no longer reaches the value it was matched out of, or the value that one was built from (`Some(v1)` and `v1` both changed on the compiled tiers). A binding written without `mut` through a `&mut` scrutinee still names the enum's own payload.
+- `opt.unwrap_or(fallback)` on an `Option<Map>` answers a map of the caller's own on the compiled tiers; it freed the fallback twice when `opt` was `None`, and freed the payload's map out from under its owner when it was `Some`.
+- A function taking a `&mut` payload enum (`fn bump(t: &mut Tree) { match t { .. } }`) reads the enum through the reference on the compiled tiers, as a `&mut self` method does; matching on it crashed.
+- `m.or_insert(k, d).field.push(x)` and other writes through a field path of a struct or tuple entry keep the write on the bytecode VM, which dropped it.
+- `u64` and `usize` values convert to `f32` and `f64` as unsigned numbers on every tier (`u64::MAX as f64` was `-1`), and a float cast to `u64` or `usize` saturates at `[0, u64::MAX]`, so `-1.5 as u64` is `0` and `1e19 as u64` is `10000000000000000000`.
+- An integer cast to `f32` rounds once, straight from the integer, on the compiled tiers, as the bytecode VM does; converting through `f64` first could round a large value differently.
+- Under the JIT, a comparison, shift, division, or remainder on a `u64` constant is unsigned: once constant propagation reached the operation, `u64::MAX > 1` answered `false` and `u64::MAX >> 60` kept the sign bit.
+- On the bytecode VM, `!x` and `-x` on a `u8`, `u16`, or `u32` wrap at the declared width in every expression position; `!255u8` printed `-256`.
+- `%` on floats runs on the bytecode VM; a program using it failed to load there.
+- A range pattern bound may be a primitive integer limit (`i64::MIN..=-1`, `128..=u8::MAX`); any other path as a bound reports GP0059 once, where it produced a cascade of unrelated parse errors.
+- A malformed format placeholder reports only GP0021, without a second argument-count error that miscounted it.
+- A program whose JIT-compiled functions use float `%` alongside another function (a closure, a helper) no longer aborts the in-process JIT with an internal error.
+- A type named through an imported stdlib module that the module does not export (`sync::Bogus`, `fs::Nope`) is `GR0007`, where it was accepted as a type that matched anything. A module's `Error` (`http::Error`, `io::Error`) is the `errors::Error` its fallible calls answer.
+- A method call on an integer, float, `bool`, or `char` is checked against that scalar's own surface and the `impl` blocks written for its type. A method some struct declares - including the `cmp` and `eq` every struct is given - no longer passes on a scalar in a program that declares a struct, where it failed at run time on the bytecode VM and at link time in a native build.
+- `(n..)` on the bytecode VM panics with `attempt to add with overflow in open integer range` when it passes `i64::MAX`, as the compiled checked tiers do, in every build of `gos`; only an interpreter built with Rust debug assertions checked it.
+- `to_json::<T>` escapes the strings and map keys it writes as `json::encode` escapes them, so a value holding a quote, a backslash, a control character, or `<` encodes to JSON that `from_json::<T>` reads back; they were written between bare quotes on every tier. `to_yaml::<T>` and `to_toml::<T>`, which go through the same encoder, carry the fix.
+- A NaN or infinite float encodes as `null` in JSON on every tier - through `json::encode`, a `json::Value` built from it, and `to_json::<T>` - where the bytecode VM wrote `NaN` or `inf`, which is not JSON, and the compiled tiers wrote `0.0`.
+- A format placeholder whose spec the grammar does not take (`{:+}`, `{:e}`, `{x:+5}`) reports `GP0021`, where it was printed as literal text and an argument meant for it was reported as surplus.
+- The skill card's typed serde example reads `from_json::<T>(text)?`; the `&` it showed is `GP0055` in a program.
+- The standard library reference describes `find` and `rfind` as they behave on every tier: each answers the character index of a match as an `Option`, where the reference named a byte position and a `-1` for a miss.
+- Windows release builds of programs whose closures share a callback shape across codegen chunks link instead of failing with duplicate `__fn_thunk_*` symbols.
+
 ## 0.63.3 - Faster CRC and unsigned math, cheaper field loops and struct pushes, in-place substring appends, shared statics
 
 - `>>` and `<`, `<=`, `>`, `>=` on `u8`, `u16`, and `u32` compile to unsigned instructions in release builds, as they already did for `u64`, so LLVM sees what the code computes: a bitwise CRC loop (`if crc & 1 != 0 { crc = (crc >> 1) ^ poly } else { crc >>= 1 }`) becomes a byte-at-a-time table lookup, several times faster. Results are unchanged on every tier.

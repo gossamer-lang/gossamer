@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gossamer_ast::{
     AssignOp, BinaryOp, Block, Expr, ExprKind, ImplItem, Item, ItemKind, Literal, ModBody,
-    Mutability, PathExpr, Pattern, PatternKind, SourceFile, Stmt, StmtKind, UnaryOp, UseDecl,
-    UseListEntry, UseTarget,
+    Mutability, PathExpr, Pattern, PatternKind, SourceFile, Stmt, StmtKind, TraitItem, UnaryOp,
+    UseDecl, UseListEntry, UseTarget,
 };
 use gossamer_lex::Span;
 
@@ -871,6 +871,7 @@ fn lint_self_assignment(sf: &SourceFile) -> Vec<Finding> {
 /// continuation the writer meant as part of the line above becomes a
 /// stand-alone expression whose value nothing reads.
 fn lint_no_effect_statement(sf: &SourceFile) -> Vec<Finding> {
+    let declared = declared_fn_names(&sf.items);
     let mut out = Vec::new();
     each_fn_body(sf, |body| {
         walk_expr(body, &mut |expr| {
@@ -881,18 +882,106 @@ fn lint_no_effect_statement(sf: &SourceFile) -> Vec<Finding> {
                 let StmtKind::Expr { expr, .. } = &stmt.kind else {
                     continue;
                 };
-                if !computes_without_effect(expr) {
-                    continue;
+                if computes_without_effect(expr) {
+                    out.push((
+                        expr.span,
+                        "this expression's value is not used".to_string(),
+                        Some("bind it, or join it to the line above".to_string()),
+                    ));
+                } else if let Some(method) = discarded_value_method(expr, &declared) {
+                    out.push((
+                        expr.span,
+                        format!("`{method}` answers a new value, which is not used"),
+                        Some(format!(
+                            "`{method}` leaves its receiver unchanged; bind what it answers"
+                        )),
+                    ));
                 }
-                out.push((
-                    expr.span,
-                    "this expression's value is not used".to_string(),
-                    Some("bind it, or join it to the line above".to_string()),
-                ));
             }
         });
     });
     out
+}
+
+/// Builtin methods that answer a new value and write nothing, so a call
+/// whose result is dropped does nothing. `sort`, `reverse`, `push`, and the
+/// other in-place writers are not here.
+const VALUE_ONLY_METHODS: &[&str] = &[
+    "dedup",
+    "rev",
+    "trim",
+    "trim_start",
+    "trim_end",
+    "to_uppercase",
+    "to_lowercase",
+    "replace",
+    "repeat",
+    "to_string",
+    "clone",
+    "len",
+    "is_empty",
+    "contains",
+    "starts_with",
+    "ends_with",
+    "flatten",
+    "concat",
+];
+
+/// The method a statement calls when it is a value-only builtin applied to
+/// operands that compute without effect. A name some function in the file
+/// declares may be a user method that writes its receiver, so it is left out.
+fn discarded_value_method<'a>(expr: &'a Expr, declared: &BTreeSet<&str>) -> Option<&'a str> {
+    let ExprKind::MethodCall {
+        receiver,
+        name,
+        args,
+        ..
+    } = &expr.kind
+    else {
+        return None;
+    };
+    let method = name.name.as_str();
+    (VALUE_ONLY_METHODS.contains(&method)
+        && !declared.contains(method)
+        && computes_without_effect(receiver)
+        && args.iter().all(computes_without_effect))
+    .then_some(method)
+}
+
+fn declared_fn_names(items: &[Item]) -> BTreeSet<&str> {
+    let mut names = BTreeSet::new();
+    collect_fn_names(items, &mut names);
+    names
+}
+
+fn collect_fn_names<'a>(items: &'a [Item], names: &mut BTreeSet<&'a str>) {
+    for item in items {
+        match &item.kind {
+            ItemKind::Fn(decl) => {
+                names.insert(decl.name.name.as_str());
+            }
+            ItemKind::Impl(decl) => {
+                for item in &decl.items {
+                    if let ImplItem::Fn(method) = item {
+                        names.insert(method.name.name.as_str());
+                    }
+                }
+            }
+            ItemKind::Trait(decl) => {
+                for item in &decl.items {
+                    if let TraitItem::Fn(method) = item {
+                        names.insert(method.name.name.as_str());
+                    }
+                }
+            }
+            ItemKind::Mod(decl) => {
+                if let ModBody::Inline(inner) = &decl.body {
+                    collect_fn_names(inner, names);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Whether an expression only computes: no call, no assignment, no control

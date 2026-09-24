@@ -1,0 +1,31 @@
+// `u64` / `usize` values convert to floats as unsigned numbers, a float cast
+// to `u64` saturates at `[0, u64::MAX]`, and an unsigned constant keeps its
+// unsignedness through constant propagation into a comparison, a shift, a
+// division, and a cast.
+
+use std::env
+
+fn widen(xs: Vec<u8>) -> u32 { xs.len() as u32 }
+
+fn to_f32(n: i64) -> f32 { n as f32 }
+
+fn mix(acc: i64, v: i64) -> i64 { acc * 31 + v }
+
+fn main() {
+    let mut digest = 0
+    for i in 0..64 { digest = mix(digest % 1_000_003, i) }
+    println("digest {}", digest)
+    let q: u64 = 0xFFFFFFFFFFFFFFFF
+    println("{} {} {} {}", q > 1, q >> 60, q / 10, q % 10)
+    println("{} {} {}", q as f64, q as i64, q as u32)
+    let h: u64 = 0x8000000000000000
+    println("{} {} {}", h >= 1, h < 5, h as f64)
+    let runtime = env::args().len() as u64 + 18_446_744_073_709_551_610
+    println("{} {} {}", runtime as f64, runtime > 5, runtime >> 60)
+    let neg = 0.0 - 1.5
+    println("{} {} {}", neg as u64, 1e19 as u64, 1e30 as u64)
+    let idx: usize = 18_446_744_073_709_551_615
+    println("{}", idx as f64)
+    println("{} {}", to_f32(16_777_217), to_f32(9_007_199_254_740_993))
+    println("{}", widen(#[1, 2, 3]))
+}

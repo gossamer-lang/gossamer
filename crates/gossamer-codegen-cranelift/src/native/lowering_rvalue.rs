@@ -410,17 +410,41 @@ pub(super) fn lower_rvalue_into(
                         _ => src_v,
                     }
                 }
-                // Integer → float (f32 / f64). Use signed
-                // conversion since Gossamer's primary integer is
-                // signed `i64`. Unsigned casts go through a same-
-                // width int rebox before this point.
-                (s, d) if s.is_int() && d.is_float() => builder.ins().fcvt_from_sint(d, src_v),
+                // Integer → float. A `u64` / `usize` reads its bits as
+                // unsigned; every narrower unsigned value is stored
+                // zero-extended and converts the same either way. An `f32`
+                // target rounds once, straight from the integer, as the VM
+                // does: going through `f64` first can round twice.
+                (s, d) if s.is_int() && d.is_float() => {
+                    let unsigned = operand_is_unsigned_word(tcx, body, operand);
+                    let direct = if matches!(tcx.kind_of(*target), TyKind::Float(FloatTy::F32)) {
+                        types::F32
+                    } else {
+                        d
+                    };
+                    let converted = if unsigned {
+                        builder.ins().fcvt_from_uint(direct, src_v)
+                    } else {
+                        builder.ins().fcvt_from_sint(direct, src_v)
+                    };
+                    if direct == d {
+                        converted
+                    } else {
+                        builder.ins().fpromote(d, converted)
+                    }
+                }
                 // Float → integer saturates at the TARGET's range, so
                 // `300.7 as u8` is `255` and `-1.5 as u8` is `0`; NaN reads
                 // as zero. The intrinsic saturates at the machine width, and
-                // the declared width clamps what it answers.
+                // the declared width clamps what it answers; a `u64` /
+                // `usize` target saturates at `[0, u64::MAX]`.
                 (s, d) if s.is_float() && d.is_int() => {
-                    let converted = builder.ins().fcvt_to_sint_sat(d, src_v);
+                    let converted =
+                        if matches!(tcx.kind_of(*target), TyKind::Int(IntTy::U64 | IntTy::Usize)) {
+                            builder.ins().fcvt_to_uint_sat(d, src_v)
+                        } else {
+                            builder.ins().fcvt_to_sint_sat(d, src_v)
+                        };
                     let (width, signed) = match tcx.kind_of(*target) {
                         TyKind::Int(IntTy::I8) => (8, true),
                         TyKind::Int(IntTy::U8) => (8, false),
@@ -1483,6 +1507,19 @@ fn int_cmp_cc(op: BinOp, unsigned: bool) -> ir::condcodes::IntCC {
         (BinOp::Ge, true) => IntCC::UnsignedGreaterThanOrEqual,
         _ => unreachable!("int_cmp_cc only handles ordered comparisons"),
     }
+}
+
+/// Whether `operand` names a `u64` / `usize` place, whose bits convert to a
+/// float as an unsigned value.
+fn operand_is_unsigned_word(tcx: &TyCtxt, body: &Body, operand: &Operand) -> bool {
+    let Operand::Copy(place) = operand else {
+        return false;
+    };
+    let mut ty = resolve_place_ty(tcx, body, place);
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(ty) {
+        ty = *inner;
+    }
+    matches!(tcx.kind_of(ty), TyKind::Int(IntTy::U64 | IntTy::Usize))
 }
 
 /// Widens a scalar narrower than a slot to the whole word the slot holds, so

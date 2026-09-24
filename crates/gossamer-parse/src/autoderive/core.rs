@@ -239,10 +239,17 @@ impl FieldKind {
     /// `String` - or, for nested structs, a `?`-propagating call.
     fn render_to_json(&self, expr: &str) -> String {
         match self {
-            Self::I64 | Self::Int(_) | Self::U64(_) | Self::Float(_) | Self::Bool => {
+            Self::I64 | Self::Int(_) | Self::U64(_) | Self::Bool => {
                 format!("format(\"{{}}\", {expr})")
             }
-            Self::String => format!("format(\"\\\"{{}}\\\"\", {expr})"),
+            // JSON has no spelling for NaN or an infinity, which are the
+            // values `x - x` does not bring to zero, so those are `null`.
+            Self::Float(_) => format!(
+                "if {expr} - {expr} == 0.0 {{ format(\"{{}}\", {expr}) }} else {{ \"null\" }}"
+            ),
+            // The text is escaped exactly as `json::encode` escapes a string,
+            // so a quote, a control character, or `<` in it stays inside it.
+            Self::String => format!("json::encode({expr})"),
             Self::Vec(inner) => render_vec_to_json(expr, inner),
             Self::Struct(ty) => format!("{}({expr})?", to_json_fn(&ty.symbol)),
             Self::Option(inner) => {
@@ -572,7 +579,7 @@ fn render_map_to_json(expr: &str, inner: &FieldKind) -> String {
     // iteration order is not stable and differs interp-vs-compiled).
     let vr = inner.render_to_json("__v");
     format!(
-        "{{ let mut __ks = {expr}.keys()\n            __ks.sort()\n            let mut __buf = \"{{\"\n            let mut __first = true\n            for __k in __ks {{\n                if !__first {{ __buf += \",\" }}\n                __first = false\n                __buf += format(\"\\\"{{}}\\\":\", __k)\n                if let Some(__v) = {expr}.get(__k) {{ __buf += {vr} }}\n            }}\n            __buf += \"}}\"\n            __buf }}"
+        "{{ let mut __ks = {expr}.keys()\n            __ks.sort()\n            let mut __buf = \"{{\"\n            let mut __first = true\n            for __k in __ks {{\n                if !__first {{ __buf += \",\" }}\n                __first = false\n                __buf += json::encode(__k)\n                __buf += \":\"\n                if let Some(__v) = {expr}.get(__k) {{ __buf += {vr} }}\n            }}\n            __buf += \"}}\"\n            __buf }}"
     )
 }
 

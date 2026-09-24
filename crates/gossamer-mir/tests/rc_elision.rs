@@ -58,10 +58,12 @@ fn a_unique_local_pays_no_retain_and_one_release() {
 }
 
 #[test]
-fn a_value_read_after_it_is_stored_keeps_its_own_share() {
+fn a_value_read_after_it_is_stored_stores_a_copy() {
     let (bodies, _) =
         lower("fn f() -> i64 {\n let xs = #[1]\n let both = #[xs]\n both.len() + xs.len()\n}\n");
-    assert!(count_calls(body(&bodies, "f"), "gos_rt_vec_retain") >= 1);
+    let f = body(&bodies, "f");
+    assert!(count_calls(f, "gos_rt_vec_clone") >= 1);
+    assert_eq!(count_calls(f, "gos_rt_vec_retain"), 0);
 }
 
 #[test]
@@ -74,6 +76,22 @@ fn a_value_stored_by_its_last_use_hands_over_its_share() {
 fn a_copy_of_a_unique_vector_nothing_reads_again_is_a_handoff() {
     let (bodies, _) = lower(
         "fn build() -> Vec<i64> { #[1, 2] }\nfn f() -> i64 {\n let xs = build()\n let ys = xs\n ys.len()\n}\n",
+    );
+    assert_eq!(count_calls(body(&bodies, "f"), "gos_rt_vec_clone"), 0);
+}
+
+#[test]
+fn a_row_of_aggregates_stored_by_its_last_use_is_handed_over() {
+    let (bodies, _) = lower(
+        "struct Cell { alive: bool, ns: Vec<i64> }\nfn f(h: i64, w: i64) -> i64 {\n let mut cells: Vec<Vec<Cell>> = #[]\n for _ in 0..h {\n let mut row: Vec<Cell> = #[]\n for _ in 0..w { row.push(Cell { alive: false, ns: #[] }) }\n cells.push(row)\n }\n cells.len()\n}\n",
+    );
+    assert_eq!(count_calls(body(&bodies, "f"), "gos_rt_vec_clone"), 0);
+}
+
+#[test]
+fn a_row_of_constructed_values_stored_by_its_last_use_is_handed_over() {
+    let (bodies, _) = lower(
+        "struct Cell { alive: bool, ns: Vec<i64> }\nimpl Cell {\n fn new(a: bool) -> Cell { Cell { alive: a, ns: Vec::with_capacity(8) } }\n}\nfn f(h: i64, w: i64) -> i64 {\n let mut cells: Vec<Vec<Cell>> = #[]\n for _ in 0..h {\n let mut row: Vec<Cell> = #[]\n for _ in 0..w { row.push(Cell::new(false)) }\n cells.push(row)\n }\n cells.len()\n}\n",
     );
     assert_eq!(count_calls(body(&bodies, "f"), "gos_rt_vec_clone"), 0);
 }

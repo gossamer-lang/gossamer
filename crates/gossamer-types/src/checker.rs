@@ -191,11 +191,25 @@ const OPTION_DEF_LOCAL: u32 = u32::MAX - 1;
 const PURE_HANDLE_LO_OFFSET: u32 = 34;
 const PURE_HANDLE_HI_OFFSET: u32 = 49;
 
-/// Widest sentinel offset any stdlib handle occupies, pure band and the
-/// pre-band handles alike. A receiver inside this span whose display name is
-/// module-qualified answers a closed method table, which is what lets an
+/// Sentinel-offset band of the `std::sync` handles (`sync::RwLock` predates
+/// it and sits in the pure band) and the shared `I64Vec` word buffer. Each is
+/// a runtime pointer with no text form and a closed method table, typed by
+/// [`Checker::sync_handle_method_ret`] and [`Checker::heap_buffer_method_ret`].
+const SYNC_HANDLE_LO_OFFSET: u32 = 50;
+const SYNC_HANDLE_HI_OFFSET: u32 = 58;
+
+/// Sentinel offsets of the `trace` span handles a `Tracer` hands out.
+const TRACE_SPAN_OFFSET: u32 = 59;
+const TRACE_ENDED_SPAN_OFFSET: u32 = 60;
+
+/// Sentinel offset of the `U8Vec` byte buffer, which predates the bands.
+const U8_VEC_OFFSET: u32 = 20;
+
+/// Widest sentinel offset any stdlib handle occupies, the handle bands and
+/// the pre-band handles alike. A receiver inside this span whose display name
+/// is module-qualified answers a closed method table, which is what lets an
 /// unknown name on one be named at the call site.
-pub(crate) const HANDLE_SENTINEL_SPAN: u32 = PURE_HANDLE_HI_OFFSET;
+pub(crate) const HANDLE_SENTINEL_SPAN: u32 = TRACE_ENDED_SPAN_OFFSET;
 
 /// One constructor of a runtime handle: the module path it is written
 /// under, and the associated function's name.
@@ -236,12 +250,7 @@ const PURE_HANDLES: &[HandleRow] = &[
     (
         42,
         "rand::Rng",
-        &[
-            (&["rand", "Rng"], "new"),
-            (&["math", "rand", "Rng"], "new"),
-            (&["rand", "Rng"], "seeded"),
-            (&["math", "rand", "Rng"], "seeded"),
-        ],
+        &[(&["rand", "Rng"], "new"), (&["math", "rand", "Rng"], "new")],
     ),
     (43, "bufio::Scanner", &[(&["bufio", "Scanner"], "new")]),
     // `File::open` / `File::create` answer their handle through a
@@ -282,6 +291,52 @@ const PURE_HANDLES: &[HandleRow] = &[
     // The composed-middleware handler closes the band; it is produced by
     // the `middleware::*` wrappers rather than by a named constructor.
     (PURE_HANDLE_HI_OFFSET, "http::Handler", &[]),
+    // The `std::sync` band. Their constructors are typed, arguments and
+    // all, by `sync_call_ret_ty`; these rows name the types an annotation
+    // resolves to.
+    (
+        50,
+        "sync::Mutex",
+        &[(&["sync", "Mutex"], "new"), (&["Mutex"], "new")],
+    ),
+    (
+        51,
+        "sync::Once",
+        &[(&["sync", "Once"], "new"), (&["Once"], "new")],
+    ),
+    (
+        52,
+        "sync::WaitGroup",
+        &[(&["sync", "WaitGroup"], "new"), (&["WaitGroup"], "new")],
+    ),
+    (
+        53,
+        "sync::Barrier",
+        &[(&["sync", "Barrier"], "new"), (&["Barrier"], "new")],
+    ),
+    (
+        54,
+        "sync::AtomicI64",
+        &[(&["sync", "AtomicI64"], "new"), (&["AtomicI64"], "new")],
+    ),
+    (
+        55,
+        "sync::AtomicI32",
+        &[(&["sync", "AtomicI32"], "new"), (&["AtomicI32"], "new")],
+    ),
+    (
+        56,
+        "sync::AtomicU64",
+        &[(&["sync", "AtomicU64"], "new"), (&["AtomicU64"], "new")],
+    ),
+    (
+        57,
+        "sync::AtomicBool",
+        &[(&["sync", "AtomicBool"], "new"), (&["AtomicBool"], "new")],
+    ),
+    // A shared buffer of i64 words; its constructor is typed by
+    // `heap_buffer_call_ret_ty`.
+    (SYNC_HANDLE_HI_OFFSET, "I64Vec", &[(&["I64Vec"], "new")]),
 ];
 
 /// One constructor of a pre-band handle: its module path and name,
@@ -6854,9 +6909,14 @@ impl<'a> TypeChecker<'a> {
             let e = self.tcx.dyn_error_ty();
             return Some(self.result_adt_ty(vec_u8, e));
         }
-        if let Some(ty) =
-            self.check_stdlib_module_ret_ty(module, last, callee, args, arg_tys, expected)
-        {
+        let user_callee = matches!(self.tcx.kind(resolved), Some(TyKind::FnDef { .. }));
+        if let Some(ty) = self.check_stdlib_module_ret_ty(
+            (module, last, user_callee),
+            callee,
+            args,
+            arg_tys,
+            expected,
+        ) {
             return Some(ty);
         }
         if let Some(ty) = self.stdlib_signature_return_ty(module, last) {
@@ -9146,6 +9206,424 @@ impl<'a> TypeChecker<'a> {
         self.bytes_handle_method_ret(method, args, arg_tys, resolved, span)
             .or_else(|| self.regex_handle_method_ret(method, args, arg_tys, resolved, span))
             .or_else(|| self.fs_handle_method_ret(method, args, arg_tys, resolved, span))
+            .or_else(|| self.sync_handle_method_ret(method, args, arg_tys, resolved, span))
+            .or_else(|| self.heap_buffer_method_ret(method, args, arg_tys, resolved, span))
+            .or_else(|| self.table_handle_method_ret(method, args, arg_tys, resolved, span))
+    }
+
+    fn shape_ty(&mut self, shape: Shape) -> Ty {
+        match shape {
+            Shape::Unit => self.tcx.unit(),
+            Shape::Bool => self.tcx.bool_ty(),
+            Shape::I64 => self.tcx.int_ty(IntTy::I64),
+            Shape::U64 => self.tcx.int_ty(IntTy::U64),
+            Shape::U32 => self.tcx.int_ty(IntTy::U32),
+            Shape::F64 => self.tcx.float_ty(FloatTy::F64),
+            Shape::Str => self.tcx.string_ty(),
+            Shape::StrVec => {
+                let s = self.tcx.string_ty();
+                self.tcx.intern(TyKind::Vec(s))
+            }
+            Shape::F64Vec => {
+                let f = self.tcx.float_ty(FloatTy::F64);
+                self.tcx.intern(TyKind::Vec(f))
+            }
+            Shape::OptStr => {
+                let s = self.tcx.string_ty();
+                self.option_adt_ty(s)
+            }
+            Shape::DoneChannel => {
+                let i = self.tcx.int_ty(IntTy::I64);
+                self.tcx.intern(TyKind::Receiver(i))
+            }
+            Shape::Handle(offset, name) => self.stdlib_handle_ty(offset, name),
+            // Checked against the three instruments by `check_metric_arg`.
+            Shape::Metric => self.fresh(),
+        }
+    }
+
+    /// Reports an argument to `Registry::register` that is not one of the
+    /// `metrics` instruments.
+    fn check_metric_arg(&mut self, arg_ty: Ty, arg: &Expr) {
+        let resolved = self.infer.resolve(self.tcx, arg_ty);
+        let numeric = self.infer.is_integer_constrained_var(self.tcx, resolved)
+            || self.infer.is_float_literal_var(self.tcx, resolved);
+        let name = match self.tcx.kind(resolved) {
+            Some(TyKind::Adt { def, .. }) => self.tcx.def_name(*def),
+            Some(TyKind::Var(_)) if numeric => None,
+            Some(TyKind::Var(_) | TyKind::Error) | None => return,
+            Some(_) => None,
+        };
+        if !matches!(
+            name,
+            Some("metrics::Counter" | "metrics::Gauge" | "metrics::Histogram")
+        ) {
+            self.emit(
+                TypeError::TypeMismatch {
+                    expected: "metrics::Counter | metrics::Gauge | metrics::Histogram".to_string(),
+                    found: crate::render_ty(self.tcx, resolved),
+                },
+                arg.span,
+            );
+        }
+    }
+
+    /// Checks a call against a [`HANDLE_METHODS`] row and answers its type.
+    fn check_table_row(
+        &mut self,
+        callee: &str,
+        params: &[Shape],
+        ret: Shape,
+        (args, arg_tys): (&[Expr], &[Ty]),
+        span: Span,
+    ) -> Ty {
+        if args.len() != params.len() {
+            self.emit(
+                TypeError::CallArityMismatch {
+                    callee: callee.to_string(),
+                    expected: params.len(),
+                    found: args.len(),
+                },
+                span,
+            );
+            return self.tcx.error_ty();
+        }
+        for (param, (arg_ty, arg)) in params.iter().zip(arg_tys.iter().zip(args)) {
+            if matches!(param, Shape::Metric) {
+                self.check_metric_arg(*arg_ty, arg);
+                continue;
+            }
+            let param = self.shape_ty(*param);
+            self.check_expected_integer_literal_range(arg, Expectation::HasType(param), *arg_ty);
+            self.check_sig_param_arg(param, *arg_ty, arg);
+        }
+        self.shape_ty(ret)
+    }
+
+    /// Types a method on a handle [`HANDLE_METHODS`] describes.
+    fn table_handle_method_ret(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        resolved: Ty,
+        span: Span,
+    ) -> Option<Ty> {
+        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
+            return None;
+        };
+        if def.local < u32::MAX - HANDLE_SENTINEL_SPAN {
+            return None;
+        }
+        let owner = self.tcx.def_name(*def)?;
+        if !HANDLE_METHODS.iter().any(|(o, ..)| *o == owner) {
+            return None;
+        }
+        let owner = owner.to_string();
+        if method == "clone" && args.is_empty() {
+            return Some(resolved);
+        }
+        let row = HANDLE_METHODS
+            .iter()
+            .find(|(o, m, ..)| *o == owner && *m == method && *m != "new")
+            .filter(|(_, m, ..)| !matches!(*m, "background" | "with_cancel" | "with_timeout"));
+        let Some((_, _, params, ret)) = row else {
+            let error = self.unresolved_method_call(owner, method, resolved, args.len());
+            self.emit(error, span);
+            return Some(self.tcx.error_ty());
+        };
+        let callee = format!("{owner}::{method}");
+        Some(self.check_table_row(&callee, params, *ret, (args, arg_tys), span))
+    }
+
+    /// Types a call written on the path of a handle [`HANDLE_METHODS`]
+    /// describes: a constructor, or a method in its qualified form with the
+    /// handle as the first argument.
+    fn table_handle_call_ret_ty(
+        &mut self,
+        module: &[&str],
+        last: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let owner = table_handle_owner(module)?;
+        let Some((_, _, params, ret)) = HANDLE_METHODS
+            .iter()
+            .find(|(o, m, ..)| *o == owner && *m == last)
+        else {
+            let handle = self.fresh();
+            let error = self.unresolved_method_call(owner.to_string(), last, handle, args.len());
+            self.emit(error, span);
+            return Some(self.tcx.error_ty());
+        };
+        let is_ctor = matches!(last, "new" | "background" | "with_cancel" | "with_timeout");
+        if is_ctor {
+            let callee = format!("{owner}::{last}");
+            return Some(self.check_table_row(&callee, params, *ret, (args, arg_tys), span));
+        }
+        let (Some(receiver_ty), Some(receiver)) = (arg_tys.first(), args.first()) else {
+            self.emit(
+                TypeError::CallArityMismatch {
+                    callee: format!("{owner}::{last}"),
+                    expected: params.len() + 1,
+                    found: 0,
+                },
+                span,
+            );
+            return Some(self.tcx.error_ty());
+        };
+        let offset = HANDLE_METHODS.iter().find_map(|(_, _, _, ret)| match ret {
+            Shape::Handle(offset, name) if *name == owner => Some(*offset),
+            _ => None,
+        })?;
+        let handle = self.stdlib_handle_ty(offset, owner);
+        self.check_sig_param_arg(handle, *receiver_ty, receiver);
+        self.table_handle_method_ret(last, &args[1..], &arg_tys[1..], handle, span)
+    }
+
+    /// Types `I64Vec::new(len)` and `U8Vec::new(len)`, the shared word and
+    /// byte buffers.
+    fn heap_buffer_call_ret_ty(
+        &mut self,
+        module: &[&str],
+        last: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let (offset, owner) = match module {
+            ["I64Vec"] => (SYNC_HANDLE_HI_OFFSET, "I64Vec"),
+            ["U8Vec"] => (U8_VEC_OFFSET, "U8Vec"),
+            _ => return None,
+        };
+        if last != "new" {
+            return None;
+        }
+        let handle = self.stdlib_handle_ty(offset, owner);
+        let len = vec![self.tcx.int_ty(IntTy::I64)];
+        let ok = self.check_sync_args(&format!("{owner}::new"), &len, args, arg_tys, span);
+        Some(if ok { handle } else { self.tcx.error_ty() })
+    }
+
+    /// Types a method on the `I64Vec` word buffer or the `U8Vec` byte
+    /// buffer. Positions, lengths, and stored values are all `i64` words.
+    fn heap_buffer_method_ret(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        resolved: Ty,
+        span: Span,
+    ) -> Option<Ty> {
+        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
+            return None;
+        };
+        let offset = u32::MAX - def.local;
+        let owner = match offset {
+            SYNC_HANDLE_HI_OFFSET => "I64Vec",
+            U8_VEC_OFFSET => "U8Vec",
+            _ => return None,
+        };
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let unit = self.tcx.unit();
+        let (params, ret) = match (owner, method) {
+            (_, "clone") => (Vec::new(), resolved),
+            ("I64Vec", "set_at") | ("U8Vec", "set_byte") => (vec![i64_ty, i64_ty], unit),
+            ("I64Vec", "get_at") | ("U8Vec", "get_byte") => (vec![i64_ty], i64_ty),
+            ("I64Vec", "vec_len") | ("U8Vec", "byte_len") => (Vec::new(), i64_ty),
+            ("I64Vec", "write_range_to_stdout") | ("U8Vec", "write_byte_range_to_stdout") => {
+                (vec![i64_ty, i64_ty], unit)
+            }
+            ("I64Vec", "write_lines_to_stdout") | ("U8Vec", "write_byte_lines_to_stdout") => {
+                (vec![i64_ty, i64_ty, i64_ty], unit)
+            }
+            ("U8Vec", "window_key") => (vec![i64_ty, i64_ty], i64_ty),
+            ("U8Vec", "count_singles" | "count_pairs") => {
+                (vec![i64_ty], self.tcx.intern(TyKind::Vec(i64_ty)))
+            }
+            ("U8Vec", "count_kmers") => {
+                let counts = self.tcx.intern(TyKind::HashMap {
+                    key: i64_ty,
+                    value: i64_ty,
+                    ordered: false,
+                });
+                (vec![i64_ty, i64_ty], counts)
+            }
+            ("U8Vec", "to_string") => (vec![i64_ty], self.tcx.string_ty()),
+            _ => {
+                let error =
+                    self.unresolved_method_call(owner.to_string(), method, resolved, args.len());
+                self.emit(error, span);
+                return Some(self.tcx.error_ty());
+            }
+        };
+        let callee = format!("{owner}::{method}");
+        let ok = self.check_sync_args(&callee, &params, args, arg_tys, span);
+        Some(if ok { ret } else { self.tcx.error_ty() })
+    }
+
+    /// `(sentinel offset, display name)` of the `std::sync` handle a
+    /// type-qualified path names: `sync::Mutex`, `std::sync::Mutex`, or the
+    /// bare `Mutex` the prelude reaches.
+    fn sync_handle_of_path(module: &[&str]) -> Option<(u32, &'static str)> {
+        let tail = match module {
+            ["std", "sync", tail] | ["sync", tail] | [tail] => *tail,
+            _ => return None,
+        };
+        PURE_HANDLES
+            .iter()
+            .find(|(offset, name, _)| {
+                (*offset == 35 || (SYNC_HANDLE_LO_OFFSET..=SYNC_HANDLE_HI_OFFSET).contains(offset))
+                    && name.strip_prefix("sync::") == Some(tail)
+            })
+            .map(|(offset, name, _)| (*offset, *name))
+    }
+
+    /// Types a call written on a `std::sync` type path: the constructor
+    /// `T::new(..)`, or a method in its qualified form `T::load(handle)`,
+    /// which is typed from the same table as the method with the handle as
+    /// its receiver.
+    fn sync_call_ret_ty(
+        &mut self,
+        module: &[&str],
+        last: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> Option<Ty> {
+        let (offset, owner) = Self::sync_handle_of_path(module)?;
+        let handle = self.stdlib_handle_ty(offset, owner);
+        if last != "new" {
+            let (Some(receiver_ty), Some(receiver)) = (arg_tys.first(), args.first()) else {
+                self.emit(
+                    TypeError::CallArityMismatch {
+                        callee: format!("{owner}::{last}"),
+                        expected: 1,
+                        found: 0,
+                    },
+                    span,
+                );
+                return Some(self.tcx.error_ty());
+            };
+            self.check_sig_param_arg(handle, *receiver_ty, receiver);
+            return self.sync_handle_method_ret(last, &args[1..], &arg_tys[1..], handle, span);
+        }
+        let params = match owner {
+            "sync::RwLock" | "sync::Barrier" | "sync::AtomicI64" => {
+                vec![self.tcx.int_ty(IntTy::I64)]
+            }
+            "sync::AtomicI32" => vec![self.tcx.int_ty(IntTy::I32)],
+            "sync::AtomicU64" => vec![self.tcx.int_ty(IntTy::U64)],
+            "sync::AtomicBool" => vec![self.tcx.bool_ty()],
+            _ => Vec::new(),
+        };
+        self.check_sync_args(&format!("{owner}::new"), &params, args, arg_tys, span)
+            .then_some(handle)
+            .or_else(|| Some(self.tcx.error_ty()))
+    }
+
+    /// Checks a `std::sync` call's arguments against its parameter list,
+    /// reporting an arity mismatch; answers whether the arity matched.
+    fn check_sync_args(
+        &mut self,
+        callee: &str,
+        params: &[Ty],
+        args: &[Expr],
+        arg_tys: &[Ty],
+        span: Span,
+    ) -> bool {
+        if args.len() != params.len() {
+            self.emit(
+                TypeError::CallArityMismatch {
+                    callee: callee.to_string(),
+                    expected: params.len(),
+                    found: args.len(),
+                },
+                span,
+            );
+            return false;
+        }
+        for (param, (arg_ty, arg)) in params.iter().zip(arg_tys.iter().zip(args)) {
+            self.check_expected_integer_literal_range(arg, Expectation::HasType(*param), *arg_ty);
+            self.check_sig_param_arg(*param, *arg_ty, arg);
+        }
+        true
+    }
+
+    /// Types a method on a `std::sync` handle. The table is the handle's
+    /// whole surface on every tier: an atomic holds a word of its own
+    /// width, and an `RwLock` guards an `i64`, the one word its compiled
+    /// form stores.
+    fn sync_handle_method_ret(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        arg_tys: &[Ty],
+        resolved: Ty,
+        span: Span,
+    ) -> Option<Ty> {
+        let Some(TyKind::Adt { def, .. }) = self.tcx.kind(resolved) else {
+            return None;
+        };
+        let offset = u32::MAX - def.local;
+        if offset != 35 && !(SYNC_HANDLE_LO_OFFSET..SYNC_HANDLE_HI_OFFSET).contains(&offset) {
+            return None;
+        }
+        let owner = self.tcx.def_name(*def)?.to_string();
+        let unit = self.tcx.unit();
+        let bool_ty = self.tcx.bool_ty();
+        let i64_ty = self.tcx.int_ty(IntTy::I64);
+        let word = match owner.as_str() {
+            "sync::AtomicI32" => Some(self.tcx.int_ty(IntTy::I32)),
+            "sync::AtomicU64" => Some(self.tcx.int_ty(IntTy::U64)),
+            "sync::AtomicI64" => Some(i64_ty),
+            "sync::AtomicBool" => Some(bool_ty),
+            _ => None,
+        };
+        let (params, ret) = match (owner.as_str(), method) {
+            (_, "clone") => (Vec::new(), resolved),
+            ("sync::Mutex", "lock" | "unlock")
+            | ("sync::WaitGroup", "done" | "wait")
+            | ("sync::Barrier", "wait") => (Vec::new(), unit),
+            ("sync::WaitGroup", "add") => (vec![i64_ty], unit),
+            ("sync::WaitGroup", "wait_ctx") => {
+                let context = self.stdlib_handle_ty(11, "context::Context");
+                (vec![context], bool_ty)
+            }
+            ("sync::Once", "call") => {
+                let body = FnSig {
+                    inputs: Vec::new(),
+                    output: self.fresh(),
+                };
+                (vec![self.tcx.intern(TyKind::FnTrait(body))], bool_ty)
+            }
+            ("sync::RwLock", "read") => (Vec::new(), i64_ty),
+            ("sync::RwLock", "write") => (vec![i64_ty], unit),
+            ("sync::RwLock", "with_read" | "with_write") => {
+                let body = FnSig {
+                    inputs: vec![i64_ty],
+                    output: i64_ty,
+                };
+                (vec![self.tcx.intern(TyKind::FnTrait(body))], i64_ty)
+            }
+            _ => {
+                let Some(signature) =
+                    word.and_then(|word| atomic_method(method, word, bool_ty, unit))
+                else {
+                    let error = self.unresolved_method_call(owner, method, resolved, args.len());
+                    self.emit(error, span);
+                    return Some(self.tcx.error_ty());
+                };
+                signature
+            }
+        };
+        let callee = format!("{owner}::{method}");
+        if self.check_sync_args(&callee, &params, args, arg_tys, span) {
+            Some(ret)
+        } else {
+            Some(self.tcx.error_ty())
+        }
     }
 
     /// Types a `regex::Pattern` method.
@@ -9367,7 +9845,13 @@ impl<'a> TypeChecker<'a> {
     ///
     /// The guarded slot is one word that every tier reads back as an
     /// integer, so that is what a read answers and what an update stores.
-    fn shared_method_ret(&mut self, method: &str, resolved: Ty, args: &[Expr]) -> Option<Ty> {
+    fn shared_method_ret(
+        &mut self,
+        method: &str,
+        resolved: Ty,
+        args: &[Expr],
+        span: Span,
+    ) -> Option<Ty> {
         let TyKind::Adt { def, .. } = self.tcx.kind_of(resolved) else {
             return None;
         };
@@ -9403,7 +9887,17 @@ impl<'a> TypeChecker<'a> {
                 }
                 Some(output)
             }
-            _ => None,
+            "clone" => Some(resolved),
+            _ => {
+                let error = self.unresolved_method_call(
+                    "sync::Shared".to_string(),
+                    method,
+                    resolved,
+                    args.len(),
+                );
+                self.emit(error, span);
+                Some(self.tcx.error_ty())
+            }
         }
     }
 
@@ -9488,8 +9982,7 @@ impl<'a> TypeChecker<'a> {
 
     fn check_stdlib_module_ret_ty(
         &mut self,
-        module: &[&str],
-        last: &str,
+        (module, last, user_callee): (&[&str], &str, bool),
         callee: &Expr,
         args: &[Expr],
         arg_tys: &[Ty],
@@ -9544,6 +10037,23 @@ impl<'a> TypeChecker<'a> {
                 "new" | "wrap" => Some(self.tcx.dyn_error_ty()),
                 _ => None,
             };
+        }
+        // A path a user item answers (`Counter::add` on a user `Counter`) is
+        // that item's, whatever runtime handle shares its name.
+        let user_type = matches!(module, [name] if self.adt_def_by_name.contains_key(*name));
+        if !user_callee && !user_type {
+            if let Some(ty) = self.sync_call_ret_ty(module, last, args, arg_tys, callee.span) {
+                return Some(ty);
+            }
+            if let Some(ty) = self.heap_buffer_call_ret_ty(module, last, args, arg_tys, callee.span)
+            {
+                return Some(ty);
+            }
+            if let Some(ty) =
+                self.table_handle_call_ret_ty(module, last, args, arg_tys, callee.span)
+            {
+                return Some(ty);
+            }
         }
         if let Some(ty) = self.handle_call_ret_ty(module, last) {
             return Some(ty);
@@ -11616,7 +12126,7 @@ impl<'a> TypeChecker<'a> {
         if let Some(ty) = self.flag_set_method_ret(method, resolved) {
             return ty;
         }
-        if let Some(ty) = self.shared_method_ret(method, resolved, args) {
+        if let Some(ty) = self.shared_method_ret(method, resolved, args, receiver.span) {
             return ty;
         }
         if let Some(ty) = self.http_client_method_ret(method, resolved) {
@@ -11779,7 +12289,11 @@ impl<'a> TypeChecker<'a> {
         {
             return false;
         }
-        let declared = self.user_method_owners.contains_key(method)
+        // A user `impl` reaches a scalar only when it names that scalar's own
+        // type: a method some struct declares - or the `cmp` / `eq` every
+        // struct is given - is not one an integer answers. A literal's type is
+        // known once defaulting has run, so its owner is checked then.
+        let declared = (!literal && self.user_impl_declares(resolved, method))
             || gossamer_resolve::is_prelude_value(method)
             || self.import_binds_free_name(method)
             // The conversions every value answers, which no signature row
@@ -11818,7 +12332,8 @@ impl<'a> TypeChecker<'a> {
             if !matches!(
                 self.tcx.kind(resolved),
                 Some(TyKind::Int(_) | TyKind::Float(_))
-            ) {
+            ) || self.user_impl_declares(resolved, &method)
+            {
                 continue;
             }
             let ty = self.render_public_ty(resolved);
@@ -19745,14 +20260,8 @@ impl<'a> TypeChecker<'a> {
             // fresh inference var the JIT can't classify. It is NOT
             // reference-counted (a handle, like the sockets), which
             // `is_rc_managed` already reports for unregistered sentinels.
-            //
-            // The sibling sync handles (`Mutex` / `WaitGroup` / `Atomic` /
-            // `I64Vec`) are deliberately NOT registered: their methods
-            // dispatch by name on every tier (`gos_rt_wg_done`, etc.), and
-            // forcing a concrete receiver type reroutes that dispatch and
-            // breaks the compiled lowering. A fresh inference var keeps them
-            // on the working name-global path.
-            "U8Vec" => Some(20),
+            "U8Vec" => Some(U8_VEC_OFFSET),
+            "I64Vec" => Some(SYNC_HANDLE_HI_OFFSET),
             "Notifier" => Some(17),
             _ => None,
         };
@@ -19760,7 +20269,7 @@ impl<'a> TypeChecker<'a> {
             let def = gossamer_resolve::DefId::local(u32::MAX - off);
             match tail {
                 "Context" => self.tcx.register_def_name(def, "context::Context"),
-                "U8Vec" => self.tcx.register_def_name(def, tail),
+                "U8Vec" | "I64Vec" => self.tcx.register_def_name(def, tail),
                 "Notifier" => self.tcx.register_def_name(def, tail),
                 // The qualified name the constructor path registers, so a
                 // written annotation and a constructed value name one type
@@ -21965,12 +22474,19 @@ fn json_value_variant_of(path: &TypePath) -> Option<&'static str> {
     }
 }
 
+/// `errors::Error`, and the `Error` a stdlib module's fallible calls answer
+/// (`http::Error`, `io::Error`), which is that same type.
 fn path_matches_dyn_error(path: &TypePath) -> bool {
     let names: Vec<&str> = path.segments.iter().map(|s| s.name.name.as_str()).collect();
-    matches!(
-        names.as_slice(),
-        ["errors" | "error", "Error"] | ["std", "errors" | "error", "Error"]
-    )
+    match names.as_slice() {
+        [module, "Error"] | ["std", module, "Error"] => {
+            *module == "error"
+                || gossamer_resolve::STDLIB_MODULES
+                    .binary_search(module)
+                    .is_ok()
+        }
+        _ => false,
+    }
 }
 
 /// Returns the use-site type arguments of `path` (`Foo<i64, String>` ->
@@ -22880,14 +23396,223 @@ fn stdlib_handle_by_path(segments: &[&str]) -> Option<(u32, &'static str)> {
 /// `http::Response`) whose fields are read through accessors rather than
 /// rendered.
 const OPAQUE_HANDLE_OFFSETS: &[u32] = &[
-    4, 5, 9, 10, 11, 12, 13, 14, 15, 16, 17, 21, 22, 23, 24, 25, 26, 27,
+    4,
+    5,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    U8_VEC_OFFSET,
+    21,
+    22,
+    23,
+    24,
+    25,
+    26,
+    27,
 ];
+
+/// A parameter or return shape in [`HANDLE_METHODS`].
+#[derive(Clone, Copy)]
+enum Shape {
+    Unit,
+    Bool,
+    I64,
+    U64,
+    U32,
+    F64,
+    Str,
+    StrVec,
+    F64Vec,
+    OptStr,
+    DoneChannel,
+    /// A handle, by sentinel offset and display name.
+    Handle(u32, &'static str),
+    /// Any of the three `metrics` instruments a registry collects.
+    Metric,
+}
+
+/// The typed surface of the table-described runtime handles: `(owner,
+/// method, parameters, return)`. `new` rows are the constructors, written on
+/// the owner's path; every other row is a method on the handle. A name an
+/// owner does not list is reported where it is written.
+const HANDLE_METHODS: &[(&str, &str, &[Shape], Shape)] = &[
+    (
+        "context::Context",
+        "background",
+        &[],
+        Shape::Handle(11, "context::Context"),
+    ),
+    (
+        "context::Context",
+        "with_cancel",
+        &[Shape::Handle(11, "context::Context")],
+        Shape::Handle(11, "context::Context"),
+    ),
+    (
+        "context::Context",
+        "with_timeout",
+        &[Shape::Handle(11, "context::Context"), Shape::I64],
+        Shape::Handle(11, "context::Context"),
+    ),
+    ("context::Context", "cancel", &[], Shape::Unit),
+    ("context::Context", "done", &[], Shape::Bool),
+    ("context::Context", "is_cancelled", &[], Shape::Bool),
+    ("context::Context", "done_chan", &[], Shape::DoneChannel),
+    (
+        "metrics::Counter",
+        "new",
+        &[Shape::Str, Shape::Str],
+        Shape::Handle(36, "metrics::Counter"),
+    ),
+    ("metrics::Counter", "inc", &[], Shape::Unit),
+    ("metrics::Counter", "value", &[], Shape::I64),
+    (
+        "metrics::Gauge",
+        "new",
+        &[Shape::Str, Shape::Str],
+        Shape::Handle(37, "metrics::Gauge"),
+    ),
+    ("metrics::Gauge", "set", &[Shape::F64], Shape::Unit),
+    ("metrics::Gauge", "inc", &[], Shape::Unit),
+    ("metrics::Gauge", "dec", &[], Shape::Unit),
+    ("metrics::Gauge", "value", &[], Shape::F64),
+    (
+        "metrics::Histogram",
+        "new",
+        &[Shape::Str, Shape::Str, Shape::F64Vec],
+        Shape::Handle(38, "metrics::Histogram"),
+    ),
+    ("metrics::Histogram", "observe", &[Shape::F64], Shape::Unit),
+    ("metrics::Histogram", "count", &[], Shape::I64),
+    ("metrics::Histogram", "sum", &[], Shape::F64),
+    (
+        "metrics::Registry",
+        "new",
+        &[],
+        Shape::Handle(39, "metrics::Registry"),
+    ),
+    (
+        "metrics::Registry",
+        "register",
+        &[Shape::Metric],
+        Shape::Unit,
+    ),
+    ("metrics::Registry", "render", &[], Shape::Str),
+    (
+        "trace::Tracer",
+        "new",
+        &[],
+        Shape::Handle(40, "trace::Tracer"),
+    ),
+    (
+        "trace::Tracer",
+        "start_span",
+        &[Shape::Str],
+        Shape::Handle(TRACE_SPAN_OFFSET, "trace::Span"),
+    ),
+    (
+        "trace::Span",
+        "set_attribute",
+        &[Shape::Str, Shape::Str],
+        Shape::Unit,
+    ),
+    (
+        "trace::Span",
+        "set_status",
+        &[Shape::I64, Shape::Str],
+        Shape::Unit,
+    ),
+    (
+        "trace::Span",
+        "end",
+        &[],
+        Shape::Handle(TRACE_ENDED_SPAN_OFFSET, "trace::EndedSpan"),
+    ),
+    ("trace::EndedSpan", "to_otlp_json", &[], Shape::Str),
+    (
+        "rand::Rng",
+        "new",
+        &[Shape::I64],
+        Shape::Handle(42, "rand::Rng"),
+    ),
+    ("rand::Rng", "next_u64", &[], Shape::U64),
+    ("rand::Rng", "next_u32", &[], Shape::U32),
+    (
+        "rand::Rng",
+        "range_u64",
+        &[Shape::U64, Shape::U64],
+        Shape::U64,
+    ),
+    ("rand::Rng", "next_f64", &[], Shape::F64),
+    (
+        "bufio::Scanner",
+        "new",
+        &[Shape::Handle(25, "io::Stream")],
+        Shape::Handle(43, "bufio::Scanner"),
+    ),
+    ("bufio::Scanner", "scan", &[], Shape::Bool),
+    ("bufio::Scanner", "next", &[], Shape::OptStr),
+    ("bufio::Scanner", "text", &[], Shape::Str),
+    ("sync::Map", "new", &[], Shape::Handle(34, "sync::Map")),
+    (
+        "sync::Map",
+        "insert",
+        &[Shape::Str, Shape::Str],
+        Shape::Unit,
+    ),
+    ("sync::Map", "get", &[Shape::Str], Shape::OptStr),
+    ("sync::Map", "remove", &[Shape::Str], Shape::Unit),
+    ("sync::Map", "len", &[], Shape::I64),
+    ("sync::Map", "contains_key", &[Shape::Str], Shape::Bool),
+    ("sync::Map", "keys", &[], Shape::StrVec),
+];
+
+/// The owner a type-qualified path names in [`HANDLE_METHODS`]: the display
+/// name itself, or one reached with a `std::` / `math::` prefix or through
+/// its bare type name.
+fn table_handle_owner(module: &[&str]) -> Option<&'static str> {
+    let module = module.strip_prefix(&["std"]).unwrap_or(module);
+    let module = module.strip_prefix(&["math"]).unwrap_or(module);
+    HANDLE_METHODS
+        .iter()
+        .map(|(owner, ..)| *owner)
+        .find(|owner| {
+            let mut parts = owner.split("::");
+            let (Some(head), Some(tail)) = (parts.next(), parts.next()) else {
+                return false;
+            };
+            // A bare `Map` is the collections map, so the concurrent one is
+            // reached only through `sync::Map`.
+            matches!(module, [m, t] if *m == head && *t == tail)
+                || (*owner != "sync::Map" && matches!(module, [t] if *t == tail))
+        })
+}
+
+/// `(parameters, return)` of an atomic's method over its word type. A
+/// `bool` word has no arithmetic, so only the integer atomics add and
+/// subtract.
+fn atomic_method(method: &str, word: Ty, bool_ty: Ty, unit: Ty) -> Option<(Vec<Ty>, Ty)> {
+    match method {
+        "load" => Some((Vec::new(), word)),
+        "store" => Some((vec![word], unit)),
+        "compare_exchange" => Some((vec![word, word], bool_ty)),
+        "fetch_add" | "fetch_sub" if word != bool_ty => Some((vec![word], word)),
+        _ => None,
+    }
+}
 
 /// True when `def` names a runtime handle rather than a value with a
 /// representation of its own.
 fn is_opaque_handle_def(local: u32) -> bool {
     let offset = u32::MAX - local;
     (PURE_HANDLE_LO_OFFSET..=PURE_HANDLE_HI_OFFSET).contains(&offset)
+        || (SYNC_HANDLE_LO_OFFSET..=TRACE_ENDED_SPAN_OFFSET).contains(&offset)
         || OPAQUE_HANDLE_OFFSETS.contains(&offset)
 }
 

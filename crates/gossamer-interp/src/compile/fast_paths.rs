@@ -21,6 +21,22 @@ impl<'tcx> FnBuilder<'tcx> {
         }
     }
 
+    /// The register a part of a destructured value binds from: a `mut`
+    /// binding is a value of its own, so a table it holds is copied out of
+    /// the aggregate it came from - unless that aggregate is being drained,
+    /// when nothing else sees it.
+    fn own_mut_part(&mut self, sub: &HirPat, part: Reg, consume: bool) -> Reg {
+        if consume || !matches!(sub.kind, HirPatKind::Binding { mutable: true, .. }) {
+            return part;
+        }
+        let own = self.alloc_reg();
+        self.emit(Op::CloneMapLike {
+            dst: own,
+            src: part,
+        });
+        own
+    }
+
     pub(crate) fn bind_pattern_locals(
         &mut self,
         pattern: &HirPat,
@@ -81,6 +97,7 @@ impl<'tcx> FnBuilder<'tcx> {
                     }
                     // A drained element is uniquely owned, so propagate
                     // `consume` into nested tuple sub-patterns.
+                    let dst = self.own_mut_part(sub, dst, consume);
                     self.bind_pattern_locals_ex(sub, dst, consume)?;
                 }
                 Ok(())
@@ -100,7 +117,10 @@ impl<'tcx> FnBuilder<'tcx> {
                         cache_idx,
                     });
                     match &fp.pattern {
-                        Some(sub) => self.bind_pattern_locals(sub, dst)?,
+                        Some(sub) => {
+                            let dst = self.own_mut_part(sub, dst, false);
+                            self.bind_pattern_locals(sub, dst)?;
+                        }
                         None => self.bind_local(
                             &fp.name.name,
                             TypedReg {
@@ -122,6 +142,7 @@ impl<'tcx> FnBuilder<'tcx> {
                         src: init_reg,
                         idx,
                     });
+                    let dst = self.own_mut_part(fp, dst, false);
                     self.bind_pattern_locals(fp, dst)?;
                 }
                 Ok(())
@@ -519,7 +540,27 @@ impl<'tcx> FnBuilder<'tcx> {
                     kind: RegKind::Value,
                 })
             }
-            _ => Err(RuntimeError::Unsupported("f64 binary op kind")),
+            _ => {
+                // `%` and any other op without a typed f64 opcode run through
+                // the generic arithmetic op, which answers a float for floats.
+                let lhs = self.as_value(TypedReg {
+                    reg: lhs_f,
+                    kind: RegKind::F64,
+                });
+                let rhs = self.as_value(TypedReg {
+                    reg: rhs_f,
+                    kind: RegKind::F64,
+                });
+                let dst = self.alloc_reg();
+                let instr = self
+                    .binary_op(op, dst, lhs, rhs)
+                    .ok_or(RuntimeError::Unsupported("f64 binary op kind"))?;
+                self.emit(instr);
+                Ok(TypedReg {
+                    reg: dst,
+                    kind: RegKind::Value,
+                })
+            }
         }
     }
 

@@ -1,0 +1,16 @@
+fn wrap(x: f64, m: f64) -> f64 {
+    x % m
+}
+
+fn main() {
+    let a = 7.5
+    let b = 2.0
+    let mut c = -7.25
+    c %= 2.0
+    let v = #[5.5, 1.25]
+    let r = a % b + 1.0
+    println("{} {} {} {} {}", a % b, 7.5 % 2.0, c, v[0] % v[1], r)
+    println("{} {}", 1.0 % 0.0, -0.0 % 1.0)
+    let wrapped = #[370.0, -30.0, 720.5].map(|d| wrap(d, 360.0))
+    println("{:?}", wrapped)
+}

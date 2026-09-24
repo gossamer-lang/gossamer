@@ -867,7 +867,9 @@ fn lazy_next(
                     Ok(Some(Value::Int(out)))
                 }
             } else if *end_open {
-                if cfg!(debug_assertions) && *current == i64::MAX {
+                // The bytecode VM is a checked tier whatever profile the
+                // interpreter itself was built with.
+                if *current == i64::MAX {
                     Err(crate::value::RuntimeError::Panic(
                         "attempt to add with overflow in open integer range".to_string(),
                     ))

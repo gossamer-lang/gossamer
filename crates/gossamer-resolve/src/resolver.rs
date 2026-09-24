@@ -1850,6 +1850,40 @@ impl Resolver {
         }
     }
 
+    /// Reports a type named through an imported stdlib module that the
+    /// module does not export. Such a type (`sync::Mutex`) has no
+    /// declaration of its own to reach, so the module's export set decides
+    /// whether it names anything; `sync::Bogus` is not a type.
+    fn check_std_type_path(&mut self, effective: &[&str], span: Span) {
+        if effective.len() > 1
+            && let Some(target) = self.import_target(effective[0]).cloned()
+        {
+            let module = target.strip_prefix("std::").unwrap_or(&target).to_string();
+            if crate::stdlib_exports::is_stdlib_module_path_or_namespace(&module) {
+                let mut joined = module.clone();
+                for segment in &effective[1..] {
+                    joined.push_str("::");
+                    joined.push_str(segment);
+                }
+                // `Error` names the error type every module's fallible calls
+                // answer, `errors::Error`, whether or not the module lists it.
+                if effective[1..] != ["Error"]
+                    && !crate::stdlib_exports::is_stdlib_item_path(&joined)
+                    && !crate::stdlib_exports::is_stdlib_module_path_or_namespace(&joined)
+                {
+                    let parent = joined.rsplit_once("::").map_or("", |(parent, _)| parent);
+                    self.emit(
+                        ResolveError::UnknownStdItem {
+                            name: effective[effective.len() - 1].to_string(),
+                            module: parent.to_string(),
+                        },
+                        span,
+                    );
+                }
+            }
+        }
+    }
+
     fn resolve_type_path_in(
         &mut self,
         path: &TypePath,
@@ -1927,6 +1961,9 @@ impl Resolver {
                     return;
                 }
             }
+        }
+        if let Some(span) = span {
+            self.check_std_type_path(&effective, span);
         }
         // A qualifier that leaves one segment behind (`super::Point`,
         // `crate::Point`) names that type through the scope chain, the same

@@ -1384,6 +1384,14 @@ impl<'a> Builder<'a> {
         if matches!(self.tcx.kind_of(cur), TyKind::DynError) {
             return Some("errors::Error");
         }
+        // A `std::sync` or `trace` span handle is named by its sentinel type
+        // rather than by the rendered tail, which a user type may share.
+        if let TyKind::Adt { def, .. } = self.tcx.kind_of(cur)
+            && def.local >= u32::MAX - 64
+            && let Some(kind) = self.tcx.def_name(*def).and_then(sentinel_runtime_kind)
+        {
+            return Some(kind);
+        }
         let rendered = gossamer_types::printer::render_ty(self.tcx, cur);
         let bare = rendered.rsplit("::").next().unwrap_or(&rendered);
         let name = bare.split('<').next().unwrap_or(bare).trim();
@@ -1399,6 +1407,7 @@ impl<'a> Builder<'a> {
             // (no local construction to tag) still routes `load`/`store`
             // to the bool-typed shims.
             "AtomicBool" => Some("sync::AtomicBool"),
+            "AtomicI32" => Some("sync::AtomicI32"),
             // `validate::Errors` / `validate::FieldError` handles flowing
             // in by parameter or out by return carry no construction tag;
             // recover the handle kind from the receiver's named type.
@@ -1588,6 +1597,26 @@ impl<'a> Builder<'a> {
     /// Whether the carrier's payload is a `Vec` / `[T]` - the case where
     /// `unwrap_or`'s fallback is itself a heap value and only one of the two
     /// becomes the answer.
+    /// Whether the carrier's payload is a `Map`, which the carrier lends
+    /// rather than owns, so `unwrap_or` answers a copy.
+    pub(crate) fn carrier_payload_is_map(&self, ty: Ty) -> bool {
+        use gossamer_types::TyKind;
+        let mut cur = ty;
+        loop {
+            match self.tcx.kind_of(cur) {
+                TyKind::Ref { inner, .. } => cur = *inner,
+                TyKind::Adt { def, substs }
+                    if def.local == u32::MAX || def.local == u32::MAX - 1 =>
+                {
+                    return substs.types().first().is_some_and(|payload| {
+                        matches!(self.tcx.kind_of(*payload), TyKind::HashMap { .. })
+                    });
+                }
+                _ => return false,
+            }
+        }
+    }
+
     pub(crate) fn carrier_payload_is_sequence(&self, ty: Ty) -> bool {
         use gossamer_types::TyKind;
         let mut cur = ty;
@@ -2017,6 +2046,15 @@ impl<'a> Builder<'a> {
                     (gossamer_abi::rc::RC_CHILD_MAP << gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
                         | word,
                 );
+            } else if let Some(container) = crate::lower::handle_container(self.tcx, fty) {
+                // A set, a deque, and a heap are held the way a map is: the
+                // blob owns a store of its own and frees it at its death.
+                let kind = match container {
+                    crate::lower::HandleContainer::Set => gossamer_abi::rc::RC_CHILD_SET,
+                    crate::lower::HandleContainer::Deque => gossamer_abi::rc::RC_CHILD_DEQUE,
+                    crate::lower::HandleContainer::Heap => gossamer_abi::rc::RC_CHILD_HEAP,
+                };
+                out.push((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word);
             } else if self.tcx.is_rc_managed(fty) {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word,
@@ -2541,4 +2579,65 @@ impl<'a> Builder<'a> {
             _ => None,
         }
     }
+}
+
+/// The runtime kind of a stdlib handle type, by the name its sentinel type
+/// registers. The rendered tail is not enough: a user type may share it, and
+/// `sync::Map` renders as the collections map's name.
+fn sentinel_runtime_kind(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "sync::Mutex" => "sync::Mutex",
+        "sync::Once" => "sync::Once",
+        "sync::WaitGroup" => "sync::WaitGroup",
+        "sync::Barrier" => "sync::Barrier",
+        "sync::AtomicI64" => "sync::AtomicI64",
+        "sync::AtomicI32" => "sync::AtomicI32",
+        "sync::AtomicU64" => "sync::AtomicU64",
+        "sync::AtomicBool" => "sync::AtomicBool",
+        "sync::RwLock" => "sync::RwLock",
+        "sync::Map" => "sync::Map",
+        "trace::Tracer" => "trace::Tracer",
+        "trace::Span" => "trace::Span",
+        "trace::EndedSpan" => "trace::EndedSpan",
+        "metrics::Counter" => "metrics::Counter",
+        "metrics::Gauge" => "metrics::Gauge",
+        "metrics::Histogram" => "metrics::Histogram",
+        "metrics::Registry" => "metrics::Registry",
+        "rand::Rng" => "math::rand::Rng",
+        "bufio::Scanner" => "bufio::Scanner",
+        _ => return None,
+    })
+}
+
+/// The runtime symbol a `std::sync` handle's method lowers to. Each kind
+/// names its own shims, so a method name two kinds share (`wait` on a
+/// `WaitGroup` and on a `Barrier`) reaches the right one.
+pub(crate) fn sync_method_symbol(kind: &str, method: &str) -> Option<&'static str> {
+    Some(match (kind, method) {
+        ("sync::Mutex", "lock") => "gos_rt_mutex_lock",
+        ("sync::Mutex", "unlock") => "gos_rt_mutex_unlock",
+        ("sync::WaitGroup", "add") => "gos_rt_wg_add",
+        ("sync::WaitGroup", "done") => "gos_rt_wg_done",
+        ("sync::WaitGroup", "wait") => "gos_rt_wg_wait",
+        ("sync::WaitGroup", "wait_ctx") => "gos_rt_wg_wait_ctx",
+        ("sync::Barrier", "wait") => "gos_rt_barrier_wait",
+        ("sync::AtomicBool", "load") => "gos_rt_atomic_bool_load",
+        ("sync::AtomicBool", "store") => "gos_rt_atomic_bool_store",
+        ("sync::AtomicBool", "compare_exchange") => "gos_rt_atomic_bool_cas",
+        // An `AtomicI32` shares the i64 cell; its arithmetic wraps at 32 bits.
+        ("sync::AtomicI32", "fetch_add") => "gos_rt_atomic_i32_fetch_add",
+        ("sync::AtomicI32", "fetch_sub") => "gos_rt_atomic_i32_fetch_sub",
+        ("sync::AtomicI64" | "sync::AtomicI32" | "sync::AtomicU64", "load") => {
+            "gos_rt_atomic_i64_load"
+        }
+        ("sync::AtomicI64" | "sync::AtomicI32" | "sync::AtomicU64", "store") => {
+            "gos_rt_atomic_i64_store"
+        }
+        ("sync::AtomicI64" | "sync::AtomicI32" | "sync::AtomicU64", "compare_exchange") => {
+            "gos_rt_atomic_i64_cas"
+        }
+        ("sync::AtomicI64" | "sync::AtomicU64", "fetch_add") => "gos_rt_atomic_i64_fetch_add",
+        ("sync::AtomicI64" | "sync::AtomicU64", "fetch_sub") => "gos_rt_atomic_i64_fetch_sub",
+        _ => return None,
+    })
 }

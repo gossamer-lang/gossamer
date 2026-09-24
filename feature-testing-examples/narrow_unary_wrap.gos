@@ -1,0 +1,25 @@
+// `!x` and `-x` on a narrow integer wrap at its declared width wherever the
+// expression sits: a binding, a format argument, a call argument, a field.
+
+struct Flags { bits: u8 }
+
+fn show(v: u8) -> String { v.to_string() }
+
+fn flip(f: Flags) -> u8 { !f.bits }
+
+fn mix(acc: i64, v: i64) -> i64 { acc * 31 + v }
+
+fn main() {
+    let mut digest = 0
+    for i in 0..64 { digest = mix(digest % 1_000_003, i) }
+    println("digest {}", digest)
+    let z: u8 = 255
+    let w: u16 = 1
+    let d: u32 = 0
+    let s: i8 = -128
+    println("{} {} {} {}", !z, !w, !d, -s)
+    println("{}", show(!z))
+    println("{}", flip(Flags { bits: 0x0F }))
+    let values = #[!z, !(z - 1)]
+    println("{:?}", values)
+}

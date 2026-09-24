@@ -159,6 +159,10 @@ A newline followed by `-`, `*`, or `&` starts a NEW statement, so
 a continuation meant as part of the line above becomes one of
 these. Join it to that line (end the previous line with the
 operator, or parenthesise), or bind what it computes.
+A builtin method that answers a new value and writes nothing -
+`v.dedup()`, `s.trim()`, `s.to_uppercase()` - is reported the same
+way when its result is dropped: the receiver is unchanged, so bind
+the result (`v = v.dedup()`).
 
 ## `bool_literal_in_condition`
 

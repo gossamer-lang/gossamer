@@ -1316,7 +1316,9 @@ closed (`1..=10`), exclusive (`1..10`), or open-ended: `..=hi` and
 inclusive). Range patterns are opaque to exhaustiveness analysis, so a `_`
 arm is still required even when the ranges appear to cover the type. An
 inclusive marker requires an upper bound, so bare `..=` and `lo..=` are
-parse errors.
+parse errors. A bound is a literal or a primitive integer limit
+(`i64::MIN..=-1`, `128..=u8::MAX`), which stands for its literal; any other
+path as a bound is `GP0059`, and a named constant is matched with a guard.
 
 ```
 match divide(a, b) {
@@ -2238,7 +2240,7 @@ following implemented happens-before edges:
 - Channel operations establish happens-before relationships.
 - Mutex lock/unlock establish happens-before relationships.
 - WaitGroup completion happens before a successful wait returns.
-- `sync::Once::call_once` publishes its completed body to every caller that
+- `sync::Once::call` publishes its completed body to every caller that
   returns from the same `Once`.
 - Sequentially consistent atomic operations publish and acquire a
   happens-before edge; explicit release stores pair with acquire loads.
@@ -2252,7 +2254,7 @@ is enabled, the LLVM AOT codegen instruments heap loads and stores with
 `gos_rt_race_access` calls and the runtime (`gossamer-runtime::race`)
 maintains a per-goroutine vector-clock happens-before model, recording
 synchronisation edges at channel handoff, mutex unlock, WaitGroup completion,
-`Once::call_once`, and the supported atomic acquire/release operations. Any
+`Once::call`, and the supported atomic acquire/release operations. Any
 access pair left unordered by a happens-before edge is
 reported and fails the test run. It is a testing instrument rather than
 an always-on runtime guard, and it sees the compiled-tier accesses the
@@ -2849,10 +2851,24 @@ transformation when the chain doesn't return from the enclosing fn.
 
 ### 10.8 `std::sync`
 
-- `Mutex<T>`, `RwLock<T>` (parking_lot-style: no poisoning).
-- `Once`, `WaitGroup`, `Barrier`.
-- `AtomicI64`, `AtomicU64`, and `AtomicBool`. Raw-pointer atomics are not
-  exposed because the safe language has no raw-pointer surface.
+- `Mutex`: `Mutex::new()`, `lock()`, `unlock()` (no poisoning). It guards
+  the code between the two calls, not a value.
+- `RwLock`, guarding an `i64`: `RwLock::new(v)`, `read()`, `write(v)`,
+  `with_read(f)`, `with_write(f)`, where `f` is `Fn(i64) -> i64`.
+- `Once`: `Once::new()`, `call(f) -> bool`, true on the call that ran `f`.
+- `WaitGroup`: `WaitGroup::new()`, `add(n)`, `done()`, `wait()`,
+  `wait_ctx(ctx) -> bool`.
+- `Barrier`: `Barrier::new(n)`, `wait()`.
+- `AtomicI64`, `AtomicI32`, `AtomicU64`, and `AtomicBool`, each holding a
+  value of its own type: `new(v)`, `load()`, `store(v)`,
+  `compare_exchange(current, new) -> bool`, and on the integer atomics
+  `fetch_add(n)` / `fetch_sub(n)`, which wrap at the type's width and
+  answer the previous value. Every operation is sequentially consistent.
+  Raw-pointer atomics are not exposed because the safe language has no
+  raw-pointer surface.
+
+Each is a handle: copying one shares the same lock or cell, and a method
+outside its list is a type error (`GT0002`).
 
 ### 10.9 `std::time`
 

@@ -1215,6 +1215,10 @@ pub(super) fn lower_intrinsic_call_io_math(
         // map's death gives it back.
         "gos_rt_map_set_blob_values"
         | "gos_rt_map_set_vec_values"
+        | "gos_rt_map_set_map_values"
+        | "gos_rt_map_set_set_values"
+        | "gos_rt_map_set_deque_values"
+        | "gos_rt_map_set_heap_values"
         | "gos_rt_map_set_float_keys" => {
             let m = match args.first() {
                 Some(a) => lower_operand(
@@ -1232,6 +1236,10 @@ pub(super) fn lower_intrinsic_call_io_math(
             let sym: &'static str = match name {
                 "gos_rt_map_set_blob_values" => "gos_rt_map_set_blob_values",
                 "gos_rt_map_set_float_keys" => "gos_rt_map_set_float_keys",
+                "gos_rt_map_set_map_values" => "gos_rt_map_set_map_values",
+                "gos_rt_map_set_set_values" => "gos_rt_map_set_set_values",
+                "gos_rt_map_set_deque_values" => "gos_rt_map_set_deque_values",
+                "gos_rt_map_set_heap_values" => "gos_rt_map_set_heap_values",
                 _ => "gos_rt_map_set_vec_values",
             };
             let f = intrinsics.extern_fn(module, sym, &[ptr_ty], &[])?;

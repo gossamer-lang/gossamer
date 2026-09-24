@@ -2676,6 +2676,8 @@ impl<'a> Builder<'a> {
                     // handed over as the address the word helper returns.
                     if self.carrier_payload_is_carrier(receiver_ty) {
                         Some("gos_rt_result_unwrap_or_carrier")
+                    } else if self.carrier_payload_is_map(receiver_ty) {
+                        Some("gos_rt_result_unwrap_or_map")
                     } else if self.carrier_payload_is_sequence(receiver_ty) {
                         Some("gos_rt_result_unwrap_or_vec")
                     } else if self.carrier_payload_is_string(receiver_ty) {
@@ -3604,6 +3606,7 @@ impl<'a> Builder<'a> {
             (Some("http::Response"), "body") => Some("gos_rt_http_response_body"),
             (Some("bufio::Scanner"), "scan") => Some("gos_rt_bufio_scanner_scan"),
             (Some("bufio::Scanner"), "text") => Some("gos_rt_bufio_scanner_text"),
+            (Some("bufio::Scanner"), "next") => Some("gos_rt_bufio_scanner_next"),
             (Some("errors::Error"), "message") => Some("gos_rt_error_message"),
             // `{}` on an error renders the colon-joined chain, and
             // `to_string` is the same contract by another spelling.
@@ -3883,6 +3886,11 @@ impl<'a> Builder<'a> {
         _heap_float_elem: bool,
     ) -> Option<&'static str> {
         let _ = receiver_ty;
+        if let Some(symbol) =
+            rk.and_then(|kind| super::types::sync_method_symbol(kind, method.name.as_str()))
+        {
+            return Some(symbol);
+        }
         match (rk, method.name.as_str()) {
             (Some("sync::Map"), "insert") => Some("gos_rt_sync_map_set"),
             (Some("sync::Map"), "get") => Some("gos_rt_sync_map_get"),
@@ -4370,6 +4378,23 @@ impl<'a> Builder<'a> {
         ty: Ty,
     ) -> Ty {
         match rt {
+            // An atomic's word is the width its type names, which the checker
+            // already gave the call: a `u64` read renders unsigned.
+            "gos_rt_atomic_i64_load"
+            | "gos_rt_atomic_i64_fetch_add"
+            | "gos_rt_atomic_i64_fetch_sub"
+            | "gos_rt_atomic_i32_fetch_add"
+            | "gos_rt_atomic_i32_fetch_sub"
+            | "gos_rt_math_rng_next_u64"
+            | "gos_rt_math_rng_next_u32"
+            | "gos_rt_math_rng_range_u64" => ty,
+            "gos_rt_mutex_lock"
+            | "gos_rt_mutex_unlock"
+            | "gos_rt_wg_add"
+            | "gos_rt_wg_done"
+            | "gos_rt_wg_wait"
+            | "gos_rt_barrier_wait"
+            | "gos_rt_atomic_i64_store" => self.tcx.unit(),
             "gos_rt_error_display"
             | "gos_rt_error_message"
             | "gos_rt_bufio_scanner_text"
@@ -4626,7 +4651,7 @@ impl<'a> Builder<'a> {
                     _ => self.option_i64_adt_ty(),
                 }
             }
-            "gos_rt_sync_map_get" => self.option_string_adt_ty(),
+            "gos_rt_sync_map_get" | "gos_rt_bufio_scanner_next" => self.option_string_adt_ty(),
             "gos_rt_sync_map_keys" => {
                 let s = self.tcx.string_ty();
                 self.tcx.intern(gossamer_types::TyKind::Vec(s))
@@ -5021,6 +5046,7 @@ impl<'a> Builder<'a> {
             (Some("http::Response"), "body") => Some("gos_rt_http_response_body"),
             (Some("bufio::Scanner"), "scan") => Some("gos_rt_bufio_scanner_scan"),
             (Some("bufio::Scanner"), "text") => Some("gos_rt_bufio_scanner_text"),
+            (Some("bufio::Scanner"), "next") => Some("gos_rt_bufio_scanner_next"),
             (Some("errors::Error"), "message") => Some("gos_rt_error_message"),
             // `{}` on an error renders the colon-joined chain, and
             // `to_string` is the same contract by another spelling.
@@ -5110,6 +5136,11 @@ impl<'a> Builder<'a> {
         _heap_float_elem: bool,
     ) -> Option<&'static str> {
         let _ = receiver_ty;
+        if let Some(symbol) =
+            rk.and_then(|kind| super::types::sync_method_symbol(kind, method.name.as_str()))
+        {
+            return Some(symbol);
+        }
         match (rk, method.name.as_str()) {
             (Some("sync::Map"), "insert") => Some("gos_rt_sync_map_set"),
             (Some("sync::Map"), "get") => Some("gos_rt_sync_map_get"),
@@ -5527,6 +5558,8 @@ impl<'a> Builder<'a> {
                     // loaded back rather than handed over as an address.
                     runtime_symbol = Some(if self.carrier_payload_is_carrier(lowered_recv_ty) {
                         "gos_rt_result_unwrap_or_carrier"
+                    } else if self.carrier_payload_is_map(lowered_recv_ty) {
+                        "gos_rt_result_unwrap_or_map"
                     } else if self.carrier_payload_is_sequence(lowered_recv_ty) {
                         "gos_rt_result_unwrap_or_vec"
                     } else if self.carrier_payload_is_string(lowered_recv_ty) {

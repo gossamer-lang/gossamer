@@ -4447,6 +4447,186 @@ fn stores_aggregate_by_pointer(name: &str) -> bool {
         || name.starts_with("gos_rt_chan_send")
 }
 
+/// `true` when `local`, an argument of the consuming call `name`, is a value
+/// the receiving container stores a copy of, so the frame keeps its own: a
+/// `Map`, `Set`, or deque value of a map that owns such values entry by entry
+/// (`gos_rt_map_set_map_values` and kin), or a `Set`, deque, or heap element
+/// of a vector or deque, whose store copies each one into its slot.
+fn stores_table_value_copy(
+    tcx: &gossamer_types::TyCtxt,
+    body: &Body,
+    name: &str,
+    args: &[Operand],
+    local: Local,
+) -> bool {
+    use gossamer_types::TyKind;
+    let Some(Operand::Copy(receiver)) = args.first() else {
+        return false;
+    };
+    if !receiver.projection.is_empty() {
+        return false;
+    }
+    let mut map_ty = body.locals[receiver.local.0 as usize].ty;
+    while let TyKind::Ref { inner, .. } = tcx.kind_of(map_ty) {
+        map_ty = *inner;
+    }
+    let element_store = name.starts_with("gos_rt_vec_push")
+        || name.starts_with("gos_rt_deque_push")
+        || name.starts_with("gos_rt_vec_set")
+        || name.starts_with("gos_rt_vec_insert");
+    if element_store {
+        let is_value = matches!(args.last(), Some(Operand::Copy(p)) if p.local == local);
+        let elem = match tcx.kind_of(map_ty) {
+            TyKind::Vec(elem) | TyKind::Slice(elem) => Some(*elem),
+            TyKind::Adt { substs, .. } if handle_container(tcx, map_ty).is_some() => {
+                substs.types().first().copied()
+            }
+            _ => None,
+        };
+        return is_value && elem.is_some_and(|elem| handle_container(tcx, elem).is_some());
+    }
+    if !(name.starts_with("gos_rt_map_insert") || name.starts_with("gos_rt_map_or_insert")) {
+        return false;
+    }
+    let TyKind::HashMap { value, .. } = tcx.kind_of(map_ty) else {
+        return false;
+    };
+    let table_value = matches!(tcx.kind_of(*value), TyKind::HashMap { .. })
+        || matches!(
+            handle_container(tcx, *value),
+            Some(HandleContainer::Set | HandleContainer::Deque)
+        );
+    table_value && matches!(args.last(), Some(Operand::Copy(p)) if p.local == local)
+}
+
+/// Gives a container stored into another container a value of its own.
+///
+/// `v.push(x)`, `xs[i] = x`, `m.insert(k, x)`, and their kin keep what they
+/// are handed, but a container a binding names is still the binding's: a
+/// write through the binding afterwards must not reach the stored element.
+/// A `Vec` store takes a share and a `Map`, `Set`, or deque store the handle
+/// itself, and neither survives an in-place write, so the stored value is a
+/// copy. A copy of a binding the store is the last use of is handed over
+/// instead by the uniqueness pass, so a value built and stored in one go pays
+/// nothing. A map that owns its table values copies them itself.
+pub(crate) fn copy_stored_containers(body: &mut Body, tcx: &gossamer_types::TyCtxt) {
+    use gossamer_types::TyKind;
+    let stores_value = |name: &str| {
+        name.starts_with("gos_rt_vec_push")
+            || name.starts_with("gos_rt_deque_push")
+            || matches!(
+                name,
+                "gos_rt_vec_set" | "gos_rt_vec_set_i64" | "gos_rt_vec_set_i64_unchecked"
+            )
+            || name.starts_with("gos_rt_vec_insert")
+            || name.starts_with("gos_rt_map_insert")
+            || name.starts_with("gos_rt_map_or_insert")
+    };
+    let n_blocks = body.blocks.len();
+    for bi in 0..n_blocks {
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            ..
+        } = &body.blocks[bi].terminator
+        else {
+            continue;
+        };
+        if !stores_value(name) || args.len() < 2 {
+            continue;
+        }
+        let value_index = args.len() - 1;
+        let (Some(Operand::Copy(receiver)), Some(Operand::Copy(value))) =
+            (args.first(), args.get(value_index))
+        else {
+            continue;
+        };
+        if !receiver.projection.is_empty() || !value.projection.is_empty() {
+            continue;
+        }
+        let value_local = value.local;
+        let decl = &body.locals[value_local.0 as usize];
+        // A binding or a parameter names a value something else can still
+        // reach; a temporary the lowering made for this store does not.
+        if decl.debug_name.is_none() || decl.region {
+            continue;
+        }
+        let mut container = body.locals[receiver.local.0 as usize].ty;
+        while let TyKind::Ref { inner, .. } = tcx.kind_of(container) {
+            container = *inner;
+        }
+        let elem = match tcx.kind_of(container) {
+            TyKind::Vec(elem) | TyKind::Slice(elem) => *elem,
+            TyKind::HashMap { value, .. } => *value,
+            TyKind::Adt { substs, .. } if handle_container(tcx, container).is_some() => {
+                match substs.types().first() {
+                    Some(elem) => *elem,
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        let symbol = match tcx.kind_of(elem) {
+            TyKind::Vec(_) | TyKind::Slice(_) => "gos_rt_vec_clone",
+            TyKind::HashMap { .. } => "gos_rt_map_clone",
+            _ => match handle_container(tcx, elem) {
+                Some(HandleContainer::Set) => "gos_rt_set_clone",
+                Some(HandleContainer::Deque) => "gos_rt_deque_clone",
+                Some(HandleContainer::Heap) => "gos_rt_vec_clone",
+                None => continue,
+            },
+        };
+        let args_now = match &body.blocks[bi].terminator {
+            Terminator::Call { args, .. } => args.clone(),
+            _ => continue,
+        };
+        if stores_table_value_copy(tcx, body, name, &args_now, value_local) {
+            continue;
+        }
+        let copy_ty = if matches!(
+            tcx.kind_of(decl.ty),
+            TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. }
+        ) || handle_container(tcx, decl.ty).is_some()
+        {
+            decl.ty
+        } else {
+            elem
+        };
+        let copy = Local(u32::try_from(body.locals.len()).expect("local overflow"));
+        body.locals.push(crate::ir::LocalDecl {
+            ty: copy_ty,
+            debug_name: None,
+            mutable: false,
+            region: false,
+        });
+        let store_id = BlockId(u32::try_from(body.blocks.len()).expect("block overflow"));
+        let block = &mut body.blocks[bi];
+        let span = block.terminator_span.unwrap_or(block.span);
+        let mut store = std::mem::replace(
+            &mut block.terminator,
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(symbol.to_string())),
+                args: vec![Operand::Copy(Place::local(value_local))],
+                destination: Place::local(copy),
+                target: Some(store_id),
+            },
+        );
+        if let Terminator::Call { args, .. } = &mut store {
+            args[value_index] = Operand::Copy(Place::local(copy));
+        }
+        let terminator_span = block.terminator_span;
+        let terminator_inlined = block.terminator_inlined.clone();
+        body.blocks.push(crate::ir::BasicBlock {
+            id: store_id,
+            stmts: Vec::new(),
+            terminator: store,
+            span,
+            terminator_span,
+            terminator_inlined,
+        });
+    }
+}
+
 pub(crate) fn is_consuming_call(name: &str) -> bool {
     is_element_push(name)
         // `xs[i] = v` writes the value into the element store, which owns its
@@ -5214,8 +5394,51 @@ const SLOT_KIND_VEC: i64 = 2;
 const SLOT_KIND_MAP: i64 = 3;
 const SLOT_KIND_RC_NODE: i64 = 7;
 const SLOT_KIND_SET: i64 = 11;
+const SLOT_KIND_DEQUE: i64 = 13;
+const SLOT_KIND_HEAP: i64 = 14;
 const SLOT_HASH_SET_DEF_LOCAL: u32 = u32::MAX - 7;
 const SLOT_BTREE_SET_DEF_LOCAL: u32 = u32::MAX - 18;
+const SLOT_VEC_DEQUE_DEF_LOCAL: u32 = u32::MAX - 19;
+const SLOT_BINARY_HEAP_DEF_LOCAL: u32 = u32::MAX - 28;
+const SLOT_MIN_HEAP_DEF_LOCAL: u32 = u32::MAX - 30;
+const SLOT_VEC_QUEUE_DEF_LOCAL: u32 = u32::MAX - 31;
+const SLOT_VEC_STACK_DEF_LOCAL: u32 = u32::MAX - 32;
+
+/// The standard containers a value reaches through a handle a copy cannot
+/// share: a `Set`, a deque (`Deque` / `Queue` / `Stack`), or a heap.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HandleContainer {
+    Set,
+    Deque,
+    Heap,
+}
+
+/// Which [`HandleContainer`] `ty` is, if any.
+pub(crate) fn handle_container(
+    tcx: &gossamer_types::TyCtxt,
+    ty: gossamer_types::Ty,
+) -> Option<HandleContainer> {
+    let gossamer_types::TyKind::Adt { def, .. } = tcx.kind_of(ty) else {
+        return None;
+    };
+    match def.local {
+        SLOT_HASH_SET_DEF_LOCAL | SLOT_BTREE_SET_DEF_LOCAL => Some(HandleContainer::Set),
+        SLOT_VEC_DEQUE_DEF_LOCAL | SLOT_VEC_QUEUE_DEF_LOCAL | SLOT_VEC_STACK_DEF_LOCAL => {
+            Some(HandleContainer::Deque)
+        }
+        SLOT_BINARY_HEAP_DEF_LOCAL | SLOT_MIN_HEAP_DEF_LOCAL => Some(HandleContainer::Heap),
+        _ => None,
+    }
+}
+
+/// The slot-child kind an element store owns a [`HandleContainer`] under.
+fn handle_slot_kind(container: HandleContainer) -> i64 {
+    match container {
+        HandleContainer::Set => SLOT_KIND_SET,
+        HandleContainer::Deque => SLOT_KIND_DEQUE,
+        HandleContainer::Heap => SLOT_KIND_HEAP,
+    }
+}
 
 /// Walks the flat slot layout of a by-value aggregate `ty`, appending one
 /// `(gate, disc_word, word, kind)` entry per RC child pointer the vec must
@@ -5292,13 +5515,10 @@ fn collect_field_rc(
         // its holders, exactly as a `GosMap` is, so the element store owns a
         // table per slot: the copy paths clone one in and the free path drops
         // it. `BTreeSet` shares the handle and the helpers.
-        TyKind::Adt { def, .. }
-            if matches!(
-                def.local,
-                SLOT_HASH_SET_DEF_LOCAL | SLOT_BTREE_SET_DEF_LOCAL
-            ) =>
-        {
-            out.push((-1, 0, word, SLOT_KIND_SET));
+        TyKind::Adt { .. } if handle_container(tcx, fty).is_some() => {
+            if let Some(container) = handle_container(tcx, fty) {
+                out.push((-1, 0, word, handle_slot_kind(container)));
+            }
             *has_direct = true;
         }
         // `Option`/`Result`: the payload word holds a heap pointer only on
@@ -5312,13 +5532,8 @@ fn collect_field_rc(
                     TyKind::String => Some(SLOT_KIND_STRING),
                     TyKind::Vec(_) | TyKind::Slice(_) => Some(SLOT_KIND_VEC),
                     TyKind::HashMap { .. } => Some(SLOT_KIND_MAP),
-                    TyKind::Adt { def, .. }
-                        if matches!(
-                            def.local,
-                            SLOT_HASH_SET_DEF_LOCAL | SLOT_BTREE_SET_DEF_LOCAL
-                        ) =>
-                    {
-                        Some(SLOT_KIND_SET)
+                    TyKind::Adt { .. } if handle_container(tcx, t).is_some() => {
+                        handle_container(tcx, t).map(handle_slot_kind)
                     }
                     TyKind::Adt { .. } | TyKind::Tuple(_)
                         if tcx.is_rc_managed(t) || tcx.slot_bytes(t) > 8 =>
@@ -5441,13 +5656,8 @@ fn ensure_slot_children_meta(
     // element - minted when an element is copied in, dropped with it. The
     // walk below descends into an aggregate's fields, so an element that is
     // itself such a handle is named here.
-    if let gossamer_types::TyKind::Adt { def, .. } = tcx.kind_of(elem)
-        && matches!(
-            def.local,
-            SLOT_HASH_SET_DEF_LOCAL | SLOT_BTREE_SET_DEF_LOCAL
-        )
-    {
-        children.push((-1, 0, 0, SLOT_KIND_SET));
+    if let Some(container) = handle_container(tcx, elem) {
+        children.push((-1, 0, 0, handle_slot_kind(container)));
         has_direct = true;
     } else if let gossamer_types::TyKind::Adt { def, .. } = tcx.kind_of(elem)
         && (def.local == u32::MAX || def.local == u32::MAX - 1)
@@ -5573,6 +5783,10 @@ pub(crate) fn insert_vec_elem_metas(
         VecElems,
         MapBlob,
         MapVec,
+        MapMapValues,
+        MapSetValues,
+        MapDequeValues,
+        MapHeapValues,
         MapFloatKeys,
         MapOrdered {
             unsigned: bool,
@@ -5630,8 +5844,16 @@ pub(crate) fn insert_vec_elem_metas(
             // holds. Every other element keeps its handle, and its share.
             let bytes = matches!(tcx.kind_of(*elem), TyKind::Int(gossamer_types::IntTy::U8));
             (!bytes).then_some(VecMeta::MapVec)
+        } else if matches!(tcx.kind_of(*value), TyKind::HashMap { .. }) {
+            // A table carries no reference count, so each entry owns a copy.
+            Some(VecMeta::MapMapValues)
         } else {
-            None
+            match handle_container(tcx, *value) {
+                Some(HandleContainer::Set) => Some(VecMeta::MapSetValues),
+                Some(HandleContainer::Deque) => Some(VecMeta::MapDequeValues),
+                Some(HandleContainer::Heap) => Some(VecMeta::MapHeapValues),
+                None => None,
+            }
         }
     };
 
@@ -5810,6 +6032,22 @@ pub(crate) fn insert_vec_elem_metas(
             },
             VecMeta::MapVec => Rvalue::CallIntrinsic {
                 name: "gos_rt_map_set_vec_values",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::MapMapValues => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_map_values",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::MapSetValues => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_set_values",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::MapDequeValues => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_deque_values",
+                args: vec![Operand::Copy(Place::local(l))],
+            },
+            VecMeta::MapHeapValues => Rvalue::CallIntrinsic {
+                name: "gos_rt_map_set_heap_values",
                 args: vec![Operand::Copy(Place::local(l))],
             },
             VecMeta::MapFloatKeys => Rvalue::CallIntrinsic {
@@ -6230,6 +6468,7 @@ pub(crate) fn insert_early_releases(body: &mut Body, tcx: &gossamer_types::TyCtx
                 | "gos_rt_result_unwrap_or_str"
                 | "gos_rt_result_unwrap_or_node"
                 | "gos_rt_result_unwrap_or_vec"
+                | "gos_rt_result_unwrap_or_map"
                 | "gos_rt_result_ok"
                 | "gos_rt_result_err"
                 | "gos_rt_option_unwrap"
@@ -7454,6 +7693,12 @@ fn send_layout_entries(
             TyKind::HashMap { .. } => out.push(entry(RC_CHILD_MAP, word)),
             TyKind::Adt { def, .. } if is_set_def(tcx, def) => {
                 out.push(entry(RC_CHILD_SET, word));
+            }
+            TyKind::Adt { .. } if handle_container(tcx, fty) == Some(HandleContainer::Deque) => {
+                out.push(entry(gossamer_abi::rc::RC_CHILD_DEQUE, word));
+            }
+            TyKind::Adt { .. } if handle_container(tcx, fty) == Some(HandleContainer::Heap) => {
+                out.push(entry(gossamer_abi::rc::RC_CHILD_HEAP, word));
             }
             // An `Option` / `Result` holds its payload in the word after the
             // discriminant; a `None` payload word is zero, which the walk
@@ -8772,6 +9017,7 @@ fn discarded_receiver_arm(name: &str) -> Option<(usize, usize)> {
         | "gos_rt_result_unwrap_or_str"
         | "gos_rt_result_unwrap_or_node"
         | "gos_rt_result_unwrap_or_vec"
+        | "gos_rt_result_unwrap_or_map"
         | "gos_rt_result_unwrap_or_carrier"
         | "gos_rt_result_default_with"
         | "gos_rt_result_ok"
@@ -10161,11 +10407,17 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                         // teardown), so the frame's per-site reuse of the
                         // stored local stays sound and load-bearing.
                         if stores_owned_vec_value(name)
-                            && matches!(
+                            && (matches!(
                                 tcx.kind_of(body.locals[p.local.0 as usize].ty),
                                 TyKind::Vec(_) | TyKind::Slice(_)
-                            )
+                            ) || handle_container(tcx, body.locals[p.local.0 as usize].ty)
+                                == Some(HandleContainer::Heap))
                         {
+                            continue;
+                        }
+                        // A map that owns `Map` / `Set` values stores a copy of
+                        // the one it is handed, so the frame keeps its own.
+                        if stores_table_value_copy(tcx, body, name, args, p.local) {
                             continue;
                         }
                         aliased[p.local.0 as usize] = true;
@@ -10870,6 +11122,8 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                 && let Some(elem_op @ Operand::Copy(p)) = args.get(1)
                 && p.projection.is_empty()
                 && !is_container_local(elem_op)
+                // A store that copies the element leaves the frame its own.
+                && !stores_table_value_copy(tcx, body, name, args, p.local)
             {
                 let idx = p.local.0 as usize;
                 if idx < moved_into_return.len() && !moved_into_return[idx] {

@@ -807,15 +807,19 @@ impl<'a> Lowerer<'a> {
         if matches!(dst_kind, NumericKind::Float(FloatTy::F32)) {
             let as_double = match src_kind {
                 NumericKind::Float(_) => self.coerce_llvm_value(&src_v, &src_llvm, "double"),
+                // An integer rounds once, straight to `float`, as the VM
+                // does: going through `double` first can round twice.
                 NumericKind::Int(i) => {
-                    let op = if int_signed(i) || int_width(i) <= 64 {
+                    let op = if int_signed(i) || int_width(i) < 64 {
                         "sitofp"
                     } else {
                         "uitofp"
                     };
-                    let tmp = self.fresh();
-                    writeln!(self.out, "  {tmp} = {op} {src_llvm} {src_v} to double").unwrap();
-                    tmp
+                    let narrowed = self.fresh();
+                    writeln!(self.out, "  {narrowed} = {op} {src_llvm} {src_v} to float").unwrap();
+                    let widened = self.fresh();
+                    writeln!(self.out, "  {widened} = fpext float {narrowed} to double").unwrap();
+                    return Ok(widened);
                 }
                 NumericKind::Other => {
                     let wide = self.fresh();
@@ -860,9 +864,13 @@ impl<'a> Lowerer<'a> {
                 FloatTy::F32 => "float",
                 FloatTy::F64 => "double",
             };
-            let intrinsic = match f {
-                FloatTy::F32 => "llvm.fptosi.sat.i64.f32",
-                FloatTy::F64 => "llvm.fptosi.sat.i64.f64",
+            // A 64-bit unsigned target saturates at `[0, u64::MAX]`, which only
+            // the unsigned conversion reaches.
+            let intrinsic = match (f, int_signed(b) || int_width(b) < 64) {
+                (FloatTy::F32, true) => "llvm.fptosi.sat.i64.f32",
+                (FloatTy::F64, true) => "llvm.fptosi.sat.i64.f64",
+                (FloatTy::F32, false) => "llvm.fptoui.sat.i64.f32",
+                (FloatTy::F64, false) => "llvm.fptoui.sat.i64.f64",
             };
             self.runtime_refs
                 .insert(format!("declare i64 @{intrinsic}({src_float})"));
@@ -921,11 +929,9 @@ impl<'a> Lowerer<'a> {
                 }
             }
             (NumericKind::Int(i), NumericKind::Float(_)) => {
-                // Every ≤64-bit int (u64/usize included) lives as a
-                // signed i64 value at runtime, so the conversion is
-                // signed (VM parity: `(0u64 - 1) as f64 == -1.0`).
-                // Only u128 takes the unsigned conversion.
-                if int_signed(i) || int_width(i) <= 64 {
+                // Every narrower unsigned value is stored zero-extended, so
+                // only `u64` / `usize` read differently as signed.
+                if int_signed(i) || int_width(i) < 64 {
                     format!("sitofp {src_llvm} {src_v} to {dst_llvm}")
                 } else {
                     format!("uitofp {src_llvm} {src_v} to {dst_llvm}")

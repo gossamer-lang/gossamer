@@ -16,7 +16,7 @@ const EMITTED_CODES: &[&str] = &[
     "GP0030", "GP0031", "GP0032", "GP0033", "GP0035", "GP0036", "GP0037", "GP0038", "GP0039",
     "GP0040", "GP0041", "GP0042", "GP0043", "GP0044", "GP0045", "GP0046", "GP0047", "GP0048",
     "GP0049", "GP0050", "GP0051", "GP0052", "GP0053", "GP0054", "GP0055", "GP0056", "GP0057",
-    "GP0058", // Resolver (gossamer-resolve/src/diagnostic.rs).
+    "GP0058", "GP0059", // Resolver (gossamer-resolve/src/diagnostic.rs).
     "GR0001", "GR0002", "GR0003", "GR0004", "GR0005", "GR0006", "GR0007", "GR0008", "GR0009",
     "GR0010", "GR0011", "GR0012", "GR0013", "GR0017", "GR0019", "GR0020", "GR0021",
     "GR0014", // Type checker (gossamer-types/src/error.rs).

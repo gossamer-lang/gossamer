@@ -33,6 +33,10 @@ pub enum CastTarget {
     F32,
     /// `f64`.
     F64,
+    /// `f32` from a `u64` / `usize` source, whose bits read as unsigned.
+    F32FromUnsigned,
+    /// `f64` from a `u64` / `usize` source, whose bits read as unsigned.
+    F64FromUnsigned,
     /// `char` - operand is a `u8` by the whitelist; mask to the
     /// declared width and take the code point.
     Char,
@@ -78,6 +82,17 @@ impl CastTarget {
             TyKind::Bool => Self::Bool,
             _ => return None,
         })
+    }
+
+    /// The same target read from a source of kind `source`: a `u64` or
+    /// `usize` operand converts to a float by its unsigned value.
+    pub(crate) fn read_from(self, source: Option<&TyKind>) -> Self {
+        let unsigned = matches!(source, Some(TyKind::Int(IntTy::U64 | IntTy::Usize)));
+        match self {
+            Self::F32 if unsigned => Self::F32FromUnsigned,
+            Self::F64 if unsigned => Self::F64FromUnsigned,
+            other => other,
+        }
     }
 }
 
@@ -129,8 +144,9 @@ pub(crate) fn cast_scalar(v: &Value, target: CastTarget) -> Option<Value> {
             int_base(v).map(Value::Int)
         }
         CastTarget::U64 => {
+            // A float saturates at the unsigned range: `-1.5 as u64` is `0`.
             if let Value::Float(f) = v {
-                return Some(Value::Uint((*f as i64) as u64));
+                return Some(Value::Uint(*f as u64));
             }
             int_base(v).map(|n| Value::Uint(n as u64))
         }
@@ -146,6 +162,10 @@ pub(crate) fn cast_scalar(v: &Value, target: CastTarget) -> Option<Value> {
             }
             int_base(v).map(|n| Value::Float(n as f64))
         }
+        CastTarget::F32FromUnsigned => {
+            int_base(v).map(|n| Value::Float(f64::from(n as u64 as f32)))
+        }
+        CastTarget::F64FromUnsigned => int_base(v).map(|n| Value::Float(n as u64 as f64)),
         CastTarget::Char => {
             // Any int source reads its low byte (the same masking
             // `u8 as char` applies), matching the compiled tiers, so

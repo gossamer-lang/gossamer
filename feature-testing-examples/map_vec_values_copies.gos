@@ -1,0 +1,33 @@
+// A copy of a map holding `Vec` values holds `Vec`s of its own, and the
+// vectors `values()` answers belong to the caller, so a write through either
+// leaves the other map's entries alone.
+
+#[derive(Debug)]
+enum Color { Red, Blue(i64) }
+
+fn grouped(n: i64) -> Map<String, Vec<i64>> {
+    let mut groups: Map<String, Vec<i64>> = Map::new()
+    for i in 0..n { groups.or_insert((i % 3).to_string(), #[]).push(i) }
+    groups
+}
+
+fn main() {
+    let mut m = grouped(9)
+    let m2 = m
+    m.or_insert("0", #[]).push(100)
+    println("{:?} {:?}", m.get("0"), m2.get("0"))
+
+    let mut vals = m.values()
+    vals[0].push(-1)
+    println("{} {}", vals[0].len(), m.get("0").unwrap_or(#[]).len())
+
+    let mut by_color: Map<Color, Vec<i64>> = Map::new()
+    by_color.insert(Color::Red, #[1])
+    by_color.insert(Color::Blue(2), #[2])
+    let colors2 = by_color
+    by_color.or_insert(Color::Red, #[]).push(9)
+    println("{:?} {:?}", by_color.get(Color::Red), colors2.get(Color::Red))
+    let mut read = by_color.get(Color::Blue(2)).unwrap_or(#[])
+    read.push(3)
+    println("{:?} {:?}", read, by_color.get(Color::Blue(2)))
+}

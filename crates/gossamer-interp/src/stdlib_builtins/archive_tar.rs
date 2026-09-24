@@ -231,6 +231,7 @@ pub(crate) fn install_sync_atomic_u64(globals: &mut Vec<(&'static str, Value)>) 
         ("AtomicU64::load", builtin_atomic_u64_load),
         ("AtomicU64::store", builtin_atomic_u64_store),
         ("AtomicU64::fetch_add", builtin_atomic_u64_fetch_add),
+        ("AtomicU64::fetch_sub", builtin_atomic_u64_fetch_sub),
         ("AtomicU64::compare_exchange", builtin_atomic_u64_cas),
     ];
     for (name, call) in entries {
@@ -286,6 +287,15 @@ pub(crate) fn builtin_atomic_u64_fetch_add(args: &[Value]) -> RuntimeResult<Valu
     let prev = args
         .first()
         .and_then(|v| with_atomic_u64(v, |a| a.fetch_add(delta, Ordering::SeqCst)))
+        .unwrap_or(0);
+    Ok(Value::Int(prev as i64))
+}
+
+pub(crate) fn builtin_atomic_u64_fetch_sub(args: &[Value]) -> RuntimeResult<Value> {
+    let delta = args.get(1).and_then(value_to_int).unwrap_or(0) as u64;
+    let prev = args
+        .first()
+        .and_then(|v| with_atomic_u64(v, |a| a.fetch_sub(delta, Ordering::SeqCst)))
         .unwrap_or(0);
     Ok(Value::Int(prev as i64))
 }

@@ -120,6 +120,7 @@ feature-testing-examples/comptime_reflection.gos	entry shape
 feature-testing-examples/concurrency_stress_shapes.gos	cross-goroutine
 feature-testing-examples/concurrent_atomic.gos	cross-goroutine
 feature-testing-examples/container_display.gos	entry shape
+feature-testing-examples/container_elements_owned.gos	bytecode-only local
 feature-testing-examples/container_impl_and_literals.gos	admission gate
 feature-testing-examples/container_in_aggregate_rendering.gos	no hot body
 feature-testing-examples/context_aware_waits.gos	cross-goroutine
@@ -241,7 +242,9 @@ feature-testing-examples/map_inc_at_oob.gos	no hot body
 feature-testing-examples/map_iter_wildcard_destructure.gos	bytecode-only local
 feature-testing-examples/map_owned_struct_value_rc.gos	bytecode-only local
 feature-testing-examples/map_set_aggregate_value_equality.gos	bytecode-only local
+feature-testing-examples/map_table_values_owned.gos	entry shape
 feature-testing-examples/map_tuple_key_tuple_value.gos	no hot body
+feature-testing-examples/map_vec_values_copies.gos	entry shape
 feature-testing-examples/method_dispatch_collision.gos	entry shape
 feature-testing-examples/method_dispatch_collisions.gos	no hot body
 feature-testing-examples/method_name_collision.gos	entry shape
@@ -253,6 +256,7 @@ feature-testing-examples/module_scoped_type_names.gos	entry shape
 feature-testing-examples/mut_param_is_a_copy.gos	no hot body
 feature-testing-examples/mut_ref_container_params.gos	&mut aggregate param
 feature-testing-examples/mut_ref_params.gos	callable local
+feature-testing-examples/mut_ref_payload_enum_param.gos	admission gate
 feature-testing-examples/mut_ref_scalar_writeback.gos	no hot body
 feature-testing-examples/mut_ref_string_writeback.gos	string append
 feature-testing-examples/mutability_explicit_parity.gos	&mut aggregate param
@@ -283,6 +287,7 @@ feature-testing-examples/operator_overload_enum_generic.gos	admission gate
 feature-testing-examples/operator_overloads.gos	entry shape
 feature-testing-examples/option_default.gos	no hot body
 feature-testing-examples/option_result_chain_methods.gos	no hot body
+feature-testing-examples/or_insert_field_path_write.gos	entry shape
 feature-testing-examples/or_patterns.gos	no hot body
 feature-testing-examples/os_signal_subscribe.gos	no hot body
 feature-testing-examples/packed_enum_repr.gos	admission gate
@@ -440,3 +445,8 @@ feature-testing-examples/winb_text_unicode.gos	no hot body
 feature-testing-examples/winb_text_utf8.gos	no hot body
 feature-testing-examples/write_file_bytes.gos	no hot body
 feature-testing-examples/yaml_autoderive.gos	entry shape
+feature-testing-examples/float_remainder.gos	no hot body
+feature-testing-examples/sync_handles_typed.gos	cross-goroutine
+feature-testing-examples/flat_map_iterator_callbacks.gos	entry shape
+feature-testing-examples/runtime_handles_typed.gos	bytecode-only local
+feature-testing-examples/bufio_scanner_next.gos	bytecode-only local

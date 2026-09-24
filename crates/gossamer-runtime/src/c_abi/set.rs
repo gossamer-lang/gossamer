@@ -465,7 +465,11 @@ pub unsafe extern "C" fn gos_rt_set_insert(s: *mut GosSet, key: *const c_char) -
         }
         let k = unsafe { crate::c_abi::gos_str_arg_string(key) };
         let s = unsafe { &mut *s };
-        i64::from(s.inner.add(k))
+        let added = s.inner.add(k);
+        // The set keeps a copy of the text, so the share the consuming call
+        // handed over goes back.
+        unsafe { crate::c_abi::string::consume_moved_string_typed(key.cast_mut()) };
+        i64::from(added)
     })
 }
 

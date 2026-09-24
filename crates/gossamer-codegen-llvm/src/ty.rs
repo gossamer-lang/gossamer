@@ -113,12 +113,17 @@ pub(crate) fn param_llvm_ty(tcx: &TyCtxt, ty: Ty) -> String {
 /// a single i64 slot: the collection handles (`HashSet` `u32::MAX - 7`,
 /// `BTreeSet` `- 18`, `Deque` `- 19`, `MaxHeap` `- 28`, `MinHeap` `- 30`,
 /// `Queue` `- 31`, `Stack` `- 32`) and the opaque stdlib handles in the
-/// `- 48 ..= - 34` band. The field-bearing sentinel blobs
+/// `- 48 ..= - 34` band, the `std::sync` band `- 57 ..= - 50`, and the
+/// `trace` spans `- 59` / `- 60`. The shared word and byte buffers (`I64Vec`
+/// `- 58`, `U8Vec` `- 20`) are pointers. The field-bearing sentinel blobs
 /// (`http::ResponseStream`, `http::Response`) are excluded: their fields are
 /// read through a pointer.
 fn is_bare_handle_def(def_local: u32) -> bool {
     let offset = u32::MAX - def_local;
-    matches!(offset, 7 | 18 | 19 | 28 | 30 | 31 | 32) || (34..=48).contains(&offset)
+    matches!(offset, 7 | 18 | 19 | 28 | 30 | 31 | 32)
+        || (34..=48).contains(&offset)
+        || (50..=57).contains(&offset)
+        || matches!(offset, 59 | 60)
 }
 
 /// True when `ty` lowers to the 2-word by-value enum representation:

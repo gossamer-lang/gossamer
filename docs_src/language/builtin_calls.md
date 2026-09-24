@@ -45,7 +45,8 @@ println("{a.owner}: {a.balance:>8}")
 ```
 
 Any other expression in a placeholder (`{age + 1}`, `{v[i]}`) is a parse
-error (`GP0021`) - bind it first or pass it positionally.
+error (`GP0021`) - bind it first or pass it positionally. So is a spec the
+grammar does not take (`{:+}`, `{:e}`), which would otherwise print as text.
 
 ## Desugaring calls
 

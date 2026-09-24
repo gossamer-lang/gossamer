@@ -291,6 +291,110 @@ fn the_file_constructors_answer_a_result() {
     assert!(d.is_empty(), "{d:?}");
 }
 
+/// Each `std::sync` handle answers its own method table: a read typed
+/// against the wrong annotation, an argument of the wrong type, and a name
+/// the handle lacks are all reported where they are written.
+#[test]
+fn sync_handle_methods_are_typed() {
+    for (body, code) in [
+        (
+            "let m = sync::Mutex::new()\n let h: String = m.lock()",
+            "GT0001",
+        ),
+        ("let m = sync::Mutex::new()\n m.frobnicate()", "GT0002"),
+        ("let m = sync::Mutex::new(0)", "GT0018"),
+        (
+            "let a = sync::AtomicI64::new(0)\n let s: String = a.load()",
+            "GT0001",
+        ),
+        ("let a = sync::AtomicI64::new(0)\n a.store(\"x\")", "GT0001"),
+        (
+            "let a = sync::AtomicBool::new(false)\n let n: i64 = a.load()",
+            "GT0001",
+        ),
+        (
+            "let a = sync::AtomicBool::new(false)\n let _ = a.fetch_add(true)",
+            "GT0002",
+        ),
+        (
+            "let a = sync::AtomicU64::new(0)\n let s: String = a.fetch_add(1)",
+            "GT0001",
+        ),
+        ("let w = sync::WaitGroup::new()\n w.add(\"x\")", "GT0001"),
+        ("let o = sync::Once::new()\n let _ = o.call(5)", "GT0001"),
+        (
+            "let b = sync::Barrier::new(2)\n let s: String = b.wait()",
+            "GT0001",
+        ),
+        (
+            "let r = sync::RwLock::new(5)\n let s: String = r.read()",
+            "GT0001",
+        ),
+        (
+            "let a = sync::AtomicI64::new(0)\n let s: String = sync::AtomicI64::load(a)",
+            "GT0001",
+        ),
+        (
+            "let v = I64Vec::new(3)\n let s: String = v.get_at(0)",
+            "GT0001",
+        ),
+        (
+            "let v = U8Vec::new(3)\n let s: String = v.get_byte(0)",
+            "GT0001",
+        ),
+        (
+            "let c = context::Context::background()\n let s: String = c.is_cancelled()",
+            "GT0001",
+        ),
+        (
+            "let c = metrics::Counter::new(\"a\", \"b\")\n let s: String = c.value()",
+            "GT0001",
+        ),
+        ("let c = metrics::Counter::new(1, \"b\")", "GT0001"),
+        ("let r = metrics::Registry::new()\n r.register(5)", "GT0001"),
+        (
+            "let t = trace::Tracer::new()\n let s: i64 = t.start_span(\"a\")",
+            "GT0001",
+        ),
+        (
+            "let r = rand::Rng::new(1)\n let s: i64 = r.next_u64()",
+            "GT0001",
+        ),
+        ("let r = rand::Rng::seeded(1)", "GT0002"),
+        (
+            "let m = sync::Map::new()\n let s: i64 = m.get(\"k\")",
+            "GT0001",
+        ),
+        ("let x = sync::Shared::new(1)\n x.frob()", "GT0002"),
+    ] {
+        let d = diagnostics_for(&format!(
+            "use std::{{context, metrics, sync, trace}}\nuse std::math::rand\nfn main() {{\n {body}\n}}\n"
+        ));
+        assert!(has_code(&d, code), "{body}: expected {code}, got {d:?}");
+    }
+}
+
+/// A correct program over every `std::sync` handle checks clean, the
+/// handles typed in annotations as well as at their constructors.
+#[test]
+fn sync_handle_programs_check_clean() {
+    let d = diagnostics_for(
+        "use std::sync\n\
+         fn bump(a: sync::AtomicI64, m: sync::Mutex, w: sync::WaitGroup) -> i64 {\n\
+         m.lock()\n let n = a.fetch_add(1)\n m.unlock()\n w.done()\n n }\n\
+         fn main() {\n\
+         let a = sync::AtomicI64::new(0)\n let m = sync::Mutex::new()\n\
+         let w = sync::WaitGroup::new()\n w.add(1)\n let n: i64 = bump(a, m, w)\n\
+         w.wait()\n let u: u64 = sync::AtomicU64::new(1).load()\n\
+         let i: i32 = sync::AtomicI32::new(1).fetch_sub(1)\n\
+         let ok: bool = sync::AtomicBool::new(true).compare_exchange(true, false)\n\
+         let ran: bool = sync::Once::new().call(|| println(\"x\"))\n\
+         let r: i64 = sync::RwLock::new(1).with_read(|v| v + 1)\n\
+         println(\"{} {} {} {} {} {}\", n, u, i, ok, ran, r)\n }\n",
+    );
+    assert!(d.is_empty(), "{d:?}");
+}
+
 #[test]
 fn a_range_is_a_lazy_iterator() {
     let checked = run("fn main() { let r = 10.. }\n");

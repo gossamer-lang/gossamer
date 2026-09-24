@@ -1,0 +1,62 @@
+// The runtime handles of `context`, `metrics`, `trace`, `math::rand`, and
+// `sync::Map` carry types of their own, so each one crosses a function
+// boundary with its methods intact and answers its declared types: a
+// `next_u64` draw is unsigned, a span ended in a helper exports its name.
+
+use std::context
+use std::math::rand
+use std::metrics
+use std::strings
+use std::sync
+use std::trace
+
+fn tag(span: trace::Span, user: String) -> trace::EndedSpan {
+    span.set_attribute("user", user)
+    trace::Span::end(span)
+}
+
+fn draw(r: rand::Rng) -> u64 {
+    r.next_u64()
+}
+
+fn cancelled(ctx: context::Context) -> bool {
+    context::Context::is_cancelled(ctx)
+}
+
+fn record(c: metrics::Counter, times: i64) -> i64 {
+    for _ in 0..times {
+        c.inc()
+    }
+    metrics::Counter::value(c)
+}
+
+fn main() {
+    let tracer = trace::Tracer::new()
+    let ended = tag(tracer.start_span("checkout"), "alice")
+    let json = ended.to_otlp_json()
+    println("{} {}", strings::contains(json, "checkout"), strings::contains(json, "alice"))
+
+    let r = rand::Rng::new(424_242)
+    let first = draw(r)
+    println("{} {}", first, first > 9_223_372_036_854_775_807)
+    println("{} {}", r.next_u32() < 4_294_967_296, r.range_u64(10, 20) >= 10)
+
+    let root = context::Context::background()
+    let child = context::Context::with_cancel(root)
+    println("{} {}", cancelled(child), child.done())
+    child.cancel()
+    println("{} {}", cancelled(child), cancelled(root))
+
+    let c = metrics::Counter::new("hits", "hit count")
+    println("{}", record(c, 3))
+    let g = metrics::Gauge::new("temp", "temperature")
+    g.set(2.5)
+    let reg = metrics::Registry::new()
+    reg.register(c)
+    reg.register(g)
+    println("{}", strings::contains(reg.render(), "hits 3"))
+
+    let mut m = sync::Map::new()
+    m.insert("k", "v")
+    println("{:?} {:?} {}", m.get("k"), sync::Map::get(m, "x"), m.len())
+}

@@ -2270,9 +2270,11 @@ fn body_has_wide_spawn(body: &Body) -> bool {
 /// gossamer code does.
 fn render_spawn_wide_cabi_thunk() -> String {
     let mut out = String::new();
+    let linkage = "linkonce_odr ";
+    let comdat = linkonce_comdat(&mut out, linkage, SPAWN_WIDE_CABI_THUNK);
     let _ = writeln!(
         out,
-        "define linkonce_odr <16 x i8> @\"{SPAWN_WIDE_CABI_THUNK}\"(ptr %env) {{"
+        "define {linkage}<16 x i8> @\"{SPAWN_WIDE_CABI_THUNK}\"(ptr %env){comdat} {{"
     );
     writeln!(out, "entry:").unwrap();
     writeln!(out, "  %fn_ptr = load ptr, ptr %env").unwrap();
@@ -2677,9 +2679,10 @@ fn render_cabi_thunk_with_linkage(name: &str, param_tys: &[String], linkage: &st
         .map(|(i, ty)| format!("{ty} %a{i}"))
         .collect();
     let mut out = String::new();
+    let comdat = linkonce_comdat(&mut out, linkage, &format!("{name}$cabi"));
     let _ = writeln!(
         out,
-        "define {linkage}<16 x i8> @\"{name}$cabi\"({}) {{",
+        "define {linkage}<16 x i8> @\"{name}$cabi\"({}){comdat} {{",
         params.join(", ")
     );
     writeln!(out, "entry:").unwrap();
@@ -2688,6 +2691,32 @@ fn render_cabi_thunk_with_linkage(name: &str, param_tys: &[String], linkage: &st
     writeln!(out, "  ret <16 x i8> %v").unwrap();
     writeln!(out, "}}").unwrap();
     out
+}
+
+/// Writes the `comdat` declaration a definition of `symbol` with `linkage`
+/// needs and answers the suffix its `define` carries. COFF coalesces a
+/// `linkonce_odr` definition emitted by several objects only through a COMDAT
+/// section of its own; ELF and Mach-O coalesce it from the linkage alone, and
+/// Mach-O has no COMDATs.
+fn linkonce_comdat(out: &mut String, linkage: &str, symbol: &str) -> &'static str {
+    match coff_comdat_decl(linkage, symbol) {
+        Some(decl) => {
+            let _ = writeln!(out, "{decl}");
+            " comdat"
+        }
+        None => "",
+    }
+}
+
+/// The module-level `$"symbol" = comdat any` a `linkonce_odr` definition of
+/// `symbol` pairs with on a COFF target, where it is the only way the linker
+/// keeps one copy; `None` for any other linkage or target.
+pub(crate) fn coff_comdat_decl(linkage: &str, symbol: &str) -> Option<String> {
+    comdat_decl_for(linkage, symbol, target_is_windows())
+}
+
+fn comdat_decl_for(linkage: &str, symbol: &str, coff: bool) -> Option<String> {
+    (coff && linkage.trim_end() == "linkonce_odr").then(|| format!("$\"{symbol}\" = comdat any"))
 }
 
 /// Synthesises an LLVM `define` for a per-shape callable thunk
@@ -2728,7 +2757,11 @@ fn render_shape_thunk_with_linkage(name: &str, linkage: &str) -> Option<String> 
     for (i, t) in input_tys.iter().enumerate() {
         let _ = write!(params, ", {t} %a{i}");
     }
-    let _ = writeln!(out, "define {linkage}{header_ret} @\"{name}\"({params}) {{");
+    let comdat = linkonce_comdat(&mut out, linkage, name);
+    let _ = writeln!(
+        out,
+        "define {linkage}{header_ret} @\"{name}\"({params}){comdat} {{"
+    );
     writeln!(out, "entry:").unwrap();
     writeln!(out, "  %fn_ptr_addr = getelementptr i8, ptr %env, i64 8").unwrap();
     writeln!(out, "  %fn_ptr = load ptr, ptr %fn_ptr_addr").unwrap();
@@ -2804,11 +2837,12 @@ fn shape_char_to_llvm_ty(c: char) -> Option<&'static str> {
 
 fn validate_global_decl_shape(g: &str) -> Result<()> {
     let trimmed = g.trim_start();
-    let valid = trimmed.starts_with('@') || trimmed.starts_with("declare ");
+    let valid =
+        trimmed.starts_with('@') || trimmed.starts_with('$') || trimmed.starts_with("declare ");
     if !valid {
         return Err(anyhow!(
-            "llvm backend: malformed module-level entry (expected `@symbol = ...` or \
-             `declare ...`, got: {snippet:?}). This is the same shape regression that \
+            "llvm backend: malformed module-level entry (expected `@symbol = ...`, \
+             `$comdat = ...`, or `declare ...`, got: {snippet:?}). This is the same shape regression that \
              caused the 2026-04-28 / 2026-04-30 silent Cranelift-fallback incidents.",
             snippet = if trimmed.len() > 80 {
                 &trimmed[..80]
@@ -4109,6 +4143,23 @@ entry:
 #[cfg(test)]
 mod cabi_thunk_tests {
     use super::render_cabi_handler_thunk;
+
+    #[test]
+    fn coff_linkonce_definition_pairs_with_an_any_comdat() {
+        assert_eq!(
+            super::comdat_decl_for("linkonce_odr ", "__fn_thunk_i_r$cabi", true).as_deref(),
+            Some("$\"__fn_thunk_i_r$cabi\" = comdat any"),
+        );
+    }
+
+    #[test]
+    fn non_coff_or_strong_definition_takes_no_comdat() {
+        assert_eq!(
+            super::comdat_decl_for("linkonce_odr ", "__fn_thunk_i_i", false),
+            None
+        );
+        assert_eq!(super::comdat_decl_for("", "App::serve", true), None);
+    }
 
     /// `render_cabi_handler_thunk` must emit a plain `define`, not
     /// `define linkonce_odr`. On ELF, `linkonce_odr` deduplicates across

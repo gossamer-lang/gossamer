@@ -609,13 +609,14 @@ impl Drop for RuntimeJsonWriter {
 /// number inside a document reads as the one `{}` shows for it. Rust's
 /// shortest-round-trip float writer would spell large and small magnitudes in
 /// exponent form, which no other rendering in the language uses. A value with
-/// no fractional part keeps a `.0` so it stays a float on the way back in.
+/// no fractional part keeps a `.0` so it stays a float on the way back in, and
+/// NaN or an infinity, which JSON cannot spell, is written `null`.
 fn write_language_float<W: std::io::Write + ?Sized>(
     writer: &mut W,
     value: f64,
 ) -> std::io::Result<()> {
     if !value.is_finite() {
-        return writer.write_all(b"0.0");
+        return writer.write_all(b"null");
     }
     if value.fract() == 0.0 {
         write!(writer, "{value}.0")
@@ -1251,10 +1252,10 @@ pub unsafe extern "C" fn gos_rt_json_value_bool(b: i32) -> *mut GosJson {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_float(x: f64) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
-        let n = serde_json::Number::from_f64(x)
-            .or_else(|| serde_json::Number::from_f64(0.0))
-            .unwrap_or_else(|| serde_json::Number::from(0));
-        GosJson::into_raw(serde_json::Value::Number(n))
+        // JSON has no NaN or infinity, so such a float is `null`.
+        let value = serde_json::Number::from_f64(x)
+            .map_or(serde_json::Value::Null, serde_json::Value::Number);
+        GosJson::into_raw(value)
     })
 }
 

@@ -1,0 +1,23 @@
+// A write through a field path of a map entry (`m.or_insert(k, d).f.push(x)`)
+// lands in the stored entry, and a copy of the map taken before keeps its own.
+
+struct Bucket { items: Vec<i64>, inner: Tags }
+struct Tags { names: Vec<String> }
+
+fn empty() -> Bucket { Bucket { items: #[], inner: Tags { names: #[] } } }
+
+fn main() {
+    let mut buckets: Map<String, Bucket> = Map::new()
+    buckets.insert("a", Bucket { items: #[1], inner: Tags { names: #[] } })
+    let before = buckets
+    buckets.or_insert("a", empty()).items.push(7)
+    buckets.or_insert("b", empty()).inner.names.push("x")
+    buckets.or_insert("b", empty()).inner.names.push("y")
+    let mut pairs: Map<i64, (Vec<i64>, i64)> = Map::new()
+    pairs.or_insert(1, (#[], 0)).0.push(4)
+    pairs.or_insert(1, (#[], 0)).0.push(5)
+    println("{:?}", buckets.get("a").unwrap().items)
+    println("{:?}", before.get("a").unwrap().items)
+    println("{:?}", buckets.get("b").unwrap().inner.names)
+    println("{:?}", pairs.get(1))
+}

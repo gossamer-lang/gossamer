@@ -665,6 +665,21 @@ pub unsafe extern "C" fn gos_rt_deque_field_release(slot: *mut *mut GosDeque) {
     });
 }
 
+/// Marks the element store of `d` shared, so goroutines on other threads
+/// that reach the deque through a shared owner count its elements atomically.
+///
+/// # Safety
+/// `d` is a live `GosDeque` or null.
+pub(crate) unsafe fn deque_mark_shared(d: *mut GosDeque) {
+    if d.is_null() {
+        return;
+    }
+    let vec = unsafe { &*d }.vec;
+    if !vec.is_null() {
+        unsafe { crate::c_abi::vec::gos_rt_vec_mark_shared(vec) };
+    }
+}
+
 /// `Queue::clone` - the same header a deque has.
 ///
 /// # Safety

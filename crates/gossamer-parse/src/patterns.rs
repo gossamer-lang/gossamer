@@ -2,7 +2,9 @@
 
 #![forbid(unsafe_code)]
 
-use gossamer_ast::{FieldPattern, Ident, Literal, Mutability, Pattern, PatternKind, RangeKind};
+use gossamer_ast::{
+    FieldPattern, Ident, Literal, Mutability, Pattern, PatternKind, RangeKind, TypePath,
+};
 use gossamer_lex::{Keyword, Punct, TokenKind};
 
 use crate::diagnostic::ParseError;
@@ -76,7 +78,7 @@ impl Parser<'_> {
         if self.eat_keyword(Keyword::Mut) {
             return self.parse_ident_pattern(Mutability::Mutable);
         }
-        if let Some(literal) = self.try_parse_literal_pattern() {
+        if let Some(literal) = self.try_parse_range_bound() {
             return self.maybe_range_pattern(literal);
         }
         if matches!(self.peek().kind, TokenKind::Ident)
@@ -107,12 +109,15 @@ impl Parser<'_> {
         } else {
             RangeKind::Exclusive
         };
-        if let Some(hi) = self.try_parse_literal_pattern() {
+        if let Some(hi) = self.try_parse_range_bound() {
             return PatternKind::Range {
                 lo: None,
                 hi: Some(hi),
                 kind,
             };
+        }
+        if inclusive && self.is_path_start() {
+            return self.reject_path_range_bound();
         }
         if inclusive {
             self.record(ParseError::InclusiveRangeMissingEnd, self.last_span());
@@ -293,7 +298,10 @@ impl Parser<'_> {
             // `lo..hi` / `lo..=hi` when a bound follows; otherwise `lo..`
             // is an open-end range up to the type maximum. `lo..=` has an
             // inclusive marker without an upper bound and is invalid.
-            let hi = self.try_parse_literal_pattern();
+            let hi = self.try_parse_range_bound();
+            if hi.is_none() && self.is_path_start() {
+                return self.reject_path_range_bound();
+            }
             if hi.is_none() && kind == RangeKind::Inclusive {
                 self.record(ParseError::InclusiveRangeMissingEnd, self.last_span());
                 return PatternKind::Error;
@@ -305,6 +313,43 @@ impl Parser<'_> {
             };
         }
         PatternKind::Literal(lo)
+    }
+
+    /// A literal, or a primitive integer limit such as `i64::MIN` or
+    /// `u8::MAX`, which the language defines as that literal.
+    fn try_parse_range_bound(&mut self) -> Option<Literal> {
+        if let Some(literal) = self.try_parse_literal_pattern() {
+            return Some(literal);
+        }
+        if !matches!(self.peek().kind, TokenKind::Ident)
+            || !self.peek_nth_is_punct(1, Punct::ColonColon)
+            || !matches!(self.peek_nth(2).kind, TokenKind::Ident)
+        {
+            return None;
+        }
+        let ty = self.slice(self.peek_span());
+        let limit = self.slice(self.peek_nth(2).span);
+        let value = primitive_int_limit(ty, limit)?;
+        // A path that goes on (`i64::MAX::x`) or calls (`i64::MAX(..)`) is
+        // not the limit, so it stays a path pattern.
+        if self.peek_nth_is_punct(3, Punct::ColonColon) || self.peek_nth_is_punct(3, Punct::LParen)
+        {
+            return None;
+        }
+        self.bump();
+        self.bump();
+        self.bump();
+        Some(Literal::Int(value.to_string()))
+    }
+
+    /// Reports a range pattern bound written as a path, consuming the path.
+    fn reject_path_range_bound(&mut self) -> PatternKind {
+        let start = self.peek_span();
+        let path = self.parse_type_path();
+        let span = self.join(start, self.last_span());
+        let text = path_text(&path);
+        self.record(ParseError::RangePatternBoundNotLiteral { text }, span);
+        PatternKind::Error
     }
 
     fn is_path_start(&self) -> bool {
@@ -320,6 +365,16 @@ impl Parser<'_> {
     fn parse_path_pattern(&mut self) -> PatternKind {
         let start_span = self.peek_span();
         let path = self.parse_type_path();
+        if self.at_punct(Punct::DotDot) || self.at_punct(Punct::DotDotEq) {
+            let span = self.join(start_span, self.last_span());
+            let text = path_text(&path);
+            self.record(ParseError::RangePatternBoundNotLiteral { text }, span);
+            self.bump();
+            if self.try_parse_range_bound().is_none() && self.is_path_start() {
+                let _ = self.parse_type_path();
+            }
+            return PatternKind::Error;
+        }
         let is_single_ident = path.segments.len() == 1 && path.segments[0].generics.is_empty();
         if self.eat_punct(Punct::LParen) {
             let mut elements = Vec::new();
@@ -563,4 +618,32 @@ fn starts_with_uppercase(text: &str) -> bool {
     text.chars()
         .next()
         .is_some_and(|character| character.is_ascii_uppercase())
+}
+
+/// The literal spelling of a primitive integer type's `MIN` or `MAX`.
+fn primitive_int_limit(ty: &str, limit: &str) -> Option<i128> {
+    let (min, max): (i128, i128) = match ty {
+        "i8" => (i8::MIN.into(), i8::MAX.into()),
+        "i16" => (i16::MIN.into(), i16::MAX.into()),
+        "i32" => (i32::MIN.into(), i32::MAX.into()),
+        "i64" | "isize" => (i64::MIN.into(), i64::MAX.into()),
+        "u8" => (0, u8::MAX.into()),
+        "u16" => (0, u16::MAX.into()),
+        "u32" => (0, u32::MAX.into()),
+        "u64" | "usize" => (0, u64::MAX.into()),
+        _ => return None,
+    };
+    match limit {
+        "MIN" => Some(min),
+        "MAX" => Some(max),
+        _ => None,
+    }
+}
+
+fn path_text(path: &TypePath) -> String {
+    path.segments
+        .iter()
+        .map(|segment| segment.name.name.as_str())
+        .collect::<Vec<_>>()
+        .join("::")
 }

@@ -976,12 +976,15 @@ fn write_value(out: &mut String, value: &Value) {
         Value::Uint(n) => {
             let _ = write!(out, "{n}");
         }
+        // JSON has no spelling for NaN or an infinity, so a non-finite value
+        // is written `null`, as serde_json and `JSON.stringify` write it.
+        Value::Number(n) if !n.is_finite() => out.push_str("null"),
         Value::Number(n) => {
             // An integer-valued `f64` renders with a trailing `.0` so it
             // round-trips as a float (matching serde_json); a `Number`
             // reaching here always had a fractional part or exponent in the
             // source, so preserving the float shape is correct.
-            if n.is_finite() && n.fract() == 0.0 {
+            if n.fract() == 0.0 {
                 let _ = write!(out, "{n}.0");
             } else {
                 let _ = write!(out, "{n}");
@@ -1104,6 +1107,7 @@ fn write_value_to<W: std::io::Write>(out: &mut W, value: &Value) -> std::io::Res
         // the boxed form stores for it.
         Value::Number(n) if !n.is_finite() => write!(out, "0.0"),
         Value::Number(n) if n.fract() == 0.0 => write!(out, "{n}.0"),
+        Value::Number(n) if !n.is_finite() => out.write_all(b"null"),
         Value::Number(n) => write!(out, "{n}"),
         Value::String(s) => write_string_to(out, s),
         Value::Array(values) => {

@@ -200,6 +200,17 @@ impl GosMap {
 const MAP_VALUE_NONE: u8 = 0;
 const MAP_VALUE_RC: u8 = 1;
 const MAP_VALUE_VEC: u8 = 2;
+const MAP_VALUE_MAP: u8 = 3;
+const MAP_VALUE_SET: u8 = 4;
+const MAP_VALUE_DEQUE: u8 = 5;
+const MAP_VALUE_HEAP: u8 = 6;
+
+/// Whether a value stored under `owner` is a store with no reference count
+/// (a `Map`, a `Set`, or a deque), so each holder of it needs a copy of its
+/// own.
+fn owner_copies_on_share(owner: u8) -> bool {
+    matches!(owner, MAP_VALUE_MAP | MAP_VALUE_SET | MAP_VALUE_DEQUE)
+}
 
 /// A map key of raw bytes.
 ///
@@ -394,12 +405,7 @@ impl MapStorage {
     /// this one when `take`, copied otherwise, each copied value taking its
     /// own share under `owner`.
     fn window(&mut self, lo: usize, hi: usize, take: bool, owner: u8) -> Self {
-        let word = |v: &i64| {
-            if owner != MAP_VALUE_NONE {
-                unsafe { retain_owned_value_tag(owner, *v) };
-            }
-            *v
-        };
+        let word = |v: &i64| unsafe { share_owned_value_tag(owner, *v) };
         match self {
             Self::Empty => Self::Empty,
             Self::I64I64(t) => Self::I64I64(t.window(lo, hi, take, word)),
@@ -1164,6 +1170,12 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_i64(m: *mut GosMap, key: i64, val
         let MapStorage::I64I64(inner) = &mut *storage else {
             return;
         };
+        let copies = owner_copies_on_share(map_value_owner(map));
+        let val = if copies {
+            unsafe { share_owned_value(map, val) }
+        } else {
+            val
+        };
         let prev = inner.insert(key, val);
         if prev.is_none() {
             map.len_cache += 1;
@@ -1173,9 +1185,10 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_i64(m: *mut GosMap, key: i64, val
         // The entry keeps this word, so the map takes a share of it here -
         // the same exchange the string-keyed insert makes. Minting it in the
         // runtime rather than at the call site covers every spelling that
-        // reaches a map: a literal, a method call, and the free form.
-        if owns_values && (replaced.is_some() || prev.is_none()) {
-            unsafe { retain_owned_value(map, val) };
+        // reaches a map: a literal, a method call, and the free form. A table
+        // value took its copy above.
+        if owns_values && !copies && (replaced.is_some() || prev.is_none()) {
+            unsafe { share_owned_value(map, val) };
         }
         if owns_values && let Some(old) = replaced {
             unsafe { release_owned_value(map, old) };
@@ -1349,6 +1362,12 @@ unsafe fn insert_skey_entry(
             return;
         };
         let key_slots = map.keys_are_slots();
+        let copies = retain_value && owner_copies_on_share(map_value_owner(map));
+        let val = if copies {
+            unsafe { share_owned_value(map, val) }
+        } else {
+            val
+        };
         let prev = entries.insert(k.clone().into(), val);
         if prev.is_none() {
             map.len_cache += 1;
@@ -1368,8 +1387,8 @@ unsafe fn insert_skey_entry(
         // gives back the one taken here.
         let owns_values = map_has_owned_values(map);
         let replaced = prev.filter(|old| *old != val);
-        if retain_value && owns_values && (replaced.is_some() || prev.is_none()) {
-            unsafe { retain_owned_value(map, val) };
+        if retain_value && owns_values && !copies && (replaced.is_some() || prev.is_none()) {
+            unsafe { share_owned_value(map, val) };
         }
         if owns_values && let Some(old) = replaced {
             unsafe { release_owned_value(map, old) };
@@ -1401,13 +1420,9 @@ pub unsafe extern "C" fn gos_rt_map_get_skey_opt(
             }
             _ => None,
         };
-        if let Some(v) = payload
-            && map_has_owned_values(map)
-        {
-            unsafe { retain_owned_value(map, v) };
-        }
+        // The caller's option holder receives a share of its own.
         match payload {
-            Some(v) => unsafe { gos_rt_result_new(0, v) },
+            Some(v) => unsafe { gos_rt_result_new(0, lend_owned_value(map, v)) },
             None => none,
         }
     })
@@ -1502,14 +1517,12 @@ pub unsafe extern "C" fn gos_rt_map_get_i64_opt(m: *const GosMap, key: i64) -> i
             _ => None,
         };
         match payload {
-            Some(v) => {
-                // Blob values: the caller's option holder receives (and
-                // later releases) its own share; the map keeps its own.
-                if map_has_owned_values(map) {
-                    unsafe { retain_owned_value(map, v) };
-                }
-                unsafe { gos_rt_result_new(0, v) }
-            }
+            // Owned values: the caller's option holder receives (and later
+            // releases) its own share; the map keeps its own.
+            Some(v) if matches!(&*storage, MapStorage::I64I64(_)) => unsafe {
+                gos_rt_result_new(0, lend_owned_value(map, v))
+            },
+            Some(v) => unsafe { gos_rt_result_new(0, v) },
             None => unsafe { gos_rt_result_new(1, 0) },
         }
     })
@@ -1599,6 +1612,12 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
         let MapStorage::StrI64(inner) = &mut *storage else {
             return;
         };
+        let copies = owner_copies_on_share(map_value_owner(map));
+        let val = if copies {
+            unsafe { share_owned_value(map, val) }
+        } else {
+            val
+        };
         let prev = if let Some(slot) = inner.get_mut(ByteKeyRef::new(key_bytes)) {
             Some(std::mem::replace(slot, val))
         } else {
@@ -1621,8 +1640,8 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
         // The entry keeps this word, and the `get` path hands out a share of
         // it beside the map's own, so the entry needs one: without it the
         // first read to be dropped takes the stored object with it.
-        if owns_values && prev != Some(val) {
-            unsafe { retain_owned_value(map, val) };
+        if owns_values && !copies && prev != Some(val) {
+            unsafe { share_owned_value(map, val) };
         }
         if let Some(old) = release_old {
             unsafe { release_owned_value(map, old) };
@@ -1705,13 +1724,9 @@ unsafe fn map_get_str_opt_impl(m: *const GosMap, key: *const c_char) -> i128 {
         // and the caller's drop are balanced. Gated like the i64/i64
         // get path; the StrStr/Bytes arms allocate a fresh c-string
         // and are not blob-values.
-        if let Some(v) = payload
-            && matches!(&*storage, MapStorage::StrI64(_))
-            && map_has_owned_values(map)
-        {
-            unsafe { retain_owned_value(map, v) };
-        }
+        let shares = matches!(&*storage, MapStorage::StrI64(_));
         match payload {
+            Some(v) if shares => unsafe { gos_rt_result_new(0, lend_owned_value(map, v)) },
             Some(v) => unsafe { gos_rt_result_new(0, v) },
             None => unsafe { gos_rt_result_new(1, 0) },
         }
@@ -2042,6 +2057,9 @@ unsafe fn map_or_insert_str_i64_impl(
         let MapStorage::StrI64(inner) = &mut *storage else {
             return default;
         };
+        // A table value arrives as the caller's own, which the caller frees:
+        // the entry keeps a copy of it and never releases it.
+        let copies = owner_copies_on_share(map_value_owner(map));
         if let Some(v) = inner.get(ByteKeyRef::new(key_bytes)).copied() {
             // Key present: hand back the stored value. For a copy-blob
             // value (Vec / struct handle) the result remains an interior
@@ -2050,10 +2068,8 @@ unsafe fn map_or_insert_str_i64_impl(
             // container-call retain before this runtime helper ran, so drop
             // that prospective map share and leave its source owner for its
             // ordinary scope cleanup.
-            if map_has_owned_values(map) {
-                if default != v {
-                    unsafe { release_owned_value(map, default) };
-                }
+            if map_has_owned_values(map) && !copies && default != v {
+                unsafe { release_owned_value(map, default) };
             }
             // The key was retained as a consuming-call argument and copied
             // into the map's owned byte key, so release its source share.
@@ -2067,14 +2083,19 @@ unsafe fn map_or_insert_str_i64_impl(
         // Key absent: the compiler's consuming-call retain supplies the
         // map's independent value share. The return below is a borrow of
         // that stored value and therefore does not create another share.
-        inner.insert(crate::c_abi::string::boxed_bytes(key_bytes).into(), default);
+        let stored = if copies {
+            unsafe { share_owned_value(map, default) }
+        } else {
+            default
+        };
+        inner.insert(crate::c_abi::string::boxed_bytes(key_bytes).into(), stored);
         map.len_cache += 1;
         if typed_key {
             unsafe { crate::c_abi::string::consume_moved_string_typed(key.cast_mut()) };
         } else {
             unsafe { crate::c_abi::string::consume_moved_string(key.cast_mut()) };
         }
-        default
+        stored
     })
 }
 
@@ -2140,16 +2161,24 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
         let MapStorage::I64I64(inner) = &mut *storage else {
             return default;
         };
+        // A table value arrives as the caller's own, which the caller frees:
+        // the entry keeps a copy of it and never releases it.
+        let copies = owner_copies_on_share(map_value_owner(map));
         if let Some(v) = inner.get(&key).copied() {
             // The default arrived as a moved share the entry does not keep.
-            if default != v && map_has_owned_values(map) {
+            if default != v && !copies && map_has_owned_values(map) {
                 unsafe { release_owned_value(map, default) };
             }
             return v;
         }
-        inner.insert(key, default);
+        let stored = if copies {
+            unsafe { share_owned_value(map, default) }
+        } else {
+            default
+        };
+        inner.insert(key, stored);
         map.len_cache += 1;
-        default
+        stored
     })
 }
 
@@ -3781,6 +3810,57 @@ pub unsafe extern "C" fn gos_rt_map_set_vec_values(m: *mut GosMap) {
         .store(MAP_VALUE_VEC, Ordering::Release);
 }
 
+/// Marks `m` as holding `Map` values. A `GosMap` has no reference count, so
+/// the map keeps a table of its own for each entry: an insert stores a copy,
+/// a read lends the stored table, and overwrite, removal, and free release
+/// the entry's table.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_set_map_values(m: *mut GosMap) {
+    if m.is_null() {
+        return;
+    }
+    unsafe { &*m }
+        .value_owner
+        .store(MAP_VALUE_MAP, Ordering::Release);
+}
+
+/// Marks `m` as holding heap (`MinHeap` / `MaxHeap`) values. A heap is a
+/// counted vector, so an entry holds a share of it and a copy of the map takes
+/// a heap of its own; a read lends the stored heap, which a binding copies.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_set_heap_values(m: *mut GosMap) {
+    if m.is_null() {
+        return;
+    }
+    unsafe { &*m }
+        .value_owner
+        .store(MAP_VALUE_HEAP, Ordering::Release);
+}
+
+/// Marks `m` as holding `Deque`, `Queue`, or `Stack` values, owned entry by
+/// entry as [`gos_rt_map_set_map_values`] owns `Map` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_set_deque_values(m: *mut GosMap) {
+    if m.is_null() {
+        return;
+    }
+    unsafe { &*m }
+        .value_owner
+        .store(MAP_VALUE_DEQUE, Ordering::Release);
+}
+
+/// Marks `m` as holding `Set` values, owned entry by entry as
+/// [`gos_rt_map_set_map_values`] owns `Map` values.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_map_set_set_values(m: *mut GosMap) {
+    if m.is_null() {
+        return;
+    }
+    unsafe { &*m }
+        .value_owner
+        .store(MAP_VALUE_SET, Ordering::Release);
+}
+
 fn map_value_owner(m: &GosMap) -> u8 {
     m.value_owner.load(Ordering::Acquire)
 }
@@ -3816,7 +3896,14 @@ unsafe fn release_owned_value_tag(owner: u8, word: i64) {
     }
     match owner {
         MAP_VALUE_RC => unsafe { release_blob_value(word) },
-        MAP_VALUE_VEC => unsafe { gos_rt_vec_free(word as usize as *mut GosVec) },
+        MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe { gos_rt_vec_free(word as usize as *mut GosVec) },
+        MAP_VALUE_MAP => unsafe { gos_rt_map_free(word as usize as *mut GosMap) },
+        MAP_VALUE_SET => unsafe { gos_rt_set_free(word as usize as *mut GosSet) },
+        MAP_VALUE_DEQUE => unsafe {
+            crate::c_abi::deque::gos_rt_deque_free(
+                word as usize as *mut crate::c_abi::deque::GosDeque,
+            );
+        },
         _ => {}
     }
 }
@@ -3854,22 +3941,64 @@ unsafe fn release_storage_entries(owner: u8, storage: &MapStorage) {
     }
 }
 
-unsafe fn retain_owned_value(m: &GosMap, word: i64) {
-    unsafe { retain_owned_value_tag(map_value_owner(m), word) };
+/// The value word a read hands out: a share of a counted value, which the
+/// caller's carrier releases, or the stored table itself for a `Map` / `Set`
+/// value - a carrier never owns a table, so the caller copies one it keeps.
+unsafe fn lend_owned_value(m: &GosMap, word: i64) -> i64 {
+    let owner = map_value_owner(m);
+    if owner_copies_on_share(owner) || owner == MAP_VALUE_HEAP {
+        return word;
+    }
+    unsafe { share_owned_value(m, word) }
 }
 
-/// Same as [`retain_owned_value`], keyed directly by a `value_owner` tag
+/// The word a new holder of `word` keeps: a share of a counted value, or a
+/// copy of a table value.
+unsafe fn share_owned_value(m: &GosMap, word: i64) -> i64 {
+    unsafe { share_owned_value_tag(map_value_owner(m), word) }
+}
+
+/// Same as [`share_owned_value`], keyed directly by a `value_owner` tag
 /// instead of a live `GosMap` - used while building a cloned map's storage,
 /// before a `GosMap` wrapping it exists to read the tag from.
-unsafe fn retain_owned_value_tag(owner: u8, word: i64) {
+unsafe fn share_owned_value_tag(owner: u8, word: i64) -> i64 {
     if word == 0 {
-        return;
+        return word;
     }
     match owner {
         MAP_VALUE_RC => unsafe { retain_blob_value(word) },
-        MAP_VALUE_VEC => unsafe { crate::c_abi::gos_rt_vec_retain(word as usize as *mut GosVec) },
+        MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe {
+            crate::c_abi::gos_rt_vec_retain(word as usize as *mut GosVec);
+        },
+        MAP_VALUE_MAP => {
+            return unsafe { gos_rt_map_clone(word as usize as *const GosMap) } as i64;
+        }
+        MAP_VALUE_SET => {
+            return unsafe { crate::c_abi::set::gos_rt_set_clone(word as usize as *const GosSet) }
+                as i64;
+        }
+        MAP_VALUE_DEQUE => {
+            let copy = unsafe {
+                crate::c_abi::deque::gos_rt_deque_clone(
+                    word as usize as *mut crate::c_abi::deque::GosDeque,
+                )
+            };
+            return copy as i64;
+        }
         _ => {}
     }
+    word
+}
+
+/// The value word a cloned map stores for `word`. A `Vec` value is copied, as
+/// `gos_rt_vec_clone` copies a `Vec` element: `push` and every other in-place
+/// write reach a stored `Vec` without checking its count, so two maps may not
+/// hold one. Every other owned value is shared.
+unsafe fn adopt_cloned_value(owner: u8, word: i64) -> i64 {
+    if word != 0 && matches!(owner, MAP_VALUE_VEC | MAP_VALUE_HEAP) {
+        return unsafe { crate::c_abi::gos_rt_vec_clone(word as usize as *const GosVec) } as i64;
+    }
+    unsafe { share_owned_value_tag(owner, word) }
 }
 
 /// Deep-clones `storage`'s entries into a fresh `MapStorage` of the same
@@ -3881,28 +4010,28 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
     match storage {
         MapStorage::Empty => MapStorage::Empty,
         MapStorage::I64I64(m) => {
-            let cloned = m.clone();
+            let mut cloned = m.clone();
             if value_owner != MAP_VALUE_NONE {
-                for &v in cloned.values() {
-                    unsafe { retain_owned_value_tag(value_owner, v) };
+                for v in cloned.values_mut() {
+                    *v = unsafe { adopt_cloned_value(value_owner, *v) };
                 }
             }
             MapStorage::I64I64(cloned)
         }
         MapStorage::StrI64(m) => {
-            let cloned = m.clone();
+            let mut cloned = m.clone();
             if value_owner != MAP_VALUE_NONE {
-                for &v in cloned.values() {
-                    unsafe { retain_owned_value_tag(value_owner, v) };
+                for v in cloned.values_mut() {
+                    *v = unsafe { adopt_cloned_value(value_owner, *v) };
                 }
             }
             MapStorage::StrI64(cloned)
         }
         MapStorage::SkeyVal { entries, desc } => {
-            let cloned = entries.clone();
+            let mut cloned = entries.clone();
             if value_owner != MAP_VALUE_NONE {
-                for &v in cloned.values() {
-                    unsafe { retain_owned_value_tag(value_owner, v) };
+                for v in cloned.values_mut() {
+                    *v = unsafe { adopt_cloned_value(value_owner, *v) };
                 }
             }
             if cloned.keys_own_slots() {
@@ -3934,7 +4063,7 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
                 cloned.insert(
                     k.clone(),
                     EnumEntry {
-                        value: e.value,
+                        value: unsafe { adopt_cloned_value(value_owner, e.value) },
                         key_node: e.key_node,
                     },
                 );
@@ -4011,6 +4140,32 @@ pub unsafe extern "C" fn gos_rt_map_assign(dst: *mut GosMap, src: *const GosMap)
     });
 }
 
+/// Marks one value an owning map holds as reachable from another thread, by
+/// the marker its kind takes.
+unsafe fn mark_owned_value_shared(owner: u8, word: i64) {
+    if word == 0 {
+        return;
+    }
+    match owner {
+        MAP_VALUE_RC => unsafe {
+            crate::c_abi::rc::gos_rt_rc_mark_shared(word as usize as *mut u8);
+        },
+        MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe {
+            crate::c_abi::vec::gos_rt_vec_mark_shared(word as usize as *mut GosVec);
+        },
+        MAP_VALUE_MAP => unsafe { gos_rt_map_mark_shared(word as usize as *mut GosMap) },
+        MAP_VALUE_SET => unsafe {
+            crate::c_abi::set::gos_rt_set_mark_shared(word as usize as *mut GosSet);
+        },
+        MAP_VALUE_DEQUE => unsafe {
+            crate::c_abi::deque::deque_mark_shared(
+                word as usize as *mut crate::c_abi::deque::GosDeque,
+            );
+        },
+        _ => {}
+    }
+}
+
 /// Marks `m` shared across goroutines so every subsequent operation
 /// takes the real lock instead of the goroutine-local fast path.
 /// Codegen emits this at goroutine-spawn / channel-send escape points
@@ -4026,54 +4181,15 @@ pub unsafe extern "C" fn gos_rt_map_mark_shared(m: *mut GosMap) {
             return;
         }
         let map = unsafe { &*m };
-        if map_has_owned_values(map) {
+        let owner = map_value_owner(map);
+        if owner != MAP_VALUE_NONE {
             let storage = map.storage.lock();
+            let mark = |v: i64| unsafe { mark_owned_value_shared(owner, v) };
             match &*storage {
-                MapStorage::I64I64(inner) => {
-                    for &v in inner.values() {
-                        if map_value_owner(map) == MAP_VALUE_VEC {
-                            unsafe {
-                                crate::c_abi::vec::gos_rt_vec_mark_shared(
-                                    v as usize as *mut GosVec,
-                                );
-                            };
-                        } else {
-                            unsafe {
-                                crate::c_abi::rc::gos_rt_rc_mark_shared(v as usize as *mut u8);
-                            };
-                        }
-                    }
-                }
-                MapStorage::SkeyVal { entries, .. } => {
-                    for &v in entries.values() {
-                        if map_value_owner(map) == MAP_VALUE_VEC {
-                            unsafe {
-                                crate::c_abi::vec::gos_rt_vec_mark_shared(
-                                    v as usize as *mut GosVec,
-                                );
-                            };
-                        } else {
-                            unsafe {
-                                crate::c_abi::rc::gos_rt_rc_mark_shared(v as usize as *mut u8);
-                            };
-                        }
-                    }
-                }
-                MapStorage::StrI64(inner) => {
-                    for &v in inner.values() {
-                        if map_value_owner(map) == MAP_VALUE_VEC {
-                            unsafe {
-                                crate::c_abi::vec::gos_rt_vec_mark_shared(
-                                    v as usize as *mut GosVec,
-                                );
-                            };
-                        } else {
-                            unsafe {
-                                crate::c_abi::rc::gos_rt_rc_mark_shared(v as usize as *mut u8);
-                            };
-                        }
-                    }
-                }
+                MapStorage::I64I64(inner) => inner.values().for_each(|&v| mark(v)),
+                MapStorage::SkeyVal { entries, .. } => entries.values().for_each(|&v| mark(v)),
+                MapStorage::StrI64(inner) => inner.values().for_each(|&v| mark(v)),
+                MapStorage::EkeyVal { entries } => entries.values().for_each(|e| mark(e.value)),
                 _ => {}
             }
         }
@@ -5517,6 +5633,25 @@ pub unsafe extern "C" fn gos_rt_map_values_vec_u64(m: *const GosMap) -> *mut Gos
     })
 }
 
+/// The values of a map that owns `Vec` values, as a vec that owns a copy of
+/// each: the snapshot is a `Vec<Vec<_>>` of its own, whose elements a write
+/// through (`vals[0].push(x)`) must not reach the map's entries with.
+unsafe fn owned_vec_values(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    let words = unsafe { map_values_ordered(m, order) };
+    let len = unsafe { (*words).len.max(0) } as usize;
+    let out = unsafe {
+        crate::c_abi::vec::gos_rt_vec_with_capacity_typed(8, len as i64, vec_elem_kind::VEC)
+    };
+    for i in 0..len {
+        // SAFETY: `words` holds `len` eight-byte value words.
+        let word = unsafe { (*words).ptr.add(i * 8).cast::<i64>().read_unaligned() };
+        let copy = unsafe { crate::c_abi::gos_rt_vec_clone(word as usize as *const GosVec) };
+        unsafe { gos_rt_vec_push(out, (&raw const copy).cast()) };
+    }
+    unsafe { gos_rt_vec_free(words) };
+    out
+}
+
 unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
     {
         if m.is_null() {
@@ -5525,6 +5660,15 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         match &*storage {
+            MapStorage::I64I64(_)
+            | MapStorage::StrI64(_)
+            | MapStorage::SkeyVal { .. }
+            | MapStorage::EkeyVal { .. }
+                if map_value_owner(map) == MAP_VALUE_VEC =>
+            {
+                drop(storage);
+                unsafe { owned_vec_values(m, order) }
+            }
             MapStorage::I64I64(_) | MapStorage::StrI64(_) => {
                 drop(storage);
                 unsafe { map_values_ordered(m, order) }
@@ -5831,8 +5975,9 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_skey(
         // The key and the value arrive as moved shares: the key is folded into
         // the entry's own bytes either way, and the value share becomes the
         // entry's when the key is absent.
+        let copies = !m.is_null() && owner_copies_on_share(map_value_owner(unsafe { &*m }));
         if let Some(found) = unsafe { skey_lookup(m, key, desc) } {
-            if !m.is_null() && default != found {
+            if !m.is_null() && default != found && !copies {
                 let map = unsafe { &*m };
                 if map_has_owned_values(map) {
                     unsafe { release_owned_value(map, default) };
@@ -5841,9 +5986,16 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_skey(
             unsafe { consume_moved_skey(key, desc) };
             return found;
         }
-        unsafe { insert_skey_entry(m, key, desc, default, false) };
+        // A table value arrives as the caller's own, which the caller frees,
+        // so the entry keeps a copy.
+        let stored = if copies {
+            unsafe { share_owned_value(&*m, default) }
+        } else {
+            default
+        };
+        unsafe { insert_skey_entry(m, key, desc, stored, false) };
         unsafe { consume_moved_skey(key, desc) };
-        default
+        stored
     })
 }
 
@@ -6031,19 +6183,18 @@ pub unsafe extern "C" fn gos_rt_map_insert_ekey_opt(
     val: i64,
 ) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+        // An owning map keeps a share of the stored value, and a replaced value
+        // leaves with the share the entry held, so the caller owns what comes
+        // back - including the stored value itself when it is inserted again.
+        let val = if m.is_null() {
+            val
+        } else {
+            unsafe { share_owned_value(&*m, val) }
+        };
         let previous = unsafe { ekey_insert(m, key, desc, val) };
         // The entry took its own share of the key node; the caller's moved
         // share goes back.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
-        // An owning map keeps a share of the stored value, and a replaced value
-        // leaves with the share the entry held, so the caller owns what comes
-        // back - including the stored value itself when it is inserted again.
-        if !m.is_null() {
-            let map = unsafe { &*m };
-            if map_has_owned_values(map) {
-                unsafe { retain_owned_value(map, val) };
-            }
-        }
         match previous {
             Some(prev) => unsafe { gos_rt_result_new(0, prev) },
             None => unsafe { gos_rt_result_new(1, 0) },
@@ -6059,8 +6210,10 @@ pub unsafe extern "C" fn gos_rt_map_get_ekey_opt(
     desc: *const i64,
 ) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+        // The caller's option holder receives a share of its own, as every
+        // other key shape's `get` gives it.
         match unsafe { ekey_lookup(m, key, desc) } {
-            Some(v) => unsafe { gos_rt_result_new(0, v) },
+            Some(v) => unsafe { gos_rt_result_new(0, lend_owned_value(&*m, v)) },
             None => unsafe { gos_rt_result_new(1, 0) },
         }
     })
@@ -6130,8 +6283,9 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_ekey(
         // The key node and the value arrive as moved shares. The entry takes a
         // key share of its own, and keeps the value share only when the key is
         // absent.
+        let copies = !m.is_null() && owner_copies_on_share(map_value_owner(unsafe { &*m }));
         if let Some(found) = unsafe { ekey_lookup(m, key, desc) } {
-            if !m.is_null() && default != found {
+            if !m.is_null() && default != found && !copies {
                 let map = unsafe { &*m };
                 if map_has_owned_values(map) {
                     unsafe { release_owned_value(map, default) };
@@ -6140,9 +6294,16 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_ekey(
             unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
             return found;
         }
-        unsafe { ekey_insert(m, key, desc, default) };
+        // A table value arrives as the caller's own, which the caller frees,
+        // so the entry keeps a copy.
+        let stored = if copies {
+            unsafe { share_owned_value(&*m, default) }
+        } else {
+            default
+        };
+        unsafe { ekey_insert(m, key, desc, stored) };
         unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
-        default
+        stored
     })
 }
 

@@ -661,6 +661,87 @@ impl Lowerer<'_> {
         self.ids.next()
     }
 
+    /// The method a type-qualified call on a runtime handle names, when its
+    /// first argument is that type's handle: `sync::AtomicI64::load(a)` is
+    /// `a.load()`, so every tier reaches it through the one method lowering.
+    fn sync_qualified_method(&self, callee: &HirExpr, args: &[HirExpr]) -> Option<Ident> {
+        use gossamer_types::TyKind;
+        let HirExprKind::Path { segments, .. } = &callee.kind else {
+            return None;
+        };
+        let [.., owner, method] = segments.as_slice() else {
+            return None;
+        };
+        // A constructor may take a handle of its own type (`with_cancel(parent)`)
+        // and still answer a new one, so it is never the receiver's method.
+        if matches!(
+            method.name.as_str(),
+            "new" | "background" | "with_cancel" | "with_timeout"
+        ) {
+            return None;
+        }
+        let TyKind::Adt { def, .. } = self.tcx.kind_of(args.first()?.ty) else {
+            return None;
+        };
+        if def.local < u32::MAX - 64 {
+            return None;
+        }
+        let name = self.tcx.def_name(*def)?;
+        let (module, tail) = name.rsplit_once("::")?;
+        let typed_family = matches!(
+            module,
+            "sync" | "metrics" | "trace" | "rand" | "bufio" | "context"
+        );
+        (typed_family && tail == owner.name).then(|| method.clone())
+    }
+
+    /// Ends an inline `flat_map` callback whose body yields an `Iterator` in
+    /// `.collect()`. The concatenation reads each callback result as a
+    /// sequence, and lazy iterator state is not one until it is drained.
+    fn drain_iterator_callback(&mut self, callback: &mut HirExpr) {
+        use gossamer_types::{FnSig, TyKind};
+        let HirExprKind::Closure { ret, body, .. } = &mut callback.kind else {
+            return;
+        };
+        let TyKind::Iterator(elem) = self.tcx.kind_of(body.ty).clone() else {
+            return;
+        };
+        let vec_ty = self.tcx.intern(TyKind::Vec(elem));
+        let span = body.span;
+        let inner = std::mem::replace(
+            body.as_mut(),
+            HirExpr {
+                id: self.ids.next(),
+                span,
+                ty: vec_ty,
+                kind: HirExprKind::Placeholder,
+            },
+        );
+        body.kind = HirExprKind::MethodCall {
+            receiver: Box::new(inner),
+            name: Ident::new("collect"),
+            args: Vec::new(),
+            owner: None,
+        };
+        if ret.is_some() {
+            *ret = Some(vec_ty);
+        }
+        let sig = match self.tcx.kind_of(callback.ty) {
+            TyKind::FnTrait(sig) | TyKind::FnPtr(sig) => Some(sig.clone()),
+            _ => None,
+        };
+        if let Some(sig) = sig {
+            let rewritten = FnSig {
+                inputs: sig.inputs,
+                output: vec_ty,
+            };
+            callback.ty = match self.tcx.kind_of(callback.ty) {
+                TyKind::FnPtr(_) => self.tcx.intern(TyKind::FnPtr(rewritten)),
+                _ => self.tcx.intern(TyKind::FnTrait(rewritten)),
+            };
+        }
+    }
+
     /// Appends the values a call hands its callee's const generic parameters,
     /// which the callee receives as trailing parameters.
     fn append_const_generic_args(&mut self, callee: NodeId, args: &mut Vec<HirExpr>, span: Span) {
@@ -1478,8 +1559,26 @@ impl Lowerer<'_> {
                     let callee_node = callee.id;
                     let callee = Box::new(self.lower_expr(callee));
                     let mut args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
+                    if let Some(method) = self.sync_qualified_method(&callee, &args) {
+                        let receiver = args.remove(0);
+                        return HirExprKind::MethodCall {
+                            receiver: Box::new(receiver),
+                            name: method,
+                            args,
+                            owner: None,
+                        };
+                    }
                     self.resolve_format_pad_request(&callee, &mut args);
                     self.quote_debug_strings(&callee, &mut args);
+                    if let HirExprKind::Path { segments, .. } = &callee.kind
+                        && segments.len() == 2
+                        && segments[0].name == "iter"
+                        && segments[1].name == "flat_map"
+                    {
+                        for arg in &mut args {
+                            self.drain_iterator_callback(arg);
+                        }
+                    }
                     self.append_const_generic_args(callee_node, &mut args, expr.span);
                     HirExprKind::Call { callee, args }
                 }
@@ -1614,6 +1713,11 @@ impl Lowerer<'_> {
                 }
                 let owner = self.method_owner_of(expr.id);
                 let mut args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
+                if name.name == "flat_map"
+                    && let [callback] = args.as_mut_slice()
+                {
+                    self.drain_iterator_callback(callback);
+                }
                 self.append_const_generic_args(expr.id, &mut args, expr.span);
                 HirExprKind::MethodCall {
                     receiver: Box::new(self.lower_expr(receiver)),
@@ -4245,7 +4349,8 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Desugars the statement `m.or_insert(k, d).method(args)` on a
+    /// Desugars the statement `m.or_insert(k, d).method(args)`, or the same
+    /// through a field path (`m.or_insert(k, d).items.push(x)`), on a
     /// HashMap-typed simple-place receiver into an explicit write-back:
     ///
     /// ```text
@@ -4268,12 +4373,21 @@ impl Lowerer<'_> {
         else {
             return None;
         };
+        // `m.or_insert(k, d).method(..)`, or the same through a field path
+        // (`m.or_insert(k, d).items.push(x)`): the projections between the
+        // entry and the method's receiver, outermost first.
+        let mut entry = &**outer_recv;
+        let mut projections: Vec<&AstExpr> = Vec::new();
+        while let AstExprKind::FieldAccess { receiver, .. } = &entry.kind {
+            projections.push(entry);
+            entry = receiver;
+        }
         let AstExprKind::MethodCall {
             receiver: map_expr,
             name: inner_name,
             args: inner_args,
             ..
-        } = &outer_recv.kind
+        } = &entry.kind
         else {
             return None;
         };
@@ -4304,11 +4418,12 @@ impl Lowerer<'_> {
         let map = self.lower_expr(map_expr);
         let map_again = self.lower_expr(map_expr);
         let key_ty = key.ty;
-        let value_ty = self.ty_of(outer_recv.id);
+        let value_ty = self.ty_of(entry.id);
         let outer_ty = self.ty_of(expr.id);
         let unit_ty = self.unit();
         let (k_let, v_let) = self.entry_prelude(span, key, default, map, value_ty);
-        let v_for_call = self.entry_path(span, "__entry_v", value_ty);
+        let entry_v = self.entry_path(span, "__entry_v", value_ty);
+        let v_for_call = self.project_entry_value(entry_v, &projections, span);
         let lowered_args: Vec<HirExpr> = outer_args.iter().map(|a| self.lower_expr(a)).collect();
         let mutate_call = HirExpr {
             id: self.fresh(),
@@ -4343,6 +4458,45 @@ impl Lowerer<'_> {
                 is_comptime: false,
             }),
         })
+    }
+
+    /// `value` reached through `projections` (outermost first), the field
+    /// path an entry mutation names below `m.or_insert(k, d)`.
+    fn project_entry_value(
+        &mut self,
+        value: HirExpr,
+        projections: &[&AstExpr],
+        span: Span,
+    ) -> HirExpr {
+        let mut projected = value;
+        for projection in projections.iter().rev() {
+            let AstExprKind::FieldAccess { receiver, field } = &projection.kind else {
+                continue;
+            };
+            let tuple_struct = matches!(field, gossamer_ast::FieldSelector::Index(_))
+                && self.receiver_is_tuple_struct(receiver);
+            let kind = match field {
+                gossamer_ast::FieldSelector::Named(name) => HirExprKind::Field {
+                    receiver: Box::new(projected),
+                    name: name.clone(),
+                },
+                gossamer_ast::FieldSelector::Index(idx) if tuple_struct => HirExprKind::Field {
+                    receiver: Box::new(projected),
+                    name: gossamer_ast::Ident::new(idx.to_string()),
+                },
+                gossamer_ast::FieldSelector::Index(idx) => HirExprKind::TupleIndex {
+                    receiver: Box::new(projected),
+                    index: *idx,
+                },
+            };
+            projected = HirExpr {
+                id: self.fresh(),
+                span,
+                ty: self.ty_of(projection.id),
+                kind,
+            };
+        }
+        projected
     }
 
     fn placeholder_expr(&mut self, span: Span) -> HirExpr {

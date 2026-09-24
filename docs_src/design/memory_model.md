@@ -65,13 +65,11 @@ Gossamer establishes these edges:
 - `Barrier::wait` is a rendezvous for its participants. Code after a
   released barrier round runs after every participant reached that same
   round.
-- `Once::call_once` publishes the completed initialization body to every
+- `Once::call` publishes the completed initialization body to every
   caller that returns from the same `Once`.
 - Atomic operations follow their documented ordering. The default
-  `load`, `store`, `fetch_add`, and compare-and-swap APIs are
-  sequentially consistent. Ordered APIs expose `Relaxed`, `Acquire`,
-  `Release`, `AcqRel`, and `SeqCst`; relaxed operations are atomic but
-  do not publish non-atomic memory by themselves.
+  `load`, `store`, `fetch_add`, `fetch_sub`, and `compare_exchange`
+  methods are sequentially consistent.
 
 These edges compose transitively. For example, if goroutine A writes a
 value, sends on a channel, goroutine B receives that send and then

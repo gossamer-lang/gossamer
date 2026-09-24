@@ -106,14 +106,24 @@ pub const SYNC: StdModule = StdModule {
             doc: "Bidirectional channel handle.",
         },
         StdItem {
+            name: "Sender",
+            kind: StdItemKind::Type,
+            doc: "The sending end of a channel: `send(v)`, `close()`.",
+        },
+        StdItem {
+            name: "Receiver",
+            kind: StdItemKind::Type,
+            doc: "The receiving end of a channel: `recv() -> Option<T>`, `None` once it is closed and drained.",
+        },
+        StdItem {
             name: "Mutex",
             kind: StdItemKind::Type,
-            doc: "Mutual-exclusion lock.",
+            doc: "Mutual-exclusion lock: `lock()` / `unlock()` around the code it guards.",
         },
         StdItem {
             name: "RwLock",
             kind: StdItemKind::Type,
-            doc: "Reader-writer lock.",
+            doc: "Reader-writer lock guarding an `i64`: `read`, `write`, `with_read`, `with_write`.",
         },
         StdItem {
             name: "Shared",

@@ -112,6 +112,12 @@ pub enum ParseError {
     /// An inclusive range operator appeared without its required upper bound.
     #[error("inclusive range operator `..=` requires an upper bound")]
     InclusiveRangeMissingEnd,
+    /// A range pattern bound was written as a path other than a primitive limit.
+    #[error("range pattern bound `{text}` is not a literal")]
+    RangePatternBoundNotLiteral {
+        /// The path as written.
+        text: String,
+    },
     /// A match arm pattern was not followed by its arrow.
     #[error("expected `=>` after match arm pattern, found {found}")]
     MatchArmMissingArrow {
@@ -722,6 +728,16 @@ impl ParseError {
     #[allow(clippy::too_many_lines, reason = "one arm per diagnostic code")]
     fn code_title_help_syntax(&self) -> (&'static str, String, Option<String>) {
         match self {
+            ParseError::RangePatternBoundNotLiteral { text } => (
+                "GP0059",
+                format!("range pattern bound `{text}` is not a literal"),
+                Some(
+                    "a range pattern bound is a literal or a primitive integer limit such as \
+                     `i64::MIN`; compare against a named constant with a guard \
+                     (`n if n >= LOW => ..`)"
+                        .to_string(),
+                ),
+            ),
             ParseError::InclusiveRangeMissingEnd => (
                 "GP0026",
                 "inclusive range operator `..=` requires an upper bound".to_string(),
@@ -977,8 +993,9 @@ impl ParseError {
                 "GP0021",
                 format!("malformed format placeholder `{{{text}}}`"),
                 Some(
-                    "format macros interpolate a binding name or a `{:spec}`, not an expression; \
-                     bind it first or pass it as a positional argument with `{}`"
+                    "a placeholder names a binding or a positional argument, with an optional \
+                     `:spec` of fill, alignment, zero-pad, width, precision, and radix (`{:>8}`, \
+                     `{:08.3}`, `{:#x}`) or `?`; bind an expression first"
                         .to_string(),
                 ),
             ),

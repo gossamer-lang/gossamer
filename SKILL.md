@@ -889,7 +889,7 @@ Full path spelling is validated (GR0005); discover signatures with
   (vec-shaped `min(xs)`/`max(xs)` return `Option<T>`).
 - Encoding: `encoding::{json, yaml, toml, xml, csv, base64, base32,
   ascii85, hex, pem, binary}`. Typed serde is free functions with a
-  turbofish - `from_json::<T>(&text)?` / `to_json::<T>(v)` (same for
+  turbofish - `from_json::<T>(text)?` / `to_json::<T>(v)` (same for
   yaml/toml). Struct fields may be scalars, `String`, `Option<T>`,
   tuples, `Map<String, V>`, nested structs, and `Vec<T>` of those;
   fixed arrays/slices are rejected with a type diagnostic. For dynamic or

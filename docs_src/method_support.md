@@ -330,12 +330,27 @@ share these methods:
 
 ## Concurrency primitives
 
-`sync::Mutex<T>::new()`:
+`sync::Mutex::new()`:
 
 | Method | Returns | Notes |
 |---|---|---|
 | `m.lock()` | `()` | Blocks until acquired. |
 | `m.unlock()` | `()` | |
+
+`sync::RwLock::new(v: i64)`:
+
+| Method | Returns | Notes |
+|---|---|---|
+| `l.read()` | `i64` | Under a read lock. |
+| `l.write(v)` | `()` | Under a write lock. |
+| `l.with_read(f)` | `i64` | `f: Fn(i64) -> i64` runs under a read lock. |
+| `l.with_write(f)` | `i64` | Stores and answers what `f` answers. |
+
+`sync::Once::new()`:
+
+| Method | Returns | Notes |
+|---|---|---|
+| `o.call(f)` | `bool` | Runs `f` once; `true` on the call that ran it. |
 
 `sync::WaitGroup::new()`:
 
@@ -344,14 +359,23 @@ share these methods:
 | `wg.add(n)` | `()` | Bumps counter by n. |
 | `wg.done()` | `()` | Decrements; notifies on zero. |
 | `wg.wait()` | `()` | Blocks until counter reaches zero. |
+| `wg.wait_ctx(ctx)` | `bool` | `false` when `ctx` cancelled the wait. |
 
-`sync::AtomicI64::new(initial)`:
+`sync::Barrier::new(n)`:
 
 | Method | Returns | Notes |
 |---|---|---|
-| `a.load()` | `i64` | Relaxed ordering. |
-| `a.store(v)` | `()` | Relaxed ordering. |
-| `a.fetch_add(n)` | `i64` | Returns previous value. |
+| `b.wait()` | `()` | Blocks until `n` participants arrive. |
+
+`sync::AtomicI64::new(v)`, `sync::AtomicI32::new(v)`, `sync::AtomicU64::new(v)`
+(each holding its own type `T`) and `sync::AtomicBool::new(v)`:
+
+| Method | Returns | Notes |
+|---|---|---|
+| `a.load()` | `T` | Sequentially consistent. |
+| `a.store(v)` | `()` | Sequentially consistent. |
+| `a.compare_exchange(current, new)` | `bool` | `true` when it stored `new`. |
+| `a.fetch_add(n)` / `a.fetch_sub(n)` | `T` | Integer atomics; wraps at `T`'s width and answers the previous value. |
 
 `I64Vec::new(len)` - heap-allocated atomic-i64 buffer for
 goroutine fan-out:
