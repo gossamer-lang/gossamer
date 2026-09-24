@@ -194,7 +194,7 @@ const PURE_HANDLE_HI_OFFSET: u32 = 49;
 /// Sentinel-offset band of the `std::sync` handles (`sync::RwLock` predates
 /// it and sits in the pure band) and the shared `I64Vec` word buffer. Each is
 /// a runtime pointer with no text form and a closed method table, typed by
-/// [`Checker::sync_handle_method_ret`] and [`Checker::heap_buffer_method_ret`].
+/// [`TypeChecker::sync_handle_method_ret`] and [`TypeChecker::heap_buffer_method_ret`].
 const SYNC_HANDLE_LO_OFFSET: u32 = 50;
 const SYNC_HANDLE_HI_OFFSET: u32 = 58;
 
