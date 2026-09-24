@@ -2211,7 +2211,8 @@ scope:</p>
 <a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="n">println</span><span class="p">(</span><span class="s">&quot;{a.owner}: {a.balance:&gt;8}&quot;</span><span class="p">)</span>
 </code></pre></div>
 <p>Any other expression in a placeholder (<code>{age + 1}</code>, <code>{v[i]}</code>) is a parse
-error (<code>GP0021</code>) - bind it first or pass it positionally.</p>
+error (<code>GP0021</code>) - bind it first or pass it positionally. So is a spec the
+grammar does not take (<code>{:+}</code>, <code>{:e}</code>), which would otherwise print as text.</p>
 <h2 id="desugaring-calls">Desugaring calls<a class="headerlink" href="#desugaring-calls" title="Permanent link">&para;</a></h2>
 <p>These expand at parse time into ordinary constructs, so they lower
 uniformly on every tier:</p>

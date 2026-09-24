@@ -2010,6 +2010,39 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gt0090" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0090
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0091" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0091
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0092" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0092
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gp0056" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2036,6 +2069,17 @@
     <span class="md-ellipsis">
 
         GP0058
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gp0059" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GP0059
 
     </span>
   </a>
@@ -3797,6 +3841,39 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#gt0090" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0090
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0091" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0091
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gt0092" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GT0092
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#gp0056" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -3823,6 +3900,17 @@
     <span class="md-ellipsis">
 
         GP0058
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#gp0059" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        GP0059
 
     </span>
   </a>
@@ -4385,7 +4473,7 @@ version. This page is auto-generated from the catalogue in
 <tr>
 <td><a href="#gt0085"><code>GT0085</code></a></td>
 <td>Types</td>
-<td>ordered container over a type that writes its own <code>cmp</code></td>
+<td>heap over a type that writes its own <code>cmp</code></td>
 </tr>
 <tr>
 <td><a href="#gt0086"><code>GT0086</code></a></td>
@@ -4413,6 +4501,21 @@ version. This page is auto-generated from the catalogue in
 <td>unsupported vector type or operation</td>
 </tr>
 <tr>
+<td><a href="#gt0090"><code>GT0090</code></a></td>
+<td>Types</td>
+<td>parallel adapter callback that is not provably pure</td>
+</tr>
+<tr>
+<td><a href="#gt0091"><code>GT0091</code></a></td>
+<td>Types</td>
+<td>ordered range bounds not written in the call</td>
+</tr>
+<tr>
+<td><a href="#gt0092"><code>GT0092</code></a></td>
+<td>Types</td>
+<td>field read from a closure parameter of undecided type</td>
+</tr>
+<tr>
 <td><a href="#gp0056"><code>GP0056</code></a></td>
 <td>Parser</td>
 <td>retired cohort isolation spelling</td>
@@ -4426,6 +4529,11 @@ version. This page is auto-generated from the catalogue in
 <td><a href="#gp0058"><code>GP0058</code></a></td>
 <td>Parser</td>
 <td>malformed literal SQL statement</td>
+</tr>
+<tr>
+<td><a href="#gp0059"><code>GP0059</code></a></td>
+<td>Parser</td>
+<td>range pattern bound that is not a literal</td>
 </tr>
 <tr>
 <td><a href="#gp0053"><code>GP0053</code></a></td>
@@ -4705,8 +4813,8 @@ version. This page is auto-generated from the catalogue in
 <p><strong>Types</strong> - impl of a trait the language supplies itself</p>
 <p>Hashing, copying, release, marker safety, and the <code>Into</code> / <code>TryInto</code> / <code>IntoIterator</code> directions are the language's, not a per-type choice, so the block would declare a contract nothing dispatches through. The diagnostic names what the language does and what to write in its place - a <code>From</code> impl on the target, a <code>defer</code>, an inherent method - or remove the block.</p>
 <h2 id="gt0085"><code>GT0085</code> <a id="gt0085"></a><a class="headerlink" href="#gt0085" title="Permanent link">&para;</a></h2>
-<p><strong>Types</strong> - ordered container over a type that writes its own <code>cmp</code></p>
-<p>A heap, a <code>BTreeSet</code>, or a <code>BTreeMap</code> keeps its elements in the order they went in and reads them back with no comparator to call, so an element or key whose type writes its own <code>cmp</code> would silently not be ordered by it. A sequence orders on demand and does route through the type's <code>cmp</code>: sort a <code>Vec&lt;T&gt;</code>, or key the container on a value that carries the order.</p>
+<p><strong>Types</strong> - heap over a type that writes its own <code>cmp</code></p>
+<p>A <code>MinHeap</code> or <code>MaxHeap</code> keeps its elements in the order they went in and reads them back with no comparator to call, so an element whose type writes its own <code>cmp</code> would silently not be ordered by it. A sequence orders on demand and does route through the type's <code>cmp</code>, and a <code>BTreeSet</code> or <code>BTreeMap</code> seats its entries by it: sort a <code>Vec&lt;T&gt;</code>, use a sorted set, or key the heap on a value that carries the order.</p>
 <h2 id="gt0086"><code>GT0086</code> <a id="gt0086"></a><a class="headerlink" href="#gt0086" title="Permanent link">&para;</a></h2>
 <p><strong>Types</strong> - <code>spawn</code> outside a <code>cohort</code> block</p>
 <p>A <code>spawn</code> must be written lexically inside a <code>cohort { }</code> in its own function body; <code>main</code> is the one exemption, since the root cohort's extent is main's own. Elsewhere the child attaches to whatever cohort the caller happens to be inside, which neither the callee's signature nor the call site says, and to the root cohort - whose extent is the process - when the program has none. Open a block around the spawns and the code that collects from them.</p>
@@ -4722,6 +4830,15 @@ version. This page is auto-generated from the catalogue in
 <h2 id="gt0089"><code>GT0089</code> <a id="gt0089"></a><a class="headerlink" href="#gt0089" title="Permanent link">&para;</a></h2>
 <p><strong>Types</strong> - unsupported vector type or operation</p>
 <p>A <code>Simd</code> or <code>Mask</code> vector named an element type, a lane count, or an operation the vector type does not support. <code>Simd&lt;T, N&gt;</code> takes <code>f32</code>, <code>f64</code>, <code>i32</code>, <code>i64</code>, <code>u8</code>, or <code>u32</code> lanes and <code>N</code> of 2, 4, 8, or 16 (16 for <code>u8</code>, <code>i32</code>, and <code>u32</code>); <code>Simd::splat</code> takes its lane count from the annotated type.</p>
+<h2 id="gt0090"><code>GT0090</code> <a id="gt0090"></a><a class="headerlink" href="#gt0090" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - parallel adapter callback that is not provably pure</p>
+<p>A parallel adapter runs its callback on many workers at once, so the callback must be a closure literal with a pure body or a named pure function. A callable reached through a binding is not decidable at the call site, and a closure that writes a container it captured would have every worker write the same container. Collect the results and combine them afterwards, or use <code>cohort { }</code> with <code>spawn</code> for work that performs effects.</p>
+<h2 id="gt0091"><code>GT0091</code> <a id="gt0091"></a><a class="headerlink" href="#gt0091" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - ordered range bounds not written in the call</p>
+<p><code>m.range(r)</code> on a <code>BTreeMap</code> reads its bounds from the range written in the call, and each bound is a key: <code>m.range("b".."d")</code>, <code>m.range(lo..=hi)</code>, <code>m.range(lo..)</code>, <code>m.range(..hi)</code>, or <code>m.range(..)</code>. A range stored in a binding carries no bounds a key can be compared with, so write the range in place.</p>
+<h2 id="gt0092"><code>GT0092</code> <a id="gt0092"></a><a class="headerlink" href="#gt0092" title="Permanent link">&para;</a></h2>
+<p><strong>Types</strong> - field read from a closure parameter of undecided type</p>
+<p>A field was read from a closure parameter with no annotation, and the closure is never handed to anything that says what it takes, so nothing decides the parameter's type. The field's layout depends on that type: annotate the parameter, <code>|r: http::Request| r.path</code>, or pass the closure where its parameter type is known.</p>
 <h2 id="gp0056"><code>GP0056</code> <a id="gp0056"></a><a class="headerlink" href="#gp0056" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - retired cohort isolation spelling</p>
 <p><code>context::Context</code> is the cancellation type a cohort may one day inherit; this setting decides whether a child gets an OS thread of its own, so it is <code>isolation: Isolation::Shared</code> or <code>isolation: Isolation::Thread</code>. <code>--fix</code> rewrites it.</p>
@@ -4731,6 +4848,9 @@ version. This page is auto-generated from the catalogue in
 <h2 id="gp0058"><code>GP0058</code> <a id="gp0058"></a><a class="headerlink" href="#gp0058" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - malformed literal SQL statement</p>
 <p>A string literal handed to <code>sql::statement</code> is not a well-formed statement: it is empty, or its parentheses do not balance. The statement is checked while the program is parsed.</p>
+<h2 id="gp0059"><code>GP0059</code> <a id="gp0059"></a><a class="headerlink" href="#gp0059" title="Permanent link">&para;</a></h2>
+<p><strong>Parser</strong> - range pattern bound that is not a literal</p>
+<p>A range pattern bound is a literal, or a primitive integer limit such as <code>i64::MIN</code> or <code>u8::MAX</code>, which stands for its literal. Any other path - a <code>const</code>, a static, an enum variant - is not a bound: match it with a guard instead (<code>n if n &gt;= LOW =&gt; ..</code>).</p>
 <h2 id="gp0053"><code>GP0053</code> <a id="gp0053"></a><a class="headerlink" href="#gp0053" title="Permanent link">&para;</a></h2>
 <p><strong>Parser</strong> - <code>Display</code> rendering declared as <code>to_string</code></p>
 <p>Both rendering contracts declare one method that answers a <code>String</code>, so both are written <code>fn fmt</code>; the <code>impl</code> header is what decides which channel a value reaches, <code>{}</code> taking <code>Display</code> and <code>{:?}</code> taking <code>Debug</code>. <code>x.to_string()</code> still renders through <code>Display</code>.</p>

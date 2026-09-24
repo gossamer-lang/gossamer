@@ -19,7 +19,7 @@ lifetimes, no tracing-GC pauses). Syntax is Rust-flavoured; the
 runtime is Go-shaped (goroutines, channels). Source files conventionally end
 in `.gos`, but `gos run TARGET` runs an existing file with any extension. The
 toolchain binary is `gos`, and projects carry a
-`project.toml` manifest. Pre-1.0.0: APIs may change. Most documented
+`project.toml` manifest. Most documented
 surface is available on the bytecode VM, in-process JIT, and LLVM AOT,
 but support is item- and platform-specific; check `gos feature-status`
 and validate the target tier before relying on an API in production.

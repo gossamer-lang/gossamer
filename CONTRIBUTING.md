@@ -1,7 +1,6 @@
 # Contributing to Gossamer
 
-Thanks for your interest. Gossamer is pre-1.0.0; the API, syntax,
-and tooling are all in flux.
+Thanks for your interest.
 
 ## LLM Policy
 

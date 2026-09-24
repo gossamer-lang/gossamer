@@ -1,6 +1,6 @@
 # Gossamer Language Specification
 
-> Status: pre-1.0.0 draft. Models the current Gossamer language -
+> Status: draft. Models the current Gossamer language -
 > a language targeting the 2026+ Rust ecosystem. The CLI toolchain is
 > `gos` (single unified binary in the spirit of `go` or `cargo`).
 > Source files use the extension `.gos`. The manifest file is
@@ -19,7 +19,7 @@ This document distinguishes four active lifecycle levels:
   but is not yet protected by the Stable compatibility commitment.
 - **Experimental**: the syntax or API is implemented enough to be exposed,
   but may change incompatibly, gain limits, or be withdrawn in a later
-  release. Experimental APIs are not part of the 1.0 compatibility promise.
+  release. Experimental APIs are not part of the compatibility promise.
 - **Planned**: documentation of an intended direction only. Planned surface
   has no implementation or compatibility commitment.
 
@@ -31,8 +31,8 @@ of individual language and standard-library entries. This specification is
 authoritative for the semantics of Stable language constructs; it does not
 silently promote a manifest entry merely because it is documented here.
 
-Until a 1.0 release designates a core-library set explicitly, standard-library
-modules default to Experimental. Network protocols, databases, templates,
+Standard-library modules default to Experimental unless the `gos feature-status`
+registry marks them Stable. Network protocols, databases, templates,
 archive formats, process launching, and platform drivers remain Experimental
 regardless of examples elsewhere in this document. In particular, compatibility
 aliases do not become Stable merely because they remain wired.
@@ -3587,4 +3587,4 @@ idiom, a new type-system theory, or machinery the reader cannot see.
 
 ---
 
-*End of Gossamer specification (pre-1.0.0 draft).*
+*End of Gossamer specification (draft).*

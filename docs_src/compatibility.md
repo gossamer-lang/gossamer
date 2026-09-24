@@ -8,12 +8,9 @@ without reading a changelog. A promise nothing verifies is not worth
 reading; every rule below is either enforced by a gate in CI or carried
 by a `gos fix` rewriter.
 
-## Before 1.0
-
-Gossamer is pre-1.0 and the language surface is still moving. This page
-does not claim otherwise. What it does claim is that **a change you have
-to make by hand is a bug in the release** - if a version bump requires
-edits, the toolchain owes you the rewriter that makes them.
+**A change you have to make by hand is a bug in the release** - if a
+version bump requires edits, the toolchain owes you the rewriter that
+makes them.
 
 ## What a patch release (0.47.0 -> 0.47.1) may change
 

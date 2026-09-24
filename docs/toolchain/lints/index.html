@@ -3707,7 +3707,11 @@ arithmetic over them - and hands its value to nothing.
 A newline followed by <code>-</code>, <code>*</code>, or <code>&amp;</code> starts a NEW statement, so
 a continuation meant as part of the line above becomes one of
 these. Join it to that line (end the previous line with the
-operator, or parenthesise), or bind what it computes.</p>
+operator, or parenthesise), or bind what it computes.
+A builtin method that answers a new value and writes nothing -
+<code>v.dedup()</code>, <code>s.trim()</code>, <code>s.to_uppercase()</code> - is reported the same
+way when its result is dropped: the receiver is unchanged, so bind
+the result (<code>v = v.dedup()</code>).</p>
 <h2 id="bool_literal_in_condition"><code>bool_literal_in_condition</code><a class="headerlink" href="#bool_literal_in_condition" title="Permanent link">&para;</a></h2>
 <p><code>if true { ... }</code> / <code>while false { ... }</code> - the branch is
 decided at compile time. Drop the control-flow construct.</p>

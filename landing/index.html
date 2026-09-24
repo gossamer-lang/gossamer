@@ -64,7 +64,7 @@
         .then(function (rel) {
           if (rel && rel.tag_name) {
             var tag = document.querySelector(".ver-tag");
-            if (tag) tag.textContent = rel.tag_name + " (pre-1.0)";
+            if (tag) tag.textContent = " \u00b7 " + rel.tag_name;
           }
         })
         .catch(function () {});
@@ -98,7 +98,7 @@
           GitHub
         </a>
       </p>
-      <p class="version">Open source &middot; Apache-2.0 &middot; <span class="ver-tag">pre-1.0</span></p>
+      <p class="version">Open source &middot; Apache-2.0<span class="ver-tag"></span></p>
     </div>
   </header>
 
@@ -123,6 +123,7 @@
             Forward pipes (<code>|&gt;</code>), immutable by default.
             Default & Keyword arguments. "?"/Rust like error handling.
             Traits, generics, no <code>null</code>.
+            Result</code> / <code>Option</code>, exhaustive <code>match</code>
           </p>
         </article>
         <article class="card">
@@ -151,13 +152,6 @@
           <p>
             A bytecode VM with JIT and a REPL for fast iteration; a single,
             dependency-free native binary via LLVM when you ship.
-          </p>
-        </article>
-        <article class="card">
-          <h3>Pattern Matching and ADTs</h3>
-          <p>
-            <code>Result</code> / <code>Option</code>,
-            exhaustive <code>match</code>.
           </p>
         </article>
         <article class="card">
@@ -365,7 +359,7 @@ $ gos build --release hello.gos   # one native binary, ready to ship</code></pre
       <a href="https://github.com/gossamer-lang/gossamer/blob/main/SPEC.md">Language spec</a>
       <a href="https://github.com/gossamer-lang/gossamer-editor-support">Editor support</a>
     </nav>
-    <p class="foot-note">Gossamer is open source under the Apache-2.0 license. Pre-1.0 - the surface is stable to write against.</p>
+    <p class="foot-note">Gossamer is open source under the Apache-2.0 license.</p>
   </footer>
 
   <style>

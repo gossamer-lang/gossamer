@@ -1405,7 +1405,7 @@ unsafe fn read_gos_vec_u8(p: *const GosVec) -> Vec<u8> {
 // Phase 1 - expanded type vocabulary.
 //
 // Helpers + impls for the most-asked-for binding shapes the
-// pre-1.0 allowlist did not cover. See `~/dev/contexts/gos/rustergo.md`
+// original allowlist did not cover. See `~/dev/contexts/gos/rustergo.md`
 // §4.7 for the design and §6 for the file/line boundary.
 // ---------------------------------------------------------------------
 

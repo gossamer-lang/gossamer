@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-Gossamer is pre-1.0 and ships from `main`. Tagged releases older
+Gossamer ships from `main`. Tagged releases older
 than the most recent tag are unsupported.
 
 ## Reporting a vulnerability

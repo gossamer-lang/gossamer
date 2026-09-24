@@ -2187,8 +2187,8 @@
 </tr>
 <tr>
 <td><a href="https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_websocket.rs"><code>accept</code></a></td>
-<td><code>fn accept(request: http::Request) -&gt; Result&lt;http::websocket::Conn, errors::Error&gt;</code></td>
-<td>Upgrade an incoming Request to a WebSocket (Rust-side).</td>
+<td><code>fn accept(request: http::Request) -&gt; Result&lt;http::Response, errors::Error&gt;</code></td>
+<td>Validate a WebSocket upgrade request and answer the 101 Switching Protocols response that completes the handshake.</td>
 </tr>
 <tr>
 <td><a href="https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_websocket.rs"><code>accept_key</code></a></td>

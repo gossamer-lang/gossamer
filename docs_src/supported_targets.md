@@ -9,7 +9,7 @@ The matrix is evidence-based: accepting a triple locally is not support.
 ## Tier 1
 
 Tier 1 targets execute the pure bytecode VM, the JIT-enabled VM, and LLVM AOT
-fixtures on native CI. They are the supported 1.0 execution contract.
+fixtures on native CI. They are the supported execution contract.
 
 | Target triple | Native CI evidence |
 |---|---|

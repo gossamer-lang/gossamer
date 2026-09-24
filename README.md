@@ -90,6 +90,12 @@ My goal is for Gossamer to replace Go, Python, F#/C#, Kotlin/Java, and
 | Built in MCP server                             |    ✓     |      |  ✓  |     |        |        |        |
 | Parallel collection adapters                    |    ✓     |   ✓  |     |  ✓  |        |        |    ✓   |
 
+**Wrapping arithmetic operators**
+
+`a +% b`, `a -% b`, and `a *% b` add, subtract, and multiply.
+
+`+%=`, `-%=`, `*%=` for compounding.
+
 **Not Transpiled**
 
 Gossamer compiles directly to native, it does not transpile to Rust or Go.
@@ -189,12 +195,6 @@ is to use the dedicated ones.
 | Queue | Queue::new() | Queue::from([1,2,3]) |
 | Stack | Stack::new() | Stack::from([1,2,3]) |
 | Deque | Deque::new() | Deque::from([1,2,3]) |
-
-**Wrapping arithmetic operators**
-
-`a +% b`, `a -% b`, and `a *% b` add, subtract, and multiply.
-
-`+%=`, `-%=`, `*%=` for compounding.
 
 ## Details
 

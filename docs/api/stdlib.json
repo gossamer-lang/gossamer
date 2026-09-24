@@ -4034,7 +4034,7 @@
       "name": "std::fs::File",
       "kind": "type",
       "signature": null,
-      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
+      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -4805,6 +4805,82 @@
       "limits": [],
       "cookbook_tags": [],
       "doc_anchor": "docs_src/stdlib.md#stdhashcrc32",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-hash-crc32c-checksum",
+      "name": "std::hash::crc32c::checksum",
+      "kind": "function",
+      "signature": "fn checksum(data: Vec<u8>) -> i64",
+      "description": "CRC-32C checksum of a byte slice.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-hash-crc32c-checksum-string",
+      "name": "std::hash::crc32c::checksum_string",
+      "kind": "function",
+      "signature": "fn checksum_string(text: String) -> i64",
+      "description": "CRC-32C checksum of a String.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-hash-crc32c-update",
+      "name": "std::hash::crc32c::update",
+      "kind": "function",
+      "signature": "fn update(seed: i64, data: Vec<u8>) -> i64",
+      "description": "Continues a CRC-32C from a running value over more bytes.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-hash-crc32c-update-window",
+      "name": "std::hash::crc32c::update_window",
+      "kind": "function",
+      "signature": "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
+      "description": "Continues a CRC-32C over `data[start..end]`, checking a record where it lies rather than copying the window out first.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdhashcrc32c",
       "example_id": null,
       "reference_status": "catalog_only"
     },
@@ -6997,8 +7073,8 @@
       "id": "std-http-websocket-accept",
       "name": "std::http::websocket::accept",
       "kind": "function",
-      "signature": "fn accept(request: http::Request) -> Result<http::websocket::Conn, errors::Error>",
-      "description": "Upgrade an incoming Request to a WebSocket (Rust-side).",
+      "signature": "fn accept(request: http::Request) -> Result<http::Response, errors::Error>",
+      "description": "Validate a WebSocket upgrade request and answer the 101 Switching Protocols response that completes the handshake.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -14484,7 +14560,7 @@
       "name": "std::strings::find",
       "kind": "function",
       "signature": "fn find(text: String, needle: String | char) -> Option<i64>",
-      "description": "Returns the byte position of the first match.",
+      "description": "Returns the character index of the first match, or None.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -14655,7 +14731,7 @@
       "name": "std::strings::rfind",
       "kind": "function",
       "signature": "fn rfind(text: String, needle: String | char) -> Option<i64>",
-      "description": "Byte index of the last occurrence of a needle, or -1.",
+      "description": "Returns the character index of the last match, or None.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15244,7 +15320,7 @@
       "name": "std::sync::Mutex",
       "kind": "type",
       "signature": null,
-      "description": "Mutual-exclusion lock.",
+      "description": "Mutual-exclusion lock: `lock()` / `unlock()` around the code it guards.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15278,11 +15354,49 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-sync-Receiver",
+      "name": "std::sync::Receiver",
+      "kind": "type",
+      "signature": null,
+      "description": "The receiving end of a channel: `recv() -> Option<T>`, `None` once it is closed and drained.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdsync",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-sync-RwLock",
       "name": "std::sync::RwLock",
       "kind": "type",
       "signature": null,
-      "description": "Reader-writer lock.",
+      "description": "Reader-writer lock guarding an `i64`: `read`, `write`, `with_read`, `with_write`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdsync",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-sync-Sender",
+      "name": "std::sync::Sender",
+      "kind": "type",
+      "signature": null,
+      "description": "The sending end of a channel: `send(v)`, `close()`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15586,7 +15700,7 @@
       "name": "std::time::Duration",
       "kind": "type",
       "signature": null,
-      "description": "Difference between two `Instant`s.",
+      "description": "A span of nanoseconds: `from_nanos` / `from_micros` / `from_millis` / `from_secs` / `from_secs_f64`, the matching `as_*` accessors, `+`, `-`, and ordering.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15605,7 +15719,7 @@
       "name": "std::time::Instant",
       "kind": "type",
       "signature": null,
-      "description": "Monotonic point-in-time.",
+      "description": "A monotonic clock reading in nanoseconds: `now()`, `elapsed()`, `elapsed_ms()`, `duration_since(earlier)`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15644,6 +15758,44 @@
       "kind": "type",
       "signature": null,
       "description": "Wall-clock point-in-time.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdtime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-time---sleep-ns",
+      "name": "std::time::__sleep_ns",
+      "kind": "builtin",
+      "signature": null,
+      "description": "Internal: suspends the current goroutine for a nanosecond count; the lowering of `sleep` and `sleep_ctx`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdtime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-time---sleep-ns-ctx",
+      "name": "std::time::__sleep_ns_ctx",
+      "kind": "builtin",
+      "signature": null,
+      "description": "Internal: context-aware nanosecond sleep; the lowering of `sleep_ctx` that wakes early when the context fires.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15908,7 +16060,7 @@
       "id": "std-time-since-ms",
       "name": "std::time::since_ms",
       "kind": "function",
-      "signature": "fn since_ms(instant: time::Instant) -> i64",
+      "signature": "fn since_ms(start_ms: i64) -> i64",
       "description": "Milliseconds elapsed since an earlier monotonic reading.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -15928,7 +16080,7 @@
       "name": "std::time::sleep",
       "kind": "function",
       "signature": "fn sleep(ms: i64) -> ()",
-      "description": "Suspends the current goroutine for `Duration`.",
+      "description": "Suspends the current goroutine for a `Duration`, or for an integer count of milliseconds.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

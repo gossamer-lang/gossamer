@@ -162,7 +162,7 @@ pub struct StackFrame {
 /// current frame (`skip == 0` returns the immediate caller).
 /// Mirrors Go's `runtime.Caller(skip)`.
 ///
-/// Pre-1.0 caveat: under `gos build` without DWARF, the
+/// Under `gos build` without DWARF, the
 /// returned frame contains the function name only; `file` is
 /// empty and `line` is 0. Under `gos` (interpreter), full
 /// frame info is available from the bytecode line tables.

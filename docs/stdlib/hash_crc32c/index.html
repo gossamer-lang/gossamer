@@ -12,13 +12,9 @@
         <meta name="author" content="Gossamer contributors">
 
 
-        <link rel="canonical" href="https://gossamer-lang.org/docs/design/memory_model/">
+        <link rel="canonical" href="https://gossamer-lang.org/docs/stdlib/hash_crc32c/">
 
 
-        <link rel="prev" href="../jit_native_memory_ownership/">
-
-
-        <link rel="next" href="../goroutine_stacks/">
 
 
 
@@ -29,7 +25,7 @@
 
 
 
-        <title>Memory model - Gossamer</title>
+        <title>std::hash::crc32c - Gossamer</title>
 
 
 
@@ -82,7 +78,7 @@
     <div data-md-component="skip">
 
 
-        <a href="#concurrency-memory-model" class="md-skip">
+        <a href="#stdhashcrc32c" class="md-skip">
           Skip to content
         </a>
 
@@ -117,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
 
-              Memory model
+              std::hash::crc32c
 
           </span>
         </div>
@@ -938,7 +934,7 @@
 
 
           <div class="md-nav__link md-nav__container">
-            <a href="../../stdlib/" class="md-nav__link ">
+            <a href="../" class="md-nav__link ">
 
 
 
@@ -982,7 +978,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../../stdlib/" class="md-nav__link">
+      <a href="../" class="md-nav__link">
 
 
 
@@ -1066,7 +1062,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../../stdlib/collection_patterns/" class="md-nav__link">
+      <a href="../collection_patterns/" class="md-nav__link">
 
 
 
@@ -1728,13 +1724,11 @@
 
 
 
-
-
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
 
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_18" checked>
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_18" >
 
 
           <label class="md-nav__link" for="__nav_18" id="__nav_18_label" tabindex="">
@@ -1755,7 +1749,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
 
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_18_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_18_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_18">
             <span class="md-nav__icon md-icon"></span>
 
@@ -1773,7 +1767,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../sequence_reference_safety/" class="md-nav__link">
+      <a href="../../design/sequence_reference_safety/" class="md-nav__link">
 
 
 
@@ -1801,7 +1795,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../diagnostics/" class="md-nav__link">
+      <a href="../../design/diagnostics/" class="md-nav__link">
 
 
 
@@ -1829,7 +1823,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../incremental/" class="md-nav__link">
+      <a href="../../design/incremental/" class="md-nav__link">
 
 
 
@@ -1857,7 +1851,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../lazy_iterators/" class="md-nav__link">
+      <a href="../../design/lazy_iterators/" class="md-nav__link">
 
 
 
@@ -1885,7 +1879,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../runtime/" class="md-nav__link">
+      <a href="../../design/runtime/" class="md-nav__link">
 
 
 
@@ -1913,7 +1907,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../jit_native_memory_ownership/" class="md-nav__link">
+      <a href="../../design/jit_native_memory_ownership/" class="md-nav__link">
 
 
 
@@ -1940,35 +1934,8 @@
 
 
 
-
-
-    <li class="md-nav__item md-nav__item--active">
-
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-
-
-
-
-
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-
-
-
-  <span class="md-ellipsis">
-
-
-    Memory model
-
-
-
-  </span>
-
-
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../design/memory_model/" class="md-nav__link">
 
 
 
@@ -1984,92 +1951,6 @@
 
 
       </a>
-
-
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-
-
-
-
-
-
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-
-        <li class="md-nav__item">
-  <a href="#what-this-is-like" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        What this is like
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#happens-before-edges" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Happens-before edges
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#channels" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Channels
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#select" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Select
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#atomics" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Atomics
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#race-detector" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Race detector
-
-    </span>
-  </a>
-
-</li>
-
-    </ul>
-
-</nav>
-
     </li>
 
 
@@ -2082,7 +1963,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../goroutine_stacks/" class="md-nav__link">
+      <a href="../../design/goroutine_stacks/" class="md-nav__link">
 
 
 
@@ -2110,7 +1991,7 @@
 
 
     <li class="md-nav__item">
-      <a href="../selfhosting/" class="md-nav__link">
+      <a href="../../design/selfhosting/" class="md-nav__link">
 
 
 
@@ -2239,80 +2120,6 @@
 
 
 
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-
-        <li class="md-nav__item">
-  <a href="#what-this-is-like" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        What this is like
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#happens-before-edges" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Happens-before edges
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#channels" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Channels
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#select" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Select
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#atomics" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Atomics
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#race-detector" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Race detector
-
-    </span>
-  </a>
-
-</li>
-
-    </ul>
-
 </nav>
                   </div>
                 </div>
@@ -2328,117 +2135,9 @@
 
 
 
-<h1 id="concurrency-memory-model">Concurrency memory model<a class="headerlink" href="#concurrency-memory-model" title="Permanent link">&para;</a></h1>
-<p>This page describes how shared memory is ordered when Gossamer
-goroutines communicate.</p>
-<p>Gossamer has automatic memory management. Heap values stay alive while
-reachable, and compiled tiers promote reference counts to atomic
-counting when a value crosses a goroutine boundary. That protects object
-lifetime. It does not make ordinary reads and writes into a
-synchronization protocol.</p>
-<p>Ordinary memory operations inside one goroutine run in program order.
-Between goroutines, an ordinary read is ordered after an ordinary write
-only when a synchronization operation connects them. Without such an
-edge, the operations may be observed in either order, and if both touch
-the same memory location with at least one write, the program has a data
-race. Gossamer keeps the managed object alive, but the racing value
-itself has no useful cross-goroutine ordering guarantee.</p>
-<h2 id="what-this-is-like">What this is like<a class="headerlink" href="#what-this-is-like" title="Permanent link">&para;</a></h2>
-<p>The concurrency side is Go-shaped: goroutines share memory, and channels
-or synchronization primitives establish ordering. Sharing a pointer is
-not publication by itself.</p>
-<p>The lifetime side is Swift-like: compiled code uses deterministic
-reference counting rather than a tracing collector. Unlike Swift ARC,
-compiled Gossamer also collects strong cycles, and it can keep
-goroutine-local reference counts non-atomic until an object is shared.</p>
-<p>This is not Rust's ownership model. <code>&amp;</code> and <code>&amp;mut</code> are shared and exclusive
-lexical views enforced by a conservative borrow checker. Their implicit
-lifetimes end at the closing brace. There is no explicit lifetime annotation
-language or non-lexical last-use inference.</p>
-<p>This is not C or C++ either. A data race is not documented as permission
-for the compiler to assume arbitrary facts about the whole program. It
-means the racing accesses are unordered by the Gossamer model, so the
-value observed there is not a reliable communication result. Use
-channels, locks, wait groups, barriers, once initialization, or atomics
-when another goroutine must observe a write.</p>
-<h2 id="happens-before-edges">Happens-before edges<a class="headerlink" href="#happens-before-edges" title="Permanent link">&para;</a></h2>
-<p>A happens-before edge is the ordering relation used by the model. If A
-happens-before B, then effects before A are visible to code after B
-according to the synchronization primitive's contract.</p>
-<p>Gossamer establishes these edges:</p>
-<ul>
-<li>Starting a goroutine publishes the values captured or passed to that
-  goroutine before its body begins.</li>
-<li>A channel send publishes to the receive that obtains that value.</li>
-<li>Closing a channel publishes to receives that observe the closed and
-  drained state.</li>
-<li><code>select</code> inherits the send, receive, and close edge of the arm that
-  actually runs. A <code>default</code> arm does not synchronize with another
-  goroutine.</li>
-<li><code>Mutex</code> unlock publishes to a later lock of the same mutex.</li>
-<li><code>RwLock</code> write unlock publishes to later readers and writers that
-  acquire the same lock. Concurrent readers are mutually compatible but
-  do not publish to each other merely by overlapping.</li>
-<li><code>WaitGroup::done</code> publishes to a <code>wait</code> call that observes the count
-  reach zero.</li>
-<li><code>Barrier::wait</code> is a rendezvous for its participants. Code after a
-  released barrier round runs after every participant reached that same
-  round.</li>
-<li><code>Once::call</code> publishes the completed initialization body to every
-  caller that returns from the same <code>Once</code>.</li>
-<li>Atomic operations follow their documented ordering. The default
-  <code>load</code>, <code>store</code>, <code>fetch_add</code>, <code>fetch_sub</code>, and <code>compare_exchange</code>
-  methods are sequentially consistent.</li>
-</ul>
-<p>These edges compose transitively. For example, if goroutine A writes a
-value, sends on a channel, goroutine B receives that send and then
-unlocks a mutex, goroutine C's later lock of the same mutex is ordered
-after A's write.</p>
-<h2 id="channels">Channels<a class="headerlink" href="#channels" title="Permanent link">&para;</a></h2>
-<p><code>channel()</code> and <code>channel(0)</code> create an unbuffered rendezvous channel. A
-send on an unbuffered channel does not complete until a receiver accepts
-that exact value, and the send publishes to that receive.</p>
-<p><code>channel(n)</code> for <code>n &gt; 0</code> creates a bounded buffered channel. Sends block
-when the buffer is full. Receives block when the buffer is empty. The
-send of a buffered element publishes to the receive that removes that
-element from the buffer.</p>
-<p><code>channel::unbounded()</code> creates an explicit unbounded queue channel for
-code that intentionally wants producer sends to complete without a
-receiver or capacity limit. Ordering is still per element: a send
-publishes to the receive of that element.</p>
-<p>Receiving from a closed and drained channel returns <code>None</code>. Closing an
-already closed channel is an error.</p>
-<h2 id="select">Select<a class="headerlink" href="#select" title="Permanent link">&para;</a></h2>
-<p>When multiple non-default <code>select</code> arms are ready, Gossamer polls arms in
-pseudo-random order so source order does not deterministically win.
-<code>default</code> is selected only when no send or receive arm is ready.</p>
-<p>Blocking <code>select</code> registers interest in all channel arms and wakes when
-any of those channels may have become ready. The selected arm determines
-the synchronization edge. Arms that were registered but not selected do
-not synchronize.</p>
-<h2 id="atomics">Atomics<a class="headerlink" href="#atomics" title="Permanent link">&para;</a></h2>
-<p>Atomic values provide indivisible operations on their own storage. They
-are the right tool for counters, flags, and carefully designed lock-free
-handoffs.</p>
-<p>Sequentially consistent atomics participate in a single global order for
-that atomic API surface. Release stores publish to acquire loads that
-observe the released value. AcqRel read-modify-write operations both
-acquire from the value they read and release the value they write.</p>
-<p>Relaxed atomic operations are still atomic: there is no torn read or
-write of the atomic value. They do not order ordinary memory. A relaxed
-counter can count events, but it does not publish the data associated
-with those events unless some other synchronization does that work.</p>
-<h2 id="race-detector">Race detector<a class="headerlink" href="#race-detector" title="Permanent link">&para;</a></h2>
-<p><code>gos test --race</code> and race-enabled compiled code instrument heap
-accesses and report conflicting non-atomic accesses that are not ordered
-by detector-visible synchronization. The detector uses vector clocks and
-records handoff edges for goroutine scheduling, channels, mutexes, wait
-groups, once initialization, and detector-aware atomic operations.</p>
-<p>The detector is diagnostic tooling, not the definition of the language.
-It can miss synchronization it does not currently model, such as some
-reader-writer-lock paths, and it does not make an unordered program
-ordered. Treat a reported race as a real bug unless there is a precise
-reason that the detector lacks the relevant edge.</p>
+<h1 id="stdhashcrc32c"><code>std::hash::crc32c</code><a class="headerlink" href="#stdhashcrc32c" title="Permanent link">&para;</a></h1>
+<p>Status: experimental</p>
+<p>CRC-32C (Castagnoli) checksums, computed with the CPU's CRC instruction where there is one.</p>
 
 
 

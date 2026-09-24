@@ -3707,7 +3707,7 @@ share these methods:</p>
 </tbody>
 </table>
 <h2 id="concurrency-primitives">Concurrency primitives<a class="headerlink" href="#concurrency-primitives" title="Permanent link">&para;</a></h2>
-<p><code>sync::Mutex&lt;T&gt;::new()</code>:</p>
+<p><code>sync::Mutex::new()</code>:</p>
 <table>
 <thead>
 <tr>
@@ -3726,6 +3726,55 @@ share these methods:</p>
 <td><code>m.unlock()</code></td>
 <td><code>()</code></td>
 <td></td>
+</tr>
+</tbody>
+</table>
+<p><code>sync::RwLock::new(v: i64)</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Returns</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>l.read()</code></td>
+<td><code>i64</code></td>
+<td>Under a read lock.</td>
+</tr>
+<tr>
+<td><code>l.write(v)</code></td>
+<td><code>()</code></td>
+<td>Under a write lock.</td>
+</tr>
+<tr>
+<td><code>l.with_read(f)</code></td>
+<td><code>i64</code></td>
+<td><code>f: Fn(i64) -&gt; i64</code> runs under a read lock.</td>
+</tr>
+<tr>
+<td><code>l.with_write(f)</code></td>
+<td><code>i64</code></td>
+<td>Stores and answers what <code>f</code> answers.</td>
+</tr>
+</tbody>
+</table>
+<p><code>sync::Once::new()</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Returns</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>o.call(f)</code></td>
+<td><code>bool</code></td>
+<td>Runs <code>f</code> once; <code>true</code> on the call that ran it.</td>
 </tr>
 </tbody>
 </table>
@@ -3754,9 +3803,32 @@ share these methods:</p>
 <td><code>()</code></td>
 <td>Blocks until counter reaches zero.</td>
 </tr>
+<tr>
+<td><code>wg.wait_ctx(ctx)</code></td>
+<td><code>bool</code></td>
+<td><code>false</code> when <code>ctx</code> cancelled the wait.</td>
+</tr>
 </tbody>
 </table>
-<p><code>sync::AtomicI64::new(initial)</code>:</p>
+<p><code>sync::Barrier::new(n)</code>:</p>
+<table>
+<thead>
+<tr>
+<th>Method</th>
+<th>Returns</th>
+<th>Notes</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>b.wait()</code></td>
+<td><code>()</code></td>
+<td>Blocks until <code>n</code> participants arrive.</td>
+</tr>
+</tbody>
+</table>
+<p><code>sync::AtomicI64::new(v)</code>, <code>sync::AtomicI32::new(v)</code>, <code>sync::AtomicU64::new(v)</code>
+(each holding its own type <code>T</code>) and <code>sync::AtomicBool::new(v)</code>:</p>
 <table>
 <thead>
 <tr>
@@ -3768,18 +3840,23 @@ share these methods:</p>
 <tbody>
 <tr>
 <td><code>a.load()</code></td>
-<td><code>i64</code></td>
-<td>Relaxed ordering.</td>
+<td><code>T</code></td>
+<td>Sequentially consistent.</td>
 </tr>
 <tr>
 <td><code>a.store(v)</code></td>
 <td><code>()</code></td>
-<td>Relaxed ordering.</td>
+<td>Sequentially consistent.</td>
 </tr>
 <tr>
-<td><code>a.fetch_add(n)</code></td>
-<td><code>i64</code></td>
-<td>Returns previous value.</td>
+<td><code>a.compare_exchange(current, new)</code></td>
+<td><code>bool</code></td>
+<td><code>true</code> when it stored <code>new</code>.</td>
+</tr>
+<tr>
+<td><code>a.fetch_add(n)</code> / <code>a.fetch_sub(n)</code></td>
+<td><code>T</code></td>
+<td>Integer atomics; wraps at <code>T</code>'s width and answers the previous value.</td>
 </tr>
 </tbody>
 </table>

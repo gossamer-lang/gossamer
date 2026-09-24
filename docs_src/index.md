@@ -18,8 +18,6 @@ and it runs on every core you have. See
   drop it into a model's context to teach it idiomatic Gossamer
   (`gos skill-prompt` prints the same text)
 
-Gossamer is pre-1.0.0, so the public API may still change before 1.0.
-
 ## Hello, Gossamer
 
 ```gossamer
