@@ -5,6 +5,12 @@ use crate::jit_stub as jit_backend;
 #[cfg(not(target_arch = "wasm32"))]
 use gossamer_codegen_cranelift as jit_backend;
 
+/// Trace frames one chain of tail calls keeps before it renames its newest
+/// frame instead of adding another. Each is a name and a position, so the
+/// bound keeps a chain that never returns in constant space while a report
+/// on an ordinary chain still names every function it passed through.
+const MAX_TAIL_TRACE_FRAMES: usize = 64;
+
 /// How a spawned goroutine is named in the diagnostic registry.
 struct GoroutineOrigin {
     name: String,
@@ -184,6 +190,7 @@ impl Vm {
                 // this many entries at once; an error intentionally leaves
                 // them available to the caller's traceback renderer.
                 let mut tail_frames = 0usize;
+                let mut tail_preempt = crate::vm::run::VM_PREEMPT_INTERVAL;
                 loop {
                     // A resumed frame has already crossed its entry boundary:
                     // it must neither consume another JIT hot-count tick nor
@@ -392,22 +399,35 @@ impl Vm {
                             // equally safe for a named function and a closure.
                             // Keep the logical frame for diagnostics while
                             // reusing this trampoline iteration.
-                            if tail_frames >= MAX_TAIL_CALL_DEPTH {
-                                // Tail calls share one physical depth slot,
-                                // so the ordinary call-depth guard cannot
-                                // stop an unbounded `fn f() { f() }` loop.
-                                // Retire the active explicit frames exactly
-                                // as the run-error path does, but retain the
-                                // logical names for the diagnostic snapshot.
-                                let released = suspended.len().saturating_add(1);
-                                self.call_depth
-                                    .set(self.call_depth.get().saturating_sub(released));
-                                return Err(RuntimeError::StackOverflow(MAX_TAIL_CALL_DEPTH));
+                            // A tail call replaces its caller, so a chain of
+                            // them runs in one native frame however long it
+                            // is. Its trace keeps a frame per function the
+                            // chain passes through, so a report still names
+                            // each step: a function calling itself renames its
+                            // own frame, and past `MAX_TAIL_TRACE_FRAMES` the
+                            // newest frame is renamed, which keeps the trace
+                            // of an endless chain in constant space.
+                            {
+                                let mut stack = self.call_stack.borrow_mut();
+                                let recursing = tail_frames > 0
+                                    && stack
+                                        .last()
+                                        .is_some_and(|top| top.function == next_chunk.name);
+                                match stack.last_mut() {
+                                    Some(top)
+                                        if recursing || tail_frames >= MAX_TAIL_TRACE_FRAMES =>
+                                    {
+                                        *top = VmCallStackFrame::new(next_chunk.name);
+                                    }
+                                    _ => {
+                                        stack.push(VmCallStackFrame::new(next_chunk.name));
+                                        tail_frames += 1;
+                                    }
+                                }
                             }
-                            self.call_stack
-                                .borrow_mut()
-                                .push(VmCallStackFrame::new(next_chunk.name));
-                            tail_frames += 1;
+                            // A tail call is the loop a self-recursive body
+                            // spells, so it yields where a loop back-edge does.
+                            crate::vm::run::poll_vm_backedge(&mut tail_preempt);
                             chunk = next_chunk;
                             args = tail_args;
                         }

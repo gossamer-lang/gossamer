@@ -490,8 +490,25 @@ thread_local! {
     static ON_GOROUTINE_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
+/// The operation `main`'s thread is waiting in, if any. A deadlock report
+/// names it whichever participant notices, since `main`'s wait is the one the
+/// program is stopped at.
+static MAIN_WAIT_OP: parking_lot::Mutex<Option<&'static str>> = parking_lot::Mutex::new(None);
+
+/// Records `op` as `main`'s current wait when called on `main`'s thread.
+fn note_main_wait(op: Option<&'static str>) {
+    if !ON_GOROUTINE_WORKER.with(std::cell::Cell::get) {
+        *MAIN_WAIT_OP.lock() = op;
+    }
+}
+
 /// Threads currently suspended inside a channel wait.
 static CHANNEL_WAITERS: AtomicUsize = AtomicUsize::new(0);
+
+/// Threads currently suspended joining a cohort's children. A joiner waits
+/// on other participants just as a channel waiter does, so it counts toward
+/// the waits a deadlock needs.
+static JOIN_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
 /// Channels holding a waiter whose operation would complete if it woke now -
 /// a queued value with a receiver for it, or room for a blocked sender's.
@@ -564,19 +581,24 @@ impl ChannelWait {
     /// Call with the channel's own lock held and the caller already counted
     /// among that channel's waiters, so a handoff this caller completes is
     /// visible to the readiness count.
-    pub(crate) fn enter(can_progress: impl FnOnce() -> bool) -> Option<Self> {
+    pub(crate) fn enter(op: &'static str, can_progress: impl FnOnce() -> bool) -> Option<Self> {
         // The browser settles every goroutine at its spawn, so by the time a
         // wait is entered there every sender that will ever run has run.
         if !gossamer_runtime::platform::CAN_BLOCK {
             return None;
         }
+        // Recorded before this wait is counted, so a participant that sees
+        // the count already sees which operation `main` is stopped at.
+        note_main_wait(Some(op));
         // Sampled before the counts: a waiter drops its count one step ahead
         // of retiring the readiness that woke it, so counts read across such a
         // step belong to two different states. `reads_as_terminal` compares
         // this reading again at the end and stands only on a window nothing
         // moved in.
         let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
-        let waiting = CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel) + 1;
+        let waiting = CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel)
+            + 1
+            + JOIN_WAITERS.load(Ordering::Acquire);
         // The program's participants are every outstanding goroutine plus
         // `main` while it is still running. All of them waiting on channels
         // that can hand nothing over means nothing is left to deliver a
@@ -595,6 +617,7 @@ impl ChannelWait {
             return Some(Self { stuck: true });
         }
         if stuck {
+            note_main_wait(None);
             CHANNEL_WAITERS.fetch_sub(1, Ordering::AcqRel);
             // A deadlock is a property of the whole program, not of the
             // goroutine that happens to notice. Ending only this goroutine
@@ -602,7 +625,7 @@ impl ChannelWait {
             // so a worker reports for the program and stops it; the main
             // thread returns instead, and its error carries a call stack.
             if ON_GOROUTINE_WORKER.with(std::cell::Cell::get) {
-                report_fatal_deadlock();
+                report_fatal_deadlock(op);
             }
             return None;
         }
@@ -610,22 +633,68 @@ impl ChannelWait {
     }
 }
 
-/// Prints the deadlock report and stops the program, matching the exit code
-/// a panic produces.
-fn report_fatal_deadlock() -> ! {
+/// Prints the deadlock report and stops the program, as a panic on `main`'s
+/// thread does: the same line and the same exit code.
+fn report_fatal_deadlock(op: &str) -> ! {
     use std::io::Write as _;
+    let op = MAIN_WAIT_OP.lock().unwrap_or(op);
     let mut err = std::io::stderr();
     let _ = writeln!(
         err,
-        "error: runtime error: error[GX0005]: panic: all goroutines are \
-         asleep - deadlock!"
+        "error[GX0005]: panic: all goroutines are asleep - deadlock! ({op} can never complete)"
     );
     let _ = err.flush();
     std::process::exit(101);
 }
 
+/// Marks its thread as suspended joining a cohort for as long as it lives.
+pub(crate) struct JoinWait;
+
+impl JoinWait {
+    /// Enters a cohort join, reporting a deadlock when doing so leaves every
+    /// participant waiting with no channel able to hand anything over: the
+    /// children the join waits for are then waiting too, and nothing is left
+    /// to finish them.
+    ///
+    /// Returns `None` on `main`'s thread in that state, for the caller to
+    /// report with its call stack; a goroutine worker stops the program.
+    pub(crate) fn enter() -> Option<Self> {
+        if !gossamer_runtime::platform::CAN_BLOCK {
+            return Some(Self);
+        }
+        note_main_wait(Some("cohort join"));
+        let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
+        let waiting = JOIN_WAITERS.fetch_add(1, Ordering::AcqRel)
+            + 1
+            + CHANNEL_WAITERS.load(Ordering::Acquire);
+        let main_returned = MAIN_RETURNED.load(Ordering::Acquire);
+        let participants = outstanding_goroutines() + u64::from(!main_returned);
+        // Past `main`, leftover goroutines are abandoned rather than reported,
+        // as a compiled binary leaves them.
+        if !main_returned && reads_as_terminal(waiting as u64, participants, epoch, || false) {
+            note_main_wait(None);
+            JOIN_WAITERS.fetch_sub(1, Ordering::AcqRel);
+            note_progress();
+            if ON_GOROUTINE_WORKER.with(std::cell::Cell::get) {
+                report_fatal_deadlock("cohort join");
+            }
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+impl Drop for JoinWait {
+    fn drop(&mut self) {
+        note_main_wait(None);
+        JOIN_WAITERS.fetch_sub(1, Ordering::AcqRel);
+        note_progress();
+    }
+}
+
 impl Drop for ChannelWait {
     fn drop(&mut self) {
+        note_main_wait(None);
         if self.stuck {
             STUCK_WAITERS.fetch_sub(1, Ordering::AcqRel);
         }

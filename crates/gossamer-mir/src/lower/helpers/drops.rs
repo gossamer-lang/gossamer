@@ -5657,7 +5657,12 @@ fn ensure_slot_children_meta(
     // walk below descends into an aggregate's fields, so an element that is
     // itself such a handle is named here.
     if let Some(container) = handle_container(tcx, elem) {
-        children.push((-1, 0, 0, handle_slot_kind(container)));
+        children.push((
+            gossamer_abi::rc::SLOT_GATE_WHOLE_ELEMENT,
+            0,
+            0,
+            handle_slot_kind(container),
+        ));
         has_direct = true;
     } else if let gossamer_types::TyKind::Adt { def, .. } = tcx.kind_of(elem)
         && (def.local == u32::MAX || def.local == u32::MAX - 1)
@@ -7970,8 +7975,9 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
     // The `gos_rt_result_payload_release` kinds of a carrier's two arms,
     // `(ok, err)`: `1` for a `String`, `2` for a `Vec` / slice, `4` for a
     // counted node (an `errors::Error` cell, a payload-enum node, or a
-    // callable's environment), `0` for an arm whose payload the helper does
-    // not own. `None` when neither arm is one.
+    // callable's environment), `5` / `6` / `7` for a `Map` / `Set` / deque
+    // (see [`table_payload_kind`]), `0` for an arm whose payload the helper
+    // does not own. `None` when neither arm is one.
     let payload_kind = |ty: gossamer_types::Ty| -> Option<(i64, i64)> {
         let arm = |payload: Option<&gossamer_types::Ty>| match payload {
             Some(t) if tcx.is_counted_node(*t) => 4,
@@ -7979,7 +7985,7 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                 TyKind::String => 1,
                 TyKind::Vec(_) | TyKind::Slice(_) => 2,
                 TyKind::DynError => 4,
-                _ => 0,
+                _ => table_payload_kind(tcx, *t).unwrap_or(0),
             },
             None => 0,
         };
@@ -8018,10 +8024,19 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
             counted_answer[destination.local.0 as usize] = true;
         }
     }
+    // A region carrier's counted payload lives in the arena that frees it
+    // wholesale, but a table is always a heap allocation of its own, so the
+    // carrier still owns a table arm.
     let kinds: Vec<Option<(i64, i64)>> = (0..n_locals)
         .map(|i| {
-            if i == 0 || body.locals[i].region || counted_answer[i] {
+            if i == 0 || counted_answer[i] {
                 None
+            } else if body.locals[i].region {
+                payload_kind(body.locals[i].ty).and_then(|(ok, err)| {
+                    let table_only = |kind: i64| if is_table_kind(kind) { kind } else { 0 };
+                    let kinds = (table_only(ok), table_only(err));
+                    (kinds != (0, 0)).then_some(kinds)
+                })
             } else {
                 payload_kind(body.locals[i].ty)
             }
@@ -8031,6 +8046,14 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
         return;
     }
     let is_carrier = |local: usize| local < n_locals && kinds[local].is_some();
+    // A table is not counted, so a carrier holding one either owns it outright
+    // or not at all: it is owned only when a call answered it fresh, and it
+    // leaves the frame only through a mention that moves the whole payload.
+    // Every site that would share the payload instead withdraws the carrier.
+    let holds_table = |local: usize| {
+        local < n_locals
+            && kinds[local].is_some_and(|(ok, err)| is_table_kind(ok) || is_table_kind(err))
+    };
     // A by-value carrier parameter is the caller's value, lent for the call.
     // A mention that hands it on takes a share of its own for what it hands
     // over, and a parameter the body reassigns takes a share at entry and is
@@ -8249,7 +8272,9 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                             withdrawn[dest] = true;
                         }
                     }
-                    if owned_def {
+                    let bare_copy = matches!(rvalue,
+                        Rvalue::Use(Operand::Copy(src)) if src.projection.is_empty());
+                    if owned_def && (bare_copy || !holds_table(dest)) {
                         redefinitions.push((dest, bi, Some(si)));
                     } else {
                         withdrawn[dest] = true;
@@ -8289,8 +8314,15 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                         // The release pass takes no share out of the extraction
                         // of an aliased carrier or of a parameter, so the carrier
                         // keeps its own.
+                        // A table read out of its carrier is always handed
+                        // over whole: the binding owns it (see
+                        // `insert_drops_at_returns`), so the carrier must not.
+                        let moves_table = *name == "gos_rt_result_payload"
+                            && place.projection.is_empty()
+                            && table_payload_kind(tcx, body.locals[dest].ty).is_some();
                         if idx == 0
                             && *name == "gos_rt_result_payload"
+                            && !moves_table
                             && matches!(arg, Operand::Copy(p)
                                 if p.projection.is_empty()
                                     && (p.local.0 as usize) < n_locals
@@ -8298,6 +8330,17 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                                         || aliases.target[p.local.0 as usize]
                                         || is_param(p.local.0 as usize)))
                         {
+                            continue;
+                        }
+                        // Any other runtime entry could keep or free the table
+                        // a carrier holds, so the carrier is left alone.
+                        if let Operand::Copy(p) = arg
+                            && p.projection.is_empty()
+                            && holds_table(p.local.0 as usize)
+                            && !(idx == 0
+                                && (*name == "gos_rt_result_payload" || queries_arm(name)))
+                        {
+                            withdrawn[p.local.0 as usize] = true;
                             continue;
                         }
                         mentions_of(arg, &mut locals);
@@ -8407,12 +8450,40 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                                     .is_some()
                                     || tcx.aggr_copy_meta(ty).is_some()
                             });
+                    // A table carrier is lent to a callee that only reads it,
+                    // handed over by an unwrap that answers the payload whole,
+                    // and withdrawn from any other runtime entry, which could
+                    // keep or free the table.
+                    // A push onto a heap vec clones the element's table in,
+                    // so the carrier keeps the one it holds; a region vec
+                    // owns no children and takes nothing of its own.
+                    let push_copies_table = name.starts_with("gos_rt_vec_push")
+                        && idx == 1
+                        && matches!(args.first(), Some(Operand::Copy(v))
+                            if v.projection.is_empty()
+                                && (v.local.0 as usize) < n_locals
+                                && !body.locals[v.local.0 as usize].region);
+                    if holds_table(l)
+                        && !gossamer_callee
+                        && !renders_args(name)
+                        && !(idx == 0 && queries_arm(name))
+                        && !reads_table_carrier(name)
+                        && !push_copies_table
+                    {
+                        if (moves_table_carrier(name) || passes_table_through(name)) && idx == 0 {
+                            consumed_here.push(l);
+                        } else {
+                            withdrawn[l] = true;
+                        }
+                        continue;
+                    }
                     // A boxed-carrier reader answers words the box still owns
                     // and takes its own share of them, so the fallback it may
                     // answer instead is lent the same way. A Gossamer callee
                     // takes its by-value parameters as borrows it cannot
                     // outlive, so a carrier handed to one stays this frame's.
                     if !is_carrier(l)
+                        || reads_table_carrier(name)
                         || renders_args(name)
                         || (idx == 0 && queries_arm(name))
                         || name.starts_with("gos_rt_vec_push")
@@ -8444,12 +8515,26 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
                 }
                 if is_carrier(dest) {
                     // A carrier read out of a container slot borrows the
-                    // payload the container still owns.
+                    // payload the container still owns, and a table carrier
+                    // is owned only when the call answered its table fresh.
                     if destination.projection.is_empty()
                         && target.is_some()
                         && !answers_borrowed_element(name)
                         && !returns_borrowed_pointer(name)
+                        && (!holds_table(dest)
+                            || answers_owned_table_carrier(callee)
+                            || passes_table_through(name))
                     {
+                        // The answer holds the argument's table, so the two
+                        // share whatever the walk decides for either.
+                        if holds_table(dest)
+                            && passes_table_through(name)
+                            && let Some(Operand::Copy(src)) = args.first()
+                            && src.projection.is_empty()
+                            && is_carrier(src.local.0 as usize)
+                        {
+                            copies.push((dest, src.local.0 as usize));
+                        }
                         redefinitions.push((dest, bi, None));
                     } else {
                         withdrawn[dest] = true;
@@ -8584,6 +8669,10 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
             Site::Call(_) => None,
         };
         match shared_copy {
+            Some(dest) if holds_table(local) => {
+                withdrawn[local] = true;
+                withdrawn[dest] = true;
+            }
             Some(dest) => {
                 views.push((dest, site));
                 copies.retain(|&pair| pair != (dest, local));
@@ -8595,6 +8684,30 @@ pub(crate) fn own_carrier_payloads(body: &mut Body, tcx: &gossamer_types::TyCtxt
         }
     }
     consumes = kept_consumes;
+    // A table cannot be shared, so a table carrier on any site that takes a
+    // share of its payload is left to whatever holds the table now.
+    for &(local, _) in views.iter().chain(&escapes) {
+        if holds_table(local) {
+            withdrawn[local] = true;
+        }
+    }
+    for &(local, _, _) in &aggregate_shares {
+        if holds_table(local) {
+            withdrawn[local] = true;
+        }
+    }
+    for &(local, _, _) in &handed_shares {
+        if holds_table(local) {
+            withdrawn[local] = true;
+        }
+    }
+    for local in (0..n_locals).filter(|&l| is_param(l) && holds_table(l)) {
+        withdrawn[local] = true;
+    }
+    views.retain(|&(local, _)| !holds_table(local));
+    escapes.retain(|&(local, _)| !holds_table(local));
+    aggregate_shares.retain(|&(local, _, _)| !holds_table(local));
+    handed_shares.retain(|&(local, _, _)| !holds_table(local));
     // Two carriers that exchange a value share its fate.
     loop {
         let mut changed = false;
@@ -9265,6 +9378,10 @@ pub(crate) fn free_overwritten_ctor_values(
             && destination.projection.is_empty()
             && (destination.local.0 as usize) < n
             && !rebound[destination.local.0 as usize]
+            && !matches!(
+                tcx.kind_of(body.locals[destination.local.0 as usize].ty),
+                gossamer_types::TyKind::Adt { def, .. } if def.local < u32::MAX - 64
+            )
             && let Some(free) = ctor_free(name.as_str())
         {
             ctor_at.insert(destination.local.0, free);
@@ -9683,9 +9800,93 @@ fn answers_owned_map(name: &str) -> bool {
             | "BTreeMap::new"
             | "collections::BTreeMap::new"
     ) || name.starts_with("gos_rt_map_range_")
-        || name.starts_with("gos_rt_map_pop")
+        || takes_element_out(name)
         || name.starts_with("gos_rt_chan_recv")
         || name.starts_with("gos_rt_chan_try_recv")
+}
+
+/// Whether `name` answers, in a carrier, an element it took out of its
+/// container, which no longer holds it: a pop from a `Vec`, a deque (and so a
+/// `Queue` or `Stack`), or an ordered map, or a `Vec` remove.
+fn takes_element_out(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_vec_pop_opt"
+            | "gos_rt_vec_remove_safe"
+            | "gos_rt_deque_pop_front"
+            | "gos_rt_deque_pop_back"
+    ) || name.starts_with("gos_rt_map_pop")
+}
+
+/// The `gos_rt_result_payload_release` kind of a table payload - `5` a `Map`,
+/// `6` a `Set`, `7` a `Deque` / `Queue` / `Stack` - or `None` for any other
+/// type. Tables are not counted: a carrier holding one owns it outright.
+pub(crate) fn table_payload_kind(
+    tcx: &gossamer_types::TyCtxt,
+    ty: gossamer_types::Ty,
+) -> Option<i64> {
+    match tcx.kind_of(ty) {
+        gossamer_types::TyKind::HashMap { .. } => Some(5),
+        _ => match handle_container(tcx, ty) {
+            Some(HandleContainer::Set) => Some(6),
+            Some(HandleContainer::Deque) => Some(7),
+            Some(HandleContainer::Heap) | None => None,
+        },
+    }
+}
+
+/// Whether a carrier payload kind names a table (see [`table_payload_kind`]).
+const fn is_table_kind(kind: i64) -> bool {
+    matches!(kind, 5..=7)
+}
+
+/// The free a table payload's binding owes, or `None` for a non-table type.
+fn table_free(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<&'static str> {
+    match table_payload_kind(tcx, ty)? {
+        5 => Some("gos_rt_map_free"),
+        6 => Some("gos_rt_set_free"),
+        _ => Some("gos_rt_deque_free"),
+    }
+}
+
+/// Whether a call's answer is a carrier whose table the caller owns: a
+/// Gossamer function normalises the carrier it answers (see
+/// [`own_returned_map_payloads`]), and a receive, pop, or remove hands over a
+/// table its source no longer holds.
+fn answers_owned_table_carrier(callee: &Operand) -> bool {
+    match callee {
+        Operand::FnRef { .. } => true,
+        Operand::Const(ConstValue::Str(name)) => {
+            takes_element_out(name)
+                || name.starts_with("gos_rt_chan_recv")
+                || name.starts_with("gos_rt_chan_try_recv")
+        }
+        _ => false,
+    }
+}
+
+/// Runtime entries that answer their carrier argument's table arm unchanged in
+/// a carrier of their own: `opt.ok_or(e)` and `opt.ok_or_else(f)`.
+fn passes_table_through(name: &str) -> bool {
+    matches!(name, "gos_rt_result_ok_or" | "gos_rt_result_ok_or_else")
+}
+
+/// Runtime entries that read a table carrier and keep nothing of it:
+/// `unwrap_or` on an `Option<Map>` answers a map of the caller's own.
+fn reads_table_carrier(name: &str) -> bool {
+    name == "gos_rt_result_unwrap_or_map"
+}
+
+/// Runtime entries that answer a table carrier's payload whole, which the
+/// binding they define then owns.
+fn moves_table_carrier(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_option_unwrap"
+            | "gos_rt_result_unwrap"
+            | "gos_rt_option_expect"
+            | "gos_rt_result_expect"
+    )
 }
 
 /// A carrier a function answers owns the map it holds, so the frame that
@@ -10060,15 +10261,7 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         } = &block.terminator
             && destination.projection.is_empty()
             && (destination.local.0 as usize) < n_all
-            && match callee {
-                Operand::FnRef { .. } => true,
-                Operand::Const(ConstValue::Str(name)) => {
-                    name.starts_with("gos_rt_chan_recv")
-                        || name.starts_with("gos_rt_chan_try_recv")
-                        || name.starts_with("gos_rt_map_pop")
-                }
-                _ => false,
-            }
+            && answers_owned_table_carrier(callee)
         {
             owned_carrier[destination.local.0 as usize] = true;
         }
@@ -10091,28 +10284,48 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                 changed = true;
             }
         }
+        for block in &body.blocks {
+            if let Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                args,
+                destination,
+                ..
+            } = &block.terminator
+                && passes_table_through(name)
+                && destination.projection.is_empty()
+                && (destination.local.0 as usize) < n_all
+                && !owned_carrier[destination.local.0 as usize]
+                && matches!(args.first(), Some(Operand::Copy(src))
+                    if src.projection.is_empty()
+                        && (src.local.0 as usize) < n_all
+                        && owned_carrier[src.local.0 as usize])
+            {
+                owned_carrier[destination.local.0 as usize] = true;
+                changed = true;
+            }
+        }
         if !changed {
             break;
         }
     }
-    let takes_owned_map = |rvalue: &Rvalue, dest: usize| -> bool {
-        matches!(tcx.kind_of(body.locals[dest].ty), TyKind::HashMap { .. })
-            && matches!(
-                rvalue,
-                Rvalue::CallIntrinsic { name: "gos_rt_result_payload", args }
-                    if matches!(
-                        args.first(),
-                        Some(Operand::Copy(c))
-                            if c.projection.is_empty()
-                                && (c.local.0 as usize) < n_all
-                                && owned_carrier[c.local.0 as usize]
-                    )
-            )
+    // A table read out of a carrier this frame owns is this frame's to free.
+    let takes_owned_table = |rvalue: &Rvalue, dest: usize| -> Option<&'static str> {
+        let free = table_free(tcx, body.locals[dest].ty)?;
+        matches!(
+            rvalue,
+            Rvalue::CallIntrinsic { name: "gos_rt_result_payload", args }
+                if matches!(
+                    args.first(),
+                    Some(Operand::Copy(c))
+                        if c.projection.is_empty()
+                            && (c.local.0 as usize) < n_all
+                            && owned_carrier[c.local.0 as usize]
+                )
+        )
+        .then_some(free)
     };
 
     // Pass 1: discover constructor-allocated locals. Track every
-    // assignment that *might* invalidate ownership (re-assignment,
-    // projection writes) so we can disqualify aliasing patterns. Track every
     // assignment that *might* invalidate ownership (re-assignment,
     // projection writes) so we can disqualify aliasing patterns.
     //
@@ -10152,8 +10365,10 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                 if owner_ctor[idx].is_some() && !matches!(rvalue, Rvalue::CallIntrinsic { .. }) {
                     owner_ctor[idx] = None;
                 }
-                if owner_ctor[idx].is_none() && takes_owned_map(rvalue, idx) {
-                    owner_ctor[idx] = Some("gos_rt_map_free");
+                if owner_ctor[idx].is_none()
+                    && let Some(free) = takes_owned_table(rvalue, idx)
+                {
+                    owner_ctor[idx] = Some(free);
                 }
             }
         }
@@ -10206,6 +10421,23 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                             && (c.local.0 as usize) < n_all
                             && owned_carrier[c.local.0 as usize]
                 );
+            // A `Set` or deque unwrapped out of a carrier this frame owns is
+            // handed over whole, as a map is.
+            let unwrapped_table = match callee {
+                Operand::Const(ConstValue::Str(s)) if moves_table_carrier(s) => {
+                    match args.first() {
+                        Some(Operand::Copy(c))
+                            if c.projection.is_empty()
+                                && (c.local.0 as usize) < n_all
+                                && owned_carrier[c.local.0 as usize] =>
+                        {
+                            table_free(tcx, dest_ty)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
             let borrowed_callee = unwraps_lent_map
                 || matches!(
                     callee,
@@ -10229,10 +10461,19 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                     TyKind::HashMap { .. } => Some("gos_rt_map_free"),
                     TyKind::Vec(_) => Some("gos_rt_vec_free"),
                     TyKind::Slice(_) if gossamer_callee => Some("gos_rt_vec_free"),
+                    _ if unwrapped_table.is_some() => unwrapped_table,
                     _ => iterator_free(dest_ty, callee),
                 }
             };
-            if let Operand::Const(ConstValue::Str(name)) = callee {
+            // A constructor the program declares shares its spelling with a
+            // standard one (`Stack::new`) but builds a value of its own type.
+            let program_value = matches!(
+                tcx.kind_of(dest_ty),
+                TyKind::Adt { def, .. } if def.local < u32::MAX - 64
+            );
+            if let Operand::Const(ConstValue::Str(name)) = callee
+                && !program_value
+            {
                 if let Some(free) = ctor_to_free(name.as_str()) {
                     if owner_ctor[idx].is_none() {
                         owner_ctor[idx] = Some(free);
@@ -11189,6 +11430,80 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
         }
     }
 
+    // A table the frame owns, wrapped for the last time into an `Ok` / `Some`
+    // the frame answers, leaves with the answer on that path only. It keeps its
+    // own reclaim and is emptied right after the wrap, so the reclaim frees it
+    // on a path that answers something else and is a no-op on the one that
+    // hands it over.
+    let mut wrapped_tables: Vec<(usize, Local, Local)> = Vec::new();
+    {
+        let mut edge_count = vec![0usize; body.locals.len()];
+        // Mentions as an operand of an intrinsic or an aggregate, any of which
+        // could carry the table somewhere this walk does not follow.
+        let mut held_in = vec![0usize; body.locals.len()];
+        for stmt in body.blocks.iter().flat_map(|b| &b.stmts) {
+            if let StatementKind::Assign {
+                rvalue:
+                    Rvalue::CallIntrinsic { args: operands, .. } | Rvalue::Aggregate { operands, .. },
+                ..
+            } = &stmt.kind
+            {
+                for op in operands {
+                    if let Operand::Copy(p) = op
+                        && let Some(count) = held_in.get_mut(p.local.0 as usize)
+                    {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+        for edges in &copy_edges_to {
+            for src in edges {
+                if let Some(count) = edge_count.get_mut(src.0 as usize) {
+                    *count += 1;
+                }
+            }
+        }
+        for (bi, block) in body.blocks.iter().enumerate() {
+            for (si, stmt) in block.stmts.iter().enumerate() {
+                let StatementKind::Assign {
+                    place,
+                    rvalue:
+                        Rvalue::CallIntrinsic {
+                            name: "gos_rt_result_new",
+                            args,
+                        },
+                } = &stmt.kind
+                else {
+                    continue;
+                };
+                let Some(Operand::Copy(p)) = args.get(1) else {
+                    continue;
+                };
+                let payload = p.local.0 as usize;
+                if !place.projection.is_empty()
+                    || !p.projection.is_empty()
+                    || payload <= arity
+                    || payload >= owner_ctor.len()
+                    || !moved_into_return[place.local.0 as usize]
+                    || edge_count[payload] != 1
+                    || held_in[payload] != 1
+                    || aliased[payload]
+                    || !owner_ctor[payload].is_some_and(|free| {
+                        matches!(
+                            free,
+                            "gos_rt_map_free" | "gos_rt_set_free" | "gos_rt_deque_free"
+                        )
+                    })
+                    || !copy_is_last_use(body, (bi, si), p.local)
+                {
+                    continue;
+                }
+                moved_into_return[payload] = false;
+                wrapped_tables.push((bi, place.local, p.local));
+            }
+        }
+    }
     // (`gos_rt_vec_push` element-ownership transfer is handled inside
     // the fixpoint above so it composes with the `gos_store` rule for
     // arbitrarily deep enum/container nesting.)
@@ -11559,6 +11874,40 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
                 },
             );
         }
+    }
+
+    // Empty each table right after the wrap that hands it to the answer, found
+    // by its content for the same reason as the moved origins below.
+    for &(block_idx, carrier, table) in &wrapped_tables {
+        let Some(block) = body.blocks.get_mut(block_idx) else {
+            continue;
+        };
+        let Some(wrap_idx) = block.stmts.iter().position(|stmt| {
+            matches!(
+                &stmt.kind,
+                StatementKind::Assign {
+                    place,
+                    rvalue: Rvalue::CallIntrinsic { name: "gos_rt_result_new", args },
+                } if place.projection.is_empty()
+                    && place.local == carrier
+                    && matches!(args.get(1), Some(Operand::Copy(p))
+                        if p.projection.is_empty() && p.local == table)
+            )
+        }) else {
+            continue;
+        };
+        let span = block.stmts[wrap_idx].span;
+        block.stmts.insert(
+            wrap_idx + 1,
+            Statement {
+                kind: StatementKind::Assign {
+                    place: Place::local(table),
+                    rvalue: Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                },
+                span,
+                inlined: None,
+            },
+        );
     }
 
     // Empty each moved origin right after the copy that moved it. The copy is

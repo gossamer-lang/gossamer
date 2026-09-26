@@ -1,0 +1,25 @@
+// A unit value is an element, a tuple field, and a payload like any other:
+// it renders as `()`, compares equal to itself, and sorts in place.
+
+fn unit() {}
+fn main() {
+    let mut v: Vec<()> = #[]
+    v.push(())
+    v.push(unit())
+    println("{:?} {}", v, v.len())
+    let t = (1, (), "x")
+    println("{:?}", t)
+    let o: Option<()> = Some(())
+    println("{:?}", o)
+    let r: Result<(), String> = Ok(())
+    println("{:?}", r)
+    let pairs: Vec<(i64, ())> = #[(1, ()), (2, ())]
+    println("{:?}", pairs)
+    println("{}", v == #[(), ()])
+    more()
+}
+fn more() {
+    let mut pairs = #[(2, ()), (1, ())]
+    pairs.sort()
+    println("{:?} {}", pairs, (1, ()) == (1, ()))
+}

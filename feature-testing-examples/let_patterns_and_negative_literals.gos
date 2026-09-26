@@ -1,0 +1,48 @@
+fn make(k: i64) -> Fn(i64) -> i64 {
+    let base = k * 2
+    |x| x + base
+}
+
+fn pair(xs: Vec<i64>) -> i64 {
+    let [mut a, b] = [xs[0], xs[1]]
+    a += 10
+    let Some(first) = xs.first() else {
+        return -1
+    }
+    let [head, ..rest] = xs else {
+        return -2
+    }
+    a + b + first + head + rest.len()
+}
+
+struct Walker { n: i64 }
+
+impl Iterator for Walker {
+    type Item = i64
+    fn next(&mut self) -> Option<i64> {
+        if self.n == 0 {
+            None
+        } else {
+            self.n -= 1
+            Some(self.n)
+        }
+    }
+}
+
+fn main() {
+    println("{}", make(3)(4))
+    println("{}", pair(#[1, 2, 3]))
+    let lows = [-128i8, 127i8]
+    println("{} {} {}", lows[0], -32768i16, -9223372036854775808i64)
+    let mut total = 0
+    let w = Walker { n: 4 }
+    for v in w {
+        total += v
+    }
+    println("{}", total)
+    let arr = [1, 2]
+    let [p, q] = arr
+    println("{} {}", p, q)
+    let x = while false {}
+    println("{:?}", x)
+}

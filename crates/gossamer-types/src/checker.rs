@@ -94,8 +94,11 @@ impl TypeChecker<'_> {
         self.check_deferred_type_mismatches();
         self.check_deferred_conversion_targets();
         self.check_deferred_into_conversions();
+        self.check_deferred_try_conversions();
         self.check_deferred_literal_type_mismatches();
         self.check_deferred_scalar_method_rejections();
+        self.record_deferred_method_owners();
+        self.check_deferred_binding_callbacks();
         self.check_deferred_wrapping_operands();
         self.check_deferred_mutating_receivers();
         self.check_deferred_private_fields();
@@ -831,12 +834,23 @@ struct TypeChecker<'a> {
     /// conversion exists can only be decided once unification has pinned
     /// it.
     deferred_into_conversions: Vec<(Ty, Ty, Span)>,
+    /// `(operand error, enclosing error, span)` for each `?` on a `Result`,
+    /// audited once unification has settled both types.
+    deferred_try_conversions: Vec<(Ty, Ty, Span)>,
     deferred_literal_type_mismatches: Vec<(Ty, &'static str, Span)>,
     /// `x.name()` on an unsuffixed numeric literal, recorded as
     /// (receiver, method, span). The literal's width is pinned by
     /// defaulting after the last item is checked, so whether the receiver
     /// is a scalar - and which scalar to name - is only known then.
     deferred_scalar_method_rejections: Vec<(Ty, String, Span)>,
+    /// Method calls on an unsuffixed numeric literal, recorded as (call,
+    /// receiver, method). Which `impl` block the call reaches depends on the
+    /// width defaulting gives the literal, so the owner is recorded then.
+    deferred_method_owners: Vec<(NodeId, Ty, String)>,
+    /// Closures handed to a `[rust-bindings]` callback parameter, as (type,
+    /// callee, span). A binding's signature does not name the closure's
+    /// types, so they are checked once inference has settled them.
+    deferred_binding_callbacks: Vec<(Ty, String, Span)>,
     /// Wrapping arithmetic operands still being inferred when checked, with
     /// the other operand's type, the operator, and its span. Literal defaulting
     /// settles them, so the integer requirement is checked afterwards.
@@ -1208,8 +1222,11 @@ impl<'a> TypeChecker<'a> {
             catalog_params_as_params: false,
             deferred_type_mismatches: Vec::new(),
             deferred_into_conversions: Vec::new(),
+            deferred_try_conversions: Vec::new(),
             deferred_literal_type_mismatches: Vec::new(),
             deferred_scalar_method_rejections: Vec::new(),
+            deferred_method_owners: Vec::new(),
+            deferred_binding_callbacks: Vec::new(),
             deferred_wrapping_operands: Vec::new(),
             deferred_conversion_targets: Vec::new(),
             enum_variant_payloads: HashMap::new(),
@@ -1712,9 +1729,10 @@ impl<'a> TypeChecker<'a> {
         };
         let self_ty = impl_self_ty_name(decl);
         for item in &decl.items {
-            let name = match item {
-                ImplItem::Fn(fn_decl) => fn_decl.name.name.clone(),
-                ImplItem::Type { name, .. } | ImplItem::Const { name, .. } => name.name.clone(),
+            let (name, kind) = match item {
+                ImplItem::Fn(fn_decl) => (fn_decl.name.name.clone(), "fn"),
+                ImplItem::Type { name, .. } => (name.name.clone(), "type"),
+                ImplItem::Const { name, .. } => (name.name.clone(), "const"),
             };
             if declared.contains(&name) {
                 continue;
@@ -1724,6 +1742,7 @@ impl<'a> TypeChecker<'a> {
                     trait_name: trait_name.clone(),
                     ty: self_ty.clone(),
                     item: name,
+                    kind,
                     declared: declared.clone(),
                 },
                 span,
@@ -1745,8 +1764,15 @@ impl<'a> TypeChecker<'a> {
             );
             return Some(names);
         }
-        builtin_trait_impl_items(trait_name)
-            .map(|items| items.iter().map(ToString::to_string).collect())
+        let mut names: Vec<String> = builtin_trait_impl_items(trait_name)?
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        // An iterator may state the element type it yields.
+        if trait_name == "Iterator" {
+            names.push("Item".to_string());
+        }
+        Some(names)
     }
 
     /// Reports a second `impl Trait for Type` for a pair one block already
@@ -4819,7 +4845,7 @@ impl<'a> TypeChecker<'a> {
         });
         if declared_ret.is_some() && !discards_tail {
             self.record_fn_item_coercion(body, ret);
-            self.unify(ret, body_ty, body.span);
+            self.unify(ret, body_ty, body_value_span(body));
         }
     }
 
@@ -6036,13 +6062,6 @@ impl<'a> TypeChecker<'a> {
                 }
                 TyKind::Var(_) => {
                     let result = self.fresh();
-                    if std::env::var_os("GOS_DBG_IDX").is_some() {
-                        eprintln!(
-                            "[idx] deferred base={:?} result={:?}",
-                            self.tcx.kind_of(cur),
-                            self.tcx.kind_of(result)
-                        );
-                    }
                     self.deferred_structural.push(DeferredStructural {
                         ty: cur,
                         span,
@@ -6073,6 +6092,19 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_call(&mut self, callee: &Expr, args: &[Expr], expected: Expectation) -> Ty {
+        if let (ExprKind::Path(path), [source]) = (&callee.kind, args)
+            && path.segments.len() == 1
+            && path.segments[0].name.name == "__gos_codegen"
+        {
+            // `codegen(src)` is replaced by the code `src` spells before the
+            // program is checked for real, so its type is whatever that code
+            // answers where it is spliced; only the source text is checked
+            // here.
+            let string = self.tcx.string_ty();
+            let got = self.check_expr_expecting(source, Expectation::HasType(string));
+            self.unify(string, got, source.span);
+            return self.fresh();
+        }
         self.check_overlapping_mutable_call_args(args);
         if matches!(callee.kind, ExprKind::Path(_)) {
             self.callee_path_nodes.insert(callee.id);
@@ -6910,6 +6942,32 @@ impl<'a> TypeChecker<'a> {
             return Some(self.result_adt_ty(vec_u8, e));
         }
         let user_callee = matches!(self.tcx.kind(resolved), Some(TyKind::FnDef { .. }));
+        if !user_callee && let Some(item) = self.external_binding_item(module, last) {
+            let callee_name = if module.is_empty() {
+                last.to_string()
+            } else {
+                format!("{}::{last}", module.join("::"))
+            };
+            for (param, (arg_ty, arg)) in item.params.iter().zip(arg_tys.iter().zip(args)) {
+                if matches!(param, gossamer_resolve::BindingType::Callback(..)) {
+                    // A named function crosses as a callable value, so the
+                    // argument carries the function's signature rather than
+                    // the item itself.
+                    let arg_ty = match self.fn_item_value_ty(*arg_ty) {
+                        Some(callable) => {
+                            self.record(arg.id, callable);
+                            callable
+                        }
+                        None => *arg_ty,
+                    };
+                    self.deferred_binding_callbacks
+                        .push((arg_ty, callee_name.clone(), arg.span));
+                }
+            }
+            if let Some(ty) = self.binding_ty(&item.ret) {
+                return Some(ty);
+            }
+        }
         if let Some(ty) = self.check_stdlib_module_ret_ty(
             (module, last, user_callee),
             callee,
@@ -9232,6 +9290,18 @@ impl<'a> TypeChecker<'a> {
                 let s = self.tcx.string_ty();
                 self.option_adt_ty(s)
             }
+            Shape::MutStr => {
+                let s = self.tcx.string_ty();
+                self.tcx.intern(TyKind::Ref {
+                    mutability: Mutbl::Mut,
+                    inner: s,
+                })
+            }
+            Shape::ResultI64 => {
+                let i = self.tcx.int_ty(IntTy::I64);
+                let err = self.tcx.dyn_error_ty();
+                self.result_adt_ty(i, err)
+            }
             Shape::DoneChannel => {
                 let i = self.tcx.int_ty(IntTy::I64);
                 self.tcx.intern(TyKind::Receiver(i))
@@ -9323,10 +9393,18 @@ impl<'a> TypeChecker<'a> {
         if method == "clone" && args.is_empty() {
             return Some(resolved);
         }
-        let row = HANDLE_METHODS
-            .iter()
-            .find(|(o, m, ..)| *o == owner && *m == method && *m != "new")
-            .filter(|(_, m, ..)| !matches!(*m, "background" | "with_cancel" | "with_timeout"));
+        // A method may be written with more than one arity (`read_line()`
+        // answers the next line, `read_line(&mut buf)` appends to one), so
+        // the row whose parameters match the call answers first.
+        let rows = || {
+            HANDLE_METHODS
+                .iter()
+                .filter(|(o, m, ..)| *o == owner && *m == method && *m != "new")
+                .filter(|(_, m, ..)| !matches!(*m, "background" | "with_cancel" | "with_timeout"))
+        };
+        let row = rows()
+            .find(|(_, _, params, _)| params.len() == args.len())
+            .or_else(|| rows().next());
         let Some((_, _, params, ret)) = row else {
             let error = self.unresolved_method_call(owner, method, resolved, args.len());
             self.emit(error, span);
@@ -9980,6 +10058,84 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// The `[rust-bindings]` item a call path names: `module::item`, a path
+    /// through a module's last segment (`echo::shout` for `tools::echo`), or
+    /// a bare name a `use` bound to one.
+    fn external_binding_item(
+        &self,
+        module: &[&str],
+        last: &str,
+    ) -> Option<gossamer_resolve::ExternalItem> {
+        if module.is_empty() {
+            return self
+                .import_targets
+                .iter()
+                .filter(|((_, bound), _)| bound == last)
+                .find_map(|(_, full)| gossamer_resolve::lookup_external_item(&full.join("::")));
+        }
+        let joined = format!("{}::{last}", module.join("::"));
+        if let Some(item) = gossamer_resolve::lookup_external_item(&joined) {
+            return Some(item);
+        }
+        let [leading] = module else {
+            return None;
+        };
+        gossamer_resolve::all_external_modules()
+            .into_iter()
+            .filter(|m| m.path.rsplit("::").next() == Some(*leading))
+            .find_map(|m| m.items.into_iter().find(|item| item.name == last))
+    }
+
+    /// The type a binding value of shape `t` has in the program, or `None`
+    /// for a shape whose program type the signature alone does not name (a
+    /// callback, a declared arm set, an untyped value).
+    fn binding_ty(&mut self, t: &gossamer_resolve::BindingType) -> Option<Ty> {
+        use gossamer_resolve::BindingType as B;
+        Some(match t {
+            B::Unit => self.tcx.unit(),
+            B::Bool => self.tcx.bool_ty(),
+            B::I64 => self.tcx.int_ty(IntTy::I64),
+            B::F64 => self.tcx.float_ty(FloatTy::F64),
+            B::Char => self.tcx.char_ty(),
+            B::String => self.tcx.string_ty(),
+            B::Bytes => {
+                let byte = self.tcx.int_ty(IntTy::U8);
+                self.tcx.intern(TyKind::Slice(byte))
+            }
+            B::Tuple(elems) => {
+                let elems = elems
+                    .iter()
+                    .map(|elem| self.binding_ty(elem))
+                    .collect::<Option<Vec<_>>>()?;
+                self.tcx.intern(TyKind::Tuple(elems))
+            }
+            B::Vec(elem) => {
+                let elem = self.binding_ty(elem)?;
+                self.tcx.intern(TyKind::Vec(elem))
+            }
+            B::Option(payload) => {
+                let payload = self.binding_ty(payload)?;
+                self.option_adt_ty(payload)
+            }
+            B::Result(ok, err) => {
+                let ok = self.binding_ty(ok)?;
+                let err = self.binding_ty(err)?;
+                self.result_adt_ty(ok, err)
+            }
+            B::Map(key, value) => {
+                let key = self.binding_ty(key)?;
+                let value = self.binding_ty(value)?;
+                self.tcx.intern(TyKind::HashMap {
+                    key,
+                    value,
+                    ordered: false,
+                })
+            }
+            B::Variant(arms) if arms.is_empty() => self.tcx.intern(TyKind::DynValue),
+            B::Variant(_) | B::Callback(..) | B::Opaque(_) | B::Any => return None,
+        })
+    }
+
     fn check_stdlib_module_ret_ty(
         &mut self,
         (module, last, user_callee): (&[&str], &str, bool),
@@ -9988,6 +10144,12 @@ impl<'a> TypeChecker<'a> {
         arg_tys: &[Ty],
         expected: Expectation,
     ) -> Option<Ty> {
+        // A `[rust-bindings]` module answers its own items, whatever standard
+        // type shares its name: a binding's opaque `Counter` is not
+        // `metrics::Counter`.
+        if gossamer_resolve::lookup_external_module(&module.join("::")).is_some() {
+            return None;
+        }
         if let Some(ty) = self.check_qualified_map_accessor_ret(module, last, arg_tys) {
             return Some(ty);
         }
@@ -10405,13 +10567,9 @@ impl<'a> TypeChecker<'a> {
             );
         }
         let ty = match name {
-            "__concat"
-            | "__debug"
-            | "__fmt_prec"
-            | "__fmt_pad"
-            | "__fmt_radix"
-            | "__fmt_upper"
-            | "__gos_strconv_quote" => {
+            "__concat" | "__debug" | "__fmt_prec" | "__fmt_pad" | "__fmt_radix" | "__fmt_upper"
+            | "__gos_debug_quote" | "__gos_f32_display" | "__gos_f32_debug"
+            | "__gos_dyn_display" | "__gos_dyn_debug" => {
                 for ty in arg_tys {
                     let resolved = self.infer.resolve(self.tcx, *ty);
                     if matches!(
@@ -10465,7 +10623,7 @@ impl<'a> TypeChecker<'a> {
                 };
                 self.tcx.intern(TyKind::JoinHandle(elem))
             }
-            "min" | "max" | "clamp" => self.scalar_bound_intrinsic_ty(name, arg_tys)?,
+            "min" | "max" | "clamp" => self.scalar_bound_intrinsic_ty(name, arg_tys, span)?,
             "Some" => {
                 let payload = arg_tys.first().copied().unwrap_or_else(|| self.fresh());
                 self.option_adt_ty(payload)
@@ -10495,7 +10653,7 @@ impl<'a> TypeChecker<'a> {
     /// them here is what lets a binding of the result, and a format site
     /// reading it, know it is a `Vec` or a `u64` rather than an unconstrained
     /// variable.
-    fn scalar_bound_intrinsic_ty(&mut self, name: &str, arg_tys: &[Ty]) -> Option<Ty> {
+    fn scalar_bound_intrinsic_ty(&mut self, name: &str, arg_tys: &[Ty], span: Span) -> Option<Ty> {
         match (name, arg_tys.len()) {
             ("min" | "max", 1) => {
                 let seq = self.peel_resolved_refs(arg_tys[0]);
@@ -10507,7 +10665,7 @@ impl<'a> TypeChecker<'a> {
                 };
                 Some(self.option_adt_ty(elem))
             }
-            ("min" | "max", 2) | ("clamp", 3) => self.scalar_bound_call_ty(arg_tys),
+            ("min" | "max", 2) | ("clamp", 3) => self.scalar_bound_call_ty(arg_tys, span),
             _ => None,
         }
     }
@@ -10525,25 +10683,38 @@ impl<'a> TypeChecker<'a> {
     /// scalar type, where one of them names it. An unsigned 64-bit operand
     /// decides, since its values reach past what a signed word orders; an
     /// integer literal beside it takes that type at run time too.
-    fn scalar_bound_call_ty(&mut self, arg_tys: &[Ty]) -> Option<Ty> {
+    fn scalar_bound_call_ty(&mut self, arg_tys: &[Ty], span: Span) -> Option<Ty> {
         let operands: Vec<Ty> = arg_tys
             .iter()
             .map(|ty| self.peel_resolved_refs(*ty))
             .collect();
-        if let Some(unsigned) = operands.iter().copied().find(|ty| {
-            matches!(
-                self.tcx.kind(*ty),
-                Some(TyKind::Int(IntTy::U64 | IntTy::Usize))
-            )
-        }) {
-            return Some(unsigned);
-        }
+        // Every operand is one value of one type: `min(2.5, 3)` and
+        // `max(a_u8, b_i64)` are mismatches, as they would be for `a < b`.
         let first = *operands.first()?;
-        matches!(
-            self.tcx.kind(first),
-            Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Char)
-        )
-        .then_some(first)
+        for other in &operands[1..] {
+            self.unify(first, *other, span);
+        }
+        let bound = self.peel_resolved_refs(first);
+        let orderable = match self.tcx.kind(bound) {
+            Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Char) => true,
+            Some(TyKind::Var(_)) => {
+                self.infer.is_integer_constrained_var(self.tcx, bound)
+                    || self.infer.is_float_literal_var(self.tcx, bound)
+            }
+            Some(TyKind::Error) => true,
+            _ => false,
+        };
+        if !orderable {
+            let found = self.render_public_ty(bound);
+            self.emit(
+                TypeError::TypeMismatch {
+                    expected: "a number or char".to_string(),
+                    found,
+                },
+                span,
+            );
+        }
+        Some(bound)
     }
 
     fn channel_tuple_ty(&mut self) -> Ty {
@@ -12062,10 +12233,10 @@ impl<'a> TypeChecker<'a> {
                 call_span,
             );
         }
-        if self.reject_collection_method_arity(resolved, method, arg_count, receiver.span) {
+        if self.reject_collection_method_arity(resolved, method, arg_count, name_span) {
             return self.tcx.error_ty();
         }
-        if self.reject_unknown_deque_method(resolved, method, arg_count, receiver.span) {
+        if self.reject_unknown_deque_method(resolved, method, arg_count, name_span) {
             return self.tcx.error_ty();
         }
         if let Some(ty) =
@@ -12117,7 +12288,7 @@ impl<'a> TypeChecker<'a> {
         if let Some(ty) = self.set_method_ret(method, &all_arg_tys, resolved, receiver.span) {
             return ty;
         }
-        if self.reject_unknown_set_method(resolved, method, arg_count, receiver.span) {
+        if self.reject_unknown_set_method(resolved, method, arg_count, name_span) {
             return self.tcx.error_ty();
         }
         if let Some(ty) = self.map_method_ret(method, &all_arg_tys, resolved, receiver.span) {
@@ -12149,7 +12320,7 @@ impl<'a> TypeChecker<'a> {
             return ty;
         }
         if method != "clone"
-            && self.reject_unknown_sequence_method(resolved, method, arg_count, receiver.span)
+            && self.reject_unknown_sequence_method(resolved, method, arg_count, name_span)
         {
             return self.tcx.error_ty();
         }
@@ -12165,7 +12336,7 @@ impl<'a> TypeChecker<'a> {
         ) {
             return ty;
         }
-        self.check_unsurfaced_method(call_id, method, resolved, args, arg_count, receiver.span)
+        self.check_unsurfaced_method(call_id, method, resolved, args, arg_count, name_span)
     }
 
     /// Types a call the surfaced-receiver arms did not claim: the `math`
@@ -12321,6 +12492,40 @@ impl<'a> TypeChecker<'a> {
         let error = self.unresolved_method(ty, method, resolved);
         self.emit(error, span);
         true
+    }
+
+    /// Reports a closure handed to a binding callback whose parameter or
+    /// result type nothing in the program decides. A compiled program calls
+    /// the closure's code through the register class of each type, so each
+    /// has to be known.
+    fn check_deferred_binding_callbacks(&mut self) {
+        for (ty, callee, span) in std::mem::take(&mut self.deferred_binding_callbacks) {
+            let resolved = self.deep_resolve(ty);
+            let (TyKind::FnPtr(sig) | TyKind::FnTrait(sig)) = self.tcx.kind_of(resolved).clone()
+            else {
+                continue;
+            };
+            let untyped = sig
+                .inputs
+                .iter()
+                .chain(std::iter::once(&sig.output))
+                .any(|t| {
+                    let resolved = self.deep_resolve(*t);
+                    matches!(self.tcx.kind(resolved), Some(TyKind::Var(_)))
+                });
+            if untyped {
+                self.emit(TypeError::BindingCallbackUntyped { callee }, span);
+            }
+        }
+    }
+
+    /// Records the owner of each method call on a numeric literal, once
+    /// defaulting has given the literal its type.
+    fn record_deferred_method_owners(&mut self) {
+        for (call_id, receiver_ty, method) in std::mem::take(&mut self.deferred_method_owners) {
+            let resolved = self.deep_resolve(receiver_ty);
+            self.record_method_owner(call_id, resolved, &method);
+        }
     }
 
     /// Reports `x.name()` on a numeric literal, once defaulting has given
@@ -12522,6 +12727,13 @@ impl<'a> TypeChecker<'a> {
     /// owner from a type that no longer names it.
     fn record_method_owner(&mut self, call_id: NodeId, receiver_ty: Ty, method: &str) {
         let resolved = self.peel_refs(self.infer.resolve(self.tcx, receiver_ty));
+        if self.infer.is_integer_constrained_var(self.tcx, resolved)
+            || self.infer.is_float_literal_var(self.tcx, resolved)
+        {
+            self.deferred_method_owners
+                .push((call_id, receiver_ty, method.to_string()));
+            return;
+        }
         // A receiver whose type is a parameter has one type per instantiation,
         // and the bytecode VM runs one body for all of them, so there is no
         // single block to name. Such a call is dispatched on the value in hand.
@@ -14728,9 +14940,6 @@ impl<'a> TypeChecker<'a> {
                             TyKind::String => Some(self.tcx.char_ty()),
                             _ => None,
                         };
-                        if std::env::var_os("GOS_DBG_IDX").is_some() {
-                            eprintln!("[idx] resolve kind={kind:?} element={element:?}");
-                        }
                         if let Some(element) = element {
                             self.unify(result, element, d.span);
                         }
@@ -15516,6 +15725,25 @@ impl<'a> TypeChecker<'a> {
             );
             return self.tcx.error_ty();
         };
+        // A closure whose answer nothing has fixed yet takes the family its
+        // `?` propagates, and a `Result` the error type the operand carries.
+        let open_ret = self.infer.resolve(self.tcx, ret);
+        if matches!(self.tcx.kind(open_ret), Some(TyKind::Var(_))) {
+            let shaped = match inner_family {
+                TryFamily::Result => {
+                    let ok = self.fresh();
+                    let err = self
+                        .result_payload_tys(ty, span)
+                        .map_or_else(|| self.fresh(), |(_, err)| err);
+                    self.result_adt_ty(ok, err)
+                }
+                TryFamily::Option => {
+                    let value = self.fresh();
+                    self.option_adt_ty(value)
+                }
+            };
+            self.unify(open_ret, shaped, span);
+        }
         let Some((ret_family, _)) = self.try_family_and_payload(ret) else {
             let ty = self.render_public_ty(ret);
             self.emit(
@@ -15540,7 +15768,49 @@ impl<'a> TypeChecker<'a> {
             );
             return self.tcx.error_ty();
         }
+        if inner_family == TryFamily::Result
+            && let (Some((_, from)), Some((_, to))) = (
+                self.result_payload_tys(ty, span),
+                self.result_payload_tys(ret, span),
+            )
+        {
+            self.deferred_try_conversions.push((from, to, span));
+        }
         payload
+    }
+
+    /// Reports a `?` whose operand's error type the enclosing function's
+    /// cannot take. Decided once unification has settled both, since either
+    /// may be pinned by code after the `?`.
+    fn check_deferred_try_conversions(&mut self) {
+        let deferred = std::mem::take(&mut self.deferred_try_conversions);
+        for (from, to, span) in deferred {
+            let from = self.deep_resolve(from);
+            let to = self.deep_resolve(to);
+            if from == to
+                || matches!(self.tcx.kind(from), Some(TyKind::Var(_) | TyKind::Error))
+                || matches!(self.tcx.kind(to), Some(TyKind::Var(_) | TyKind::Error))
+                || matches!(self.tcx.kind(to), Some(TyKind::DynError))
+                // A `String` error takes any error through its rendering.
+                || matches!(self.tcx.kind(to), Some(TyKind::String))
+            {
+                continue;
+            }
+            let target = self.render_public_ty(to);
+            let source = self
+                .method_param_types
+                .get(&(target.clone(), "from".to_string()))
+                .and_then(|params| (params.len() == 1).then(|| params[0]));
+            let converts = source.is_some_and(|source| self.deep_resolve(source) == from);
+            if converts {
+                continue;
+            }
+            let from = self.render_public_ty(from);
+            self.emit(
+                TypeError::QuestionMarkNoConversion { from, to: target },
+                span,
+            );
+        }
     }
 
     fn try_family_and_payload(&mut self, ty: Ty) -> Option<(TryFamily, Ty)> {
@@ -16414,7 +16684,20 @@ impl<'a> TypeChecker<'a> {
         if matches!(op, UnaryOp::RefShared | UnaryOp::RefMut) {
             self.suppressed.borrow_read_conflict = true;
         }
-        let operand_ty = self.check_expr_expecting(operand, operand_expected);
+        let operand_ty = match (op, &operand.kind) {
+            // A suffixed literal under `-` is one negative constant, so its
+            // range is checked from the negative side: `-128i8` is `i8::MIN`.
+            (UnaryOp::Neg, ExprKind::Literal(Literal::Int(text)))
+                if INT_SUFFIXES
+                    .iter()
+                    .any(|(suffix, _)| text.ends_with(suffix)) =>
+            {
+                let ty = self.type_of_int_literal(&format!("-{text}"), operand.span);
+                self.record(operand.id, ty);
+                ty
+            }
+            _ => self.check_expr_expecting(operand, operand_expected),
+        };
         self.suppressed.borrow_read_conflict = previous_suppression;
         let resolved = self.infer.resolve(self.tcx, operand_ty);
         match op {
@@ -18094,6 +18377,7 @@ impl<'a> TypeChecker<'a> {
             }
             None => self.type_of_pattern(pattern),
         };
+        self.reject_refutable_for_pattern(pattern, pat_ty);
         self.bind_pattern(pattern, pat_ty);
         self.check_discarded_expr(body);
         self.report_discarded_result(body, None);
@@ -18301,13 +18585,6 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_let_stmt(&mut self, pattern: &Pattern, ty: Option<&AstType>, init: Option<&Expr>) {
-        if let Some(problem) = plain_let_pattern_problem(pattern) {
-            let error = match problem {
-                PlainLetPatternProblem::Literal => TypeError::CannotAssignToLiteral,
-                PlainLetPatternProblem::MayNotMatch => TypeError::LetPatternMayNotMatch,
-            };
-            self.emit(error, pattern.span);
-        }
         let forced = self.write_arg_bindings.get(&pattern.id).copied();
         let binding_ty = if let Some(authored) = ty {
             self.type_from_ast(authored)
@@ -18357,12 +18634,121 @@ impl<'a> TypeChecker<'a> {
             self.check_local_reference_storage(pattern, binding_ty, init);
             self.check_reference_pattern(pattern, init_ty);
         }
+        if let Some(problem) = self.let_pattern_problem(pattern, Some(binding_ty)) {
+            let error = match problem {
+                PlainLetPatternProblem::Literal => TypeError::CannotAssignToLiteral,
+                PlainLetPatternProblem::MayNotMatch => TypeError::LetPatternMayNotMatch,
+            };
+            self.emit(error, pattern.span);
+        }
         if ty.is_none() && forced.is_none() {
             self.infer.default_numeric_vars_in_ty(self.tcx, binding_ty);
         }
         self.bind_pattern(pattern, binding_ty);
         if let Some(init) = init {
             self.register_named_mutable_borrow(pattern, init);
+        }
+    }
+
+    /// Reports a `for` pattern that some element of type `elem` fails to
+    /// match: the loop has nowhere to send that element.
+    fn reject_refutable_for_pattern(&mut self, pattern: &Pattern, elem: Ty) {
+        if let Some(problem) = self.let_pattern_problem(pattern, Some(elem)) {
+            let error = match problem {
+                PlainLetPatternProblem::Literal => TypeError::CannotAssignToLiteral,
+                PlainLetPatternProblem::MayNotMatch => TypeError::ForPatternMayNotMatch,
+            };
+            self.emit(error, pattern.span);
+        }
+    }
+
+    /// Why a plain `let` cannot take `pattern` for a value of type `ty`, when
+    /// it cannot: a literal in binding position, or a pattern some value of
+    /// the type fails to match. A slice pattern over a fixed array whose
+    /// length it spells out matches every value, as does one whose `..`
+    /// absorbs the rest.
+    fn let_pattern_problem(
+        &mut self,
+        pattern: &Pattern,
+        ty: Option<Ty>,
+    ) -> Option<PlainLetPatternProblem> {
+        let resolved = ty.and_then(|ty| {
+            let resolved = self.infer.resolve(self.tcx, ty);
+            self.tcx.kind(resolved).cloned()
+        });
+        match &pattern.kind {
+            PatternKind::Literal(_) => Some(PlainLetPatternProblem::Literal),
+            PatternKind::Range { .. } => Some(PlainLetPatternProblem::MayNotMatch),
+            PatternKind::Ident { subpattern, .. } => subpattern
+                .as_deref()
+                .and_then(|sub| self.let_pattern_problem(sub, ty)),
+            PatternKind::Tuple(parts) => {
+                let elems = match resolved {
+                    Some(TyKind::Tuple(elems)) if elems.len() == parts.len() => elems,
+                    _ => Vec::new(),
+                };
+                parts
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, part)| self.let_pattern_problem(part, elems.get(i).copied()))
+            }
+            PatternKind::Or(parts) => {
+                let problems: Vec<_> = parts
+                    .iter()
+                    .map(|part| self.let_pattern_problem(part, ty))
+                    .collect();
+                if problems.iter().all(Option::is_some) {
+                    problems
+                        .into_iter()
+                        .flatten()
+                        .find(|problem| matches!(problem, PlainLetPatternProblem::Literal))
+                        .or(Some(PlainLetPatternProblem::MayNotMatch))
+                } else {
+                    None
+                }
+            }
+            PatternKind::Struct { fields, .. } => fields
+                .iter()
+                .filter_map(|field| field.pattern.as_ref())
+                .find_map(|part| self.let_pattern_problem(part, None)),
+            PatternKind::TupleStruct { elems, .. } => elems
+                .iter()
+                .find_map(|part| self.let_pattern_problem(part, None)),
+            PatternKind::Slice {
+                prefix,
+                rest,
+                suffix,
+            } => {
+                let (elem, len) = match resolved {
+                    Some(TyKind::Array { elem, len }) => (
+                        Some(elem),
+                        match len {
+                            crate::ArrayLen::Concrete(n) => Some(n),
+                            crate::ArrayLen::Param(_) => None,
+                        },
+                    ),
+                    _ => (None, None),
+                };
+                if let Some(problem) = prefix
+                    .iter()
+                    .chain(suffix)
+                    .find_map(|part| self.let_pattern_problem(part, elem))
+                {
+                    return Some(problem);
+                }
+                let written = prefix.len() + suffix.len();
+                let always_matches = match len {
+                    Some(n) if rest.is_some() => written <= n,
+                    Some(n) => written == n,
+                    None => written == 0 && rest.is_some(),
+                };
+                (!always_matches).then_some(PlainLetPatternProblem::MayNotMatch)
+            }
+            PatternKind::Ref { inner, .. } => self.let_pattern_problem(inner, None),
+            PatternKind::Wildcard
+            | PatternKind::Path(_)
+            | PatternKind::Rest
+            | PatternKind::Error => None,
         }
     }
 
@@ -22599,50 +22985,6 @@ enum PlainLetPatternProblem {
     MayNotMatch,
 }
 
-fn plain_let_pattern_problem(pattern: &Pattern) -> Option<PlainLetPatternProblem> {
-    match &pattern.kind {
-        PatternKind::Literal(_) => Some(PlainLetPatternProblem::Literal),
-        PatternKind::Range { .. } => Some(PlainLetPatternProblem::MayNotMatch),
-        PatternKind::Ident { subpattern, .. } => {
-            subpattern.as_deref().and_then(plain_let_pattern_problem)
-        }
-        PatternKind::Tuple(parts) => parts.iter().find_map(plain_let_pattern_problem),
-        PatternKind::Or(parts) => {
-            let problems: Vec<_> = parts.iter().map(plain_let_pattern_problem).collect();
-            if problems.iter().all(Option::is_some) {
-                problems
-                    .into_iter()
-                    .flatten()
-                    .find(|problem| matches!(problem, PlainLetPatternProblem::Literal))
-                    .or(Some(PlainLetPatternProblem::MayNotMatch))
-            } else {
-                None
-            }
-        }
-        PatternKind::Struct { fields, .. } => fields
-            .iter()
-            .filter_map(|field| field.pattern.as_ref())
-            .find_map(plain_let_pattern_problem),
-        PatternKind::TupleStruct { elems, .. } => elems.iter().find_map(plain_let_pattern_problem),
-        PatternKind::Slice {
-            prefix,
-            rest,
-            suffix,
-        } => prefix
-            .iter()
-            .chain(suffix)
-            .find_map(plain_let_pattern_problem)
-            .or_else(|| {
-                (!prefix.is_empty() || rest.is_none() || !suffix.is_empty())
-                    .then_some(PlainLetPatternProblem::MayNotMatch)
-            }),
-        PatternKind::Ref { inner, .. } => plain_let_pattern_problem(inner),
-        PatternKind::Wildcard | PatternKind::Path(_) | PatternKind::Rest | PatternKind::Error => {
-            None
-        }
-    }
-}
-
 fn expr_diverges(expr: &Expr) -> bool {
     matches!(
         expr.kind,
@@ -23430,6 +23772,10 @@ enum Shape {
     StrVec,
     F64Vec,
     OptStr,
+    /// `&mut String`, a buffer the method appends to.
+    MutStr,
+    /// `Result<i64, errors::Error>`.
+    ResultI64,
     DoneChannel,
     /// A handle, by sentinel offset and display name.
     Handle(u32, &'static str),
@@ -23571,6 +23917,24 @@ const HANDLE_METHODS: &[(&str, &str, &[Shape], Shape)] = &[
     ("sync::Map", "len", &[], Shape::I64),
     ("sync::Map", "contains_key", &[Shape::Str], Shape::Bool),
     ("sync::Map", "keys", &[], Shape::StrVec),
+    ("io::Stream", "write_byte", &[Shape::I64], Shape::Unit),
+    ("io::Stream", "write", &[Shape::Str], Shape::Unit),
+    ("io::Stream", "write_str", &[Shape::Str], Shape::Unit),
+    ("io::Stream", "flush", &[], Shape::Unit),
+    ("io::Stream", "read_line", &[], Shape::OptStr),
+    (
+        "io::Stream",
+        "read_line",
+        &[Shape::MutStr],
+        Shape::ResultI64,
+    ),
+    ("io::Stream", "read_to_string", &[], Shape::Str),
+    ("Child", "write_stdin", &[Shape::Str], Shape::Bool),
+    ("Child", "close_stdin", &[], Shape::Unit),
+    ("Child", "read_line", &[], Shape::OptStr),
+    ("Child", "read_stdout", &[], Shape::Str),
+    ("Child", "wait", &[], Shape::ResultI64),
+    ("Child", "kill", &[], Shape::Bool),
 ];
 
 /// The owner a type-qualified path names in [`HANDLE_METHODS`]: the display

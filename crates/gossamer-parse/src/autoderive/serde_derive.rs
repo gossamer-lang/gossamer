@@ -417,18 +417,59 @@ fn type_head_name(ty: &gossamer_ast::Type) -> Option<&str> {
 /// `None`, which is the order a sort of bare `Option`s already gives.
 fn derived_cmp_field(ty: &gossamer_ast::Type, mine: &str, theirs: &str) -> String {
     if type_head_name(ty) != Some("Option") {
+        return scalar_cmp_lines(is_float_type(ty), mine, theirs);
+    }
+    let inner_float = option_payload(ty).is_some_and(is_float_type);
+    format!(
+        "        if {mine}.is_some() && {theirs}.is_none() {{ return -1 }}\n\
+         \x20       if {mine}.is_none() && {theirs}.is_some() {{ return 1 }}\n\
+         \x20       if {mine}.is_some() && {theirs}.is_some() {{\n\
+         {}\
+         \x20       }}\n",
+        scalar_cmp_lines(
+            inner_float,
+            &format!("{mine}.unwrap()"),
+            &format!("{theirs}.unwrap()")
+        )
+    )
+}
+
+/// The `cmp` lines ordering two values of one type. A float follows the
+/// language's float order, which `<` alone cannot give: every NaN is one
+/// value above every number, and `-0.0` sits just below `0.0` (their
+/// reciprocals are the two infinities).
+fn scalar_cmp_lines(float: bool, mine: &str, theirs: &str) -> String {
+    if !float {
         return format!(
             "        if {mine} < {theirs} {{ return -1 }}\n        if {theirs} < {mine} {{ return 1 }}\n"
         );
     }
     format!(
-        "        if {mine}.is_some() && {theirs}.is_none() {{ return -1 }}\n\
-         \x20       if {mine}.is_none() && {theirs}.is_some() {{ return 1 }}\n\
-         \x20       if {mine}.is_some() && {theirs}.is_some() {{\n\
-         \x20           if {mine}.unwrap() < {theirs}.unwrap() {{ return -1 }}\n\
-         \x20           if {theirs}.unwrap() < {mine}.unwrap() {{ return 1 }}\n\
+        "        if {mine}.is_nan() || {theirs}.is_nan() {{\n\
+         \x20           if !{theirs}.is_nan() {{ return 1 }}\n\
+         \x20           if !{mine}.is_nan() {{ return -1 }}\n\
+         \x20       }} else {{\n\
+         \x20           if {mine} < {theirs} {{ return -1 }}\n\
+         \x20           if {theirs} < {mine} {{ return 1 }}\n\
+         \x20           if 1.0 / {mine} < 1.0 / {theirs} {{ return -1 }}\n\
+         \x20           if 1.0 / {theirs} < 1.0 / {mine} {{ return 1 }}\n\
          \x20       }}\n"
     )
+}
+
+fn is_float_type(ty: &gossamer_ast::Type) -> bool {
+    matches!(type_head_name(ty), Some("f64" | "f32"))
+}
+
+/// The `T` of an `Option<T>` field type.
+fn option_payload(ty: &gossamer_ast::Type) -> Option<&gossamer_ast::Type> {
+    let TypeKind::Path(path) = &ty.kind else {
+        return None;
+    };
+    match path.segments.last()?.generics.first()? {
+        gossamer_ast::GenericArg::Type(inner) => Some(inner),
+        gossamer_ast::GenericArg::Const(_) => None,
+    }
 }
 
 /// Scalar field types a synthesized `fmt` can render directly via
@@ -1280,11 +1321,14 @@ fn emit_enum_derive_impl(
             if lbinds.is_empty() {
                 out.push_str(&format!("            {lpat} => 0,\n"));
             } else {
+                let field_tys: Vec<&gossamer_ast::Type> = match &v.body {
+                    StructBody::Unit => Vec::new(),
+                    StructBody::Tuple(fields) => fields.iter().map(|f| &f.ty).collect(),
+                    StructBody::Named(fields) => fields.iter().map(|f| &f.ty).collect(),
+                };
                 let mut body = String::new();
-                for (a, b) in lbinds.iter().zip(&rbinds) {
-                    body.push_str(&format!(
-                        "if {a} < {b} {{ return -1 }}\n                if {b} < {a} {{ return 1 }}\n                "
-                    ));
+                for ((a, b), field_ty) in lbinds.iter().zip(&rbinds).zip(field_tys) {
+                    body.push_str(&derived_cmp_field(field_ty, a, b));
                 }
                 body.push('0');
                 out.push_str(&format!(

@@ -89,12 +89,6 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  unreachable").unwrap();
     }
 
-    /// Lowers `Terminator::Assert`: branches to the success
-    /// target on the expected condition; on the other branch
-    /// emits a category-specific panic message. Mirrors the
-    /// Cranelift backend's `BoundsCheck` / `Overflow` /
-    /// `DivideByZero` strings so panic output stays consistent
-    /// across backends.
     /// The shared block every failed bounds check in a release body branches
     /// to, when any does: it raises the report for the vector and index the
     /// failing check carried in.
@@ -125,6 +119,12 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  unreachable").unwrap();
     }
 
+    /// Lowers `Terminator::Assert`: branches to the success
+    /// target on the expected condition; on the other branch
+    /// emits a category-specific panic message. Mirrors the
+    /// Cranelift backend's `BoundsCheck` / `Overflow` /
+    /// `DivideByZero` strings so panic output stays consistent
+    /// across backends.
     pub(crate) fn lower_assert(
         &mut self,
         cond: &Operand,

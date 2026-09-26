@@ -1,0 +1,25 @@
+// `?` converts the operand's error into the function's: through the
+// function's error type's `From` impl, into `errors::Error` by the error's
+// text, and in a closure whose answer the `?` itself decides.
+
+use std::errors
+
+struct MyErr { code: i64 }
+struct Other { msg: String }
+impl From<MyErr> for Other { fn from(e: MyErr) -> Other { Other { msg: format("code {}", e.code) } } }
+impl Display for MyErr { fn fmt(&self) -> String { format("my error {}", self.code) } }
+fn inner(fail: bool) -> Result<i64, MyErr> { if fail { Err(MyErr { code: -4 }) } else { Ok(7) } }
+fn outer(fail: bool) -> Result<i64, Other> { let v = inner(fail)?; Ok(v + 1) }
+fn to_dyn(fail: bool) -> Result<i64, errors::Error> { let v = inner(fail)?; Ok(v * 2) }
+fn from_text(s: String) -> Result<i64, errors::Error> { let n = s.to_i64().ok_or("not a number")?; Ok(n) }
+fn main() {
+    match outer(true) { Ok(v) => println("ok {}", v), Err(e) => println("{}", e.msg) }
+    match outer(false) { Ok(v) => println("ok {}", v), Err(e) => println("{}", e.msg) }
+    match to_dyn(true) { Ok(v) => println("ok {}", v), Err(e) => println("{}", e) }
+    println("{:?}", to_dyn(false).is_ok())
+    match from_text("x1") { Ok(v) => println("{}", v), Err(e) => println("{}", e) }
+    let f = || { let v = inner(false)?; Ok(v) }
+    println("{:?}", f().map(|v| v + 100).unwrap_or(0))
+    let g = |s: String| { let n = s.to_i64()?; Some(n * 3) }
+    println("{:?} {:?}", g("4"), g("z"))
+}

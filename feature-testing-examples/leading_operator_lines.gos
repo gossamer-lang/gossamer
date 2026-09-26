@@ -1,0 +1,24 @@
+// A line that opens with `-`, `*`, `&`, or a closure's `|` starts a new
+// statement, except inside a grouping `( .. )`, where it continues the line
+// above. A list keeps a leading `-` as the sign of its next element.
+
+fn offset(k: i64) -> Fn(i64) -> i64 {
+    let base = k * 2
+    |x| x + base
+}
+
+fn main() {
+    let total = (8
+        - 2)
+    let mask = (4
+        | 1)
+    let product = (3
+        * 5)
+    println("{} {} {}", total, mask, product)
+    let signed = #[
+        1
+        -2
+    ]
+    println("{:?}", signed)
+    println("{}", offset(5)(1))
+}

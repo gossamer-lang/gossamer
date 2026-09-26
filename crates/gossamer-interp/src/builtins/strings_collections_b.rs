@@ -464,7 +464,9 @@ fn builtin_sort(args: &[Value]) -> RuntimeResult<Value> {
         }
         Some(Value::FloatVec(data)) => {
             let mut owned = crate::value::copy_with_capacity(data);
-            owned.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            // The IEEE total order, which places NaN after every number, as
+            // the compiled tiers sort.
+            owned.sort_by(|a, b| gossamer_runtime::c_abi::sort::float_order(*a, *b));
             Ok(Value::FloatVec(Arc::new(owned)))
         }
         Some(v) => {
@@ -1197,6 +1199,7 @@ fn render_nested(
 ) -> RuntimeResult<String> {
     match value {
         Value::String(text) => Ok(format!("{:?}", text.as_str())),
+        Value::Char(ch) => Ok(format!("{ch:?}")),
         Value::Float(number) => Ok(gossamer_runtime::builtins::format_float_debug(*number)),
         other => render_display(dispatch, other, aliases, method),
     }
@@ -1313,7 +1316,7 @@ fn render_display(
                 // form and both compiled tiers show one.
                 let key = match key.to_value() {
                     Value::String(text) => format!("{:?}", text.as_str()),
-                    Value::Char(ch) => ch.to_string(),
+                    Value::Char(ch) => format!("{ch:?}"),
                     other => render_display(dispatch, &other, aliases, method)?,
                 };
                 parts.push(format!("{key}: {}", render_nested(dispatch, entry, aliases, method)?));

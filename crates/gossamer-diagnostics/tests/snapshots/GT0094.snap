@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0094]: A closure passed to a `[rust-bindings]` function's callback parameter - here
+--- framed ---
+error[GT0094]: A closure passed to a `[rust-bindings]` function's callback parameter
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -1,0 +1,13 @@
+// A `DynValue` renders like the value it holds: `{}` shows a string or char
+// as its own text and `{:?}` in the spelling that builds it, at the top
+// level and nested.
+
+fn main() {
+    let d = DynValue::string("hi")
+    println("{:?} {} {}", d, d, d.to_string())
+    let l = DynValue::list(#[DynValue::string("a"), DynValue::int(1), DynValue::char('q'), DynValue::float(2.0)])
+    println("{:?} {}", l, l)
+    let c = DynValue::char('x')
+    let f = DynValue::float(3.0)
+    println("{:?} {} {:?} {}", c, c, f, f)
+}

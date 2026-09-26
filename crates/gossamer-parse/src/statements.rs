@@ -353,7 +353,7 @@ impl Parser<'_> {
         let else_expr = Expr::new(self.alloc_id(), else_span, ExprKind::Block(block));
         self.eat_statement_semicolon();
 
-        let mut binds: Vec<Ident> = Vec::new();
+        let mut binds: Vec<(Ident, Mutability)> = Vec::new();
         collect_pattern_bindings(&pattern, &mut binds);
         let pat_span = pattern.span;
 
@@ -388,10 +388,10 @@ impl Parser<'_> {
 
     /// Builds the success-arm body: the pattern's bindings as a tuple (single
     /// value when there is one, `()` when there are none).
-    fn make_var_tuple_expr(&mut self, binds: &[Ident], span: Span) -> Expr {
+    fn make_var_tuple_expr(&mut self, binds: &[(Ident, Mutability)], span: Span) -> Expr {
         let mut refs: Vec<Expr> = binds
             .iter()
-            .map(|id| {
+            .map(|(id, _)| {
                 let path = PathExpr {
                     segments: vec![PathSegment {
                         name: id.clone(),
@@ -410,19 +410,20 @@ impl Parser<'_> {
 
     /// Builds the outer `let` pattern that receives the match result: the
     /// pattern's bindings as a tuple of irrefutable name bindings (single when
-    /// there is one, `_` when there are none).
-    fn make_binding_pattern(&mut self, binds: &[Ident], span: Span) -> Pattern {
+    /// there is one, `_` when there are none), each as mutable as the pattern
+    /// wrote it.
+    fn make_binding_pattern(&mut self, binds: &[(Ident, Mutability)], span: Span) -> Pattern {
         if binds.is_empty() {
             return Pattern::new(self.alloc_id(), span, PatternKind::Wildcard);
         }
         let mut pats: Vec<Pattern> = binds
             .iter()
-            .map(|id| {
+            .map(|(id, mutability)| {
                 Pattern::new(
                     self.alloc_id(),
                     span,
                     PatternKind::Ident {
-                        mutability: Mutability::Immutable,
+                        mutability: *mutability,
                         name: id.clone(),
                         subpattern: None,
                     },
@@ -463,14 +464,17 @@ fn requires_statement_separator(kind: &StmtKind) -> bool {
     }
 }
 
-/// Collects the binding identifiers introduced by a pattern, in source order,
-/// so `let ... else` can thread them out of the desugared `match`.
-fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<Ident>) {
+/// Collects the binding identifiers introduced by a pattern, with the
+/// mutability each was written with, in source order, so `let ... else` can
+/// thread them out of the desugared `match`.
+fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<(Ident, Mutability)>) {
     match &pat.kind {
         PatternKind::Ident {
-            name, subpattern, ..
+            name,
+            subpattern,
+            mutability,
         } => {
-            out.push(name.clone());
+            out.push((name.clone(), *mutability));
             if let Some(sub) = subpattern {
                 collect_pattern_bindings(sub, out);
             }
@@ -485,11 +489,20 @@ fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<Ident>) {
                 collect_pattern_bindings(p, out);
             }
         }
+        PatternKind::Slice {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            for p in prefix.iter().chain(rest.as_deref()).chain(suffix) {
+                collect_pattern_bindings(p, out);
+            }
+        }
         PatternKind::Struct { fields, .. } => {
             for f in fields {
                 match &f.pattern {
                     Some(p) => collect_pattern_bindings(p, out),
-                    None => out.push(f.name.clone()),
+                    None => out.push((f.name.clone(), Mutability::Immutable)),
                 }
             }
         }
@@ -500,7 +513,12 @@ fn collect_pattern_bindings(pat: &Pattern, out: &mut Vec<Ident>) {
             }
         }
         PatternKind::Ref { inner, .. } => collect_pattern_bindings(inner, out),
-        _ => {}
+        PatternKind::Wildcard
+        | PatternKind::Literal(_)
+        | PatternKind::Path(_)
+        | PatternKind::Range { .. }
+        | PatternKind::Rest
+        | PatternKind::Error => {}
     }
 }
 

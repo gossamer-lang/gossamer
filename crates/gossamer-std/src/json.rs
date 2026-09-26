@@ -881,15 +881,34 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_number(&mut self) -> Result<Value, Error> {
+        // RFC 8259: `-? (0 | [1-9][0-9]*) (. [0-9]+)? ([eE] [+-]? [0-9]+)?`.
         let start = self.cursor;
         if self.peek() == Some(b'-') {
             self.bump();
         }
-        while matches!(
-            self.peek(),
-            Some(b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
-        ) {
+        match self.peek() {
+            Some(b'0') => {
+                self.bump();
+            }
+            Some(b'1'..=b'9') => self.bump_digits(),
+            _ => return Err(self.error("invalid number: expected a digit")),
+        }
+        if self.peek() == Some(b'.') {
             self.bump();
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.error("invalid number: expected a digit after `.`"));
+            }
+            self.bump_digits();
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.bump();
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.bump();
+            }
+            if !matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(self.error("invalid number: expected a digit in the exponent"));
+            }
+            self.bump_digits();
         }
         let text = std::str::from_utf8(&self.bytes[start..self.cursor])
             .map_err(|_| self.error("invalid UTF-8 in number"))?;
@@ -901,6 +920,11 @@ impl<'a> Parser<'a> {
         // `u64` - falls back to `f64`.
         let is_float = text.bytes().any(|b| matches!(b, b'.' | b'e' | b'E'));
         if !is_float {
+            // `-0` keeps its sign, which only a float can, as serde_json and
+            // the compiled tiers read it.
+            if text == "-0" {
+                return Ok(Value::Number(-0.0));
+            }
             if let Ok(n) = text.parse::<i64>() {
                 return Ok(Value::Int(n));
             }
@@ -908,9 +932,22 @@ impl<'a> Parser<'a> {
                 return Ok(Value::Uint(n));
             }
         }
-        text.parse::<f64>()
-            .map(Value::Number)
-            .map_err(|_| self.error(format!("invalid number {text:?}")))
+        // A number too large for an `f64` is rejected rather than read as an
+        // infinity no JSON document can spell back.
+        match text.parse::<f64>() {
+            Ok(value) if value.is_finite() => Ok(Value::Number(value)),
+            Ok(_) => Err(self.error(format!("number out of range {text:?}"))),
+            Err(_) => Err(self.error(format!("invalid number {text:?}"))),
+        }
+    }
+}
+
+impl Parser<'_> {
+    /// Consumes a run of ASCII digits.
+    fn bump_digits(&mut self) {
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.bump();
+        }
     }
 }
 

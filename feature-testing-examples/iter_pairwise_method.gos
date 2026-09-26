@@ -1,0 +1,11 @@
+// `pairwise` is an adapter like the others, so it chains as a method on a
+// sequence and on an iterator, as well as being called in its free form.
+
+use std::iter
+
+fn main() {
+    let v = #[1, 2, 3, 4]
+    println("{:?}", v.pairwise())
+    println("{:?}", iter::pairwise(v))
+    println("{:?}", v.iter().pairwise())
+}

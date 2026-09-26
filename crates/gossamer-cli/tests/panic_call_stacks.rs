@@ -88,3 +88,35 @@ fn jit_report_names_inlined_callees_from_the_machine_stack() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn debug_build_report_matches_the_bytecode_report() {
+    let dir = std::env::temp_dir().join(format!("gos-debug-call-stacks-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    std::fs::write(dir.join("stack.gos"), INLINED_CALLS).expect("write program");
+    let build = Command::new(gos_bin())
+        .current_dir(&dir)
+        .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+        .args(["build", "stack.gos", "--out-dir", "out"])
+        .output()
+        .expect("spawn gos build");
+    assert!(
+        build.status.success(),
+        "{}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir
+        .join("out")
+        .join(if cfg!(windows) { "stack.exe" } else { "stack" });
+    let output = Command::new(&binary).output().expect("run the artifact");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(101), "stderr:\n{stderr}");
+    assert!(
+        stderr.contains(
+            "  call stack (outermost first):\n    at main (stack.gos:15:19)\n    at outer (stack.gos:10:5)\n    at bump (stack.gos:4:9)\n"
+        ),
+        "stderr:\n{stderr}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}

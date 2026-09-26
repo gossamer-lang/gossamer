@@ -16,6 +16,17 @@ use std::os::raw::c_char;
 
 use super::*;
 
+/// The language's order of two floats, the one sorting, `min`, `max`, and a
+/// structural comparison use: IEEE total order (`-0.0` just below `0.0`),
+/// with every NaN one value above `+inf`. A NaN's sign bit depends on how it
+/// was made - hardware division gives one sign, a folded constant another -
+/// so it takes no part in the order.
+#[must_use]
+pub fn float_order(a: f64, b: f64) -> std::cmp::Ordering {
+    let canonical = |x: f64| if x.is_nan() { f64::NAN } else { x };
+    canonical(a).total_cmp(&canonical(b))
+}
+
 /// Read the `i64` slots of a Vec whose elements are 8-byte primitives.
 unsafe fn i64_slots<'a>(v: *const GosVec) -> &'a [i64] {
     if v.is_null() {
@@ -194,7 +205,7 @@ pub unsafe extern "C" fn gos_rt_sort_stable_f64(v: *const GosVec) -> *mut GosVec
         }
         let slots = unsafe { f64_slots(v) };
         let mut order: Vec<usize> = (0..slots.len()).collect();
-        order.sort_by(|&a, &b| slots[a].total_cmp(&slots[b]));
+        order.sort_by(|&a, &b| float_order(slots[a], slots[b]));
         unsafe { clone_vec(v, &order) }
     })
 }
@@ -205,8 +216,8 @@ pub unsafe extern "C" fn gos_rt_sort_stable_f64(v: *const GosVec) -> *mut GosVec
 pub unsafe extern "C" fn gos_rt_sort_binary_search_f64(v: *const GosVec, target: f64) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
         let slots = unsafe { f64_slots(v) };
-        let at = lower_bound(slots.len(), |mid| slots[mid].total_cmp(&target));
-        if at < slots.len() && slots[at].total_cmp(&target) == std::cmp::Ordering::Equal {
+        let at = lower_bound(slots.len(), |mid| float_order(slots[mid], target));
+        if at < slots.len() && float_order(slots[at], target) == std::cmp::Ordering::Equal {
             unsafe { gos_rt_result_new(0, at as i64) }
         } else {
             unsafe { gos_rt_result_new(1, 0) }
@@ -219,7 +230,7 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_f64(v: *const GosVec, target:
 pub unsafe extern "C" fn gos_rt_sort_partition_point_f64(v: *const GosVec, pivot: f64) -> i64 {
     ffi_entry!(0, {
         let slots = unsafe { f64_slots(v) };
-        lower_bound(slots.len(), |mid| slots[mid].total_cmp(&pivot)) as i64
+        lower_bound(slots.len(), |mid| float_order(slots[mid], pivot)) as i64
     })
 }
 
@@ -237,13 +248,13 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_i64(v: *const GosVec, target: 
 }
 
 /// `xs.binary_search(needle) -> Result<i64, i64>` over a sorted
-/// `Vec<f64>`, ordered by `total_cmp` like every other float sort.
+/// `Vec<f64>`, ordered by [`float_order`] like every other float sort.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_binary_search_f64(v: *const GosVec, target: f64) -> i128 {
     ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
         let slots = unsafe { f64_slots(v) };
-        let at = lower_bound(slots.len(), |mid| slots[mid].total_cmp(&target));
-        let found = at < slots.len() && slots[at].total_cmp(&target) == std::cmp::Ordering::Equal;
+        let at = lower_bound(slots.len(), |mid| float_order(slots[mid], target));
+        let found = at < slots.len() && float_order(slots[at], target) == std::cmp::Ordering::Equal;
         unsafe { gos_rt_result_new(i64::from(!found), at as i64) }
     })
 }

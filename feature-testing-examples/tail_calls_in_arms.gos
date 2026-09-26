@@ -1,0 +1,46 @@
+// A call that is the last thing an `if` arm, a `match` arm, a block tail, or
+// a `return` does is in tail position, so recursion through it runs past the
+// VM's frame limit as it does on the compiled tiers.
+
+fn count(n: i64, acc: i64) -> i64 {
+    if n == 0 { acc } else { count(n - 1, acc + 1) }
+}
+
+fn count_match(n: i64, acc: i64) -> i64 {
+    match n {
+        0 => acc
+        _ => count_match(n - 1, acc + 2)
+    }
+}
+
+fn count_return(n: i64, acc: i64) -> i64 {
+    if n == 0 {
+        return acc
+    }
+    return count_return(n - 1, acc + 3)
+}
+
+fn count_block(n: i64, acc: i64) -> i64 {
+    if n > 0 {
+        let next = n - 1
+        count_block(next, acc + 1)
+    } else {
+        acc
+    }
+}
+
+fn is_even(n: i64) -> bool {
+    if n == 0 { true } else { is_odd(n - 1) }
+}
+
+fn is_odd(n: i64) -> bool {
+    if n == 0 { false } else { is_even(n - 1) }
+}
+
+fn main() {
+    println("{}", count(100000, 0))
+    println("{}", count_match(100000, 0))
+    println("{}", count_return(100000, 0))
+    println("{}", count_block(100000, 0))
+    println("{} {}", is_even(100000), is_odd(7))
+}

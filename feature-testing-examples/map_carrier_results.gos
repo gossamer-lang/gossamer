@@ -1,0 +1,21 @@
+// `map` whose callback answers an `Option` or `Result` collects the carriers
+// themselves, over word, string, float, and struct elements, eagerly and
+// through an iterator chain.
+
+struct P { a: i64, b: i64 }
+
+fn main() {
+    let wrapped = #[1, 2].map(|n| Some(n))
+    assert_eq(wrapped, #[Some(1), Some(2)])
+    println("{:?}", wrapped)
+    println("{:?}", #[1, -1].map(|n| if n > 0 { Ok(n) } else { Err(n) }))
+    let names = #["a", "bb", ""]
+    println("{:?}", names.map(|s| if s.is_empty() { None } else { Some(s.len()) }))
+    println("{:?}", names.map(|s| if s.is_empty() { None } else { Some(format("<{}>", s)) }))
+    println("{:?}", #[1.5, -2.0].map(|f| if f > 0.0 { Some(f) } else { None }))
+    let ps = #[P { a: 1, b: 2 }, P { a: 3, b: 4 }]
+    println("{:?}", ps.map(|p| if p.a > 1 { Ok(p.b) } else { Err(format("small {}", p.a)) }))
+    let lazy: Vec<Option<i64>> = #[4, 5, 6].iter().map(|n| if n % 2 == 0 { Some(n * 10) } else { None }).collect()
+    assert_eq(lazy, #[Some(40), None, Some(60)])
+    println("{:?}", lazy)
+}

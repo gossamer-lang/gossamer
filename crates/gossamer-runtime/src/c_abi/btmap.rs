@@ -146,9 +146,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_char(v: *const GosVec, bare: i32) -> 
                 out.push_str(", ");
             }
             let word = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) };
-            if let Some(c) = char::from_u32(word as u32) {
-                out.push(c);
-            }
+            crate::c_abi::map::push_quoted_char(&mut out, word);
         }
         out.push(']');
         alloc_cstring(out.as_bytes())
@@ -579,9 +577,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_char(p: *const i64, len: i64) -> *mut
                 out.push_str(", ");
             }
             let raw = unsafe { p.add(i).read_unaligned() };
-            if let Some(c) = char::from_u32(raw as u32) {
-                out.push(c);
-            }
+            crate::c_abi::map::push_quoted_char(&mut out, raw);
         }
         out.push(']');
         alloc_cstring(out.as_bytes())

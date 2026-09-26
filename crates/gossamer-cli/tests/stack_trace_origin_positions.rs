@@ -63,7 +63,7 @@ fn a_panic_in_a_sibling_module_names_that_file_and_line() {
     let native = Command::new(&binary).output().expect("run the artifact");
     let native_stderr = String::from_utf8_lossy(&native.stderr).into_owned();
     assert!(
-        native_stderr.contains("util::pick (util.gos:5)"),
+        native_stderr.contains("  call stack (outermost first):\n    at main (main.gos:5:13)\n    at util::pick (util.gos:5:5)\n"),
         "{native_stderr}"
     );
 

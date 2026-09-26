@@ -3,7 +3,7 @@
 // `sort` reads all of stdin then writes the sorted lines, so the
 // write-close-read sequence exercises real interactive plumbing
 // without deadlock; it exists on Linux, macOS, and Windows.
-use std::process
+use std::{errors, process}
 
 fn main() {
     match process::spawn_piped("sort", Vec::from([])) {
@@ -19,6 +19,25 @@ fn main() {
                 Ok(code) => println("exit: {}", code)
                 Err(e) => println("wait error: {}", e)
             }
+        }
+        Err(e) => println("spawn error: {}", e)
+    }
+    collected()
+}
+
+// Each method answers its declared type, so the lines a loop collects are
+// the `String`s the child wrote.
+fn collected() {
+    match process::spawn_piped("sort", Vec::from([])) {
+        Ok(child) => {
+            let sent: bool = child.write_stdin("b\na\n")
+            child.close_stdin()
+            let mut got = #[]
+            while let Some(line) = child.read_line() {
+                got.push(line)
+            }
+            let code: Result<i64, errors::Error> = child.wait()
+            println("{} {:?} {:?}", sent, got, code.is_ok())
         }
         Err(e) => println("spawn error: {}", e)
     }

@@ -1072,12 +1072,73 @@ fn runtime_answers_fresh(name: &str) -> bool {
             | "gos_rt_queue_clone"
             | "gos_rt_stack_clone"
             | "gos_rt_par_run"
-    ) || gossamer_abi::lookup(name).is_some_and(|entry| {
-        // A sequence combinator builds the collection it answers, so nothing
-        // else holds it.
-        entry.mints_string
-            || (entry.combinator.is_some() && entry.sig.ret == gossamer_abi::AbiType::Ptr)
-    })
+    ) || answers_fresh_table(name)
+        || gossamer_abi::lookup(name).is_some_and(|entry| {
+            // A sequence combinator builds the collection it answers, so nothing
+            // else holds it.
+            entry.mints_string
+                || (entry.combinator.is_some() && entry.sig.ret == gossamer_abi::AbiType::Ptr)
+        })
+}
+
+/// Whether `name` builds a `Map`, `Set`, or deque nothing else holds.
+fn answers_fresh_table(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_map_new"
+            | "gos_rt_map_new_with_capacity"
+            | "gos_rt_map_new_with_capacity_typed"
+            | "Map::new"
+            | "collections::Map::new"
+            | "HashMap::new"
+            | "collections::HashMap::new"
+            | "Map::with_capacity"
+            | "collections::Map::with_capacity"
+            | "BTreeMap::new"
+            | "collections::BTreeMap::new"
+            | "gos_rt_set_new"
+            | "gos_rt_btree_set_new"
+            | "Set::new"
+            | "collections::Set::new"
+            | "BTreeSet::new"
+            | "collections::BTreeSet::new"
+            | "gos_rt_deque_new"
+            | "gos_rt_deque_new_typed"
+            | "gos_rt_queue_new"
+            | "gos_rt_stack_new"
+            | "Deque::new"
+            | "collections::Deque::new"
+            | "Queue::new"
+            | "collections::Queue::new"
+            | "Stack::new"
+            | "collections::Stack::new"
+    )
+}
+
+/// Whether the table method `name` reads or changes its receiver in place and
+/// keeps no handle to it: an insert stores its key and value, not the table,
+/// and a lookup answers a stored value, not the table. `gos_rt_deque_vec`
+/// answers the deque's own storage, which only tags its element layout right
+/// after construction.
+fn table_receiver_only(name: &str) -> bool {
+    const PREFIXES: &[&str] = &[
+        "gos_rt_map_insert",
+        "gos_rt_map_get",
+        "gos_rt_map_len",
+        "gos_rt_map_contains",
+        "gos_rt_map_remove",
+        "gos_rt_map_inc",
+        "gos_rt_map_is_empty",
+        "gos_rt_set_insert",
+        "gos_rt_set_contains",
+        "gos_rt_set_remove",
+        "gos_rt_set_len",
+        "gos_rt_set_is_empty",
+        "gos_rt_deque_push",
+        "gos_rt_deque_len",
+        "gos_rt_deque_is_empty",
+    ];
+    name == "gos_rt_deque_vec" || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
 
 /// Whether the runtime helper `name` neither keeps nor hands out a handle to
@@ -1130,7 +1191,7 @@ pub(crate) fn runtime_arg_kept_no_handle(name: &str, index: usize) -> bool {
             | "gos_rt_map_or_insert_str_i64"
             | "gos_rt_map_or_insert_typed_str_i64"
     );
-    (index == 0 && receiver_only)
+    (index == 0 && (receiver_only || table_receiver_only(name)))
         || (index == 1
             && matches!(
                 name,

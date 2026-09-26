@@ -132,3 +132,167 @@ fn main() {
     );
     assert_expected_output(&stdout);
 }
+
+const SCAFFOLD_ADDITIONS: &str = r#"
+#[gos_module("extras")]
+mod extras {
+    pub fn touch() {}
+}
+
+pub struct Counter {
+    value: i64,
+}
+
+#[gossamer_binding::gos_opaque]
+impl Counter {
+    pub fn new() -> Self {
+        Self { value: 0 }
+    }
+
+    pub fn inc(&mut self) -> i64 {
+        self.value += 1;
+        self.value
+    }
+
+    pub fn get(&self) -> i64 {
+        self.value
+    }
+}
+
+gossamer_binding::register_module!(
+    name: calls,
+    doc: "Callbacks into Gossamer.",
+
+    cb_fn apply(d, f: gossamer_binding::PersistentCallback, x: i64) -> i64 {
+        match f.invoke(d, vec![gossamer_binding::Value::Int(x)]) {
+            Ok(gossamer_binding::Value::Int(n)) => n,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    cb_fn shout(d, f: gossamer_binding::BindingCallback, s: String) -> String {
+        match f.invoke(d, vec![gossamer_binding::Value::String(s.as_str().into())]) {
+            Ok(gossamer_binding::Value::String(t)) => t.to_string(),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+);
+
+pub fn __bindings_force_link() {
+    __gos_calls::force_link();
+}
+"#;
+
+const SCAFFOLD_MAIN: &str = r#"use probe
+use extras
+use calls
+use Counter
+
+fn double(x: i64) -> i64 {
+    x * 2
+}
+
+fn main() {
+    println("{}", probe::greet("gossamer"))
+    println("{:?}", probe::parse_int("12"))
+    println("{:?}", extras::touch())
+    let c = Counter::new()
+    Counter::inc(c)
+    Counter::inc(c)
+    println("{}", Counter::get(c))
+    let k = 3
+    println("{}", calls::apply(|x: i64| x * k, 14))
+    println("{}", calls::apply(|x: i64| x + 1, 14))
+    println("{}", calls::apply(double, 5))
+    println("{}", calls::shout(|s: String| s.to_uppercase() + "!", "hey"))
+}
+"#;
+
+const SCAFFOLD_EXPECTED: &str = "hello, gossamer\nOk(12)\n()\n2\n42\n15\n10\nHEY!\n";
+
+/// The crate `gos new --template binding` writes builds as written, and a
+/// project calling it - a unit function, an opaque type sharing a standard
+/// handle's name, and callbacks of every closure shape - prints the same
+/// under `gos run` and from `gos build` binaries.
+#[test]
+fn scaffolded_binding_runs_and_builds() {
+    let root = workspace_root();
+    let dir = std::env::temp_dir().join(format!("gos-binding-scaffold-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create scratch dir");
+    let gos = |args: &[&str], cwd: &std::path::Path| {
+        Command::new(gos_bin())
+            .args(args)
+            .current_dir(cwd)
+            .env("GOSSAMER_ROOT", &root)
+            .env("GOSSAMER_CACHE", dir.join("cache"))
+            .env("GOSSAMER_CACHE_DIR", dir.join("cache"))
+            .output()
+            .expect("spawn gos")
+    };
+    let app = dir.join("app");
+    let out = gos(&["new", "example.com/app", "--path", "app"], &dir);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = gos(
+        &[
+            "new",
+            "example.com/probe",
+            "--template",
+            "binding",
+            "--path",
+            "app/probe",
+        ],
+        &dir,
+    );
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let lib = app.join("probe/src/lib.rs");
+    let mut source = std::fs::read_to_string(&lib).expect("read scaffolded lib.rs");
+    source.push_str(SCAFFOLD_ADDITIONS);
+    std::fs::write(&lib, source).expect("extend scaffolded lib.rs");
+    let mut manifest =
+        std::fs::read_to_string(app.join("project.toml")).expect("read project manifest");
+    manifest.push_str("\n[rust-bindings]\nprobe-binding = { path = \"probe\" }\n");
+    std::fs::write(app.join("project.toml"), manifest).expect("write project manifest");
+    std::fs::write(app.join("src/main.gos"), SCAFFOLD_MAIN).expect("write main");
+
+    let run = gos(&["run", "."], &app);
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(run.status.success(), "gos run failed:\n{stderr}");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), SCAFFOLD_EXPECTED);
+
+    for (profile, flags) in [("debug", &[][..]), ("release", &["--release"][..])] {
+        let mut args = vec!["build"];
+        args.extend_from_slice(flags);
+        args.push(".");
+        let build = gos(&args, &app);
+        assert!(
+            build.status.success(),
+            "{profile} build failed:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let binary =
+            app.join("target")
+                .join(profile)
+                .join(if cfg!(windows) { "app.exe" } else { "app" });
+        let native = Command::new(&binary).output().expect("run the artifact");
+        assert!(
+            native.status.success(),
+            "{profile} binary failed:\n{}",
+            String::from_utf8_lossy(&native.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&native.stdout),
+            SCAFFOLD_EXPECTED,
+            "{profile} binary"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

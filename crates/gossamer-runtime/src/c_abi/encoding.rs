@@ -334,8 +334,12 @@ pub(crate) fn base64_decode_into(bytes: &[u8], out: &mut [u8]) -> Result<usize, 
     let mut nbits = 0u32;
     let mut i = 0usize;
     let mut written = 0usize;
+    // Alphabet characters and `=` padding read so far; whitespace is skipped.
+    let mut data = 0usize;
+    let mut pad = 0usize;
     while i < bytes.len() {
         if nbits == 0
+            && pad == 0
             && i + 4 <= bytes.len()
             && let a = u32::from(BASE64_VALUES[bytes[i] as usize])
             && let b = u32::from(BASE64_VALUES[bytes[i + 1] as usize])
@@ -350,18 +354,27 @@ pub(crate) fn base64_decode_into(bytes: &[u8], out: &mut [u8]) -> Result<usize, 
             out[written + 1] = (n >> 8) as u8;
             out[written + 2] = n as u8;
             written += 3;
+            data += 4;
             i += 4;
             continue;
         }
         let ch = bytes[i];
         i += 1;
+        if ch.is_ascii_whitespace() {
+            continue;
+        }
+        if ch == b'=' {
+            pad += 1;
+            continue;
+        }
         let val = BASE64_VALUES[ch as usize];
         if val == BASE64_INVALID {
-            if ch == b'=' || ch.is_ascii_whitespace() {
-                continue;
-            }
             return Err(format!("base64: invalid character '{}'", ch as char));
         }
+        if pad > 0 {
+            return Err("base64: data after padding".to_string());
+        }
+        data += 1;
         bits = (bits << 6) | u32::from(val);
         nbits += 6;
         if nbits >= 8 {
@@ -370,7 +383,27 @@ pub(crate) fn base64_decode_into(bytes: &[u8], out: &mut [u8]) -> Result<usize, 
             written += 1;
         }
     }
+    base64_check_shape(data, pad)?;
     Ok(written)
+}
+
+/// Whether `data` alphabet characters followed by `pad` padding characters
+/// spell whole groups of four, padded only where the last group is short:
+/// `xx==` and `xxx=` end an encoding, and nothing else may.
+pub(crate) fn base64_check_shape(data: usize, pad: usize) -> Result<(), String> {
+    if !(data + pad).is_multiple_of(4) {
+        return Err("base64: input length must be a multiple of 4".to_string());
+    }
+    let valid_padding = match pad {
+        0 => true,
+        1 => data % 4 == 3,
+        2 => data % 4 == 2,
+        _ => false,
+    };
+    if !valid_padding {
+        return Err("base64: padding does not end a group".to_string());
+    }
+    Ok(())
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {

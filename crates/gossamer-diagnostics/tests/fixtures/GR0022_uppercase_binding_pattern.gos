@@ -1,0 +1,6 @@
+// ERROR: GR0022
+
+fn main() {
+    let Total = 5
+    println("{}", Total)
+}

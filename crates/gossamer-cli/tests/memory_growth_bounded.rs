@@ -1911,3 +1911,98 @@ fn main() {
          at 100000): every parsed document is still held"
     );
 }
+
+/// A table answered in a carrier - a `Map`, `Set`, or deque popped or removed
+/// from a container, or returned by a function on one path and not another -
+/// is freed exactly once, so the live table counts do not track the loop.
+#[test]
+fn table_carriers_leave_no_live_table_per_iteration() {
+    let dir = env::temp_dir().join(format!("gos-table-carriers-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("table_carriers.gos");
+    std::fs::write(
+        &source,
+        "
+use std::{env, collections::Deque}
+
+fn answer(i: i64) -> Option<Map<i64, i64>> {
+    let mut m: Map<i64, i64> = Map::new()
+    m.insert(i, i)
+    if i % 2 == 0 { Some(m) } else { None }
+}
+
+fn main() {
+    let n = env::args().first().unwrap_or(\"64\").to_i64().unwrap_or(64)
+    let mut maps: Vec<Map<i64, i64>> = #[]
+    let mut sets: Vec<Set<i64>> = #[]
+    let mut deques: Deque<Deque<i64>> = Deque::new()
+    let mut held: Vec<Option<Map<i64, i64>>> = #[]
+    let mut total = 0
+    for i in 0..n {
+        let mut m: Map<i64, i64> = Map::new()
+        m.insert(i, i)
+        maps.push(m)
+        let mut s: Set<i64> = Set::new()
+        s.insert(i)
+        sets.push(s)
+        let mut d: Deque<i64> = Deque::new()
+        d.push_back(i)
+        deques.push_back(d)
+        if maps.len() > 2 { let _ = maps.pop() }
+        if let Some(s) = sets.pop() { total += s.len() }
+        if let Ok(d) = deques.pop_front().ok_or(0) { total += d.len() }
+        let _ = answer(i)
+        total += answer(i).unwrap_or(Map::new()).len()
+        held.push(answer(i))
+        if held.len() > 2 { let _ = held.remove(0) }
+    }
+    println(\"{} {}\", total, maps.len())
+}
+",
+    )
+    .unwrap();
+    for release in [false, true] {
+        let mut cmd = Command::new(gos_bin());
+        cmd.arg("build");
+        if release {
+            cmd.arg("--release");
+        }
+        let build = cmd
+            .arg("--out-dir")
+            .arg(&dir)
+            .arg(&source)
+            .output()
+            .expect("gos build");
+        assert!(
+            build.status.success(),
+            "build failed (release={release}): {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let binary = dir.join(format!("table_carriers{}", std::env::consts::EXE_SUFFIX));
+        let live = |iterations: &str, kind: &str| -> i64 {
+            let out = Command::new(&binary)
+                .arg(iterations)
+                .env("GOS_LEAK_LEDGER", "1")
+                .output()
+                .expect("run with the allocation ledger");
+            assert!(out.status.success(), "run failed (release={release})");
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            stderr
+                .split(&format!("{kind}="))
+                .nth(1)
+                .and_then(|tail| tail.split_whitespace().next())
+                .and_then(|n| n.parse::<i64>().ok())
+                .unwrap_or_else(|| panic!("ledger must report a live {kind} count: {stderr}"))
+        };
+        for kind in ["map", "set", "deque"] {
+            let small = live("64", kind);
+            let large = live("4096", kind);
+            assert_eq!(
+                small, large,
+                "live {kind} count tracks the iteration count (release={release}): \
+                 {small} at 64, {large} at 4096"
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

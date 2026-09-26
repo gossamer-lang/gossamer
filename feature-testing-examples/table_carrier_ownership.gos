@@ -1,0 +1,93 @@
+// A `Map`, `Set`, or deque answered in an `Option` / `Result` - popped or
+// removed from a container, or returned by a function - is the caller's own:
+// reading it, dropping it unread, and building it on a path that answers
+// something else all leave exactly one owner.
+
+use std::collections::{Deque, Queue, Stack}
+
+fn table(i: i64) -> Option<Map<i64, i64>> {
+    let mut m: Map<i64, i64> = Map::new()
+    m.insert(i, i * 10)
+    if i % 2 == 0 { Some(m) } else { None }
+}
+
+fn checked(i: i64) -> Result<Map<i64, i64>, String> {
+    let mut m: Map<i64, i64> = Map::new()
+    m.insert(i, i)
+    if i % 3 == 0 { Err(format("rejected {}", i)) } else { Ok(m) }
+}
+
+fn members(i: i64) -> Option<Set<i64>> {
+    let mut s: Set<i64> = Set::new()
+    s.insert(i)
+    s.insert(i + 1)
+    Some(s)
+}
+
+fn main() {
+    let mut maps: Vec<Map<i64, i64>> = #[]
+    let mut sets: Vec<Set<i64>> = #[]
+    let mut deques: Vec<Deque<i64>> = #[]
+    for i in 0..6 {
+        let mut m: Map<i64, i64> = Map::new()
+        m.insert(i, i)
+        maps.push(m)
+        let mut s: Set<i64> = Set::new()
+        s.insert(i)
+        sets.push(s)
+        let mut d: Deque<i64> = Deque::new()
+        d.push_back(i)
+        deques.push(d)
+    }
+    let _ = maps.pop()
+    let popped = maps.pop()
+    assert_eq(popped.map(|m| m.len()), Some(1))
+    match maps.remove(0) {
+        Ok(m) => assert_eq(m.get(0), Some(0))
+        Err(e) => panic("remove failed: {}", e)
+    }
+    if let Some(s) = sets.pop() {
+        assert(s.contains(5))
+        println("set {:?}", s)
+    }
+    let _ = sets.remove(1)
+    if let Some(d) = deques.pop() {
+        println("deque {:?}", d)
+    }
+    println("{} {} {}", maps.len(), sets.len(), deques.len())
+
+    let mut nested: Deque<Deque<i64>> = Deque::new()
+    let mut inner: Deque<i64> = Deque::new()
+    inner.push_back(7)
+    nested.push_back(inner)
+    println("{:?}", nested.pop_front())
+    let mut stack: Stack<Map<String, i64>> = Stack::new()
+    stack.push({ "k": 1 })
+    println("{:?} {}", stack.pop(), stack.len())
+    let mut queue: Queue<Set<i64>> = Queue::new()
+    queue.push(#{ 3 })
+    println("{:?}", queue.pop())
+
+    let mut total = 0
+    for i in 0..8 {
+        let _ = table(i)
+        if let Some(m) = table(i) { total += m.len() }
+        total += table(i).unwrap_or(Map::new()).len()
+        match checked(i) {
+            Ok(m) => total += m.len()
+            Err(e) => total += e.len()
+        }
+        if let Some(s) = members(i) { total += s.len() }
+    }
+    assert_eq(total, 59)
+    println("total {}", total)
+
+    let mut held: Vec<Option<Map<i64, i64>>> = #[]
+    for i in 0..4 {
+        held.push(table(i))
+        if held.len() > 2 {
+            let _ = held.remove(0)
+        }
+    }
+    println("{:?}", held)
+}

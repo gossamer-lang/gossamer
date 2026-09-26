@@ -219,6 +219,10 @@ macro_rules! __rm_munch {
                         let out: $cr = $cn(_dispatch, $($ca),*);
                         Ok(<$cr as $crate::ToGos>::to_gos(out))
                     }
+
+                    $crate::__rm_emit_native_export_cb! {
+                        $sym, $cn, ( $($ca : $ct),* ), $cr
+                    }
                 )*
 
                 pub static ITEMS: &[$crate::ItemFn] = &[
@@ -305,6 +309,11 @@ macro_rules! __rm_munch {
                             $sym, $sn
                         }
                     )*
+                    $(
+                        $crate::__rm_register_native_export! {
+                            $sym, $cn
+                        }
+                    )*
                 }
             }
         }
@@ -333,6 +342,29 @@ macro_rules! __rm_munch {
                 doc = [ $($fdoc)* ]
             } ],
             rest = [ $($rest)* ]
+        }
+    };
+
+    // ---- munch: fn with no return type --------------------------
+    (
+        $modname:tt, $path:expr, $sym:tt, $doc:literal,
+        simple = [ $($simple:tt)* ],
+        cb = [ $($cb:tt)* ],
+        rest = [
+            $(#[doc = $fdoc:literal])*
+            fn $name:ident( $($arg:ident : $argty:ty),* $(,)? ) $body:block
+            $($rest:tt)*
+        ]
+    ) => {
+        $crate::__rm_munch! {
+            $modname, $path, $sym, $doc,
+            simple = [ $($simple)* ],
+            cb = [ $($cb)* ],
+            rest = [
+                $(#[doc = $fdoc])*
+                fn $name( $($arg : $argty),* ) -> () $body
+                $($rest)*
+            ]
         }
     };
 
@@ -388,6 +420,59 @@ macro_rules! __rm_emit_native_export {
                             unsafe { <$argty as $crate::native::BindingAbi>::from_input($arg) };
                     )*
                     let out: $ret = $name($($arg),*);
+                    <$ret as $crate::native::BindingAbi>::to_output(out)
+                }));
+                result.unwrap_or_else(|_| {
+                    <<$ret as $crate::native::BindingAbi>::Output as ::core::default::Default>::default()
+                })
+            }
+
+            #[allow(non_snake_case, reason = "the thunk is named after the user's function, whose case the macro cannot change")]
+            fn [< __addr_ $sym __ $name >]() -> *const u8 {
+                [< gos_binding_ $sym __ $name >] as *const u8
+            }
+
+            #[$crate::linkme::distributed_slice($crate::NATIVE_SYMBOLS)]
+            #[linkme(crate = $crate::linkme)]
+            #[allow(non_upper_case_globals, reason = "the static is named after the user's binding, whose case the macro cannot change")]
+            static [< __NATIVE_SYM_ $sym __ $name >]: $crate::NativeSymbolEntry =
+                $crate::NativeSymbolEntry {
+                    name: concat!(
+                        "gos_binding_",
+                        stringify!($sym),
+                        "__",
+                        stringify!($name),
+                    ),
+                    addr_fn: [< __addr_ $sym __ $name >],
+                };
+        }
+    };
+}
+
+/// Internal: the `extern "C"` thunk for one `cb_fn` binding, the compiled
+/// tiers' way in. A compiled program has no interpreter to re-enter, so the
+/// body receives [`crate::native::CompiledDispatch`]; a callback argument
+/// arrives as the runtime handle its `invoke` calls through.
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __rm_emit_native_export_cb {
+    (__nosym, $name:ident, ( $($arg:ident : $argty:ty),* ), $ret:ty) => {};
+    ($sym:ident, $name:ident, ( $($arg:ident : $argty:ty),* ), $ret:ty) => {
+        $crate::__paste::paste! {
+            #[unsafe(no_mangle)]
+            #[allow(non_snake_case, unused_variables, unused_unsafe, reason = "the export is named after the user's function, and a binding with no arguments uses none of them")]
+            pub extern "C" fn [< gos_binding_ $sym __ $name >](
+                $( $arg : <$argty as $crate::native::BindingAbi>::Input ),*
+            ) -> <$ret as $crate::native::BindingAbi>::Output {
+                let result = ::std::panic::catch_unwind(::std::panic::AssertUnwindSafe(|| {
+                    $(
+                        // SAFETY: the codegen guarantees `$arg`
+                        // is the C-ABI `Input` shape declared
+                        // by `BindingAbi` for `$argty`.
+                        let $arg: $argty =
+                            unsafe { <$argty as $crate::native::BindingAbi>::from_input($arg) };
+                    )*
+                    let out: $ret = $name(&mut $crate::native::CompiledDispatch, $($arg),*);
                     <$ret as $crate::native::BindingAbi>::to_output(out)
                 }));
                 result.unwrap_or_else(|_| {

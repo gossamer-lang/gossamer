@@ -513,6 +513,7 @@ impl MultiScheduler {
     fn try_spawn_as<T: SchedTask + 'static>(&self, task: T, service: bool) -> Option<Gid> {
         let max = self.inner.max_live.load(Ordering::Relaxed);
         let prev = self.inner.live_goroutines.fetch_add(1, Ordering::AcqRel);
+        crate::sched_global::note_scheduler_progress();
         if prev >= max {
             self.inner.live_goroutines.fetch_sub(1, Ordering::AcqRel);
             return None;
@@ -732,6 +733,7 @@ impl MultiScheduler {
         reason = "called for its side effect; the bool (found-parked vs pre-unpark) is informational and most call sites are fire-and-forget"
     )]
     pub fn unpark(&self, gid: Gid) -> bool {
+        crate::sched_global::note_scheduler_progress();
         // Hold the `parked` guard across the `pre_unpark.insert()`
         // below so the worker's symmetric "insert into parked, then
         // check pre_unpark" sequence (in `worker_loop`) cannot
@@ -785,6 +787,30 @@ impl MultiScheduler {
         }
         self.inner.stats.unparks.fetch_add(1, Ordering::Relaxed);
         true
+    }
+
+    /// When every live goroutine is parked waiting on a channel or a
+    /// synchronisation object, with no wake already on its way to any of
+    /// them, answers how many of them wait on a channel; `None` otherwise.
+    #[must_use]
+    pub fn blocked_on_program(&self) -> Option<usize> {
+        let mut parked = 0usize;
+        let mut on_channels = 0usize;
+        for shard in &self.inner.parked {
+            let shard = shard.lock();
+            if !shard.early.is_empty() {
+                return None;
+            }
+            for entry in shard.entries.values() {
+                match entry.reason {
+                    ParkReason::Chan => on_channels += 1,
+                    ParkReason::Sync => {}
+                    ParkReason::Other | ParkReason::Io | ParkReason::Timer => return None,
+                }
+                parked += 1;
+            }
+        }
+        (parked == self.live_goroutines()).then_some(on_channels)
     }
 
     /// Returns the number of currently parked goroutines. Exposed for
@@ -1154,6 +1180,7 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                 // wakeup source unparks it, instead of busy-
                 // looping back through the run queue.
                 if let Some((gid, reason)) = crate::sched_global::take_pending_park() {
+                    let blocked_on_program = matches!(reason, ParkReason::Chan | ParkReason::Sync);
                     let mut parked = shared.park_shard(gid).lock();
                     parked.entries.insert(
                         gid,
@@ -1191,6 +1218,11 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                             deque.push(entry.task);
                             shared.stats.unparks.fetch_add(1, Ordering::Relaxed);
                         }
+                    } else if blocked_on_program {
+                        drop(parked);
+                        // A goroutine that now waits on the program itself
+                        // may be the last thing that could have moved it.
+                        crate::sched_global::check_program_blocked();
                     }
                 } else {
                     deque.push(task);
@@ -1199,6 +1231,8 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
             Step::Done => {
                 shared.stats.finished.fetch_add(1, Ordering::Relaxed);
                 shared.live_goroutines.fetch_sub(1, Ordering::AcqRel);
+                crate::sched_global::note_scheduler_progress();
+                crate::sched_global::check_program_blocked();
                 slot.last_yield_micros
                     .store(now_micros_since_start(), Ordering::Release);
             }

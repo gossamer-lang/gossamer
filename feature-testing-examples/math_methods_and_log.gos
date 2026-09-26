@@ -1,0 +1,23 @@
+// A `math` function called as a method on a number is the free call with the
+// receiver first, on every tier; `math::log(x, base)` takes its value first.
+
+use std::math
+
+fn methods() {
+    let f = "0.75".to_f64().unwrap_or(0.0)
+    let g = "2.5".to_f64().unwrap_or(0.0)
+    let n = "9".to_i64().unwrap_or(0)
+    println("{} {} {} {}", f.acos(), f.asin(), f.atan(), f.atan2(g))
+    println("{} {} {} {}", g.cbrt(), g.copysign(-1.0), f.cosh(), g.exp2())
+    println("{} {} {} {}", g.hypot(f), g.is_nan(), g.log10(), g.log2())
+    println("{} {} {} {}", g.positive_diff(f), g.pow(2.0), g.rem(f), g.round())
+    println("{} {} {} {}", f.sinh(), f.tan(), f.tanh(), g.trunc())
+    println("{} {} {}", n.pow(2.0), n.sqrt(), n.cbrt())
+    println("{} {}", (-g).round(), (0.5).round())
+}
+
+fn main() {
+    methods()
+    assert_eq(math::log(8.0, 2.0), 3.0)
+    println("{} {}", math::log(8.0, 2.0), (8.0).log(2.0))
+}

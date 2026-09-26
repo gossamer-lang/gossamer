@@ -193,50 +193,38 @@ payload }])` table.
 
 ## Callback
 
-### Two shapes for two tiers
+A binding takes a Gossamer closure as a `PersistentCallback` or a
+`BindingCallback` parameter of a `cb_fn`, and calls it with
+`invoke(dispatch, args)`. The two tiers reach the closure differently,
+behind the same call:
 
-Bindings call back into Gossamer from inside a binding fn. The
-ABI distinguishes interp and compiled tiers because the
-underlying dispatch differs:
+- **Interpreter**: the parameter wraps the closure `Value`, and `invoke`
+  re-enters the interpreter through [`NativeDispatch::call_value`].
+- **Compiled tiers**: the caller registers the closure with the runtime
+  (`gos_rt_binding_callback_register`) together with the register class
+  of each parameter and of the result, and the binding receives the
+  `u64` handle. `invoke` converts its arguments to tagged wire values and
+  calls `gos_rt_callback_invoke`, which calls the closure's compiled
+  code. The `cb_fn`'s `extern "C"` thunk hands the body a
+  `CompiledDispatch`, since there is no interpreter to re-enter.
 
-- **Interp tier**: `BindingCallback` wraps a `Value` (closure /
-  builtin / native). `invoke` calls
-  [`NativeDispatch::call_value`].
-- **Compiled tier**: `NativeCallback` wraps a `u64` handle into
-  a per-call dispatch table. `invoke_raw` calls the runtime
-  helper `gos_rt_callback_invoke`.
-
-Bindings that need to work in both tiers should declare two
-overload-like fns, one per tier, OR accept `BindingCallback`
-(works in interp; compiled tier currently traps).
+The closure's parameters and result are integers, floats, `bool`, `char`,
+and `String` (the result may also be `()`), with at most four parameters.
 
 ### Lifetime - STRICT
 
-**Call-scoped.** A `BindingCallback` / `NativeCallback` is valid
-only for the duration of the binding fn that received it.
-Retaining it past the return is undefined behaviour:
-
-- **Interp tier**: the underlying `Value` reference is borrowed
-  from the caller's `&[Value]` slice. After return, the
-  interpreter may drop or recycle the value.
-- **Compiled tier**: the handle is registered into a per-call
-  dispatch table that is cleared on return. Calls after return
-  trap with `RuntimeError::Type`.
-
-Persistent callbacks (e.g. event handlers stored on a
-binding-owned struct, called from a later goroutine) require a
-different shape - coming in a future ABI bump via
-opaque-handle-backed callback registration.
+**Call-scoped.** A callback is valid only for the duration of the binding
+fn that received it. On the compiled tiers the caller releases the handle
+when the call returns, and an `invoke` after that answers an error instead
+of calling anything. On the interpreter the wrapped `Value` may be dropped
+or recycled after the return.
 
 ### Coroutine / async safety
 
-The interp-tier `invoke` re-enters the interpreter via
-`NativeDispatch::call_value`. Goroutine yielding inside the
-callback works the same as any other Gossamer fn call -
-scheduling is the interpreter's concern.
-
-The compiled-tier `invoke_raw` is `unsafe`; binding authors
-must not retain handles across the binding return.
+The interpreter's `invoke` re-enters the interpreter via
+`NativeDispatch::call_value`, and goroutine yielding inside the callback
+works as it does for any Gossamer call. The compiled path calls the closure
+on the binding's own thread, inside the binding call.
 
 ## ABI versioning
 
@@ -280,18 +268,12 @@ JSON; the driver parses it. New JSON tags: `"bytes"`, `"map"`,
 
 ### Tier coverage matrix
 
-| Type | `gos` (interp) | `gos build` (cranelift) | `gos build --release` (LLVM) |
+| Type | `gos run` (interpreter / JIT) | `gos build` (LLVM) | `gos build --release` (LLVM) |
 |---|---|---|---|
-| Bytes        | works | works (typed `Vec<i64>` lowering) | works |
+| Bytes        | works | works | works |
 | Map<K, V>    | works | works | works |
-| Variant      | works | works (via `GosDynVariant`) | works |
-| Callback (interp) | works | n/a | n/a |
-| Callback (compiled) | n/a | runtime helper required (gated) | runtime helper required (gated) |
-
-Compiled-tier `NativeCallback::invoke_raw` requires
-`gos_rt_callback_invoke` to be implemented in the runtime
-(currently a declared extern; implementation lands in the next
-runtime push that touches the scheduler/preempt path).
+| Variant      | works | works | works |
+| Callback     | works | works | works |
 
 ## Failure semantics
 
@@ -307,9 +289,8 @@ runtime push that touches the scheduler/preempt path).
   `register_module!`-generated thunk's `catch_unwind`; the
   thunk returns `Output::default()`. Bindings observe this as a
   null/empty return.
-- **Callback retention past return**: undefined behaviour for
-  the compiled tier; the interp tier may panic on the next
-  `invoke`.
+- **Callback retention past return**: the compiled tiers answer
+  an error from the next `invoke`; the interpreter may panic on it.
 
 ## Examples
 

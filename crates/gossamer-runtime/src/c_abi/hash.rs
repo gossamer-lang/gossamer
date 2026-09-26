@@ -274,13 +274,13 @@ pub unsafe extern "C" fn gos_rt_hash_fnv32(data: *const super::vec::GosVec) -> i
     ffi_entry!(0, { i64::from(fnv32(&unsafe { vec_u8(data) })) })
 }
 
-/// `hash::fnv::hash64(data) -> i64` (wrapping into i64 bit-for-bit).
+/// `hash::fnv::hash64(data) -> u64`, carried as its bits in an `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_fnv64(data: *const super::vec::GosVec) -> i64 {
     ffi_entry!(0, { fnv64(&unsafe { vec_u8(data) }) as i64 })
 }
 
-/// `hash::fnv::hash_string(s) -> i64`.
+/// `hash::fnv::hash_string(s) -> u64`, carried as its bits in an `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_fnv_string(s: *const c_char) -> i64 {
     ffi_entry!(0, { fnv64(unsafe { cstr_bytes(s) }) as i64 })

@@ -1,0 +1,11 @@
+// `min`, `max`, and `clamp` compare one value of one numeric or `char` type;
+// a string, a tuple, a `bool`, or two different types is rejected at check
+// time (GT0001). `scalar_bounds_reject_non_numeric_operands` in
+// `crates/gossamer-cli/tests/bug_regressions` asserts the diagnostics.
+
+fn main() {
+    println("{}", max("x", "y"))
+    println("{}", max((1, 2), (1, 3)))
+    println("{}", max(1, "x"))
+    println("{}", max(true, false))
+}

@@ -908,6 +908,17 @@ impl Resolver {
             );
             return;
         }
+        if let Some(template) =
+            name.strip_prefix(gossamer_ast::common::REFLECTING_CALL_WITHOUT_TYPE_PREFIX)
+        {
+            self.emit(
+                ResolveError::ReflectingCallWithoutType {
+                    name: template.to_string(),
+                },
+                span,
+            );
+            return;
+        }
         if let Some(replacement) = crate::stdlib_exports::canonical_collection_name(name) {
             self.emit(
                 ResolveError::RemovedStdItem {
@@ -1827,7 +1838,16 @@ impl Resolver {
         }
     }
 
-    fn resolve_pattern_path(&mut self, path: &TypePath, anchor: NodeId, span: Span) {
+    /// Resolves the path a pattern names. `bare_uppercase_name` marks a
+    /// pattern that is the path alone, one uppercase name, which the parser
+    /// read as a path where a binding may have been meant.
+    fn resolve_pattern_path(
+        &mut self,
+        path: &TypePath,
+        anchor: NodeId,
+        span: Span,
+        bare_uppercase_name: bool,
+    ) {
         let Some(head) = path.segments.first() else {
             return;
         };
@@ -1838,7 +1858,14 @@ impl Resolver {
             .or_else(|| self.scopes.lookup_type(name))
             .map_or(Resolution::Err, |b| b.resolution);
         if matches!(resolution, Resolution::Err) {
-            self.emit_unresolved_or_rename(name, span);
+            if bare_uppercase_name {
+                self.emit(
+                    ResolveError::UppercaseBindingPattern { name: name.clone() },
+                    span,
+                );
+            } else {
+                self.emit_unresolved_or_rename(name, span);
+            }
         }
         self.check_visibility(resolution, Some(name), span);
         if path.segments.len() == 1 {
@@ -2952,7 +2979,13 @@ impl Resolver {
                 }
             }
             PatternKind::Path(path) => {
-                self.resolve_pattern_path(path, pattern.id, pattern.span);
+                let bare_uppercase_name = path.segments.len() == 1
+                    && path.segments[0].generics.is_empty()
+                    && path.segments[0]
+                        .name
+                        .name
+                        .starts_with(|c: char| c.is_uppercase());
+                self.resolve_pattern_path(path, pattern.id, pattern.span, bare_uppercase_name);
             }
             PatternKind::Tuple(parts) => {
                 for part in parts {
@@ -2975,13 +3008,13 @@ impl Resolver {
                 }
             }
             PatternKind::Struct { path, fields, .. } => {
-                self.resolve_pattern_path(path, pattern.id, pattern.span);
+                self.resolve_pattern_path(path, pattern.id, pattern.span, false);
                 for field in fields {
                     self.bind_field_pattern(field);
                 }
             }
             PatternKind::TupleStruct { path, elems } => {
-                self.resolve_pattern_path(path, pattern.id, pattern.span);
+                self.resolve_pattern_path(path, pattern.id, pattern.span, false);
                 for elem in elems {
                     self.bind_pattern(elem);
                 }

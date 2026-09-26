@@ -4489,7 +4489,7 @@ impl<'tcx> FnBuilder<'tcx> {
         }
         let direct_global_idx = if let HirExprKind::Path { segments, def } = &callee.kind {
             let local = segments.len() == 1 && self.lookup_local(&segments[0].name).is_some();
-            let module_const = def.is_some_and(|def| self.module_consts.contains_key(&def));
+            let module_const = def.is_some_and(|def| self.module_consts.contains_key(def));
             if local || module_const {
                 None
             } else {
@@ -4552,7 +4552,8 @@ impl<'tcx> FnBuilder<'tcx> {
         // mirrors the compiled tiers' printer choice from declared type and
         // MIR cast provenance.
         let render_call = Self::callee_renders_args(callee);
-        let unsigned_leaves_call = render_call || Self::callee_encodes_json(callee);
+        let encodes_json = Self::callee_encodes_json(callee);
+        let unsigned_leaves_call = render_call || encodes_json;
         // `__debug` is the `{:?}` channel and answers through `impl Debug`;
         // every other rendering callee is `{}` and answers through
         // `impl Display`.
@@ -4638,7 +4639,11 @@ impl<'tcx> FnBuilder<'tcx> {
                 self.emit(Op::I64ToUint { dst_v, src_i });
                 arg_regs.push(dst_v);
             } else if unsigned_leaves_call
-                && let Some(desc) = self.uint_leaves_desc(self.static_ty(arg))
+                && let Some(desc) = if encodes_json {
+                    crate::value::json_descriptor(self.tcx, self.static_ty(arg))
+                } else {
+                    self.uint_leaves_desc(self.static_ty(arg))
+                }
             {
                 // An integer the type declared `u64` / `usize` reads as
                 // unsigned wherever it sits, exactly as the compiled tiers'

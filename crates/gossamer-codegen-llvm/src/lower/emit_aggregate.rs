@@ -325,6 +325,9 @@ impl<'a> Lowerer<'a> {
             }
             let value = self.lower_operand(operand)?;
             let op_llvm = self.operand_llvm_ty(operand);
+            if op_llvm == "void" {
+                continue;
+            }
             let narrow = match field_tys.get(index).and_then(|ty| self.tcx.kind(*ty)) {
                 Some(TyKind::Int(IntTy::I8 | IntTy::U8)) => Some("i8"),
                 Some(TyKind::Int(IntTy::I16 | IntTy::U16)) => Some("i16"),
@@ -350,6 +353,10 @@ impl<'a> Lowerer<'a> {
     /// sign so the word reads back as the value written; every other narrow
     /// scalar - `char`, `bool`, an unsigned integer - is a magnitude.
     fn slot_word_of(&mut self, operand: &Operand, op_llvm: &str, value: &str) -> Option<String> {
+        // A unit field carries nothing; its slot holds zero.
+        if op_llvm == "void" {
+            return Some("0".to_string());
+        }
         let width: u32 = op_llvm.strip_prefix('i')?.parse().ok()?;
         if width >= 64 {
             return None;
@@ -631,6 +638,15 @@ impl<'a> Lowerer<'a> {
         let bare = i32::from(bare);
         let dest = self.fresh();
         match kind {
+            ConcatKind::F32(debug) => {
+                let shim = if debug {
+                    "gos_rt_f32_debug_to_str"
+                } else {
+                    "gos_rt_f32_to_str"
+                };
+                declare_rt(&mut self.runtime_refs, shim);
+                writeln!(self.out, "  {dest} = call ptr @{shim}(double {value})").unwrap();
+            }
             ConcatKind::VecI64 => {
                 declare_rt(&mut self.runtime_refs, "gos_rt_vec_format_i64");
                 writeln!(

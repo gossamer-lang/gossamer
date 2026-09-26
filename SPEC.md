@@ -300,11 +300,12 @@ parenthesised expression spanning lines stays that expression: `(\n a + b \n)`
 is the sum, not a one-element tuple. The one-element tuple is still written
 with its comma, `(a,)`.
 
-One narrow newline rule disambiguates the three operators that are
-also unary prefixes (`&`, `*`, `-`): when one of them appears as the
-first non-whitespace token on a new line, it begins a new statement
-rather than continuing the previous expression as a binary operator.
-So:
+One narrow newline rule disambiguates the operators that also begin an
+expression (`&`, `*`, `-`, and the `|` that opens a closure): when one of
+them appears as the first non-whitespace token on a new line, it begins a
+new statement rather than continuing the previous expression as a binary
+operator. A function can therefore end in a closure on its own line
+(`let k = 2` then `|x| x * k`). So:
 
 ```
 let s = read_file(path)?
@@ -313,9 +314,9 @@ let s = read_file(path)?
 
 parses as a let followed by a pipe-expression statement, not as
 `let s = read_file(path)? & s |> ...`. Multi-line continuation of
-those three operators still works when the operator sits at the end
+those operators still works when the operator sits at the end
 of the previous line (`let x = a -\n  b`) or inside parentheses.
-The other binary operators (`+`, `&&`, `|>`, `==`, …) continue across
+The other binary operators (`+`, `&&`, `||`, `|>`, `==`, …) continue across
 newlines unconditionally.
 
 > **Gotcha - leading `&` / `*` / `-` starts a new statement.** A line break

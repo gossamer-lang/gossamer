@@ -42,7 +42,7 @@ pub(crate) fn install_sort(globals: &mut Vec<(&'static str, Value)>) {
 fn cmp_values(a: &Value, b: &Value) -> std::cmp::Ordering {
     match (a, b) {
         (Value::Int(x), Value::Int(y)) => x.cmp(y),
-        (Value::Float(x), Value::Float(y)) => x.total_cmp(y),
+        (Value::Float(x), Value::Float(y)) => gossamer_runtime::c_abi::sort::float_order(*x, *y),
         (Value::String(x), Value::String(y)) => x.as_str().cmp(y.as_str()),
         _ => crate::stdlib_builtins::iter::compare_values_total(a, b),
     }

@@ -248,7 +248,7 @@ fn binding_template_lib_rs(crate_name: &str) -> String {
          \n\
          \x20\x20\x20\x20/// Greet the supplied name.\n\
          \x20\x20\x20\x20pub fn greet(name: String) -> String {{\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20format(\"hello, {{name}}\")\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20format!(\"hello, {{name}}\")\n\
          \x20\x20\x20\x20}}\n\
          \n\
          \x20\x20\x20\x20/// Fallible example: parse an integer.\n\

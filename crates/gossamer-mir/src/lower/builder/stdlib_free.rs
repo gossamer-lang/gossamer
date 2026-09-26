@@ -170,6 +170,7 @@ impl<'a> Builder<'a> {
         let sym = match self.tcx.kind_of(t) {
             TyKind::String => return local,
             TyKind::Int(int) => super::int_to_str_symbol(*int),
+            TyKind::Float(gossamer_types::FloatTy::F32) => "gos_rt_f32_to_str",
             TyKind::Float(_) => "gos_rt_f64_to_str",
             TyKind::Bool => "gos_rt_bool_to_str",
             TyKind::Char => "gos_rt_char_to_str",
@@ -533,8 +534,17 @@ impl<'a> Builder<'a> {
                 .is_aggregate_key(value_ty)
                 .then(|| self.key_descriptor(value_ty))
                 .flatten();
+            // A user enum's value is a counted node, keyed by the same
+            // discriminant-and-payload bytes `s.insert(v)` uses.
+            let enum_desc = if aggregate_desc.is_none() && self.struct_name_of(value_ty).is_none() {
+                self.ensure_enum_eq_desc(value_ty)
+            } else {
+                None
+            };
             let rt = if aggregate_desc.is_some() {
                 "gos_rt_set_insert_skey"
+            } else if enum_desc.is_some() {
+                "gos_rt_set_insert_ekey"
             } else if matches!(map_key_kind_from(self.tcx, value_ty), MapKeyKind::I64) {
                 "gos_rt_set_insert_i64"
             } else {
@@ -544,7 +554,7 @@ impl<'a> Builder<'a> {
                 Operand::Copy(Place::local(set)),
                 Operand::Copy(Place::local(value)),
             ];
-            if let Some(desc) = aggregate_desc {
+            if let Some(desc) = aggregate_desc.or(enum_desc) {
                 call_args.push(Operand::Const(ConstValue::Str(desc)));
             }
             let inserted = self.fresh(bool_ty);
@@ -592,10 +602,22 @@ impl<'a> Builder<'a> {
             return None;
         };
         let (key_ty, val_ty) = (*key_ty, *val_ty);
-        if !self.is_aggregate_key(key_ty) {
+        // A struct, tuple, or array key content-hashes through its slot
+        // descriptor; a user enum key hashes by discriminant and payload, as
+        // `m.insert(k, v)` keys one.
+        let (insert, descriptor) = if self.is_aggregate_key(key_ty) {
+            ("gos_rt_map_insert_skey_opt", self.key_descriptor(key_ty)?)
+        } else if self.struct_name_of(key_ty).is_none()
+            && let Some(desc) = self.ensure_enum_eq_desc(key_ty)
+        {
+            let _ = self.ensure_aggr_struct_meta(val_ty);
+            if self.is_inline_aggregate_ty(val_ty) {
+                let _ = self.ensure_aggr_copy_meta(val_ty);
+            }
+            ("gos_rt_map_insert_ekey_opt", desc)
+        } else {
             return None;
-        }
-        let descriptor = self.key_descriptor(key_ty)?;
+        };
         let map_ty = self.tcx.intern(TyKind::HashMap {
             key: key_ty,
             value: val_ty,
@@ -626,7 +648,7 @@ impl<'a> Builder<'a> {
                 span,
             );
             let _ = self.emit_combinator_call(
-                "gos_rt_map_insert_skey_opt",
+                insert,
                 vec![
                     Operand::Copy(Place::local(map)),
                     Operand::Copy(Place::local(key)),
@@ -1836,11 +1858,11 @@ impl<'a> Builder<'a> {
             ),
             "hash::fnv::hash64" => (
                 "gos_rt_hash_fnv64",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U64),
             ),
             "hash::fnv::hash_string" => (
                 "gos_rt_hash_fnv_string",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U64),
             ),
             _ => return None,
         })
@@ -2018,7 +2040,7 @@ impl<'a> Builder<'a> {
     fn lower_math_free(
         &mut self,
         joined: &str,
-        _args: &[HirExpr],
+        args: &[HirExpr],
     ) -> Option<(&'static str, gossamer_types::Ty)> {
         Some(match joined {
             "f64::to_bits" => (
@@ -2108,6 +2130,27 @@ impl<'a> Builder<'a> {
             ),
             "math::atan" => (
                 "gos_rt_math_atan",
+                self.tcx.float_ty(gossamer_types::FloatTy::F64),
+            ),
+            "__gos_debug_quote" if args.len() == 1 => {
+                let helper = if matches!(
+                    self.tcx.kind_of(self.peel_ref_ty(args[0].ty)),
+                    gossamer_types::TyKind::Char
+                ) {
+                    "gos_rt_debug_quote_char"
+                } else {
+                    "gos_rt_debug_quote_str"
+                };
+                (helper, self.tcx.string_ty())
+            }
+            "__gos_f32_display" if args.len() == 1 => ("gos_rt_f32_to_str", self.tcx.string_ty()),
+            "__gos_dyn_display" if args.len() == 1 => ("gos_rt_dyn_display", self.tcx.string_ty()),
+            "__gos_dyn_debug" if args.len() == 1 => ("gos_rt_dyn_format", self.tcx.string_ty()),
+            "__gos_f32_debug" if args.len() == 1 => {
+                ("gos_rt_f32_debug_to_str", self.tcx.string_ty())
+            }
+            "math::log" => (
+                "gos_rt_math_log_base",
                 self.tcx.float_ty(gossamer_types::FloatTy::F64),
             ),
             "math::atan2" => (
@@ -2820,7 +2863,7 @@ impl<'a> Builder<'a> {
             // Result<T, errors::Error> packed as a *mut GosResult;
             // format_* return String.
             "strconv::parse_i64" => ("gos_rt_strconv_parse_i64", self.result_i64_error_adt_ty()),
-            "strconv::parse_u64" => ("gos_rt_strconv_parse_u64", self.result_i64_error_adt_ty()),
+            "strconv::parse_u64" => ("gos_rt_strconv_parse_u64", self.result_u64_error_adt_ty()),
             "strconv::parse_f64" => ("gos_rt_strconv_parse_f64", self.result_f64_error_adt_ty()),
             "strconv::parse_bool" => ("gos_rt_strconv_parse_bool", self.result_bool_error_adt_ty()),
             "strconv::parse_i64_radix" => (
@@ -2830,9 +2873,7 @@ impl<'a> Builder<'a> {
             "strconv::format_i64_radix" => {
                 ("gos_rt_strconv_format_i64_radix", self.tcx.string_ty())
             }
-            "strconv::quote" | "__gos_strconv_quote" => {
-                ("gos_rt_strconv_quote", self.tcx.string_ty())
-            }
+            "strconv::quote" => ("gos_rt_strconv_quote", self.tcx.string_ty()),
             "strconv::unquote" => ("gos_rt_strconv_unquote", self.result_string_error_adt_ty()),
             // Format-spec intrinsics from `{:spec}` expansion. `__fmt_radix`
             // and `__fmt_upper` reuse the strconv/strings shims; `__fmt_pad`
@@ -4538,9 +4579,13 @@ impl<'a> Builder<'a> {
             && segments.len() == 1
             && segments[0].name.as_str() == "__concat"
             && rendered_args.len() == 1
+            // The helper renders an `i64`; a `u64` / `usize` above
+            // `i64::MAX` would print negative, so it keeps the general path,
+            // which renders it unsigned.
             && matches!(
                 self.tcx.kind_of(rendered_args[0].ty),
-                gossamer_types::TyKind::Int(_)
+                gossamer_types::TyKind::Int(int)
+                    if !matches!(int, gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize)
             )
         {
             let mut locals = Vec::with_capacity(4);

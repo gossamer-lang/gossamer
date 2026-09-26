@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
-# Walks each example project, runs `gos` against it, and
-# (optionally) `gos build` if BUILD=1 in the environment. The
-# default is run-only because the compiled-mode codegen for
-# binding calls is incremental - `gos` covers the full
-# binding pipeline today.
+# Walks each example project, runs it with `gos run`, and builds
+# and runs it with `gos build` when BUILD=1 is set in the
+# environment.
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,8 +20,8 @@ for ex in 01-gossamer-aware 02-plain-rust-wrapped; do
     echo "=> example: ${ex}"
     cd "${SELF_DIR}/${ex}"
 
-    echo "  -- gos (debug runner)"
-    "${GOS}" src/main.gos
+    echo "  -- gos run"
+    "${GOS}" run src/main.gos
 
     if [[ -n "${BUILD:-}" ]]; then
         echo "  -- gos build (debug)"

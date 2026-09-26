@@ -547,6 +547,15 @@ pub(crate) fn gossamer_to_json_value(value: &Value) -> json_std::Value {
         // compiled tiers build it.
         Value::Float(f) if !f.is_finite() => json_std::Value::Null,
         Value::Float(f) => json_std::Value::Number(*f),
+        // An `f32` encodes as its single-precision digits, as the compiled
+        // tiers write it.
+        Value::Struct(_) if let Some(f) = crate::value::f32_render_slot(value) => {
+            if f.is_finite() {
+                json_std::Value::Number(gossamer_runtime::builtins::f32_as_decimal_double(f))
+            } else {
+                json_std::Value::Null
+            }
+        }
         Value::Char(c) => json_std::Value::String(c.to_string()),
         Value::String(s) => json_std::Value::String(s.as_str().to_string()),
         Value::Tuple(parts) => {

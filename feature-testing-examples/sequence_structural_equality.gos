@@ -1,0 +1,27 @@
+// Two sequences are equal when their elements are, compared the way `==`
+// compares each element type: nested sequences, tuples, structs, and
+// `Option` / `Result` carriers by content, and a NaN equal to nothing.
+
+struct P { a: i64, s: String }
+
+fn main() {
+    let nan = "nan".to_f64().unwrap_or(0.0)
+    let a = #[Some(1), Some(2)]
+    let b = #[Some(1), Some(3)]
+    let c = #[Some(1), Some(2)]
+    println("{} {} {}", a == b, a == c, a != b)
+    println("{}", #[#[1, 2], #[3]] == #[#[1, 2], #[3]])
+    println("{}", #[(1, "a")] == #[(1, "a")])
+    println("{}", #[P { a: 1, s: "x" }] == #[P { a: 1, s: "x" }])
+    println("{}", #[P { a: 1, s: "x" }] == #[P { a: 1, s: "y" }])
+    let r1: Vec<Result<i64, String>> = #[Ok(1), Err("e")]
+    let r2: Vec<Result<i64, String>> = #[Ok(1), Err("e")]
+    println("{}", r1 == r2)
+    println("{} {}", #[Some(nan)] == #[Some(nan)], #[nan] == #[nan])
+    let vv = #[#[1], #[2, 3]]
+    println("{} {}", vv.contains(#[2, 3]), vv.contains(#[9]))
+    println("{}", #[Some(1), None].contains(None))
+    assert_eq(#[1, 2].map(|n| Some(n)), a)
+    assert_eq(vv, #[#[1], #[2, 3]])
+    println("ok")
+}

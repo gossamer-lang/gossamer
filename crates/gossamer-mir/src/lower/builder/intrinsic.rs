@@ -673,10 +673,10 @@ impl<'a> Builder<'a> {
         );
         let (helper, mut args) = match method {
             "sort" => {
-                let helper = if matches!(self.tcx.kind_of(elem), TyKind::String) {
-                    "gos_rt_arr_sort_str"
-                } else {
-                    "gos_rt_arr_sort_i64"
+                let helper = match self.tcx.kind_of(elem) {
+                    TyKind::String => "gos_rt_arr_sort_str",
+                    TyKind::Float(_) => "gos_rt_arr_sort_f64",
+                    _ => "gos_rt_arr_sort_i64",
                 };
                 (
                     helper,
@@ -2396,6 +2396,30 @@ impl<'a> Builder<'a> {
                     });
                     self.set_current(next);
                     return Some(dest);
+                }
+                // A callback answering an `Option` or `Result` hands back the
+                // two-word carrier by value, which the carrier shim reads and
+                // stores whole.
+                if matches!(self.tcx.kind_of(out_ty),
+                    TyKind::Adt { def, .. } if def.local == u32::MAX || def.local == u32::MAX - 1)
+                {
+                    let closure_local =
+                        self.lower_iter_closure(&args[0], &[in_ty], out_ty, span)?;
+                    let vec_local = self.lower_iter_vec_arg(&args[1])?;
+                    let dest_ty = self.eager_seq_result_ty(ty, out_ty);
+                    let mapped = self.emit_iter_combinator_call(
+                        "map_carrier",
+                        in_abi,
+                        None,
+                        vec![
+                            Operand::Copy(Place::local(closure_local)),
+                            Operand::Copy(Place::local(vec_local)),
+                        ],
+                        dest_ty,
+                        span,
+                    );
+                    self.tag_owned_elements(mapped, out_ty, span);
+                    return Some(mapped);
                 }
                 // A callback the compiler can name is called directly, one
                 // element at a time, instead of through the runtime's
@@ -4283,8 +4307,19 @@ impl<'a> Builder<'a> {
         combinator: &str,
         span: Span,
     ) -> Option<Local> {
-        let (elem_ty, elem_abi) = self.iter_elem_abi(self.locals[v.0 as usize].ty);
+        let seq_ty = self.locals[v.0 as usize].ty;
+        let (elem_ty, elem_abi) = self.iter_elem_abi(seq_ty);
+        // An `f32` keeps its own type: its slot is double width either way,
+        // and the type is what renders its single-precision digits.
         let payload_ty = match elem_abi {
+            ElemAbi::Float
+                if matches!(
+                    self.iter_element_kind(seq_ty),
+                    Some(gossamer_types::TyKind::Float(gossamer_types::FloatTy::F32))
+                ) =>
+            {
+                self.tcx.float_ty(gossamer_types::FloatTy::F32)
+            }
             ElemAbi::Float => self.tcx.float_ty(gossamer_types::FloatTy::F64),
             _ => elem_ty,
         };

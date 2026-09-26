@@ -30,6 +30,7 @@ fn stream_fd(value: &Value) -> i64 {
 fn math_arg(args: &[Value]) -> f64 {
     match args.first() {
         Some(Value::Float(x)) => *x,
+        Some(Value::Uint(n)) => *n as f64,
         other => other.and_then(Value::as_i64).map_or(0.0, |n| n as f64),
     }
 }
@@ -183,6 +184,7 @@ fn builtin_math_pow(args: &[Value]) -> RuntimeResult<Value> {
     let y = match args.get(1) {
         Some(Value::Float(v)) => *v,
         Some(Value::Int(n)) => *n as f64,
+        Some(Value::Uint(n)) => *n as f64,
         _ => 0.0,
     };
     Ok(Value::Float(x.powf(y)))
@@ -405,6 +407,10 @@ fn builtin_concat(args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_debug(args: &[Value]) -> RuntimeResult<Value> {
     let mut out = String::with_capacity(args.len() * 8);
     for arg in args {
+        if let Some(f) = crate::value::f32_render_slot(arg) {
+            out.push_str(&gossamer_runtime::builtins::format_f32_debug(f));
+            continue;
+        }
         match arg {
             Value::Float(f) => out.push_str(&gossamer_runtime::builtins::format_float_debug(*f)),
             other => {

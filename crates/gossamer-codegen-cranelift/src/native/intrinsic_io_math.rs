@@ -2341,13 +2341,13 @@ pub(super) fn lower_intrinsic_call_io_math(
             Ok(true)
         }
         // `std::math::*` - all (f64) -> f64 except where noted.
-        "math::sqrt" | "math::sin" | "math::cos" | "math::ln" | "math::log" | "math::exp"
-        | "math::abs" | "math::floor" | "math::ceil" => {
+        "math::sqrt" | "math::sin" | "math::cos" | "math::ln" | "math::exp" | "math::abs"
+        | "math::floor" | "math::ceil" => {
             let rt_name = match name {
                 "math::sqrt" => "gos_rt_math_sqrt",
                 "math::sin" => "gos_rt_math_sin",
                 "math::cos" => "gos_rt_math_cos",
-                "math::ln" | "math::log" => "gos_rt_math_log",
+                "math::ln" => "gos_rt_math_log",
                 "math::exp" => "gos_rt_math_exp",
                 "math::abs" => "gos_rt_math_abs",
                 "math::floor" => "gos_rt_math_floor",

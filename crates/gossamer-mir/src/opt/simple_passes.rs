@@ -599,9 +599,10 @@ pub fn copy_propagate(body: &mut Body, tcx: &TyCtxt) {
     }
 }
 
-/// Which locals hold a `u64` / `usize`: the one integer shape whose value a
-/// bare `ConstValue::Int` cannot carry, since the backends read an untyped
-/// constant as a signed `i64`.
+/// Which locals hold an unsigned integer: a bare `ConstValue::Int` carries no
+/// signedness, and the backends read an untyped constant as a signed `i64`,
+/// so an unsigned value keeps its place wherever signedness decides the
+/// result.
 fn unsigned_word_locals(body: &Body, tcx: &TyCtxt) -> Vec<bool> {
     body.locals
         .iter()
@@ -609,7 +610,10 @@ fn unsigned_word_locals(body: &Body, tcx: &TyCtxt) -> Vec<bool> {
             matches!(
                 tcx.kind(decl.ty),
                 Some(TyKind::Int(
-                    gossamer_types::IntTy::U64
+                    gossamer_types::IntTy::U8
+                        | gossamer_types::IntTy::U16
+                        | gossamer_types::IntTy::U32
+                        | gossamer_types::IntTy::U64
                         | gossamer_types::IntTy::Usize
                         | gossamer_types::IntTy::U128
                 ))

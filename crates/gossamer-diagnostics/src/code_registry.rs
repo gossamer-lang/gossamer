@@ -815,6 +815,22 @@ pub const REGISTRY: &[(&str, &str)] = &[
             `iter::map(xs, f)` read as the `xs.map(f)` it stands for.",
     ),
     (
+        "GR0022",
+        "A pattern that is a single name starting with an uppercase letter\n\
+            names a unit variant or a constant, so it is read as a path and\n\
+            never introduces a binding. No variant or constant by that name is\n\
+            in scope. If a binding was meant, start its name with a lowercase\n\
+            letter; if a variant was meant, import it or qualify it.",
+    ),
+    (
+        "GR0023",
+        "A function whose body walks `typeInfo::<T>()` over its own type\n\
+            parameter is specialised once per type it is called with, and the\n\
+            call is what names that type. A call without a turbofish names\n\
+            none, so there is no specialisation for it to reach. Write the type\n\
+            at the call: `describe::<Point>(p)`.",
+    ),
+    (
         "GT0001",
         "The type checker could not reconcile two types it expected to\n\
                      match. The primary label shows the location of the mismatch;\n\
@@ -1473,6 +1489,24 @@ pub const REGISTRY: &[(&str, &str)] = &[
             nothing decides the parameter's type. The field's layout depends on\n\
             that type: annotate the parameter, `|r: http::Request| r.path`, or\n\
             pass the closure where its parameter type is known.",
+    ),
+    (
+        "GT0093",
+        "`?` hands an error of the operand's type to a function that answers\n\
+            a different one. It converts when the function answers\n\
+            `errors::Error` (any error, by its text) or a type with an\n\
+            `impl From<E> for T` taking exactly the operand's error type. Otherwise\n\
+            write that impl, change the function's error type, or convert first\n\
+            with `.map_err(..)`.",
+    ),
+    (
+        "GT0094",
+        "A closure passed to a `[rust-bindings]` function's callback parameter\n\
+            has a parameter or result whose type nothing in the program decides.\n\
+            The binding's signature does not name its callback's types, and a\n\
+            compiled program calls the closure through each type's register\n\
+            class, so annotate each parameter (`|s: String| ..`) or use it in a way\n\
+            that fixes its type.",
     ),
     (
         "GX0001",

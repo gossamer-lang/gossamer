@@ -587,6 +587,23 @@ fn container_ctor_format_symbol(ctor: &str) -> Option<&'static str> {
     })
 }
 
+/// Whether `ty` holds an `f32` anywhere a rendering walks: a sequence
+/// element, a tuple field, a map key or value, or a carrier payload. A lane
+/// vector renders as its own lanes and is not one of them.
+fn holds_f32(tcx: &TyCtxt, ty: gossamer_types::Ty) -> bool {
+    match tcx.kind_of(ty) {
+        TyKind::Float(gossamer_types::FloatTy::F32) => true,
+        TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => {
+            holds_f32(tcx, *elem)
+        }
+        TyKind::Ref { inner, .. } => holds_f32(tcx, *inner),
+        TyKind::Tuple(elems) => elems.iter().any(|e| holds_f32(tcx, *e)),
+        TyKind::HashMap { key, value, .. } => holds_f32(tcx, *key) || holds_f32(tcx, *value),
+        TyKind::Adt { substs, .. } => substs.types().iter().any(|t| holds_f32(tcx, *t)),
+        _ => false,
+    }
+}
+
 pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -> PrintKind {
     match operand {
         Operand::Const(ConstValue::Str(_)) => PrintKind::StrPtr,
@@ -618,6 +635,12 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                 }
                 _ => ty,
             };
+            // An `f32` inside a sequence, tuple, map, or carrier renders
+            // through a leaf tag only the descriptor walk carries, which this
+            // tier does not emit, so such a body runs on the VM.
+            if !matches!(tcx.kind_of(ty), TyKind::Float(_)) && holds_f32(tcx, ty) {
+                return PrintKind::Unsupported("a value holding an f32");
+            }
             // A container renders through its own runtime shim whether the
             // local carries the container's type or the bare i64 handle the
             // constructor returned.
@@ -664,6 +687,12 @@ pub(super) fn operand_print_kind(body: &Body, tcx: &TyCtxt, operand: &Operand) -
                 // `time::Duration` / `time::Instant` are transparent
                 // `i64`s; print the millisecond count they carry.
                 TyKind::Unit | TyKind::Never | TyKind::Duration | TyKind::Instant => PrintKind::Int,
+                // A format site names an `f32` directly only through a type
+                // parameter; its single-precision digits come from the
+                // renderer the other tiers call, so such a body runs on the VM.
+                TyKind::Float(gossamer_types::FloatTy::F32) => {
+                    PrintKind::Unsupported("an f32 through a type parameter")
+                }
                 TyKind::Float(_) => PrintKind::Float,
                 TyKind::String | TyKind::Ref { .. } => PrintKind::StrPtr,
                 // `Var(_)` means the typechecker did not resolve

@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GR0023]: A function whose body walks `typeInfo::<T>()` over its own type - here
+--- framed ---
+error[GR0023]: A function whose body walks `typeInfo::<T>()` over its own type
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

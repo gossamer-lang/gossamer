@@ -375,10 +375,21 @@ fn print_profile_plan(target: &LinkTarget, opts: LinkOptions, static_musl: bool)
         TargetOs::Linux => "linux:dynamic",
         TargetOs::Other => "other",
     };
+    let triple = linked_triple(&target.triple, static_musl);
+    let loop_idiom_disabled =
+        opts.release && gossamer_codegen_llvm::loop_idiom_disabled(static_musl, &triple);
     eprintln!(
-        "build-profile: {{\"profile\":\"{profile}\",\"target\":\"{}\",\"mir\":\"{mir}\",\"llvm\":\"{llvm}\",\"static_musl\":{static_musl},\"loop_idiom_disabled\":{static_musl},\"link\":\"{linker}\",\"runtime_profile\":\"embedded\"}}",
-        target.triple,
+        "build-profile: {{\"profile\":\"{profile}\",\"target\":\"{triple}\",\"mir\":\"{mir}\",\"llvm\":\"{llvm}\",\"static_musl\":{static_musl},\"loop_idiom_disabled\":{loop_idiom_disabled},\"link\":\"{linker}\",\"runtime_profile\":\"embedded\"}}",
     );
+}
+
+/// The triple a binary is linked for: a GNU triple built as a static-musl
+/// artifact links against musl.
+fn linked_triple(triple: &str, static_musl: bool) -> String {
+    match triple.strip_suffix("-linux-gnu") {
+        Some(arch_vendor) if static_musl => format!("{arch_vendor}-linux-musl"),
+        _ => triple.to_string(),
+    }
 }
 
 /// Wall-clock accounting for the native build critical path. The values are
@@ -1218,20 +1229,27 @@ fn try_native_build(
         }
         NativeBuildOutcome {
             size: fs::metadata(out_path).map_or(0, |m| m.len()),
-            note: format!(
-                "target {triple}{tag}{pgo}",
-                triple = object_triple.as_deref().unwrap_or("unknown"),
-                tag = if static_musl { ", static-musl" } else { "" },
-                pgo = if pgo.collect_path.is_some() {
-                    ", pgo-collect"
-                } else if pgo.profile {
-                    ", pgo-guided"
-                } else {
-                    ""
-                },
-            ),
+            note: artifact_note(object_triple.as_deref(), static_musl, &pgo),
         }
     })
+}
+
+/// The parenthesised note a finished build prints after its path: the triple
+/// the binary is linked for and how it was linked.
+fn artifact_note(object_triple: Option<&str>, static_musl: bool, pgo: &PgoLinkConfig) -> String {
+    format!(
+        "target {triple}{tag}{pgo}",
+        triple =
+            object_triple.map_or_else(|| "unknown".to_string(), |t| linked_triple(t, static_musl)),
+        tag = if static_musl { ", static-musl" } else { "" },
+        pgo = if pgo.collect_path.is_some() {
+            ", pgo-collect"
+        } else if pgo.profile {
+            ", pgo-guided"
+        } else {
+            ""
+        },
+    )
 }
 
 struct PgoLinkConfig {
@@ -1583,6 +1601,27 @@ fn link_posix(
         // functions are global) via the post-link `strip -x`.
         cmd.arg("-Wl,--strip-debug");
     }
+    if lt.os == TargetOs::Linux {
+        // Assembler temporaries (`.L*`) and the CRT's local labels name no
+        // function, so no trace or profile reads them; named local
+        // functions, which traces do read, are kept.
+        cmd.arg("-Wl,--discard-locals");
+        if !opts.want_strip() {
+            // gdb and lldb read compressed debug sections directly.
+            cmd.arg("-Wl,--compress-debug-sections=zlib");
+        }
+    }
+    if lt.os == TargetOs::Linux
+        && lt.env == TargetEnv::Gnu
+        && !lt.is_cross
+        && host_glibc_reads_relr()
+    {
+        // Packed relative relocations keep the binary position independent
+        // at a fraction of the relocation size. The linker records a
+        // `GLIBC_ABI_DT_RELR` requirement, so a loader older than 2.36
+        // refuses the binary rather than misreading it.
+        cmd.arg("-Wl,-z,pack-relative-relocs");
+    }
     trace_link_command(&cmd);
     match cmd.status() {
         Ok(s) if s.success() => {
@@ -1599,6 +1638,35 @@ fn link_posix(
             "{cc} exited with {s}"
         ))),
         Err(err) => Err(NativeBuildError::LinkerMissing(format!("{cc}: {err}"))),
+    }
+}
+
+/// Whether this host's glibc loads packed relative relocations (`DT_RELR`),
+/// which it does from 2.36 on. Read from `ldd --version`, whose first line
+/// ends in the glibc version; any other answer reads as no.
+fn host_glibc_reads_relr() -> bool {
+    static READS_RELR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *READS_RELR.get_or_init(|| {
+        let Ok(output) = std::process::Command::new("ldd").arg("--version").output() else {
+            return false;
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let Some(first) = text.lines().next() else {
+            return false;
+        };
+        if !first.contains("GLIBC") && !first.contains("GNU libc") {
+            return false;
+        }
+        glibc_version_reads_relr(first.rsplit(' ').next().unwrap_or(""))
+    })
+}
+
+/// Whether a glibc version string (`2.39`) is 2.36 or later.
+fn glibc_version_reads_relr(version: &str) -> bool {
+    let mut parts = version.trim().split('.').map(str::parse::<u32>);
+    match (parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => (major, minor) >= (2, 36),
+        _ => false,
     }
 }
 
@@ -1750,7 +1818,11 @@ fn link_posix_static_musl(
         // gos function names; only drop DWARF debug sections. See the
         // matching note in `link_posix`.
         cmd.arg("--strip-debug");
+    } else {
+        cmd.arg("--compress-debug-sections=zlib");
     }
+    // As in `link_posix`: temporaries name nothing a trace reads.
+    cmd.arg("--discard-locals");
     trace_link_command(&cmd);
     match cmd.status() {
         Ok(s) if s.success() => {
@@ -1967,6 +2039,32 @@ fn set_executable(path: &Path) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn packed_relative_relocations_need_glibc_2_36() {
+        assert!(super::glibc_version_reads_relr("2.36"));
+        assert!(super::glibc_version_reads_relr("2.39"));
+        assert!(super::glibc_version_reads_relr("3.0"));
+        assert!(!super::glibc_version_reads_relr("2.35"));
+        assert!(!super::glibc_version_reads_relr("2.9"));
+        assert!(!super::glibc_version_reads_relr("musl"));
+    }
+
+    #[test]
+    fn a_static_musl_build_names_the_musl_triple() {
+        assert_eq!(
+            super::linked_triple("x86_64-unknown-linux-gnu", true),
+            "x86_64-unknown-linux-musl"
+        );
+        assert_eq!(
+            super::linked_triple("x86_64-unknown-linux-gnu", false),
+            "x86_64-unknown-linux-gnu"
+        );
+        assert_eq!(
+            super::linked_triple("aarch64-apple-darwin", true),
+            "aarch64-apple-darwin"
+        );
+    }
+
     fn scratch(name: &str) -> std::path::PathBuf {
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

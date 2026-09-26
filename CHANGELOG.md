@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.64.1 - Correctness, tier parity, debug info, and smaller binaries
+
+- A `Map`, `Set`, or deque taken out of a container (`pop`, `remove`, `pop_front`) is freed on the compiled tiers; popping a `Set` or deque no longer crashes, and a table a function returns on one path no longer leaks on the others.
+- Storing a `Map` binding on its last use hands it over instead of copying it.
+- A `for` over a struct or nested tuple pattern terminates on the compiled tiers.
+- Integer operations folded from constants keep their signedness in native builds.
+- `map` callbacks answering an `Option` and `==` / `contains` on vectors of aggregates behave the same on every tier.
+- A user type named `Stack`, `Queue`, `Deque`, `Set`, `Map`, or `Once` is its own type, not the builtin.
+- `?` converts an error through the target's `From` impl; without one it is `GT0093`.
+- Nested patterns, `@` bindings, and set or map literals over enum payloads read the right values on the compiled tiers.
+- A trait method on an integer literal, `.pairwise()` in method form, a local `const` built from a call, and `Vec<()>` compile natively.
+- Tail calls in `if` and `match` arms run at any depth on the bytecode VM, and a panic trace still names each function the chain passed through.
+- `io::stdin()` / `stdout()` / `stderr()` and `process::Child` methods are typed.
+- `math::log(x, base)` answers the logarithm in `base` on every tier; `math` functions work in method position.
+- `u64` values format, parse, pass through `math`, and read from JSON unsigned on every tier; `hash::fnv::hash64` answers a `u64`.
+- `abs` and radix formatting of narrow signed integers stay at the declared width.
+- `f32` arithmetic, literals, reductions, rendering, and JSON are single precision on every tier.
+- `min`, `max`, and `clamp` reject operands that are not one number or `char` type.
+- JSON follows the RFC 8259 grammar, parses every number to the nearest double, renders one canonical form, and encodes a `char` as a string.
+- `{:?}` escapes strings one way at every depth and quotes `char`s; `DynValue` renders the same on every tier.
+- Sorting floats orders by value on every tier, and every NaN takes one place above every number, whatever its sign.
+- `split_once("")`, `strings::slice` on non-ASCII text, and a negative `repeat` count behave the same on every tier.
+- A deadlock under a `cohort` is reported instead of hanging, and every tier reports a deadlock with the same text naming the operation `main` is waiting in.
+- Panic traces from a debug build match the bytecode VM's: `call stack (outermost first)` with `file:line:column` for every frame; release traces name `main` and list each frame.
+- `gos build -g` emits line tables for Gossamer source: debuggers stop at `file.gos:line` and backtraces name Gossamer lines. Its debug sections are compressed.
+- Native binaries are smaller: exception tables of discarded functions are dropped, the runtime archive is link-time optimized, and panic traces use the symbolizer every binary already carries. Debug binaries use packed relocations on glibc 2.36 and later.
+- `--explain-profile` and the `build:` line report the triple a binary is linked for and the real loop-idiom setting.
+- Slicing, trimming, and splitting non-ASCII strings in native builds no longer revalidate text already known to be UTF-8.
+- A closure on its own line after a statement is a closure; inside a grouping `( .. )` a line opening with `-`, `*`, `&`, or `|` continues the expression, as the spec says.
+- `let` with an array pattern on a fixed array, `let`-else with a slice pattern and `mut` bindings, and `-128i8`-style minimum literals are accepted.
+- `codegen(..)` splices code of any type.
+- New diagnostics: positional format placeholders (`{0}`, GP0021), an uppercase name used as a binding (GR0022), a reflecting generic called without a turbofish (GR0023), a refutable `for` pattern (GT0047), and an untyped closure passed to a binding callback (GT0094). `impl Iterator` may state `type Item`; GT0002 points at the method name.
+- Rust bindings: the scaffolded crate compiles, functions without a return type and opaque types named like standard handles work, binding results are typed, and callbacks (closures and named functions) work in `gos build`. Bindings are aimed at `gos build`, supported by `gos run`, and not loaded by the REPL.
+
 ## 0.64.0 - Correctness and soundness fixes
 
 - The `std::sync` handles (`Mutex`, `RwLock`, `Once`, `WaitGroup`, `Barrier`, `AtomicI64`, `AtomicI32`, `AtomicU64`, `AtomicBool`) and the `I64Vec` / `U8Vec` buffers are typed, each with its own method table: a wrong annotation (`let s: String = m.lock()`), a wrong argument, or a method the handle lacks is a type error, where the program checked and then printed differently on each tier.

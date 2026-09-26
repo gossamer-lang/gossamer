@@ -89,6 +89,12 @@ pub unsafe extern "C" fn gos_rt_math_atan2(y: f64, x: f64) -> f64 {
     ffi_entry!(f64::NAN, { y.atan2(x) })
 }
 
+/// `math::log(x, base)`: the logarithm of `x` in `base`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_math_log_base(x: f64, base: f64) -> f64 {
+    ffi_entry!(f64::NAN, { x.ln() / base.ln() })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_sinh(x: f64) -> f64 {
     ffi_entry!(f64::NAN, { x.sinh() })

@@ -1,0 +1,8 @@
+// ERROR: GT0047
+
+fn main() {
+    let m = {"a": #[1, 2]}
+    for (k, [a, b]) in m {
+        println("{} {} {}", k, a, b)
+    }
+}

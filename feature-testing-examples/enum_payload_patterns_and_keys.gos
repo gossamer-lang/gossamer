@@ -1,0 +1,47 @@
+// Patterns reach into an enum payload at its own type - a one-word struct or
+// tuple struct through a nested pattern, a `char` or number through an `@`
+// binding - and a set or map literal keyed by enum values hashes each by
+// discriminant and payload.
+
+struct W(i64)
+struct P { x: i32, y: i32 }
+enum E { A(W), B(P), C(i64) }
+enum Tok { Op(char), N(i64), F(f64) }
+enum K { KA(i64), KB, KC(String) }
+enum Unit { X, Y }
+
+fn nested(e: E) -> String {
+    match e {
+        E::A(W(n)) => format("a {}", n)
+        E::B(P { x, y }) => format("b {} {}", x, y)
+        E::C(n) => format("c {}", n)
+    }
+}
+
+fn token(t: Tok) -> String {
+    match t {
+        Tok::Op(c @ '+') => format("plus {}", c)
+        Tok::Op(c @ ('-' | '*')) => format("minus-or-times {}", c)
+        Tok::Op(c) => format("other {}", c)
+        Tok::N(n @ 1..=9) => format("digit {}", n)
+        Tok::N(n) => format("num {}", n)
+        Tok::F(x) => format("float {}", x)
+    }
+}
+
+fn main() {
+    assert_eq(nested(E::A(W(42))), "a 42")
+    assert_eq(nested(E::B(P { x: 3, y: -4 })), "b 3 -4")
+    println("{} | {} | {}", nested(E::A(W(42))), nested(E::B(P { x: 3, y: -4 })), nested(E::C(7)))
+    if let E::B(P { x, .. }) = E::B(P { x: 9, y: 1 }) { println("{}", x) }
+    for t in #[Tok::Op('+'), Tok::Op('*'), Tok::Op('/'), Tok::N(5), Tok::N(-3), Tok::F(2.5)] {
+        println("{}", token(t))
+    }
+    let s = #{ K::KA(3), K::KB, K::KA(3), K::KC("z") }
+    println("{} {} {}", s.len(), s.contains(K::KA(3)), s.contains(K::KA(4)))
+    let m = { K::KA(1): 10, K::KB: 20, K::KC("k"): 30 }
+    println("{} {:?} {:?}", m.len(), m.get(K::KA(1)), m.get(K::KC("k")))
+    let u = { Unit::X: "x", Unit::Y: "y" }
+    println("{:?} {}", u.get(Unit::Y), u.len())
+    println("{}", #{ Unit::X, Unit::X }.len())
+}

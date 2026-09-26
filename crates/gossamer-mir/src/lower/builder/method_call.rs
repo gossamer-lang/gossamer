@@ -495,6 +495,11 @@ impl<'a> Builder<'a> {
             return r;
         }
         if let MethodLowering::Handled(r) =
+            self.lower_numeric_math_method(receiver, method, args, ty, span)
+        {
+            return r;
+        }
+        if let MethodLowering::Handled(r) =
             self.lower_seq_combinator_method(receiver, method, args, ty, span)
         {
             return r;
@@ -2566,7 +2571,7 @@ impl<'a> Builder<'a> {
                 "as_str" => Some("gos_rt_dyn_as_str"),
                 "as_bytes" => Some("gos_rt_dyn_as_bytes"),
                 "clone" => Some("gos_rt_dyn_clone"),
-                "to_string" => Some("gos_rt_dyn_format"),
+                "to_string" => Some("gos_rt_dyn_display"),
                 _ => None,
             } {
                 return SymbolLookup::Found(Some(symbol));
@@ -2593,6 +2598,7 @@ impl<'a> Builder<'a> {
                 } else {
                     match &receiver_kind_flat {
                         TyKind::Int(int) => Some(super::int_to_str_symbol(*int)),
+                        TyKind::Float(gossamer_types::FloatTy::F32) => Some("gos_rt_f32_to_str"),
                         TyKind::Float(_) => Some("gos_rt_f64_to_str"),
                         // A `char` is a scalar Unicode value, so its String
                         // form is built rather than reinterpreted.
@@ -3126,6 +3132,8 @@ impl<'a> Builder<'a> {
             "sort" => Some(
                 if vec_element_kind(self.tcx, receiver_ty) == VecElemKind::Str {
                     "gos_rt_vec_sort_str"
+                } else if self.sequence_elem_is_float(receiver_ty) {
+                    "gos_rt_vec_sort_f64"
                 } else {
                     "gos_rt_vec_sort_i64"
                 },
@@ -4804,6 +4812,15 @@ impl<'a> Builder<'a> {
             {
                 ty
             }
+            // A symbol the ABI declares as answering nothing gives the call
+            // the unit value, whatever word the call site would otherwise hold.
+            _ if matches!(
+                gossamer_abi::registry::lookup(rt).map(|entry| entry.sig.ret),
+                Some(gossamer_abi::types::AbiType::Void)
+            ) =>
+            {
+                self.tcx.unit()
+            }
             _ => self.tcx.int_ty(gossamer_types::IntTy::I64),
         }
     }
@@ -5536,6 +5553,7 @@ impl<'a> Builder<'a> {
         if matches!(runtime_symbol, Some("")) && method.name.as_str() == "to_string" {
             runtime_symbol = match self.tcx.kind_of(lowered_recv_ty) {
                 TyKind::Int(int) => Some(super::int_to_str_symbol(*int)),
+                TyKind::Float(gossamer_types::FloatTy::F32) => Some("gos_rt_f32_to_str"),
                 TyKind::Float(_) => Some("gos_rt_f64_to_str"),
                 _ => runtime_symbol,
             };
@@ -6412,6 +6430,116 @@ impl<'a> Builder<'a> {
     /// These name the same operation as the prelude's free `max(n, m)`, so
     /// they lower through the same runtime helpers rather than reaching the
     /// by-name fallback, which had no symbol to call.
+    /// `f.round()`, `x.pow(2.0)`, `f.atan2(y)` - a `math::` function called
+    /// on a number, which names the free call with the receiver as its first
+    /// argument, and lowers as that call does. An integer receiver reaches a
+    /// float function as the `f64` the checker types the result at.
+    fn lower_numeric_math_method(
+        &mut self,
+        receiver: &HirExpr,
+        method: &Ident,
+        args: &[HirExpr],
+        ty: Ty,
+        span: Span,
+    ) -> MethodLowering {
+        let name = method.name.as_str();
+        let (_, recv_kind) = self.receiver_dispatch_kinds(receiver);
+        // An integer's magnitude is computed as a word and narrowed back to
+        // the receiver's width, which wraps `i8::MIN` to itself as unary `-`
+        // does, so the value never leaves its type's range.
+        if name == "abs"
+            && args.is_empty()
+            && let TyKind::Int(int) = recv_kind
+        {
+            let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+            let recv_ty = self.tcx.int_ty(int);
+            let value = match self.lower_expr(receiver) {
+                Some(value) => value,
+                None => return MethodLowering::Handled(None),
+            };
+            let wide = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(wide),
+                Rvalue::Cast {
+                    operand: Operand::Copy(Place::local(value)),
+                    target: i64_ty,
+                },
+                span,
+            );
+            let magnitude = self.emit_combinator_call(
+                "gos_rt_math_abs_i64",
+                vec![Operand::Copy(Place::local(wide))],
+                i64_ty,
+                span,
+            );
+            if recv_ty == i64_ty {
+                return MethodLowering::Handled(Some(magnitude));
+            }
+            let narrowed = self.fresh(recv_ty);
+            self.emit_assign(
+                Place::local(narrowed),
+                Rvalue::Cast {
+                    operand: Operand::Copy(Place::local(magnitude)),
+                    target: recv_ty,
+                },
+                span,
+            );
+            return MethodLowering::Handled(Some(narrowed));
+        }
+        // The bounds keep their own typed lowering.
+        if matches!(name, "abs" | "min" | "max" | "clamp") {
+            return MethodLowering::Pass;
+        }
+        let receiver_is_float = match recv_kind {
+            TyKind::Float(_) => true,
+            TyKind::Int(_) => false,
+            _ => return MethodLowering::Pass,
+        };
+        let Some(shape) =
+            gossamer_types::stdlib_signatures::function_shape_for_path(&["math"], name)
+        else {
+            return MethodLowering::Pass;
+        };
+        if shape.params.len() != args.len() + 1 {
+            return MethodLowering::Pass;
+        }
+        let first = if receiver_is_float {
+            receiver.clone()
+        } else {
+            let f64_ty = self.tcx.float_ty(gossamer_types::FloatTy::F64);
+            HirExpr {
+                id: receiver.id,
+                span: receiver.span,
+                ty: f64_ty,
+                kind: HirExprKind::Cast {
+                    value: Box::new(receiver.clone()),
+                    ty: f64_ty,
+                },
+            }
+        };
+        let mut free_args = Vec::with_capacity(args.len() + 1);
+        free_args.push(first);
+        free_args.extend(args.iter().cloned());
+        let call = HirExpr {
+            id: receiver.id,
+            span,
+            ty,
+            kind: HirExprKind::Call {
+                callee: Box::new(HirExpr {
+                    id: receiver.id,
+                    span,
+                    ty,
+                    kind: HirExprKind::Path {
+                        segments: vec![Ident::new("math"), method.clone()],
+                        def: None,
+                    },
+                }),
+                args: free_args,
+            },
+        };
+        MethodLowering::Handled(self.lower_expr(&call))
+    }
+
     fn lower_scalar_bound_method(
         &mut self,
         receiver: &HirExpr,
@@ -6478,6 +6606,7 @@ impl<'a> Builder<'a> {
             ("windows", 1) => Some("iter::windows"),
             ("dedup", 0) => Some("iter::dedup"),
             ("flatten", 0) => Some("iter::flatten"),
+            ("pairwise", 0) => Some("iter::pairwise"),
             // Every adapter is a method. These had a data-last free call and
             // no receiver form, which made the rule "an adapter chains" hold
             // everywhere except here.
@@ -6706,6 +6835,20 @@ impl<'a> Builder<'a> {
     /// elements Display-render through the typed join shims; every other
     /// element type renders through the same formatter `{}` uses
     /// ([`Self::lower_display_join`]).
+    /// Whether the sequence `ty` names (through any references) holds floats.
+    fn sequence_elem_is_float(&self, ty: Ty) -> bool {
+        let mut ty = ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(ty) {
+            ty = *inner;
+        }
+        match self.tcx.kind_of(ty) {
+            TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => {
+                matches!(self.tcx.kind_of(*elem), TyKind::Float(_))
+            }
+            _ => false,
+        }
+    }
+
     fn vec_join_symbol(&self, receiver_ty: Ty) -> Option<&'static str> {
         let mut ty = receiver_ty;
         while let TyKind::Ref { inner, .. } = self.tcx.kind_of(ty) {
@@ -6718,6 +6861,7 @@ impl<'a> Builder<'a> {
         };
         match self.tcx.kind_of(elem) {
             TyKind::String => Some("gos_rt_strings_join"),
+            TyKind::Float(gossamer_types::FloatTy::F32) => Some("gos_rt_vec_join_f32"),
             TyKind::Float(_) => Some("gos_rt_vec_join_f64"),
             TyKind::Bool => Some("gos_rt_vec_join_bool"),
             TyKind::Char => Some("gos_rt_vec_join_char"),

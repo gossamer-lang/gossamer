@@ -39,7 +39,7 @@ mod bindings {
 
     /// Greet the supplied name.
     pub fn greet(name: String) -> String {
-        format("hello, {name}")
+        format!("hello, {name}")
     }
 
     /// Fallible example: parse an integer.
@@ -134,7 +134,7 @@ ABI knows. Anything else is a compile error in the binding crate
 | a struct | `#[derive(GosStruct)]` struct | Crosses by value, field by field. |
 | `DynValue` | `DynValue` | A value whose shape the data decides; see [Dynamic values](#dynamic-values). |
 | a declared arm set | `Type::Variant(&[VariantArm..])` | Matched as the Gossamer enum spelling the same arms. |
-| a callback | `Fn(..) -> ..` | Call-scoped, interpreter only; see [Callbacks](#callbacks). |
+| a closure | `PersistentCallback` / `BindingCallback` | Taken by a `cb_fn`; see [Callbacks](#callbacks). |
 
 Shapes outside that set need a hand-written wrapper on the Rust side:
 take the pieces the table covers and assemble the richer value inside
@@ -306,11 +306,39 @@ another variant.
 
 ## Callbacks
 
-A binding can call back into Gossamer during a call. The handle it
-receives is **call-scoped**: it is valid only until the binding
-function returns, and retaining it past the return is undefined
-behaviour. A callback that must outlive the call needs a different
-design - hand the binding a channel, or have Gossamer poll.
+A binding takes a Gossamer closure through a `cb_fn`, whose first
+parameter is the dispatch it calls the closure through:
+
+```rust
+register_module!(
+    name: events,
+    doc: "Callback example.",
+
+    cb_fn apply(d, f: PersistentCallback, x: i64) -> i64 {
+        match f.invoke(d, vec![Value::Int(x)]) {
+            Ok(Value::Int(n)) => n,
+            _ => -1,
+        }
+    }
+);
+```
+
+```gossamer
+use events
+
+let k = 3
+println("{}", events::apply(|x| x * k, 14))
+```
+
+The closure is **call-scoped**: it is valid only until the binding
+function returns. A compiled program releases it then, and a later
+`invoke` reports an error instead of calling anything. A callback that
+must outlive the call needs a different design - hand the binding a
+channel, or have Gossamer poll.
+
+The closure's parameters and result are integers, floats, `bool`,
+`char`, and `String` (its result may also be `()`), and it takes at
+most four parameters.
 
 ## Wrapping a crate that knows nothing about Gossamer
 
@@ -377,18 +405,19 @@ see them.
 
 ## Tiers and the ABI
 
-Binding calls run on the bytecode VM (`gos`, `gos test`), the
-Cranelift JIT, and LLVM AOT (`gos build`, `gos build --release`).
+Bindings are aimed at `gos build`, which links each binding crate into
+the native binary, and are supported by `gos run` and `gos test`,
+which build a per-project copy of `gos` with the bindings linked in.
+The REPL does not load them: it notes a project's `[rust-bindings]`
+at startup, and `gos run` or `gos build` is the way to call them.
+
+Binding calls run on the bytecode VM, the Cranelift JIT, and LLVM AOT
+(`gos build`, `gos build --release`).
 Values that are pointer-shaped on both sides - `String`, `Vec<T>`, an
 opaque handle - cross unchanged; `Bytes`, `Map<K, V>`, tuples,
 `#[derive(GosStruct)]` structs, and `DynValue` (open or with declared arms)
 are converted between the runtime's own shape and the wire shape at each
 boundary crossing, so the same program prints the same thing on every tier.
-
-A `Fn(..)` callback has no compiled-tier representation yet and is reachable
-only from `gos` / `gos test`. A native build of a program that passes one does
-not report the gap, so keep callbacks out of code you intend to `gos build`
-until they land.
 
 `gossamer-binding` carries an ABI version (currently `2.0`) that the
 runtime checks at load time, so a stale binding is reported rather

@@ -2164,6 +2164,15 @@ pub(crate) fn cmd_repl(verbose: bool) -> Result<()> {
         arch = std::env::consts::ARCH,
         os = std::env::consts::OS,
     );
+    let declares_bindings = crate::paths::project_context()
+        .manifest_result()
+        .is_some_and(|manifest| manifest.is_ok_and(|m| !m.rust_bindings.is_empty()));
+    if declares_bindings {
+        outln!(
+            "note: this project's [rust-bindings] are not loaded in the REPL; \
+             `gos run` and `gos build` load them"
+        );
+    }
 
     let mut transcript: Vec<String> = Vec::new();
     let mut declarations: Vec<String> = Vec::new();

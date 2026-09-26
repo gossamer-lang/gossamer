@@ -1101,16 +1101,22 @@ impl<'a> Builder<'a> {
     }
 
     pub(crate) fn is_boxable_aggregate_payload(&self, ty: Ty) -> bool {
-        use gossamer_types::TyKind;
-        let aggregate = match self.tcx.kind_of(ty) {
-            TyKind::Adt { def, .. } => def.local < u32::MAX - 16 && !self.tcx.is_inline_enum_ty(ty),
-            TyKind::Tuple(_) | TyKind::Array { .. } => true,
-            _ => false,
-        };
         // A single-slot aggregate fits the payload word and is stored in it,
         // unless that word is a counted handle: the node owns a share of what
         // it holds, and the box is what carries the child meta saying so.
-        aggregate && (self.type_slot_bytes(ty) > 8 || !self.aggr_child_entries(ty).is_empty())
+        self.is_aggregate_payload(ty)
+            && (self.type_slot_bytes(ty) > 8 || !self.aggr_child_entries(ty).is_empty())
+    }
+
+    /// Whether an enum payload of type `ty` is a struct, tuple, or array,
+    /// whether boxed or stored in the payload word.
+    pub(crate) fn is_aggregate_payload(&self, ty: Ty) -> bool {
+        use gossamer_types::TyKind;
+        match self.tcx.kind_of(ty) {
+            TyKind::Adt { def, .. } => def.local < u32::MAX - 16 && !self.tcx.is_inline_enum_ty(ty),
+            TyKind::Tuple(_) | TyKind::Array { .. } => true,
+            _ => false,
+        }
     }
 
     /// Boxes the multi-slot aggregate in `payload_local` into an RC cell and

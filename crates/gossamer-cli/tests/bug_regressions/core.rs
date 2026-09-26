@@ -1942,3 +1942,67 @@ fn main() {
     assert_eq!(vm.0, "6\n6\n3\n", "vm stdout");
     assert_eq!(native.0, vm.0, "tier parity");
 }
+
+#[test]
+fn question_mark_without_conversion_is_rejected() {
+    // `?` on a `Result<_, B>` inside a function answering `Result<_, C>`,
+    // where `C` converts only from `A`: the checker names both error types
+    // rather than letting the lowering call `C::from` with a `B`.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../feature-testing-examples/question_mark_no_conversion.gos");
+    let out = Command::new(gos_bin())
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("spawn gos check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "check unexpectedly passed: {stderr}");
+    assert!(stderr.contains("GT0093"), "expected GT0093, got: {stderr}");
+    assert!(
+        stderr.contains("`B`") && stderr.contains("`C`"),
+        "diagnostic must name both error types: {stderr}"
+    );
+}
+
+#[test]
+fn stream_and_child_methods_answer_their_declared_types() {
+    // A standard stream's `read_line` / `flush` and a child's `wait` answer
+    // `Result<i64, _>`, `()`, and `Result<i64, _>`; a `bool` annotation on
+    // any of them is a mismatch, and a method the stream lacks is reported.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../feature-testing-examples/stream_method_types_rejected.gos");
+    let out = Command::new(gos_bin())
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("spawn gos check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "check unexpectedly passed: {stderr}");
+    assert_eq!(
+        stderr.matches("GT0001").count(),
+        3,
+        "expected three type mismatches: {stderr}"
+    );
+    assert!(stderr.contains("write_all"), "expected the unknown method: {stderr}");
+}
+
+#[test]
+fn scalar_bounds_reject_non_numeric_operands() {
+    // `max("x", "y")`, a tuple, a `bool`, and a mixed pair each report a type
+    // mismatch where they printed `0` on the VM and a heap address compiled.
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../feature-testing-examples/scalar_bound_operand_types.gos");
+    let out = Command::new(gos_bin())
+        .arg("check")
+        .arg(&fixture)
+        .output()
+        .expect("spawn gos check");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "check unexpectedly passed: {stderr}");
+    assert_eq!(
+        stderr.matches("error[GT0001]").count(),
+        4,
+        "each bad operand set is reported once: {stderr}"
+    );
+    assert!(stderr.contains("a number or char"), "names what it expected: {stderr}");
+}

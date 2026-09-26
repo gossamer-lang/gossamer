@@ -42,6 +42,9 @@ use crate::tree::{
 /// The binding a `for` loop over a stateful iterable keeps its cursor in.
 pub(crate) const FOR_ITER: &str = "__for_iter";
 
+/// Name a `for` loop binds a compound element under before destructuring it.
+pub(crate) const FOR_ELEM: &str = "__for_elem";
+
 /// Rewrites every recognised `iter::` range pipeline in `program` into a
 /// fused loop.
 pub fn fuse_iter_pipelines(program: &mut HirProgram, tcx: &mut TyCtxt, ids: &mut HirIdGenerator) {

@@ -1354,6 +1354,198 @@ impl crate::sig::SigType for NativeCallback {
     const TYPE: Type = Type::Callback(&[], &Type::Any);
 }
 
+// A callable argument crosses the compiled boundary as the handle the caller
+// registered it under.
+impl BindingAbi for crate::conv::BindingCallback {
+    type Input = u64;
+    type Output = u64;
+    const TYPE: Type = Type::Callback(&[], &Type::Any);
+
+    unsafe fn from_input(input: u64) -> Self {
+        Self::from_handle(input)
+    }
+
+    fn to_output(self) -> u64 {
+        self.handle().unwrap_or(0)
+    }
+}
+
+impl BindingAbi for crate::conv::PersistentCallback {
+    type Input = u64;
+    type Output = u64;
+    const TYPE: Type = Type::Callback(&[], &Type::Any);
+
+    unsafe fn from_input(input: u64) -> Self {
+        Self::from_handle(input)
+    }
+
+    fn to_output(self) -> u64 {
+        self.handle().unwrap_or(0)
+    }
+}
+
+// --- Callbacks on the compiled tiers ---------------------------------
+
+unsafe extern "C" {
+    /// Releases a runtime string the compiled callback answered.
+    fn gos_rt_str_free(s: *mut c_char);
+}
+
+/// Wire tag for a callback that answers the unit value.
+const WIRE_TAG_UNIT: i32 = 9;
+
+/// The dispatch a `cb_fn` binding receives on the compiled tiers.
+///
+/// A compiled program has no interpreter to re-enter. A callback argument
+/// arrives as the runtime handle [`crate::PersistentCallback::invoke`] and
+/// [`crate::BindingCallback::invoke`] call through, so this dispatch answers
+/// only that nothing here can run interpreted code.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompiledDispatch;
+
+fn no_interpreter<T>() -> gossamer_interp::value::RuntimeResult<T> {
+    Err(gossamer_interp::value::RuntimeError::Type(
+        "a compiled program has no interpreter to call into; call a callback through its \
+         `invoke`"
+            .to_string(),
+    ))
+}
+
+impl gossamer_interp::value::NativeDispatch for CompiledDispatch {
+    fn call_fn(
+        &mut self,
+        _name: &str,
+        _args: Vec<gossamer_interp::value::Value>,
+    ) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
+        no_interpreter()
+    }
+
+    fn has_fn(&self, _name: &str) -> bool {
+        false
+    }
+
+    fn call_value(
+        &mut self,
+        _callee: &gossamer_interp::value::Value,
+        _args: Vec<gossamer_interp::value::Value>,
+    ) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
+        no_interpreter()
+    }
+
+    fn spawn_callable(
+        &mut self,
+        _callable: gossamer_interp::value::Value,
+        _args: Vec<gossamer_interp::value::Value>,
+    ) -> gossamer_interp::value::RuntimeResult<()> {
+        no_interpreter()
+    }
+
+    fn spawn_join(
+        &mut self,
+        _callable: gossamer_interp::value::Value,
+        _args: Vec<gossamer_interp::value::Value>,
+    ) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
+        no_interpreter()
+    }
+
+    fn spawn_with_outcome(
+        &mut self,
+        _target: gossamer_interp::value::SpawnTarget,
+        _args: Vec<gossamer_interp::value::Value>,
+        sink: Box<
+            dyn FnOnce(gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value>) + Send,
+        >,
+    ) {
+        sink(no_interpreter());
+    }
+}
+
+/// Calls the compiled callback registered under `handle` with `args` and
+/// answers its result.
+///
+/// The handle is valid for the binding call that received it: the compiled
+/// caller releases it when that call returns, after which this reports an
+/// error rather than calling anything.
+pub(crate) fn invoke_compiled_callback(
+    handle: u64,
+    args: &[gossamer_interp::value::Value],
+) -> gossamer_interp::value::RuntimeResult<gossamer_interp::value::Value> {
+    use gossamer_interp::value::{RuntimeError, Value};
+    let mut strings: Vec<std::ffi::CString> = Vec::new();
+    let mut wire: Vec<GosVariantValue> = Vec::with_capacity(args.len());
+    for arg in args {
+        let (tag, data) = match arg {
+            Value::Int(n) => (0, GosVariantPayload { i64_: *n }),
+            Value::Uint(n) => (0, GosVariantPayload { i64_: *n as i64 }),
+            Value::Float(f) => (1, GosVariantPayload { f64_: *f }),
+            Value::Bool(b) => (
+                2,
+                GosVariantPayload {
+                    i64_: i64::from(*b),
+                },
+            ),
+            Value::Char(c) => (
+                3,
+                GosVariantPayload {
+                    i64_: i64::from(u32::from(*c)),
+                },
+            ),
+            Value::String(s) => {
+                let text = std::ffi::CString::new(s.as_str()).map_err(|_| {
+                    RuntimeError::Type("a callback string argument holds a NUL byte".to_string())
+                })?;
+                let ptr = text.as_ptr().cast_mut();
+                strings.push(text);
+                (4, GosVariantPayload { string: ptr })
+            }
+            other => {
+                return Err(RuntimeError::Type(format!(
+                    "a compiled callback takes integers, floats, bools, chars, and strings; \
+                     found {other:?}"
+                )));
+            }
+        };
+        wire.push(GosVariantValue { tag, data });
+    }
+    let callback = NativeCallback { handle };
+    // SAFETY: the handle was registered by the compiled caller for the
+    // duration of the binding call that received it, and the string
+    // arguments stay alive in `strings` until the call returns.
+    let result = unsafe { callback.invoke_raw(&wire) }.map_err(|code| {
+        RuntimeError::Type(format!(
+            "callback {handle} could not be called (status {code}); a compiled callback is \
+             valid only during the binding call that received it"
+        ))
+    })?;
+    drop(strings);
+    // SAFETY: the runtime wrote the member the tag names.
+    unsafe {
+        Ok(match result.tag {
+            0 => Value::Int(result.data.i64_),
+            1 => Value::Float(result.data.f64_),
+            2 => Value::Bool(result.data.i64_ != 0),
+            3 => Value::Char(char::from_u32(result.data.char_).unwrap_or('\u{FFFD}')),
+            4 => {
+                let ptr = result.data.string;
+                if ptr.is_null() {
+                    Value::String("".into())
+                } else {
+                    let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+                    // The callback answered an owned runtime string.
+                    gos_rt_str_free(ptr);
+                    Value::String(text.into())
+                }
+            }
+            WIRE_TAG_UNIT => Value::Unit,
+            other => {
+                return Err(RuntimeError::Type(format!(
+                    "a compiled callback answered an unknown wire tag {other}"
+                )));
+            }
+        })
+    }
+}
+
 // --- ABI 0.4: Vec<u8> as a plain byte vec (non-Bytes path) ---------
 
 impl BindingAbi for Vec<u8> {

@@ -1101,13 +1101,6 @@ pub(crate) const DIRECT_BYTECODE_CALL_DEPTH: usize = 16;
 #[cfg(not(debug_assertions))]
 pub(crate) const DIRECT_BYTECODE_CALL_DEPTH: usize = 128;
 
-/// Maximum logical tail frames retained for diagnostics in one trampoline
-/// chain. Tail calls reuse their physical VM frame, so [`MAX_CALL_DEPTH`]
-/// cannot bound an unbounded tail-recursive program. This remains above the
-/// 10,000-step tail-recursion regression while ensuring a malformed program
-/// reaches `GX0008` instead of spinning indefinitely.
-const MAX_TAIL_CALL_DEPTH: usize = 65_536;
-
 /// Native stack reserved for every OS thread that executes the
 /// bytecode VM - the main `gos-vm` thread and each goroutine worker.
 ///
@@ -1842,6 +1835,14 @@ fn compare(
     order: std::cmp::Ordering,
     or_equal: bool,
 ) -> RuntimeResult<Value> {
+    // Two floats compare as IEEE says: a NaN is neither above nor below
+    // anything. The structural order below gives every NaN a place, which
+    // only a comparison of aggregates or a sort uses.
+    if let (Value::Float(x), Value::Float(y)) = (a, b) {
+        return Ok(Value::Bool(x.partial_cmp(y).is_some_and(|result| {
+            result == order || (or_equal && result == std::cmp::Ordering::Equal)
+        })));
+    }
     // Scalars compare by natural order; tuples and vec/array values compare
     // lexicographically (`value_ordering` recurses and auto-derefs cells).
     let result = value_ordering(a, b)?;
@@ -2340,9 +2341,9 @@ pub(crate) fn value_ordering(a: &Value, b: &Value) -> RuntimeResult<std::cmp::Or
         (Value::Uint(x), Value::Int(y)) => Ok(x.cmp(&(*y as u64))),
         (Value::Int(x), Value::Uint(y)) => Ok((*x as u64).cmp(y)),
         (Value::Bool(x), Value::Bool(y)) => Ok(x.cmp(y)),
-        (Value::Float(x), Value::Float(y)) => x
-            .partial_cmp(y)
-            .ok_or_else(|| RuntimeError::Arithmetic("NaN comparison".to_string())),
+        (Value::Float(x), Value::Float(y)) => {
+            Ok(gossamer_runtime::c_abi::sort::float_order(*x, *y))
+        }
         (Value::Char(x), Value::Char(y)) => Ok(x.cmp(y)),
         (Value::String(x), Value::String(y)) => Ok(x.cmp(y)),
         (Value::Tuple(xa), Value::Tuple(xb)) => seq_ordering(xa, xb),

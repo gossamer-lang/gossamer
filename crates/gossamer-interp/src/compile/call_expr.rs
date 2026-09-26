@@ -20,12 +20,20 @@ impl<'tcx> FnBuilder<'tcx> {
             // `DefId`, so block-scoped consts do not collapse into
             // same-named constants from an outer scope.
             if let Some(def) = def
-                && let Some(value) = self.module_consts.get(&def)
+                && let Some(value) = self.module_consts.get(def)
             {
                 let key = const_key_for_value(value);
                 let idx = self.const_idx(key, value.clone());
                 let dst = self.alloc_reg();
                 self.emit(Op::LoadConst { dst, idx });
+                return Ok(dst);
+            }
+            if let Some(def) = def
+                && let Some(global) = self.module_consts.deferred_global(def)
+            {
+                let idx = self.global_idx(global);
+                let dst = self.alloc_reg();
+                self.emit(Op::LoadGlobal { dst, idx });
                 return Ok(dst);
             }
         }

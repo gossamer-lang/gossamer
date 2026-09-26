@@ -4907,7 +4907,7 @@
       "id": "std-hash-fnv-hash64",
       "name": "std::hash::fnv::hash64",
       "kind": "function",
-      "signature": "fn hash64(data: Vec<u8>) -> i64",
+      "signature": "fn hash64(data: Vec<u8>) -> u64",
       "description": "64-bit FNV-1a of a byte slice.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4926,7 +4926,7 @@
       "id": "std-hash-fnv-hash-string",
       "name": "std::hash::fnv::hash_string",
       "kind": "function",
-      "signature": "fn hash_string(text: String) -> i64",
+      "signature": "fn hash_string(text: String) -> u64",
       "description": "64-bit FNV-1a of a String.",
       "lifecycle": "experimental",
       "tier_support": [

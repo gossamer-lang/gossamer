@@ -1,0 +1,19 @@
+// Negative fixture: each standard-stream and child-process method answers its
+// declared type, so an annotation naming another type, or a method the handle
+// does not have, is reported.
+
+use std::{io, process}
+
+fn main() {
+    let mut buf = ""
+    let n: bool = io::stdin().read_line(&mut buf)
+    let f: bool = io::stdout().flush()
+    io::stdout().write_all("x")
+    match process::spawn_piped("sort", #[]) {
+        Ok(child) => {
+            let code: bool = child.wait()
+            println("{} {} {}", n, f, code)
+        }
+        Err(_) => {}
+    }
+}

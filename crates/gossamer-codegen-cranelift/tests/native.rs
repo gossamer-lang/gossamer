@@ -155,7 +155,9 @@ fn gos_bin() -> PathBuf {
             let mut cmd = Command::new(std::env::var("CARGO").unwrap_or_else(|_| "cargo".into()));
             cmd.args(["build", "--quiet", "--bin", "gos"])
                 .current_dir(workspace_root());
-            let out = run_output(&mut cmd, "cargo build --bin gos", BUILD_TIMEOUT);
+            // A build takes as long as the workspace needs; the job's own
+            // limit bounds it.
+            let out = cmd.output().expect("spawn cargo build --bin gos");
             assert!(
                 out.status.success(),
                 "building gos failed:\nstdout={}\nstderr={}",

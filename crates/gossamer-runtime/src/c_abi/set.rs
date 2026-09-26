@@ -269,11 +269,16 @@ pub unsafe extern "C" fn gos_rt_set_mark_shared(set: *mut GosSet) {
     });
 }
 
+/// Boxes `set` as a runtime handle, counted by the leak ledger until
+/// [`gos_rt_set_free`](crate::c_abi::map::gos_rt_set_free) reclaims it.
+fn set_handle(set: GosSet) -> *mut GosSet {
+    crate::c_abi::ledger::set_inc();
+    Box::into_raw(Box::new(set))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_set_new() -> *mut GosSet {
-    ffi_entry!(std::ptr::null_mut(), {
-        Box::into_raw(Box::new(GosSet::default()))
-    })
+    ffi_entry!(std::ptr::null_mut(), { set_handle(GosSet::default()) })
 }
 
 #[unsafe(no_mangle)]
@@ -281,7 +286,7 @@ pub unsafe extern "C" fn gos_rt_btree_set_new() -> *mut GosSet {
     ffi_entry!(std::ptr::null_mut(), {
         let mut set = GosSet::default();
         set.make_ordered();
-        Box::into_raw(Box::new(set))
+        set_handle(set)
     })
 }
 
@@ -325,7 +330,7 @@ pub unsafe extern "C" fn gos_rt_set_clone(src: *const GosSet) -> *mut GosSet {
         if src.is_null() {
             return unsafe { gos_rt_set_new() };
         }
-        Box::into_raw(Box::new(unsafe { &*src }.clone()))
+        set_handle(unsafe { &*src }.clone())
     })
 }
 
@@ -870,7 +875,7 @@ unsafe fn set_combine(
     };
     // The combined table copied its elements' slots out of the operands.
     combined.retain_all_elements();
-    Box::into_raw(Box::new(combined))
+    set_handle(combined)
 }
 
 /// True when `pred` holds for every element family of the two operands.
@@ -1357,7 +1362,7 @@ pub unsafe extern "C" fn gos_rt_set_window(
         let lo = if lo < 0 { lo.saturating_add(len) } else { lo };
         let lo = lo.clamp(0, len) as usize;
         let hi = (hi.clamp(0, len) as usize).max(lo);
-        Box::into_raw(Box::new(unsafe { set_window(set, lo, hi, take != 0) }))
+        set_handle(unsafe { set_window(set, lo, hi, take != 0) })
     })
 }
 
@@ -1408,7 +1413,7 @@ unsafe fn set_range(
     } else {
         usize::MAX
     };
-    Box::into_raw(Box::new(unsafe { set_window(set, lo, hi.max(lo), false) }))
+    set_handle(unsafe { set_window(set, lo, hi.max(lo), false) })
 }
 
 /// `s.range(lo..hi)` on a `BTreeSet` of integers.

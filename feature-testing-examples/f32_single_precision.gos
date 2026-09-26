@@ -1,0 +1,112 @@
+// An `f32` computes, parses, reduces, renders, and encodes at single
+// precision on every tier: each operation rounds to the nearest `f32`, and
+// its text is the shortest that reads back as the single-precision value.
+
+use std::collections::Deque
+use std::encoding::json
+
+const TENTH: f32 = 0.1
+
+#[derive(Debug)]
+struct Wrap<T> {
+    v: T
+}
+
+struct Pt {
+    x: f32
+    y: f64
+    v: Vec<f32>
+    o: Option<f32>
+}
+
+fn show<T>(x: T) -> String {
+    format("{} {:?}", x, x)
+}
+
+fn mk() -> Vec<f32> {
+    #[100000000.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+}
+
+fn arithmetic() {
+    let a: f32 = 0.1
+    let b: f32 = 0.2
+    println("{} {} {} {}", a, b, a + b, a + b == 0.3)
+    println("{:?} {:.3} {}", a * 3.0, a, 1.0f32 / 3.0)
+    let big: f32 = 16777217.0
+    println("{} {}", big, 16777217 as f32)
+    let mut acc: f32 = 0.0
+    for _ in 0..10 {
+        acc += 0.1
+    }
+    println("{} {}", acc, TENTH * 3.0)
+    println("{} {} {}", 0.1f32 as f64, (0.1f64 as f32), a.sqrt())
+    println("{} {}", f32::MAX, f32::EPSILON)
+    let huge: f32 = 1e30 * 1e10
+    println("{} {} {}", huge, -huge, (-a).abs())
+    let mut t: (f32, f32) = (0.1, 0.2)
+    t.0 += t.1
+    println("{:?} {}", t, 0.1f32.to_string())
+}
+
+fn containers() {
+    let a: f32 = 0.1
+    let v: Vec<f32> = #[a, 0.25, 1.0 / 3.0]
+    println("{:?} {} {}", v, v, v.join(" "))
+    let arr: [f32; 2] = [0.7, 1.5]
+    let nested: [[f32; 2]; 2] = [[0.1, 0.2], [0.3, 0.4]]
+    println("{:?} {} {:?}", arr, arr, nested)
+    println("{:?} {:?}", (a, 2, "s"), #[(0.1f32, 1)])
+    let o: Option<f32> = Some(0.3)
+    let r: Result<f32, String> = Ok(0.6)
+    println("{:?} {} {:?} {:?}", o, o, r, #[Some(0.1f32)])
+    let mut m = { "k": 0.1f32 }
+    m.insert("j", 2.5)
+    let mut im: Map<i64, f32> = Map::new()
+    im.insert(3, 0.9)
+    println("{:?} {:?} {:?}", m, im, im.values())
+    let vv: Vec<Vec<f32>> = #[#[0.1], #[0.2, 0.3]]
+    let mut d: Deque<f32> = Deque::new()
+    d.push_back(0.1)
+    println("{:?} {:?} {:?}", vv, d, Wrap { v: a })
+    println("{}", show(1.0f32))
+    let mut s: Vec<f32> = #[0.3, -0.1, 0.2, -3.0]
+    s.sort()
+    println("{:?} {:?} {:?}", s, s.iter().min(), s.iter().max())
+}
+
+fn reductions() {
+    let xs = mk()
+    let a: f32 = xs.iter().sum()
+    let b: f32 = mk().iter().sum()
+    let c: f32 = xs.sum()
+    let d: f32 = xs.iter().map(|x| x * 1.0).sum()
+    let e: f32 = xs.par_sum()
+    let f: f32 = xs.iter().fold(0.0, |acc, x| acc + x)
+    let g: f32 = xs.par_reduce(0.0, |p, q| p + q)
+    println("{} {} {} {} {} {} {}", a, b, c, d, e, f, g)
+    let ys: Vec<f32> = #[1.1, 1.1, 1.1, 1.1]
+    let p: f32 = ys.iter().product()
+    let ws: Vec<i64> = #[100000000, 1, 1, 1, 1, 1]
+    let q: f32 = ws.iter().sum_by(|w| w as f32)
+    let r: f32 = (0..10).map(|i| i as f32 * 0.1).sum()
+    println("{} {} {}", p, q, r)
+}
+
+fn encoding() {
+    let p = Pt { x: 0.1, y: 0.1, v: #[0.2, 1.5], o: Some(0.3) }
+    println("{}", json::encode(p))
+    println("{}", to_json::<Pt>(p))
+    let f: f32 = 0.1
+    println("{} {}", json::encode(f), json::encode(#[f]))
+    match from_json::<Pt>("{\"x\": 0.1, \"y\": 0.1, \"v\": [0.2], \"o\": 0.7}") {
+        Ok(q) => println("{} {} {}", q.x as f64, q.x + 0.2 == 0.3, q.o.unwrap_or(0.0) as f64)
+        Err(e) => println("err {}", e)
+    }
+}
+
+fn main() {
+    arithmetic()
+    containers()
+    reductions()
+    encoding()
+}

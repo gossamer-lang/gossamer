@@ -391,6 +391,8 @@ fn rc_release_only(name: &str) -> bool {
             | "gos_rt_str_free"
             | "gos_rt_str_free_typed"
             | "gos_rt_map_free"
+            | "gos_rt_set_free"
+            | "gos_rt_deque_free"
             | "gos_rt_error_free"
     )
 }

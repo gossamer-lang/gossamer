@@ -100,6 +100,15 @@ pub const DESC_ARRAY: u8 = 20;
 /// kind.
 pub const DESC_PACKED: u8 = 24;
 
+/// Rendering tag for an `f32` leaf: the slot holds the value at double width,
+/// and it renders with the shortest digits that read back as the
+/// single-precision value. Only rendering streams carry it; an `f32` orders,
+/// compares, and hashes as the word the float tag names.
+pub const TUPLE_TAG_F32: u8 = 25;
+
+/// Rendering tag for a unit leaf: the slot holds no value and renders `()`.
+pub const TUPLE_TAG_UNIT: u8 = 26;
+
 /// How a [`DESC_PACKED`] leaf is stored and ordered.
 pub mod packed_leaf {
     /// A signed integer in one byte.
@@ -152,7 +161,7 @@ pub const I128_CALLBACK_SHIMS: &[&str] = &[
 /// Sequence combinators whose callback answers the two-word carrier, named
 /// without an element class. Every registry shim implementing one of these
 /// reads a carrier back, whichever class its symbol carries.
-const I128_CALLBACK_COMBINATORS: &[&str] = &["filter_map", "find_map"];
+const I128_CALLBACK_COMBINATORS: &[&str] = &["filter_map", "find_map", "map_carrier"];
 
 /// Whether `name` invokes a gossamer callback that answers the two-word
 /// `[disc, payload]` carrier, so a Win64 backend must hand the runtime a

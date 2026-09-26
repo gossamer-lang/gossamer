@@ -1,0 +1,36 @@
+// Unsigned values through math, width formatting, JSON, and parsing; narrow
+// signed values through `abs` and radix formatting; and JSON documents parsed
+// by the RFC 8259 grammar and rendered in the one canonical form.
+
+use std::{strconv, math}
+use std::encoding::json
+
+fn edges() {
+    let u = "9".to_i64().unwrap_or(0) as u64
+    println("{} {} {}", u.pow(3.0), u.sqrt(), u.abs())
+    let big = u64::MAX
+    println("[{:>22}] [{:<21}|] [{:03}]", big, big, big)
+    let doc = json::parse("{\"i\":12345678901234567890}").unwrap()
+    println("{:?}", json::get(doc, "i").and_then(json::as_u64))
+    println("{} {}", json::encode('x'), json::encode(#['a', 'b']))
+    println("{:?}", strconv::parse_u64("18446744073709551615"))
+    let a = "-1".to_i64().unwrap_or(0) as i8
+    let b = "-2".to_i64().unwrap_or(0) as i16
+    println("{:x} {:b} {:o} {:x} {:#x}", a, a, a, b, a)
+    for t in #["01", "-01", "1.", "-.5", "1.e3", "00", "1e999", "\"\\ud800\"", "1.5", "-0", "12"] {
+        println("{} -> {}", t, json::parse(t).is_ok())
+    }
+    println("{}", json::render(json::parse("{\"b\":1,\"a\":1E2,\"c\":\"\\u00e9\",\"d\":-0}").unwrap()))
+    println("{}", json::render(json::parse("[12.100000000000001,0.30000000000000004]").unwrap()))
+}
+
+fn a8(x: i8) -> i8 { x.abs() }
+fn a16(x: i16) -> i16 { x.abs() }
+
+fn main() {
+    edges()
+    let v = "-128".to_i64().unwrap_or(0) as i8
+    let w = "-32768".to_i64().unwrap_or(0) as i16
+    assert_eq(a8(-5), 5)
+    println("{} {} {} {}", a8(v), a8(-5), a16(w), a8(v) as i64 + 1)
+}

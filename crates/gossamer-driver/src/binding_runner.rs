@@ -572,6 +572,7 @@ impl StaticBindingsLib {
             "",
             "<staticlib>",
         )?;
+        link_archive_exception_tables(&archive)?;
         let kind = match &self.cargo_target {
             Some(t) => format!("staticlib:{t}"),
             None => "staticlib".to_string(),
@@ -1564,6 +1565,20 @@ fn pid_alive(pid: u32) -> bool {
         let _ = pid;
         true
     }
+}
+
+/// Ties each function's exception table in `archive` to its code, so a link
+/// that drops the function drops the table (see
+/// [`crate::lsda_link_order`]). The archive is rewritten through a temporary
+/// file, so a reader never sees it half written.
+fn link_archive_exception_tables(archive: &Path) -> io::Result<()> {
+    let mut bytes = fs::read(archive)?;
+    if crate::lsda_link_order::link_exception_tables_in_archive(&mut bytes) == 0 {
+        return Ok(());
+    }
+    let tmp = archive.with_extension(format!("a.tmp-{}", std::process::id()));
+    fs::write(&tmp, &bytes)?;
+    fs::rename(&tmp, archive)
 }
 
 #[cfg(test)]

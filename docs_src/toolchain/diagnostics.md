@@ -76,6 +76,8 @@ version. This page is auto-generated from the catalogue in
 | [`GT0090`](#gt0090) | Types | parallel adapter callback that is not provably pure |
 | [`GT0091`](#gt0091) | Types | ordered range bounds not written in the call |
 | [`GT0092`](#gt0092) | Types | field read from a closure parameter of undecided type |
+| [`GT0093`](#gt0093) | Types | `?` error with no conversion |
+| [`GT0094`](#gt0094) | Types | binding callback with an undecided type |
 | [`GP0056`](#gp0056) | Parser | retired cohort isolation spelling |
 | [`GP0057`](#gp0057) | Parser | literal regex pattern that does not compile |
 | [`GP0058`](#gp0058) | Parser | malformed literal SQL statement |
@@ -95,6 +97,8 @@ version. This page is auto-generated from the catalogue in
 | [`GR0019`](#gr0019) | Resolver | two dependency packages under one module name |
 | [`GR0020`](#gr0020) | Resolver | declaration under a compiler-known call name |
 | [`GR0021`](#gr0021) | Resolve | std free call written data-last |
+| [`GR0022`](#gr0022) | Resolve | uppercase name used as a binding |
+| [`GR0023`](#gr0023) | Resolve | reflecting generic called without a type |
 | [`GT0001`](#gt0001) | Types | type mismatch |
 | [`GT0002`](#gt0002) | Types | unresolved method |
 | [`GT0003`](#gt0003) | Types | unresolved operator |
@@ -487,6 +491,18 @@ A parallel adapter runs its callback on many workers at once, so the callback mu
 
 A field was read from a closure parameter with no annotation, and the closure is never handed to anything that says what it takes, so nothing decides the parameter's type. The field's layout depends on that type: annotate the parameter, `|r: http::Request| r.path`, or pass the closure where its parameter type is known.
 
+## `GT0093` <a id="gt0093"></a>
+
+**Types** - `?` error with no conversion
+
+`?` hands an error of the operand's type to a function that answers a different one. It converts when the function answers `errors::Error` (any error, by its text) or a type with an `impl From<E> for T` taking exactly the operand's error type. Otherwise write that impl, change the function's error type, or convert first with `.map_err(..)`.
+
+## `GT0094` <a id="gt0094"></a>
+
+**Types** - binding callback with an undecided type
+
+A closure passed to a `[rust-bindings]` function's callback parameter has a parameter or result whose type nothing in the program decides. The binding's signature does not name its callback's types, and a compiled program calls the closure through each type's register class, so annotate each parameter (`|s: String| ..`) or use it in a way that fixes its type.
+
 ## `GP0056` <a id="gp0056"></a>
 
 **Parser** - retired cohort isolation spelling
@@ -600,6 +616,18 @@ A `fn` or a binding was declared under one of the compiler-known call names - `p
 **Resolve** - std free call written data-last
 
 A std free function was called with its data argument in the slot it occupied before every module took its data first. The call still means what it did, so nothing else in the body is affected; write the data argument first, which is what makes `iter::map(xs, f)` read as the `xs.map(f)` it stands for.
+
+## `GR0022` <a id="gr0022"></a>
+
+**Resolve** - uppercase name used as a binding
+
+A pattern that is a single name starting with an uppercase letter names a unit variant or a constant, so it is read as a path and never introduces a binding. No variant or constant by that name is in scope. If a binding was meant, start its name with a lowercase letter; if a variant was meant, import it or qualify it.
+
+## `GR0023` <a id="gr0023"></a>
+
+**Resolve** - reflecting generic called without a type
+
+A function whose body walks `typeInfo::<T>()` over its own type parameter is specialised once per type it is called with, and the call is what names that type. A call without a turbofish names none, so there is no specialisation for it to reach. Write the type at the call: `describe::<Point>(p)`.
 
 ## `GT0001` <a id="gt0001"></a>
 

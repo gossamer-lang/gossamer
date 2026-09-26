@@ -268,7 +268,7 @@ impl<'a> Lowerer<'a> {
         if !crate::emit::want_stack_frames() {
             return;
         }
-        let Some((file, line)) = crate::emit::source_position(self.body.span.start) else {
+        let Some((file, line, column)) = crate::emit::source_position(self.body.span.start) else {
             return;
         };
         declare_rt(&mut self.runtime_refs, "gos_rt_stack_push");
@@ -276,7 +276,7 @@ impl<'a> Lowerer<'a> {
         let (file_global, _) = self.strings.borrow_mut().intern(&file);
         writeln!(
             self.out,
-            "  call void @gos_rt_stack_push(ptr {name_global}, ptr {file_global}, i32 {line})"
+            "  call void @gos_rt_stack_push(ptr {name_global}, ptr {file_global}, i32 {line}, i32 {column})"
         )
         .unwrap();
         self.frame_globals = Some((name_global, file_global));
@@ -291,9 +291,25 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  call void @gos_rt_stack_pop()").unwrap();
     }
 
-    /// Records `span`'s line as the one this body's frame stands at, so a
-    /// panic names the statement that raised it rather than the function's
-    /// first line.
+    /// Marks the source position the instructions written next belong to,
+    /// for the debug-info pass to attach as their locations.
+    pub(crate) fn emit_debug_location(&mut self, offset: u32) {
+        if !crate::emit::want_dwarf() {
+            return;
+        }
+        if let Some((_, line, column)) = crate::emit::source_position(offset) {
+            writeln!(
+                self.out,
+                "  {}{line} {column}",
+                crate::emit::DEBUG_LOCATION_MARKER
+            )
+            .unwrap();
+        }
+    }
+
+    /// Records `span`'s line and column as the position this body's frame
+    /// stands at, so a panic names the statement that raised it rather than
+    /// the function's first line.
     ///
     /// The update is written where the line can be read - ahead of a call,
     /// which a report can reach through its callee, and inside the cold block
@@ -304,10 +320,10 @@ impl<'a> Lowerer<'a> {
         if !crate::emit::want_stack_frames() {
             return;
         }
-        let Some((_, line)) = crate::emit::source_position(offset) else {
+        let Some((_, line, column)) = crate::emit::source_position(offset) else {
             return;
         };
-        self.pending_frame_line = Some(line);
+        self.pending_frame_line = Some((line, column));
     }
 
     /// Lowers through `f`, then writes the pending frame-line update ahead of
@@ -322,19 +338,19 @@ impl<'a> Lowerer<'a> {
         // A call on any path keeps this body's frame: a cold one can report
         // and return, so the frame it names has to already be there.
         self.frame_observed |= text_reads_frame_line(&self.out[mark..]);
-        let Some(line) = self.pending_frame_line else {
+        let Some((line, column)) = self.pending_frame_line else {
             return result;
         };
-        if self.last_frame_line == Some(line)
+        if self.last_frame_line == Some((line, column))
             || !hot_text_reads_frame_line(&self.out, mark, &self.cold_spans)
         {
             return result;
         }
-        self.last_frame_line = Some(line);
+        self.last_frame_line = Some((line, column));
         declare_rt(&mut self.runtime_refs, "gos_rt_stack_set_line");
         self.out.insert_str(
             mark,
-            &format!("  call void @gos_rt_stack_set_line(i32 {line})\n"),
+            &format!("  call void @gos_rt_stack_set_line(i32 {line}, i32 {column})\n"),
         );
         result
     }
@@ -360,11 +376,11 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             if let Some(rest) = line.strip_prefix(set_line_prefix)
-                && let Some(number) = rest.strip_suffix(')')
+                && let Some(position) = rest.strip_suffix(')')
             {
                 writeln!(
                     rewritten,
-                    "  call void @gos_rt_stack_push(ptr {name_global}, ptr {file_global}, i32 {number})"
+                    "  call void @gos_rt_stack_push(ptr {name_global}, ptr {file_global}, i32 {position})"
                 )
                 .unwrap();
                 continue;
@@ -397,15 +413,19 @@ impl<'a> Lowerer<'a> {
         // A body whose raising statement carries no source position still
         // needs its frame named, so the entry line stands in for it: a report
         // that names the function at its first line beats one missing it.
-        let line = match self.pending_frame_line {
-            Some(line) => line,
+        let (line, column) = match self.pending_frame_line {
+            Some(position) => position,
             None => match crate::emit::source_position(self.body.span.start) {
-                Some((_, line)) => line,
+                Some((_, line, column)) => (line, column),
                 None => return,
             },
         };
         declare_rt(&mut self.runtime_refs, "gos_rt_stack_set_line");
-        writeln!(self.out, "  call void @gos_rt_stack_set_line(i32 {line})").unwrap();
+        writeln!(
+            self.out,
+            "  call void @gos_rt_stack_set_line(i32 {line}, i32 {column})"
+        )
+        .unwrap();
     }
 
     /// A fresh stack slot for a call-scoped temporary, declared in the entry

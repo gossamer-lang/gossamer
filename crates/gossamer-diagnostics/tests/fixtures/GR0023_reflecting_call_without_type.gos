@@ -1,0 +1,15 @@
+// ERROR: GR0023
+
+struct Point { x: i64 }
+
+fn describe<T>(v: T) -> String {
+    let mut out = ""
+    for (name, ty) in typeInfo::<T>() {
+        out += name
+    }
+    out
+}
+
+fn main() {
+    println("{}", describe(Point { x: 1 }))
+}

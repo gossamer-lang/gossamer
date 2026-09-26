@@ -414,9 +414,10 @@ impl Parser<'_> {
         };
         let where_clause = self.parse_where_clause();
         let body = if self.at_punct(Punct::LBrace) {
+            let open = self.peek_span();
             self.bump();
             let block = self.parse_block_body();
-            let span = self.last_span();
+            let span = self.join(open, self.last_span());
             let id = self.alloc_id();
             Some(Box::new(Expr::new(id, span, ExprKind::Block(block))))
         } else {

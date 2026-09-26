@@ -44,6 +44,7 @@ impl<'a> Builder<'a> {
             TyKind::JsonValue
             | TyKind::Int(_)
             | TyKind::Bool
+            | TyKind::Char
             | TyKind::Float(_)
             | TyKind::String => true,
             TyKind::Adt { def, .. } => {
@@ -128,11 +129,20 @@ impl<'a> Builder<'a> {
             TyKind::Bool => {
                 self.emit_writer_call("gos_rt_json_writer_bool", vec![writer, local], span)
             }
+            TyKind::Float(gossamer_types::FloatTy::F32) => {
+                self.emit_writer_call("gos_rt_json_writer_f32", vec![writer, local], span)
+            }
             TyKind::Float(_) => {
                 self.emit_writer_call("gos_rt_json_writer_f64", vec![writer, local], span)
             }
             TyKind::String => {
                 self.emit_writer_call("gos_rt_json_writer_str", vec![writer, local], span)
+            }
+            // A `char` encodes as the one-character string it is.
+            TyKind::Char => {
+                let string_ty = self.tcx.string_ty();
+                let text = self.emit_rt_call("gos_rt_char_to_str", vec![local], string_ty, span);
+                self.emit_writer_call("gos_rt_json_writer_str", vec![writer, text], span);
             }
             TyKind::Adt { def, .. } => {
                 if self.is_result_or_option_adt(ty) {

@@ -1,0 +1,17 @@
+// `sort` orders a float sequence by value, in the total order that puts
+// `-0.0` before `0.0`, for a `Vec` and a fixed array alike.
+
+fn main() {
+    let mut a: Vec<f64> = #[-1.0, 2.0, -3.0, 0.5, -0.0, 0.0, -2.5]
+    a.sort()
+    println("{:?}", a)
+    let mut b: Vec<f32> = #[-1.0, 2.0, -3.0, 0.5]
+    b.sort()
+    println("{:?}", b)
+    let mut c: [f64; 4] = [-1.0, -3.0, 2.0, -2.0]
+    c.sort()
+    println("{:?}", c)
+    let mut u: Vec<u64> = #[18446744073709551615, 1, 9223372036854775808]
+    u.sort()
+    println("{:?}", u)
+}

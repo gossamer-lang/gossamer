@@ -1,0 +1,48 @@
+// An integer constant is signed unless the operation's other side says
+// otherwise, whatever unsigned bindings the surrounding function holds, and an
+// unsigned binding keeps its signedness when its value is a known constant.
+
+fn signed_only() {
+    assert_eq(-17 / 5, -3)
+    assert_eq(-17 % 5, -2)
+    assert(-17 < 5)
+    assert_eq(-1 >> 1, -1)
+    println("{} {} {} {}", -17 / 5, -17 % 5, -17 < 5, -1 >> 1)
+}
+
+fn beside_unsigned() {
+    let g: u64 = 5
+    let small: u8 = 200
+    let mid: u32 = 4000000000
+    println("{} {} {}", g + 1, small / 3, mid >> 4)
+    assert_eq(-17 / 5, -3)
+    assert_eq(-17 % 5, -2)
+    assert(-17 < 5)
+    assert_eq(-1 >> 1, -1)
+    println("{} {} {} {}", -17 / 5, -17 % 5, -17 < 5, -1 >> 1)
+    println("{} {} {}", u64::MAX > 1, u64::MAX >> 60, u64::MAX / 3)
+}
+
+fn known_constants() {
+    let a: u32 = 4000000000
+    let b: i64 = -9
+    let c: u8 = 250
+    let d: i8 = -100
+    let e: u16 = 65000
+    assert_eq(b / 2, -4)
+    assert(a > 3000000000)
+    assert_eq(a / 7, 571428571)
+    assert_eq(c >> 1, 125)
+    assert(c > 100)
+    assert_eq(d / 3, -33)
+    assert(d < 0)
+    assert_eq(e % 1000, 0)
+    println("{} {} {} {} {} {} {}", b / 2, a > 3000000000, a / 7, c >> 1, d / 3, d < 0, e % 1000)
+    println("{} {}", u8::MAX / 2, 7 - 10)
+}
+
+fn main() {
+    signed_only()
+    beside_unsigned()
+    known_constants()
+}

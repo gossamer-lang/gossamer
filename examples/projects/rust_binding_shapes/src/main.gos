@@ -65,7 +65,7 @@ mod shapes_tests {
         // The open shape has no declared type to lower through, so a native
         // build once handed back the pointer that reached it.
         let _ = testing::check_eq(format("{:?}", shapes::dynamic(2)), "-7", "int")
-        let _ = testing::check_eq(format("{:?}", shapes::dynamic(5)), "hi", "string")
+        let _ = testing::check_eq(format("{:?}", shapes::dynamic(5)), "\"hi\"", "string")
         let _ = testing::check_eq(format("{:?}", shapes::dynamic(6)), "[1, 2, 3]", "bytes")
         let _ = testing::check_eq(
             format("{:?}", shapes::dynamic(8))

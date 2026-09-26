@@ -361,10 +361,39 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
     std::process::exit(101);
 }
 
+/// Ends the program with a fault whatever thread reports it, rendered as a
+/// fault is on `main`'s thread: `error[<code>]: <prefix><text>`, the call
+/// stack when `with_trace` asks for this thread's, and exit code 101.
+///
+/// For a fault that belongs to the whole program rather than to the work
+/// the reporting thread serves, such as a deadlock a scheduler worker
+/// notices. The browser build settles every goroutine at its spawn, so no
+/// scheduler there reports one.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn fatal_program_fault(code: &str, prefix: &str, text: &str, with_trace: bool) -> ! {
+    install_silent_gos_hook();
+    if !call_user_panic_hook(text) {
+        unsafe {
+            gos_rt_flush_stdout();
+        }
+        eprintln!("error[{code}]: {prefix}{text}");
+        if with_trace {
+            let trace = fault_trace();
+            if !trace.is_empty() {
+                eprint!("{trace}");
+            }
+        }
+    }
+    unsafe {
+        gos_rt_flush_stdout();
+    }
+    std::process::exit(101);
+}
+
 /// Pushes a call-stack frame on entry to a Gossamer function.
 /// Codegen prologues emit one call per function entry; the
-/// interpreter calls this directly. `function`, `file`, and `line`
-/// identify the frame for panic dumps and SIGQUIT renders.
+/// `function`, `file`, `line`, and `column` identify the frame for panic
+/// dumps and SIGQUIT renders.
 ///
 /// `function` and `file` must be string constants in the program
 /// image - the frame borrows them for the process lifetime rather
@@ -376,13 +405,14 @@ pub unsafe extern "C" fn gos_rt_stack_push(
     function: *const c_char,
     file: *const c_char,
     line: u32,
+    column: u32,
 ) {
     // SAFETY: the parameters are program-image string constants, per this
     // shim's contract above.
     let function = unsafe { crate::sigquit::ImageStr::new(function) };
     // SAFETY: as above.
     let file = unsafe { crate::sigquit::ImageStr::new(file) };
-    crate::sigquit::stack_push(function, file, line);
+    crate::sigquit::stack_push(function, file, line, column);
 }
 
 /// Pops the topmost call-stack frame on return from a Gossamer
@@ -392,14 +422,14 @@ pub extern "C" fn gos_rt_stack_pop() {
     crate::sigquit::stack_pop();
 }
 
-/// Updates the line number of the topmost call-stack frame.
+/// Updates the line and column of the topmost call-stack frame.
 /// Emitted by codegen at MIR-statement granularity so panic
-/// dumps show the line of the most recent statement, not the
+/// dumps show the position of the most recent statement, not the
 /// function entry. The frame's file path stays as it was set by
 /// the matching `gos_rt_stack_push`.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_stack_set_line(line: u32) {
-    crate::sigquit::set_active_line(line);
+pub extern "C" fn gos_rt_stack_set_line(line: u32, column: u32) {
+    crate::sigquit::set_active_line(line, column);
 }
 
 /// Returns 1 if any spawned goroutine has panicked since process

@@ -1,0 +1,37 @@
+// `{:?}` renders a String or char in the literal spelling that builds it, at the
+// top level and inside every collection, tuple, struct, Option, and Result.
+
+use std::collections::BTreeSet
+
+struct S { t: String, c: char }
+
+fn top_level_and_nested() {
+    let s = "a\u{0}b\u{200b}\"q\n"
+    println("{:?}", s)
+    println("{:?}", #[s])
+    println("{:?}", S { t: s, c: '\n' })
+    println("{:?} {:?} {:?}", 'x', '\'', '\n')
+    println("{:?}", #['a', '\'', '"'])
+    println("{}", #['a', '\''])
+    println("{}", #["a b"])
+    println("{:?}", Some('z'))
+    println("{:?}", ('c', "s"))
+}
+
+fn char_collections() {
+    let cs = #['a', 'b']
+    let bs: BTreeSet<char> = #{ 'q', 'p' }
+    let m = { 'k': 'v' }
+    println("{:?} {:?} {:?}", cs, bs, m)
+    println("{} {} {}", cs, bs, m)
+    println("{:?} {}", ('x', 1), ('x', 1))
+    println("{:?} {}", Some('\t'), Some('y'))
+    let r: Result<char, String> = Ok('!')
+    println("{:?}", r)
+    println("{}", 'p')
+}
+
+fn main() {
+    top_level_and_nested()
+    char_collections()
+}

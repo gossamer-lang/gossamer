@@ -91,7 +91,6 @@ fn install_math_builtins(globals: &mut Vec<(&'static str, Value)>) {
     globals.push(("ln", builtin("ln", builtin_math_ln)));
     globals.push(("log", builtin("log", builtin_math_ln)));
     globals.push(("math::ln", builtin("math::ln", builtin_math_ln)));
-    globals.push(("math::log", builtin("math::log", builtin_math_ln)));
     globals.push(("abs", builtin("abs", builtin_math_abs)));
     globals.push(("math::abs", builtin("math::abs", builtin_math_abs)));
     globals.push(("floor", builtin("floor", builtin_math_floor)));

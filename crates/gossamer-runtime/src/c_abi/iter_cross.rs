@@ -427,6 +427,32 @@ cross_shims!(
     "`iter::filter_map(f, xs)` - the Some payloads of `f(x)`. The trailing arguments are the declared width of the kept payload and whether the callback answers its storage address."
 );
 
+unsafe fn map_carrier_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosVec {
+    let len = vec_len_of(v);
+    // SAFETY: fresh allocation sized for one carrier per element.
+    let out = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity_typed(16, len, 0) };
+    let Some(addr) = env_fn_addr(env) else {
+        return out;
+    };
+    for i in 0..len {
+        // The callback answers a carrier of its own, whose payload share the
+        // element now holds.
+        let carrier = unsafe { opt_at(addr, env, v, i, pass) };
+        unsafe { crate::c_abi::vec::gos_rt_vec_push_i128(out, carrier) };
+    }
+    out
+}
+
+cross_shims!(
+    map_carrier_impl,
+    (env: *const u8, v: *const GosVec) -> *mut GosVec,
+    gos_rt_iter_map_carrier_i64,
+    gos_rt_iter_map_carrier_f64,
+    gos_rt_iter_map_carrier_ptr,
+    std::ptr::null_mut(),
+    "`iter::map(f, xs)` whose callback answers an `Option` or `Result`: a fresh `Vec` of the carriers `f(x)` answers."
+);
+
 unsafe fn find_map_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i128 {
     let Some(addr) = env_fn_addr(env) else {
         return NONE;
@@ -997,12 +1023,12 @@ pub(crate) enum SortKey {
 
 impl SortKey {
     /// Order against another key of the same shape. Float keys order by
-    /// `f64::total_cmp`, the same total order `iter::max` and `iter::min`
+    /// the language's float order (`sort::float_order`), the one `iter::max` and `iter::min`
     /// place a float sequence in.
     pub(crate) fn order(self, other: Self) -> std::cmp::Ordering {
         match (self, other) {
             (Self::Int(a), Self::Int(b)) => a.cmp(&b),
-            (Self::Float(a), Self::Float(b)) => a.total_cmp(&b),
+            (Self::Float(a), Self::Float(b)) => crate::c_abi::sort::float_order(a, b),
             _ => std::cmp::Ordering::Equal,
         }
     }

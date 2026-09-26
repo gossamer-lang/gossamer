@@ -1,0 +1,36 @@
+// A type the program declares keeps its own methods whatever it is called,
+// even when the name is also a standard collection or handle.
+
+struct Stack { items: Vec<i64> }
+
+impl Stack {
+    fn new() -> Stack { Stack { items: #[] } }
+    fn push(&mut self, v: i64) { self.items.push(v * 10) }
+    fn len(&self) -> i64 { self.items.len() + 100 }
+}
+
+struct Queue { head: String }
+
+impl Queue {
+    fn pop(&mut self) -> String { format("popped {}", self.head) }
+}
+
+struct Context { depth: i64 }
+
+impl Context {
+    fn is_cancelled(&self) -> bool { self.depth > 2 }
+}
+
+fn describe(s: Stack) -> String { format("{:?} {}", s.items, s.len()) }
+
+fn main() {
+    let mut s = Stack::new()
+    s.push(1)
+    s.push(2)
+    assert_eq(s.items, #[10, 20])
+    println("{}", describe(s))
+    let mut q = Queue { head: "front" }
+    println("{}", q.pop())
+    let c = Context { depth: 3 }
+    println("{}", c.is_cancelled())
+}

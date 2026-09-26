@@ -21,6 +21,11 @@ use std::path::{Path, PathBuf};
 /// `(file, enclosing item, reason)`.
 const ALLOWLIST: &[(&str, &str, &str)] = &[
     (
+        "binding_callback.rs",
+        "invoke_closure",
+        "a native Rust binding passes a callback's string argument as a C string it owns",
+    ),
+    (
         "args.rs",
         "gos_rt_set_args",
         "libc owns argv; the entries are copied into tagged Gossamer strings here",

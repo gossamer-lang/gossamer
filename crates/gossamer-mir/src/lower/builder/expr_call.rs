@@ -352,9 +352,13 @@ impl<'a> Builder<'a> {
                 && rendered_segments.len() == 1
                 && rendered_segments[0].name.as_str() == "__concat"
                 && rendered_args.len() == 1
+                // The helper renders an `i64`; a `u64` / `usize` above
+                // `i64::MAX` would print negative, so it keeps the general
+                // path, which renders it unsigned.
                 && matches!(
                     self.tcx.kind_of(rendered_args[0].ty),
-                    gossamer_types::TyKind::Int(_)
+                    gossamer_types::TyKind::Int(int)
+                        if !matches!(int, gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize)
                 )
             {
                 let mut locals = Vec::with_capacity(5);

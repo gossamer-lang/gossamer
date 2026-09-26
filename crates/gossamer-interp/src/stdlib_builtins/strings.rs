@@ -191,8 +191,10 @@ fn non_negative_usize_arg(
         .get(idx)
         .and_then(value_to_int)
         .ok_or_else(|| RuntimeError::Type(format!("{builtin}: {name} must be i64")))?;
+    // A negative count is a caller's fault the program cannot recover from,
+    // raised as the panic the compiled tiers raise.
     if raw < 0 {
-        return Err(RuntimeError::Type(format!(
+        return Err(RuntimeError::Panic(format!(
             "{builtin}: {name} must be non-negative"
         )));
     }

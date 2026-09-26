@@ -765,8 +765,13 @@ pub(super) fn lower_intrinsic_call_handles(
             );
             Ok(true)
         }
-        "gos_rt_json_value_float" => {
-            let rt_fn = intrinsics.extern_fn_by_name(module, "gos_rt_json_value_float")?;
+        "gos_rt_json_value_float" | "gos_rt_json_value_float32" => {
+            let symbol = if name == "gos_rt_json_value_float" {
+                "gos_rt_json_value_float"
+            } else {
+                "gos_rt_json_value_float32"
+            };
+            let rt_fn = intrinsics.extern_fn_by_name(module, symbol)?;
             let fref = module.declare_func_in_func(rt_fn, builder.func);
             let x = match args.first() {
                 Some(a) => lower_operand(

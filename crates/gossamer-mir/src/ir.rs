@@ -691,7 +691,7 @@ impl RawIntrinsic {
             "f64.floor" | "floor" => Self::F64Math(F64MathIntrinsic::Floor),
             "f64.ceil" | "ceil" => Self::F64Math(F64MathIntrinsic::Ceil),
             "f64.exp" | "exp" => Self::F64Math(F64MathIntrinsic::Exp),
-            "f64.ln" | "ln" | "f64.log" | "log" => Self::F64Math(F64MathIntrinsic::Log),
+            "f64.ln" | "ln" => Self::F64Math(F64MathIntrinsic::Log),
             other if gossamer_abi::lookup(other).is_some() => Self::Runtime,
             _ => return None,
         };

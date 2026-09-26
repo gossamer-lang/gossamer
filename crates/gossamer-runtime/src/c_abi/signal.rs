@@ -233,6 +233,26 @@ pub unsafe extern "C" fn gos_rt_arr_sort_i64(p: *mut i64, len: i64) {
     });
 }
 
+/// Sorts a flat fixed-size float array in place, in the total order
+/// `f64::total_cmp` defines, which is how every tier orders floats.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_arr_sort_f64(p: *mut i64, len: i64) {
+    ffi_entry!((), {
+        if p.is_null() || len <= 1 {
+            return;
+        }
+        sort_float_words(unsafe { std::slice::from_raw_parts_mut(p, len as usize) });
+    });
+}
+
+/// Orders float slot words by the values they hold. An `f32` sits in its
+/// slot at double width, where it keeps its own order.
+fn sort_float_words(words: &mut [i64]) {
+    words.sort_unstable_by(|a, b| {
+        crate::c_abi::sort::float_order(f64::from_bits(*a as u64), f64::from_bits(*b as u64))
+    });
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_arr_sort_str(p: *mut usize, len: i64) {
     ffi_entry!((), {
@@ -372,6 +392,23 @@ unsafe fn store_elems(v: *mut GosVec, elems: &[i64]) {
     for (i, &value) in elems.iter().enumerate() {
         unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, i as i64, value) };
     }
+}
+
+/// Sorts a float-element `Vec` in place, in the total order
+/// `f64::total_cmp` defines.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_sort_f64(v: *mut GosVec) {
+    ffi_entry!((), {
+        if v.is_null() {
+            return;
+        }
+        let vec = unsafe { &mut *v };
+        if vec.len <= 1 || vec.ptr.is_null() {
+            return;
+        }
+        let len = vec.len as usize;
+        sort_float_words(unsafe { std::slice::from_raw_parts_mut(vec.ptr.cast::<i64>(), len) });
+    });
 }
 
 /// Sorts a `Vec<i64>` (heap `GosVec`) in ascending order in place.

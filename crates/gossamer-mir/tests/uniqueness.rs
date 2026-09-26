@@ -188,3 +188,57 @@ fn a_recursive_function_that_returns_its_argument_answers_a_shared_value() {
     let u = uniqueness_of(source, "f", "b", return_point);
     assert_eq!(u, Uniqueness::Shared);
 }
+
+/// The names of every runtime entry `func`'s final MIR calls.
+fn called_names(source: &str, func: &str) -> Vec<String> {
+    let (bodies, _) = lower(source);
+    let body = bodies
+        .iter()
+        .find(|body| body.name == func)
+        .unwrap_or_else(|| panic!("no body {func}"));
+    body.blocks
+        .iter()
+        .filter_map(|block| match &block.terminator {
+            Terminator::Call {
+                callee: Operand::Const(ConstValue::Str(name)),
+                ..
+            } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_map_filled_by_inserts_stays_unique() {
+    let u = uniqueness_of(
+        "fn f() -> i64 {\n let mut m: Map<i64, i64> = Map::new()\n m.insert(1, 2)\n m.len()\n}\n",
+        "f",
+        "m",
+        return_point,
+    );
+    assert_eq!(u, Uniqueness::Unique);
+}
+
+#[test]
+fn a_map_stored_on_its_last_use_moves_instead_of_copying() {
+    let names = called_names(
+        "fn f(q: &mut Vec<Map<i64, i64>>) {\n let mut m: Map<i64, i64> = Map::new()\n m.insert(1, 2)\n q.push(m)\n}\n",
+        "f",
+    );
+    assert!(
+        !names.iter().any(|n| n == "gos_rt_map_clone"),
+        "a map pushed on its last use is handed over, not copied: {names:?}"
+    );
+}
+
+#[test]
+fn a_deque_binding_takes_the_table_its_constructor_built() {
+    let names = called_names(
+        "use std::collections::Deque\nfn f() -> i64 {\n let mut d: Deque<i64> = Deque::new()\n d.push_back(1)\n d.len()\n}\n",
+        "f",
+    );
+    assert!(
+        !names.iter().any(|n| n == "gos_rt_deque_clone"),
+        "a freshly built deque is bound without a copy: {names:?}"
+    );
+}

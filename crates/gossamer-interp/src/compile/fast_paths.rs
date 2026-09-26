@@ -233,9 +233,7 @@ impl<'tcx> FnBuilder<'tcx> {
                 });
                 self.bind_pattern_locals_ex(inner, peeled, consume)
             }
-            _ => Err(RuntimeError::Unsupported(
-                "this `let` pattern is not supported by the VM compiler",
-            )),
+            _ => Err(RuntimeError::Unsupported("this `let` pattern")),
         }
     }
 

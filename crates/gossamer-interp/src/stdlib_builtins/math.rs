@@ -171,13 +171,17 @@ pub(crate) fn arg_f64(args: &[Value], idx: usize) -> f64 {
     match args.get(idx) {
         Some(Value::Float(f)) => *f,
         Some(Value::Int(n)) => *n as f64,
+        Some(Value::Uint(n)) => *n as f64,
         _ => 0.0,
     }
 }
 
 pub(crate) fn builtin_math_abs(args: &[Value]) -> RuntimeResult<Value> {
-    if let Some(Value::Int(n)) = args.first() {
-        return Ok(Value::Int(math_std::abs_i64(*n)));
+    match args.first() {
+        Some(Value::Int(n)) => return Ok(Value::Int(math_std::abs_i64(*n))),
+        // An unsigned value is its own magnitude.
+        Some(Value::Uint(n)) => return Ok(Value::Uint(*n)),
+        _ => {}
     }
     Ok(Value::Float(math_std::abs(arg_f64(args, 0))))
 }

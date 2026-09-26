@@ -657,8 +657,8 @@ fn fold_binary(
 /// rewritten to that copy, and the generic template is removed so it is
 /// never type-checked generically. Runs before `expand_typeinfo_loops`.
 /// Concrete-type loops use no turbofish and skip this pass entirely; a
-/// template called without a turbofish leaves no specialization and the
-/// removed template surfaces as an ordinary unknown-name error.
+/// template called without a turbofish is renamed so the resolver reports
+/// the missing type at the call.
 pub fn specialize_inline_for_generics(sf: &mut SourceFile) {
     use gossamer_ast::{ItemKind, Visitor};
     let mut templates: HashMap<String, String> = HashMap::new();
@@ -890,6 +890,15 @@ impl gossamer_ast::VisitorMut for TurbofishRewriter<'_> {
         }
         let orig = p.segments[0].name.name.clone();
         if !self.templates.contains_key(&orig) {
+            return;
+        }
+        if p.segments[0].generics.is_empty() {
+            // No type named, so no specialisation exists to call; the
+            // resolver reports the missing turbofish at this name.
+            p.segments[0].name = gossamer_ast::Ident::new(format!(
+                "{}{orig}",
+                gossamer_ast::common::REFLECTING_CALL_WITHOUT_TYPE_PREFIX
+            ));
             return;
         }
         let concrete = {

@@ -207,6 +207,7 @@ impl<'a> Lowerer<'a> {
             self.emit_cleanup_call(entry);
         }
         for stmt in &block.stmts {
+            self.emit_debug_location(stmt.span.start);
             self.emit_stack_frame_line(stmt.span.start);
             self.with_frame_line(|lowerer| lowerer.lower_stmt(stmt))?;
         }
@@ -215,6 +216,7 @@ impl<'a> Lowerer<'a> {
         }
         self.current_block = Some(block.id.as_u32());
         if let Some(span) = block.terminator_span {
+            self.emit_debug_location(span.start);
             self.emit_stack_frame_line(span.start);
         }
         self.with_frame_line(|lowerer| lowerer.lower_terminator(&block.terminator))?;

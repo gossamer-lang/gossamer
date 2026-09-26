@@ -169,6 +169,16 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          `process::run` wrappers fold, on the same process API",
     ),
     (
+        "gos_rt_f32_debug_to_str",
+        "the VM renders an `f32` for `{:?}` through `__gos_f32_debug`, the call the \
+         `f32` HIR pass writes for every such operand",
+    ),
+    (
+        "gos_rt_f32_to_str",
+        "the VM renders an `f32` for `{}` and `to_string` through \
+         `__gos_f32_display`, the call the `f32` HIR pass writes for every such operand",
+    ),
+    (
         "gos_rt_f64_*",
         "the VM renders a float through its `Display` implementation for \
          `Value::Float`, precision included",

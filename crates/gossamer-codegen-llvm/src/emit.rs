@@ -1780,9 +1780,46 @@ pub fn set_debug_info(enabled: bool) {
 #[derive(Debug, Clone, Default)]
 pub struct SourcePositions {
     unit: String,
-    unit_lines: Vec<u32>,
-    files: Vec<(String, Vec<u32>)>,
+    unit_text: SourceText,
+    files: Vec<(String, SourceText)>,
     regions: Vec<SourceRegion>,
+}
+
+/// A file's text with the byte offset each of its lines begins at.
+#[derive(Debug, Clone, Default)]
+struct SourceText {
+    text: String,
+    line_starts: Vec<u32>,
+}
+
+impl SourceText {
+    fn new(text: &str) -> Self {
+        Self {
+            text: text.to_string(),
+            line_starts: line_starts(text),
+        }
+    }
+
+    /// The one-based line and column of `offset`, the column counted in
+    /// characters as the source map counts it.
+    fn line_column(&self, offset: u32) -> (u32, u32) {
+        // `partition_point` gives the count of line starts at or before the
+        // offset, which is exactly the one-based line number.
+        let line = self
+            .line_starts
+            .partition_point(|start| *start <= offset)
+            .max(1);
+        let start = self.line_starts[line - 1] as usize;
+        let end = (offset as usize).clamp(start, self.text.len());
+        let column = self
+            .text
+            .get(start..end)
+            .map_or(end - start, |prefix| prefix.chars().count());
+        (
+            u32::try_from(line).unwrap_or(u32::MAX),
+            u32::try_from(column + 1).unwrap_or(u32::MAX),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1811,7 +1848,7 @@ impl SourcePositions {
     pub fn new(unit: impl Into<String>, source: &str) -> Self {
         Self {
             unit: unit.into(),
-            unit_lines: line_starts(source),
+            unit_text: SourceText::new(source),
             files: Vec::new(),
             regions: Vec::new(),
         }
@@ -1833,7 +1870,7 @@ impl SourcePositions {
             index
         } else {
             self.files
-                .push((file.to_string(), line_starts(file_source)));
+                .push((file.to_string(), SourceText::new(file_source)));
             self.files.len() - 1
         };
         self.regions.push(SourceRegion {
@@ -1844,23 +1881,21 @@ impl SourcePositions {
         });
     }
 
-    /// The file and one-based line a unit offset was written at.
-    fn position(&self, offset: u32) -> (String, u32) {
-        // `partition_point` gives the count of line starts at or before the
-        // offset, which is exactly the one-based line number.
-        let line_of = |starts: &[u32], at: u32| starts.partition_point(|start| *start <= at).max(1);
-        match self
+    /// The file and the one-based line and column a unit offset was written
+    /// at.
+    fn position(&self, offset: u32) -> (String, u32, u32) {
+        if let Some(region) = self
             .regions
             .iter()
             .rev()
             .find(|region| offset >= region.start && offset < region.end)
         {
-            Some(region) => {
-                let (name, starts) = &self.files[region.file];
-                let local = region.origin_start + (offset - region.start);
-                (name.clone(), line_of(starts, local) as u32)
-            }
-            None => (self.unit.clone(), line_of(&self.unit_lines, offset) as u32),
+            let (name, text) = &self.files[region.file];
+            let (line, column) = text.line_column(region.origin_start + (offset - region.start));
+            (name.clone(), line, column)
+        } else {
+            let (line, column) = self.unit_text.line_column(offset);
+            (self.unit.clone(), line, column)
         }
     }
 }
@@ -1875,9 +1910,9 @@ pub fn set_source_positions(positions: SourcePositions) {
     *slot = Some(positions);
 }
 
-/// The file name and the one-based line for `offset`, or `None` when no
-/// table has been registered for this build.
-pub(crate) fn source_position(offset: u32) -> Option<(String, u32)> {
+/// The file name and the one-based line and column for `offset`, or `None`
+/// when no table has been registered for this build.
+pub(crate) fn source_position(offset: u32) -> Option<(String, u32, u32)> {
     let slot = SOURCE_POSITIONS
         .read()
         .expect("source-position table lock poisoned");
@@ -1974,6 +2009,14 @@ fn disable_loop_idiom_for_target_with_static_musl(static_musl: bool, triple: &st
         && target_arch_from_triple(triple) != "x86_64"
 }
 
+/// Whether a release build for `triple`, linked statically against musl when
+/// `static_musl` holds, compiles with LLVM's loop idiom recognition turned
+/// off.
+#[must_use]
+pub fn loop_idiom_disabled(static_musl: bool, triple: &str) -> bool {
+    disable_loop_idiom_for_target_with_static_musl(static_musl, triple)
+}
+
 fn disable_loop_idiom_for_target(triple: &str) -> bool {
     disable_loop_idiom_for_target_with_static_musl(static_musl_link_enabled(), triple)
 }
@@ -1990,72 +2033,195 @@ pub(crate) fn opt_profile() -> OptProfile {
 /// Triggered by either the `GOS_DWARF` env var (used by tests),
 /// the `GOS_BUILD_DEBUG` env var (CI), or [`set_debug_info`] (CLI
 /// `-g` flag).
-fn want_dwarf() -> bool {
+pub(crate) fn want_dwarf() -> bool {
     DEBUG_INFO.load(std::sync::atomic::Ordering::Acquire)
         || std::env::var("GOS_DWARF").is_ok()
         || std::env::var("GOS_BUILD_DEBUG").is_ok()
 }
 
-/// Emits LLVM debug-info metadata for every body in `bodies`.
-/// Produces:
-///
-/// - `llvm.module.flags` declaring DWARF v4 and Debug Info v3.
-/// - One `DICompileUnit` for the program, owning a single
-///   synthetic `DIFile` (the source map is not yet plumbed
-///   through to the lowerer; per-function file resolution is a
-///   follow-up).
-/// - One `DISubprogram` per body, attached to the function's
-///   `define` line via `!dbg !N`. The subprogram metadata is what
-///   `gdb` / `lldb` use to walk a backtrace and resolve
-///   instruction pointers to function names.
-fn emit_dwarf_metadata(out: &mut String, bodies: &[Body]) {
-    let cwd = std::env::current_dir()
-        .ok()
-        .and_then(|p| p.to_str().map(str::to_string))
-        .unwrap_or_else(|| ".".to_string());
-    // 1. Tag the function definitions with `!dbg !N`. The
-    //    subprogram numbers start at 100; the file is !50, the
-    //    compile unit is !51.
-    let mut subprogram_lines: Vec<String> = Vec::new();
-    for (idx, body) in bodies.iter().enumerate() {
-        let llvm_name = crate::lower::mangle_fn_name(&body.name);
-        let id = 100u32 + u32::try_from(idx).unwrap_or(u32::MAX);
-        // Best-effort: stamp every function with the body name and
-        // a stable scopeLine of 1. Real source line numbers will
-        // arrive once the SourceMap is threaded through the
-        // codegen pipeline.
-        subprogram_lines.push(format!(
-            "!{id} = distinct !DISubprogram(name: \"{name}\", linkageName: \"{lname}\", \
-             scope: !51, file: !50, line: 1, type: !52, scopeLine: 1, \
-             spFlags: DISPFlagDefinition, unit: !51)",
-            id = id,
-            name = body.name.replace('"', "\\\""),
-            lname = llvm_name.replace('"', "\\\""),
-        ));
-        // Attach `!dbg` to the define line.
-        let needle = format!("define i64 @\"{llvm_name}\"");
-        let attached = format!("define i64 @\"{llvm_name}\"");
-        if let Some(pos) = out.find(&needle) {
-            // Scan forward to the opening brace and insert `!dbg !N`
-            // just before it.
-            if let Some(brace) = out[pos..].find(" {\n") {
-                let abs = pos + brace;
-                let insertion = format!(" !dbg !{id}");
-                out.insert_str(abs, &insertion);
-                continue;
-            }
-            let _ = attached;
+/// Comment line the lowerer writes ahead of each MIR statement's instructions
+/// when the build carries DWARF: `; gos.loc <line> <column>`.
+/// [`emit_dwarf_metadata`] turns it into the `!dbg` location of every
+/// instruction that follows, up to the next one.
+pub(crate) const DEBUG_LOCATION_MARKER: &str = "; gos.loc ";
+
+/// Debug-info metadata nodes numbered as they are first needed.
+struct DebugMetadata {
+    directory: String,
+    lines: Vec<String>,
+    files: HashMap<String, u32>,
+    locations: HashMap<(u32, u32, u32), u32>,
+    next_id: u32,
+}
+
+impl DebugMetadata {
+    fn file(&mut self, name: &str) -> u32 {
+        if let Some(&id) = self.files.get(name) {
+            return id;
         }
-        // Same scan for the `void`-returning shape.
-        let needle_void = format!("define void @\"{llvm_name}\"");
-        if let Some(pos) = out.find(&needle_void) {
-            if let Some(brace) = out[pos..].find(" {\n") {
-                let abs = pos + brace;
-                let insertion = format!(" !dbg !{id}");
-                out.insert_str(abs, &insertion);
+        let id = self.next_id;
+        self.next_id += 1;
+        self.lines.push(format!(
+            "!{id} = !DIFile(filename: \"{}\", directory: \"{}\")",
+            escape_metadata_string(name),
+            escape_metadata_string(&self.directory),
+        ));
+        self.files.insert(name.to_string(), id);
+        id
+    }
+
+    fn location(&mut self, line: u32, column: u32, scope: u32) -> u32 {
+        if let Some(&id) = self.locations.get(&(line, column, scope)) {
+            return id;
+        }
+        let id = self.next_id;
+        self.next_id += 1;
+        self.lines.push(format!(
+            "!{id} = !DILocation(line: {line}, column: {column}, scope: !{scope})"
+        ));
+        self.locations.insert((line, column, scope), id);
+        id
+    }
+}
+
+/// `text` as the body of an LLVM metadata string, with quotes and
+/// backslashes escaped.
+fn escape_metadata_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '"' | '\\' => {
+                let _ = write!(out, "\\{:02X}", u32::from(ch));
             }
+            _ => out.push(ch),
         }
     }
+    out
+}
+
+/// Byte offset of the `;` that starts a trailing comment on an IR line, or
+/// the line's length when it has none. A `;` inside a quoted symbol or
+/// string is not a comment.
+fn ir_comment_start(line: &str) -> usize {
+    let mut in_string = false;
+    for (index, byte) in line.bytes().enumerate() {
+        match byte {
+            b'"' => in_string = !in_string,
+            b';' if !in_string => return index,
+            _ => {}
+        }
+    }
+    line.len()
+}
+
+/// Emits DWARF debug-info metadata for every body in `bodies` and gives each
+/// of their instructions a source location.
+///
+/// Each body gets a `DISubprogram` in the file and at the line it was written
+/// in, attached to its `define`; every instruction in it carries a
+/// `DILocation` taken from the nearest [`DEBUG_LOCATION_MARKER`] above it, or
+/// the function's own position before the first. LLVM drops a module's debug
+/// info when an inlinable call in a function that has some lacks a location,
+/// so a function either has locations on all of its instructions or no
+/// subprogram at all.
+fn emit_dwarf_metadata(out: &mut String, bodies: &[Body]) {
+    let directory = if want_reproducible() {
+        ".".to_string()
+    } else {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.to_str().map(str::to_string))
+            .unwrap_or_else(|| ".".to_string())
+    };
+    let first_free = 100u32.saturating_add(u32::try_from(bodies.len()).unwrap_or(u32::MAX));
+    let mut meta = DebugMetadata {
+        directory,
+        lines: Vec::new(),
+        files: HashMap::new(),
+        locations: HashMap::new(),
+        next_id: first_free,
+    };
+    let mut subprograms: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    let mut unit_file = None;
+    for (idx, body) in bodies.iter().enumerate() {
+        let id = 100u32 + u32::try_from(idx).unwrap_or(u32::MAX);
+        let (file, line, column) =
+            source_position(body.span.start).unwrap_or_else(|| ("main.gos".to_string(), 1, 1));
+        let file_id = meta.file(&file);
+        if body.name == "main" || unit_file.is_none() {
+            unit_file = Some(file_id);
+        }
+        let llvm_name = crate::lower::mangle_fn_name(&body.name).into_owned();
+        meta.lines.push(format!(
+            "!{id} = distinct !DISubprogram(name: \"{name}\", linkageName: \"{lname}\", \
+             scope: !{file_id}, file: !{file_id}, line: {line}, type: !52, scopeLine: {line}, \
+             spFlags: DISPFlagDefinition, unit: !51)",
+            name = escape_metadata_string(&body.name),
+            lname = escape_metadata_string(&llvm_name),
+        ));
+        subprograms.insert(llvm_name, (id, line, column));
+    }
+    let unit_file = unit_file.unwrap_or_else(|| meta.file("main.gos"));
+
+    let mut rewritten = String::with_capacity(out.len() + out.len() / 3);
+    // The subprogram of the function being walked and the position its next
+    // instruction is at.
+    let mut current: Option<(u32, u32, u32)> = None;
+    let mut in_switch = false;
+    for line in out.lines() {
+        if line.starts_with("define ") {
+            current = first_llvm_symbol(line)
+                .and_then(|symbol| subprograms.get(&symbol).copied())
+                .filter(|_| line.ends_with(" {"));
+            if let (Some((scope, _, _)), Some(head)) = (current, line.strip_suffix(" {")) {
+                let _ = writeln!(rewritten, "{head} !dbg !{scope} {{");
+            } else {
+                rewritten.push_str(line);
+                rewritten.push('\n');
+            }
+            continue;
+        }
+        let Some((scope, at_line, at_column)) = current.as_mut() else {
+            rewritten.push_str(line);
+            rewritten.push('\n');
+            continue;
+        };
+        let trimmed = line.trim_start();
+        if line == "}" {
+            current = None;
+            in_switch = false;
+        } else if let Some(position) = trimmed.strip_prefix(DEBUG_LOCATION_MARKER) {
+            let mut parts = position.split_whitespace().map(str::parse::<u32>);
+            if let (Some(Ok(l)), Some(Ok(c))) = (parts.next(), parts.next()) {
+                *at_line = l;
+                *at_column = c;
+            }
+            continue;
+        } else if in_switch {
+            // A `switch`'s case list spans lines; its location follows the
+            // closing bracket.
+            if trimmed == "]" {
+                in_switch = false;
+                let id = meta.location(*at_line, *at_column, *scope);
+                let _ = writeln!(rewritten, "{line}, !dbg !{id}");
+                continue;
+            }
+        } else if line.starts_with("  ") && !trimmed.is_empty() && !trimmed.starts_with(';') {
+            let end = ir_comment_start(line);
+            let code = line[..end].trim_end();
+            if code.ends_with('[') {
+                in_switch = true;
+            } else {
+                let id = meta.location(*at_line, *at_column, *scope);
+                let _ = writeln!(rewritten, "{code}, !dbg !{id}{}", &line[end..]);
+                continue;
+            }
+        }
+        rewritten.push_str(line);
+        rewritten.push('\n');
+    }
+    *out = rewritten;
+
     writeln!(out).unwrap();
     writeln!(out, "!llvm.module.flags = !{{!40, !41}}").unwrap();
     writeln!(out, "!llvm.dbg.cu = !{{!51}}").unwrap();
@@ -2063,19 +2229,15 @@ fn emit_dwarf_metadata(out: &mut String, bodies: &[Body]) {
     writeln!(out, "!41 = !{{i32 2, !\"Debug Info Version\", i32 3}}").unwrap();
     writeln!(
         out,
-        "!50 = !DIFile(filename: \"main.gos\", directory: \"{dir}\")",
-        dir = cwd.replace('"', "\\\""),
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "!51 = distinct !DICompileUnit(language: DW_LANG_C99, file: !50, \
-         producer: \"gossamer 0.0.0\", isOptimized: true, runtimeVersion: 0, \
-         emissionKind: FullDebug)"
+        "!51 = distinct !DICompileUnit(language: DW_LANG_C99, file: !{unit_file}, \
+         producer: \"gossamer {version}\", isOptimized: {optimized}, runtimeVersion: 0, \
+         emissionKind: FullDebug)",
+        version = env!("CARGO_PKG_VERSION"),
+        optimized = matches!(opt_profile(), OptProfile::Release),
     )
     .unwrap();
     writeln!(out, "!52 = !DISubroutineType(types: !{{}})").unwrap();
-    for line in subprogram_lines {
+    for line in meta.lines {
         writeln!(out, "{line}").unwrap();
     }
 }

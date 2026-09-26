@@ -159,7 +159,7 @@ pub fn log10(x: f64) -> f64 {
 
 /// Logarithm of `x` with the given `base`; computed as `ln(x) / ln(base)`.
 #[must_use]
-pub fn log(base: f64, x: f64) -> f64 {
+pub fn log(x: f64, base: f64) -> f64 {
     x.ln() / base.ln()
 }
 
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn log_custom_base() {
-        assert!((log(2.0, 8.0) - 3.0).abs() < 1e-12);
+        assert!((log(8.0, 2.0) - 3.0).abs() < 1e-12);
     }
 
     #[test]

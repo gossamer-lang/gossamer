@@ -27,8 +27,8 @@
 
 use std::io;
 use std::panic::AssertUnwindSafe;
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::time::Duration;
 
@@ -613,6 +613,124 @@ pub fn report_deadlock_if_stuck(op: &str) {
     {
         report_fatal_deadlock(op);
     }
+    // `main` about to wait on a channel while goroutines live: record the
+    // wait, so the goroutine whose park leaves nothing runnable reports it,
+    // and check now in case every goroutine already waits.
+    if is_main_thread() {
+        begin_main_wait(op, None);
+        check_program_blocked();
+    }
+}
+
+/// Advances every time the set of runnable goroutines may have changed: a
+/// spawn, a wake, a finish, or `main` entering or leaving a wait. A
+/// deadlock check that reads the same value before and after its counts
+/// read one state.
+static SCHEDULER_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Records that the runnable set may have changed.
+pub fn note_scheduler_progress() {
+    SCHEDULER_EPOCH.fetch_add(1, Ordering::AcqRel);
+}
+
+/// The OS thread a compiled program's `main` runs on.
+static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
+fn is_main_thread() -> bool {
+    MAIN_THREAD
+        .get()
+        .is_some_and(|id| *id == std::thread::current().id())
+}
+
+/// What `main` is waiting on while it waits on the program's goroutines.
+struct MainWait {
+    /// The operation named in a deadlock report.
+    op: String,
+    /// Whether the wait still has something left to wait for. A channel wait
+    /// has none of its own: the channel counts say whether it can complete.
+    still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+}
+
+static MAIN_WAIT: Mutex<Option<MainWait>> = Mutex::new(None);
+
+fn begin_main_wait(op: &str, still_waiting: Option<Arc<dyn Fn() -> bool + Send + Sync>>) {
+    *MAIN_WAIT.lock() = Some(MainWait {
+        op: op.to_string(),
+        still_waiting,
+    });
+    note_scheduler_progress();
+}
+
+/// Records that `main` is about to wait for `op`, which completes only when
+/// `still_waiting` answers `false`, and reports a deadlock if nothing left
+/// in the program can bring that about. Call from `main`'s thread holding
+/// none of the locks `still_waiting` takes, and pair with
+/// [`end_main_wait`].
+pub fn main_waits_on(op: &str, still_waiting: Arc<dyn Fn() -> bool + Send + Sync>) {
+    if !is_main_thread() {
+        return;
+    }
+    begin_main_wait(op, Some(still_waiting));
+    check_program_blocked();
+}
+
+/// Records that `main` is no longer waiting.
+pub fn end_main_wait() {
+    if is_main_thread() {
+        *MAIN_WAIT.lock() = None;
+        note_scheduler_progress();
+    }
+}
+
+/// Stops the program with the deadlock report when `main` waits on the
+/// program and nothing left can wake it: every live goroutine is parked on a
+/// channel or a synchronisation object with no wake on its way, no channel
+/// holds a handoff, no timer, I/O registration, or outside thread can act,
+/// and `main`'s own wait still has something to wait for.
+///
+/// Called where that state can first arise - a goroutine parking, a
+/// goroutine finishing, `main` beginning a wait - so a deadlock is reported
+/// by whichever event completes it.
+pub fn check_program_blocked() {
+    if !PROGRAM_ENTERED.load(Ordering::Acquire) {
+        return;
+    }
+    let epoch = SCHEDULER_EPOCH.load(Ordering::Acquire);
+    let (op, still_waiting) = {
+        let wait = MAIN_WAIT.lock();
+        let Some(wait) = wait.as_ref() else {
+            return;
+        };
+        (wait.op.clone(), wait.still_waiting.clone())
+    };
+    if PENDING_HANDOFFS.load(Ordering::Acquire) > 0 || EXTERNAL_ACTORS.load(Ordering::Acquire) > 0 {
+        return;
+    }
+    let Some(globals) = GLOBALS.get() else {
+        return;
+    };
+    if !globals.wakers.lock().is_empty() {
+        return;
+    }
+    let Some(on_channels) = globals.scheduler.blocked_on_program() else {
+        return;
+    };
+    // Every other channel waiter has to be one of the parked goroutines: a
+    // thread outside the goroutine set inside a channel wait is an actor
+    // this count cannot see.
+    let main_on_channel = usize::from(still_waiting.is_none());
+    if CHANNEL_WAITERS.load(Ordering::Acquire) != on_channels + main_on_channel {
+        return;
+    }
+    if let Some(still_waiting) = still_waiting
+        && !still_waiting()
+    {
+        return;
+    }
+    if SCHEDULER_EPOCH.load(Ordering::Acquire) != epoch {
+        return;
+    }
+    report_fatal_deadlock(&op);
 }
 
 /// Threads and goroutines currently suspended inside a channel wait.
@@ -669,6 +787,7 @@ static PROGRAM_ENTERED: AtomicBool = AtomicBool::new(false);
 /// Marks the process as a running Gossamer program. Called from the entry
 /// shim a compiled binary emits, and from nowhere else.
 pub fn mark_program_entered() {
+    let _ = MAIN_THREAD.set(std::thread::current().id());
     PROGRAM_ENTERED.store(true, Ordering::Release);
 }
 
@@ -678,19 +797,19 @@ pub fn adjust_channel_waiters(entering: bool) {
         CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel);
     } else {
         CHANNEL_WAITERS.fetch_sub(1, Ordering::AcqRel);
+        end_main_wait();
     }
 }
 
+/// Ends the program with the deadlock report, the fault a panic raises; the
+/// call stack is `main`'s when `main`'s thread is the one that noticed.
 fn report_fatal_deadlock(op: &str) -> ! {
-    use std::io::Write as _;
-    let mut err = std::io::stderr();
-    let _ = writeln!(
-        err,
-        "error: runtime error: error[GX0005]: panic: all goroutines are \
-         asleep - deadlock! ({op} can never complete)"
-    );
-    let _ = err.flush();
-    std::process::exit(101);
+    crate::c_abi::panic::fatal_program_fault(
+        "GX0005",
+        "panic: ",
+        &format!("all goroutines are asleep - deadlock! ({op} can never complete)"),
+        is_main_thread(),
+    )
 }
 
 pub use crate::sched::multi::{SYSCALL_HANDOFF_THRESHOLD, SyscallGuard, syscall_enter};

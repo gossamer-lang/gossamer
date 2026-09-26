@@ -2286,6 +2286,15 @@ pub(crate) fn push_quoted_str(out: &mut String, text: &str) {
     let _ = write!(out, "{text:?}");
 }
 
+/// Appends the `char` whose code point is `word` in the spelling that builds
+/// it - between single quotes, escaped as Rust's `Debug` escapes it.
+pub(crate) fn push_quoted_char(out: &mut String, word: i64) {
+    use std::fmt::Write as _;
+    if let Some(c) = u32::try_from(word).ok().and_then(char::from_u32) {
+        let _ = write!(out, "{c:?}");
+    }
+}
+
 /// Renders one value word per the tuple tag encoding. Container tags read
 /// the word as a handle; a tag with no handle shape renders as an integer.
 pub(crate) unsafe fn render_tagged_word(out: &mut String, word: i64, tag: u8) {
@@ -2294,12 +2303,12 @@ pub(crate) unsafe fn render_tagged_word(out: &mut String, word: i64, tag: u8) {
         2 => out.push_str(&crate::builtins::format_float_debug(f64::from_bits(
             word as u64,
         ))),
+        gossamer_abi::TUPLE_TAG_F32 => out.push_str(&crate::builtins::format_f32_debug(
+            f64::from_bits(word as u64),
+        )),
+        gossamer_abi::TUPLE_TAG_UNIT => out.push_str("()"),
         3 => out.push_str(crate::builtins::format_bool(word & 1 != 0)),
-        4 => {
-            if let Some(c) = char::from_u32(word as u32) {
-                out.push(c);
-            }
-        }
+        4 => push_quoted_char(out, word),
         5 => {
             let sp: *const c_char = std::ptr::with_exposed_provenance(word as usize);
             if !sp.is_null() {
@@ -2835,11 +2844,7 @@ pub(crate) unsafe fn render_tuple_elements(
                 word as u64,
             ))),
             3 => out.push_str(crate::builtins::format_bool(word & 1 != 0)),
-            4 => {
-                if let Some(c) = char::from_u32(word as u32) {
-                    out.push(c);
-                }
-            }
+            4 => push_quoted_char(out, word),
             5 => {
                 let sp: *const c_char = std::ptr::with_exposed_provenance(word as usize);
                 if !sp.is_null() {
@@ -3048,7 +3053,10 @@ unsafe fn compare_tuple_elements(
                 let (fa, fb) = (f64::from_bits(wa as u64), f64::from_bits(wb as u64));
                 match mode {
                     crate::c_abi::desc_cmp::CmpMode::Equal if fa != fb => Ordering::Greater,
-                    _ => fa.partial_cmp(&fb).unwrap_or(Ordering::Equal),
+                    crate::c_abi::desc_cmp::CmpMode::Equal => Ordering::Equal,
+                    crate::c_abi::desc_cmp::CmpMode::Order => {
+                        crate::c_abi::sort::float_order(fa, fb)
+                    }
                 }
             }
             3 => (wa & 1).cmp(&(wb & 1)),
@@ -4472,6 +4480,7 @@ pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
         if s.is_null() {
             return;
         }
+        crate::c_abi::ledger::set_dec();
         drop(unsafe { Box::from_raw(s) });
     });
 }

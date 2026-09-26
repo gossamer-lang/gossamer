@@ -495,13 +495,22 @@ pub(crate) fn current_isolation() -> i64 {
     ISOLATION_SHARED
 }
 
-fn wait_for_drain(node: &Arc<CohortNode>) {
+/// Waits for `node`'s children. Answers `false` when the wait can never end:
+/// every participant is waiting, the children included.
+fn wait_for_drain(node: &Arc<CohortNode>) -> bool {
+    if node.state.lock().outstanding == 0 {
+        return true;
+    }
+    let Some(_joining) = crate::vm::goroutine::JoinWait::enter() else {
+        return false;
+    };
     let mut state = node.state.lock();
     // A child settles at its spawn on the browser build, so the count is
     // already final and a wait would be for a goroutine that has finished.
     while gossamer_runtime::platform::CAN_BLOCK && state.outstanding > 0 {
         node.progress.wait(&mut state);
     }
+    true
 }
 
 /// How long the root drain waits at exit before it reports what is still
@@ -513,11 +522,11 @@ pub(crate) const ROOT_DRAIN_DEADLINE: std::time::Duration = std::time::Duration:
 /// Waits for `node`'s children, bounded by its own `drain:` setting when it
 /// named one. A cohort with no bound waits as long as its children take:
 /// leaving the block is the program's statement that they are finished.
-fn drain_within_bound(node: &Arc<CohortNode>) {
+/// Answers `false` when the children can never finish.
+fn drain_within_bound(node: &Arc<CohortNode>) -> bool {
     let bound = node.drain_ms;
     if bound <= 0 {
-        wait_for_drain(node);
-        return;
+        return wait_for_drain(node);
     }
     let outstanding = wait_for_drain_bounded(node, std::time::Duration::from_millis(bound as u64));
     if outstanding > 0 {
@@ -528,6 +537,7 @@ fn drain_within_bound(node: &Arc<CohortNode>) {
             unfinished_children(node)
         );
     }
+    true
 }
 
 fn wait_for_drain_bounded(node: &Arc<CohortNode>, deadline: std::time::Duration) -> i64 {
@@ -615,7 +625,8 @@ fn pop_current() {
     let already_joined = node.state.lock().joined;
     if !already_joined {
         cancel(id);
-        drain_within_bound(&node);
+        // Cancelled children leave their waits, so this drain ends.
+        let _ = drain_within_bound(&node);
     }
     set_current(node.parent);
     if node.cancelled.load(Ordering::Acquire) {
@@ -756,7 +767,9 @@ fn builtin_cohort_join(_args: &[Value]) -> RuntimeResult<Value> {
     let Some(node) = node_of(id) else {
         return Ok(Value::variant("Ok", vec![Value::Unit]));
     };
-    drain_within_bound(&node);
+    if !drain_within_bound(&node) {
+        return Err(crate::value::deadlock_error("cohort join"));
+    }
     Ok(match outcome_message(&node) {
         None => Value::variant("Ok", vec![Value::Unit]),
         Some(message) => Value::variant("Err", vec![crate::builtins::make_error_value(&message)]),

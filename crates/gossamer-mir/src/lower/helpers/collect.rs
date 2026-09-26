@@ -68,20 +68,68 @@ pub(crate) fn collect_const_values(
 /// as a literal at every use) instead of misreading the item as a function
 /// reference. A `static mut` item is excluded: its reads must observe the
 /// live shared cell (`mut_statics`), not a fresh copy of the declaration.
+///
+/// A `const` declared inside a function body is an item like any other, so
+/// the walk reaches every body, including those of nested items.
 pub(crate) fn collect_const_init_exprs(
     program: &HirProgram,
 ) -> HashMap<gossamer_resolve::DefId, HirExpr> {
     let mut out = HashMap::new();
     for item in &program.items {
-        let Some(def) = item.def else { continue };
-        let init = match &item.kind {
-            HirItemKind::Const(decl) => &decl.value,
-            HirItemKind::Static(decl) if !decl.mutable => &decl.value,
-            _ => continue,
-        };
-        out.insert(def, init.clone());
+        collect_item_init_exprs(item, &mut out);
     }
     out
+}
+
+fn collect_item_init_exprs(item: &HirItem, out: &mut HashMap<gossamer_resolve::DefId, HirExpr>) {
+    let init = match &item.kind {
+        HirItemKind::Const(decl) => Some(&decl.value),
+        HirItemKind::Static(decl) if !decl.mutable => Some(&decl.value),
+        _ => None,
+    };
+    if let (Some(def), Some(init)) = (item.def, init) {
+        out.insert(def, init.clone());
+    }
+    let bodies: Vec<&HirBlock> = match &item.kind {
+        HirItemKind::Fn(decl) => decl.body.iter().map(|body| &body.block).collect(),
+        HirItemKind::Impl(decl) => decl
+            .methods
+            .iter()
+            .filter_map(|method| method.body.as_ref().map(|body| &body.block))
+            .collect(),
+        HirItemKind::Trait(decl) => decl
+            .methods
+            .iter()
+            .filter_map(|method| method.body.as_ref().map(|body| &body.block))
+            .collect(),
+        HirItemKind::Const(_) | HirItemKind::Static(_) | HirItemKind::Adt(_) => Vec::new(),
+    };
+    for block in bodies {
+        collect_block_init_exprs(block, out);
+    }
+}
+
+fn collect_block_init_exprs(block: &HirBlock, out: &mut HashMap<gossamer_resolve::DefId, HirExpr>) {
+    for stmt in &block.stmts {
+        match &stmt.kind {
+            HirStmtKind::Item(item) => collect_item_init_exprs(item, out),
+            HirStmtKind::Let { init: Some(e), .. }
+            | HirStmtKind::Expr { expr: e, .. }
+            | HirStmtKind::Defer(e) => collect_expr_init_exprs(e, out),
+            HirStmtKind::Let { init: None, .. } => {}
+        }
+    }
+    if let Some(tail) = &block.tail {
+        collect_expr_init_exprs(tail, out);
+    }
+}
+
+fn collect_expr_init_exprs(expr: &HirExpr, out: &mut HashMap<gossamer_resolve::DefId, HirExpr>) {
+    if let HirExprKind::Block(block) = &expr.kind {
+        collect_block_init_exprs(block, out);
+        return;
+    }
+    gossamer_hir::for_each_child_expr(expr, &mut |child| collect_expr_init_exprs(child, out));
 }
 
 fn collect_item_const_values(
@@ -1441,7 +1489,14 @@ pub(crate) fn lower_fn(
             // short-name `Request` both light up.
             let rendered = gossamer_types::printer::render_ty(builder.tcx, param.ty);
             let last_segment = rendered.rsplit("::").next().unwrap_or(&rendered);
+            // A parameter of a type the program declares is never a runtime
+            // handle, whatever the type is called.
+            let program_type = matches!(
+                builder.tcx.kind_of(param.ty),
+                gossamer_types::TyKind::Adt { def, .. } if def.local < u32::MAX - 64
+            );
             let runtime_kind_from_type: Option<&'static str> = match last_segment {
+                _ if program_type => None,
                 "Request" => Some("http::Request"),
                 "Response" => Some("http::Response"),
                 "Scanner" => Some("bufio::Scanner"),

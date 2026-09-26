@@ -1,0 +1,21 @@
+// Every NaN orders as one value above every number, whichever way it was
+// made: a run-time `0.0 / 0.0` and a folded one sort, `min` / `max`, and
+// compare structurally in the same place on every tier. A plain `<` against a
+// NaN stays false.
+
+struct P { x: f64 }
+
+fn main() {
+    let zero = "0".to_f64().unwrap_or(1.0)
+    let runtime_nan = zero / zero
+    let folded_nan = 0.0 / 0.0
+    let mut v = #[3.0, runtime_nan, 1.0, folded_nan, -2.0, -0.0, 0.0]
+    v.sort()
+    println("{:?}", v)
+    println("{:?} {:?}", min(v), max(v))
+    println("{} {} {}", runtime_nan < 1.0, 1.0 < runtime_nan, runtime_nan == runtime_nan)
+    let mut ps = #[P { x: runtime_nan }, P { x: 2.0 }, P { x: folded_nan }, P { x: -1.0 }]
+    ps.sort()
+    println("{:?}", ps)
+    println("{} {}", (1.0, runtime_nan) < (1.0, 3.0), (1.0, 3.0) < (1.0, folded_nan))
+}

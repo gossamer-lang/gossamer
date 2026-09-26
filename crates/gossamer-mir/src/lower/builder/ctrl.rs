@@ -1621,12 +1621,14 @@ impl<'a> Builder<'a> {
                                     )))),
                                     span,
                                 );
-                                // A multi-slot aggregate field (e.g. the
-                                // `Point` of `Shape::Dot(Point { x, y })`) is a
-                                // boxed pointer: type the field local as the
-                                // aggregate so `gos_enum_load` materialises it
-                                // by value, then the nested struct / tuple
-                                // pattern reads real field slots.
+                                // An aggregate field - boxed when it spans
+                                // several slots (the `Point` of
+                                // `Shape::Dot(Point { x, y })`), or stored in
+                                // the payload word when it fits one - is read
+                                // into a local of the aggregate's type, which
+                                // `gos_enum_load` materialises by value, so the
+                                // nested struct / tuple pattern reads real
+                                // field slots.
                                 let nested_ty = payload_tys
                                     .as_ref()
                                     .and_then(|tys| tys.get(i).copied())
@@ -1637,7 +1639,24 @@ impl<'a> Builder<'a> {
                                                 | gossamer_types::TyKind::Error
                                         )
                                     })
-                                    .filter(|&t| self.is_boxable_aggregate_payload(t));
+                                    .filter(|&t| self.is_aggregate_payload(t));
+                                // A scalar payload is read at its own type, so
+                                // an `@` binding or a literal sub-pattern sees
+                                // a `char` / `bool` / float, not the word it is
+                                // carried in. It owns nothing, so the view is
+                                // never mistaken for an owner.
+                                let scalar_ty = payload_tys
+                                    .as_ref()
+                                    .and_then(|tys| tys.get(i).copied())
+                                    .filter(|&t| {
+                                        matches!(
+                                            self.tcx.kind_of(t),
+                                            gossamer_types::TyKind::Int(_)
+                                                | gossamer_types::TyKind::Float(_)
+                                                | gossamer_types::TyKind::Bool
+                                                | gossamer_types::TyKind::Char
+                                        )
+                                    });
                                 let field_local = match nested_ty {
                                     Some(t) => {
                                         let fl = self.fresh(t);
@@ -1646,7 +1665,7 @@ impl<'a> Builder<'a> {
                                         }
                                         fl
                                     }
-                                    None => self.fresh(i64_ty),
+                                    None => self.fresh(scalar_ty.unwrap_or(i64_ty)),
                                 };
                                 // Reading a payload word is side-effect-free
                                 // whatever variant the value turned out to be,

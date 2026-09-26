@@ -26,8 +26,10 @@ pub enum DispatchOutcome {
     Failed(gossamer_driver::binding_runner::BindingRunnerError),
 }
 
-/// Subcommands that load user code and therefore want a runner.
-const RUNNER_SUBCOMMANDS: &[&str] = &["build", "check", "doc", "repl", "run", "test"];
+/// Subcommands that load user code and therefore want a runner. The REPL
+/// is not one: `[rust-bindings]` are supported by `gos run` and aimed at
+/// `gos build`, and the REPL says so rather than building a runner.
+const RUNNER_SUBCOMMANDS: &[&str] = &["build", "check", "doc", "run", "test"];
 
 /// Returns whether the parsed argv warrants a runner dispatch.
 ///

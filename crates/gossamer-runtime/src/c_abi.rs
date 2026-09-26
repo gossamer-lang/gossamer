@@ -187,6 +187,7 @@ impl<T> From<*const T> for SyncRawPtr<T> {
 pub mod archive;
 pub mod args;
 pub mod atomic;
+pub mod binding_callback;
 pub mod binding_wire;
 pub mod btmap;
 pub mod bufio;

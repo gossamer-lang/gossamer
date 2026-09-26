@@ -583,6 +583,13 @@ pub struct VecSlotChild {
     pub kind: u8,
 }
 
+/// Whether each element of `v` is one table handle - a `Set` or a deque - so
+/// an element read answers the handle word, as a `Map` element's does.
+pub(crate) fn vec_elem_is_handle(v: &GosVec) -> bool {
+    matches!(vec_slot_children(v), Some([child])
+        if child.gate == gossamer_abi::rc::SLOT_GATE_WHOLE_ELEMENT)
+}
+
 /// Slot-children layout of an `AGGR_OWNED` vec, or `None` for any
 /// other vec.
 pub fn vec_slot_children(v: &GosVec) -> Option<&[VecSlotChild]> {
@@ -1399,7 +1406,7 @@ pub(crate) unsafe fn vec_elem_shared_payload_word(v: &GosVec, idx: i64) -> i64 {
 /// children, or nothing for an element of scalars.
 unsafe fn vec_elem_payload_blob(v: &GosVec, idx: i64, shared: bool) -> i64 {
     let stride = v.elem_bytes as usize;
-    if stride == 0 || v.ptr.is_null() || !vec_elem_is_inline_aggregate(v) {
+    if stride == 0 || v.ptr.is_null() || !vec_elem_is_inline_aggregate(v) || vec_elem_is_handle(v) {
         return unsafe { vec_elem_load_i64(v, idx) };
     }
     let guarded = vec_elem_meta(std::ptr::from_ref(v));
@@ -2823,15 +2830,23 @@ fn debug_payload_string_with(payload: i64, kind: i64, fmt: *const std::ffi::c_vo
     debug_payload_string(payload, kind)
 }
 
-/// Renders a single enum payload word for `{:?}` Debug output, matching the
-/// VM's Display-style rendering (no string quoting). `kind`: 0=i64, 1=u64,
-/// 2=f64 (bit pattern), 3=bool, 4=char, 5=String pointer.
+/// Renders a single enum payload word for `{:?}` Debug output, as the VM
+/// renders a nested value: a `char` and a `String` in the spelling that builds
+/// them. `kind`: 0=i64, 1=u64, 2=f64 (bit pattern), 3=bool, 4=char,
+/// 5=String pointer.
 fn debug_payload_string(payload: i64, kind: i64) -> String {
     match kind {
         1 => (payload as u64).to_string(),
         2 => crate::builtins::format_float_debug(f64::from_bits(payload as u64)),
+        k if k == i64::from(gossamer_abi::TUPLE_TAG_F32) => {
+            crate::builtins::format_f32_debug(f64::from_bits(payload as u64))
+        }
         3 => if payload != 0 { "true" } else { "false" }.to_string(),
-        4 => char::from_u32(payload as u32).map_or_else(String::new, |c| c.to_string()),
+        4 => {
+            let mut out = String::new();
+            crate::c_abi::map::push_quoted_char(&mut out, payload);
+            out
+        }
         5 => {
             if payload == 0 {
                 String::new()
@@ -3244,6 +3259,21 @@ pub extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
         },
         // SAFETY: as above, for an error cell.
         4 => unsafe { crate::c_abi::rc::gos_rt_rc_release(payload as usize as *mut u8) },
+        // SAFETY: as above, for a table the carrier owns outright: a `Map`
+        // (5), a `Set` (6), or a `Deque` / `Queue` / `Stack` (7). Tables are
+        // not counted, so only a carrier that is the table's sole owner is
+        // ever released with these kinds.
+        5 => unsafe {
+            crate::c_abi::map::gos_rt_map_free(payload as usize as *mut crate::c_abi::map::GosMap);
+        },
+        6 => unsafe {
+            crate::c_abi::map::gos_rt_set_free(payload as usize as *mut crate::c_abi::set::GosSet);
+        },
+        7 => unsafe {
+            crate::c_abi::deque::gos_rt_deque_free(
+                payload as usize as *mut crate::c_abi::deque::GosDeque,
+            );
+        },
         _ => {}
     }
 }

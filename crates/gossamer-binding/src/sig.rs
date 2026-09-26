@@ -82,6 +82,11 @@ impl SigType for crate::conv::Bytes {
     const TYPE: Type = Type::Bytes;
 }
 
+impl SigType for crate::conv::BindingCallback {
+    /// A callable, valid for the binding call that received it.
+    const TYPE: Type = Type::Callback(&[], &Type::Any);
+}
+
 impl SigType for crate::conv::PersistentCallback {
     /// Persistent callbacks ride on the same `Callback` shape as
     /// `BindingCallback`. The lifetime distinction is enforced

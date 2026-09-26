@@ -1275,6 +1275,17 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// `Result<u64, errors::Error>`, the answer of an unsigned parse.
+    pub(crate) fn result_u64_error_adt_ty(&mut self) -> Ty {
+        let u = self.tcx.int_ty(gossamer_types::IntTy::U64);
+        let e = self.tcx.dyn_error_ty();
+        let substs = gossamer_types::Substs::from_types([u, e]);
+        self.tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX),
+            substs,
+        })
+    }
+
     pub(crate) fn result_f64_error_adt_ty(&mut self) -> Ty {
         let f = self.tcx.float_ty(gossamer_types::FloatTy::F64);
         let e = self.tcx.dyn_error_ty();
@@ -1391,6 +1402,11 @@ impl<'a> Builder<'a> {
             && let Some(kind) = self.tcx.def_name(*def).and_then(sentinel_runtime_kind)
         {
             return Some(kind);
+        }
+        // A type the program declares is never a runtime handle, whatever it
+        // is called: its methods are its own.
+        if matches!(self.tcx.kind_of(cur), TyKind::Adt { def, .. } if def.local < u32::MAX - 64) {
+            return None;
         }
         let rendered = gossamer_types::printer::render_ty(self.tcx, cur);
         let bare = rendered.rsplit("::").next().unwrap_or(&rendered);

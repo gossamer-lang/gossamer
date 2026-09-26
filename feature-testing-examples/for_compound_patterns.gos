@@ -1,0 +1,27 @@
+// A `for` pattern may destructure a struct, a tuple struct, or nested tuples,
+// over a vector, a map, or an iterator chain: each element is bound whole and
+// destructured the way an irrefutable `let` is.
+
+struct P { x: i64, y: i64 }
+struct W(i64, String)
+
+fn main() {
+    let v = #[P { x: 1, y: 2 }, P { x: 3, y: 4 }]
+    let mut sum = 0
+    for P { x, y } in v { sum += x * 10 + y }
+    assert_eq(sum, 46)
+    let w = #[((1, 2), 3), ((4, 5), 6)]
+    for ((a, b), c) in w { println("{} {} {}", a, b, c) }
+    let m = { "k": (1, "v"), "j": (2, "u") }
+    let mut rows = #[]
+    for (k, (n, s)) in m { rows.push(format("{} {} {}", k, n, s)) }
+    rows.sort()
+    assert_eq(rows, #["j 2 u", "k 1 v"])
+    println("{:?}", rows)
+    for W(n, s) in #[W(7, "seven")] { println("{} {}", n, s) }
+    for (i, P { x, .. }) in v.iter().enumerate() { println("{} {}", i, x) }
+    let mut firsts = 0
+    for (a, _) in #[(1, "x"), (2, "y")] { firsts += a }
+    assert_eq(firsts, 3)
+    println("{} {}", sum, firsts)
+}

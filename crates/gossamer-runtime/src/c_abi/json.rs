@@ -79,17 +79,20 @@ fn parse_checked_json(text: &str) -> Result<serde_json::Value, serde_json::Error
     Ok(value)
 }
 
-/// Rewrites every integer above the `i64` range as the `f64` nearest it.
+/// Rewrites every integer outside the `i64` and `u64` ranges as the `f64`
+/// nearest it.
 ///
-/// An integer a program cannot name is one it cannot read back: `as_i64`
-/// answers `None` for it and `as_f64` answers the approximation, so holding
-/// the exact value would let a document render digits no accessor agrees
-/// with. The bytecode VM's parser resolves these to `f64` for the same
-/// reason, and this keeps every tier's rendering and accessors identical.
+/// An integer a program cannot name is one it cannot read back: neither
+/// `as_i64` nor `as_u64` answers it and `as_f64` answers the approximation,
+/// so holding the exact value would let a document render digits no accessor
+/// agrees with. The bytecode VM's parser resolves these to `f64` for the same
+/// reason, and keeps a value `as_u64` reads, as this does, so every tier's
+/// rendering and accessors are identical.
 fn narrow_numbers_to_language_range(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Number(n) => {
             if n.as_i64().is_none()
+                && n.as_u64().is_none()
                 && let Some(as_float) = n.as_f64()
                 && let Some(narrowed) = serde_json::Number::from_f64(as_float)
             {
@@ -112,11 +115,69 @@ fn narrow_numbers_to_language_range(value: &mut serde_json::Value) {
 
 /// Fully validates a document without constructing a DOM. Parsed documents
 /// stay in this compact form until an API actually projects a child or value.
+/// Every string is decoded, so an escape naming no character - a lone
+/// surrogate - is rejected here as the bytecode VM's parser rejects it.
 fn validate_checked_json(text: &str) -> Result<(), serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     deserializer.disable_recursion_limit();
-    serde::de::IgnoredAny::deserialize(&mut deserializer)?;
+    ValidatedJson::deserialize(&mut deserializer)?;
     deserializer.end()
+}
+
+/// A JSON value walked for validity only: strings are decoded and dropped,
+/// every other value is skipped.
+struct ValidatedJson;
+
+impl<'de> serde::Deserialize<'de> for ValidatedJson {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(ValidatedJson)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for ValidatedJson {
+    type Value = ValidatedJson;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_bool<E>(self, _: bool) -> Result<Self, E> {
+        Ok(self)
+    }
+    fn visit_i64<E>(self, _: i64) -> Result<Self, E> {
+        Ok(self)
+    }
+    fn visit_u64<E>(self, _: u64) -> Result<Self, E> {
+        Ok(self)
+    }
+    fn visit_f64<E>(self, _: f64) -> Result<Self, E> {
+        Ok(self)
+    }
+    fn visit_str<E>(self, _: &str) -> Result<Self, E> {
+        Ok(self)
+    }
+    fn visit_unit<E>(self) -> Result<Self, E> {
+        Ok(self)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self, A::Error> {
+        while seq.next_element::<ValidatedJson>()?.is_some() {}
+        Ok(self)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self, A::Error> {
+        while map.next_entry::<ValidatedKey, ValidatedJson>()?.is_some() {}
+        Ok(self)
+    }
+}
+
+/// An object key, decoded and dropped.
+struct ValidatedKey;
+
+impl<'de> serde::Deserialize<'de> for ValidatedKey {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer
+            .deserialize_str(ValidatedJson)
+            .map(|_| ValidatedKey)
+    }
 }
 
 // ---------------------------------------------------------------
@@ -172,13 +233,6 @@ impl JsonTree {
             Self::Value(value) => value,
             Self::Raw { text, parsed } => parsed
                 .get_or_init(|| parse_checked_json(text).expect("validated JSON must reparse")),
-        }
-    }
-
-    fn raw_text(&self) -> Option<&str> {
-        match self {
-            Self::Raw { text, parsed } if parsed.get().is_none() => Some(text),
-            _ => None,
         }
     }
 }
@@ -752,55 +806,10 @@ fn render_json_direct(value: &serde_json::Value, pretty: bool) -> *mut c_char {
     writer.finish()
 }
 
-fn render_json_raw(text: &str) -> *mut c_char {
-    use std::io::Write as _;
-
-    let mut writer = RuntimeJsonWriter::new(text.len().max(64 * 1024));
-    let bytes = text.as_bytes();
-    let mut in_string = false;
-    let mut escaped = false;
-    let mut start = 0usize;
-    let mut offset = 0usize;
-    while offset < bytes.len() {
-        let byte = bytes[offset];
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if byte == b'\\' {
-                escaped = true;
-            } else if byte == b'"' {
-                in_string = false;
-            }
-            offset += 1;
-            continue;
-        }
-        if byte == b'"' {
-            in_string = true;
-            offset += 1;
-            continue;
-        }
-        if byte.is_ascii_whitespace() {
-            let _ = writer.write_all(&bytes[start..offset]);
-            offset += 1;
-            while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
-                offset += 1;
-            }
-            start = offset;
-        } else {
-            offset += 1;
-        }
-    }
-    let _ = writer.write_all(&bytes[start..]);
-    writer.finish()
-}
-
+/// Renders a document in the language's one JSON form - keys in order,
+/// numbers and strings as `json::encode` writes them - whatever text it was
+/// parsed from, so every tier renders a parsed document identically.
 fn render_json_handle(json: &GosJson, pretty: bool) -> *mut c_char {
-    if !pretty
-        && json.view.is_null()
-        && let Some(text) = json.tree.raw_text()
-    {
-        return render_json_raw(text);
-    }
     render_json_direct(json.value(), pretty)
 }
 
@@ -1259,6 +1268,13 @@ pub unsafe extern "C" fn gos_rt_json_value_float(x: f64) -> *mut GosJson {
     })
 }
 
+/// A JSON number from an `f32` held at double width, spelled with the
+/// single-precision value's digits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_value_float32(x: f64) -> *mut GosJson {
+    unsafe { gos_rt_json_value_float(crate::builtins::f32_as_decimal_double(x)) }
+}
+
 /// `json::Value::Null` constructor.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_null() -> *mut GosJson {
@@ -1300,7 +1316,8 @@ pub unsafe extern "C" fn gos_rt_json_value_array(vec: *const GosVec) -> *mut Gos
 /// Builds a `json::Value::Array` from a Gossamer `Vec` of scalar
 /// elements. `kind` selects how each 8-byte slot is read:
 /// 0 = i64, 1 = f64 (bit pattern), 2 = String (`*const c_char`),
-/// 3 = bool, 4 = an integer declared `u64` / `usize`. Used by `json::encode([…])` on a scalar array, where
+/// 3 = bool, 4 = an integer declared `u64` / `usize`, 5 = an `f32` at double
+/// width. Used by `json::encode([…])` on a scalar array, where
 /// the MIR has a typed scalar `*GosVec` rather than a Vec of
 /// pre-boxed `*GosJson` pointers (the shape `gos_rt_json_value_array`
 /// expects).
@@ -1333,6 +1350,10 @@ pub unsafe extern "C" fn gos_rt_json_array_from_scalar_vec(
                         }
                         3 => serde_json::Value::Bool(w != 0),
                         4 => serde_json::Value::Number((w as u64).into()),
+                        5 => serde_json::Number::from_f64(crate::builtins::f32_as_decimal_double(
+                            f64::from_bits(w as u64),
+                        ))
+                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
                         _ => serde_json::Value::Number(w.into()),
                     };
                     out.push(v);
@@ -1710,6 +1731,12 @@ pub unsafe extern "C" fn gos_rt_json_writer_f64(w: *mut JsonTokenWriter, x: f64)
     });
 }
 
+/// Writes an `f32` held at double width as its single-precision digits.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_json_writer_f32(w: *mut JsonTokenWriter, x: f64) {
+    unsafe { gos_rt_json_writer_f64(w, crate::builtins::f32_as_decimal_double(x)) }
+}
+
 /// Writes a boolean value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_bool(w: *mut JsonTokenWriter, b: i32) {
@@ -1853,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    fn json_render_preserves_parsed_number_spelling() {
+    fn json_render_keeps_every_parsed_double() {
         let text = std::ffi::CString::new(r#"{"score":12.100000000000001,"short":20.9}"#).unwrap();
         let parsed = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&text)) };
         assert_eq!(crate::c_abi::vec::gos_rt_result_disc(parsed), 0);
@@ -1862,7 +1889,7 @@ mod tests {
         let rendered = unsafe { CStr::from_ptr(rendered_ptr) }.to_str().unwrap();
         assert!(
             rendered.contains("\"score\":12.100000000000001"),
-            "rendered JSON must retain the original numeric spelling: {rendered}"
+            "a parsed number renders as the double it parsed to: {rendered}"
         );
         assert!(rendered.contains("\"short\":20.9"));
         unsafe { crate::c_abi::string::gos_rt_str_free(rendered_ptr) };
@@ -1870,7 +1897,7 @@ mod tests {
     }
 
     #[test]
-    fn untouched_json_renders_without_materialising_the_dom() {
+    fn a_parsed_document_is_materialised_on_first_use_and_renders_canonically() {
         let text = std::ffi::CString::new(" { \"value\" : 7 } ").unwrap();
         let parsed = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&text)) };
         let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
@@ -1884,10 +1911,6 @@ mod tests {
             unsafe { CStr::from_ptr(rendered_ptr) }.to_bytes(),
             br#"{"value":7}"#
         );
-        assert!(matches!(
-            &*handle.tree,
-            JsonTree::Raw { parsed, .. } if parsed.get().is_none()
-        ));
         let key = c"value";
         let child = unsafe { gos_rt_json_get(json, crate::c_abi::string::test_gos_ptr(key)) };
         assert_eq!(unsafe { gos_rt_json_as_i64(child) }, 7);

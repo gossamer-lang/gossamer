@@ -946,6 +946,9 @@ fn intern_arm_name(name: &str) -> &'static str {
 #[derive(Debug, Clone)]
 pub struct BindingCallback {
     inner: Value,
+    /// The runtime handle a compiled caller registered the callable under,
+    /// when the binding runs in a compiled program.
+    handle: Option<u64>,
 }
 
 impl BindingCallback {
@@ -954,7 +957,25 @@ impl BindingCallback {
     /// not call this directly.
     #[must_use]
     pub fn from_value(v: Value) -> Self {
-        Self { inner: v }
+        Self {
+            inner: v,
+            handle: None,
+        }
+    }
+
+    /// A callable a compiled caller registered under `handle`.
+    #[must_use]
+    pub fn from_handle(handle: u64) -> Self {
+        Self {
+            inner: Value::Int(handle as i64),
+            handle: Some(handle),
+        }
+    }
+
+    /// The runtime handle a compiled caller registered the callable under.
+    #[must_use]
+    pub fn handle(&self) -> Option<u64> {
+        self.handle
     }
 
     /// Returns the wrapped callable, useful for stashing into an
@@ -973,7 +994,10 @@ impl BindingCallback {
         dispatch: &mut dyn gossamer_interp::value::NativeDispatch,
         args: Vec<Value>,
     ) -> RuntimeResult<Value> {
-        dispatch.call_value(&self.inner, args)
+        match self.handle {
+            Some(handle) => crate::native::invoke_compiled_callback(handle, &args),
+            None => dispatch.call_value(&self.inner, args),
+        }
     }
 
     /// Returns a reference to the wrapped callable for
@@ -987,9 +1011,11 @@ impl BindingCallback {
 impl FromGos for BindingCallback {
     fn from_gos(value: &Value) -> RuntimeResult<Self> {
         match value {
-            Value::Closure(_) | Value::Native(_) | Value::Builtin(_) => Ok(Self {
-                inner: value.clone(),
-            }),
+            // The bytecode VM passes a named function in value position as
+            // its name, which the dispatcher resolves when it is called.
+            Value::Closure(_) | Value::Native(_) | Value::Builtin(_) | Value::String(_) => {
+                Ok(Self::from_value(value.clone()))
+            }
             other => type_err("Fn(...)", other),
         }
     }
@@ -1036,23 +1062,50 @@ impl ToGos for BindingCallback {
 #[derive(Debug, Clone)]
 pub struct PersistentCallback {
     inner: Value,
+    /// The runtime handle a compiled caller registered the callable under,
+    /// when the binding runs in a compiled program.
+    handle: Option<u64>,
 }
 
 impl PersistentCallback {
     /// Wraps the underlying callable.
     #[must_use]
     pub fn from_value(v: Value) -> Self {
-        Self { inner: v }
+        Self {
+            inner: v,
+            handle: None,
+        }
     }
 
-    /// Invokes the callable with `args`, re-entering the interp
-    /// through `dispatch`.
+    /// A callable a compiled caller registered under `handle`. In a
+    /// compiled program the handle is valid only during the binding call
+    /// that received it.
+    #[must_use]
+    pub fn from_handle(handle: u64) -> Self {
+        Self {
+            inner: Value::Int(handle as i64),
+            handle: Some(handle),
+        }
+    }
+
+    /// The runtime handle a compiled caller registered the callable under.
+    #[must_use]
+    pub fn handle(&self) -> Option<u64> {
+        self.handle
+    }
+
+    /// Invokes the callable with `args`: through `dispatch` when the
+    /// binding runs under the interpreter, through the runtime handle in a
+    /// compiled program.
     pub fn invoke(
         &self,
         dispatch: &mut dyn gossamer_interp::value::NativeDispatch,
         args: Vec<Value>,
     ) -> RuntimeResult<Value> {
-        dispatch.call_value(&self.inner, args)
+        match self.handle {
+            Some(handle) => crate::native::invoke_compiled_callback(handle, &args),
+            None => dispatch.call_value(&self.inner, args),
+        }
     }
 
     /// Borrow the underlying callable for inspection.
@@ -1078,9 +1131,11 @@ impl PersistentCallback {
 impl FromGos for PersistentCallback {
     fn from_gos(value: &Value) -> RuntimeResult<Self> {
         match value {
-            Value::Closure(_) | Value::Native(_) | Value::Builtin(_) => Ok(Self {
-                inner: value.clone(),
-            }),
+            // The bytecode VM passes a named function in value position as
+            // its name, which the dispatcher resolves when it is called.
+            Value::Closure(_) | Value::Native(_) | Value::Builtin(_) | Value::String(_) => {
+                Ok(Self::from_value(value.clone()))
+            }
             other => type_err("Fn(...) [persistent]", other),
         }
     }
@@ -1245,8 +1300,19 @@ mod tests {
 
     #[test]
     fn binding_callback_rejects_non_callable() {
-        let v: Value = "not a fn".to_gos();
+        let v: Value = 7_i64.to_gos();
         let err = BindingCallback::from_gos(&v).unwrap_err();
         assert!(matches!(err, RuntimeError::Type(_)));
+        let err = PersistentCallback::from_gos(&v).unwrap_err();
+        assert!(matches!(err, RuntimeError::Type(_)));
+    }
+
+    #[test]
+    fn a_named_function_is_a_callback() {
+        // The bytecode VM passes a named function in value position as its
+        // name, which the dispatcher resolves when the callback is invoked.
+        let v: Value = "double".to_gos();
+        assert!(BindingCallback::from_gos(&v).is_ok());
+        assert!(PersistentCallback::from_gos(&v).is_ok());
     }
 }

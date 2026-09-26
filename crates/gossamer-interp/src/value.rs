@@ -2666,7 +2666,7 @@ impl Channel {
                     // is not coming.
                     && !crate::stdlib_builtins::cohort::current_is_cancelled()
                 {
-                    let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter(|| {
+                    let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("send", || {
                         guard.has_ready_waiter()
                             || any_channel_can_progress(&self.inner)
                             || crate::stdlib_builtins::cohort::deadline_pending()
@@ -2692,9 +2692,11 @@ impl Channel {
                     Self::sync_ready_count(&mut guard);
                     let mut deadlocked = false;
                     while guard.buf.len() >= capacity {
-                        let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter(|| {
-                            guard.has_ready_waiter() || any_channel_can_progress(&self.inner)
-                        }) else {
+                        let Some(_waiting) =
+                            crate::vm::goroutine::ChannelWait::enter("send", || {
+                                guard.has_ready_waiter() || any_channel_can_progress(&self.inner)
+                            })
+                        else {
                             deadlocked = true;
                             break;
                         };
@@ -2824,7 +2826,7 @@ impl Channel {
                 Self::sync_ready_count(&mut guard);
                 self.wake_select_waiters(&guard);
             }
-            let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter(|| {
+            let Some(_waiting) = crate::vm::goroutine::ChannelWait::enter("receive", || {
                 guard.has_ready_waiter()
                     || any_channel_can_progress(&self.inner)
                     || crate::stdlib_builtins::context::deadline_pending()
@@ -3366,6 +3368,9 @@ impl fmt::Display for Value {
                 if matches!(inner.name.as_str(), "bytes::Buffer" | "bytes::Builder") {
                     return out.write_str(inner.name.as_str());
                 }
+                if let Some(f) = f32_render_slot(self) {
+                    return out.write_str(&gossamer_runtime::builtins::format_f32(f));
+                }
                 if let Some(items) = vec_render_items(inner) {
                     return out.write_str(&repr_vec(items));
                 }
@@ -3415,6 +3420,9 @@ pub(crate) mod uint_desc {
     pub(crate) const NONE: u8 = b'.';
     /// This integer position is unsigned.
     pub(crate) const UINT: u8 = b'u';
+    /// This float position is an `f32`, which renders with the digits of its
+    /// single-precision value. Only a render descriptor carries it.
+    pub(crate) const F32: u8 = b'f';
     /// A fixed array or a slice; the element's own descriptor follows.
     /// Renders in bare brackets, which is how both are written.
     pub(crate) const SEQ: u8 = b'v';
@@ -3452,6 +3460,12 @@ pub(crate) mod uint_desc {
 /// type is the only thing that can tell them apart; the wrapper carries
 /// that answer on the renderer's private copy and nowhere else.
 pub(crate) const VEC_RENDER_NAME: &str = "__vec";
+
+/// Name of the one-field wrapper [`uint_leaves`] puts an `f32` in so the
+/// renderer spells it with single-precision digits. The slot holds the value
+/// at double width, so the static type is the only thing that says which
+/// digits read back as it.
+pub(crate) const F32_RENDER_NAME: &str = "__f32";
 
 /// Field a rendered container handle carries to describe its elements,
 /// for the containers whose elements the renderer reads out of a
@@ -3501,6 +3515,10 @@ fn convert_uint(value: &Value, desc: &[u8], cursor: &mut usize) -> Value {
     match tag {
         uint_desc::UINT => match value {
             Value::Int(n) => Value::Uint(*n as u64),
+            other => other.clone(),
+        },
+        uint_desc::F32 => match value {
+            Value::Float(f) => Value::struct_(F32_RENDER_NAME, vec![("value", Value::Float(*f))]),
             other => other.clone(),
         },
         uint_desc::SEQ => convert_uint_sequence(value, desc, cursor),
@@ -3586,6 +3604,12 @@ fn convert_uint_sequence(value: &Value, desc: &[u8], cursor: &mut usize) -> Valu
         Value::Array(items) => Value::Array(Arc::new(items.iter().map(convert).collect())),
         Value::IntArray(items) => Value::Array(Arc::new(
             items.iter().map(|n| convert(&Value::Int(*n))).collect(),
+        )),
+        Value::FloatVec(items) => Value::Array(Arc::new(
+            items.iter().map(|f| convert(&Value::Float(*f))).collect(),
+        )),
+        Value::FloatArray(_) => Value::Array(Arc::new(
+            value.float_array_elems().iter().map(convert).collect(),
         )),
         other => other.clone(),
     }
@@ -3679,13 +3703,20 @@ fn uint_aware_field(struct_name: &str, field_name: &str, field: &Value) -> Strin
 /// the way the same value reads anywhere else, which is what both compiled
 /// tiers render from the key's tag.
 fn map_key_text(key: &Value) -> String {
+    if let Some(f) = f32_render_slot(key) {
+        return gossamer_runtime::builtins::format_f32_debug(f);
+    }
     match key {
         Value::String(text) => format!("{:?}", text.as_str()),
+        Value::Char(ch) => format!("{ch:?}"),
         other => other.to_string(),
     }
 }
 
 fn repr_value(value: &Value) -> String {
+    if let Some(f) = f32_render_slot(value) {
+        return gossamer_runtime::builtins::format_f32_debug(f);
+    }
     match value {
         Value::Float(number) => repr_float(*number),
         Value::String(text) => format!("{:?}", text.as_str()),
@@ -3845,6 +3876,20 @@ fn is_set_struct_name(name: &str) -> bool {
     matches!(name, "Set" | "BTreeSet")
 }
 
+/// The value an [`F32_RENDER_NAME`] wrapper carries, when `value` is one.
+pub(crate) fn f32_render_slot(value: &Value) -> Option<f64> {
+    let Value::Struct(inner) = value else {
+        return None;
+    };
+    if inner.name.as_str() != F32_RENDER_NAME {
+        return None;
+    }
+    match inner.fields.get(0) {
+        Some((_, Value::Float(f))) => Some(*f),
+        _ => None,
+    }
+}
+
 /// Whether `inner` is the render-only wrapper that says "this sequence
 /// is a `Vec`", and the sequence it carries.
 pub(crate) fn vec_render_items(inner: &StructInner) -> Option<&Value> {
@@ -3858,9 +3903,13 @@ pub(crate) fn vec_render_items(inner: &StructInner) -> Option<&Value> {
 /// reads in the form that shows it is one, which is what
 /// [`write_element`] writes wherever a sequence is rendered.
 fn render_element(value: &Value) -> String {
+    if let Some(f) = f32_render_slot(value) {
+        return gossamer_runtime::builtins::format_f32_debug(f);
+    }
     match value {
         Value::Float(number) => repr_float(*number),
         Value::String(text) => format!("{:?}", text.as_str()),
+        Value::Char(ch) => format!("{ch:?}"),
         other => other.to_string(),
     }
 }
@@ -4028,10 +4077,14 @@ pub(crate) fn error_chain_text(value: &Value) -> Option<String> {
 /// part or an exponent so the text reads back as a float, matching how a
 /// struct field renders; every other value keeps its Display text.
 fn write_element(out: &mut fmt::Formatter<'_>, value: &Value) -> fmt::Result {
+    if let Some(f) = f32_render_slot(value) {
+        return out.write_str(&gossamer_runtime::builtins::format_f32_debug(f));
+    }
     match value {
         Value::Float(f) => out.write_str(&gossamer_runtime::builtins::format_float_debug(*f)),
-        // A nested string renders in the spelling that builds it.
+        // A nested string or char renders in the spelling that builds it.
         Value::String(text) => write!(out, "{:?}", text.as_str()),
+        Value::Char(ch) => write!(out, "{ch:?}"),
         other => write!(out, "{other}"),
     }
 }
@@ -5590,7 +5643,7 @@ pub fn render_descriptor(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -
 #[must_use]
 pub fn ordering_descriptor(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<String> {
     let mut out = Vec::new();
-    push_render_desc_with(tcx, ty, &mut out, 0, true, &[]);
+    push_desc(tcx, ty, &mut out, 0, Walk::ORDERING, &[]);
     out.contains(&uint_desc::UINT)
         .then(|| out.iter().map(|b| *b as char).collect())
 }
@@ -5606,15 +5659,24 @@ pub fn repl_render_descriptor(
     descriptor_of(tcx, ty, true)
 }
 
+/// [`render_descriptor`] for a value encoded as JSON text. The encoder reads
+/// a struct's fields from the value rather than through a synthesized
+/// `to_string`, so every field is described, as the REPL describes them.
+#[must_use]
+pub fn json_descriptor(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> Option<String> {
+    descriptor_of(tcx, ty, true)
+}
+
 fn descriptor_of(
     tcx: &gossamer_types::TyCtxt,
     ty: gossamer_types::Ty,
     adts: bool,
 ) -> Option<String> {
     let mut out = Vec::new();
-    push_render_desc_with(tcx, ty, &mut out, 0, adts, &[]);
+    let walk = if adts { Walk::REPL } else { Walk::RENDER };
+    push_desc(tcx, ty, &mut out, 0, walk, &[]);
     out.iter()
-        .any(|b| *b == uint_desc::UINT || *b == uint_desc::SET || *b == uint_desc::VEC)
+        .any(|b| describes_something(*b))
         .then(|| out.iter().map(|b| *b as char).collect())
 }
 
@@ -5634,7 +5696,7 @@ pub fn element_render_descriptor(
     }
     out[0] = uint_desc::SEQ;
     out.iter()
-        .any(|b| *b == uint_desc::UINT || *b == uint_desc::SET || *b == uint_desc::VEC)
+        .any(|b| describes_something(*b))
         .then(|| out.iter().map(|b| *b as char).collect())
 }
 
@@ -5655,21 +5717,56 @@ fn is_unsigned64(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -> bool {
     )
 }
 
+/// A descriptor byte that makes the descriptor worth carrying: a value of a
+/// type describing none of these renders exactly as it always has.
+fn describes_something(byte: u8) -> bool {
+    matches!(
+        byte,
+        uint_desc::UINT | uint_desc::SET | uint_desc::VEC | uint_desc::F32
+    )
+}
+
+/// What a descriptor walk is for.
+#[derive(Clone, Copy)]
+struct Walk {
+    /// Describes every struct's fields, for a value rendered from the value
+    /// alone rather than through its synthesized `to_string`.
+    adts: bool,
+    /// Marks `f32` leaves, which only rendering distinguishes: an ordering
+    /// compares an `f32` as the float its slot holds.
+    f32s: bool,
+}
+
+impl Walk {
+    const RENDER: Self = Self {
+        adts: false,
+        f32s: true,
+    };
+    const REPL: Self = Self {
+        adts: true,
+        f32s: true,
+    };
+    const ORDERING: Self = Self {
+        adts: true,
+        f32s: false,
+    };
+}
+
 fn push_render_desc(
     tcx: &gossamer_types::TyCtxt,
     ty: gossamer_types::Ty,
     out: &mut Vec<u8>,
     depth: u8,
 ) {
-    push_render_desc_with(tcx, ty, out, depth, false, &[]);
+    push_desc(tcx, ty, out, depth, Walk::RENDER, &[]);
 }
 
-fn push_render_desc_with(
+fn push_desc(
     tcx: &gossamer_types::TyCtxt,
     ty: gossamer_types::Ty,
     out: &mut Vec<u8>,
     depth: u8,
-    adts: bool,
+    walk: Walk,
     params: &[gossamer_types::Ty],
 ) {
     use gossamer_types::TyKind;
@@ -5682,9 +5779,18 @@ fn push_render_desc_with(
         out.push(uint_desc::UINT);
         return;
     }
+    if walk.f32s
+        && matches!(
+            tcx.kind(peeled),
+            Some(TyKind::Float(gossamer_types::FloatTy::F32))
+        )
+    {
+        out.push(uint_desc::F32);
+        return;
+    }
     match tcx.kind(peeled) {
         Some(TyKind::Param { idx, .. }) => match params.get(idx.0 as usize) {
-            Some(arg) => push_render_desc_with(tcx, *arg, out, depth + 1, adts, &[]),
+            Some(arg) => push_desc(tcx, *arg, out, depth + 1, walk, &[]),
             None => out.push(uint_desc::NONE),
         },
         // A `Vec` renders in its own spelling; a fixed array and a slice
@@ -5692,12 +5798,12 @@ fn push_render_desc_with(
         Some(TyKind::Vec(elem)) => {
             let elem = *elem;
             out.push(uint_desc::VEC);
-            push_render_desc_with(tcx, elem, out, depth + 1, adts, params);
+            push_desc(tcx, elem, out, depth + 1, walk, params);
         }
         Some(TyKind::Slice(elem) | TyKind::Array { elem, .. }) => {
             let elem = *elem;
             out.push(uint_desc::SEQ);
-            push_render_desc_with(tcx, elem, out, depth + 1, adts, params);
+            push_desc(tcx, elem, out, depth + 1, walk, params);
         }
         Some(TyKind::Tuple(elems)) => {
             let elems = elems.clone();
@@ -5708,14 +5814,14 @@ fn push_render_desc_with(
             out.push(uint_desc::TUPLE);
             out.push(arity);
             for elem in elems {
-                push_render_desc_with(tcx, elem, out, depth + 1, adts, params);
+                push_desc(tcx, elem, out, depth + 1, walk, params);
             }
         }
         Some(TyKind::HashMap { key, value, .. }) => {
             let (key, value) = (*key, *value);
             out.push(uint_desc::MAP);
-            push_render_desc_with(tcx, key, out, depth + 1, adts, params);
-            push_render_desc_with(tcx, value, out, depth + 1, adts, params);
+            push_desc(tcx, key, out, depth + 1, walk, params);
+            push_desc(tcx, value, out, depth + 1, walk, params);
         }
         // `Option` and `Result` are the sentinel Adts `u32::MAX - 1` and
         // `u32::MAX`; a `Set` / `BTreeSet` is `u32::MAX - 7` / `- 18`.
@@ -5723,7 +5829,7 @@ fn push_render_desc_with(
             let payload = substs.types().first().copied();
             out.push(uint_desc::OPTION);
             match payload {
-                Some(payload) => push_render_desc_with(tcx, payload, out, depth + 1, adts, params),
+                Some(payload) => push_desc(tcx, payload, out, depth + 1, walk, params),
                 None => out.push(uint_desc::NONE),
             }
         }
@@ -5733,7 +5839,7 @@ fn push_render_desc_with(
             out.push(uint_desc::RESULT);
             for arm in [ok, err] {
                 match arm {
-                    Some(arm) => push_render_desc_with(tcx, arm, out, depth + 1, adts, params),
+                    Some(arm) => push_desc(tcx, arm, out, depth + 1, walk, params),
                     None => out.push(uint_desc::NONE),
                 }
             }
@@ -5747,7 +5853,7 @@ fn push_render_desc_with(
             let elem = substs.types().first().copied();
             out.push(uint_desc::CONTAINER);
             match elem {
-                Some(elem) => push_render_desc_with(tcx, elem, out, depth + 1, adts, params),
+                Some(elem) => push_desc(tcx, elem, out, depth + 1, walk, params),
                 None => out.push(uint_desc::NONE),
             }
         }
@@ -5755,7 +5861,7 @@ fn push_render_desc_with(
             if def.local == u32::MAX - 7 || def.local == u32::MAX - 18 =>
         {
             let elem = substs.types().first().copied();
-            push_set_render_desc(tcx, elem, out, depth, adts, params);
+            push_set_render_desc(tcx, elem, out, depth, walk, params);
         }
         // A program renders a struct through the `to_string` synthesized for
         // its type, which describes each field at the format site inside it.
@@ -5765,7 +5871,7 @@ fn push_render_desc_with(
         // since it renders from the value alone.
         Some(TyKind::Adt { def, substs }) if def.local < u32::MAX - 16 => {
             let (def, substs) = (*def, substs.clone());
-            push_struct_render_desc(tcx, def, &substs, out, depth, adts, params);
+            push_struct_render_desc(tcx, def, &substs, out, depth, walk, params);
         }
         _ => out.push(uint_desc::NONE),
     }
@@ -5779,12 +5885,12 @@ fn push_set_render_desc(
     elem: Option<gossamer_types::Ty>,
     out: &mut Vec<u8>,
     depth: u8,
-    adts: bool,
+    walk: Walk,
     params: &[gossamer_types::Ty],
 ) {
     let mut elem_desc = Vec::new();
     match elem {
-        Some(elem) => push_render_desc_with(tcx, elem, &mut elem_desc, depth + 1, adts, params),
+        Some(elem) => push_desc(tcx, elem, &mut elem_desc, depth + 1, walk, params),
         None => elem_desc.push(uint_desc::NONE),
     }
     if elem_desc.iter().any(|b| *b != uint_desc::NONE) {
@@ -5804,7 +5910,7 @@ fn push_struct_render_desc(
     substs: &gossamer_types::Substs,
     out: &mut Vec<u8>,
     depth: u8,
-    adts: bool,
+    walk: Walk,
     params: &[gossamer_types::Ty],
 ) {
     use gossamer_types::TyKind;
@@ -5824,7 +5930,7 @@ fn push_struct_render_desc(
         out.push(uint_desc::NONE);
         return;
     };
-    if !adts && substs.is_empty() {
+    if !walk.adts && substs.is_empty() {
         out.push(uint_desc::NONE);
         return;
     }
@@ -5839,8 +5945,8 @@ fn push_struct_render_desc(
             .as_ref()
             .and_then(|declared| declared.get(index))
             .is_some_and(|declared| crate::compile::mentions_param(tcx, *declared));
-        if adts || generic {
-            push_render_desc_with(tcx, field, out, depth + 1, adts, &args);
+        if walk.adts || generic {
+            push_desc(tcx, field, out, depth + 1, walk, &args);
         } else {
             out.push(uint_desc::NONE);
         }

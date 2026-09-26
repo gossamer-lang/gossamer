@@ -65,7 +65,12 @@ fn expand_gos_module(path_lit: &LitStr, module: &ItemMod) -> TokenStream2 {
             match item {
                 syn::Item::Fn(f) if matches!(f.vis, syn::Visibility::Public(_)) => {
                     let doc_attrs = collect_doc_attrs(&f.attrs);
-                    let sig = &f.sig;
+                    // `register_module!` names every return type, so a fn
+                    // written without one states the unit it returns.
+                    let mut sig = f.sig.clone();
+                    if matches!(sig.output, syn::ReturnType::Default) {
+                        sig.output = syn::parse_quote! { -> () };
+                    }
                     let block = &f.block;
                     fn_emits.push(quote! {
                         #( #doc_attrs )*

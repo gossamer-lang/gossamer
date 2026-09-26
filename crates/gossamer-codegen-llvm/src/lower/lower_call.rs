@@ -402,6 +402,7 @@ impl<'a> Lowerer<'a> {
             // emits its default "panic" string.
             declare_rt(&mut self.runtime_refs, "gos_rt_panic");
             let msg = self.emit_args_to_concat_string(args, " ")?;
+            self.emit_panic_site_line();
             writeln!(self.out, "  call void @gos_rt_panic(ptr {msg})").unwrap();
             writeln!(self.out, "  unreachable").unwrap();
             return Ok(());
@@ -1441,6 +1442,9 @@ impl<'a> Lowerer<'a> {
             // Any other container rides as the handle word its
             // constructor answered, the way `insert` stores one.
             Some(TyKind::Vec(_) | TyKind::Slice(_) | TyKind::HashMap { .. }) => Some(0),
+            // An enum whose variants carry no payload is its variant index,
+            // one word keyed and stored as an integer is.
+            Some(TyKind::Adt { .. }) if self.is_unit_only_enum(ty) => Some(0),
             _ => None,
         }
     }
@@ -1519,10 +1523,28 @@ impl<'a> Lowerer<'a> {
                     value,
                 })
             }
+            Some(TyKind::Adt { .. }) if self.is_unit_only_enum(ty) => {
+                let value = self.fresh();
+                writeln!(self.out, "  {value} = load i64, ptr {slot}").unwrap();
+                Ok(LoweredMapSlot {
+                    llvm_ty: "i64",
+                    value,
+                })
+            }
             _ => Err(BuildError::InternalLoweringBug(
                 "HashMap::from native lowering cannot load key/value type",
             )),
         }
+    }
+
+    /// Whether `ty` is an enum none of whose variants carries a payload, whose
+    /// value is its variant index in one word.
+    fn is_unit_only_enum(&self, ty: Ty) -> bool {
+        matches!(self.tcx.kind(self.unwrap_ref(ty)), Some(TyKind::Adt { def, .. })
+            if self
+                .tcx
+                .enum_variant_tys(*def)
+                .is_some_and(|variants| variants.iter().all(Vec::is_empty)))
     }
 
     /// Reads the heap pointer value addressed by an operand

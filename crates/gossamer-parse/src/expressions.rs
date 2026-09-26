@@ -139,7 +139,7 @@ impl Parser<'_> {
                 if op == BinaryOp::BitOr && self.in_pattern_pipe() {
                     break;
                 }
-                if is_unary_startable(op) && self.newline_before_peek() {
+                if is_unary_startable(op) && self.newline_before_peek() && !self.in_paren_group {
                     break;
                 }
                 self.bump();
@@ -1325,6 +1325,7 @@ impl Parser<'_> {
 
     fn parse_paren_or_tuple(&mut self) -> ExprKind {
         self.with_struct_literals_allowed(|p| {
+            p.in_paren_group = true;
             if p.eat_punct(Punct::RParen) {
                 return ExprKind::Literal(Literal::Unit);
             }
@@ -2574,9 +2575,12 @@ impl Parser<'_> {
             .count();
         // A malformed placeholder has no arity of its own, so its diagnostic
         // stands alone rather than beside a count that miscounts it.
-        let has_invalid = segments
-            .iter()
-            .any(|segment| matches!(segment, FormatSegment::Invalid(_)));
+        let has_invalid = segments.iter().any(|segment| {
+            matches!(
+                segment,
+                FormatSegment::Invalid(_) | FormatSegment::Indexed(_)
+            )
+        });
         if expected != rest.len() && !has_invalid {
             self.record(
                 ParseError::FormatArgumentCount {
@@ -2586,13 +2590,43 @@ impl Parser<'_> {
                 first.span,
             );
         }
-        let mut concat_args: Vec<Expr> = Vec::new();
         let mut positional_iter = rest.into_iter();
+        let mut concat_args = self.format_segment_args(segments, &mut positional_iter, &first);
+        // Retain surplus arguments in the recovery AST. The format-arity
+        // diagnostic above already rejects them, but keeping an explicit `_`
+        // lets pipe substitution recognize it and avoids a misleading second
+        // diagnostic claiming that the pipe had no placeholder.
+        concat_args.extend(positional_iter);
+        let concat_call = self.alloc_function_call_expr("__concat", concat_args);
+        if macro_name == "format" {
+            return concat_call.kind;
+        }
+        self.alloc_function_call(macro_name, vec![concat_call])
+    }
+
+    /// The `__concat` arguments a parsed template stands for: each literal
+    /// piece, each named capture, and each positional placeholder filled from
+    /// `positional_iter` in order, rendered through its spec.
+    fn format_segment_args(
+        &mut self,
+        segments: Vec<FormatSegment>,
+        positional_iter: &mut std::vec::IntoIter<Expr>,
+        first: &Expr,
+    ) -> Vec<Expr> {
+        let mut concat_args: Vec<Expr> = Vec::new();
         for segment in segments {
             match segment {
                 FormatSegment::Invalid(text) => {
                     self.record(
                         ParseError::MalformedFormatPlaceholder { text: text.clone() },
+                        first.span,
+                    );
+                    concat_args
+                        .push(self.alloc_literal_expr(Literal::String(format!("{{{text}}}"))));
+                }
+                FormatSegment::Indexed(text) => {
+                    self.record(
+                        ParseError::FormatArgumentIndex { text: text.clone() },
                         first.span,
                     );
                     concat_args
@@ -2640,16 +2674,7 @@ impl Parser<'_> {
                 }
             }
         }
-        // Retain surplus arguments in the recovery AST. The format-arity
-        // diagnostic above already rejects them, but keeping an explicit `_`
-        // lets pipe substitution recognize it and avoids a misleading second
-        // diagnostic claiming that the pipe had no placeholder.
-        concat_args.extend(positional_iter);
-        let concat_call = self.alloc_function_call_expr("__concat", concat_args);
-        if macro_name == "format" {
-            return concat_call.kind;
-        }
-        self.alloc_function_call(macro_name, vec![concat_call])
+        concat_args
     }
 
     fn alloc_function_call_expr(&mut self, name: &str, args: Vec<Expr>) -> Expr {
@@ -3011,14 +3036,20 @@ fn keyword_or_ident_text(text: &str) -> String {
     text.to_string()
 }
 
-/// Whether a binary operator's punctuation also serves as a unary
-/// prefix in Gossamer. These are the only ops for which a leading
-/// newline must be treated as a statement boundary, so that
-/// `let x = expr\n&y` parses as two statements (`let x = expr;`
-/// followed by `&y`) rather than the binary `expr & y`. The other
-/// unary prefix `!` has no binary form so does not need this guard.
+/// Whether a binary operator's punctuation also begins an expression in
+/// Gossamer. These are the only ops for which a leading newline must be
+/// treated as a statement boundary, so that `let x = expr\n&y` parses as two
+/// statements (`let x = expr;` followed by `&y`) rather than the binary
+/// `expr & y`, and a closure `|x| x * k` on the line after a statement is a
+/// closure rather than `expr | x | x * k`. The other unary prefix `!` has no
+/// binary form so does not need this guard; `||` stays a continuation, since
+/// a leading `||` continues a condition far more often than it opens a
+/// parameterless closure.
 fn is_unary_startable(op: BinaryOp) -> bool {
-    matches!(op, BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::Mul)
+    matches!(
+        op,
+        BinaryOp::Sub | BinaryOp::BitAnd | BinaryOp::Mul | BinaryOp::BitOr
+    )
 }
 
 fn extract_raw_string_body(source: &str, hashes: u8) -> String {
@@ -3235,6 +3266,10 @@ enum FormatSegment {
     /// binding. Carries the inner text for the diagnostic; the caller
     /// records a `MalformedFormatPlaceholder` error.
     Invalid(String),
+    /// `{0}` / `{1:>3}` - a placeholder naming an argument by position,
+    /// which templates do not take. Carries the inner text for the
+    /// diagnostic; the caller records a `FormatArgumentIndex` error.
+    Indexed(String),
 }
 
 /// Whether a placeholder's name part (the text before any `:`) looks like an
@@ -3323,8 +3358,13 @@ fn parse_format_template(template: &str) -> Vec<FormatSegment> {
                     segments.push(FormatSegment::Literal(std::mem::take(&mut literal)));
                 }
                 let inner = template[i + 1..close].trim();
+                let name_part = format_spec_colon(inner)
+                    .map_or(inner, |at| &inner[..at])
+                    .trim();
                 if inner.is_empty() {
                     segments.push(FormatSegment::Positional);
+                } else if !name_part.is_empty() && name_part.bytes().all(|b| b.is_ascii_digit()) {
+                    segments.push(FormatSegment::Indexed(inner.to_string()));
                 } else if is_capture_name(inner) {
                     segments.push(FormatSegment::Named(inner.to_string()));
                 } else if format_name_looks_like_expr(inner) {

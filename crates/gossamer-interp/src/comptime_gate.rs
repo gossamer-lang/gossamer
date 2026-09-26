@@ -530,11 +530,14 @@ mod comptime_gate_tests {
     fn every_wrapper_leaf_is_classified() {
         // A `__gos_` leaf is the native half of a source-level wrapper, so it
         // needs the capability of the call it implements. These families
-        // compute over values they are handed, the zone database the `time`
+        // compute over values they are handed (rendering included), the zone database the `time`
         // leaves read is compiled in, and a parallel adapter's leaf is a
         // callback GT0090 has already proven pure.
         let pure_prefixes: &[&str] = &[
             "__gos_codegen",
+            "__gos_debug_quote",
+            "__gos_dyn_",
+            "__gos_f32_",
             "__gos_par_",
             "__gos_pem_",
             "__gos_strconv_",

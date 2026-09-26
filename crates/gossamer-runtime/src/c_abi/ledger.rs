@@ -181,6 +181,8 @@ pub static RC_LIVE: AtomicI64 = AtomicI64::new(0);
 pub static STR_LIVE: AtomicI64 = AtomicI64::new(0);
 pub static VEC_LIVE: AtomicI64 = AtomicI64::new(0);
 pub static MAP_LIVE: AtomicI64 = AtomicI64::new(0);
+pub static SET_LIVE: AtomicI64 = AtomicI64::new(0);
+pub static DEQUE_LIVE: AtomicI64 = AtomicI64::new(0);
 
 // Allocation-shape counters for the compact GosVec layout. These are totals
 // rather than live counts: the point is to expose how often a workload pays
@@ -251,12 +253,14 @@ unsafe extern "C" {
 extern "C" fn report() {
     if std::env::var("GOS_LEAK_LEDGER").is_ok() {
         eprintln!(
-            "LEAK LEDGER (live at exit): aggr={} rc={} str={} vec={} map={}",
+            "LEAK LEDGER (live at exit): aggr={} rc={} str={} vec={} map={} set={} deque={}",
             AGGR_LIVE.load(Ordering::SeqCst),
             RC_LIVE.load(Ordering::SeqCst),
             STR_LIVE.load(Ordering::SeqCst),
             VEC_LIVE.load(Ordering::SeqCst),
             MAP_LIVE.load(Ordering::SeqCst),
+            SET_LIVE.load(Ordering::SeqCst),
+            DEQUE_LIVE.load(Ordering::SeqCst),
         );
     }
     if std::env::var("GOS_VEC_ALLOC_STATS").is_ok() {
@@ -516,6 +520,37 @@ pub fn map_dec() {
         return;
     }
     MAP_LIVE.fetch_sub(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_inc() {
+    if !instrumentation_armed() {
+        return;
+    }
+    arm();
+    SET_LIVE.fetch_add(1, Ordering::Relaxed);
+}
+#[inline]
+pub fn set_dec() {
+    if !instrumentation_armed() {
+        return;
+    }
+    SET_LIVE.fetch_sub(1, Ordering::Relaxed);
+}
+#[inline]
+pub fn deque_inc() {
+    if !instrumentation_armed() {
+        return;
+    }
+    arm();
+    DEQUE_LIVE.fetch_add(1, Ordering::Relaxed);
+}
+#[inline]
+pub fn deque_dec() {
+    if !instrumentation_armed() {
+        return;
+    }
+    DEQUE_LIVE.fetch_sub(1, Ordering::Relaxed);
 }
 
 #[inline]

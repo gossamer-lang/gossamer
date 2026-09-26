@@ -94,11 +94,13 @@ impl<'a> Builder<'a> {
         }
         let helper = match self.tcx.kind_of(ty) {
             TyKind::JsonValue => return Some(arg_local),
+            TyKind::Char => return self.build_json_value(arg_local, ty, span),
             TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
                 "gos_rt_json_value_uint"
             }
             TyKind::Int(_) | TyKind::Var(_) | TyKind::Error => "gos_rt_json_value_int",
             TyKind::Bool => "gos_rt_json_value_bool",
+            TyKind::Float(gossamer_types::FloatTy::F32) => "gos_rt_json_value_float32",
             TyKind::Float(_) => "gos_rt_json_value_float",
             TyKind::String => "gos_rt_json_value_string",
             _ => return None,
@@ -562,6 +564,7 @@ impl<'a> Builder<'a> {
                             "gos_rt_json_value_uint"
                         }
                         TyKind::Int(_) => "gos_rt_json_value_int",
+                        TyKind::Float(gossamer_types::FloatTy::F32) => "gos_rt_json_value_float32",
                         TyKind::Float(_) => "gos_rt_json_value_float",
                         TyKind::Bool => "gos_rt_json_value_bool",
                         _ => "gos_rt_json_value_string",
@@ -886,6 +889,20 @@ impl<'a> Builder<'a> {
         let json_val_ty = self.tcx.json_value_ty();
         match self.tcx.kind_of(ty).clone() {
             TyKind::JsonValue => Some(local),
+            // A `char` is the one-character string it spells.
+            TyKind::Char => {
+                let string_ty = self.tcx.string_ty();
+                let text = self.fresh(string_ty);
+                let next = self.new_block(span);
+                self.terminate(Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str("gos_rt_char_to_str".to_string())),
+                    args: vec![Operand::Copy(Place::local(local))],
+                    destination: Place::local(text),
+                    target: Some(next),
+                });
+                self.set_current(next);
+                self.build_json_value(text, string_ty, span)
+            }
             TyKind::Int(_) | TyKind::Bool | TyKind::Float(_) | TyKind::String => {
                 let helper = match self.tcx.kind_of(ty) {
                     TyKind::Int(gossamer_types::IntTy::U64 | gossamer_types::IntTy::Usize) => {
@@ -893,6 +910,7 @@ impl<'a> Builder<'a> {
                     }
                     TyKind::Int(_) => "gos_rt_json_value_int",
                     TyKind::Bool => "gos_rt_json_value_bool",
+                    TyKind::Float(gossamer_types::FloatTy::F32) => "gos_rt_json_value_float32",
                     TyKind::Float(_) => "gos_rt_json_value_float",
                     _ => "gos_rt_json_value_string",
                 };
@@ -1320,6 +1338,7 @@ impl<'a> Builder<'a> {
                     }
                     TyKind::Int(_) => "gos_rt_json_value_int",
                     TyKind::Bool => "gos_rt_json_value_bool",
+                    TyKind::Float(gossamer_types::FloatTy::F32) => "gos_rt_json_value_float32",
                     TyKind::Float(_) => "gos_rt_json_value_float",
                     _ => "gos_rt_json_value_string",
                 };
@@ -1340,6 +1359,7 @@ impl<'a> Builder<'a> {
                     flat = *inner;
                 }
                 let kind: i64 = match self.tcx.kind_of(flat) {
+                    TyKind::Float(gossamer_types::FloatTy::F32) => 5,
                     TyKind::Float(_) => 1,
                     TyKind::String => 2,
                     TyKind::Bool => 3,

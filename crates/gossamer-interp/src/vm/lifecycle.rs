@@ -806,6 +806,10 @@ impl Vm {
                 &mut_statics,
             )?;
         }
+        deferred_initializers.extend(nested_const_items(program).into_iter().filter(|item| {
+            item.def
+                .is_some_and(|def| module_consts.deferred_global(def).is_some())
+        }));
 
         // Pass C: compile and register every function / impl / trait
         // method, inlining the const values gathered in pass B.
@@ -920,7 +924,12 @@ impl Vm {
                         } else {
                             Global::Value(value)
                         };
-                        self.register_item_value(module_prefix.as_deref(), name, global);
+                        match item.def.and_then(|def| module_consts.deferred_global(def)) {
+                            Some(scoped) => self.register_item_value(None, scoped, global),
+                            None => {
+                                self.register_item_value(module_prefix.as_deref(), name, global);
+                            }
+                        }
                     }
                     Err(err @ RuntimeError::UnresolvedName(_)) => {
                         last_err = Some(err);
@@ -1659,7 +1668,7 @@ impl Vm {
             impl_methods,
             mut_statics,
         )?;
-        let value = self.eval_initializer(
+        let value = match self.eval_initializer(
             &decl.value,
             tcx,
             layouts,
@@ -1671,7 +1680,18 @@ impl Vm {
             method_muts,
             impl_methods,
             mut_statics,
-        )?;
+        ) {
+            Ok(value) => value,
+            // An initializer calling a function the compiler does not inline
+            // evaluates once functions load, and reads reach it by global.
+            Err(RuntimeError::UnresolvedName(_)) if item.def.is_some() => {
+                if let Some(def) = item.def {
+                    module_consts.defer(def, &decl.name.name);
+                }
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
         if let Some(def) = item.def {
             module_consts.insert(def, value);
         }
@@ -3086,4 +3106,59 @@ fn build_native_struct_shapes(
         let handles = Arc::new(shapes.clone());
         (shapes, (idx_of, handles))
     })
+}
+
+/// Every `const` item declared inside a function body, at any depth.
+fn nested_const_items(program: &gossamer_hir::HirProgram) -> Vec<&HirItem> {
+    fn in_block<'p>(block: &'p gossamer_hir::HirBlock, out: &mut Vec<&'p HirItem>) {
+        for stmt in &block.stmts {
+            match &stmt.kind {
+                gossamer_hir::HirStmtKind::Item(item) => in_item(item, out, true),
+                gossamer_hir::HirStmtKind::Let { init: Some(e), .. }
+                | gossamer_hir::HirStmtKind::Expr { expr: e, .. }
+                | gossamer_hir::HirStmtKind::Defer(e) => in_expr(e, out),
+                gossamer_hir::HirStmtKind::Let { init: None, .. } => {}
+            }
+        }
+        if let Some(tail) = &block.tail {
+            in_expr(tail, out);
+        }
+    }
+    fn in_expr<'p>(expr: &'p gossamer_hir::HirExpr, out: &mut Vec<&'p HirItem>) {
+        if let gossamer_hir::HirExprKind::Block(block) = &expr.kind {
+            in_block(block, out);
+            return;
+        }
+        gossamer_hir::for_each_child_expr(expr, &mut |child| in_expr(child, out));
+    }
+    fn in_item<'p>(item: &'p HirItem, out: &mut Vec<&'p HirItem>, nested: bool) {
+        let bodies: Vec<&gossamer_hir::HirBlock> = match &item.kind {
+            HirItemKind::Const(_) => {
+                if nested {
+                    out.push(item);
+                }
+                Vec::new()
+            }
+            HirItemKind::Fn(decl) => decl.body.iter().map(|body| &body.block).collect(),
+            HirItemKind::Impl(decl) => decl
+                .methods
+                .iter()
+                .filter_map(|m| m.body.as_ref().map(|body| &body.block))
+                .collect(),
+            HirItemKind::Trait(decl) => decl
+                .methods
+                .iter()
+                .filter_map(|m| m.body.as_ref().map(|body| &body.block))
+                .collect(),
+            HirItemKind::Static(_) | HirItemKind::Adt(_) => Vec::new(),
+        };
+        for block in bodies {
+            in_block(block, out);
+        }
+    }
+    let mut out = Vec::new();
+    for item in &program.items {
+        in_item(item, &mut out, false);
+    }
+    out
 }

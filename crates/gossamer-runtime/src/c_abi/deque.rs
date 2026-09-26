@@ -24,10 +24,17 @@ pub struct GosDeque {
     head: i64,
 }
 
+/// Boxes a deque over `vec` as a runtime handle, counted by the leak ledger
+/// until [`gos_rt_deque_free`] reclaims it.
+fn deque_handle(vec: *mut GosVec) -> *mut GosDeque {
+    crate::c_abi::ledger::deque_inc();
+    Box::into_raw(Box::new(GosDeque { vec, head: 0 }))
+}
+
 unsafe fn deque_alloc(elem_bytes: i32, elem_kind: u8) -> *mut GosDeque {
     let bytes = if elem_bytes > 0 { elem_bytes } else { 8 };
     let vec = unsafe { crate::c_abi::vec::gos_rt_vec_new_typed(bytes as u32, elem_kind) };
-    Box::into_raw(Box::new(GosDeque { vec, head: 0 }))
+    deque_handle(vec)
 }
 
 /// Number of live elements: everything from the front index to the end of
@@ -131,7 +138,7 @@ pub unsafe extern "C" fn gos_rt_deque_from_vec(v: *const GosVec) -> *mut GosDequ
         } else {
             unsafe { crate::c_abi::string::gos_rt_vec_clone(v) }
         };
-        Box::into_raw(Box::new(GosDeque { vec, head: 0 }))
+        deque_handle(vec)
     })
 }
 
@@ -583,7 +590,7 @@ pub unsafe extern "C" fn gos_rt_deque_clone(d: *mut GosDeque) -> *mut GosDeque {
         } else {
             unsafe { crate::c_abi::string::gos_rt_vec_clone(source) }
         };
-        Box::into_raw(Box::new(GosDeque { vec, head: 0 }))
+        deque_handle(vec)
     })
 }
 
@@ -708,6 +715,7 @@ pub unsafe extern "C" fn gos_rt_deque_free(d: *mut GosDeque) {
         // so its own deep-free releases each element that is still here and
         // nothing that was popped out.
         unsafe { deque_compact(d) };
+        crate::c_abi::ledger::deque_dec();
         let deque = unsafe { Box::from_raw(d) };
         if !deque.vec.is_null() {
             unsafe { crate::c_abi::map::gos_rt_vec_free(deque.vec) };

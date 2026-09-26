@@ -309,6 +309,14 @@ pub enum ParseError {
         /// The placeholder's inner text (without the braces).
         text: String,
     },
+    /// A format placeholder naming its argument by position (`{0}`), which
+    /// templates do not take: arguments fill `{}` in order, and a value used
+    /// twice is bound and named.
+    #[error("format placeholder `{{{text}}}` names an argument by position")]
+    FormatArgumentIndex {
+        /// The placeholder's inner text (without the braces).
+        text: String,
+    },
     /// A Rust-style formatting macro received a positional argument count
     /// different from the number of positional placeholders in its template.
     #[error("format string requires {expected} positional argument(s), but {found} were supplied")]
@@ -996,6 +1004,15 @@ impl ParseError {
                     "a placeholder names a binding or a positional argument, with an optional \
                      `:spec` of fill, alignment, zero-pad, width, precision, and radix (`{:>8}`, \
                      `{:08.3}`, `{:#x}`) or `?`; bind an expression first"
+                        .to_string(),
+                ),
+            ),
+            ParseError::FormatArgumentIndex { text } => (
+                "GP0021",
+                format!("format placeholder `{{{text}}}` names an argument by position"),
+                Some(
+                    "arguments fill `{}` placeholders in order; to use a value twice or out of \
+                     order, bind it and name it, as in `{total}` or `{total:>8}`"
                         .to_string(),
                 ),
             ),

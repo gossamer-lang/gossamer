@@ -1081,12 +1081,12 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::hash::fnv",
         name: "hash64",
-        signature: "fn hash64(data: Vec<u8>) -> i64",
+        signature: "fn hash64(data: Vec<u8>) -> u64",
     },
     StdFunctionSignature {
         module_path: "std::hash::fnv",
         name: "hash_string",
-        signature: "fn hash_string(text: String) -> i64",
+        signature: "fn hash_string(text: String) -> u64",
     },
     StdFunctionSignature {
         module_path: "std::html",

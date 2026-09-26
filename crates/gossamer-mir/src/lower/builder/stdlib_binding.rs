@@ -76,9 +76,16 @@ impl<'a> Builder<'a> {
             self.binding_type_to_mir(&item.ret)
         };
         let mut arg_locals: Vec<Local> = Vec::with_capacity(args.len());
+        let mut callbacks: Vec<Local> = Vec::new();
         for (idx, arg) in args.iter().enumerate() {
             let raw = self.lower_expr(arg)?;
             let param_ty = item.params.get(idx);
+            if matches!(param_ty, Some(gossamer_resolve::BindingType::Callback(..))) {
+                let handle = self.register_binding_callback(raw, arg.ty, span);
+                callbacks.push(handle);
+                arg_locals.push(handle);
+                continue;
+            }
             let coerced = self.coerce_arg_for_binding(raw, param_ty, span);
             arg_locals.push(coerced);
         }
@@ -94,6 +101,16 @@ impl<'a> Builder<'a> {
             target: Some(next),
         });
         self.set_current(next);
+        // A callback is valid for the binding call that received it.
+        let unit_ty = self.tcx.unit();
+        for handle in callbacks {
+            let _ = self.emit_runtime_call(
+                "gos_rt_binding_callback_release",
+                vec![Operand::Copy(Place::local(handle))],
+                unit_ty,
+                span,
+            );
+        }
         // Result / Option returns arrive as a binding-ABI
         // `*mut GosVariant`; convert to the runtime's packed i128
         // result (string payloads become runtime strings) and type
@@ -104,6 +121,69 @@ impl<'a> Builder<'a> {
             return Some(local);
         }
         Some(self.convert_binding_wire_return(dest, &item.ret, span))
+    }
+
+    /// Registers the closure in `closure` as a callback for one binding call
+    /// and answers the handle the binding receives. The registration records
+    /// the register class of each parameter and of the return, from the
+    /// closure's type, so the runtime can call the compiled code.
+    fn register_binding_callback(&mut self, closure: Local, closure_ty: Ty, span: Span) -> Local {
+        use gossamer_types::TyKind;
+        let class = |tcx: &TyCtxt, ty: Ty| -> char {
+            match tcx.kind_of(ty) {
+                TyKind::Float(_) => 'f',
+                TyKind::Bool => 'b',
+                TyKind::Char => 'c',
+                TyKind::String => 's',
+                TyKind::Unit | TyKind::Never => 'u',
+                _ => 'i',
+            }
+        };
+        let mut ty = closure_ty;
+        if !matches!(self.tcx.kind_of(ty), TyKind::FnPtr(_) | TyKind::FnTrait(_)) {
+            ty = self.locals[closure.0 as usize].ty;
+        }
+        let sig = match self.tcx.kind_of(ty).clone() {
+            TyKind::FnPtr(sig) | TyKind::FnTrait(sig) => Some(sig),
+            _ => None,
+        };
+        // A named function arrives as its name; the runtime calls an
+        // environment, so it is wrapped in one as any callable sink wraps it.
+        let closure = match &sig {
+            Some(sig) => {
+                let callable = self.tcx.intern(TyKind::FnTrait(sig.clone()));
+                self.coerce_to_fn_trait_if_needed(closure, callable, span)
+            }
+            None => closure,
+        };
+        let signature = match sig {
+            Some(sig) => {
+                let mut text: String = sig.inputs.iter().map(|t| class(self.tcx, *t)).collect();
+                text.push('>');
+                text.push(class(self.tcx, sig.output));
+                text
+            }
+            // No signature to call through: the runtime refuses the
+            // registration, and the binding's call through it reports that.
+            _ => String::new(),
+        };
+        let string_ty = self.tcx.string_ty();
+        let signature_local = self.fresh(string_ty);
+        self.emit_assign(
+            Place::local(signature_local),
+            Rvalue::Use(Operand::Const(ConstValue::Str(signature))),
+            span,
+        );
+        let handle_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        self.emit_runtime_call(
+            "gos_rt_binding_callback_register",
+            vec![
+                Operand::Copy(Place::local(closure)),
+                Operand::Copy(Place::local(signature_local)),
+            ],
+            handle_ty,
+            span,
+        )
     }
 
     /// Whether a binding return crosses as a wire pointer the runtime

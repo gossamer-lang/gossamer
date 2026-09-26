@@ -427,10 +427,12 @@ Write clear, low-complexity, concise code.
   error (no user macros): `println` `print` `eprintln` `eprint`
   `format` `panic` (Rust `{}` / `{name}` / `{:spec}` formatting:
   width/align/fill `{:*>8}`, zero-pad `{:08}`, radix `{:x}` `{:b}`
-  `{:o}`, precision `{:.2}`); `matches`, `todo`, `unimplemented`,
+  `{:o}`, precision `{:.2}`; no positional `{0}`, which is GP0021 - bind the
+  value and name it); `matches`, `todo`, `unimplemented`,
   `unreachable`, `dbg`; build-time `regex::compile` / `sql::statement`
   (validate the literal, and the older `regex!` / `sql!` spellings
-  report GP0051) and `codegen` (splice a `comptime fn`'s String).
+  report GP0051) and `codegen` (splice the code a `comptime fn`'s String
+  spells, typed as that code is where it lands).
 - **Output that ends in a newline leaves the process on that write**, on a
   terminal, a pipe, and a file alike, so a program that announces a line and
   then blocks is visible while it runs. A `print` with no terminator
@@ -486,9 +488,10 @@ let shout = "  Hi  ".trim().to_lowercase() |> exclaim
   `text` info string, written as "```text ... ```".
 - **Semicolons are same-line separators only**: `let a = 1; let b = 2`
   replaces a newline between statements. A trailing semicolon, or one before
-  a newline or `}`, is invalid. A newline followed by leading `&`, `*`, or `-`
-  starts a NEW statement; for multi-line continuation, end the previous line
-  with the operator or parenthesize.
+  a newline or `}`, is invalid. A newline followed by leading `&`, `*`, `-`,
+  or `|` starts a NEW statement (so a closure `|x| x + k` can end a function
+  on its own line); for multi-line continuation, end the previous line with
+  the operator or parenthesize. A leading `||` still continues a condition.
 - **Delimited lists** use commas on one line and newlines when multiline.
   This covers every delimited list: function arguments and parameters,
   closure parameters, struct fields and literals, enum variants and payload
@@ -646,10 +649,12 @@ Panics are goroutine-scoped: a spawned goroutine's panic ends only
 that goroutine; a main-goroutine panic is fatal (exit 101). Integer
 divide/modulo by zero panics (GX0005); `i64::MIN / -1` wraps. Deep
 recursion raises `GX0008` and exits 101 on every tier, with the same message.
-The depth differs by tier because the limit does: the bytecode VM refuses the
-call at 4096 frames (65536 on the tail-call path) and prints its call stack
-with repeated frames collapsed, while JIT-compiled and native frames run until
-the installed stack guard trips on the real OS stack. Neither corrupts memory.
+The depth differs by tier because the limit does: the bytecode VM refuses a
+call at 4096 frames and prints its call stack with repeated frames collapsed,
+while JIT-compiled and native frames run until the installed stack guard trips
+on the real OS stack. Neither corrupts memory. On the VM a call in tail
+position - the last thing a function body, an `if` arm, or a `match` arm
+does - replaces its caller's frame, so tail recursion runs at any depth there.
 
 ## 9. Concurrency
 
@@ -789,7 +794,11 @@ are callable as methods/free functions and materialize results.
   FIFO-only behavior, and `MinHeap` / `MaxHeap` for explicit priority order.
   Only Vec has the full sequence surface: insert, remove, truncation,
   extension, reservation, capacity, and indexed mutation methods. Mutable arrays and slices
-  support `sort`, `reverse`, `swap`, and `fill` without resizing. `%i`
+  support `sort`, `reverse`, `swap`, and `fill` without resizing. Order by a
+  key with `xs.sort_by_key(|p| p.score)` (`Reverse(k)` for descending); a
+  `sort_by` comparator answers a sign, and a scalar has no `cmp` (it orders
+  with `<`), so compare fields: `|a, b| if a.x < b.x { -1 } else if a.x > b.x
+  { 1 } else { 0 }`. `%i`
   reports each type's real surface, while `%e` also removes methods that the
   binding's mutability cannot call. Method-call
   `xs.insert/remove` mutate in place and return `Result`, with an
@@ -959,6 +968,8 @@ imports outside it), and `gos bindgen FILE` drafts one from existing
 Rust. `#[gos_opaque]` on an `impl` publishes handle-taking methods
 under the type's name, `#[derive(GosStruct)]` passes a struct by
 value, and `#[gos_blocking]` moves a long sync call off the scheduler.
+Bindings are aimed at `gos build`, supported by `gos run` / `gos test`,
+and not loaded by the REPL.
 
 A multi-package checkout uses `[workspace] members = ["packages/*"]`
 at the root (`gos new ID --template workspace`). Only the resolved

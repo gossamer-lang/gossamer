@@ -328,7 +328,27 @@ pub(crate) unsafe fn gos_str_arg_len(s: *const c_char) -> usize {
 
 #[inline]
 unsafe fn typed_str_text<'a>(s: *const c_char) -> &'a str {
-    std::str::from_utf8(unsafe { typed_str_bytes(s) }).unwrap_or("")
+    let bytes = unsafe { typed_str_bytes(s) };
+    if unsafe { typed_str_known_utf8(s) } {
+        // SAFETY: an index footer other than `u32::MAX` is written only for
+        // content that was validated, or built from validated pieces, as
+        // UTF-8 (see `rebuild_str_index` and `extend_str_index`).
+        return unsafe { std::str::from_utf8_unchecked(bytes) };
+    }
+    std::str::from_utf8(bytes).unwrap_or("")
+}
+
+/// Whether `s` carries a character index, which is written only for content
+/// known to be UTF-8.
+///
+/// SAFETY: `s` is null or a Gossamer string body.
+#[inline]
+unsafe fn typed_str_known_utf8(s: *const c_char) -> bool {
+    let Some(cap) = (unsafe { typed_str_cap(s) }) else {
+        return false;
+    };
+    let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+    (unsafe { footer.read_unaligned() }) != u32::MAX
 }
 
 /// Number of bytes in the UTF-8 scalar a leading byte begins.
@@ -509,30 +529,84 @@ const fn str_index_bytes(cap: usize) -> usize {
 
 unsafe fn rebuild_str_index(s: *mut c_char, len: usize, cap: usize) {
     let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
+    // `is_ascii` is a vectorised scan, where validation walks sequences.
+    if !bytes.is_ascii() && std::str::from_utf8(bytes).is_err() {
+        let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+        unsafe { footer.write_unaligned(u32::MAX) };
+        return;
+    }
+    unsafe { index_utf8_content(s, len, cap) };
+}
+
+/// Writes the character index of content known to be UTF-8.
+///
+/// Every character starts at a byte that is not a continuation byte, so the
+/// index reads leading bytes rather than decoding each scalar.
+///
+/// SAFETY: `s` is a string body with `cap` bytes of content capacity whose
+/// first `len` bytes are UTF-8.
+unsafe fn index_utf8_content(s: *mut c_char, len: usize, cap: usize) {
+    let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
     let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
-    // `is_ascii` is a vectorised scan, where the walk below branches and
-    // stores per character.
     if bytes.is_ascii() {
         unsafe { footer.write_unaligned(STR_INDEX_ASCII) };
         return;
     }
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        unsafe { footer.write_unaligned(u32::MAX) };
-        return;
-    };
     let mut chars = 0usize;
-    unsafe { footer.write_unaligned(0) };
-    for (offset, _) in text.char_indices() {
-        if chars.is_multiple_of(STR_INDEX_STRIDE) {
-            unsafe {
-                footer
-                    .add(1 + chars / STR_INDEX_STRIDE)
-                    .write_unaligned(offset as u32);
+    let mut offset = 0usize;
+    let words = bytes.chunks_exact(8);
+    let rest_at = len - words.remainder().len();
+    for word in words {
+        let leads = 8 - utf8_continuation_bytes(word);
+        // A word that reaches no block boundary only adds to the count; the
+        // one that does is walked byte by byte for the boundary's offset.
+        if chars % STR_INDEX_STRIDE + leads < STR_INDEX_STRIDE
+            && !chars.is_multiple_of(STR_INDEX_STRIDE)
+        {
+            chars += leads;
+        } else {
+            for (at, &byte) in word.iter().enumerate() {
+                chars = unsafe { index_char_start(footer, chars, offset + at, byte) };
             }
         }
-        chars += 1;
+        offset += 8;
+    }
+    for (at, &byte) in bytes[rest_at..].iter().enumerate() {
+        chars = unsafe { index_char_start(footer, chars, rest_at + at, byte) };
     }
     unsafe { footer.write_unaligned(chars as u32) };
+}
+
+/// How many of the eight bytes in `word` continue a character: those whose
+/// top two bits are `10`.
+#[inline]
+fn utf8_continuation_bytes(word: &[u8]) -> usize {
+    let mut raw = [0u8; 8];
+    raw.copy_from_slice(word);
+    let x = u64::from_le_bytes(raw);
+    // Bit 7 set and bit 6 clear, per byte: shifting left by one moves each
+    // byte's bit 6 into its bit 7 position.
+    ((x & !(x << 1)) & 0x8080_8080_8080_8080).count_ones() as usize
+}
+
+/// Counts `byte`, at `offset`, toward the character index: a character that
+/// starts a block records the block's byte offset. Answers the new count.
+///
+/// SAFETY: `footer` is the index footer of a string with room for the entry
+/// of the block `chars` falls in.
+#[inline]
+unsafe fn index_char_start(footer: *mut u32, chars: usize, offset: usize, byte: u8) -> usize {
+    if byte & 0xC0 == 0x80 {
+        return chars;
+    }
+    if chars.is_multiple_of(STR_INDEX_STRIDE) {
+        unsafe {
+            footer
+                .add(1 + chars / STR_INDEX_STRIDE)
+                .write_unaligned(offset as u32);
+        }
+    }
+    chars + 1
 }
 
 /// Extends the footer character index after an in-place append. The previous
@@ -833,6 +907,18 @@ fn alloc_growable_forced(parts: &[&[u8]], cap: usize, force_heap: bool) -> *mut 
     })
 }
 
+/// What an allocation already knows about the content it is filled with,
+/// which decides how much of it the character index has to read.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum KnownText {
+    /// Every byte is ASCII.
+    Ascii,
+    /// The bytes are UTF-8.
+    Utf8,
+    /// Nothing is known; the bytes are validated.
+    Unchecked,
+}
+
 /// Allocates a growable runtime string and lets `fill` initialise exactly the
 /// first `content_len` bytes of the content region.
 fn alloc_growable_with_fill<F>(
@@ -844,7 +930,7 @@ fn alloc_growable_with_fill<F>(
 where
     F: FnOnce(*mut u8),
 {
-    alloc_growable_filled(content_len, cap, force_heap, false, fill)
+    alloc_growable_filled(content_len, cap, force_heap, KnownText::Unchecked, fill)
 }
 
 /// Copies `bytes`, which the caller has proven ASCII, into a fresh string.
@@ -856,10 +942,16 @@ fn alloc_ascii_cstring(bytes: &[u8]) -> *mut c_char {
         "alloc_ascii_cstring: content is not ASCII"
     );
     let force_heap = crate::c_abi::rc::in_region_arena(bytes.as_ptr());
-    alloc_growable_filled(bytes.len(), bytes.len(), force_heap, true, |out| unsafe {
-        // SAFETY: the allocation passes `bytes.len()` writable content bytes.
-        copy_builder_part(bytes.as_ptr(), out, bytes.len());
-    })
+    alloc_growable_filled(
+        bytes.len(),
+        bytes.len(),
+        force_heap,
+        KnownText::Ascii,
+        |out| unsafe {
+            // SAFETY: the allocation passes `bytes.len()` writable content bytes.
+            copy_builder_part(bytes.as_ptr(), out, bytes.len());
+        },
+    )
 }
 
 /// Copies `bytes`, a slice of the string `source`, into a fresh string. A slice
@@ -873,19 +965,51 @@ fn alloc_ascii_cstring(bytes: &[u8]) -> *mut c_char {
 #[inline]
 pub(crate) unsafe fn alloc_slice_cstring(source: *const c_char, bytes: &[u8]) -> *mut c_char {
     if unsafe { typed_str_is_ascii(source) } {
-        alloc_ascii_cstring(bytes)
-    } else {
-        alloc_cstring(bytes)
+        return alloc_ascii_cstring(bytes);
     }
+    if unsafe { typed_str_known_utf8(source) } && utf8_slice_is_whole(bytes) {
+        let force_heap = crate::c_abi::rc::in_region_arena(bytes.as_ptr());
+        return alloc_growable_filled(
+            bytes.len(),
+            bytes.len(),
+            force_heap,
+            KnownText::Utf8,
+            |out| unsafe {
+                // SAFETY: the allocation passes `bytes.len()` writable content
+                // bytes.
+                copy_builder_part(bytes.as_ptr(), out, bytes.len());
+            },
+        );
+    }
+    alloc_cstring(bytes)
 }
 
-/// [`alloc_growable_with_fill`], told whether the filled content is known to
-/// be ASCII.
+/// Whether a run of bytes cut out of UTF-8 text is itself UTF-8: it starts
+/// on a character and its last character is complete. Everything between
+/// was already UTF-8, so the two ends are all the cut can have broken.
+fn utf8_slice_is_whole(bytes: &[u8]) -> bool {
+    let Some(&first) = bytes.first() else {
+        return true;
+    };
+    if first & 0xC0 == 0x80 {
+        return false;
+    }
+    let tail = bytes.len().saturating_sub(4);
+    let Some(lead) = (tail..bytes.len())
+        .rev()
+        .find(|&at| bytes[at] & 0xC0 != 0x80)
+    else {
+        return false;
+    };
+    lead + utf8_encoded_len(bytes[lead]) == bytes.len()
+}
+
+/// [`alloc_growable_with_fill`], told what is known about the filled content.
 fn alloc_growable_filled<F>(
     content_len: usize,
     cap: usize,
     force_heap: bool,
-    known_ascii: bool,
+    known: KnownText,
     fill: F,
 ) -> *mut c_char
 where
@@ -972,13 +1096,20 @@ where
         }
         // Empty content is ASCII, which is the index a reserved builder starts
         // from before its first append.
-        if known_ascii || content_len == 0 {
-            content
+        match known {
+            KnownText::Ascii => content
                 .add(cap + 1)
                 .cast::<u32>()
-                .write_unaligned(STR_INDEX_ASCII);
-        } else {
-            rebuild_str_index(content.cast::<c_char>(), content_len, cap);
+                .write_unaligned(STR_INDEX_ASCII),
+            // Empty content is ASCII, and `index_utf8_content` says so.
+            KnownText::Utf8 => index_utf8_content(content.cast::<c_char>(), content_len, cap),
+            KnownText::Unchecked if content_len == 0 => content
+                .add(cap + 1)
+                .cast::<u32>()
+                .write_unaligned(STR_INDEX_ASCII),
+            KnownText::Unchecked => {
+                rebuild_str_index(content.cast::<c_char>(), content_len, cap);
+            }
         }
         if tag != STR_REGION_TAG {
             register_heap_string_body(content.cast::<c_char>());
@@ -1779,7 +1910,7 @@ pub unsafe extern "C" fn gos_rt_str_concat(a: *const c_char, b: *const c_char) -
         // without reading the copied bytes again.
         if unsafe { typed_str_is_ascii(a) && typed_str_is_ascii(b) } {
             let len = a_bytes.len() + b_bytes.len();
-            return alloc_growable_filled(len, len, force_heap, true, |out| unsafe {
+            return alloc_growable_filled(len, len, force_heap, KnownText::Ascii, |out| unsafe {
                 // SAFETY: the allocation passes `len` writable content bytes,
                 // and the two parts fill them exactly once, in order.
                 copy_builder_part(a_bytes.as_ptr(), out, a_bytes.len());
@@ -2049,12 +2180,11 @@ pub unsafe extern "C" fn gos_rt_str_append_f64(acc: *const c_char, x: f64) -> *m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_trim(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = if s.is_null() {
-            b"" as &[u8]
+        let st = if s.is_null() {
+            ""
         } else {
-            unsafe { gos_str_arg_bytes(s) }
+            unsafe { gos_str_arg_text(s) }
         };
-        let st = std::str::from_utf8(bytes).unwrap_or("");
         unsafe { alloc_slice_cstring(s, st.trim().as_bytes()) }
     })
 }
@@ -2064,12 +2194,11 @@ pub unsafe extern "C" fn gos_rt_str_trim(s: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_trim_start(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = if s.is_null() {
-            b"" as &[u8]
+        let st = if s.is_null() {
+            ""
         } else {
-            unsafe { gos_str_arg_bytes(s) }
+            unsafe { gos_str_arg_text(s) }
         };
-        let st = std::str::from_utf8(bytes).unwrap_or("");
         unsafe { alloc_slice_cstring(s, st.trim_start().as_bytes()) }
     })
 }
@@ -2079,12 +2208,11 @@ pub unsafe extern "C" fn gos_rt_str_trim_start(s: *const c_char) -> *mut c_char 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_trim_end(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = if s.is_null() {
-            b"" as &[u8]
+        let st = if s.is_null() {
+            ""
         } else {
-            unsafe { gos_str_arg_bytes(s) }
+            unsafe { gos_str_arg_text(s) }
         };
-        let st = std::str::from_utf8(bytes).unwrap_or("");
         unsafe { alloc_slice_cstring(s, st.trim_end().as_bytes()) }
     })
 }
@@ -2100,7 +2228,11 @@ pub unsafe extern "C" fn gos_rt_str_to_upper(s: *const c_char) -> *mut c_char {
         if bytes.is_ascii() {
             return alloc_ascii_upper_cstring(bytes);
         }
-        let st = std::str::from_utf8(bytes).unwrap_or("");
+        let st = if s.is_null() {
+            ""
+        } else {
+            unsafe { gos_str_arg_text(s) }
+        };
         alloc_cstring(st.to_uppercase().as_bytes())
     })
 }
@@ -2108,12 +2240,11 @@ pub unsafe extern "C" fn gos_rt_str_to_upper(s: *const c_char) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_lower(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = if s.is_null() {
-            b"" as &[u8]
+        let st = if s.is_null() {
+            ""
         } else {
-            unsafe { gos_str_arg_bytes(s) }
+            unsafe { gos_str_arg_text(s) }
         };
-        let st = std::str::from_utf8(bytes).unwrap_or("");
         alloc_cstring(st.to_lowercase().as_bytes())
     })
 }
@@ -2389,9 +2520,6 @@ pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_c
         let source = s;
         let s = unsafe { gos_str_arg_text(s) };
         let sep = unsafe { gos_str_arg_text(sep) };
-        if sep.is_empty() {
-            return unsafe { gos_rt_result_new(1, 0) };
-        }
         match s.split_once(sep) {
             None => unsafe { gos_rt_result_new(1, 0) },
             Some((a, b)) => {
@@ -2421,9 +2549,6 @@ pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_
         let source = s;
         let s = unsafe { gos_str_arg_text(s) };
         let sep = unsafe { gos_str_arg_text(sep) };
-        if sep.is_empty() {
-            return unsafe { gos_rt_result_new(1, 0) };
-        }
         match s.rsplit_once(sep) {
             None => unsafe { gos_rt_result_new(1, 0) },
             Some((a, b)) => {
@@ -2618,13 +2743,9 @@ pub unsafe extern "C" fn gos_rt_str_slice(s: *const c_char, start: i64, end: i64
         };
         let len_bytes = byte_len as i64;
         if start < 0 || end < 0 || start > end || end > len_bytes {
-            let display_len = if s.is_null() {
-                0i64
-            } else {
-                unsafe { typed_str_char_len(s) as i64 }
-            };
-            let msg =
-                format!("slice: range [{start}, {end}) out of bounds for length {display_len}");
+            // The bounds are byte offsets, so the length they are checked
+            // against is the byte length.
+            let msg = format!("slice: range [{start}, {end}) out of bounds for length {len_bytes}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
             return unsafe { gos_rt_result_new(1, err as i64) };
         }
@@ -2764,27 +2885,48 @@ pub unsafe extern "C" fn gos_rt_vec_join_i64(v: *const GosVec, sep: *const c_cha
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_f64(v: *const GosVec, sep: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(b"");
-        }
-        let vec = unsafe { &*v };
-        let sep_str = if sep.is_null() {
-            ""
-        } else {
-            unsafe { gos_str_arg_text(sep) }
-        };
-        let len = vec.len.max(0) as usize;
-        let mut out = String::new();
-        for i in 0..len {
-            if i > 0 {
-                out.push_str(sep_str);
-            }
-            let bits = unsafe { vec_scalar_word(vec, i) };
-            let f = f64::from_bits(bits as u64);
-            out.push_str(&format!("{f}"));
-        }
-        alloc_cstring(out.as_bytes())
+        unsafe { join_float_elements(v, sep, |f, out| out.push_str(&format!("{f}"))) }
     })
+}
+
+/// `xs.join(sep)` for an f32-element Vec, each element in the digits of its
+/// single-precision value.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_join_f32(v: *const GosVec, sep: *const c_char) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        unsafe {
+            join_float_elements(v, sep, |f, out| {
+                out.push_str(&crate::builtins::format_f32(f));
+            })
+        }
+    })
+}
+
+/// Joins a float-element Vec's elements, each written by `render`.
+unsafe fn join_float_elements(
+    v: *const GosVec,
+    sep: *const c_char,
+    render: impl Fn(f64, &mut String),
+) -> *mut c_char {
+    if v.is_null() {
+        return alloc_cstring(b"");
+    }
+    let vec = unsafe { &*v };
+    let sep_str = if sep.is_null() {
+        ""
+    } else {
+        unsafe { gos_str_arg_text(sep) }
+    };
+    let len = vec.len.max(0) as usize;
+    let mut out = String::new();
+    for i in 0..len {
+        if i > 0 {
+            out.push_str(sep_str);
+        }
+        let bits = unsafe { vec_scalar_word(vec, i) };
+        render(f64::from_bits(bits as u64), &mut out);
+    }
+    alloc_cstring(out.as_bytes())
 }
 
 /// `xs.join(sep)` for a bool-element Vec.
@@ -3646,6 +3788,24 @@ pub unsafe extern "C" fn gos_rt_u64_to_str(n: u64) -> *mut c_char {
 pub unsafe extern "C" fn gos_rt_f64_to_str(x: f64) -> *mut c_char {
     let mut text = crate::builtins::FloatText::new();
     alloc_ascii_cstring(crate::builtins::f64_display(x, &mut text))
+}
+
+/// `x.to_string()` for an `f32`: the shortest digits that read back as the
+/// single-precision value its double-width slot holds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_f32_to_str(x: f64) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        alloc_cstring(crate::builtins::format_f32(x).as_bytes())
+    })
+}
+
+/// `{:?}` of an `f32`: [`gos_rt_f32_to_str`]'s digits, keeping a fractional
+/// part or an exponent so the text reads back as a float.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_f32_debug_to_str(x: f64) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        alloc_cstring(crate::builtins::format_f32_debug(x).as_bytes())
+    })
 }
 
 /// Stringifies an `f64` with `prec` fractional digits - the runtime
@@ -4870,5 +5030,58 @@ mod json_quote_tests {
                 assert_eq!(first_json_special(&bytes), want, "{bytes:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod char_index_tests {
+    /// Text whose characters take one to four bytes, `len` of them, laid out
+    /// so block boundaries fall on every width.
+    fn mixed_text(len: usize) -> String {
+        ['a', 'é', '€', '😀']
+            .iter()
+            .cycle()
+            .skip(len % 4)
+            .take(len)
+            .collect()
+    }
+
+    #[test]
+    fn a_slice_of_indexed_text_finds_every_character() {
+        for len in [0, 1, 7, 8, 9, 31, 32, 33, 63, 64, 65, 200, 1000] {
+            let text = mixed_text(len);
+            let starts: Vec<usize> = text
+                .char_indices()
+                .map(|(at, _)| at)
+                .chain(std::iter::once(text.len()))
+                .collect();
+            unsafe {
+                let source = super::alloc_cstring(text.as_bytes());
+                for (from, to) in [(0, len), (1.min(len), len), (0, len / 2), (len / 3, len)] {
+                    let piece = &text.as_bytes()[starts[from]..starts[to]];
+                    let slice = super::alloc_slice_cstring(source, piece);
+                    assert_eq!(super::typed_str_char_len(slice), to - from, "len {len}");
+                    for (index, &at) in starts[from..=to].iter().enumerate() {
+                        assert_eq!(
+                            super::typed_str_char_boundary(slice, index),
+                            Some(at - starts[from]),
+                            "len {len} slice {from}..{to} char {index}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_through_a_character_is_not_whole() {
+        let text = "aé€😀";
+        assert!(super::utf8_slice_is_whole(text.as_bytes()));
+        assert!(super::utf8_slice_is_whole(&text.as_bytes()[1..3]));
+        assert!(!super::utf8_slice_is_whole(&text.as_bytes()[2..]));
+        assert!(!super::utf8_slice_is_whole(
+            &text.as_bytes()[..text.len() - 1]
+        ));
+        assert!(super::utf8_slice_is_whole(b""));
     }
 }

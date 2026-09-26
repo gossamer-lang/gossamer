@@ -251,7 +251,7 @@ pub(crate) fn builtin_hash_adler32_update(args: &[Value]) -> RuntimeResult<Value
 
 pub(crate) fn builtin_hash_fnv_hash64(args: &[Value]) -> RuntimeResult<Value> {
     let input = bytes_from_value(args.first().unwrap_or(&Value::Unit));
-    Ok(Value::Int(gossamer_std::hash::fnv::hash64(&input) as i64))
+    Ok(Value::Uint(gossamer_std::hash::fnv::hash64(&input)))
 }
 
 pub(crate) fn builtin_hash_fnv_hash32(args: &[Value]) -> RuntimeResult<Value> {
@@ -263,7 +263,7 @@ pub(crate) fn builtin_hash_fnv_hash32(args: &[Value]) -> RuntimeResult<Value> {
 
 pub(crate) fn builtin_hash_fnv_hash_string(args: &[Value]) -> RuntimeResult<Value> {
     let s = args.first().and_then(as_str).unwrap_or("");
-    Ok(Value::Int(gossamer_std::hash::fnv::hash_string(s) as i64))
+    Ok(Value::Uint(gossamer_std::hash::fnv::hash_string(s)))
 }
 
 // ----------------------------------------------------------------------

@@ -245,7 +245,12 @@ impl<'a> Lowerer<'a> {
         // operands' shared type. Pick the operand type off
         // either side - both are the same kind by MIR
         // invariant.
-        let operand_ty = self.operand_ty(lhs);
+        // A constant carries no type of its own, so the operation takes the
+        // typed side's.
+        let operand_ty = match (lhs, rhs) {
+            (Operand::Const(_), Operand::Copy(_)) => self.operand_ty(rhs),
+            _ => self.operand_ty(lhs),
+        };
         let mut kind = numeric_kind(self.tcx, operand_ty);
         let mut operand_llvm = render_ty(self.tcx, operand_ty);
         if matches!(

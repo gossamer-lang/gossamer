@@ -1,0 +1,14 @@
+// A method called on an unsuffixed numeric literal reaches the impl for the
+// type defaulting gives the literal, when several types implement the trait.
+
+trait D { fn d(&self) -> String }
+impl D for i64 { fn d(&self) -> String { format("int {}", self) } }
+impl D for String { fn d(&self) -> String { format("str {}", self) } }
+impl D for f64 { fn d(&self) -> String { format("float {}", self) } }
+fn main() {
+    println("{}", 5.d())
+    println("{}", 2.5.d())
+    println("{}", "x".d())
+    let n = 7
+    println("{}", n.d())
+}

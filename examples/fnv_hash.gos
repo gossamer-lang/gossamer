@@ -12,7 +12,7 @@
 
 use std::hash
 
-fn fnv1a(bytes: [u8]) -> i64 {
+fn fnv1a(bytes: [u8]) -> u64 {
     hash::fnv::hash64(bytes.to_vec())
 }
 

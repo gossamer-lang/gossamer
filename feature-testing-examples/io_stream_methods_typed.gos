@@ -1,0 +1,16 @@
+// The standard streams' methods answer their declared types on every tier:
+// writes and `flush` answer `()`, so their results bind as unit values.
+
+use std::io
+
+fn main() {
+    let out = io::stdout()
+    let wrote: () = out.write_str("text\n")
+    out.write("more\n")
+    out.write_byte(79)
+    out.write_byte(75)
+    out.write_byte(10)
+    let flushed: () = out.flush()
+    io::stderr().write_str("")
+    println("{:?} {:?}", wrote, flushed)
+}

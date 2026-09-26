@@ -93,6 +93,8 @@ gossamer-std = { workspace = true }
 
 [dev-dependencies]
 gossamer-abi = { workspace = true }
+# Reads the zlib-compressed debug sections a `-g` build links.
+flate2 = { workspace = true }
 # In-process HTTP/2 conformance test consumes the h2 crate's
 # client side and drives the Gossamer h2 server through it.
 h2 = "0.4"

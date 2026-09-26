@@ -124,9 +124,86 @@ pub(crate) fn install_strconv(globals: &mut Vec<(&'static str, Value)>) {
         globals,
     );
     globals.push((
-        "__gos_strconv_quote",
-        Value::builtin("__gos_strconv_quote", builtin_strconv_quote),
+        "__gos_debug_quote",
+        Value::builtin("__gos_debug_quote", builtin_debug_quote),
     ));
+    globals.push((
+        "__gos_f32_display",
+        Value::builtin("__gos_f32_display", builtin_f32_display),
+    ));
+    globals.push((
+        "__gos_f32_debug",
+        Value::builtin("__gos_f32_debug", builtin_f32_debug),
+    ));
+    globals.push((
+        "__gos_dyn_display",
+        Value::builtin("__gos_dyn_display", builtin_dyn_display),
+    ));
+    globals.push((
+        "__gos_dyn_debug",
+        Value::builtin("__gos_dyn_debug", builtin_dyn_debug),
+    ));
+}
+
+/// `{}` of a `DynValue`: the value it holds, rendered as that value is.
+pub(crate) fn builtin_dyn_display(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::String(
+        args.first()
+            .map(ToString::to_string)
+            .unwrap_or_default()
+            .into(),
+    ))
+}
+
+/// `{:?}` of a `DynValue`: a string or char in the spelling that builds it,
+/// a float with its fractional part, anything else as `{}` shows it.
+pub(crate) fn builtin_dyn_debug(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::String(
+        match args.first() {
+            Some(Value::String(s)) => format!("{:?}", s.as_str()),
+            Some(Value::Char(c)) => format!("{c:?}"),
+            Some(Value::Float(f)) => gossamer_runtime::builtins::format_float_debug(*f),
+            Some(other) => other.to_string(),
+            None => String::new(),
+        }
+        .into(),
+    ))
+}
+
+fn f32_slot(args: &[Value]) -> f64 {
+    match args.first() {
+        Some(Value::Float(f)) => *f,
+        Some(other) => other.as_i64().map_or(0.0, |n| n as f64),
+        None => 0.0,
+    }
+}
+
+/// `{}` of an `f32`: the shortest digits of the single-precision value.
+pub(crate) fn builtin_f32_display(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::String(
+        gossamer_runtime::builtins::format_f32(f32_slot(args)).into(),
+    ))
+}
+
+/// `{:?}` of an `f32`.
+pub(crate) fn builtin_f32_debug(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::String(
+        gossamer_runtime::builtins::format_f32_debug(f32_slot(args)).into(),
+    ))
+}
+
+/// `{:?}` of a `String` or `char`: Rust's `Debug` quoting, as every tier
+/// renders one at the top level and nested in a container.
+pub(crate) fn builtin_debug_quote(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::String(
+        match args.first() {
+            Some(Value::String(s)) => format!("{:?}", s.as_str()),
+            Some(Value::Char(c)) => format!("{c:?}"),
+            Some(other) => format!("{other:?}"),
+            None => String::new(),
+        }
+        .into(),
+    ))
 }
 
 pub(crate) fn builtin_strconv_parse_i64_radix(args: &[Value]) -> RuntimeResult<Value> {
@@ -187,7 +264,7 @@ pub(crate) fn builtin_strconv_parse_u64(args: &[Value]) -> RuntimeResult<Value> 
         Err(v) => return Ok(v),
     };
     match strconv_std::parse_u64(&text) {
-        Ok(n) => Ok(ok_variant(Value::Int(i64::try_from(n).unwrap_or(i64::MAX)))),
+        Ok(n) => Ok(ok_variant(Value::Uint(n))),
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
 }

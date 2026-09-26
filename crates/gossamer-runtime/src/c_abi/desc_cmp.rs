@@ -185,6 +185,8 @@ pub(crate) unsafe fn compare_flat_in(mode: CmpMode, tag: u8, a: *const u8, b: *c
         2 => float_code(mode, f64::from_bits(wa as u64), f64::from_bits(wb as u64)),
         3 => ord_code((wa & 1).cmp(&(wb & 1))),
         4 => ord_code((wa as u32).cmp(&(wb as u32))),
+        // Every unit value is the same value.
+        gossamer_abi::TUPLE_TAG_UNIT => 0,
         5 => {
             let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
             let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);
@@ -199,7 +201,7 @@ pub(crate) unsafe fn compare_flat_in(mode: CmpMode, tag: u8, a: *const u8, b: *c
 fn float_code(mode: CmpMode, a: f64, b: f64) -> i64 {
     match mode {
         CmpMode::Equal => i64::from(a != b),
-        CmpMode::Order => ord_code(a.partial_cmp(&b).unwrap_or(Ordering::Equal)),
+        CmpMode::Order => ord_code(crate::c_abi::sort::float_order(a, b)),
     }
 }
 

@@ -960,7 +960,7 @@ fn process_spawn_piped_round_trips_across_tiers() {
     .expect("read fixture");
     let dir = fresh_dir("process_spawn_piped");
     let path = write_source(&dir, "process_spawn_piped", &src);
-    let expected = "line: apple\nline: mango\nline: pear\nexit: 0\n";
+    let expected = "line: apple\nline: mango\nline: pear\nexit: 0\ntrue #[\"a\", \"b\"] true\n";
     let vm = run_vm(&path);
     assert_eq!(vm.2, Some(0), "vm stderr: {}", vm.1);
     assert_eq!(vm.0, expected, "vm output drift");

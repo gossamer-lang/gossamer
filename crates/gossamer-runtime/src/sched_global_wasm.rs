@@ -143,6 +143,13 @@ pub fn mark_program_entered() {}
 /// real limit of this target, so a second report would say less, not more.
 pub fn report_deadlock_if_stuck(_op: &str) {}
 
+/// Records `main` waiting on the program. Inert here for the same reason as
+/// [`report_deadlock_if_stuck`].
+pub fn main_waits_on(_op: &str, _still_waiting: std::sync::Arc<dyn Fn() -> bool + Send + Sync>) {}
+
+/// Records `main` leaving a wait. Inert on wasm.
+pub fn end_main_wait() {}
+
 /// Suspends the calling goroutine. With no other thread to make
 /// progress, a real block cannot be satisfied, so after running `arm`
 /// (which would register the wakeup source on native) this diverges

@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0093]: `?` hands an error of the operand's type to a function that answers - here
+--- framed ---
+error[GT0093]: `?` hands an error of the operand's type to a function that answers
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

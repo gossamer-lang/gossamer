@@ -241,7 +241,46 @@ pub(crate) type FnParamTypes = std::collections::HashMap<String, Vec<Ty>>;
 /// `HashMap` lookup). The win shows up on hot loops that close
 /// over constants - fasta's `(state*IA+IC) % IM` LCG step would
 /// otherwise pay three name lookups per iteration.
-pub(crate) type ConstValues = std::collections::HashMap<gossamer_resolve::DefId, Value>;
+#[derive(Debug, Default, Clone)]
+pub(crate) struct ConstValues {
+    values: std::collections::HashMap<gossamer_resolve::DefId, Value>,
+    /// Block-scoped consts whose initializer calls a function, keyed to the
+    /// global each is registered under once functions load. The name carries
+    /// the item's `DefId`, so two blocks' same-named consts stay distinct.
+    deferred: std::collections::HashMap<gossamer_resolve::DefId, String>,
+}
+
+impl ConstValues {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn get(&self, def: gossamer_resolve::DefId) -> Option<&Value> {
+        self.values.get(&def)
+    }
+
+    pub(crate) fn insert(&mut self, def: gossamer_resolve::DefId, value: Value) {
+        self.values.insert(def, value);
+    }
+
+    /// Whether `def` names a const item, evaluated or deferred.
+    pub(crate) fn contains_key(&self, def: gossamer_resolve::DefId) -> bool {
+        self.values.contains_key(&def) || self.deferred.contains_key(&def)
+    }
+
+    /// Records that `def` is read through a global once its initializer can
+    /// run, and answers that global's name.
+    pub(crate) fn defer(&mut self, def: gossamer_resolve::DefId, name: &str) -> String {
+        let global = format!("{name}#const{}", def.local);
+        self.deferred.insert(def, global.clone());
+        global
+    }
+
+    /// The global a deferred const is read through.
+    pub(crate) fn deferred_global(&self, def: gossamer_resolve::DefId) -> Option<&str> {
+        self.deferred.get(&def).map(String::as_str)
+    }
+}
 
 /// Qualified names (`Type::method`) of every user `impl` method whose
 /// receiver is `&mut self`. A method call on a writeback place

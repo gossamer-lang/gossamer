@@ -306,6 +306,11 @@ impl Ident {
     }
 }
 
+/// Prefix of the callee a call to a reflecting generic function takes when it
+/// names no type: the function has no specialisation to reach, and the
+/// resolver reports the missing turbofish at that name.
+pub const REFLECTING_CALL_WITHOUT_TYPE_PREFIX: &str = "__gos_reflect_untyped_";
+
 /// Whether a raw name spelling is a parse-error placeholder.
 #[must_use]
 pub fn is_error_name(name: &str) -> bool {

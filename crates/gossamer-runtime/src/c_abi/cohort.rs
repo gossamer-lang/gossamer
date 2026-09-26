@@ -492,10 +492,19 @@ fn wait_for_drain(node: &Arc<Cohort>) {
                 node.joiners.lock().retain(|x| *x != gid);
             }
         } else {
+            // `main` joining children that may all be waiting on each other
+            // or on `main` itself: the scheduler reports that as a deadlock.
+            let joined = Arc::clone(node);
+            crate::sched_global::main_waits_on(
+                "cohort join",
+                Arc::new(move || joined.state.lock().outstanding > 0),
+            );
             let mut state = node.state.lock();
             if state.outstanding > 0 {
                 node.progress.wait(&mut state);
             }
+            drop(state);
+            crate::sched_global::end_main_wait();
         }
     }
 }

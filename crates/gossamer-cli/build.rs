@@ -42,6 +42,14 @@ use std::process::Command;
 )]
 mod macos_deployment;
 
+#[path = "../gossamer-driver/src/lsda_link_order.rs"]
+#[allow(
+    unreachable_pub,
+    dead_code,
+    reason = "a build-script module the script alone consumes"
+)]
+mod lsda_link_order;
+
 /// Runtime symbols that intentionally have no codegen dispatch arm.
 /// Add a one-line comment justifying each entry.
 const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
@@ -84,6 +92,7 @@ const KNOWN_UNUSED_RUNTIME_SYMBOLS: &[&str] = &[
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=../gossamer-driver/src/lsda_link_order.rs");
     println!("cargo:rerun-if-changed=../gossamer-runtime/src");
     println!("cargo:rerun-if-changed=../gossamer-runtime/Cargo.toml");
     // The workspace manifest owns the [profile.*] sections the inner
@@ -206,8 +215,8 @@ fn rustup_target_installed(triple: &str) -> bool {
     probe.exists()
 }
 
-/// Invokes `cargo build -p gossamer-runtime` with an isolated target
-/// directory, then copies the resulting staticlib into the outer
+/// Invokes `cargo rustc -p gossamer-runtime --crate-type staticlib` with an
+/// isolated target directory, then copies the resulting staticlib into the outer
 /// `target/<profile>/` so downstream lookups find it. When `triple`
 /// is supplied, builds against that rustup target and the artifact
 /// is copied into `target/<triple>/<profile>/`. Returns the path to
@@ -238,9 +247,14 @@ fn build_runtime_into(
     };
 
     let mut cmd = Command::new(&cargo);
-    cmd.arg("build")
+    // Only the staticlib is asked for: with an rlib in the unit's
+    // crate-type set cargo skips LTO, and the archive would be a bundle
+    // of every dependency's unoptimised, un-internalised objects.
+    cmd.arg("rustc")
         .arg("-p")
         .arg("gossamer-runtime")
+        .arg("--crate-type")
+        .arg("staticlib")
         .arg("--target-dir")
         .arg(&inner_target)
         .current_dir(workspace_root);
@@ -345,19 +359,19 @@ fn build_runtime_into(
 }
 
 /// Copies a runtime archive atomically so concurrent package/build readers
-/// never observe a partially-written static library.
+/// never observe a partially-written static library. Each function's
+/// exception table is tied to its code on the way, so a link that drops the
+/// function drops the table too (see `lsda_link_order`).
 fn publish_archive(source: &Path, destination: &Path) {
     if let Some(parent) = destination.parent() {
         std::fs::create_dir_all(parent).expect("create runtime archive directory");
     }
     let tmp = destination.with_extension(format!("a.tmp-{}", std::process::id()));
-    std::fs::copy(source, &tmp).unwrap_or_else(|e| {
-        panic!(
-            "copy staticlib {} -> {}: {e}",
-            source.display(),
-            tmp.display()
-        )
-    });
+    let mut bytes = std::fs::read(source)
+        .unwrap_or_else(|e| panic!("read staticlib {}: {e}", source.display()));
+    lsda_link_order::link_exception_tables_in_archive(&mut bytes);
+    std::fs::write(&tmp, &bytes)
+        .unwrap_or_else(|e| panic!("write staticlib {}: {e}", tmp.display()));
     std::fs::rename(&tmp, destination).expect("atomically publish staticlib");
 }
 

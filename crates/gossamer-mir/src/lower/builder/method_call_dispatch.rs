@@ -346,6 +346,8 @@ impl<'a> Builder<'a> {
             | "gos_rt_i64_to_str"
             | "gos_rt_u64_to_str"
             | "gos_rt_f64_to_str"
+            | "gos_rt_f32_to_str"
+            | "gos_rt_f32_debug_to_str"
             // A `char` / `bool` `to_string` answers a String like every
             // other scalar's does; without the pin the destination keeps an
             // integer type and the String pointer prints as a number.
@@ -554,6 +556,7 @@ impl<'a> Builder<'a> {
             | "gos_rt_strings_join"
             | "gos_rt_vec_join_i64"
             | "gos_rt_vec_join_f64"
+            | "gos_rt_vec_join_f32"
             | "gos_rt_vec_join_bool"
             | "gos_rt_uuid_v4"
             | "gos_rt_uuid_v7"
@@ -1017,7 +1020,7 @@ impl<'a> Builder<'a> {
                 let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
                 self.tcx.intern(gossamer_types::TyKind::Vec(i64_ty))
             }
-            "gos_rt_dyn_kind_name" | "gos_rt_dyn_name" | "gos_rt_dyn_format" => {
+            "gos_rt_dyn_kind_name" | "gos_rt_dyn_name" | "gos_rt_dyn_format" | "gos_rt_dyn_display" => {
                 self.tcx.string_ty()
             }
             "gos_rt_dyn_len" => self.tcx.int_ty(gossamer_types::IntTy::I64),

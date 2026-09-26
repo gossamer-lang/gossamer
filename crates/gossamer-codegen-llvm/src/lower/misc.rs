@@ -770,6 +770,7 @@ impl<'a> Lowerer<'a> {
                     Some(TyKind::Unit) => ConcatKind::Unit,
                     Some(TyKind::Bool) => ConcatKind::Bool,
                     Some(TyKind::Char) => ConcatKind::Char,
+                    Some(TyKind::Float(FloatTy::F32)) => ConcatKind::F32(method == "fmt"),
                     Some(TyKind::Float(_)) => ConcatKind::Float,
                     Some(TyKind::String | TyKind::Ref { .. }) => ConcatKind::StrPtr,
                     Some(TyKind::Int(int_ty)) => {
@@ -817,6 +818,11 @@ impl<'a> Lowerer<'a> {
                             Some(TyKind::Int(_)) if self.is_signed_word_int(elem) => {
                                 ConcatKind::ArrI64(n)
                             }
+                            // An `f32` renders through its own leaf tag, which
+                            // only the descriptor walk carries.
+                            Some(TyKind::Float(FloatTy::F32)) => self
+                                .value_descriptor(ty, method)
+                                .map_or(ConcatKind::Unsupported, ConcatKind::TupleDesc),
                             Some(TyKind::Float(_)) => ConcatKind::ArrF64(n),
                             Some(TyKind::Bool) => ConcatKind::ArrBool(n),
                             Some(TyKind::Char) => ConcatKind::ArrChar(n),
@@ -835,7 +841,9 @@ impl<'a> Lowerer<'a> {
                                     {
                                         ConcatKind::ArrArrI64(n, m)
                                     }
-                                    Some(TyKind::Float(_)) => ConcatKind::ArrArrF64(n, m),
+                                    Some(TyKind::Float(FloatTy::F64)) => {
+                                        ConcatKind::ArrArrF64(n, m)
+                                    }
                                     Some(TyKind::Bool) => ConcatKind::ArrArrBool(n, m),
                                     // A deeper nesting is a run of slots the
                                     // element's own descriptor reads.
@@ -876,6 +884,9 @@ impl<'a> Lowerer<'a> {
                             None | Some(TyKind::Var(_)) => ConcatKind::VecI64,
                             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => ConcatKind::VecUint,
                             Some(TyKind::Int(_)) => ConcatKind::VecI64,
+                            Some(TyKind::Float(FloatTy::F32)) => self
+                                .value_descriptor(elem, method)
+                                .map_or(ConcatKind::Unsupported, ConcatKind::VecDesc),
                             Some(TyKind::Float(_)) => ConcatKind::VecF64,
                             Some(TyKind::Bool) => ConcatKind::VecBool,
                             Some(TyKind::Char) => ConcatKind::VecChar,
@@ -885,7 +896,7 @@ impl<'a> Lowerer<'a> {
                                     Some(TyKind::Int(_)) if self.is_signed_word_int(*inner) => {
                                         ConcatKind::VecVecI64
                                     }
-                                    Some(TyKind::Float(_)) => ConcatKind::VecVecF64,
+                                    Some(TyKind::Float(FloatTy::F64)) => ConcatKind::VecVecF64,
                                     Some(TyKind::String) => ConcatKind::VecVecString,
                                     _ => self
                                         .value_descriptor(elem, method)
@@ -951,10 +962,23 @@ impl<'a> Lowerer<'a> {
                             self.tcx.kind(self.unwrap_ref(*value)),
                             Some(TyKind::Int(IntTy::U64 | IntTy::Usize))
                         );
+                        let f32_kv = [*key, *value].iter().any(|ty| {
+                            matches!(
+                                self.tcx.kind(self.unwrap_ref(*ty)),
+                                Some(TyKind::Float(FloatTy::F32))
+                            )
+                        });
                         if !self.map_kv_supported(*key) {
                             // An aggregate key is stored as its slot bytes,
                             // which the key's own descriptor renders.
                             self.map_aggregate_value_kind(*key, *value, method)
+                        } else if f32_kv
+                            && let (Some(key_tag), Some(value_tag)) =
+                                (self.tuple_elem_tag(*key), self.tuple_elem_tag(*value))
+                        {
+                            // The plain map formatter reads a float word at
+                            // double precision; the tags name the `f32` side.
+                            ConcatKind::MapTagged(key_tag, value_tag)
                         } else if unsigned_kv && self.map_kv_supported(*value) {
                             // The plain map formatter reads every integer slot
                             // as signed; the tags carry each side's declared
@@ -996,6 +1020,10 @@ impl<'a> Lowerer<'a> {
                                 // word the renderer reads through its tag.
                                 Some(TyKind::Bool) => Some(ConcatKind::SetTagged(3, is_btree)),
                                 Some(TyKind::Char) => Some(ConcatKind::SetTagged(4, is_btree)),
+                                Some(TyKind::Float(FloatTy::F32)) => Some(ConcatKind::SetTagged(
+                                    gossamer_abi::TUPLE_TAG_F32,
+                                    is_btree,
+                                )),
                                 Some(TyKind::Float(_)) => Some(ConcatKind::SetTagged(2, is_btree)),
                                 _ => None,
                             });
@@ -1391,6 +1419,7 @@ impl<'a> Lowerer<'a> {
             // `Uint` value for the same reason.
             Some(TyKind::Int(IntTy::U64 | IntTy::Usize)) => Some(1),
             Some(TyKind::Int(_)) => Some(0),
+            Some(TyKind::Float(FloatTy::F32)) => Some(gossamer_abi::TUPLE_TAG_F32),
             Some(TyKind::Float(_)) => Some(2),
             Some(TyKind::Bool) => Some(3),
             Some(TyKind::Char) => Some(4),
@@ -1635,6 +1664,8 @@ impl<'a> Lowerer<'a> {
             // signed word is the value itself.
             Some(TyKind::Int(_)) => Some(0),
             Some(TyKind::Duration | TyKind::Instant) => Some(0),
+            Some(TyKind::Unit) => Some(gossamer_abi::TUPLE_TAG_UNIT),
+            Some(TyKind::Float(FloatTy::F32)) => Some(gossamer_abi::TUPLE_TAG_F32),
             Some(TyKind::Float(_)) => Some(2),
             Some(TyKind::Bool) => Some(3),
             Some(TyKind::Char) => Some(4),
@@ -1873,6 +1904,15 @@ impl<'a> Lowerer<'a> {
         if to_ty == "void" {
             return value.to_string();
         }
+        // A unit value carries nothing, so the slot it lands in holds zero.
+        if from_ty == "void" {
+            return match to_ty {
+                "ptr" => "null",
+                "double" | "float" => "0.0",
+                _ => "0",
+            }
+            .to_string();
+        }
         let tmp = self.fresh();
         let op = match (from_ty, to_ty) {
             ("ptr", _) if to_ty.starts_with('i') => "ptrtoint",
@@ -2103,18 +2143,20 @@ impl<'a> Lowerer<'a> {
     /// [`Ty`] handle. Used to answer `operand_ty` queries for
     /// string-byte reads without needing to mint a fresh
     /// interner entry.
+    /// The type an untyped integer constant carries: a signed `i64`. An
+    /// unsigned constant never reaches an operation as a bare constant (MIR
+    /// keeps it in its typed place), and the signedness of the type chosen
+    /// here selects `sdiv` / `udiv`, `ashr` / `lshr`, and the comparison
+    /// predicate.
     pub(crate) fn borrow_i64_ty(&self) -> Option<Ty> {
-        // Any ≤64-bit integer local works: they all render as
-        // `i64` and classify as `NumericKind::Int`, which is all
-        // callers use the borrowed Ty for.
-        for decl in &self.body.locals {
-            if let Some(TyKind::Int(i)) = self.tcx.kind(decl.ty)
-                && int_width(*i) <= 64
-            {
-                return Some(decl.ty);
-            }
-        }
-        None
+        self.tcx
+            .interned(&TyKind::Int(gossamer_types::IntTy::I64))
+            .or_else(|| {
+                self.body.locals.iter().map(|decl| decl.ty).find(|ty| {
+                    matches!(self.tcx.kind(*ty), Some(TyKind::Int(i))
+                        if int_width(*i) <= 64 && crate::ty::int_signed(*i))
+                })
+            })
     }
 }
 

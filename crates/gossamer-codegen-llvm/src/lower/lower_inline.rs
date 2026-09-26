@@ -3258,6 +3258,8 @@ impl<'a> Lowerer<'a> {
         // growth proportional to the loop iteration count.
         let val_i64 = match val_ty.as_str() {
             "i64" => val_v,
+            // A unit element carries no value; its slot holds zero.
+            "void" => "0".to_string(),
             "i1" => {
                 let tmp = self.fresh();
                 writeln!(self.out, "  {tmp} = zext i1 {val_v} to i64").unwrap();

@@ -135,12 +135,10 @@ pub unsafe extern "C" fn gos_rt_strconv_atoi(s: *const c_char) -> i128 {
     unsafe { gos_rt_strconv_parse_i64(s) }
 }
 
-/// `strconv::parse_u64(s) -> Result<i64, errors::Error>`. Parses an
+/// `strconv::parse_u64(s) -> Result<u64, errors::Error>`. Parses an
 /// unsigned 64-bit decimal so a leading `-` is rejected and values up
-/// to `u64::MAX` are accepted; the i64-typed Ok payload saturates at
-/// `i64::MAX` for values above it. Mirrors `gossamer_std::strconv::
-/// parse_u64` so it agrees with `gos` (which rejects negatives and
-/// clamps the i64 result identically).
+/// to `u64::MAX` are accepted whole. Mirrors `gossamer_std::strconv::
+/// parse_u64` so it agrees with `gos`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_parse_u64(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
@@ -149,7 +147,9 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_u64(s: *const c_char) -> i128 {
             return unsafe { strconv_err("empty input") };
         }
         match trimmed.parse::<u64>() {
-            Ok(n) => unsafe { gos_rt_result_new(0, i64::try_from(n).unwrap_or(i64::MAX)) },
+            // The payload word carries the `u64`'s bits; the static type
+            // reads them back unsigned.
+            Ok(n) => unsafe { gos_rt_result_new(0, n.cast_signed()) },
             Err(e) => unsafe { strconv_err(&int_err_text(trimmed, &e)) },
         }
     })
@@ -374,6 +374,33 @@ pub unsafe extern "C" fn gos_rt_strconv_quote(s: *const c_char) -> *mut c_char {
         }
         out.push('"');
         alloc_cstring(out.as_bytes())
+    })
+}
+
+/// `{:?}` of a `String`: the string between double quotes, escaped as Rust's
+/// `Debug` escapes it, the same text a string nested in a container shows.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_debug_quote_str(s: *const c_char) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        let text = if s.is_null() {
+            ""
+        } else {
+            unsafe { crate::c_abi::gos_str_arg_text(s) }
+        };
+        alloc_cstring(format!("{text:?}").as_bytes())
+    })
+}
+
+/// `{:?}` of a `char`: the character between single quotes, escaped as
+/// Rust's `Debug` escapes it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_debug_quote_char(c: i64) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        let ch = u32::try_from(c)
+            .ok()
+            .and_then(char::from_u32)
+            .unwrap_or('\u{FFFD}');
+        alloc_cstring(format!("{ch:?}").as_bytes())
     })
 }
 

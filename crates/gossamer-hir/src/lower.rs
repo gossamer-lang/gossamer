@@ -88,6 +88,8 @@ pub fn lower_source_file(
     // meet the fuser like any hand-written loop would.
     crate::par::desugar_parallel_adapters(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
+    // After the desugars above, so the arithmetic they generate rounds too.
+    crate::f32_round::round_f32_values(&mut program, lowerer.tcx, &mut lowerer.ids);
     crate::place_refs::inline_place_references(&mut program);
     program
 }
@@ -913,9 +915,10 @@ impl Lowerer<'_> {
         }
     }
 
-    /// A path expression naming a free function, for a call this pass builds.
-    /// `{:?}` of a `String` renders it in the spelling that builds it:
-    /// each `String` argument of the `__debug` channel is quoted first.
+    /// `{:?}` of a `String` or `char` renders it in the spelling that builds
+    /// it, so each such argument of the `__debug` channel is quoted first. A
+    /// `DynValue` argument renders through the channel's own `DynValue`
+    /// renderer on either channel.
     fn quote_debug_strings(&mut self, callee: &HirExpr, args: &mut [HirExpr]) {
         let HirExprKind::Path {
             segments,
@@ -924,16 +927,32 @@ impl Lowerer<'_> {
         else {
             return;
         };
-        if !matches!(segments.as_slice(), [only] if only.name == "__debug") {
-            return;
-        }
-        for arg in args.iter_mut() {
-            if !matches!(self.tcx.kind_of(arg.ty), gossamer_types::TyKind::String) {
-                continue;
+        let debug = match segments.as_slice() {
+            [only] if only.name == "__debug" => true,
+            [only]
+                if matches!(
+                    only.name.as_str(),
+                    "__concat" | "println" | "print" | "eprintln" | "eprint" | "format" | "panic"
+                ) =>
+            {
+                false
             }
+            _ => return,
+        };
+        for arg in args.iter_mut() {
+            // A `DynValue` holds a value whose text depends on the channel:
+            // its string reads as itself under `{}` and quoted under `{:?}`.
+            let renderer = match self.tcx.kind_of(arg.ty) {
+                gossamer_types::TyKind::DynValue if debug => "__gos_dyn_debug",
+                gossamer_types::TyKind::DynValue => "__gos_dyn_display",
+                gossamer_types::TyKind::String | gossamer_types::TyKind::Char if debug => {
+                    "__gos_debug_quote"
+                }
+                _ => continue,
+            };
             let span = arg.span;
-            let ty = arg.ty;
-            let quote = self.free_path(&["__gos_strconv_quote"], span);
+            let ty = self.tcx.string_ty();
+            let quote = self.free_path(&[renderer], span);
             let inner = std::mem::replace(
                 arg,
                 HirExpr {
@@ -950,6 +969,7 @@ impl Lowerer<'_> {
         }
     }
 
+    /// A path expression naming a free function, for a call this pass builds.
     fn free_path(&mut self, segments: &[&str], span: Span) -> HirExpr {
         HirExpr {
             id: self.fresh(),
@@ -1569,6 +1589,7 @@ impl Lowerer<'_> {
                         };
                     }
                     self.resolve_format_pad_request(&callee, &mut args);
+                    self.narrow_radix_operand(&callee, &mut args);
                     self.quote_debug_strings(&callee, &mut args);
                     if let HirExprKind::Path { segments, .. } = &callee.kind
                         && segments.len() == 2
@@ -1663,6 +1684,40 @@ impl Lowerer<'_> {
                     return HirExprKind::Call {
                         callee: Box::new(callee),
                         args: call_args,
+                    };
+                }
+                // A narrow signed integer's magnitude is taken as a word and
+                // narrowed back, which wraps `i8::MIN` to itself as unary `-`
+                // does, so the value stays in its type's range on every tier.
+                if name.name == "abs"
+                    && args.is_empty()
+                    && let Some(narrow) = self.narrow_signed_int_of(receiver.id)
+                {
+                    let span = expr.span;
+                    let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+                    let widened = HirExpr {
+                        id: self.fresh(),
+                        span,
+                        ty: i64_ty,
+                        kind: HirExprKind::Cast {
+                            value: Box::new(self.lower_expr(receiver)),
+                            ty: i64_ty,
+                        },
+                    };
+                    let magnitude = HirExpr {
+                        id: self.fresh(),
+                        span,
+                        ty: i64_ty,
+                        kind: HirExprKind::MethodCall {
+                            receiver: Box::new(widened),
+                            name: name.clone(),
+                            args: Vec::new(),
+                            owner: None,
+                        },
+                    };
+                    return HirExprKind::Cast {
+                        value: Box::new(magnitude),
+                        ty: narrow,
                     };
                 }
                 // `x.to_bits()` is the method spelling of
@@ -1862,6 +1917,46 @@ impl Lowerer<'_> {
             HirExprKind::Literal(HirLiteral::Int(text)) => text.parse().ok(),
             _ => None,
         }
+    }
+
+    /// Renders a narrow signed integer in `{:x}` / `{:b}` / `{:o}` as the bits
+    /// of its own width, as Rust does: `-1i8` is `ff`, not sixteen `f`s. The
+    /// operand is read as the unsigned type of the same width.
+    fn narrow_radix_operand(&mut self, callee: &HirExpr, args: &mut [HirExpr]) {
+        use gossamer_types::{IntTy, TyKind};
+        let HirExprKind::Path { segments, .. } = &callee.kind else {
+            return;
+        };
+        if segments
+            .last()
+            .is_none_or(|segment| segment.name.as_str() != "__fmt_radix")
+        {
+            return;
+        }
+        let Some(value) = args.first_mut() else {
+            return;
+        };
+        let unsigned = match self.tcx.kind_of(value.ty) {
+            TyKind::Int(IntTy::I8) => IntTy::U8,
+            TyKind::Int(IntTy::I16) => IntTy::U16,
+            TyKind::Int(IntTy::I32) => IntTy::U32,
+            _ => return,
+        };
+        let target = self.tcx.int_ty(unsigned);
+        let span = value.span;
+        let operand = std::mem::replace(
+            value,
+            HirExpr {
+                id: self.fresh(),
+                span,
+                ty: target,
+                kind: HirExprKind::Tuple(Vec::new()),
+            },
+        );
+        value.kind = HirExprKind::Cast {
+            value: Box::new(operand),
+            ty: target,
+        };
     }
 
     /// Turns a `__fmt_pad` call's alignment *request* into the alignment the
@@ -2477,6 +2572,77 @@ impl Lowerer<'_> {
             .kind
     }
 
+    /// Splits a `for` pattern into the shape every backend's loop walks - a
+    /// binding, `_`, or a tuple of those - and the `let` statements that
+    /// destructure the rest at the top of the body. A struct, nested tuple,
+    /// or other compound element is bound whole and destructured by an
+    /// irrefutable `let`, which every tier already lowers.
+    fn flatten_for_pattern(&mut self, pat: HirPat) -> (HirPat, Vec<HirStmt>) {
+        let simple =
+            |p: &HirPat| matches!(p.kind, HirPatKind::Binding { .. } | HirPatKind::Wildcard);
+        let mut lets = Vec::new();
+        match pat.kind {
+            HirPatKind::Binding { .. } | HirPatKind::Wildcard => (pat, lets),
+            HirPatKind::Tuple(elems) => {
+                let mut flat = Vec::with_capacity(elems.len());
+                for (index, elem) in elems.into_iter().enumerate() {
+                    if simple(&elem) {
+                        flat.push(elem);
+                    } else {
+                        let name = format!("{}{index}", crate::fuse::FOR_ELEM);
+                        flat.push(self.for_elem_binding(&name, &elem));
+                        lets.push(self.for_elem_let(&name, elem));
+                    }
+                }
+                let kind = HirPatKind::Tuple(flat);
+                (HirPat { kind, ..pat }, lets)
+            }
+            kind => {
+                let whole = HirPat { kind, ..pat };
+                let binding = self.for_elem_binding(crate::fuse::FOR_ELEM, &whole);
+                lets.push(self.for_elem_let(crate::fuse::FOR_ELEM, whole));
+                (binding, lets)
+            }
+        }
+    }
+
+    /// A binding named `name` of `like`'s type, for a `for` element taken
+    /// whole.
+    fn for_elem_binding(&mut self, name: &str, like: &HirPat) -> HirPat {
+        HirPat {
+            id: self.fresh(),
+            span: like.span,
+            ty: like.ty,
+            kind: HirPatKind::Binding {
+                name: Ident::new(name),
+                mutable: false,
+            },
+        }
+    }
+
+    /// `let pattern = name`, destructuring a `for` element bound whole.
+    fn for_elem_let(&mut self, name: &str, pattern: HirPat) -> HirStmt {
+        let (ty, span) = (pattern.ty, pattern.span);
+        let init = HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Path {
+                segments: vec![Ident::new(name)],
+                def: None,
+            },
+        };
+        HirStmt {
+            id: self.fresh(),
+            span,
+            kind: HirStmtKind::Let {
+                pattern,
+                ty,
+                init: Some(init),
+            },
+        }
+    }
+
     /// Shared builder: wraps a `match scrutinee { Some(pat) =>
     /// body, None => break }` in a `loop` whose body is one Block.
     fn assemble_for_loop(
@@ -2487,7 +2653,8 @@ impl Lowerer<'_> {
         label: Option<String>,
         span: Span,
     ) -> HirExpr {
-        let loop_pat = self.lower_pat(pattern);
+        let written_pat = self.lower_pat(pattern);
+        let (loop_pat, destructures) = self.flatten_for_pattern(written_pat);
         let pat_ty = loop_pat.ty;
         let some_pat = HirPat {
             id: self.fresh(),
@@ -2507,7 +2674,25 @@ impl Lowerer<'_> {
                 fields: Vec::new(),
             },
         };
-        let body_expr = self.lower_expr(body);
+        let written_body = self.lower_expr(body);
+        let body_expr = if destructures.is_empty() {
+            written_body
+        } else {
+            let (body_ty, body_span) = (written_body.ty, written_body.span);
+            HirExpr {
+                id: self.fresh(),
+                span: body_span,
+                ty: body_ty,
+                kind: HirExprKind::Block(HirBlock {
+                    id: self.fresh(),
+                    span: body_span,
+                    stmts: destructures,
+                    tail: Some(Box::new(written_body)),
+                    ty: body_ty,
+                    is_comptime: false,
+                }),
+            }
+        };
         let unit_ty = self.unit();
         let break_expr = HirExpr {
             id: self.fresh(),
@@ -2592,6 +2777,20 @@ impl Lowerer<'_> {
             }
             _ => true,
         }
+    }
+
+    /// The type of a receiver that is an `i8`, `i16`, or `i32`.
+    fn narrow_signed_int_of(&mut self, receiver: NodeId) -> Option<gossamer_types::Ty> {
+        use gossamer_types::{IntTy, TyKind};
+        let mut ty = self.table.get(receiver)?;
+        while let Some(TyKind::Ref { inner, .. }) = self.tcx.kind(ty) {
+            ty = *inner;
+        }
+        matches!(
+            self.tcx.kind(ty),
+            Some(TyKind::Int(IntTy::I8 | IntTy::I16 | IntTy::I32))
+        )
+        .then_some(ty)
     }
 
     fn iter_needs_state_binding(&self, ty: gossamer_types::Ty) -> bool {
@@ -3008,6 +3207,7 @@ impl Lowerer<'_> {
         value_ty: gossamer_types::Ty,
         span: Span,
     ) -> HirExpr {
+        use gossamer_types::TyKind;
         let Some(inner_err) = self.try_err_payload_ty(value_ty) else {
             return err_value;
         };
@@ -3020,10 +3220,51 @@ impl Lowerer<'_> {
         if inner_err == outer_err {
             return err_value;
         }
-        // Mismatched err types - emit `errors::Error::from(__try_err)`.
-        // The std `errors::Error::from` is registered as the canonical
-        // String / errors::Error / anyhow-style adapter; programs that
-        // declare custom err types can extend it.
+        // A function answering a type of its own converts through that type's
+        // `From` impl, which the checker has matched to the operand's error.
+        if let Some(TyKind::Adt { def, .. }) = self.tcx.kind(outer_err).cloned()
+            && def.local < u32::MAX - 64
+            && let Some(owner) = self.tcx.def_name(def).map(str::to_string)
+        {
+            return HirExpr {
+                id: self.fresh(),
+                span,
+                ty: outer_err,
+                kind: HirExprKind::Call {
+                    callee: Box::new(HirExpr {
+                        id: self.fresh(),
+                        span,
+                        ty: self.error_ty(),
+                        kind: HirExprKind::Path {
+                            segments: vec![Ident::new(&owner), Ident::new("from")],
+                            def: None,
+                        },
+                    }),
+                    args: vec![err_value],
+                },
+            };
+        }
+        // `errors::Error::from` takes a message or another error; any other
+        // error reaches it as the text it displays.
+        let err_value = if matches!(
+            self.tcx.kind(inner_err),
+            Some(TyKind::String | TyKind::DynError)
+        ) {
+            err_value
+        } else {
+            let string_ty = self.tcx.string_ty();
+            HirExpr {
+                id: self.fresh(),
+                span,
+                ty: string_ty,
+                kind: HirExprKind::MethodCall {
+                    receiver: Box::new(err_value),
+                    name: Ident::new("to_string"),
+                    args: Vec::new(),
+                    owner: None,
+                },
+            }
+        };
         HirExpr {
             id: self.fresh(),
             span,
@@ -3972,10 +4213,15 @@ impl Lowerer<'_> {
                         declared_ty
                     };
                 let pattern = self.lower_pat_with_ty(pattern, pattern_ty);
-                HirStmtKind::Let {
-                    pattern,
-                    ty: pattern_ty,
-                    init,
+                match init {
+                    Some(init) if pattern_holds_slice(&pattern) => {
+                        self.let_through_match(pattern, init, stmt.span)
+                    }
+                    init => HirStmtKind::Let {
+                        pattern,
+                        ty: pattern_ty,
+                        init,
+                    },
                 }
             }
             AstStmtKind::Expr { expr, has_semi } => {
@@ -4017,6 +4263,95 @@ impl Lowerer<'_> {
             id: self.fresh(),
             span: stmt.span,
             kind,
+        }
+    }
+
+    /// A `let` whose pattern takes a fixed array apart, written as the match
+    /// `let ... else` desugars to: the pattern is an arm, and the arm answers
+    /// its bindings for a plain `let` to receive. The checker has proved the
+    /// pattern matches every value, so the one arm is the whole match.
+    fn let_through_match(&mut self, pattern: HirPat, init: HirExpr, span: Span) -> HirStmtKind {
+        let mut binds = Vec::new();
+        collect_hir_bindings(&pattern, &mut binds);
+        let unit = self.tcx.unit();
+        let (outer, ty, body) = match binds.as_slice() {
+            [] => (
+                HirPatKind::Wildcard,
+                unit,
+                HirExprKind::Literal(HirLiteral::Unit),
+            ),
+            [(name, mutable, ty)] => (
+                HirPatKind::Binding {
+                    name: name.clone(),
+                    mutable: *mutable,
+                },
+                *ty,
+                HirExprKind::Path {
+                    segments: vec![name.clone()],
+                    def: None,
+                },
+            ),
+            _ => {
+                let tys: Vec<_> = binds.iter().map(|(_, _, ty)| *ty).collect();
+                let pats = binds
+                    .iter()
+                    .map(|(name, mutable, ty)| HirPat {
+                        id: self.fresh(),
+                        span,
+                        ty: *ty,
+                        kind: HirPatKind::Binding {
+                            name: name.clone(),
+                            mutable: *mutable,
+                        },
+                    })
+                    .collect();
+                let reads = binds
+                    .iter()
+                    .map(|(name, _, ty)| HirExpr {
+                        id: self.fresh(),
+                        span,
+                        ty: *ty,
+                        kind: HirExprKind::Path {
+                            segments: vec![name.clone()],
+                            def: None,
+                        },
+                    })
+                    .collect();
+                (
+                    HirPatKind::Tuple(pats),
+                    self.tcx.intern(gossamer_types::TyKind::Tuple(tys)),
+                    HirExprKind::Tuple(reads),
+                )
+            }
+        };
+        let body = HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: body,
+        };
+        let matched = HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(init),
+                arms: vec![HirMatchArm {
+                    pattern,
+                    guard: None,
+                    body,
+                }],
+            },
+        };
+        HirStmtKind::Let {
+            pattern: HirPat {
+                id: self.fresh(),
+                span,
+                ty,
+                kind: outer,
+            },
+            ty,
+            init: Some(matched),
         }
     }
 
@@ -4926,5 +5261,103 @@ fn ty_has_unresolved_var(tcx: &gossamer_types::TyCtxt, ty: gossamer_types::Ty) -
             .into_iter()
             .any(|a| ty_has_unresolved_var(tcx, a)),
         _ => false,
+    }
+}
+
+/// Whether a pattern takes a sequence apart anywhere inside it, with every
+/// name it binds written as a pattern of its own. A struct field's shorthand
+/// binding carries no type here, so a pattern holding one keeps the plain
+/// `let` lowering.
+fn pattern_holds_slice(pattern: &HirPat) -> bool {
+    !holds_field_shorthand(pattern) && takes_sequence_apart(pattern)
+}
+
+fn holds_field_shorthand(pattern: &HirPat) -> bool {
+    match &pattern.kind {
+        HirPatKind::Struct { fields, .. } => fields
+            .iter()
+            .any(|field| field.pattern.as_ref().is_none_or(holds_field_shorthand)),
+        HirPatKind::Tuple(parts) | HirPatKind::Or(parts) => parts.iter().any(holds_field_shorthand),
+        HirPatKind::Variant { fields, .. } => fields.iter().any(holds_field_shorthand),
+        HirPatKind::Slice {
+            prefix,
+            rest,
+            suffix,
+        } => prefix
+            .iter()
+            .chain(rest.as_deref())
+            .chain(suffix)
+            .any(holds_field_shorthand),
+        HirPatKind::Ref { inner, .. } | HirPatKind::At { sub: inner, .. } => {
+            holds_field_shorthand(inner)
+        }
+        HirPatKind::Binding { .. }
+        | HirPatKind::Wildcard
+        | HirPatKind::Literal(_)
+        | HirPatKind::Rest
+        | HirPatKind::Range { .. } => false,
+    }
+}
+
+fn takes_sequence_apart(pattern: &HirPat) -> bool {
+    match &pattern.kind {
+        HirPatKind::Slice { .. } => true,
+        HirPatKind::Tuple(parts) | HirPatKind::Or(parts) => parts.iter().any(takes_sequence_apart),
+        HirPatKind::Variant { fields, .. } => fields.iter().any(takes_sequence_apart),
+        HirPatKind::Struct { fields, .. } => fields
+            .iter()
+            .filter_map(|field| field.pattern.as_ref())
+            .any(takes_sequence_apart),
+        HirPatKind::Ref { inner, .. } | HirPatKind::At { sub: inner, .. } => {
+            takes_sequence_apart(inner)
+        }
+        HirPatKind::Binding { .. }
+        | HirPatKind::Wildcard
+        | HirPatKind::Literal(_)
+        | HirPatKind::Rest
+        | HirPatKind::Range { .. } => false,
+    }
+}
+
+/// The names a pattern binds, with their mutability and type, in source
+/// order. An or-pattern binds the same names in each alternative.
+fn collect_hir_bindings(pattern: &HirPat, out: &mut Vec<(Ident, bool, gossamer_types::Ty)>) {
+    match &pattern.kind {
+        HirPatKind::Binding { name, mutable } => out.push((name.clone(), *mutable, pattern.ty)),
+        HirPatKind::Tuple(parts) | HirPatKind::Variant { fields: parts, .. } => {
+            for part in parts {
+                collect_hir_bindings(part, out);
+            }
+        }
+        HirPatKind::Or(parts) => {
+            if let Some(first) = parts.first() {
+                collect_hir_bindings(first, out);
+            }
+        }
+        HirPatKind::Slice {
+            prefix,
+            rest,
+            suffix,
+        } => {
+            for part in prefix.iter().chain(rest.as_deref()).chain(suffix) {
+                collect_hir_bindings(part, out);
+            }
+        }
+        HirPatKind::Struct { fields, .. } => {
+            for field in fields {
+                if let Some(part) = &field.pattern {
+                    collect_hir_bindings(part, out);
+                }
+            }
+        }
+        HirPatKind::At { name, mutable, sub } => {
+            out.push((name.clone(), *mutable, pattern.ty));
+            collect_hir_bindings(sub, out);
+        }
+        HirPatKind::Ref { inner, .. } => collect_hir_bindings(inner, out),
+        HirPatKind::Wildcard
+        | HirPatKind::Literal(_)
+        | HirPatKind::Rest
+        | HirPatKind::Range { .. } => {}
     }
 }

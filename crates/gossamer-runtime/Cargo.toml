@@ -61,7 +61,9 @@ num-traits = "0.2"
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true, features = ["unbounded_depth"] }
+# `float_roundtrip` parses every number to the nearest double, as the VM
+# does; the default fast path can land one ulp off.
+serde_json = { workspace = true, features = ["unbounded_depth", "float_roundtrip"] }
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 flate2 = { workspace = true }
 sha1 = { version = "0.10", default-features = false, features = ["std"] }
@@ -142,11 +144,9 @@ mimalloc = "0.1"
 # (return freed pages to the OS promptly - see `configure_allocator`),
 # and the `arena` bindings for the exclusive arena copy blobs live in.
 libmimalloc-sys = { version = "0.1", features = ["extended", "arena"] }
-# Real machine-stack unwinding for compiled-tier panic / SIGQUIT
-# backtraces. `std::backtrace` reports "unsupported" on the
-# static-musl release target, so the standalone crate - which builds
-# its unwinder into the binary against the linked `libunwind.a` - is
-# the only mechanism that works on the default release link path.
+# Resolves the return addresses the heap and CPU profilers sample, which
+# std has no API for. A panic trace walks the stack through
+# `std::backtrace`, whose symbolizer every binary already links.
 backtrace = "0.3"
 zstd = "0.13"
 # `static` bundles the libbz2 C source into the archive rather than

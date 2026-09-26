@@ -20,7 +20,7 @@ fn whole_crc(buf: Vec<u8>) -> i64 {
     crc32::checksum(buf)
 }
 
-fn digest(buf: Vec<u8>) -> i64 {
+fn digest(buf: Vec<u8>) -> u64 {
     fnv::hash64(buf)
 }
 

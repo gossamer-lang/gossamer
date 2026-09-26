@@ -229,6 +229,9 @@ pub enum TypeError {
     /// A plain `let` used a pattern that might not match its value.
     #[error("this `let` pattern might not match its value")]
     LetPatternMayNotMatch,
+    /// A `for` loop's pattern might not match some element it walks.
+    #[error("this `for` pattern might not match every element")]
+    ForPatternMayNotMatch,
     /// A `let &...` pattern tried to destructure a non-reference value.
     #[error(
         "`let {pattern} name = value` requires an `{pattern}` initializer; write `let name = {pattern} value` to borrow, or remove `{pattern}` to bind the value directly"
@@ -572,6 +575,8 @@ pub enum TypeError {
         ty: String,
         /// Item the block defines that the trait does not declare.
         item: String,
+        /// The item's keyword as written: `fn`, `type`, or `const`.
+        kind: &'static str,
         /// Item names the trait does declare, in declaration order.
         declared: Vec<String>,
     },
@@ -900,6 +905,22 @@ pub enum TypeError {
         /// Rendered key type of the map.
         key: String,
     },
+    /// `?` propagates an error of one type out of a function answering
+    /// another, and nothing converts the first into the second.
+    #[error("`?` cannot convert the error `{from}` into the function's error `{to}`")]
+    QuestionMarkNoConversion {
+        /// Rendered error type of the operand.
+        from: String,
+        /// Rendered error type the enclosing function answers.
+        to: String,
+    },
+    /// A closure handed to a `[rust-bindings]` callback has a parameter or
+    /// result type nothing in the program decides.
+    #[error("the closure passed to `{callee}` needs a type for each parameter and its result")]
+    BindingCallbackUntyped {
+        /// The binding function the closure is passed to.
+        callee: String,
+    },
     /// A field was read from an unannotated closure parameter whose type
     /// nothing in the program decides.
     #[error("cannot infer the type of the closure parameter whose field `{field}` is read")]
@@ -1066,6 +1087,7 @@ impl TypeError {
             Self::NonExhaustiveMatch { .. } => "non-exhaustive-match",
             Self::CannotAssignToLiteral => "cannot-assign-to-literal",
             Self::LetPatternMayNotMatch => "let-pattern-may-not-match",
+            Self::ForPatternMayNotMatch => "for-pattern-may-not-match",
             Self::ReferencePatternRequiresReference { .. } => {
                 "reference-pattern-requires-reference"
             }
@@ -1135,6 +1157,8 @@ impl TypeError {
             Self::SimdShape { .. } => "simd-shape",
             Self::OrderedRangeArgument { .. } => "ordered-range-argument",
             Self::FieldReceiverUninferred { .. } => "field-receiver-uninferred",
+            Self::QuestionMarkNoConversion { .. } => "question-mark-no-conversion",
+            Self::BindingCallbackUntyped { .. } => "binding-callback-untyped",
             Self::ReferenceArgumentNeedsDeref { .. } => "reference-argument-needs-deref",
             Self::DerefWriteToNonReference { .. } => "deref-write-to-non-reference",
             Self::EnumReprTooNarrow { .. } => "enum-repr-too-narrow",
@@ -1184,10 +1208,14 @@ impl TypeError {
             Self::SimdShape { .. } => "GT0089",
             Self::OrderedRangeArgument { .. } => "GT0091",
             Self::FieldReceiverUninferred { .. } => "GT0092",
+            Self::QuestionMarkNoConversion { .. } => "GT0093",
+            Self::BindingCallbackUntyped { .. } => "GT0094",
             Self::UnresolvedMethod { .. } => "GT0002",
             Self::UnresolvedOp { .. } | Self::UnresolvedOpImpl { .. } => "GT0003",
             Self::NonExhaustiveMatch { .. } => "GT0004",
-            Self::CannotAssignToLiteral | Self::LetPatternMayNotMatch => "GT0047",
+            Self::CannotAssignToLiteral
+            | Self::LetPatternMayNotMatch
+            | Self::ForPatternMayNotMatch => "GT0047",
             Self::ReferencePatternRequiresReference { .. } => "GT0048",
             Self::ReferenceParameterPatternPosition { .. } => "GT0069",
             Self::UnsizedSliceValue { .. } => "GT0049",
@@ -1518,6 +1546,13 @@ impl TypeDiagnostic {
                     )
                     .with_note("a plain `let` must accept every possible initializer value");
             }
+            TypeError::ForPatternMayNotMatch => {
+                out = out
+                    .with_help(
+                        "bind the element with a name and test it in the body with `if let` or `match`",
+                    )
+                    .with_note("a `for` pattern must accept every element the loop walks");
+            }
             TypeError::ReferencePatternRequiresReference { pattern } => {
                 out = out
                     .with_help(format!(
@@ -1786,17 +1821,21 @@ impl TypeDiagnostic {
                 trait_name,
                 ty,
                 item,
+                kind,
                 declared,
             } => {
-                out = out
-                    .with_help(format!(
+                let help = if *kind == "fn" {
+                    format!(
                         "move it to an inherent `impl {ty} {{ fn {item} .. }}` block, or \
                          declare `fn {item}` in `trait {trait_name}`"
-                    ))
-                    .with_note(match declared.as_slice() {
-                        [] => format!("`{trait_name}` declares no items of its own"),
-                        _ => format!("`{trait_name}` declares: `{}`", declared.join("`, `")),
-                    });
+                    )
+                } else {
+                    format!("declare `{kind} {item}` in `trait {trait_name}`, or remove it")
+                };
+                out = out.with_help(help).with_note(match declared.as_slice() {
+                    [] => format!("`{trait_name}` declares no items of its own"),
+                    _ => format!("`{trait_name}` declares: `{}`", declared.join("`, `")),
+                });
             }
             TypeError::ConflictingTraitImpl {
                 trait_name,
@@ -2101,6 +2140,17 @@ impl TypeDiagnostic {
                         rewrite.clone(),
                     ));
                 }
+            }
+            TypeError::QuestionMarkNoConversion { from, to } => {
+                out = out.with_help(format!(
+                    "write `impl From<{from}> for {to}`, answer `Result<_, {from}>` here, or convert the error with `.map_err(..)` before `?`"
+                ));
+            }
+            TypeError::BindingCallbackUntyped { .. } => {
+                out = out.with_help(
+                    "a binding's signature does not name its callback's types; annotate each \
+                     parameter, such as `|s: String| s.len()`",
+                );
             }
             TypeError::FieldReceiverUninferred { .. } => {
                 out = out.with_help(
@@ -2554,7 +2604,7 @@ fn json_not_serializable_diagnostic(
     ))
     .with_help(format!(
         "unwrap the value before encoding - e.g. `let v = <expr>?` then \
-             `json::{op}(&v)` - or build a `json::Value`"
+             `json::{op}(v)` - or build a `json::Value`"
     ))
 }
 

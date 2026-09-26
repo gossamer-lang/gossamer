@@ -159,6 +159,35 @@ pub fn format_float_debug(f: f64) -> String {
     format!("{f:?}")
 }
 
+/// [`format_float`] for an `f32` carried in a double-width slot: the shortest
+/// digits that read back as the same single-precision value.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the slot holds an f32 value exactly, so the conversion is exact"
+)]
+pub fn format_f32(f: f64) -> String {
+    format!("{}", f as f32)
+}
+
+/// The double whose shortest digits are an `f32`'s own, for an encoder
+/// that writes doubles: JSON text then spells the single-precision value as
+/// its own digits (`0.1`, not `0.10000000149011612`).
+#[must_use]
+pub fn f32_as_decimal_double(f: f64) -> f64 {
+    format_f32(f).parse().unwrap_or(f)
+}
+
+/// [`format_float_debug`] for an `f32` carried in a double-width slot.
+#[must_use]
+#[allow(
+    clippy::cast_possible_truncation,
+    reason = "the slot holds an f32 value exactly, so the conversion is exact"
+)]
+pub fn format_f32_debug(f: f64) -> String {
+    format!("{:?}", f as f32)
+}
+
 /// Canonical rendering of a boolean: `"true"` / `"false"`. The
 /// constant is shared so both paths format the value identically -
 /// subtle case differences would otherwise cause parity-harness

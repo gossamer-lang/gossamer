@@ -579,7 +579,7 @@ fn builtin_ends_with(args: &[Value]) -> RuntimeResult<Value> {
 }
 
 /// `String::slice(s, a, b) -> Result<String, errors::Error>` - the
-/// non-panicking character-range slice contract: `a > b` or `b > len`
+/// non-panicking byte-range slice contract: `a > b` or `b > byte_len`
 /// returns Err.
 fn builtin_str_slice(args: &[Value]) -> RuntimeResult<Value> {
     let Some(Value::String(s)) = args.first() else {
@@ -589,7 +589,8 @@ fn builtin_str_slice(args: &[Value]) -> RuntimeResult<Value> {
     };
     let start = args.get(1).and_then(value_to_int).unwrap_or(0);
     let end = args.get(2).and_then(value_to_int).unwrap_or(0);
-    let len = s.len() as i64;
+    // The bounds are byte offsets, as `substring` / `byte_len` read them.
+    let len = s.byte_len() as i64;
     // Match the compiled `gos_rt_str_slice` bounds policy + message
     // verbatim so `gos` and `gos build` agree byte-for-byte.
     if start < 0 || end < 0 || start > end || end > len {

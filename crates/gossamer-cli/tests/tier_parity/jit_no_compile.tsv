@@ -78,6 +78,7 @@ feature-testing-examples/break_unknown_label.gos	no hot body
 feature-testing-examples/btreemap_goroutine_shared.gos	cross-goroutine
 feature-testing-examples/btreemap_range_api.gos	admission gate
 feature-testing-examples/btreeset_range_api.gos	no hot body
+feature-testing-examples/bufio_scanner_next.gos	bytecode-only local
 feature-testing-examples/by_value_container_semantics.gos	admission gate
 feature-testing-examples/bytes_builder.gos	unlowered call
 feature-testing-examples/callable_containers.gos	callable local
@@ -137,6 +138,7 @@ feature-testing-examples/crypto_sha_hex.gos	no hot body
 feature-testing-examples/cycle_shared_goroutines.gos	bytecode-only local
 feature-testing-examples/debug_impl_dispatch.gos	entry shape
 feature-testing-examples/debug_option_result.gos	no hot body
+feature-testing-examples/debug_quoting_strings_chars.gos	no hot body
 feature-testing-examples/debug_string_quoting.gos	admission gate
 feature-testing-examples/debugfmt_aggregates.gos	no hot user body
 feature-testing-examples/debugfmt_floats.gos	no hot body
@@ -150,11 +152,13 @@ feature-testing-examples/display_impl_dispatch.gos	bytecode-only local
 feature-testing-examples/doc_test_vs_unit_test_drift.gos	no hot body
 feature-testing-examples/doctest_fences.gos	no hot body
 feature-testing-examples/duration_methods.gos	no hot body
+feature-testing-examples/dyn_value_rendering.gos	no hot body
 feature-testing-examples/elemty_float_eager.gos	no hot body
 feature-testing-examples/elemty_string_closures.gos	no hot body
 feature-testing-examples/encoding_xml.gos	no hot body
 feature-testing-examples/entry_result_err.gos	no hot body
 feature-testing-examples/entry_toplevel_err.gos	no hot body
+feature-testing-examples/enum_payload_patterns_and_keys.gos	bytecode-only local
 feature-testing-examples/enum_struct_eq.gos	no hot body
 feature-testing-examples/enum_tuple_payload_collections.gos	aggregate print
 feature-testing-examples/enum_unit_local.gos	no hot body
@@ -165,8 +169,13 @@ feature-testing-examples/fast_string_path_scan.gos	no hot body
 feature-testing-examples/field_iteration_callee_shapes.gos	&mut aggregate param
 feature-testing-examples/fixed_array_mut_param_copy.gos	&mut aggregate param
 feature-testing-examples/flag_cell_duration.gos	no hot body
+feature-testing-examples/flat_map_iterator_callbacks.gos	entry shape
+feature-testing-examples/float_nan_ordering.gos	aggregate print
+feature-testing-examples/float_remainder.gos	no hot body
+feature-testing-examples/float_sort_total_order.gos	no hot body
 feature-testing-examples/fmt_struct_enum.gos	entry shape
 feature-testing-examples/fmt_tuple_map.gos	no hot body
+feature-testing-examples/for_compound_patterns.gos	bytecode-only local
 feature-testing-examples/format_argument_forms.gos	no hot body
 feature-testing-examples/format_spec.gos	no hot body
 feature-testing-examples/format_width_pad_parity.gos	no hot user body
@@ -215,7 +224,10 @@ feature-testing-examples/inferred_map_dispatch.gos	bytecode-only local
 feature-testing-examples/inline_index_remap.gos	admission gate
 feature-testing-examples/inlined_aggregate_ref_param.gos	&mut aggregate param
 feature-testing-examples/instant_methods.gos	no hot body
+feature-testing-examples/integer_constant_signedness.gos	no hot body
 feature-testing-examples/integer_overflow_edges.gos	no hot body
+feature-testing-examples/io_stream_methods_typed.gos	no hot body
+feature-testing-examples/iter_pairwise_method.gos	no hot body
 feature-testing-examples/iter_zip_advances.gos	no hot body
 feature-testing-examples/iterator_param_argument.gos	unlowerable local
 feature-testing-examples/iterator_trait_user_impl.gos	admission gate
@@ -230,10 +242,13 @@ feature-testing-examples/json_yaml_encode.gos	no hot body
 feature-testing-examples/jwt_roundtrip.gos	no hot body
 feature-testing-examples/keyed_traversal_through_ref.gos	callable local
 feature-testing-examples/lazy_iter_element_classes.gos	admission gate
+feature-testing-examples/leading_operator_lines.gos	callable local
 feature-testing-examples/let_destructure_struct.gos	entry shape
+feature-testing-examples/let_patterns_and_negative_literals.gos	callable local
 feature-testing-examples/literal_forms.gos	no hot body
 feature-testing-examples/map_aggregate_values_by_key_kind.gos	bytecode-only local
 feature-testing-examples/map_bare_iteration_binding.gos	admission gate
+feature-testing-examples/map_carrier_results.gos	no hot body
 feature-testing-examples/map_channel_ownership.gos	cross-goroutine
 feature-testing-examples/map_entry_and_format_paths.gos	bytecode-only local
 feature-testing-examples/map_from_sequence.gos	bytecode-only local
@@ -245,6 +260,7 @@ feature-testing-examples/map_set_aggregate_value_equality.gos	bytecode-only loca
 feature-testing-examples/map_table_values_owned.gos	entry shape
 feature-testing-examples/map_tuple_key_tuple_value.gos	no hot body
 feature-testing-examples/map_vec_values_copies.gos	entry shape
+feature-testing-examples/math_methods_and_log.gos	no hot body
 feature-testing-examples/method_dispatch_collision.gos	entry shape
 feature-testing-examples/method_dispatch_collisions.gos	no hot body
 feature-testing-examples/method_name_collision.gos	entry shape
@@ -278,6 +294,7 @@ feature-testing-examples/net_tls_client_modes.gos	bytecode-only local
 feature-testing-examples/net_unix_echo.gos	bytecode-only local
 feature-testing-examples/non_exhaustive_match_panic.gos	no hot body
 feature-testing-examples/nul_in_strings.gos	no hot body
+feature-testing-examples/numeric_and_json_edges.gos	bytecode-only local
 feature-testing-examples/numeric_conversion_matrix.gos	no hot body
 feature-testing-examples/oob_index_aggregate_panic.gos	no hot user body
 feature-testing-examples/oob_index_scalar_panic.gos	no hot body
@@ -299,6 +316,7 @@ feature-testing-examples/pipe_operator_precedence.gos	no hot body
 feature-testing-examples/process_run_in.gos	no hot body
 feature-testing-examples/process_spawn_pipe.gos	bytecode-only local
 feature-testing-examples/process_spawn_piped.gos	bytecode-only local
+feature-testing-examples/question_mark_error_conversion.gos	entry shape
 feature-testing-examples/range_pipeline_iter.gos	no hot body
 feature-testing-examples/rc_tree_teardown.gos	admission gate
 feature-testing-examples/record_update.gos	entry shape
@@ -308,6 +326,7 @@ feature-testing-examples/regex_unicode_categories.gos	no hot body
 feature-testing-examples/result_default.gos	no hot body
 feature-testing-examples/result_struct_payload.gos	entry shape
 feature-testing-examples/router_closure_route.gos	no hot body
+feature-testing-examples/runtime_handles_typed.gos	bytecode-only local
 feature-testing-examples/same_scope_shadow_assignment.gos	no hot body
 feature-testing-examples/scheduler_drain.gos	cross-goroutine
 feature-testing-examples/select_closed_chan_ready.gos	no hot body
@@ -380,8 +399,10 @@ feature-testing-examples/struct_tuple_map_key.gos	no hot user body
 feature-testing-examples/struct_update_base.gos	no hot user body
 feature-testing-examples/structural_comparison.gos	callable local
 feature-testing-examples/sync_extra.gos	callable local
+feature-testing-examples/sync_handles_typed.gos	cross-goroutine
 feature-testing-examples/sync_map_demo.gos	no hot body
 feature-testing-examples/sync_rwlock.gos	no hot body
+feature-testing-examples/table_carrier_ownership.gos	entry shape
 feature-testing-examples/time_civil.gos	no hot body
 feature-testing-examples/time_duration_api.gos	no hot body
 feature-testing-examples/time_param_dispatch.gos	no hot body
@@ -391,6 +412,7 @@ feature-testing-examples/top_level_mixed.gos	no hot body
 feature-testing-examples/top_level_question.gos	entry shape
 feature-testing-examples/trace_observability.gos	no hot body
 feature-testing-examples/trait_bounds.gos	entry shape
+feature-testing-examples/trait_method_on_literal.gos	no hot body
 feature-testing-examples/trait_object_dispatch.gos	entry shape
 feature-testing-examples/try_err_conversion.gos	no hot body
 feature-testing-examples/try_option_propagation.gos	no hot body
@@ -406,9 +428,11 @@ feature-testing-examples/u64_unsigned.gos	no hot body
 feature-testing-examples/unicode_full.gos	no hot body
 feature-testing-examples/unit_main_goroutine_drain.gos	cross-goroutine
 feature-testing-examples/unit_struct_values.gos	bytecode-only local
+feature-testing-examples/unit_values_in_containers.gos	no hot body
 feature-testing-examples/unsigned_and_nested_rendering.gos	callable local
-feature-testing-examples/user_ordered_keys.gos	bytecode-only local
 feature-testing-examples/user_module_shadows_std_names.gos	no hot body
+feature-testing-examples/user_ordered_keys.gos	bytecode-only local
+feature-testing-examples/user_types_named_like_builtins.gos	entry shape
 feature-testing-examples/usize_compare.gos	no hot body
 feature-testing-examples/validate_errors.gos	no hot body
 feature-testing-examples/validate_errors_return.gos	bytecode-only local
@@ -445,8 +469,3 @@ feature-testing-examples/winb_text_unicode.gos	no hot body
 feature-testing-examples/winb_text_utf8.gos	no hot body
 feature-testing-examples/write_file_bytes.gos	no hot body
 feature-testing-examples/yaml_autoderive.gos	entry shape
-feature-testing-examples/float_remainder.gos	no hot body
-feature-testing-examples/sync_handles_typed.gos	cross-goroutine
-feature-testing-examples/flat_map_iterator_callbacks.gos	entry shape
-feature-testing-examples/runtime_handles_typed.gos	bytecode-only local
-feature-testing-examples/bufio_scanner_next.gos	bytecode-only local

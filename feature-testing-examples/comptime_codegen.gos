@@ -33,7 +33,18 @@ fn user_record(u: User) -> String {
     codegen(gen_record(typeInfo::<User>(), "u"))
 }
 
+comptime fn sum_expr(n: i64) -> String {
+    let mut out = "0"
+    for i in 1..=n {
+        out += " + " + i.to_string()
+    }
+    out
+}
+
 fn main() {
+    // A splice takes the type of the code it emits, here an integer sum.
+    let total: i64 = codegen(sum_expr(4))
+    println("{}", total * 2)
     println("{}", point_record(Point { x: 1, y: 2 }))
     println("{}", user_record(User { id: 7, name: "jane", active: true }))
 }

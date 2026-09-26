@@ -342,7 +342,11 @@ pub unsafe extern "C" fn gos_rt_iter_min_f64(v: *const GosVec) -> i128 {
             return 1i128;
         }
         let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<f64>(), vec.len as usize) };
-        match slice.iter().copied().min_by(f64::total_cmp) {
+        match slice
+            .iter()
+            .copied()
+            .min_by(|a, b| crate::c_abi::sort::float_order(*a, *b))
+        {
             Some(m) => gos_rt_result_new(0, m.to_bits() as i64),
             None => 1i128,
         }
@@ -362,7 +366,11 @@ pub unsafe extern "C" fn gos_rt_iter_max_f64(v: *const GosVec) -> i128 {
             return 1i128;
         }
         let slice = unsafe { std::slice::from_raw_parts(vec.ptr.cast::<f64>(), vec.len as usize) };
-        match slice.iter().copied().max_by(f64::total_cmp) {
+        match slice
+            .iter()
+            .copied()
+            .max_by(|a, b| crate::c_abi::sort::float_order(*a, *b))
+        {
             Some(m) => gos_rt_result_new(0, m.to_bits() as i64),
             None => 1i128,
         }

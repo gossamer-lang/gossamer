@@ -1740,6 +1740,10 @@ impl<'a> Builder<'a> {
             {
                 return Some(self.lower_vec_eq(op, lhs_local, rhs_local, tag, span));
             }
+            let tys = [lhs.ty, self.locals[lhs_local.0 as usize].ty];
+            if let Some(dest) = self.lower_sequence_eq(op, lhs_local, rhs_local, &tys, span) {
+                return Some(dest);
+            }
         }
         // Map and set equality: a handle compares by the entries or members
         // it stands for, not by its identity or by which storage shape it
@@ -2409,6 +2413,7 @@ impl<'a> Builder<'a> {
             TyKind::Bool => Some(vec![3]),
             TyKind::Char => Some(vec![4]),
             TyKind::String => Some(vec![5]),
+            TyKind::Unit => Some(vec![gossamer_abi::TUPLE_TAG_UNIT]),
             TyKind::Array {
                 elem,
                 len: ArrayLen::Concrete(n),
@@ -2686,6 +2691,11 @@ impl<'a> Builder<'a> {
             .or_else(|| self.vec_elem_cmp_tag(lhs_ty))
         {
             return self.lower_vec_eq(HirBinaryOp::Eq, lhs_local, rhs_local, tag, span);
+        }
+        if let Some(local) =
+            self.lower_sequence_eq(HirBinaryOp::Eq, lhs_local, rhs_local, &[ty, lhs_ty], span)
+        {
+            return local;
         }
         let cmp = self.fresh(bool_ty);
         self.emit_assign(
@@ -2993,6 +3003,35 @@ impl<'a> Builder<'a> {
             .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))?;
         let lhs_slots = self.ordered_value_slots(lhs_local, carrier, span);
         let rhs_slots = self.ordered_value_slots(rhs_local, carrier, span);
+        let desc_text: String = desc.iter().map(|&b| b as char).collect();
+        let args = vec![
+            Operand::Copy(Place::local(lhs_slots)),
+            Operand::Copy(Place::local(rhs_slots)),
+            Operand::Const(ConstValue::Str(desc_text)),
+        ];
+        Some(self.lower_equality_call(op, "gos_rt_desc_eq", args, span))
+    }
+
+    /// `==` / `!=` over two sequences whose elements are compared field by
+    /// field - nested sequences, tuples, structs, carriers - through the
+    /// sequence's descriptor, or `None` when neither type is a `Vec` / slice
+    /// with one.
+    fn lower_sequence_eq(
+        &mut self,
+        op: HirBinaryOp,
+        lhs_local: Local,
+        rhs_local: Local,
+        tys: &[Ty],
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let (seq, desc) = tys
+            .iter()
+            .map(|ty| self.peel_ref_ty(*ty))
+            .find(|ty| matches!(self.tcx.kind_of(*ty), TyKind::Vec(_) | TyKind::Slice(_)))
+            .and_then(|ty| self.ordering_stream(ty).map(|desc| (ty, desc)))?;
+        let lhs_slots = self.ordered_value_slots(lhs_local, seq, span);
+        let rhs_slots = self.ordered_value_slots(rhs_local, seq, span);
         let desc_text: String = desc.iter().map(|&b| b as char).collect();
         let args = vec![
             Operand::Copy(Place::local(lhs_slots)),

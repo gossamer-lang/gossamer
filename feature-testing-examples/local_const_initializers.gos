@@ -1,0 +1,31 @@
+// A `const` declared inside a function may hold a heap value or call a
+// function or an associated function, whatever order the items are written in.
+
+struct P { x: i64 }
+impl P { fn make(x: i64) -> P { P { x: x } } fn get(&self) -> i64 { self.x } }
+fn main() {
+    const S: String = "ab".repeat(2)
+    const Q: P = P::make(5)
+    const G: i64 = P::make(9).get()
+    const M: Map<String, i64> = { "k": 1 }
+    println("{} {} {} {:?}", S, Q.x, G, M)
+    more()
+    for i in 0..2 {
+        const T: i64 = triple(3)
+        println("{} {}", i, T)
+    }
+}
+fn triple(x: i64) -> i64 { x * 3 }
+
+fn more() {
+    const N: i64 = later(4)
+    const NAMES: Vec<String> = #["a", "b"]
+    println("{} {:?}", N, NAMES)
+    inner()
+}
+fn inner() {
+    const M: i64 = later(1) + N2
+    println("{}", M)
+}
+const N2: i64 = later(100)
+fn later(x: i64) -> i64 { x * 3 }

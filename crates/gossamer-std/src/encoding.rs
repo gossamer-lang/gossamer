@@ -55,35 +55,49 @@ pub mod base64 {
         out
     }
 
-    /// Decodes a base64 string, tolerating whitespace between
-    /// characters.
+    /// Decodes a base64 string, tolerating whitespace between characters.
+    /// The input is whole groups of four; `=` pads only the last group,
+    /// as `xx==` or `xxx=`.
     pub fn decode(input: &str) -> Result<Vec<u8>, Error> {
         let filtered: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
         if !filtered.len().is_multiple_of(4) {
-            return Err(Error::new("base64 input length must be a multiple of 4"));
+            return Err(Error::new("base64: input length must be a multiple of 4"));
+        }
+        let pad = filtered.iter().rev().take_while(|b| **b == b'=').count();
+        let data = filtered.len() - pad;
+        if filtered[..data].contains(&b'=') {
+            return Err(Error::new("base64: data after padding"));
+        }
+        let valid_padding = match pad {
+            0 => true,
+            1 => data % 4 == 3,
+            2 => data % 4 == 2,
+            _ => false,
+        };
+        if !valid_padding {
+            return Err(Error::new("base64: padding does not end a group"));
         }
         let mut out = Vec::with_capacity(filtered.len() / 4 * 3);
         for chunk in filtered.chunks(4) {
             let mut values = [0u32; 4];
-            let mut pad = 0;
+            let mut chunk_pad = 0;
             for (i, byte) in chunk.iter().enumerate() {
                 if *byte == b'=' {
-                    pad += 1;
-                    values[i] = 0;
+                    chunk_pad += 1;
                 } else {
                     values[i] = index(*byte)
                         .ok_or_else(|| {
-                            Error::new(format!("bad base64 character `{}`", *byte as char))
+                            Error::new(format!("base64: invalid character '{}'", *byte as char))
                         })?
                         .into();
                 }
             }
             let n = (values[0] << 18) | (values[1] << 12) | (values[2] << 6) | values[3];
             out.push((n >> 16) as u8);
-            if pad < 2 {
+            if chunk_pad < 2 {
                 out.push((n >> 8) as u8);
             }
-            if pad < 1 {
+            if chunk_pad < 1 {
                 out.push(n as u8);
             }
         }

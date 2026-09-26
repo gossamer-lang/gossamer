@@ -16,8 +16,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::lift::collect_pattern_names;
 use crate::tree::{
-    HirArrayExpr, HirBlock, HirExpr, HirExprKind, HirFn, HirItem, HirItemKind, HirPat, HirProgram,
-    HirSelectOp, HirStmtKind, HirUnaryOp,
+    HirBlock, HirExpr, HirExprKind, HirFn, HirItem, HirItemKind, HirPat, HirProgram, HirSelectOp,
+    HirStmtKind, HirUnaryOp, for_each_child_expr_mut,
 };
 
 /// Rewrites every function in `program`.
@@ -315,116 +315,5 @@ fn fold_expr(expr: &mut HirExpr) {
             }
         }
         _ => {}
-    }
-}
-
-/// Applies `f` to every expression directly under `expr`, mutably, in source
-/// order. The mutable twin of [`crate::tree::for_each_child_expr`].
-// One arm per HIR expression variant, as in the shared read-only walk.
-#[allow(clippy::too_many_lines)]
-fn for_each_child_expr_mut(expr: &mut HirExpr, f: &mut impl FnMut(&mut HirExpr)) {
-    match &mut expr.kind {
-        HirExprKind::Literal(_)
-        | HirExprKind::Path { .. }
-        | HirExprKind::Continue { .. }
-        | HirExprKind::Return(None)
-        | HirExprKind::Break { value: None, .. }
-        | HirExprKind::Placeholder => {}
-        HirExprKind::Call { callee, args } => {
-            f(callee);
-            args.iter_mut().for_each(&mut *f);
-        }
-        HirExprKind::MethodCall { receiver, args, .. } => {
-            f(receiver);
-            args.iter_mut().for_each(&mut *f);
-        }
-        HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
-            f(receiver);
-        }
-        HirExprKind::Index { base, index } => {
-            f(base);
-            f(index);
-        }
-        HirExprKind::Unary { operand, .. } => f(operand),
-        HirExprKind::Binary { lhs, rhs, .. } => {
-            f(lhs);
-            f(rhs);
-        }
-        HirExprKind::Assign { place, value } => {
-            f(place);
-            f(value);
-        }
-        HirExprKind::If {
-            condition,
-            then_branch,
-            else_branch,
-        } => {
-            f(condition);
-            f(then_branch);
-            if let Some(e) = else_branch {
-                f(e);
-            }
-        }
-        HirExprKind::Match { scrutinee, arms } => {
-            f(scrutinee);
-            for arm in arms {
-                if let Some(g) = &mut arm.guard {
-                    f(g);
-                }
-                f(&mut arm.body);
-            }
-        }
-        HirExprKind::Loop { body, .. } => f(body),
-        HirExprKind::While {
-            condition, body, ..
-        } => {
-            f(condition);
-            f(body);
-        }
-        HirExprKind::Block(block) => {
-            for stmt in &mut block.stmts {
-                match &mut stmt.kind {
-                    HirStmtKind::Let { init: Some(e), .. }
-                    | HirStmtKind::Expr { expr: e, .. }
-                    | HirStmtKind::Defer(e) => f(e),
-                    HirStmtKind::Let { init: None, .. } | HirStmtKind::Item(_) => {}
-                }
-            }
-            if let Some(tail) = &mut block.tail {
-                f(tail);
-            }
-        }
-        HirExprKind::Closure { body, .. } => f(body),
-        HirExprKind::LiftedClosure { captures, .. } => captures.iter_mut().for_each(&mut *f),
-        HirExprKind::Select { arms } => {
-            for arm in arms {
-                match &mut arm.op {
-                    HirSelectOp::Recv { channel, .. } => f(channel),
-                    HirSelectOp::Send { channel, value } => {
-                        f(channel);
-                        f(value);
-                    }
-                    HirSelectOp::Default => {}
-                }
-                f(&mut arm.body);
-            }
-        }
-        HirExprKind::Return(Some(e)) | HirExprKind::Break { value: Some(e), .. } => f(e),
-        HirExprKind::Tuple(items) | HirExprKind::Array(HirArrayExpr::List(items)) => {
-            items.iter_mut().for_each(&mut *f);
-        }
-        HirExprKind::Array(HirArrayExpr::Repeat { value, count }) => {
-            f(value);
-            f(count);
-        }
-        HirExprKind::Cast { value, .. } => f(value),
-        HirExprKind::Range { start, end, .. } => {
-            if let Some(s) = start {
-                f(s);
-            }
-            if let Some(e) = end {
-                f(e);
-            }
-        }
     }
 }

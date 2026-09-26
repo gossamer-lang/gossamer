@@ -697,9 +697,9 @@ const SPECS: &[Spec] = &[
     // the call site, and the `regex!` / `sql!` validation macros validate at
     // build time and fold to the validated string on every tier.
     spec("feature-testing-examples/comptime_params_validate.gos"),
-    // Code-emitting comptime (`codegen!(...)`): a comptime fn reflects a
+    // Code-emitting comptime (`codegen(...)`): a comptime fn reflects a
     // type's fields and emits a native serializer body, spliced as raw
-    // source. The emitted field code is identical on every tier and carries
+    // source, and a splice of any type (an integer expression). The emitted field code is identical on every tier and carries
     // no runtime reflection.
     spec("feature-testing-examples/comptime_codegen.gos"),
     // Phase 2 staged reflection: a `for` over `typeInfo::<T>()` is unrolled
@@ -1894,6 +1894,73 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/string_append_index_mixed.gos"),
     // Writes through places several steps deep land where the value lives.
     spec("feature-testing-examples/nested_place_writes.gos"),
+    // A table answered in a carrier - popped, removed, or returned - has
+    // exactly one owner whether it is read, dropped unread, or never answered.
+    spec("feature-testing-examples/table_carrier_ownership.gos"),
+    // An untyped integer constant is signed beside any unsigned binding, and a
+    // known unsigned value keeps its place where signedness decides the result.
+    spec("feature-testing-examples/integer_constant_signedness.gos"),
+    // A struct, tuple-struct, or nested tuple `for` pattern destructures each
+    // element as an irrefutable `let` would.
+    spec("feature-testing-examples/for_compound_patterns.gos"),
+    // `map` with a callback answering an `Option` / `Result` keeps the carriers.
+    spec("feature-testing-examples/map_carrier_results.gos"),
+    // Sequence `==` compares nested sequences, tuples, structs, and carriers
+    // by content.
+    spec("feature-testing-examples/sequence_structural_equality.gos"),
+    // A program type named like a standard collection keeps its own methods.
+    spec("feature-testing-examples/user_types_named_like_builtins.gos"),
+    // Nested and `@` patterns read an enum payload at its own type, and enum
+    // set / map literals key by discriminant and payload.
+    spec("feature-testing-examples/enum_payload_patterns_and_keys.gos"),
+    // `?` converts an error through `From`, into `errors::Error`, and in a
+    // closure the `?` shapes.
+    spec("feature-testing-examples/question_mark_error_conversion.gos"),
+    Spec {
+        skip_all: Some("rejected at check: `?` has no `From` impl to convert the error"),
+        ..spec("feature-testing-examples/question_mark_no_conversion.gos")
+    },
+    // `math` functions in method position, and `math::log(x, base)`.
+    spec("feature-testing-examples/math_methods_and_log.gos"),
+    // Unsigned and narrow values through math, formatting, JSON, and parsing.
+    spec("feature-testing-examples/numeric_and_json_edges.gos"),
+    Spec {
+        skip_all: Some("rejected at check: `min` / `max` on values that are not numbers"),
+        ..spec("feature-testing-examples/scalar_bound_operand_types.gos")
+    },
+    // Debug rendering of strings and chars at every nesting.
+    spec("feature-testing-examples/debug_quoting_strings_chars.gos"),
+    // `f32` arithmetic, reductions, rendering, and JSON at single precision.
+    spec("feature-testing-examples/f32_single_precision.gos"),
+    // Float sequences sort by value.
+    spec("feature-testing-examples/float_sort_total_order.gos"),
+    // A method on a numeric literal reaches the impl its default type names.
+    spec("feature-testing-examples/trait_method_on_literal.gos"),
+    // `pairwise` in method form.
+    spec("feature-testing-examples/iter_pairwise_method.gos"),
+    // Function-local consts with heap values and calls.
+    spec("feature-testing-examples/local_const_initializers.gos"),
+    // Unit values in sequences, tuples, and carriers.
+    spec("feature-testing-examples/unit_values_in_containers.gos"),
+    // Tail calls in `if` / `match` arms run past the VM frame limit.
+    spec("feature-testing-examples/tail_calls_in_arms.gos"),
+    // A closure opening a line, `let`-else over a slice with `mut`, an
+    // irrefutable array pattern in `let`, negated minimum literals, and an
+    // iterator stating `type Item`.
+    spec("feature-testing-examples/let_patterns_and_negative_literals.gos"),
+    // Operators opening a line: a statement start outside a grouping paren,
+    // a continuation inside one, a sign inside a list.
+    spec("feature-testing-examples/leading_operator_lines.gos"),
+    // NaN takes one place in float order whatever its sign bit.
+    spec("feature-testing-examples/float_nan_ordering.gos"),
+    // Standard-stream methods answer their declared types.
+    spec("feature-testing-examples/io_stream_methods_typed.gos"),
+    // `DynValue` renders like the value it holds on either channel.
+    spec("feature-testing-examples/dyn_value_rendering.gos"),
+    Spec {
+        skip_all: Some("rejected at check: stream and child methods answer their declared types"),
+        ..spec("feature-testing-examples/stream_method_types_rejected.gos")
+    },
 ];
 
 const DEDICATED_FEATURE_TESTING_EXAMPLES: &[&str] = &[

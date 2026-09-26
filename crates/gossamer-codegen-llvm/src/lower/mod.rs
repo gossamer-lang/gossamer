@@ -116,13 +116,13 @@ pub(crate) struct Lowerer<'a> {
     /// Runtime function signatures we've referenced so the
     /// enclosing module can emit the matching `declare`s.
     pub(crate) runtime_refs: std::collections::BTreeSet<String>,
-    /// Line this body's call-stack frame was last moved to, so a run of
-    /// statements on one source line emits a single update.
-    pub(crate) last_frame_line: Option<u32>,
-    /// Line of the statement being lowered. The frame update itself is
+    /// Line and column this body's call-stack frame was last moved to, so a
+    /// run of statements at one source position emits a single update.
+    pub(crate) last_frame_line: Option<(u32, u32)>,
+    /// Line and column of the statement being lowered. The frame update itself is
     /// written only where a report can read it - ahead of a call, and inside
     /// a panic's cold block - so arithmetic between two calls costs nothing.
-    pub(crate) pending_frame_line: Option<u32>,
+    pub(crate) pending_frame_line: Option<(u32, u32)>,
     /// Byte ranges of `out` that only a raising path reaches, so the calls
     /// they hold do not make the hot path write a frame line. Recorded by
     /// [`Lowerer::mark_cold`] and consumed once per statement.
@@ -332,6 +332,9 @@ pub(super) enum ConcatKind {
     /// `>= 2^63` print without a leading `-`.
     Uint,
     Float,
+    /// An `f32` held at double width, rendered with the digits of its
+    /// single-precision value; `true` for the `{:?}` spelling.
+    F32(bool),
     Bool,
     Char,
     /// `Vec<i64>` (or any 8-byte-elem Vec) formatted via
@@ -789,7 +792,7 @@ fn math_intrinsic(name: &str) -> Option<&'static str> {
         "floor" => "llvm.floor.f64",
         "ceil" => "llvm.ceil.f64",
         "exp" => "llvm.exp.f64",
-        "ln" | "log" => "llvm.log.f64",
+        "ln" => "llvm.log.f64",
         _ => return None,
     };
     Some(llvm)
@@ -842,7 +845,7 @@ fn map_prelude_symbol(name: &str) -> &str {
         "clamp::f64" => "gos_rt_clamp_f64",
         "math::sin" => "gos_rt_math_sin",
         "math::cos" => "gos_rt_math_cos",
-        "math::ln" | "math::log" => "gos_rt_math_log",
+        "math::ln" => "gos_rt_math_log",
         "math::exp" => "gos_rt_math_exp",
         "math::floor" => "gos_rt_math_floor",
         "math::ceil" => "gos_rt_math_ceil",

@@ -40,7 +40,7 @@ The complete boundary contract, ownership rules, and tier limits are
 in [`crates/gossamer-binding/ABI_0_4.md`](../crates/gossamer-binding/ABI_0_4.md).
 The runner-backed regression
 `external_binding_supports_ecosystem_library_shapes_without_builtins`
-in `crates/gossamer-cli/tests/cli/pkg_bindings.rs` creates an ordinary
+in `crates/gossamer-cli/tests/ecosystem_bindings.rs` creates an ordinary
 out-of-tree binding package and exercises the database, telemetry,
 CLI, and token paths end to end. This route needs no new compiler
 builtins or repository-specific bridge.

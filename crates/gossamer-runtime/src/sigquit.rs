@@ -17,23 +17,19 @@
 //!
 //! ```text
 //! goroutine 17 [running]:
-//!   main.handle_request(0xdeadbeef, 42)
-//!           /path/to/main.gos:128 +0x4c
-//!   main.main()
-//!           /path/to/main.gos:18 +0x12
+//!   handle_request()
+//!         main.gos:128
+//!   main()
+//!         main.gos:18
 //!
 //! goroutine 18 [chan receive]:
 //!   ...
 //! ```
 //!
-//! The address-only frame (`+0x4c` style) is filled in if DWARF is
-//! available; otherwise the line falls back to a decimal byte
-//! offset from the function entry. Backtrace symbolication uses
-//! `std::backtrace::Backtrace::capture()`, which honours the DWARF
-//! emitted under `gos build --release -g`. Using the std API
-//! instead of the standalone `backtrace` crate keeps `libgcc_s` out
-//! of the dependency closure, which is a precondition for the
-//! static-musl link path on Linux.
+//! A goroutine's frames are the ones its code registered: a debug build
+//! pushes one per call with its file and line, a release build records
+//! only the function the goroutine entered. The panic trace of a release
+//! build walks the machine stack instead ([`render_native_panic_trace`]).
 
 use std::io::Write;
 use std::sync::OnceLock;
@@ -104,6 +100,8 @@ pub struct Frame {
     /// in this frame. Updated by [`set_position`] at MIR-statement
     /// granularity.
     pub line: u32,
+    /// 1-based character column of that statement, or 0 when unknown.
+    pub column: u32,
 }
 
 /// Per-goroutine record published into the runtime's introspection
@@ -248,15 +246,17 @@ pub fn active_gid() -> Option<u32> {
 }
 
 /// Pushes a new frame onto the active goroutine's call stack.
-/// Called by the interpreter on every call. Lock-free: it touches
-/// only this thread's `LOCAL_FRAMES`. The compiled tier emits no
-/// such call - it recovers traces by unwinding the real machine
-/// stack ([`render_native_panic_trace`]).
-pub fn stack_push(function: ImageStr, file: ImageStr, line: u32) {
+/// Called from debug-profile compiled prologues through
+/// `gos_rt_stack_push`. Lock-free: it touches only this thread's
+/// `LOCAL_FRAMES`. A release build emits no such call and recovers
+/// traces by unwinding the real machine stack
+/// ([`render_native_panic_trace`]).
+pub fn stack_push(function: ImageStr, file: ImageStr, line: u32, column: u32) {
     let frame = Frame {
         function,
         file,
         line,
+        column,
     };
     FRAMES_RECORDED.store(true, Ordering::Relaxed);
     LOCAL_FRAMES.with(|f| f.borrow_mut().push(frame));
@@ -288,14 +288,15 @@ pub fn set_state(gid: u32, state: &'static str) {
     }
 }
 
-/// Updates the line number of the topmost call-stack frame for
-/// the active goroutine. Cheap (single locked map lookup); called
+/// Updates the line and column of the topmost call-stack frame for
+/// the active goroutine. Lock-free (this thread's frames only); called
 /// at MIR-statement granularity by codegen so panic traces carry
-/// the precise failing line, not just the function-entry line.
-pub fn set_active_line(line: u32) {
+/// the precise failing position, not just the function-entry line.
+pub fn set_active_line(line: u32, column: u32) {
     LOCAL_FRAMES.with(|f| {
         if let Some(top) = f.borrow_mut().last_mut() {
             top.line = line;
+            top.column = column;
         }
     });
 }
@@ -363,18 +364,14 @@ pub fn render_to(out: &mut impl Write) -> std::io::Result<usize> {
                 out.write_all(pos.as_bytes())?;
                 written += pos.len();
             }
-            // No per-call shadow frames (compiled tier). The dump
-            // carries this goroutine's identity, wait state, and entry
-            // function from the cheap spawn/park registry. Deep frames
-            // for an off-CPU goroutine would require unwinding its
-            // suspended coroutine stack from the signal-relay thread,
-            // which is not attempted here - capturing the relay
-            // thread's own stack (the previous behaviour) attributed
-            // the wrong frames to every goroutine.
+            // No per-call shadow frames (release compiled tier). The
+            // dump carries this goroutine's identity, wait state, and
+            // entry function from the spawn/park registry: the relay
+            // thread cannot unwind another goroutine's suspended
+            // coroutine stack, and its own stack names none of that
+            // goroutine's frames.
         } else {
-            // Render the full Gossamer call stack, innermost last
-            // (matches Rust / Go convention - most recent call on
-            // top, deepest call at the bottom near the panic).
+            // Most recent call first, as Go's stack dump prints it.
             for frame in info.frames.iter().rev() {
                 let func_line = format!("  {}()\n", frame.function);
                 out.write_all(func_line.as_bytes())?;
@@ -394,17 +391,21 @@ pub fn render_to(out: &mut impl Write) -> std::io::Result<usize> {
     Ok(written)
 }
 
-/// Renders just the active goroutine's call stack into a string,
-/// innermost frame first. Used by `gos_rt_panic` to inline the
-/// trace with the diagnostic.
+/// Heading of every panic call-stack trailer, shared with the VM's report so
+/// a trace reads the same whichever tier raised it.
+pub const PANIC_TRACE_HEADER: &str = "  call stack (outermost first):\n";
+
+/// Renders the active goroutine's call stack as a panic trailer, outermost
+/// frame first. Used by `gos_rt_panic` to inline the trace with the
+/// diagnostic.
 #[must_use]
 pub fn render_active_panic_trace() -> String {
     let frames = active_frames();
     if frames.is_empty() {
         return String::new();
     }
-    let mut out = String::new();
-    for frame in frames.iter().rev() {
+    let mut out = String::from(PANIC_TRACE_HEADER);
+    for frame in &frames {
         out.push_str("    at ");
         out.push_str(frame.function.as_str());
         if !frame.file.is_empty() {
@@ -412,6 +413,10 @@ pub fn render_active_panic_trace() -> String {
             out.push_str(frame.file.as_str());
             out.push(':');
             out.push_str(&frame.line.to_string());
+            if frame.column != 0 {
+                out.push(':');
+                out.push_str(&frame.column.to_string());
+            }
             out.push(')');
         }
         out.push('\n');
@@ -446,42 +451,21 @@ fn is_runtime_frame(symbol: &str) -> bool {
 }
 
 /// Renders the active thread's real machine-stack backtrace as a
-/// gos-focused panic trace. Used by `gos_rt_panic` on the compiled
-/// tier, which keeps no per-call shadow stack: frames are recovered
-/// by unwinding the live stack with the `backtrace` crate and
-/// symbolicating through the binary's retained symbol table
-/// (`gos build --release` keeps `.symtab`; only DWARF is stripped).
-/// Returns empty when capture or symbolication yields nothing (e.g. a
-/// fully `--strip-all` binary).
+/// gos-focused panic trace. Used by `gos_rt_panic` on a release build,
+/// which keeps no per-call shadow stack: frames are recovered by
+/// unwinding the live stack and symbolicating through the binary's
+/// symbol table (`gos build --release` keeps `.symtab`), and through its
+/// DWARF when `-g` kept that. Returns empty when capture or
+/// symbolication yields nothing (e.g. a fully `--strip-all` binary).
 #[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub fn render_native_panic_trace() -> String {
-    // The source position travels with the frame when the binary carries
-    // debug info, which a `gos build` (debug) binary does; `--release`
-    // strips DWARF, so those frames render as the symbol alone.
-    let mut symbols: Vec<(String, Option<String>)> = Vec::new();
-    backtrace::trace(|frame| {
-        backtrace::resolve_frame(frame, |sym| {
-            if let Some(name) = sym.name() {
-                let location = match (sym.filename(), sym.lineno()) {
-                    (Some(file), Some(line)) => {
-                        let file = file.file_name().map_or_else(
-                            || file.display().to_string(),
-                            |base| base.to_string_lossy().into_owned(),
-                        );
-                        match sym.colno() {
-                            Some(column) => Some(format!("{file}:{line}:{column}")),
-                            None => Some(format!("{file}:{line}")),
-                        }
-                    }
-                    _ => None,
-                };
-                symbols.push((name.to_string(), location));
-            }
-        });
-        true
-    });
-    let mut out = String::new();
+    // std's own capture and symbolizer are linked into every binary for
+    // its panic hook; walking the stack through them keeps a second
+    // symbolizer out of the binary.
+    let captured = std::backtrace::Backtrace::force_capture();
+    let symbols = backtrace_symbols(&format!("{captured:#}"));
+    let mut lines: Vec<String> = Vec::new();
     for (sym, location) in &symbols {
         // Runtime / unwinder machinery is filtered everywhere, not just
         // at the top: a goroutine stack bottoms out in coroutine
@@ -490,21 +474,71 @@ pub fn render_native_panic_trace() -> String {
         if is_runtime_frame(sym) {
             continue;
         }
-        out.push_str("    at ");
-        out.push_str(sym);
+        let entry = sym == "gos_main" || sym == "main";
+        // The program's `main` is emitted as `gos_main`; the report names
+        // the function the source declares.
+        let mut line = format!("    at {}", if entry { "main" } else { sym.as_str() });
         if let Some(location) = location {
-            out.push_str(" (");
-            out.push_str(location);
-            out.push(')');
+            line.push_str(" (");
+            line.push_str(location);
+            line.push(')');
         }
-        out.push('\n');
+        line.push('\n');
+        lines.push(line);
         // The program entry frame is the natural bottom of the gos
         // chain; everything below is libc / rt startup.
-        if sym == "gos_main" || sym == "main" {
+        if entry {
             break;
         }
     }
+    if lines.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(PANIC_TRACE_HEADER);
+    for line in lines.iter().rev() {
+        out.push_str(line);
+    }
     out
+}
+
+/// The symbols of a backtrace in std's `{:#}` rendering, innermost first,
+/// each with the `file:line[:column]` it was resolved to (the file named by
+/// its last path component). An inlined call is a symbol of its own, as
+/// std lists it; an unresolved frame, which names no symbol, is skipped.
+#[cfg(not(target_arch = "wasm32"))]
+fn backtrace_symbols(rendered: &str) -> Vec<(String, Option<String>)> {
+    let mut symbols: Vec<(String, Option<String>)> = Vec::new();
+    for line in rendered.lines() {
+        let trimmed = line.trim_start();
+        if let Some(location) = trimmed.strip_prefix("at ") {
+            if let Some(last) = symbols.last_mut()
+                && last.1.is_none()
+            {
+                let file_start = location.rfind(['/', '\\']).map_or(0, |at| at + 1);
+                last.1 = Some(location[file_start..].to_string());
+            }
+            continue;
+        }
+        let Some((index, name)) = trimmed.split_once(": ") else {
+            continue;
+        };
+        if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        // The full rendering leads each frame with its address:
+        // `0x55d1c0 - name`, or the address alone when nothing resolved.
+        let name = name.trim();
+        let name = match name.split_once(" - ") {
+            Some((address, symbol)) if address.starts_with("0x") => symbol.trim(),
+            _ if name.starts_with("0x") => continue,
+            _ => name,
+        };
+        if name.is_empty() || name == "<unknown>" {
+            continue;
+        }
+        symbols.push((name.to_string(), None));
+    }
+    symbols
 }
 
 /// wasm32 has no machine-stack unwinder (`backtrace` does not build for
@@ -565,5 +599,26 @@ mod tests {
         assert!(s.contains("goroutine"));
         assert!(s.contains("test::handle"));
         unregister(gid);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod backtrace_text_tests {
+    use super::backtrace_symbols;
+
+    #[test]
+    fn symbols_carry_the_file_they_resolved_to() {
+        let rendered = "   0:     0x7085eb - gossamer_runtime::c_abi::panic::gos_rt_panic\n             at /src/panic.rs:143:5\n   1:     0x7085ec - inner\n             at /work/p.gos:2:5\n   2: gos_main\n   3:     0x7085ed - <unknown>\n   4:     0x55d1c0\n";
+        assert_eq!(
+            backtrace_symbols(rendered),
+            vec![
+                (
+                    "gossamer_runtime::c_abi::panic::gos_rt_panic".to_string(),
+                    Some("panic.rs:143:5".to_string())
+                ),
+                ("inner".to_string(), Some("p.gos:2:5".to_string())),
+                ("gos_main".to_string(), None),
+            ]
+        );
     }
 }

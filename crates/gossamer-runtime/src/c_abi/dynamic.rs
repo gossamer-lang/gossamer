@@ -140,9 +140,7 @@ fn render(node: &DynNode, out: &mut String) {
         DynNode::Float(f) => {
             let _ = write!(out, "{}", crate::builtins::format_float_debug(*f));
         }
-        DynNode::Char(c) => {
-            let _ = write!(out, "{c}");
-        }
+        DynNode::Char(c) => crate::c_abi::map::push_quoted_char(out, i64::from(u32::from(*c))),
         // The VM's Debug channel quotes strings (the spelling that
         // builds them), so every tier's `{:?}` of a `DynValue` quotes
         // its string payloads.
@@ -522,6 +520,23 @@ pub unsafe extern "C" fn gos_rt_dyn_format(v: *const GosDyn) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let mut out = String::new();
         render(unsafe { node_of(v) }, &mut out);
+        alloc_cstring(out.as_bytes())
+    })
+}
+
+/// `{}` of a `DynValue`: a string or char at the top level reads as its own
+/// text and a float as its display digits, as the same value outside a
+/// `DynValue` does; anything else renders as `{:?}` does.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_dyn_display(v: *const GosDyn) -> *mut c_char {
+    ffi_entry!(std::ptr::null_mut(), {
+        let mut out = String::new();
+        match unsafe { node_of(v) } {
+            DynNode::Str(s) => out.push_str(s),
+            DynNode::Char(c) => out.push(*c),
+            DynNode::Float(f) => out.push_str(&crate::builtins::format_float(*f)),
+            node => render(node, &mut out),
+        }
         alloc_cstring(out.as_bytes())
     })
 }

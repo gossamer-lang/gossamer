@@ -298,7 +298,11 @@ const PRELUDE_VALUES: &[&str] = &[
     "__fmt_radix",
     "__fmt_upper",
     "__repl_discard",
-    "__gos_strconv_quote",
+    "__gos_debug_quote",
+    "__gos_f32_display",
+    "__gos_f32_debug",
+    "__gos_dyn_display",
+    "__gos_dyn_debug",
     "__struct",
     // LCG jump-ahead: routes to `gos_rt_lcg_jump`. Callable
     // from user code as `lcg_jump(state, ia, ic, im, n)`.

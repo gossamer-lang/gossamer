@@ -221,6 +221,19 @@ pub enum VerifyError {
         /// Iterator local consumed twice.
         local: Local,
     },
+    /// A string constant is written into a local of a scalar type. A name the
+    /// lowering could not resolve surfaces this way, and the backends would
+    /// read the string's address as the scalar's value.
+    StringInScalarLocal {
+        /// Function name.
+        body: String,
+        /// Block containing the assignment.
+        block: BlockId,
+        /// Destination local.
+        local: Local,
+        /// The string constant written.
+        text: String,
+    },
 }
 
 /// Walks `body` and accumulates every structural invariant
@@ -750,8 +763,23 @@ fn typed_checks(body: &Body, tcx: &TyCtxt, errors: &mut Vec<VerifyError>) {
     let n_locals = body.locals.len();
     for block in &body.blocks {
         for stmt in &block.stmts {
-            if let StatementKind::Assign { rvalue, .. } = &stmt.kind {
+            if let StatementKind::Assign { place, rvalue } = &stmt.kind {
                 check_rvalue_typed(body, tcx, block.id, rvalue, errors);
+                if let Rvalue::Use(Operand::Const(ConstValue::Str(text))) = rvalue
+                    && place.projection.is_empty()
+                    && let Some(decl) = body.locals.get(place.local.0 as usize)
+                    && matches!(
+                        tcx.kind(decl.ty),
+                        Some(TyKind::Int(_) | TyKind::Float(_) | TyKind::Bool | TyKind::Char)
+                    )
+                {
+                    errors.push(VerifyError::StringInScalarLocal {
+                        body: body.name.clone(),
+                        block: block.id,
+                        local: place.local,
+                        text: text.clone(),
+                    });
+                }
             }
         }
         check_terminator_typed(body, tcx, block, n_locals, errors);

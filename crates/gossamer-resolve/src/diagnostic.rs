@@ -239,6 +239,22 @@ pub enum ResolveError {
         /// What was being declared, for the message.
         kind: &'static str,
     },
+    /// A single-name pattern starting with an uppercase letter that names no
+    /// unit variant or constant in scope. Such a name is read as a path, not
+    /// a binding, so it cannot introduce one.
+    #[error("`{name}` is not a unit variant or constant in scope")]
+    UppercaseBindingPattern {
+        /// The name as written.
+        name: String,
+    },
+    /// A call to a function that reflects its type parameter
+    /// (`for f in typeInfo::<T>()`) written without the turbofish that names
+    /// the type, so no specialisation of it exists.
+    #[error("`{name}` reflects its type parameter, so a call to it names the type")]
+    ReflectingCallWithoutType {
+        /// The function as written.
+        name: String,
+    },
     /// A `typeInfo::<T>()` naming a type this unit does not declare, or
     /// one whose shape carries nothing to reflect.
     #[error("`typeInfo::<{name}>()` has nothing to reflect")]
@@ -381,6 +397,8 @@ impl ResolveError {
             Self::StdMacroAsValue { .. } => "std-macro-as-value",
             Self::PrivateItem { .. } => "private-item",
             Self::UnreflectableType { .. } => "unreflectable-type",
+            Self::UppercaseBindingPattern { .. } => "uppercase-binding-pattern",
+            Self::ReflectingCallWithoutType { .. } => "reflecting-call-without-type",
             Self::ReservedCallName { .. } => "reserved-call-name",
             Self::UnknownNamedArgument { .. } => "unknown-named-argument",
             Self::DuplicateNamedArgument { .. } => "duplicate-named-argument",
@@ -420,6 +438,8 @@ impl ResolveError {
             | Self::AmbiguousVariant { name, .. }
             | Self::MissingModuleSource { name }
             | Self::UnreflectableType { name }
+            | Self::UppercaseBindingPattern { name }
+            | Self::ReflectingCallWithoutType { name }
             | Self::ReservedCallName { name, .. }
             | Self::UnknownNamedArgument { name, .. }
             | Self::DuplicateNamedArgument { name }
@@ -484,6 +504,8 @@ impl ResolveError {
             Self::DependencyModuleCollision { .. } => "GR0019",
             Self::ReservedCallName { .. } => "GR0020",
             Self::DataLastCallOrder { .. } => "GR0021",
+            Self::UppercaseBindingPattern { .. } => "GR0022",
+            Self::ReflectingCallWithoutType { .. } => "GR0023",
         }
     }
 }
@@ -711,6 +733,23 @@ impl ResolveDiagnostic {
                  modules can name it; write `pub(package)` on the {kind} to reach it \
                  from anywhere in this package, or `pub` to make it part of the \
                  package's public API"
+            )),
+            ResolveError::UppercaseBindingPattern { name } => {
+                let mut chars = name.chars();
+                let lower: String = chars
+                    .next()
+                    .map(|first| first.to_lowercase().chain(chars).collect())
+                    .unwrap_or_default();
+                out.with_help(format!(
+                    "a pattern name that starts with an uppercase letter names a unit \
+                     variant or a constant; a binding starts with a lowercase letter, \
+                     as in `{lower}`"
+                ))
+            }
+            ResolveError::ReflectingCallWithoutType { name } => out.with_help(format!(
+                "name the type in a turbofish, as in `{name}::<Point>(value)`: each call \
+                 is specialised for the type it names, and the type is not inferred \
+                 from the argument"
             )),
             ResolveError::UnreflectableType { name } => out.with_help(format!(
                 "`typeInfo` reflects a struct's fields or an enum's variants; \

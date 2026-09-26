@@ -58,6 +58,12 @@ pub const RC_KIND_STRUCT_GUARDED: i64 = 6;
 /// kind: a string, vec, map, set, or reference-counted node.
 pub const RC_KIND_SLOT_CHILDREN: i64 = 7;
 
+/// Slot-child gate naming a child that is the whole element: a `Set` or deque
+/// stored in a container occupies its one slot as the table handle itself.
+/// Like any negative gate it is unconditional; it also tells an element read
+/// to answer the handle word rather than a copy of the slot block.
+pub const SLOT_GATE_WHOLE_ELEMENT: i64 = -2;
+
 // ---------------------------------------------------------------------
 // Child-entry encoding (RC_KIND_ENUM / RC_KIND_STRUCT records).
 //

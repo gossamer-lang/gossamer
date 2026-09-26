@@ -201,6 +201,9 @@ struct Open {
     kind: BraceKind,
     line_level: usize,
     line_was_cont: bool,
+    /// A `(` that groups an expression rather than opening a call's
+    /// arguments, inside which a leading operator continues the line above.
+    group: bool,
 }
 
 /// Operator role resolved from left context, for tokens whose spacing
@@ -399,14 +402,25 @@ fn render_code_line<'src>(
             *prev_sig = Some(tok.kind);
             continue;
         }
-        let mut class = classify(tok.kind, *prev_sig, &mut closure_pipe, stack.len());
-        // SPEC: a newline followed by a leading `&`, `*`, or `-`
-        // always starts a new statement, so those read as unary here.
+        // A `|` that opens a line opens a closure, as the parser reads it,
+        // except inside a grouping `(`, where it continues the line above.
+        let prev_for_class = if first_code
+            && tok.kind == TokenKind::Punct(Punct::Pipe)
+            && !stack.last().is_some_and(|open| open.group)
+        {
+            None
+        } else {
+            *prev_sig
+        };
+        let mut class = classify(tok.kind, prev_for_class, &mut closure_pipe, stack.len());
+        // SPEC: a newline followed by a leading `&`, `*`, or `-` starts a
+        // new statement outside a grouping `(`, so those read as unary here.
         if first_code
             && matches!(
                 tok.kind,
                 TokenKind::Punct(Punct::Minus | Punct::Star | Punct::Amp)
             )
+            && !stack.last().is_some_and(|open| open.group)
         {
             class = Class::Unary;
         }
@@ -519,10 +533,14 @@ fn update_stack(
         kind,
         line_level,
         line_was_cont,
+        group: false,
     };
     match kind {
         TokenKind::Punct(Punct::LParen) => {
-            stack.push(open(BraceKind::Paren));
+            stack.push(Open {
+                group: !prev_sig.is_some_and(ends_expr),
+                ..open(BraceKind::Paren)
+            });
             Some(BraceKind::Paren)
         }
         TokenKind::Punct(Punct::LBracket) => {
@@ -548,6 +566,7 @@ fn update_stack(
                 kind: brace,
                 line_level: anchor,
                 line_was_cont: line_was_cont && anchor == line_level,
+                group: false,
             });
             Some(brace)
         }
@@ -1241,6 +1260,13 @@ let s = #{
     #[test]
     fn closure_pipes_format_tight() {
         let source = "fn main() {\n    let f = xs |> |v| filter(|n: i64| n % 2 == 0, v)\n}\n";
+        assert_eq!(fmt(source), source);
+    }
+
+    #[test]
+    fn closure_opening_a_line_formats_tight() {
+        let source =
+            "fn make(k: i64) -> Fn(i64) -> i64 {\n    let base = k * 2\n    |x| x + base\n}\n";
         assert_eq!(fmt(source), source);
     }
 

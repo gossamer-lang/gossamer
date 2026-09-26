@@ -6,10 +6,10 @@ use super::*;
 use crate::bytecode::InstrIdx;
 use std::fmt::Write as _;
 
-const VM_PREEMPT_INTERVAL: u16 = 1024;
+pub(crate) const VM_PREEMPT_INTERVAL: u16 = 1024;
 
 #[inline]
-fn poll_vm_backedge(countdown: &mut u16) {
+pub(crate) fn poll_vm_backedge(countdown: &mut u16) {
     *countdown -= 1;
     if *countdown == 0 {
         // The scheduler phase/pressure poll is cheap and only yields when a
@@ -805,7 +805,7 @@ impl Vm {
                     // `main() { inner() }` must still report both frames.
                     let tail_position = chunk.name != "main"
                         && ref_cells.is_empty()
-                        && matches!(instrs.get(pc as usize), Some(Op::Return { value }) if *value == dst);
+                        && returns_value_of(instrs, pc, dst);
                     let argc_usz = argc as usize;
                     if let Some(callee) = callee
                         && let Value::Variant(inner) = &registers[callee as usize]
@@ -5166,4 +5166,26 @@ fn select_dispatch(
             ch.unregister_select_waiter(&waiter);
         }
     }
+}
+
+/// Whether the instructions from `pc` on do nothing but return the value a
+/// call just wrote to `dst`: register moves carrying it and jumps, then a
+/// `Return` of the register it ends in. An `if` or `match` arm whose tail is a
+/// call compiles to exactly that, so such a call is in tail position.
+fn returns_value_of(instrs: &[Op], pc: u32, dst: crate::bytecode::Reg) -> bool {
+    let mut at = pc as usize;
+    let mut value = dst;
+    // Each step moves forward or jumps; a chain longer than the chunk loops.
+    for _ in 0..instrs.len() {
+        match instrs.get(at) {
+            Some(Op::Return { value: returned }) => return *returned == value,
+            Some(Op::Move { dst, src } | Op::MoveConsume { dst, src }) if *src == value => {
+                value = *dst;
+                at += 1;
+            }
+            Some(Op::Jump { target }) => at = *target as usize,
+            _ => return false,
+        }
+    }
+    false
 }

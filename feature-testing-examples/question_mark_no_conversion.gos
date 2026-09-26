@@ -1,0 +1,23 @@
+// `?` on an error the enclosing function's error type has no `From` impl
+// for is rejected at check time with GT0093, not converted blindly.
+// `question_mark_without_conversion_is_rejected` in
+// `crates/gossamer-cli/tests/bug_regressions` asserts the diagnostic.
+
+struct A { x: i64 }
+struct B { y: i64 }
+struct C { z: String }
+
+impl From<A> for C {
+    fn from(a: A) -> C { C { z: format("{}", a.x) } }
+}
+
+fn fb() -> Result<i64, B> { Err(B { y: 2 }) }
+
+fn wrong_source() -> Result<i64, C> {
+    let v = fb()?
+    Ok(v)
+}
+
+fn main() {
+    println("{}", wrong_source().is_err())
+}
