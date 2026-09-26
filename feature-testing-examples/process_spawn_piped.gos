@@ -26,11 +26,12 @@ fn main() {
 }
 
 // Each method answers its declared type, so the lines a loop collects are
-// the `String`s the child wrote.
+// the `String`s the child wrote. The input is an odd number of bytes: Windows
+// `sort` reads a short even-length buffer as UTF-16.
 fn collected() {
     match process::spawn_piped("sort", Vec::from([])) {
         Ok(child) => {
-            let sent: bool = child.write_stdin("b\na\n")
+            let sent: bool = child.write_stdin("banana\napple\n")
             child.close_stdin()
             let mut got = #[]
             while let Some(line) = child.read_line() {

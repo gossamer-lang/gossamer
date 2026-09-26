@@ -47,6 +47,7 @@ fn word_elements() {
     println("word unzip {:?}", iter::unzip(ps))
     println("word for_each")
     xs.iter().for_each(|v| println("  fe {:?}", v))
+    xs.iter().for_each(|v| println("  fx {:x} {:>4} {:.1}", v, v, 0.5))
     println("word filter_map {:?}", xs.iter().filter_map(|v| if v > 1 { Some(v) } else { None }).collect())
     println("word reduce {:?}", xs.iter().reduce(|a, b| if (|a, b| a - b)(a, b) > 0 { a } else { b }))
     println("word scan {:?}", xs.iter().scan(0, |acc, v| acc + (|v| v)(v)).collect())

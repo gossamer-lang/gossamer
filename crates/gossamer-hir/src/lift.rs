@@ -289,6 +289,12 @@ const SYNTHETIC_GLOBAL_NAMES: &[&str] = &[
     "panic",
 ];
 
+/// Prefixes of the helpers the parser and the HIR lowerer call by name - the
+/// format-spec renderers (`__fmt_radix`, `__fmt_pad`, ..) and the renderers
+/// and wrappers under `__gos_` (`__gos_debug_quote`, `__gos_f32_display`,
+/// ..). Both namespaces are the compiler's own.
+const SYNTHETIC_GLOBAL_PREFIXES: &[&str] = &["__fmt_", "__gos_"];
+
 /// The global-helper names `is_bound` reports as bindings, in the shape
 /// [`collect_free_vars`] and its typed counterpart expect.
 #[must_use]
@@ -313,6 +319,9 @@ fn is_synthetic_global<H: std::hash::BuildHasher>(
     // A compiler-emitted comparator is a top-level function, named without a
     // resolved definition because nothing in the source spells it.
     SYNTHETIC_GLOBAL_NAMES.contains(&name)
+        || SYNTHETIC_GLOBAL_PREFIXES
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
         || name.starts_with(LIFTED_CLOSURE_PREFIX)
         || name.starts_with(gossamer_ast::USER_COMPARATOR_PREFIX)
         || name.starts_with(gossamer_ast::STRUCTURAL_COMPARATOR_PREFIX)
