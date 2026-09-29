@@ -638,7 +638,8 @@ pub fn add(a: i64, b: i64) -> i64 { a + b }\n\n\
         .current_dir(&dir)
         .output()
         .expect("spawn test");
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    // Paths print with the host's separator; compare in one spelling.
+    let stdout = String::from_utf8_lossy(&out.stdout).replace('\\', "/");
     assert!(
         stdout.contains("src/util.gos:11:"),
         "the failing test's frame names the module file:\n{stdout}"
