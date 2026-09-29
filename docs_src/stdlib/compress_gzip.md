@@ -1,6 +1,6 @@
 # `std::compress::gzip`
 
-Status: unproven
+Status: experimental
 
 gzip encoder / decoder (RFC 1952; flate2-backed).
 

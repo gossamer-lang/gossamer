@@ -40,7 +40,7 @@ For receiver methods on built-in types, see [`Methods by type`](../method_suppor
 | [`std::encoding::json`](encoding_json.md) | JSON parser, emitter, and derive support. |
 | [`std::encoding::pem`](encoding_pem.md) | PEM block encoder and decoder. |
 | [`std::encoding::toml`](encoding_toml.md) | TOML 1.0 parsing + emission. Pair with the turbofish `from_toml::<Type>` for typed decoding (struct auto-derive). |
-| [`std::encoding::xml`](encoding_xml.md) | Streaming XML decoder + builder (quick-xml). |
+| [`std::encoding::xml`](encoding_xml.md) | XML parse and encode (quick-xml) over a `json::Value` tree. |
 | [`std::encoding::yaml`](encoding_yaml.md) | YAML 1.2 parser/emitter (serde_norway-backed). |
 | [`std::env`](env.md) | Process environment, command-line arguments, working directory. |
 | [`std::errors`](errors.md) | Error construction, wrapping, and chain traversal. |
@@ -88,17 +88,17 @@ For receiver methods on built-in types, see [`Methods by type`](../method_suppor
 | [`std::net::netip`](net_netip.md) | Typed IP-address parsing, classification, and addr:port helpers (Go's net/netip shape). |
 | [`std::net::smtp`](net_smtp.md) | Sends one message per call, so an application can mail a password reset, an address verification, a magic link, or a security notice. A pool, a queue, retries, and bounce handling are application policy and belong in a package built on these. Port 465 speaks TLS from the first byte; any other port starts in the clear and upgrades through STARTTLS when the server offers it, and credentials are refused rather than sent to a server offering no encryption. |
 | [`std::net::url`](net_url.md) | Network URL parsing and component escaping; never use filesystem-path rules. |
-| [`std::option`](option.md) | Data-last Option combinators for pipeline chaining: map, filter, unwrap_or, and_then, etc. |
+| [`std::option`](option.md) | Option combinators as data-first free functions for pipelines: map, filter, unwrap_or, and_then, etc. |
 | [`std::os`](os.md) | Operating-system identity. |
 | [`std::os::exec`](os_exec.md) | Deprecated compatibility facade for child processes; new code uses std::process. |
 | [`std::os::signal`](os_signal.md) | POSIX-style signal subscription (Go's os/signal shape). |
 | [`std::os::user`](os_user.md) | POSIX user / group lookup. Unix-backed by `nix`; Windows falls back to env vars. |
-| [`std::panic`](panic.md) | Panic / `catch_unwind` integration. |
+| [`std::panic`](panic.md) | Goroutine-scoped panics; there is no `catch_unwind`, and `runtime::set_panic_hook` observes one. |
 | [`std::path`](path.md) | Lexical filesystem-path operations; platform path grammar, no URL parsing. |
 | [`std::pprof`](pprof.md) | Runtime profiles in the text format `go tool pprof` reads, plus a Chrome-trace scheduler capture. |
 | [`std::process`](process.md) | Canonical process control and child-process API; std::os::exec is compatibility-only. |
 | [`std::regex`](regex.md) | Compiled regular expressions (Rust `regex` crate syntax; no backreferences or look-around). |
-| [`std::result`](result.md) | Data-last Result combinators for pipeline chaining: map, map_err, unwrap_or_else, etc. |
+| [`std::result`](result.md) | Result combinators as data-first free functions for pipelines: map, map_err, unwrap_or_else, etc. |
 | [`std::runtime`](runtime.md) | Goroutine / scheduler introspection and tuning. |
 | [`std::slog`](slog.md) | Structured, levelled logging. |
 | [`std::sort`](sort.md) | Explicit stable ordering and sorted-sequence search, the deliberate counterpart to Vec's unstable inherent `sort`. |

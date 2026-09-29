@@ -1,9 +1,10 @@
 // Stack overflow must produce a clean diagnostic (non-zero exit
 // code), not silently corrupt memory. Unbounded recursion is the
-// simplest trigger.
+// simplest trigger; the call is not in tail position, since a tail
+// call replaces its caller's frame on the VM and never overflows.
 
 fn recurse(n: i64) -> i64 {
-    recurse(n + 1)
+    1 + recurse(n + 1)
 }
 
 fn main() {

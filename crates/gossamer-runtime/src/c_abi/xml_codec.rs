@@ -12,14 +12,12 @@
 //! uses - the bytes mirror `gossamer_std::encoding::xml` exactly, so
 //! a parse->encode round-trip is bit-identical across tiers.
 //!
-//! The parsed tree is handed to user code as an opaque `*mut GosXml`
-//! handle threaded through a normal i64 slot (the same opaque-handle
-//! shape `gos_rt_json_*` uses for `serde_json::Value`). `parse`
-//! returns `Result<i64-handle, errors::Error>`; `encode` consumes the
-//! handle and returns the serialised `String`. Between the two the
-//! handle is opaque - user code does not navigate it (field access on
-//! an xml node is not part of this surface), matching the VM tier
-//! where the node round-trips straight back into `encode`.
+//! The parsed tree is a `json::Value` on every tier, in the shape the VM
+//! builds: an element is `{"__xml_type": "element", "attrs": {..},
+//! "children": [..], "name": ..}` and a text node is
+//! `{"__xml_type": "text", "value": ..}`. `parse` answers a `GosJson`
+//! handle, so it renders, navigates, and is released as any other
+//! `json::Value`; `encode` reads one back.
 
 use std::collections::BTreeMap;
 use std::os::raw::c_char;
@@ -48,17 +46,6 @@ enum Node {
         children: Vec<Node>,
     },
     Text(String),
-}
-
-/// Opaque handle wrapping the parsed root node. The compiled tier
-/// shuttles the raw `*mut GosXml` through an i64 slot. Reclamation
-/// would require a dedicated `TyKind::XmlNode` so the MIR drop pass
-/// can key on it (the json model); the parse result is currently a
-/// plain `i64`, indistinguishable from any other integer, so - like
-/// the raw-i64 SQL handles - the tree is intentionally leaked rather
-/// than risk freeing a non-handle i64. See the module docs.
-pub struct GosXml {
-    node: Node,
 }
 
 fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
@@ -226,16 +213,82 @@ fn write_node(w: &mut Writer<impl std::io::Write>, node: &Node) {
     }
 }
 
-/// `encoding::xml::parse(s) -> Result<Node, errors::Error>`. The Ok
-/// payload is an opaque `*mut GosXml` handle (cast to i64); the Err
-/// payload is a gos error handle. Returns a packed `GosResult` i128
-/// (disc 0 = Ok, disc 1 = Err).
+/// The `json::Value` shape of `node`, keyed as the VM keys it.
+fn node_to_json(node: &Node) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    match node {
+        Node::Text(text) => {
+            map.insert("__xml_type".into(), "text".into());
+            map.insert("value".into(), text.as_str().into());
+        }
+        Node::Element {
+            name,
+            attrs,
+            children,
+        } => {
+            map.insert("__xml_type".into(), "element".into());
+            let attrs = attrs
+                .iter()
+                .map(|(k, v)| (k.clone(), serde_json::Value::from(v.as_str())))
+                .collect();
+            map.insert("attrs".into(), serde_json::Value::Object(attrs));
+            map.insert(
+                "children".into(),
+                serde_json::Value::Array(children.iter().map(node_to_json).collect()),
+            );
+            map.insert("name".into(), name.as_str().into());
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+/// The node a `json::Value` of the [`node_to_json`] shape describes;
+/// `None` for any other value, as the VM answers.
+fn json_to_node(value: &serde_json::Value) -> Option<Node> {
+    let map = value.as_object()?;
+    match map.get("__xml_type")?.as_str()? {
+        "text" => Some(Node::Text(
+            map.get("value")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+        )),
+        "element" => {
+            let name = map.get("name")?.as_str()?.to_string();
+            let attrs = map
+                .get("attrs")
+                .and_then(serde_json::Value::as_object)
+                .map(|attrs| {
+                    attrs
+                        .iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let children = map
+                .get("children")
+                .and_then(serde_json::Value::as_array)
+                .map(|children| children.iter().filter_map(json_to_node).collect())
+                .unwrap_or_default();
+            Some(Node::Element {
+                name,
+                attrs,
+                children,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// `encoding::xml::parse(s) -> Result<json::Value, errors::Error>`,
+/// packed as a `GosResult` i128 (disc 0 = Ok with a `GosJson` handle,
+/// disc 1 = Err with an error handle).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_xml_parse(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         match parse(cstr_to_str(s)) {
             Ok(node) => {
-                let handle = Box::into_raw(Box::new(GosXml { node }));
+                let handle = super::json::GosJson::into_raw(node_to_json(&node));
                 unsafe { super::vec::gos_rt_result_new(0, handle as i64) }
             }
             Err(e) => err_result(&e),
@@ -243,22 +296,19 @@ pub unsafe extern "C" fn gos_rt_xml_parse(s: *const c_char) -> i128 {
     })
 }
 
-/// `encoding::xml::encode(node) -> String`. Consumes the opaque
-/// `*mut GosXml` handle (passed as an i64) and returns the serialised
-/// document. A null / zero handle yields the empty string, matching
-/// the VM tier's behaviour for a non-node argument.
+/// `encoding::xml::encode(value) -> String`. Borrows the `json::Value`
+/// handle; a value that is not an XML node encodes as the empty string,
+/// as on the VM.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_xml_encode(node: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let handle = node as *const GosXml;
-        if handle.is_null() {
-            return alloc_cstring(b"");
+        // SAFETY: `node` is a `json::Value` handle (or null), which is what
+        // the checker admits for `encode`'s parameter.
+        let value = unsafe { super::json::json_borrow(node as *const super::json::GosJson) };
+        match value.and_then(json_to_node) {
+            Some(node) => alloc_cstring(encode(&node).as_bytes()),
+            None => alloc_cstring(b""),
         }
-        // SAFETY: `handle` was produced by `gos_rt_xml_parse`'s
-        // `Box::into_raw` and is still live (the handle outlives the
-        // encode call; ownership is not transferred here).
-        let xml = unsafe { &*handle };
-        alloc_cstring(encode(&xml.node).as_bytes())
     })
 }
 

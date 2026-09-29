@@ -1180,6 +1180,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "A closure passed to a `[rust-bindings]` function's callback parameter has a parameter or result whose type nothing in the program decides. The binding's signature does not name its callback's types, and a compiled program calls the closure through each type's register class, so annotate each parameter (`|s: String| ..`) or use it in a way that fixes its type.",
     ),
     (
+        "GT0095",
+        "Types",
+        "blanket impl",
+        "An `impl` block names one of its own type parameters as its self type (`impl<T: Named> Describe for T`), which would implement the trait for every type. Gossamer declines blanket impls: write the `impl` for each type that needs the trait, or take the bound in a generic function (`fn describe<T: Named>(x: T) -> String`).",
+    ),
+    (
         "GP0056",
         "Parser",
         "retired cohort isolation spelling",
@@ -1202,6 +1208,12 @@ const DIAGNOSTIC_CATALOGUE: &[(&str, &str, &str, &str)] = &[
         "Parser",
         "range pattern bound that is not a literal",
         "A range pattern bound is a literal, or a primitive integer limit such as `i64::MIN` or `u8::MAX`, which stands for its literal. Any other path - a `const`, a static, an enum variant - is not a bound: match it with a guard instead (`n if n >= LOW => ..`).",
+    ),
+    (
+        "GP0060",
+        "Parser",
+        "struct literal in a condition head",
+        "A struct literal was written without parentheses in an `if`, `while`, `match`, or `for` head. There a `{` opens the body, so the literal is ambiguous with it: write `for v in (Fib { a: 0, b: 1 }) { .. }`.",
     ),
     (
         "GP0053",
@@ -1921,7 +1933,7 @@ fn regenerate_item_fixtures(check: bool) -> Result<()> {
         let Ok(source) = fs::read_to_string(root.join(fixture)) else {
             continue;
         };
-        for module in stdlib_modules_used(&source) {
+        for module in gossamer_std::manifest::feature_status::stdlib_modules_used(&source) {
             by_module.entry(module).or_default().push(fixture.clone());
         }
         for feature in gossamer_std::manifest::feature_status::lang_features_used(&source) {
@@ -2011,45 +2023,6 @@ fn rustfmt(source: &str) -> Result<String> {
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout).context("rustfmt output is not UTF-8")
-}
-
-/// Canonical stdlib module paths a Gossamer source imports.
-fn stdlib_modules_used(source: &str) -> Vec<String> {
-    let mut found = Vec::new();
-    for line in source.lines() {
-        let Some(rest) = line.trim().strip_prefix("use std::") else {
-            continue;
-        };
-        let rest = rest.split("//").next().unwrap_or(rest).trim();
-        let (prefix, leaves) = match rest.split_once('{') {
-            Some((prefix, tail)) => (
-                prefix.trim(),
-                tail.trim_end_matches('}').split(',').collect::<Vec<_>>(),
-            ),
-            None => ("", vec![rest]),
-        };
-        for leaf in leaves {
-            let leaf = leaf.split(" as ").next().unwrap_or(leaf).trim();
-            if leaf.is_empty() {
-                continue;
-            }
-            let path = format!("std::{prefix}{leaf}");
-            // A leaf may name an item rather than a module
-            // (`use std::sync::channel`); fall back to the module above.
-            let parent = path
-                .rsplit_once("::")
-                .map_or_else(|| path.clone(), |(module, _)| module.to_string());
-            for candidate in [path, parent] {
-                if gossamer_std::registry::module(&candidate).is_some() {
-                    if !found.contains(&candidate) {
-                        found.push(candidate);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    found
 }
 
 #[cfg(test)]

@@ -2695,7 +2695,7 @@ impl<'a> Builder<'a> {
                 ("gos_rt_encoding_xml_escape", self.tcx.string_ty())
             }
             "encoding::xml::parse" | "xml::parse" => {
-                ("gos_rt_xml_parse", self.result_i64_error_adt_ty())
+                ("gos_rt_xml_parse", self.result_json_value_error_adt_ty())
             }
             "encoding::xml::encode" | "xml::encode" => ("gos_rt_xml_encode", self.tcx.string_ty()),
             "encoding::base32::encode_string" | "base32::encode_string" => {

@@ -1,13 +1,13 @@
 // A doc comment whose fenced code `gos test` compiles and runs - the
-// `lang::doctest` surface. The fence's body and `main` exercise the same
-// function, so the three execution tiers run exactly what the doctest
-// documents, and `gos test` additionally runs the fence itself.
+// `lang::doctest` surface. The fence is compiled in the scope of the item it
+// documents and calls it; `main` exercises the same function, so the three
+// execution tiers run exactly what the doctest documents.
 
 // Adds the doubled second addend, the way the doctest below shows.
 //
 // ```
-// assert_eq(4 + 2 * 2, 8)
-// println("{}", 8)
+// assert_eq(add_doubled(4, 2), 8)
+// println("{}", add_doubled(4, 2))
 // ```
 //
 // A `text` fence stays prose and is never compiled:

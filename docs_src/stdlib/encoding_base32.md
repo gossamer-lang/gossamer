@@ -1,6 +1,6 @@
 # `std::encoding::base32`
 
-Status: unproven
+Status: experimental
 
 RFC 4648 base32 (uppercase) encode / decode.
 

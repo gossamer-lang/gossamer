@@ -2203,6 +2203,24 @@ impl Parser<'_> {
         {
             return self.parse_struct_literal_tail(path);
         }
+        // `Name { field: ..` cannot open a block, so in a head where a struct
+        // literal needs parentheses it is reported once and parsed as the
+        // literal it is, leaving the rest of the statement intact.
+        if self.at_punct(Punct::LBrace)
+            && self.struct_literal_forbidden()
+            && matches!(self.peek_nth(1).kind, TokenKind::Ident)
+            && self.peek_nth_is_punct(2, Punct::Colon)
+        {
+            let name = path
+                .segments
+                .iter()
+                .map(|segment| segment.name.name.as_str())
+                .collect::<Vec<_>>()
+                .join("::");
+            let span = Span::new(path_start.file, path_start.start, self.peek_span().end);
+            self.record(ParseError::StructLiteralInHead { name }, span);
+            return self.with_struct_literals_allowed(|p| p.parse_struct_literal_tail(path));
+        }
         ExprKind::Path(path)
     }
 
@@ -2604,6 +2622,31 @@ impl Parser<'_> {
         self.alloc_function_call(macro_name, vec![concat_call])
     }
 
+    /// The span of the placeholder `{text}` inside the template literal at
+    /// `literal`, searched from `cursor` so repeated placeholders are found
+    /// in order; the whole literal when the source spells it differently
+    /// (an escape inside the placeholder).
+    fn placeholder_span(&self, literal: Span, text: &str, cursor: &mut usize) -> Span {
+        let end = (literal.end as usize).min(self.source.len());
+        let needle = format!("{{{text}}}");
+        let found = self
+            .source
+            .get(*cursor..end)
+            .and_then(|window| window.find(&needle));
+        match found {
+            Some(offset) => {
+                let start = *cursor + offset;
+                *cursor = start + needle.len();
+                Span::new(
+                    literal.file,
+                    u32::try_from(start).unwrap_or(literal.start),
+                    u32::try_from(*cursor).unwrap_or(literal.end),
+                )
+            }
+            None => literal,
+        }
+    }
+
     /// The `__concat` arguments a parsed template stands for: each literal
     /// piece, each named capture, and each positional placeholder filled from
     /// `positional_iter` in order, rendered through its spec.
@@ -2614,21 +2657,21 @@ impl Parser<'_> {
         first: &Expr,
     ) -> Vec<Expr> {
         let mut concat_args: Vec<Expr> = Vec::new();
+        let mut cursor = first.span.start as usize;
         for segment in segments {
             match segment {
                 FormatSegment::Invalid(text) => {
+                    let span = self.placeholder_span(first.span, &text, &mut cursor);
                     self.record(
                         ParseError::MalformedFormatPlaceholder { text: text.clone() },
-                        first.span,
+                        span,
                     );
                     concat_args
                         .push(self.alloc_literal_expr(Literal::String(format!("{{{text}}}"))));
                 }
                 FormatSegment::Indexed(text) => {
-                    self.record(
-                        ParseError::FormatArgumentIndex { text: text.clone() },
-                        first.span,
-                    );
+                    let span = self.placeholder_span(first.span, &text, &mut cursor);
+                    self.record(ParseError::FormatArgumentIndex { text: text.clone() }, span);
                     concat_args
                         .push(self.alloc_literal_expr(Literal::String(format!("{{{text}}}"))));
                 }

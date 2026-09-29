@@ -1,0 +1,22 @@
+// An assignment to a field path under `m.or_insert(k, d)` lands in the stored
+// value, as a method call through the same path does, on every tier.
+
+struct C { n: i64, v: Vec<i64>, inner: In }
+struct In { hits: i64, name: String }
+fn main() {
+    let mut m: Map<String, C> = Map::new()
+    m.or_insert("a", C { n: 0, v: #[], inner: In { hits: 0, name: "" } }).n += 3
+    println("{}", m.get("a").unwrap().n)
+    m.or_insert("a", C { n: 0, v: #[], inner: In { hits: 0, name: "" } }).n = 7
+    println("{}", m.get("a").unwrap().n)
+    m.or_insert("a", C { n: 0, v: #[], inner: In { hits: 0, name: "" } }).v.push(1)
+    m.or_insert("b", C { n: 1, v: #[], inner: In { hits: 0, name: "" } }).inner.hits += 2
+    m.or_insert("b", C { n: 1, v: #[], inner: In { hits: 0, name: "" } }).inner.name = "bee"
+    for k in #["a", "b"] {
+        let c = m.get(k).unwrap()
+        println("{k} {} {:?} {} {}", c.n, c.v, c.inner.hits, c.inner.name)
+    }
+    let mut t: Map<i64, (i64, String)> = Map::new()
+    for i in 0..3 { t.or_insert(i % 2, (0, "")).0 += i }
+    println("{:?} {:?}", t.get(0), t.get(1))
+}

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.64.2 - Correctness, diagnostics, and doc tests
+
+- A two-argument `math` method with an integer operand (`n.pow(2)`, `n.hypot(4)`, `y.atan2(1)`) answers the right value in native builds.
+- `m.or_insert(k, d).field = v` and `m.or_insert(k, d).field += v` update the stored value on every tier.
+- `xml::parse` answers a `json::Value` on every tier: it prints, navigates with `get` / `at`, and is freed in native builds.
+- Doc tests compile in the module that declares the item they document, so a fence can call it; their diagnostics point at the comment line, fences in a project's module files run, and their assertions count.
+- `gos test` in a project reports errors and panic frames against the module file they are in, prints a failure's `panic:` once, and shows a test inside `mod tests` as one frame.
+- A blanket impl (`impl<T: Bound> Trait for T`) is rejected with GT0095.
+- A struct literal in an `if`, `while`, `match`, or `for` head is one GP0060 with the parenthesized form, instead of a cascade of parse errors.
+- GP0021 points at the malformed placeholder, a mismatched `match` arm or `else` branch at its value, GT0002 on a `String` at the method name, and GT0083 names the expression it rejects.
+- `gos feature-status` credits a module that a fixture reaches through a parent import (`use std::encoding`, then `encoding::xml::parse`).
+- The standard library reference drops `xml::Reader`, `xml::Writer`, `xml::Event`, and `gzip::Level`, which no program could use, and corrects the `result`, `option`, `panic`, `utf16`, and `xml` descriptions.
+
 ## 0.64.1 - Correctness, tier parity, debug info, and smaller binaries
 
 - A `Map`, `Set`, or deque taken out of a container (`pop`, `remove`, `pop_front`) is freed on the compiled tiers; popping a `Set` or deque no longer crashes, and a table a function returns on one path no longer leaks on the others.

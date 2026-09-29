@@ -78,10 +78,12 @@ version. This page is auto-generated from the catalogue in
 | [`GT0092`](#gt0092) | Types | field read from a closure parameter of undecided type |
 | [`GT0093`](#gt0093) | Types | `?` error with no conversion |
 | [`GT0094`](#gt0094) | Types | binding callback with an undecided type |
+| [`GT0095`](#gt0095) | Types | blanket impl |
 | [`GP0056`](#gp0056) | Parser | retired cohort isolation spelling |
 | [`GP0057`](#gp0057) | Parser | literal regex pattern that does not compile |
 | [`GP0058`](#gp0058) | Parser | malformed literal SQL statement |
 | [`GP0059`](#gp0059) | Parser | range pattern bound that is not a literal |
+| [`GP0060`](#gp0060) | Parser | struct literal in a condition head |
 | [`GP0053`](#gp0053) | Parser | `Display` rendering declared as `to_string` |
 | [`GP0054`](#gp0054) | Parser | shared reference in parameter position |
 | [`GP0055`](#gp0055) | Parser | shared reference on a call argument |
@@ -503,6 +505,12 @@ A field was read from a closure parameter with no annotation, and the closure is
 
 A closure passed to a `[rust-bindings]` function's callback parameter has a parameter or result whose type nothing in the program decides. The binding's signature does not name its callback's types, and a compiled program calls the closure through each type's register class, so annotate each parameter (`|s: String| ..`) or use it in a way that fixes its type.
 
+## `GT0095` <a id="gt0095"></a>
+
+**Types** - blanket impl
+
+An `impl` block names one of its own type parameters as its self type (`impl<T: Named> Describe for T`), which would implement the trait for every type. Gossamer declines blanket impls: write the `impl` for each type that needs the trait, or take the bound in a generic function (`fn describe<T: Named>(x: T) -> String`).
+
 ## `GP0056` <a id="gp0056"></a>
 
 **Parser** - retired cohort isolation spelling
@@ -526,6 +534,12 @@ A string literal handed to `sql::statement` is not a well-formed statement: it i
 **Parser** - range pattern bound that is not a literal
 
 A range pattern bound is a literal, or a primitive integer limit such as `i64::MIN` or `u8::MAX`, which stands for its literal. Any other path - a `const`, a static, an enum variant - is not a bound: match it with a guard instead (`n if n >= LOW => ..`).
+
+## `GP0060` <a id="gp0060"></a>
+
+**Parser** - struct literal in a condition head
+
+A struct literal was written without parentheses in an `if`, `while`, `match`, or `for` head. There a `{` opens the body, so the literal is ambiguous with it: write `for v in (Fib { a: 0, b: 1 }) { .. }`.
 
 ## `GP0053` <a id="gp0053"></a>
 

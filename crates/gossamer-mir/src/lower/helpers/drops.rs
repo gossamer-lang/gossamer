@@ -13148,10 +13148,16 @@ pub(crate) fn collect_json_borrowing_fns(
     out
 }
 
+/// `true` when `name` is a runtime entry that takes a `json::Value` handle.
+/// `xml::encode` reads the tree `xml::parse` answers, which is a `json::Value`.
+fn json_runtime_entry(name: &str) -> bool {
+    name.starts_with("gos_rt_json_") || name == "gos_rt_xml_encode"
+}
+
 /// `true` when `name` is a json runtime entry that reads its handle argument
 /// and answers something that never aliases it.
 fn json_entry_borrows(name: &str) -> bool {
-    name.starts_with("gos_rt_json_")
+    json_runtime_entry(name)
         && !matches!(
             name,
             "gos_rt_json_identity" | "gos_rt_json_free" | "gos_rt_json_free_slots"
@@ -13253,7 +13259,7 @@ pub(crate) fn insert_json_frees(
     if !any {
         return;
     }
-    let is_json_rt = |name: &str| name.starts_with("gos_rt_json_");
+    let is_json_rt = json_runtime_entry;
     // Entries that read a carrier's arm and hand nothing of its payload out.
     let carrier_query = |name: &str| {
         matches!(

@@ -568,6 +568,99 @@ fn broken() {}\n";
 }
 
 #[test]
+fn doc_tests_call_the_documented_item_and_report_at_the_comment() {
+    let source = "\
+// Adds two numbers.\n\
+//\n\
+// ```\n\
+// assert_eq(add(2, 2), 4)\n\
+// ```\n\
+pub fn add(a: i64, b: i64) -> i64 { a + b }\n\
+\n\
+// Broken on purpose.\n\
+//\n\
+// ```\n\
+// let x: i64 = \"no\"\n\
+// ```\n\
+fn main() { println(\"{}\", add(1, 2)) }\n";
+    let fixture = write_fixture("doctest_scope", source);
+    let out = Command::new(gos_bin())
+        .arg("test")
+        .arg(&fixture)
+        .output()
+        .expect("spawn test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let name = fixture.file_name().unwrap().to_string_lossy().into_owned();
+    let reported = |verdict: &str, suffix: &str| {
+        stdout
+            .lines()
+            .any(|line| line.contains(verdict) && line.trim_end().ends_with(suffix))
+    };
+    assert!(
+        reported("PASS doc-test", &format!("{name}:3")),
+        "a fence calling the item it documents passes:\n{stdout}\n{stderr}"
+    );
+    assert!(
+        reported("FAIL doc-test", &format!("{name}:10 (compile)")),
+        "a fence that does not type-check fails:\n{stdout}"
+    );
+    assert!(
+        stderr.contains(&format!("{name}:11:17")),
+        "the diagnostic points at the comment line it was read from:\n{stderr}"
+    );
+    assert!(stdout.contains("1 assertion(s)"), "the fence's assertion counts:\n{stdout}");
+    let _ = std::fs::remove_file(&fixture);
+}
+
+#[test]
+fn test_reports_module_files_by_their_own_names() {
+    let mut dir = env::temp_dir();
+    dir.push(format!("gos-test-modules-{}", std::process::id()));
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).expect("mkdir project");
+    std::fs::write(
+        dir.join("project.toml"),
+        "[project]\nid = \"example.com/mods\"\nversion = \"0.1.0\"\n",
+    )
+    .expect("write manifest");
+    std::fs::write(src.join("main.gos"), "use util::add\n\nfn main() { println(\"{}\", add(1, 2)) }\n")
+        .expect("write main");
+    std::fs::write(
+        src.join("util.gos"),
+        "// Adds.\n//\n// ```\n// assert_eq(add(1, 1), 2)\n// ```\n\
+pub fn add(a: i64, b: i64) -> i64 { a + b }\n\n\
+#[cfg(test)]\nmod tests {\n    #[test]\n    fn wrong() { assert_eq(super::add(1, 1), 3) }\n}\n",
+    )
+    .expect("write util");
+    let out = Command::new(gos_bin())
+        .arg("test")
+        .current_dir(&dir)
+        .output()
+        .expect("spawn test");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("src/util.gos:11:"),
+        "the failing test's frame names the module file:\n{stdout}"
+    );
+    assert!(!stdout.contains("main.gos:1"), "no frame is attributed to the entry:\n{stdout}");
+    assert!(
+        !stdout.contains("panic: error["),
+        "the failure line carries one `panic:`:\n{stdout}"
+    );
+    assert_eq!(
+        stdout.matches("  at ").count(),
+        1,
+        "the failing test is one frame:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("PASS doc-test src/util.gos:3"),
+        "a module file's doc tests run:\n{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn lint_fix_applies_auto_suggestions_and_writes_back() {
     // The binding is only read as a value, so nothing here needs the `mut`.
     let source = "fn main() { let mut x = 1i64\nprintln(\"{}\", x + 1) }\n";

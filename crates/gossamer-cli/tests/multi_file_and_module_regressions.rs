@@ -2162,12 +2162,22 @@ fn main() {}
         stdout.contains("call stack (outermost first):"),
         "no traceback header:\n{stdout}",
     );
-    for frame in ["panics_in_nested_call", "top", "middle", "deepest"] {
+    // A test inside `mod tb_tests` is one frame, named by its module path.
+    for frame in [
+        "tb_tests::panics_in_nested_call",
+        "top",
+        "middle",
+        "deepest",
+    ] {
         assert!(
             stdout.contains(&format!("at {frame}")),
             "traceback missing frame `{frame}`:\n{stdout}",
         );
     }
+    assert!(
+        !stdout.contains("at panics_in_nested_call"),
+        "the test's frame appears once:\n{stdout}",
+    );
 }
 
 #[test]

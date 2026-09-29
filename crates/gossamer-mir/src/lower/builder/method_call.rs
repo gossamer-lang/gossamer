@@ -6408,32 +6408,10 @@ impl<'a> Builder<'a> {
         Some(dest)
     }
 
-    /// Resolve the runtime symbol for the type-guarded Vec / String /
-    /// HashMap method surface from a receiver type recovered after lowering.
-    ///
-    /// The top-of-method dispatch table keys on the HIR receiver type, which
-    /// is an unresolved inference `Var` when a stdlib call is used directly
-    /// as a receiver (`env::args().first()`, `s.split_whitespace()` consumed
-    /// in place) - stdlib return types are not all pinned in the checker. The
-    /// lowered MIR receiver type is ground truth, so re-keying the guarded
-    /// dispatch off it lets a chained temporary resolve the same symbol as a
-    /// `let`-bound receiver, identically across the VM, Cranelift, and LLVM
-    /// tiers. Mirrors the guarded arms in [`Self::lower_method_call`]'s table.
-    /// `xs.map(f)` / `xs.filter(f)` / `xs.sum()` / … - the method form
-    /// of the `iter::` combinators on a sequence receiver. Routes
-    /// through `try_lower_iter_call` with the receiver threading in as
-    /// the data-last argument, so both surfaces share one lowering.
-    /// Non-sequence receivers pass through: `Result::map`,
-    /// `Option::map`, `HashMap` accessors, and the String surface keep
-    /// their own dispatch.
-    /// `n.max(m)` / `n.min(m)` / `n.clamp(lo, hi)` on a numeric receiver.
-    /// These name the same operation as the prelude's free `max(n, m)`, so
-    /// they lower through the same runtime helpers rather than reaching the
-    /// by-name fallback, which had no symbol to call.
     /// `f.round()`, `x.pow(2.0)`, `f.atan2(y)` - a `math::` function called
     /// on a number, which names the free call with the receiver as its first
-    /// argument, and lowers as that call does. An integer receiver reaches a
-    /// float function as the `f64` the checker types the result at.
+    /// argument, and lowers as that call does. An integer receiver or
+    /// argument reaches a float parameter converted to `f64`.
     fn lower_numeric_math_method(
         &mut self,
         receiver: &HirExpr,
@@ -6503,23 +6481,31 @@ impl<'a> Builder<'a> {
         if shape.params.len() != args.len() + 1 {
             return MethodLowering::Pass;
         }
+        let f64_ty = self.tcx.float_ty(gossamer_types::FloatTy::F64);
+        let widen = |expr: &HirExpr| HirExpr {
+            id: expr.id,
+            span: expr.span,
+            ty: f64_ty,
+            kind: HirExprKind::Cast {
+                value: Box::new(expr.clone()),
+                ty: f64_ty,
+            },
+        };
         let first = if receiver_is_float {
             receiver.clone()
         } else {
-            let f64_ty = self.tcx.float_ty(gossamer_types::FloatTy::F64);
-            HirExpr {
-                id: receiver.id,
-                span: receiver.span,
-                ty: f64_ty,
-                kind: HirExprKind::Cast {
-                    value: Box::new(receiver.clone()),
-                    ty: f64_ty,
-                },
-            }
+            widen(receiver)
         };
         let mut free_args = Vec::with_capacity(args.len() + 1);
         free_args.push(first);
-        free_args.extend(args.iter().cloned());
+        for (arg, param) in args.iter().zip(&shape.params[1..]) {
+            let arg_is_int = matches!(self.tcx.kind_of(arg.ty), TyKind::Int(_));
+            if arg_is_int && param.ty == "f64" {
+                free_args.push(widen(arg));
+            } else {
+                free_args.push(arg.clone());
+            }
+        }
         let call = HirExpr {
             id: receiver.id,
             span,
@@ -6540,6 +6526,10 @@ impl<'a> Builder<'a> {
         MethodLowering::Handled(self.lower_expr(&call))
     }
 
+    /// `n.max(m)` / `n.min(m)` / `n.clamp(lo, hi)` on a numeric receiver.
+    /// These name the same operation as the prelude's free `max(n, m)`, so
+    /// they lower through the same runtime helpers rather than reaching the
+    /// by-name fallback, which had no symbol to call.
     fn lower_scalar_bound_method(
         &mut self,
         receiver: &HirExpr,
@@ -6568,6 +6558,13 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `xs.map(f)` / `xs.filter(f)` / `xs.sum()` / … - the method form
+    /// of the `iter::` combinators on a sequence receiver. Routes
+    /// through `try_lower_iter_call` with the receiver threading in as
+    /// the data-last argument, so both surfaces share one lowering.
+    /// Non-sequence receivers pass through: `Result::map`,
+    /// `Option::map`, `HashMap` accessors, and the String surface keep
+    /// their own dispatch.
     fn lower_seq_combinator_method(
         &mut self,
         receiver: &HirExpr,
@@ -7488,6 +7485,17 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// Resolve the runtime symbol for the type-guarded Vec / String /
+    /// HashMap method surface from a receiver type recovered after lowering.
+    ///
+    /// The top-of-method dispatch table keys on the HIR receiver type, which
+    /// is an unresolved inference `Var` when a stdlib call is used directly
+    /// as a receiver (`env::args().first()`, `s.split_whitespace()` consumed
+    /// in place) - stdlib return types are not all pinned in the checker. The
+    /// lowered MIR receiver type is ground truth, so re-keying the guarded
+    /// dispatch off it lets a chained temporary resolve the same symbol as a
+    /// `let`-bound receiver, identically across the VM, Cranelift, and LLVM
+    /// tiers. Mirrors the guarded arms in [`Self::lower_method_call`]'s table.
     fn seq_str_method_from_lowered(
         &self,
         name: &str,

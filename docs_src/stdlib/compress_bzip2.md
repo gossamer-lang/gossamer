@@ -1,6 +1,6 @@
 # `std::compress::bzip2`
 
-Status: unproven
+Status: experimental
 
 bzip2 encoder / decoder (BZh format).
 

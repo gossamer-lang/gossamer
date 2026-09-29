@@ -1,8 +1,8 @@
 # `std::encoding::xml`
 
-Status: unproven
+Status: experimental
 
-Streaming XML decoder + builder (quick-xml).
+XML parse and encode (quick-xml) over a `json::Value` tree.
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 

@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0060]: A struct literal was written without parentheses in an `if`, `while`, - here
+--- framed ---
+error[GP0060]: A struct literal was written without parentheses in an `if`, `while`,
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

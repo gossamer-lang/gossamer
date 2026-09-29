@@ -1,6 +1,6 @@
 # `std::archive::tar`
 
-Status: unproven
+Status: experimental
 
 Unix tar reader and writer (USTAR / PAX-aware decode).
 

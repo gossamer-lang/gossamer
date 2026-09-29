@@ -2,7 +2,7 @@
 
 Status: unproven
 
-Panic / `catch_unwind` integration.
+Goroutine-scoped panics; there is no `catch_unwind`, and `runtime::set_panic_hook` observes one.
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 

@@ -2286,14 +2286,26 @@ impl Lowerer<'_> {
         if let AstExprKind::Tuple(elems) = &place.kind {
             return self.lower_destructuring_assign(op, elems, place, value, outer.span);
         }
-        if matches!(op, AssignOp::Assign) {
-            return HirExprKind::Assign {
-                place: Box::new(self.lower_expr(place)),
-                value: Box::new(self.lower_expr(value)),
-            };
-        }
         let lowered_place = self.lower_expr(place);
         let lowered_value = self.lower_expr(value);
+        self.assign_kind(op, lowered_place, lowered_value, outer.span)
+    }
+
+    /// `place op value` over already-lowered operands; a compound operator
+    /// reads the place, combines, and writes it back.
+    fn assign_kind(
+        &mut self,
+        op: AssignOp,
+        lowered_place: HirExpr,
+        lowered_value: HirExpr,
+        span: Span,
+    ) -> HirExprKind {
+        if matches!(op, AssignOp::Assign) {
+            return HirExprKind::Assign {
+                place: Box::new(lowered_place),
+                value: Box::new(lowered_value),
+            };
+        }
         let bin_op = compound_assign_to_binary(op);
         let place_ty = lowered_place.ty;
         let value_ty = lowered_value.ty;
@@ -2310,7 +2322,7 @@ impl Lowerer<'_> {
         };
         let bin_expr = HirExpr {
             id: self.fresh(),
-            span: outer.span,
+            span,
             ty: place_ty,
             kind: combined,
         };
@@ -4684,8 +4696,9 @@ impl Lowerer<'_> {
         })
     }
 
-    /// Desugars the statement `m.or_insert(k, d).method(args)`, or the same
-    /// through a field path (`m.or_insert(k, d).items.push(x)`), on a
+    /// Desugars the statement `m.or_insert(k, d).method(args)`, the same
+    /// through a field path (`m.or_insert(k, d).items.push(x)`), or an
+    /// assignment to a field path (`m.or_insert(k, d).n += 1`), on a
     /// HashMap-typed simple-place receiver into an explicit write-back:
     ///
     /// ```text
@@ -4699,20 +4712,19 @@ impl Lowerer<'_> {
     /// the same place. `None` leaves the statement to the normal
     /// lowering.
     fn desugar_or_insert_mutation(&mut self, expr: &AstExpr) -> Option<HirExpr> {
-        let AstExprKind::MethodCall {
-            receiver: outer_recv,
-            name: outer_name,
-            args: outer_args,
-            ..
-        } = &expr.kind
-        else {
-            return None;
+        // `m.or_insert(k, d).method(..)`, the same through a field path
+        // (`m.or_insert(k, d).items.push(x)`), or an assignment to a field
+        // path (`m.or_insert(k, d).n += 1`): the projections between the
+        // entry and the mutated place, outermost first.
+        let (mut entry, mut projections): (&AstExpr, Vec<&AstExpr>) = match &expr.kind {
+            AstExprKind::MethodCall { receiver, .. } => (receiver, Vec::new()),
+            AstExprKind::Assign { place, .. }
+                if matches!(place.kind, AstExprKind::FieldAccess { .. }) =>
+            {
+                (place, Vec::new())
+            }
+            _ => return None,
         };
-        // `m.or_insert(k, d).method(..)`, or the same through a field path
-        // (`m.or_insert(k, d).items.push(x)`): the projections between the
-        // entry and the method's receiver, outermost first.
-        let mut entry = &**outer_recv;
-        let mut projections: Vec<&AstExpr> = Vec::new();
         while let AstExprKind::FieldAccess { receiver, .. } = &entry.kind {
             projections.push(entry);
             entry = receiver;
@@ -4759,17 +4771,24 @@ impl Lowerer<'_> {
         let (k_let, v_let) = self.entry_prelude(span, key, default, map, value_ty);
         let entry_v = self.entry_path(span, "__entry_v", value_ty);
         let v_for_call = self.project_entry_value(entry_v, &projections, span);
-        let lowered_args: Vec<HirExpr> = outer_args.iter().map(|a| self.lower_expr(a)).collect();
+        let mutate_kind = match &expr.kind {
+            AstExprKind::MethodCall { name, args, .. } => HirExprKind::MethodCall {
+                receiver: Box::new(v_for_call),
+                name: name.clone(),
+                args: args.iter().map(|a| self.lower_expr(a)).collect(),
+                owner: None,
+            },
+            AstExprKind::Assign { op, value, .. } => {
+                let value = self.lower_expr(value);
+                self.assign_kind(*op, v_for_call, value, span)
+            }
+            _ => return None,
+        };
         let mutate_call = HirExpr {
             id: self.fresh(),
             span,
             ty: outer_ty,
-            kind: HirExprKind::MethodCall {
-                receiver: Box::new(v_for_call),
-                name: outer_name.clone(),
-                args: lowered_args,
-                owner: None,
-            },
+            kind: mutate_kind,
         };
         let mutate_stmt = HirStmt {
             id: self.fresh(),

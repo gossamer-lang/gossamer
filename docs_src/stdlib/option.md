@@ -2,7 +2,7 @@
 
 Status: experimental
 
-Data-last Option combinators for pipeline chaining: map, filter, unwrap_or, and_then, etc.
+Option combinators as data-first free functions for pipelines: map, filter, unwrap_or, and_then, etc.
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 

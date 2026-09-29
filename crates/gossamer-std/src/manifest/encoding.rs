@@ -471,32 +471,17 @@ pub const ENCODING_BINARY: StdModule = StdModule {
 
 pub const ENCODING_XML: StdModule = StdModule {
     path: "std::encoding::xml",
-    summary: "Streaming XML decoder + builder (quick-xml).",
+    summary: "XML parse and encode (quick-xml) over a `json::Value` tree.",
     items: &[
-        StdItem {
-            name: "Reader",
-            kind: StdItemKind::Type,
-            doc: "Pull-style XML reader.",
-        },
-        StdItem {
-            name: "Writer",
-            kind: StdItemKind::Type,
-            doc: "Streaming XML writer.",
-        },
-        StdItem {
-            name: "Event",
-            kind: StdItemKind::Type,
-            doc: "Start / End / Text / CData / Comment / Eof.",
-        },
         StdItem {
             name: "parse",
             kind: StdItemKind::Function,
-            doc: "Parses an XML document into a Vec of events.",
+            doc: "Parses an XML document into a `json::Value` tree: an element is `{\"__xml_type\": \"element\", \"name\", \"attrs\", \"children\"}`, a text node `{\"__xml_type\": \"text\", \"value\"}`.",
         },
         StdItem {
             name: "encode",
             kind: StdItemKind::Function,
-            doc: "Serialises a sequence of events to XML text.",
+            doc: "Serialises a tree of the shape `parse` answers to XML text; any other value encodes as the empty string.",
         },
         StdItem {
             name: "escape",

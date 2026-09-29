@@ -31,17 +31,6 @@ pub(crate) fn read_source(file: &Path) -> Result<String> {
     fs::read_to_string(&resolved).map_err(|err| friendly_io_error(err, &resolved))
 }
 
-/// Reads `file` and auto-bundles every sibling `*.gos` in the same
-/// directory by wrapping each in `mod NAME { ... }` and appending
-/// it to the entry source. Used by entry-point commands
-/// (`gos`, `gos build`) so cross-module calls
-/// (`other::greet()` in `main.gos` referencing
-/// `src/other.gos::greet`) resolve at runtime. See
-/// [`gossamer_pkg::bundle`] for the bundling contract.
-pub(crate) fn read_entry_source(file: &Path) -> Result<String> {
-    Ok(read_entry_unit(file)?.source)
-}
-
 /// An entry's assembled compilation unit, plus the provenance needed to
 /// report a diagnostic against the file its bytes were written in rather
 /// than the assembled unit they were checked in.
@@ -53,7 +42,14 @@ pub(crate) struct EntryUnit {
     pub(crate) origins: Vec<gossamer_pkg::bundle::BundledSpan>,
 }
 
-/// As [`read_entry_source`], keeping the assembled unit's provenance.
+/// Reads `file` and auto-bundles every sibling `*.gos` in the same
+/// directory by wrapping each in `mod NAME { ... }` and appending
+/// it to the entry source. Used by entry-point commands
+/// (`gos`, `gos build`) so cross-module calls
+/// (`other::greet()` in `main.gos` referencing
+/// `src/other.gos::greet`) resolve at runtime. See
+/// [`gossamer_pkg::bundle`] for the bundling contract. The unit keeps
+/// each span's origin file.
 pub(crate) fn read_entry_unit(file: &Path) -> Result<EntryUnit> {
     // A bare relative entry (`gos run main.gos`) has an empty
     // `parent()`; the module scan must read the entry's real
@@ -312,7 +308,7 @@ pub(crate) fn project_root_for_entry(entry: &Path) -> Option<PathBuf> {
 }
 
 /// Discovers every transitive local `path` dependency of `entry`'s project.
-/// This shares the traversal used by [`read_entry_source`] so the development
+/// This shares the traversal used by [`read_entry_unit`] so the development
 /// watcher observes exactly the source trees included in a bundled revision.
 pub(crate) fn local_path_dependency_roots(entry: &Path) -> Vec<PathBuf> {
     let mut visited = Vec::new();

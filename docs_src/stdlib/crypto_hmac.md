@@ -1,6 +1,6 @@
 # `std::crypto::hmac`
 
-Status: unproven
+Status: experimental
 
 HMAC-SHA-256 keyed MACs.
 

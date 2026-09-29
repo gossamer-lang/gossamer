@@ -11,7 +11,7 @@ use anyhow::{Result, anyhow};
 
 use crate::cmd::attr_walk::item_has_attr;
 use crate::loaders::{load_and_check, load_and_check_with_sf};
-use crate::paths::{collect_lint_targets, default_test_root, read_entry_source, read_source};
+use crate::paths::{collect_lint_targets, default_test_root, read_source};
 
 /// ANSI styling shared by the test-runner output. Disabled when
 /// stdout isn't a TTY (CI captures, pipes), or when the user
@@ -335,18 +335,20 @@ struct TestSpec {
     timeout: Option<std::time::Duration>,
 }
 
-/// Aggregate doc-test outcome for a single source file.
+/// Aggregate doc-test outcome for one compilation unit.
 struct DocTestFileSummary {
     passes: u32,
     failures: u32,
+    assertions: u32,
 }
 
 /// One fenced code block extracted from a `//` doc comment.
 struct DocTest {
     /// Human-readable label: `<file>:<open-fence-line>`.
     name: String,
-    /// Body of the fence, with `// ` prefixes stripped.
-    code: String,
+    /// Each line of the fence with its `// ` prefix stripped, and the byte
+    /// offset in the file where that text starts.
+    lines: Vec<(String, usize)>,
 }
 
 #[allow(
@@ -512,6 +514,7 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
 
     let mut total_doc_passes = 0u32;
     let mut total_doc_failures = 0u32;
+    let mut total_doc_assertions = 0u32;
 
     let by_file: std::collections::BTreeMap<PathBuf, Vec<TestSpec>> = {
         let mut map: std::collections::BTreeMap<PathBuf, Vec<TestSpec>> =
@@ -564,9 +567,10 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
     }
     if !opts.worker {
         for file in &files {
-            let doc_summary = run_doc_tests_in_file(file, &style);
+            let doc_summary = run_doc_tests_in_unit(file, &style);
             total_doc_passes += doc_summary.passes;
             total_doc_failures += doc_summary.failures;
+            total_doc_assertions += doc_summary.assertions;
         }
     }
 
@@ -591,7 +595,8 @@ pub(crate) fn run_with_opts(opts: TestOpts) -> Result<()> {
     )
     .unwrap_or(0)
         + total_doc_failures;
-    let total_assertions: u32 = records.iter().map(|r| r.assertions).sum();
+    let total_assertions: u32 =
+        records.iter().map(|r| r.assertions).sum::<u32>() + total_doc_assertions;
     let total_ignored = records
         .iter()
         .filter(|r| r.status == TestStatus::Ignored)
@@ -1008,8 +1013,9 @@ fn validate_test_file(file: &Path) -> Result<()> {
     // augment + comptime-fold + check the execution path uses - so cross-file
     // references stay valid and a real static error is surfaced with its
     // "refusing to execute" trailer rather than swallowed.
-    let entry = read_entry_source(file)?;
-    let augmented = gossamer_parse::autoderive::augment_source(&entry);
+    let unit = crate::paths::read_entry_unit(file)?;
+    let augmented = gossamer_parse::autoderive::augment_source(&unit.source);
+    let generated_len = augmented.len().saturating_sub(unit.source.len());
     let augmented = if augmented.contains("comptime") {
         // A comptime region that will not evaluate is a static failure, and
         // the constant it should have produced is what the tests run
@@ -1019,10 +1025,24 @@ fn validate_test_file(file: &Path) -> Result<()> {
     } else {
         augmented
     };
-    let mut check_map = gossamer_lex::SourceMap::new();
-    let check_id = check_map.add_file(file.to_string_lossy().into_owned(), augmented.clone());
+    let (check_map, check_id) = unit_source_map(file, &unit, augmented.clone(), generated_len);
     let _ = load_and_check_with_sf(&augmented, check_id, &check_map)?;
     Ok(())
+}
+
+/// A source map over the assembled unit that reports each span against the
+/// module file it was written in, as `gos run` and `gos build` do.
+fn unit_source_map(
+    file: &Path,
+    unit: &crate::paths::EntryUnit,
+    source: String,
+    generated_len: usize,
+) -> (gossamer_lex::SourceMap, gossamer_lex::FileId) {
+    let mut map = gossamer_lex::SourceMap::new();
+    let file_id = map.add_file(file.to_string_lossy().into_owned(), source);
+    crate::paths::register_unit_origins(&mut map, file_id, &unit.entry, &unit.origins);
+    crate::paths::register_generated_tail(&mut map, file_id, generated_len);
+    (map, file_id)
 }
 
 fn deterministic_shuffle<T>(values: &mut [T], mut state: u64) {
@@ -1068,10 +1088,11 @@ fn run_tests_filtered_inner(
     // module (`super::helper::triple` where `src/helper.gos` is declared
     // `mod helper;`). Test-name collection stays unbundled so sibling
     // tests are not double-counted against this file.
-    let Ok(source) = read_entry_source(file) else {
+    let Ok(unit) = crate::paths::read_entry_unit(file) else {
         return Vec::new();
     };
-    let augmented = gossamer_parse::autoderive::augment_source(&source);
+    let augmented = gossamer_parse::autoderive::augment_source(&unit.source);
+    let generated_len = augmented.len().saturating_sub(unit.source.len());
     // Comptime fold so a `#[test]` compiles the same constant the run /
     // build tiers do. A failure here is reported as a failing record rather
     // than skipped: `--parallel` reaches this without the static validator,
@@ -1098,8 +1119,7 @@ fn run_tests_filtered_inner(
     } else {
         augmented
     };
-    let mut map = gossamer_lex::SourceMap::new();
-    let file_id = map.add_file(file.to_string_lossy().into_owned(), augmented.clone());
+    let (map, file_id) = unit_source_map(file, &unit, augmented.clone(), generated_len);
     let Ok((program, _sf, tcx)) = load_and_check_with_sf(&augmented, file_id, &map) else {
         return Vec::new();
     };
@@ -1162,7 +1182,12 @@ fn run_tests_filtered_inner(
         if !passed {
             let mut reason = String::new();
             if let Some(err) = panicked.as_deref() {
-                reason.push_str(&format!("panic: {err}"));
+                // A runtime fault already renders as `error[GX....]: panic: ..`.
+                if err.starts_with("error[") {
+                    reason.push_str(err);
+                } else {
+                    reason.push_str(&format!("panic: {err}"));
+                }
             }
             if let Some(err) = returned_err.as_deref() {
                 if !reason.is_empty() {
@@ -1632,53 +1657,224 @@ mod focused_tests {
     }
 }
 
-/// Extracts fenced code blocks from `//` doc comments and runs each
-/// as a standalone program. A block that compiles and executes
-/// without panicking passes. Returns a summary; a parse or runtime
-/// error counts as a failure but does not abort sibling files.
-fn run_doc_tests_in_file(file: &std::path::Path, style: &TestStyle) -> DocTestFileSummary {
-    let Ok(source) = fs::read_to_string(file) else {
-        return DocTestFileSummary {
-            passes: 0,
-            failures: 0,
-        };
+/// Runs the fenced code in the doc comments of every file `entry`'s unit is
+/// assembled from. Each fence becomes a function at the end of its own file's
+/// region, so it is compiled in the module that declares the item it
+/// documents and names that module's items as the item's own code does. A
+/// fence passes when it compiles, runs without panicking, and records no
+/// failed check; its diagnostics point at the comment lines it was read from.
+fn run_doc_tests_in_unit(entry: &Path, style: &TestStyle) -> DocTestFileSummary {
+    let entry = entry.to_path_buf();
+    let style = style.clone();
+    crate::cmd::with_vm_stack(move || run_doc_tests_in_unit_inner(&entry, &style))
+}
+
+fn run_doc_tests_in_unit_inner(entry: &Path, style: &TestStyle) -> DocTestFileSummary {
+    let mut summary = DocTestFileSummary {
+        passes: 0,
+        failures: 0,
+        assertions: 0,
     };
-    let tests = extract_doc_tests(&source, &file.display().to_string());
-    let mut passes = 0u32;
-    let mut failures = 0u32;
-    for doc in &tests {
-        let body = if doc.code.contains("fn main") {
-            doc.code.clone()
-        } else {
-            format!("fn main() {{\n{}\n}}\n", doc.code)
-        };
-        let mut map = gossamer_lex::SourceMap::new();
-        let file_id = map.add_file(doc.name.clone(), body.clone());
-        let Ok((program, tcx)) = load_and_check(&body, file_id, &map) else {
-            outln!("  {} doc-test {} (compile)", style.fail(), doc.name);
-            failures += 1;
-            continue;
-        };
-        let mut vm = gossamer_interp::Vm::new();
-        vm.set_source_map(std::sync::Arc::new(map));
-        if vm.load(&program, tcx, false).is_err() {
-            outln!("  {} doc-test {} (compile)", style.fail(), doc.name);
-            failures += 1;
-            continue;
+    let Ok(unit) = crate::paths::read_entry_unit(entry) else {
+        return summary;
+    };
+    let spans = unit_spans_covering_entry(&unit);
+    let foreign = foreign_regions(&unit);
+    let mut origins: Vec<PathBuf> = Vec::new();
+    for span in &spans {
+        let is_foreign = foreign
+            .iter()
+            .any(|(lo, hi)| span.start >= *lo && span.start < *hi);
+        if !is_foreign && !origins.contains(&span.origin) {
+            origins.push(span.origin.clone());
         }
-        vm.clear_source_map();
-        match vm.call("main", Vec::new()) {
-            Ok(_) => {
-                outln!("  {} doc-test {}", style.pass(), doc.name);
-                passes += 1;
-            }
-            Err(err) => {
-                outln!("  {} doc-test {} (runtime): {err}", style.fail(), doc.name);
-                failures += 1;
+    }
+    let mut ordinal = 0usize;
+    for origin in &origins {
+        let Ok(text) = fs::read_to_string(origin) else {
+            continue;
+        };
+        // The fence goes where the file's own text ends, inside its module.
+        let Some(insert_at) = spans
+            .iter()
+            .filter(|span| &span.origin == origin)
+            .map(|span| span.end as usize)
+            .max()
+        else {
+            continue;
+        };
+        let display = origin
+            .strip_prefix(std::env::current_dir().unwrap_or_default())
+            .unwrap_or(origin)
+            .display()
+            .to_string();
+        for doc in extract_doc_tests(&text, &display) {
+            let function = format!("__gos_doctest_{ordinal}");
+            ordinal += 1;
+            let outcome = run_one_doc_test(&unit, &spans, origin, insert_at, &doc, &function);
+            match outcome {
+                DocTestOutcome::Passed { assertions } => {
+                    outln!("  {} doc-test {}", style.pass(), doc.name);
+                    summary.passes += 1;
+                    summary.assertions += assertions;
+                }
+                DocTestOutcome::CompileFailed => {
+                    outln!("  {} doc-test {} (compile)", style.fail(), doc.name);
+                    summary.failures += 1;
+                }
+                DocTestOutcome::Failed { reason, assertions } => {
+                    outln!("  {} doc-test {}: {reason}", style.fail(), doc.name);
+                    summary.failures += 1;
+                    summary.assertions += assertions;
+                }
             }
         }
     }
-    DocTestFileSummary { passes, failures }
+    summary
+}
+
+enum DocTestOutcome {
+    Passed { assertions: u32 },
+    CompileFailed,
+    Failed { reason: String, assertions: u32 },
+}
+
+/// The unit's origin spans, with the entry's own text covered even when the
+/// bundler recorded no span for it (the entry leads the assembled unit).
+fn unit_spans_covering_entry(
+    unit: &crate::paths::EntryUnit,
+) -> Vec<gossamer_pkg::bundle::BundledSpan> {
+    let mut spans = unit.origins.clone();
+    if !spans.iter().any(|span| span.origin == unit.entry) {
+        let len = fs::read_to_string(&unit.entry).map_or(0, |text| text.len());
+        spans.push(gossamer_pkg::bundle::BundledSpan {
+            start: 0,
+            end: u32::try_from(len).unwrap_or(u32::MAX),
+            origin: unit.entry.clone(),
+            origin_start: 0,
+        });
+    }
+    spans
+}
+
+fn run_one_doc_test(
+    unit: &crate::paths::EntryUnit,
+    spans: &[gossamer_pkg::bundle::BundledSpan],
+    origin: &Path,
+    insert_at: usize,
+    doc: &DocTest,
+    function: &str,
+) -> DocTestOutcome {
+    let header = format!("\nfn {function}() {{\n");
+    let mut inserted = header.clone();
+    let mut fence_spans = Vec::with_capacity(doc.lines.len());
+    for (line, file_offset) in &doc.lines {
+        let start = insert_at + inserted.len();
+        inserted.push_str(line);
+        inserted.push('\n');
+        fence_spans.push(gossamer_pkg::bundle::BundledSpan {
+            start: u32::try_from(start).unwrap_or(u32::MAX),
+            end: u32::try_from(start + line.len()).unwrap_or(u32::MAX),
+            origin: origin.to_path_buf(),
+            origin_start: u32::try_from(*file_offset).unwrap_or(u32::MAX),
+        });
+    }
+    // A fence that declares its own `main` runs it.
+    if doc.lines.iter().any(|(line, _)| line.contains("fn main")) {
+        inserted.push_str("main()\n");
+    }
+    inserted.push_str("}\n");
+    let Some(insert_at) = unit.source.is_char_boundary(insert_at).then_some(insert_at) else {
+        return DocTestOutcome::CompileFailed;
+    };
+    let mut source = String::with_capacity(unit.source.len() + inserted.len());
+    source.push_str(&unit.source[..insert_at]);
+    source.push_str(&inserted);
+    source.push_str(&unit.source[insert_at..]);
+    let shift = u32::try_from(inserted.len()).unwrap_or(u32::MAX);
+    let at = u32::try_from(insert_at).unwrap_or(u32::MAX);
+    let mut regions: Vec<gossamer_pkg::bundle::BundledSpan> = spans
+        .iter()
+        .map(|span| {
+            let mut span = span.clone();
+            if span.start >= at {
+                span.start += shift;
+                span.end += shift;
+            }
+            span
+        })
+        .collect();
+    regions.extend(fence_spans);
+    let augmented = gossamer_parse::autoderive::augment_source(&source);
+    let generated_len = augmented.len().saturating_sub(source.len());
+    let mut map = gossamer_lex::SourceMap::new();
+    let file_id = map.add_file(unit.entry.to_string_lossy().into_owned(), augmented.clone());
+    register_region_origins(&mut map, file_id, &regions);
+    crate::paths::register_generated_tail(&mut map, file_id, generated_len);
+    let Ok((program, tcx)) = load_and_check(&augmented, file_id, &map) else {
+        return DocTestOutcome::CompileFailed;
+    };
+    let mut vm = gossamer_interp::Vm::new();
+    vm.set_source_map(std::sync::Arc::new(map));
+    vm.set_entry_points(&[function.to_string()]);
+    if vm.load(&program, tcx, false).is_err() {
+        return DocTestOutcome::CompileFailed;
+    }
+    vm.clear_source_map();
+    gossamer_interp::reset_test_tally();
+    let result = vm.call(function, Vec::new());
+    let tally = gossamer_interp::take_test_tally();
+    match result {
+        Err(err) => DocTestOutcome::Failed {
+            reason: err.to_string(),
+            assertions: tally.assertions,
+        },
+        Ok(_) if tally.failures > 0 => DocTestOutcome::Failed {
+            reason: tally
+                .first_failure
+                .unwrap_or_else(|| format!("{} check(s) failed", tally.failures)),
+            assertions: tally.assertions,
+        },
+        Ok(_) => DocTestOutcome::Passed {
+            assertions: tally.assertions,
+        },
+    }
+}
+
+/// Records which file each region of an assembled unit was read from, every
+/// file registered under its own name - the entry included, since text
+/// inserted ahead of a region moves it away from its offset in the file.
+fn register_region_origins(
+    map: &mut gossamer_lex::SourceMap,
+    unit: gossamer_lex::FileId,
+    regions: &[gossamer_pkg::bundle::BundledSpan],
+) {
+    let mut ids: Vec<(PathBuf, gossamer_lex::FileId)> = Vec::new();
+    let mut origins = Vec::with_capacity(regions.len());
+    for region in regions {
+        let known = ids
+            .iter()
+            .find(|(path, _)| *path == region.origin)
+            .map(|(_, id)| *id);
+        let id = if let Some(id) = known {
+            id
+        } else {
+            let Ok(text) = fs::read_to_string(&region.origin) else {
+                continue;
+            };
+            let id = map.add_file(region.origin.to_string_lossy().into_owned(), text);
+            ids.push((region.origin.clone(), id));
+            id
+        };
+        origins.push(gossamer_lex::OriginSpan {
+            start: region.start,
+            end: region.end,
+            origin: id,
+            origin_start: region.origin_start,
+        });
+    }
+    origins.sort_by_key(|origin| origin.start);
+    map.set_origins(unit, origins);
 }
 
 /// Extracts every fenced code block enclosed in consecutive `//`
@@ -1687,31 +1883,45 @@ fn run_doc_tests_in_file(file: &std::path::Path, style: &TestStyle) -> DocTestFi
 /// markers: ```` ``` ```` (optionally followed by `gos`). Blocks
 /// marked with a different language tag are skipped.
 fn extract_doc_tests(source: &str, display: &str) -> Vec<DocTest> {
+    /// A fence opened on `open_line` and the lines read into it so far.
+    struct OpenFence {
+        open_line: usize,
+        lines: Vec<(String, usize)>,
+        runnable: bool,
+    }
     let mut out = Vec::new();
-    let mut fence: Option<(usize, Vec<String>, bool)> = None;
-    for (idx, line) in source.lines().enumerate() {
+    let mut fence: Option<OpenFence> = None;
+    let mut offset = 0usize;
+    for (idx, raw) in source.split_inclusive('\n').enumerate() {
+        let line_start = offset;
+        offset += raw.len();
+        let line = raw.trim_end_matches(['\n', '\r']);
         let trimmed = line.trim_start();
         let Some(rest) = trimmed.strip_prefix("//") else {
             fence = None;
             continue;
         };
         let body = rest.strip_prefix(' ').unwrap_or(rest);
+        let body_start = line_start + (line.len() - body.len());
         let leading = body.trim_start();
         if let Some(after_ticks) = leading.strip_prefix("```") {
-            if let Some((open_line, captured, runnable)) = fence.take() {
-                if runnable {
+            if let Some(open) = fence.take() {
+                if open.runnable {
                     out.push(DocTest {
-                        name: format!("{display}:{open_line}"),
-                        code: captured.join("\n"),
+                        name: format!("{display}:{}", open.open_line),
+                        lines: open.lines,
                     });
                 }
             } else {
                 let tag = after_ticks.trim();
-                let runnable = tag.is_empty() || tag == "gos" || tag == "gossamer";
-                fence = Some((idx + 1, Vec::new(), runnable));
+                fence = Some(OpenFence {
+                    open_line: idx + 1,
+                    lines: Vec::new(),
+                    runnable: tag.is_empty() || tag == "gos" || tag == "gossamer",
+                });
             }
-        } else if let Some((_, captured, _)) = fence.as_mut() {
-            captured.push(body.to_string());
+        } else if let Some(open) = fence.as_mut() {
+            open.lines.push((body.to_string(), body_start));
         }
     }
     out
@@ -1880,48 +2090,13 @@ pub(crate) mod tier_parity {
         Ok(())
     }
 
-    /// Canonical paths of the stdlib modules `file` imports. Handles both
-    /// `use std::path::to::module` and the braced `use std::{a, b::c}`
-    /// form; a name the manifest does not declare is ignored.
+    /// Canonical paths of the stdlib modules `file` reaches, by import or by
+    /// a path through an imported parent module.
     fn stdlib_modules_used(file: &Path) -> Vec<String> {
-        let Ok(source) = fs::read_to_string(file) else {
-            return Vec::new();
-        };
-        let mut found: Vec<String> = Vec::new();
-        for line in source.lines() {
-            let Some(rest) = line.trim().strip_prefix("use std::") else {
-                continue;
-            };
-            let rest = rest.split("//").next().unwrap_or(rest).trim();
-            let (prefix, leaves) = match rest.split_once('{') {
-                Some((prefix, tail)) => (
-                    prefix.trim(),
-                    tail.trim_end_matches('}').split(',').collect::<Vec<_>>(),
-                ),
-                None => ("", vec![rest]),
-            };
-            for leaf in leaves {
-                let leaf = leaf.split(" as ").next().unwrap_or(leaf).trim();
-                if leaf.is_empty() {
-                    continue;
-                }
-                let path = format!("std::{prefix}{leaf}");
-                // A leaf may name an item rather than a module
-                // (`use std::sync::channel`); take the module above it.
-                let parent = path
-                    .rsplit_once("::")
-                    .map_or_else(|| path.clone(), |(module, _)| module.to_string());
-                for candidate in [path, parent] {
-                    if gossamer_std::registry::module(&candidate).is_some() {
-                        if !found.contains(&candidate) {
-                            found.push(candidate);
-                        }
-                        break;
-                    }
-                }
-            }
-        }
-        found
+        fs::read_to_string(file).map_or_else(
+            |_| Vec::new(),
+            |source| gossamer_std::manifest::feature_status::stdlib_modules_used(&source),
+        )
     }
 
     /// The fixture records of an earlier status report that this run did not

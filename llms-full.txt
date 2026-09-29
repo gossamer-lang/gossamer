@@ -167,7 +167,8 @@ Write clear, low-complexity, concise code.
 - **Wrapping arithmetic**: `+%`, `-%`, `*%` (and `+%=`, `-%=`, `*%=`) wrap
   at the operands' declared width on every tier and every profile, so a hash
   step reads `h = (h << 5) +% h +% b as u32` with no mask. Plain `+ - *`
-  keep checking for overflow. The operators are the only spelling:
+  panic on overflow under `gos` and `gos build` and wrap at the declared
+  width under `gos build --release`. The operators are the only spelling:
   `x.wrapping_add(y)` reports GT0087 with the rewrite.
 - **`if let` / `while let`** for `Option` and single-variant matches;
   `while let Some(v) = rx.recv()` is the canonical channel drain.

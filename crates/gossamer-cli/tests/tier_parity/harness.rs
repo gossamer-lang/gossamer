@@ -1922,6 +1922,8 @@ const SPECS: &[Spec] = &[
     },
     // `math` functions in method position, and `math::log(x, base)`.
     spec("feature-testing-examples/math_methods_and_log.gos"),
+    // `=` and `op=` on a field path under `or_insert` write back.
+    spec("feature-testing-examples/or_insert_field_assignment.gos"),
     // Unsigned and narrow values through math, formatting, JSON, and parsing.
     spec("feature-testing-examples/numeric_and_json_edges.gos"),
     Spec {

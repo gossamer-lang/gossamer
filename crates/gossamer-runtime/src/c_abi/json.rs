@@ -295,7 +295,7 @@ impl GosJson {
     }
 }
 
-unsafe fn json_borrow<'a>(p: *const GosJson) -> Option<&'a serde_json::Value> {
+pub(crate) unsafe fn json_borrow<'a>(p: *const GosJson) -> Option<&'a serde_json::Value> {
     if p.is_null() {
         return None;
     }

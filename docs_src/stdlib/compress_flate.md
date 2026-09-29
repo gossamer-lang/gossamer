@@ -1,6 +1,6 @@
 # `std::compress::flate`
 
-Status: unproven
+Status: experimental
 
 Raw DEFLATE (RFC 1951) encoder / decoder.
 

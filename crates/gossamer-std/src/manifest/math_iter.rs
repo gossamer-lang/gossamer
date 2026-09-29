@@ -829,7 +829,7 @@ pub const MATH_BIG: StdModule = StdModule {
 /// `std::option` - data-last combinators that thread through `|>`.
 pub const OPTION: StdModule = StdModule {
     path: "std::option",
-    summary: "Data-last Option combinators for pipeline chaining: map, filter, unwrap_or, and_then, etc.",
+    summary: "Option combinators as data-first free functions for pipelines: map, filter, unwrap_or, and_then, etc.",
     items: &[
         StdItem {
             name: "and_then",
@@ -917,7 +917,7 @@ pub const OPTION: StdModule = StdModule {
 /// `std::result` - data-last combinators that thread through `|>`.
 pub const RESULT: StdModule = StdModule {
     path: "std::result",
-    summary: "Data-last Result combinators for pipeline chaining: map, map_err, unwrap_or_else, etc.",
+    summary: "Result combinators as data-first free functions for pipelines: map, map_err, unwrap_or_else, etc.",
     items: &[
         StdItem {
             name: "and_then",

@@ -1,0 +1,7 @@
+// ERROR: GP0060
+
+struct P { x: i64 }
+
+fn main() {
+    if P { x: 1 }.x > 0 { println("pos") }
+}

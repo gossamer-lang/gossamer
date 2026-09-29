@@ -2864,7 +2864,6 @@ fn repl_meta_info_renders_matching_modules_once() {
     for expected in [
         "std::compress::gzip::encode(",
         "std::compress::gzip::decode(",
-        "std::compress::gzip::Level [type]",
     ] {
         assert!(
             out.stdout.contains(expected),

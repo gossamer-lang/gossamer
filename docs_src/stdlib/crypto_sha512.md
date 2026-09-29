@@ -1,6 +1,6 @@
 # `std::crypto::sha512`
 
-Status: unproven
+Status: experimental
 
 SHA-512 hashing.
 

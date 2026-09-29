@@ -74,14 +74,9 @@ pub const COMPRESS_GZIP: StdModule = StdModule {
     summary: "gzip encoder / decoder (RFC 1952; flate2-backed).",
     items: &[
         StdItem {
-            name: "Level",
-            kind: StdItemKind::Type,
-            doc: "Compression level (`0` store-only … `9` best); default is gzip(1)'s `6`.",
-        },
-        StdItem {
             name: "encode",
             kind: StdItemKind::Function,
-            doc: "Compresses bytes at the supplied Level.",
+            doc: "Compresses bytes at `level`, `0` (store only) to `9` (best); gzip(1) uses `6`.",
         },
         StdItem {
             name: "decode",

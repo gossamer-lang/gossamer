@@ -610,25 +610,6 @@
       "reference_status": "catalog_only"
     },
     {
-      "id": "std-compress-gzip-Level",
-      "name": "std::compress::gzip::Level",
-      "kind": "type",
-      "signature": null,
-      "description": "Compression level (`0` store-only … `9` best); default is gzip(1)'s `6`.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdcompressgzip",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
       "id": "std-compress-gzip-decode",
       "name": "std::compress::gzip::decode",
       "kind": "function",
@@ -652,7 +633,7 @@
       "name": "std::compress::gzip::encode",
       "kind": "function",
       "signature": "fn encode(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "Compresses bytes at the supplied Level.",
+      "description": "Compresses bytes at `level`, `0` (store only) to `9` (best); gzip(1) uses `6`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -3175,68 +3156,11 @@
       "reference_status": "catalog_only"
     },
     {
-      "id": "std-encoding-xml-Event",
-      "name": "std::encoding::xml::Event",
-      "kind": "type",
-      "signature": null,
-      "description": "Start / End / Text / CData / Comment / Eof.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdencodingxml",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
-      "id": "std-encoding-xml-Reader",
-      "name": "std::encoding::xml::Reader",
-      "kind": "type",
-      "signature": null,
-      "description": "Pull-style XML reader.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdencodingxml",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
-      "id": "std-encoding-xml-Writer",
-      "name": "std::encoding::xml::Writer",
-      "kind": "type",
-      "signature": null,
-      "description": "Streaming XML writer.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdencodingxml",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
       "id": "std-encoding-xml-encode",
       "name": "std::encoding::xml::encode",
       "kind": "function",
       "signature": "fn encode(value: json::Value) -> String",
-      "description": "Serialises a sequence of events to XML text.",
+      "description": "Serialises a tree of the shape `parse` answers to XML text; any other value encodes as the empty string.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -3274,7 +3198,7 @@
       "name": "std::encoding::xml::parse",
       "kind": "function",
       "signature": "fn parse(source: String) -> Result<json::Value, errors::Error>",
-      "description": "Parses an XML document into a Vec of events.",
+      "description": "Parses an XML document into a `json::Value` tree: an element is `{\"__xml_type\": \"element\", \"name\", \"attrs\", \"children\"}`, a text node `{\"__xml_type\": \"text\", \"value\"}`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -17030,7 +16954,7 @@
       "name": "std::utf16::decode_to_string",
       "kind": "function",
       "signature": "fn decode_to_string(units: Vec<u16>) -> Result<String, errors::Error>",
-      "description": "Decodes a []u16 to String.",
+      "description": "Decodes UTF-16 code units (`[u16]`) to a String.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

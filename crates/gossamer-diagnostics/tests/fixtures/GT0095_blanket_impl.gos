@@ -1,0 +1,10 @@
+// ERROR: GT0095
+
+trait Named { fn name(&self) -> String }
+trait Describe { fn describe(&self) -> String }
+
+impl<T: Named> Describe for T {
+    fn describe(&self) -> String { self.name() }
+}
+
+fn main() {}

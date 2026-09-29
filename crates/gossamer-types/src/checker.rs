@@ -1788,6 +1788,10 @@ impl<'a> TypeChecker<'a> {
         else {
             return;
         };
+        if let Some(param) = blanket_impl_param(decl) {
+            self.emit(TypeError::BlanketImpl { trait_name, param }, span);
+            return;
+        }
         // The key is the name a dispatch identifies the receiver by, so two
         // blocks it cannot separate collide here; the message names what the
         // block was written for, which is what the reader is looking at.
@@ -12330,7 +12334,7 @@ impl<'a> TypeChecker<'a> {
             generics,
             expected,
             resolved,
-            receiver.span,
+            name_span,
             args,
             &all_arg_tys,
         ) {
@@ -12561,13 +12565,6 @@ impl<'a> TypeChecker<'a> {
             })
     }
 
-    /// Types `x.sqrt()`, `(-2).abs()`, `a.pow(b)` and the rest of the
-    /// `math` surface reached in method position on a numeric receiver.
-    ///
-    /// The receiver is the function's first argument, so the arity and
-    /// the answer both come from the `math` signature row. `abs`, `min`,
-    /// `max`, and `clamp` answer in the receiver's own type; every other
-    /// row computes in floating point whatever it was handed.
     /// Return type of `f64::to_bits` / `f64::from_bits` and their `f32`
     /// siblings, written as associated functions on the primitive.
     fn float_bits_assoc_ret(&mut self, module: &[&str], last: &str) -> Option<Ty> {
@@ -12602,6 +12599,13 @@ impl<'a> TypeChecker<'a> {
         }
     }
 
+    /// Types `x.sqrt()`, `(-2).abs()`, `a.pow(b)` and the rest of the
+    /// `math` surface reached in method position on a numeric receiver.
+    ///
+    /// The receiver is the function's first argument, so the arity and
+    /// the answer both come from the `math` signature row. `abs`, `min`,
+    /// `max`, and `clamp` answer in the receiver's own type; every other
+    /// row computes in floating point whatever it was handed.
     fn check_numeric_receiver_method(
         &mut self,
         method: &str,
@@ -12948,8 +12952,6 @@ impl<'a> TypeChecker<'a> {
         methods
     }
 
-    /// Builds the GT0002 diagnostic for `method` on `resolved`, carrying
-    /// the receiver's method surface so the reader gets a did-you-mean.
     /// The spelling to name in a diagnostic about `method`: what the source
     /// wrote, which differs only where a parse-time desugar renamed the call.
     fn written_method_name(&self, method: &str) -> String {
@@ -12959,6 +12961,8 @@ impl<'a> TypeChecker<'a> {
         self.written_method.clone()
     }
 
+    /// Builds the GT0002 diagnostic for `method` on `resolved`, carrying
+    /// the receiver's method surface so the reader gets a did-you-mean.
     fn unresolved_method(&self, ty: String, method: &str, resolved: Ty) -> TypeError {
         TypeError::UnresolvedMethod {
             ty,
@@ -13796,7 +13800,7 @@ impl<'a> TypeChecker<'a> {
     }
 
     fn check_mutating_receiver_place(&mut self, receiver: &Expr) {
-        let name = Self::place_root_name(receiver).unwrap_or_else(|| "value".to_string());
+        let name = Self::written_place_name(receiver);
         self.emit_mutating_place_error(
             self.auto_deref_place_mutability(receiver),
             name,
@@ -17579,8 +17583,28 @@ impl<'a> TypeChecker<'a> {
                 }
             },
             ExprKind::Index { base, .. } => format!("{}[...]", Self::place_display(base)),
+            ExprKind::MethodCall { receiver, name, .. } => {
+                format!("{}.{}(..)", Self::place_display(receiver), name.name)
+            }
+            ExprKind::Call { callee, .. } => format!("{}(..)", Self::place_display(callee)),
+            ExprKind::Unary {
+                op: gossamer_ast::UnaryOp::Deref,
+                operand,
+            } => format!("*{}", Self::place_display(operand)),
             _ => "value".to_string(),
         }
+    }
+
+    /// The name a write diagnostic gives `place`: its root binding, or the
+    /// expression written under the `*` when no binding roots it.
+    fn written_place_name(place: &Expr) -> String {
+        Self::place_root_name(place).unwrap_or_else(|| match &place.kind {
+            ExprKind::Unary {
+                op: gossamer_ast::UnaryOp::Deref,
+                operand,
+            } => Self::place_display(operand),
+            _ => Self::place_display(place),
+        })
     }
 
     fn correct_map_lookup_assignment_result(&mut self, value: &Expr, mut value_ty: Ty) -> Ty {
@@ -17626,7 +17650,7 @@ impl<'a> TypeChecker<'a> {
     /// Reports a place that cannot be written: one borrowed elsewhere, one
     /// rooted at an immutable binding, or one reached through a shared `&T`.
     fn check_place_writable(&mut self, place: &Expr) {
-        let name = Self::place_root_name(place).unwrap_or_else(|| "value".to_string());
+        let name = Self::written_place_name(place);
         if let Some(borrower) = self
             .active_mutable_borrower(&name)
             .or_else(|| self.active_shared_borrower(&name))
@@ -17935,7 +17959,7 @@ impl<'a> TypeChecker<'a> {
             if !Self::if_chain_has_final_else(else_branch) {
                 return self.tcx.unit();
             }
-            let joined = self.join_branch_tys(then_ty, else_ty, else_branch.span);
+            let joined = self.join_branch_tys(then_ty, else_ty, branch_value_span(else_branch));
             // When the branches joined to a Vec/slice, re-record each
             // array-literal branch to that shape so an unannotated
             // `let v = if c { [1, 2] } else { [3, 4, 5] }` lowers both
@@ -18050,7 +18074,7 @@ impl<'a> TypeChecker<'a> {
                 self.unify(bool_ty, guard_ty, guard.span);
             }
             let body_ty = self.check_expr_expecting(&arm.body, expected);
-            result_ty = self.join_branch_tys(result_ty, body_ty, arm.body.span);
+            result_ty = self.join_branch_tys(result_ty, body_ty, branch_value_span(&arm.body));
             self.pop_scope();
         }
         // Second pass: if the arms joined to a Vec/slice, re-record every
@@ -23532,6 +23556,34 @@ fn impl_self_ty_name(decl: &ImplDecl) -> String {
         gossamer_ast::ty::TypeKind::Tuple(elems) => format!("tuple_{}", elems.len()),
         _ => written_type_name(&decl.self_ty),
     }
+}
+
+/// Where a branch's value is written: the tail of a block body (through
+/// nested blocks), or the expression itself.
+fn branch_value_span(expr: &Expr) -> Span {
+    match &expr.kind {
+        ExprKind::Block(block) => block.tail.as_deref().map_or(expr.span, branch_value_span),
+        _ => expr.span,
+    }
+}
+
+/// The type parameter an `impl<T: ..> Trait for T` block names as its self
+/// type: a blanket impl, which would attach the trait to every type.
+fn blanket_impl_param(decl: &ImplDecl) -> Option<String> {
+    let AstTypeKind::Path(path) = &decl.self_ty.kind else {
+        return None;
+    };
+    let [segment] = path.segments.as_slice() else {
+        return None;
+    };
+    let name = segment.name.name.as_str();
+    decl.generics
+        .params
+        .iter()
+        .any(|param| {
+            matches!(param, gossamer_ast::GenericParam::Type { name: param, .. } if param.name == name)
+        })
+        .then(|| name.to_string())
 }
 
 /// The spelling an `impl` header wrote for its self type.

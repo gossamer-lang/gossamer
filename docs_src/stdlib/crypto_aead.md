@@ -1,6 +1,6 @@
 # `std::crypto::aead`
 
-Status: unproven
+Status: experimental
 
 Authenticated encryption with associated data.
 

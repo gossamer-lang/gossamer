@@ -24,7 +24,13 @@ impl Vm {
         let callee = self
             .lookup_global(name)
             .ok_or_else(|| self.unresolved(name))?;
-        let interned = crate::value::intern_type_name(name);
+        // The entry frame carries the function's own name, so a body reached
+        // through an alias (a test inside `mod tests` called by its bare
+        // name) is one frame rather than the alias and the body.
+        let interned = match &callee {
+            Global::Fn(chunk) => chunk.name,
+            _ => crate::value::intern_type_name(name),
+        };
         self.call_stack.borrow_mut().clear();
         self.call_stack
             .borrow_mut()

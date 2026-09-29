@@ -1,6 +1,6 @@
 # `std::encoding::pem`
 
-Status: unproven
+Status: experimental
 
 PEM block encoder and decoder.
 

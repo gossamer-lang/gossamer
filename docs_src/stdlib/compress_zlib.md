@@ -1,6 +1,6 @@
 # `std::compress::zlib`
 
-Status: unproven
+Status: experimental
 
 zlib (RFC 1950) encoder / decoder.
 

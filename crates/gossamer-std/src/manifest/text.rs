@@ -752,7 +752,7 @@ pub const UTF16: StdModule = StdModule {
         StdItem {
             name: "decode_to_string",
             kind: StdItemKind::Function,
-            doc: "Decodes a []u16 to String.",
+            doc: "Decodes UTF-16 code units (`[u16]`) to a String.",
         },
     ],
 };

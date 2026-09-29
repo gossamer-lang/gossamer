@@ -101,7 +101,9 @@ use crate::builtins::{
     BuiltinFnPub, as_str, err_variant, install_module_pub, none_variant, ok_variant, some_variant,
     value_to_int,
 };
-use crate::value::{MapKey, NativeCall, NativeDispatch, RuntimeResult, Value, dense_map};
+use crate::value::{
+    JsonInner, MapKey, NativeCall, NativeDispatch, RuntimeResult, Value, dense_map,
+};
 
 /// Entry point invoked from `builtins::install`.
 use super::*;
@@ -117,119 +119,22 @@ pub(crate) fn install_encoding_xml(globals: &mut Vec<(&'static str, Value)>) {
     }
 }
 
-pub(crate) fn xml_node_to_value(node: &gossamer_std::encoding::xml::Node) -> Value {
-    use gossamer_std::encoding::xml::Node;
-    match node {
-        Node::Text(s) => {
-            let mut map = dense_map();
-            map.insert(
-                MapKey::Str("__xml_type".into()),
-                Value::String("text".into()),
-            );
-            map.insert(MapKey::Str("value".into()), Value::String(s.clone().into()));
-            Value::Map(Arc::new(parking_lot::Mutex::new(map.into())))
-        }
-        Node::Element {
-            name,
-            attrs,
-            children,
-        } => {
-            let mut map = dense_map();
-            map.insert(
-                MapKey::Str("__xml_type".into()),
-                Value::String("element".into()),
-            );
-            map.insert(
-                MapKey::Str("name".into()),
-                Value::String(name.clone().into()),
-            );
-            let mut attr_map = dense_map();
-            for (k, v) in attrs {
-                attr_map.insert(
-                    MapKey::Str(k.clone().into()),
-                    Value::String(v.clone().into()),
-                );
-            }
-            map.insert(
-                MapKey::Str("attrs".into()),
-                Value::Map(Arc::new(parking_lot::Mutex::new(attr_map.into()))),
-            );
-            let child_vals: Vec<Value> = children.iter().map(xml_node_to_value).collect();
-            map.insert(
-                MapKey::Str("children".into()),
-                Value::Array(Arc::new(child_vals)),
-            );
-            Value::Map(Arc::new(parking_lot::Mutex::new(map.into())))
-        }
-    }
-}
-
-pub(crate) fn value_to_xml_node(v: &Value) -> Option<gossamer_std::encoding::xml::Node> {
-    use gossamer_std::encoding::xml::Node;
-    let map = match v {
-        Value::Map(m) => m.lock(),
-        _ => return None,
-    };
-    let xml_type = match map.get(&MapKey::Str("__xml_type".into())) {
-        Some(Value::String(s)) => s.as_str().to_string(),
-        _ => return None,
-    };
-    if xml_type == "text" {
-        let s = match map.get(&MapKey::Str("value".into())) {
-            Some(Value::String(s)) => s.as_str().to_string(),
-            _ => String::new(),
-        };
-        return Some(Node::Text(s));
-    }
-    if xml_type == "element" {
-        let name = match map.get(&MapKey::Str("name".into())) {
-            Some(Value::String(s)) => s.as_str().to_string(),
-            _ => return None,
-        };
-        let attrs = match map.get(&MapKey::Str("attrs".into())) {
-            Some(Value::Map(m)) => {
-                let inner = m.lock();
-                inner
-                    .iter()
-                    .filter_map(|(k, v)| {
-                        let key = match k {
-                            MapKey::Str(s) => s.to_string(),
-                            _ => return None,
-                        };
-                        let val = match v {
-                            Value::String(s) => s.as_str().to_string(),
-                            _ => return None,
-                        };
-                        Some((key, val))
-                    })
-                    .collect()
-            }
-            _ => std::collections::BTreeMap::new(),
-        };
-        let children = match map.get(&MapKey::Str("children".into())) {
-            Some(Value::Array(arr)) => arr.iter().filter_map(value_to_xml_node).collect(),
-            _ => Vec::new(),
-        };
-        return Some(Node::Element {
-            name,
-            attrs,
-            children,
-        });
-    }
-    None
-}
-
 pub(crate) fn builtin_xml_parse(args: &[Value]) -> RuntimeResult<Value> {
     let src = args.first().and_then(as_str).unwrap_or("").to_string();
     match gossamer_std::encoding::xml::parse(&src) {
-        Ok(node) => Ok(ok_variant(xml_node_to_value(&node))),
+        Ok(node) => Ok(ok_variant(Value::Json(Arc::new(JsonInner::new(
+            gossamer_std::encoding::xml::to_json(&node),
+        ))))),
         Err(e) => Ok(err_variant(format!("{e}"))),
     }
 }
 
 pub(crate) fn builtin_xml_encode(args: &[Value]) -> RuntimeResult<Value> {
-    let v = args.first().unwrap_or(&Value::Unit);
-    match value_to_xml_node(v) {
+    let node = match args.first() {
+        Some(Value::Json(value)) => gossamer_std::encoding::xml::from_json(value.as_value()),
+        _ => None,
+    };
+    match node {
         Some(node) => Ok(Value::String(
             gossamer_std::encoding::xml::encode(&node).into(),
         )),

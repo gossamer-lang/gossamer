@@ -287,6 +287,78 @@ fn write_node(w: &mut Writer<impl std::io::Write>, node: &Node) {
     }
 }
 
+/// The `json::Value` a Gossamer program sees for `node`: an element is
+/// `{"__xml_type": "element", "attrs": {..}, "children": [..], "name": ..}`
+/// and a text node is `{"__xml_type": "text", "value": ..}`.
+#[must_use]
+pub fn to_json(node: &Node) -> crate::json::Value {
+    use crate::json::Value;
+    let mut map = BTreeMap::new();
+    match node {
+        Node::Text(text) => {
+            map.insert("__xml_type".to_string(), Value::String("text".into()));
+            map.insert("value".to_string(), Value::String(text.clone()));
+        }
+        Node::Element {
+            name,
+            attrs,
+            children,
+        } => {
+            map.insert("__xml_type".to_string(), Value::String("element".into()));
+            let attrs = attrs
+                .iter()
+                .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                .collect();
+            map.insert("attrs".to_string(), Value::Object(attrs));
+            map.insert(
+                "children".to_string(),
+                Value::Array(children.iter().map(to_json).collect()),
+            );
+            map.insert("name".to_string(), Value::String(name.clone()));
+        }
+    }
+    Value::Object(map)
+}
+
+/// The node a value of the [`to_json`] shape describes; `None` for any
+/// other value.
+#[must_use]
+pub fn from_json(value: &crate::json::Value) -> Option<Node> {
+    use crate::json::Value;
+    let Value::Object(map) = value else {
+        return None;
+    };
+    let text_of = |key: &str| match map.get(key) {
+        Some(Value::String(s)) => Some(s.clone()),
+        _ => None,
+    };
+    match text_of("__xml_type")?.as_str() {
+        "text" => Some(Node::Text(text_of("value").unwrap_or_default())),
+        "element" => {
+            let attrs = match map.get("attrs") {
+                Some(Value::Object(attrs)) => attrs
+                    .iter()
+                    .filter_map(|(k, v)| match v {
+                        Value::String(v) => Some((k.clone(), v.clone())),
+                        _ => None,
+                    })
+                    .collect(),
+                _ => BTreeMap::new(),
+            };
+            let children = match map.get("children") {
+                Some(Value::Array(children)) => children.iter().filter_map(from_json).collect(),
+                _ => Vec::new(),
+            };
+            Some(Node::Element {
+                name: text_of("name")?,
+                attrs,
+                children,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Escapes XML special characters in `s` (`&`, `<`, `>`, `"`, `'`).
 #[must_use]
 pub fn escape(s: &str) -> String {

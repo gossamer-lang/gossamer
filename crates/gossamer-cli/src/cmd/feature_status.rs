@@ -953,8 +953,8 @@ mod tests {
 
         // A surface no fixture exercises still claims nothing.
         let unproven = feature_status::item_evidence(
-            "std::compress::zstd",
-            feature_status::derived_status("std::compress::zstd", Status::Shipped),
+            "std::utf16",
+            feature_status::derived_status("std::utf16", Status::Shipped),
         );
         let mut bare = String::new();
         bare.push_str(&json_string(unproven.status.tag()));

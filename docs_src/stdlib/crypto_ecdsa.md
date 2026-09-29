@@ -1,6 +1,6 @@
 # `std::crypto::ecdsa`
 
-Status: unproven
+Status: experimental
 
 ECDSA over the NIST P-256 curve.
 

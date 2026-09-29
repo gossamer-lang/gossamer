@@ -591,6 +591,17 @@ pub enum TypeError {
         /// Whether the first implementation is a `#[derive(...)]`.
         derived: bool,
     },
+    /// `impl<T: Bound> Trait for T`: a blanket impl, which the language
+    /// declines (SPEC §17.5).
+    #[error(
+        "`impl {trait_name} for {param}` implements a trait for every type; blanket impls are not supported"
+    )]
+    BlanketImpl {
+        /// Trait the block implements.
+        trait_name: String,
+        /// Type parameter written as the self type.
+        param: String,
+    },
     /// A function body's tail answers a value through a signature that
     /// declares no return type, so the value is discarded and the caller
     /// reads the unit the signature promises.
@@ -1129,6 +1140,7 @@ impl TypeError {
             Self::MissingTraitImplAssocItems { .. } => "missing-trait-impl-assoc-items",
             Self::ImplItemNotInTrait { .. } => "impl-item-not-in-trait",
             Self::ConflictingTraitImpl { .. } => "conflicting-trait-impl",
+            Self::BlanketImpl { .. } => "blanket-impl",
             Self::UndeclaredReturnValue { .. } => "undeclared-return-value",
             Self::RangeBorrow { .. } => "range-borrow",
             Self::UnknownAssocItem { .. } => "unknown-assoc-item",
@@ -1210,6 +1222,7 @@ impl TypeError {
             Self::FieldReceiverUninferred { .. } => "GT0092",
             Self::QuestionMarkNoConversion { .. } => "GT0093",
             Self::BindingCallbackUntyped { .. } => "GT0094",
+            Self::BlanketImpl { .. } => "GT0095",
             Self::UnresolvedMethod { .. } => "GT0002",
             Self::UnresolvedOp { .. } | Self::UnresolvedOpImpl { .. } => "GT0003",
             Self::NonExhaustiveMatch { .. } => "GT0004",
@@ -1853,6 +1866,12 @@ impl TypeDiagnostic {
                     )
                 });
             }
+            TypeError::BlanketImpl { trait_name, param } => {
+                out = out.with_help(format!(
+                    "write `impl {trait_name} for Ty` for each type that needs it, or a generic \
+                     function `fn f<{param}: Bound>(x: {param})` that takes the bound instead"
+                ));
+            }
             TypeError::RangeBorrow { base, range, .. } => {
                 out = out
                     .with_note(
@@ -2252,15 +2271,10 @@ impl TypeDiagnostic {
                     );
             }
             TypeError::DerefWriteToNonReference { name } => {
-                out = out
-                    .with_help(format!(
-                        "write `{name}` directly, or declare it `&mut T` and pass `&mut` at \
-                         the call site"
-                    ))
-                    .with_note(
-                        "`*` reaches the place a reference names; over a value there is no \
+                out = out.with_help(deref_write_help(name)).with_note(
+                    "`*` reaches the place a reference names; over a value there is no \
                          place to write, so the assignment would be discarded",
-                    );
+                );
             }
             TypeError::AssignThroughSharedReference { name } => {
                 out = out
@@ -2657,6 +2671,19 @@ fn value_not_displayable_diagnostic(
                 "whether a generic type's fields render depends on the arguments each \
                  instantiation supplies, so the declaration is where the choice is made",
             ),
+    }
+}
+
+/// GT0083's help: a binding can become a `&mut` parameter, while a call
+/// answers a value that has to be bound and stored back.
+fn deref_write_help(name: &str) -> String {
+    if name.ends_with("(..)") {
+        format!(
+            "`{name}` answers a value; bind it, change the binding, and store it back, or use \
+             a method that updates in place (`m.inc(k, by)`)"
+        )
+    } else {
+        format!("write `{name}` directly, or declare it `&mut T` and pass `&mut` at the call site")
     }
 }
 

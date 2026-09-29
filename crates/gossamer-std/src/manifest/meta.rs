@@ -512,7 +512,7 @@ pub const TIME: StdModule = StdModule {
 
 pub const PANIC: StdModule = StdModule {
     path: "std::panic",
-    summary: "Panic / `catch_unwind` integration.",
+    summary: "Goroutine-scoped panics; there is no `catch_unwind`, and `runtime::set_panic_hook` observes one.",
     items: &[StdItem {
         name: "panic",
         kind: StdItemKind::Builtin,

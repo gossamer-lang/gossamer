@@ -1,5 +1,6 @@
 // A `math` function called as a method on a number is the free call with the
 // receiver first, on every tier; `math::log(x, base)` takes its value first.
+// An integer receiver or argument reaches a float parameter as its value.
 
 use std::math
 
@@ -16,8 +17,19 @@ fn methods() {
     println("{} {}", (-g).round(), (0.5).round())
 }
 
+fn integer_operands() {
+    let y = "3".to_i64().unwrap_or(0)
+    let x = "-5".to_i64().unwrap_or(0)
+    let f = "3.0".to_f64().unwrap_or(0.0)
+    let u: u8 = 3
+    println("{} {} {} {}", y.pow(2), x.pow(2), f.pow(2), u.pow(2))
+    println("{} {} {} {}", y.hypot(4), y.atan2(1), y.log(3), y.copysign(-1))
+    println("{} {}", f.positive_diff(1), y.pow(y))
+}
+
 fn main() {
     methods()
+    integer_operands()
     assert_eq(math::log(8.0, 2.0), 3.0)
     println("{} {}", math::log(8.0, 2.0), (8.0).log(2.0))
 }

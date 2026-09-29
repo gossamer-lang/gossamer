@@ -2,7 +2,7 @@
 
 Status: experimental
 
-Data-last Result combinators for pipeline chaining: map, map_err, unwrap_or_else, etc.
+Result combinators as data-first free functions for pipelines: map, map_err, unwrap_or_else, etc.
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 

@@ -664,6 +664,12 @@ pub const REGISTRY: &[(&str, &str)] = &[
             it with a guard instead (`n if n >= LOW => ..`).",
     ),
     (
+        "GP0060",
+        "A struct literal was written without parentheses in an `if`, `while`,\n\
+            `match`, or `for` head. There a `{` opens the body, so the literal\n\
+            is ambiguous with it: write `for v in (Fib { a: 0, b: 1 }) { .. }`.",
+    ),
+    (
         "GR0001",
         "A name used in source could not be resolved to a declaration.\n\
                      Check the spelling, whether a `use` brings the name into scope,\n\
@@ -1507,6 +1513,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
             compiled program calls the closure through each type's register\n\
             class, so annotate each parameter (`|s: String| ..`) or use it in a way\n\
             that fixes its type.",
+    ),
+    (
+        "GT0095",
+        "An `impl` block names one of its own type parameters as its self type\n\
+            (`impl<T: Named> Describe for T`), which would implement the trait for\n\
+            every type. Gossamer declines blanket impls: write the `impl` for each\n\
+            type that needs the trait, or take the bound in a generic function\n\
+            (`fn describe<T: Named>(x: T) -> String`).",
     ),
     (
         "GX0001",

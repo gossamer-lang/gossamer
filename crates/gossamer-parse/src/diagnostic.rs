@@ -112,6 +112,13 @@ pub enum ParseError {
     /// An inclusive range operator appeared without its required upper bound.
     #[error("inclusive range operator `..=` requires an upper bound")]
     InclusiveRangeMissingEnd,
+    /// A struct literal written unparenthesised in an `if` / `while` /
+    /// `match` / `for` head, where `{` opens the body.
+    #[error("struct literal `{name} {{ .. }}` must be parenthesized here")]
+    StructLiteralInHead {
+        /// The struct's path as written.
+        name: String,
+    },
     /// A range pattern bound was written as a path other than a primitive limit.
     #[error("range pattern bound `{text}` is not a literal")]
     RangePatternBoundNotLiteral {
@@ -736,6 +743,14 @@ impl ParseError {
     #[allow(clippy::too_many_lines, reason = "one arm per diagnostic code")]
     fn code_title_help_syntax(&self) -> (&'static str, String, Option<String>) {
         match self {
+            ParseError::StructLiteralInHead { name } => (
+                "GP0060",
+                format!("struct literal `{name} {{ .. }}` must be parenthesized here"),
+                Some(format!(
+                    "in an `if`, `while`, `match`, or `for` head a `{{` opens the body; write \
+                     `({name} {{ .. }})`"
+                )),
+            ),
             ParseError::RangePatternBoundNotLiteral { text } => (
                 "GP0059",
                 format!("range pattern bound `{text}` is not a literal"),

@@ -1,4 +1,5 @@
 // Tier-parity fixture for std::encoding::xml parse -> encode round-trip.
+// The parsed tree is a `json::Value`, rendered and navigated as one.
 // Exercises attributes, nested elements, escape round-trip
 // ('  -> &apos;, &lt;/&gt; entities), and a self-closing element. The
 // re-encoded bytes must be identical across the VM, Cranelift, and
@@ -11,6 +12,8 @@ fn main() {
     let src = "<note id=\"7\"><to>Tove</to><from>Jani</from><body>Don't &lt;forget&gt; me</body><empty/></note>"
     match encoding::xml::parse(src) {
         Ok(node) => {
+            println("{:?}", node.get("name"))
+            println("{}", node.get("children").unwrap().at(0))
             let out = encoding::xml::encode(node)
             println("{}", out)
             println("has_body={}", strings::contains(out, "<body>"))
