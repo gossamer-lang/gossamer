@@ -22,7 +22,6 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
@@ -30,7 +29,7 @@ use std::os::raw::c_char;
 
 use p256::elliptic_curve::rand_core::{CryptoRng, RngCore};
 
-use super::encoding::{bytes_to_gosvec, gosvec_u8};
+use super::encoding::bytes_to_gosvec;
 use super::vec::{GosVec, gos_rt_result_new};
 
 /// OS-CSPRNG adapter for `p256::ecdsa::SigningKey::random`. Mirrors
@@ -77,6 +76,8 @@ fn ecdsa_err(msg: &str) -> i128 {
 }
 
 unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_text`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_text(p) }
 }
 
@@ -95,7 +96,7 @@ static KEYPAIR_STRINGS_META: [i64; 6] = [
 /// -> Result<(String, String), errors::Error>` - fresh P-256 keypair
 /// `(secret_pkcs8_pem, public_spki_pem)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_crypto_ecdsa_keypair_pem() -> i128 {
+pub extern "C" fn gos_rt_crypto_ecdsa_keypair_pem() -> i128 {
     ffi_entry!(0i128, {
         use p256::ecdsa::SigningKey;
         use p256::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
@@ -134,7 +135,11 @@ pub unsafe extern "C" fn gos_rt_crypto_ecdsa_sign_pem(
         use p256::ecdsa::{Signature, SigningKey, signature::Signer};
         use p256::pkcs8::DecodePrivateKey;
 
-        let msg = unsafe { gosvec_u8(message) };
+        // SAFETY: `message` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let msg = unsafe { crate::c_abi::vec::vec_bytes(message) };
+        // SAFETY: `secret_pem` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr` accepts.
         let signing = match SigningKey::from_pkcs8_pem(unsafe { cstr(secret_pem) }) {
             Ok(k) => k,
             Err(e) => return ecdsa_err(&format!("ecdsa: secret pem: {e}")),
@@ -157,8 +162,14 @@ pub unsafe extern "C" fn gos_rt_crypto_ecdsa_verify_pem(
         use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
         use p256::pkcs8::DecodePublicKey;
 
-        let msg = unsafe { gosvec_u8(message) };
-        let sig_bytes = unsafe { gosvec_u8(signature) };
+        // SAFETY: `message` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let msg = unsafe { crate::c_abi::vec::vec_bytes(message) };
+        // SAFETY: `signature` is this shim's argument, live for the call (C-ABI contract) or
+        // null, which `vec_bytes` accepts.
+        let sig_bytes = unsafe { crate::c_abi::vec::vec_bytes(signature) };
+        // SAFETY: `public_pem` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr` accepts.
         let key = match VerifyingKey::from_public_key_pem(unsafe { cstr(public_pem) }) {
             Ok(k) => k,
             Err(e) => return ecdsa_err(&format!("ecdsa: public pem: {e}")),

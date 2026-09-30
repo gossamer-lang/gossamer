@@ -39,8 +39,8 @@ pub(crate) fn dispatch(path: Option<PathBuf>, all: bool, format: &str) -> Result
 
     let Some(advisories) = load_advisories(&project_root)? else {
         outln!(
-            "audit: no advisory feed - none at {}, and no `[trusted-publishers]` key to \
-             verify a registry feed against",
+            "audit: no advisory feed - none at {}, and no registry with a \
+             `[trusted-publishers]` key to verify its feed against",
             project_root.join(LOCAL_FEED).display()
         );
         return Ok(());
@@ -128,16 +128,19 @@ fn load_advisories(project_root: &Path) -> Result<Option<Vec<Advisory>>> {
     let Some((_, key_hex)) = manifest.trusted_publishers.iter().next() else {
         return Ok(None);
     };
+    let registry = match std::env::var("GOS_REGISTRY_URL") {
+        Ok(url) => url,
+        Err(_) => match manifest.registries.get("default") {
+            Some(url) => url.clone(),
+            None => return Ok(None),
+        },
+    };
     let key = gossamer_pkg::signing::VerifyingKey::from_hex(key_hex)
         .map_err(|e| anyhow!("[trusted-publishers] key: {e}"))?;
     let transport = gossamer_pkg::transport::HttpTransport;
-    gossamer_pkg::advisory::fetch_verified_feed(
-        &transport,
-        gossamer_pkg::fetch::DEFAULT_REGISTRY_URL,
-        &key,
-    )
-    .map(Some)
-    .map_err(|e| anyhow!("{e}"))
+    gossamer_pkg::advisory::fetch_verified_feed(&transport, &registry, &key)
+        .map(Some)
+        .map_err(|e| anyhow!("{e}"))
 }
 
 /// Every qualified path the project's sources mention.

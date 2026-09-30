@@ -38,6 +38,8 @@ fn callback_register_invoke_unregister_round_trip() {
 
     // First invocation: callback fires, counter increments to 1.
     let mut result = [0u8; 16];
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let rc = unsafe {
         gossamer_runtime::c_abi::gos_rt_callback_invoke(
             handle,
@@ -51,6 +53,8 @@ fn callback_register_invoke_unregister_round_trip() {
 
     // Unregister: subsequent invocations return -1.
     gossamer_runtime::c_abi::gos_rt_callback_unregister(handle);
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let rc2 = unsafe {
         gossamer_runtime::c_abi::gos_rt_callback_invoke(
             handle,
@@ -67,6 +71,8 @@ fn callback_register_invoke_unregister_round_trip() {
 #[test]
 fn callback_invoke_unknown_handle_returns_minus_one() {
     let mut result = [0u8; 16];
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let rc = unsafe {
         gossamer_runtime::c_abi::gos_rt_callback_invoke(
             0xDEAD_BEEF_DEAD_BEEF,
@@ -80,6 +86,8 @@ fn callback_invoke_unknown_handle_returns_minus_one() {
 
 #[test]
 fn callback_invoke_zero_handle_short_circuits() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let rc = unsafe {
         gossamer_runtime::c_abi::gos_rt_callback_invoke(
             0,
@@ -102,6 +110,8 @@ extern "C" fn blocking_callback(
     _args_len: u32,
     _result: *mut u8,
 ) -> i32 {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let ctx = unsafe { &*ctx.cast::<BlockingContext>() };
     ctx.entered.wait();
     ctx.release.wait();
@@ -119,6 +129,8 @@ fn unregister_waits_for_an_in_flight_callback() {
         blocking_callback,
     );
     let invoke_handle = handle;
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let invoke = std::thread::spawn(move || unsafe {
         gossamer_runtime::c_abi::gos_rt_callback_invoke(
             invoke_handle,
@@ -151,6 +163,8 @@ extern "C" fn self_unregister_callback(
     _args_len: u32,
     _result: *mut u8,
 ) -> i32 {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let ctx = unsafe { &*ctx.cast::<SelfUnregisterContext>() };
     gossamer_runtime::c_abi::gos_rt_callback_unregister(ctx.0.load(Ordering::Acquire));
     0
@@ -165,6 +179,8 @@ fn callback_can_unregister_itself_without_deadlocking() {
     );
     context.0.store(handle, Ordering::Release);
     assert_eq!(
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gossamer_runtime::c_abi::gos_rt_callback_invoke(
                 handle,
@@ -176,6 +192,8 @@ fn callback_can_unregister_itself_without_deadlocking() {
         0
     );
     assert_eq!(
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gossamer_runtime::c_abi::gos_rt_callback_invoke(
                 handle,

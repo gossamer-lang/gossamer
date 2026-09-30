@@ -43,6 +43,7 @@ follows, so the two spellings of the same operation agree.
 
 If you need out-of-range to be an error, check the bound yourself:
 
+<!-- fragment -->
 ```gossamer
 if end <= xs.len() {
     process(xs[start..end])

@@ -1010,9 +1010,10 @@ impl ShareScan<'_> {
 
     /// Whether `receiver.method(..)` answers elements copied out of the
     /// receiver into storage of their own, sharing nothing with it: a copy of
-    /// a sequence whose elements are scalars or strings.
+    /// a sequence whose elements are scalars or strings, or one such element
+    /// through `next`, the walk a `for` loop over a sequence drives.
     fn answers_fresh_copy(&mut self, receiver: &HirExpr, method: &str) -> bool {
-        if !FRESH_COPY_METHODS.contains(&method) {
+        if !FRESH_COPY_METHODS.contains(&method) && method != "next" {
             return false;
         }
         let elem = match self.tcx.kind_of(receiver.ty) {
@@ -1179,8 +1180,21 @@ impl ShareScan<'_> {
                 }
             }
             HirExprKind::Match { scrutinee, arms } => {
-                self.expr(scrutinee, false, false);
+                // `for x in grid[i]` walks the parameter's own elements: the
+                // loop binding names storage inside the parameter exactly as
+                // `let row = grid[i]` does, so it joins the tracked names.
+                let walked = self.walked_elements(scrutinee);
+                if walked {
+                    if let HirExprKind::MethodCall { receiver, .. } = &scrutinee.kind {
+                        self.walk_projection_indices(receiver);
+                    }
+                } else {
+                    self.expr(scrutinee, false, false);
+                }
                 for arm in arms {
+                    if walked {
+                        self.track_some_binding(&arm.pattern);
+                    }
                     if let Some(g) = &arm.guard {
                         self.expr(g, false, false);
                     }
@@ -1235,6 +1249,51 @@ impl ShareScan<'_> {
             return;
         }
         gossamer_hir::for_each_child_expr(e, &mut |child| self.any_mention(child));
+    }
+
+    /// Whether `scrutinee` is `seq.next()` over a sequence the parameter
+    /// holds whose elements are not copies: the element walk a `for` loop
+    /// drives, handing the body the parameter's own elements.
+    fn walked_elements(&mut self, scrutinee: &HirExpr) -> bool {
+        let HirExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &scrutinee.kind
+        else {
+            return false;
+        };
+        if name.name != "next" || !args.is_empty() || !self.projection_of_tracked(receiver) {
+            return false;
+        }
+        let elem = match self.tcx.kind_of(receiver.ty) {
+            TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. } => *elem,
+            _ => return false,
+        };
+        !self.copy(elem)
+    }
+
+    /// Tracks the name a `Some(name)` arm binds; any other shape binding a
+    /// walked element is an escape, since this walk does not follow it.
+    fn track_some_binding(&mut self, pattern: &gossamer_hir::HirPat) {
+        use gossamer_hir::HirPatKind;
+        match &pattern.kind {
+            HirPatKind::Variant { fields, .. } => match fields.as_slice() {
+                [] => {}
+                [field] => match &field.kind {
+                    HirPatKind::Binding {
+                        name,
+                        mutable: false,
+                    } => self.names.push(name.name.as_str().to_string()),
+                    HirPatKind::Wildcard => {}
+                    _ => self.escaped = true,
+                },
+                _ => self.escaped = true,
+            },
+            HirPatKind::Wildcard => {}
+            _ => self.escaped = true,
+        }
     }
 
     /// Whether a one-segment path names the parameter or one of its aliases.

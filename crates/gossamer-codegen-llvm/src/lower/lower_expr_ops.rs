@@ -525,8 +525,9 @@ impl<'a> Lowerer<'a> {
             rhs_v = masked;
         }
         let tmp = self.fresh();
-        let checked_integer = matches!(crate::emit::opt_profile(), crate::emit::OptProfile::Debug)
-            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+        // Integer arithmetic raises the overflow panic in every profile, as it
+        // does on the VM and the JIT.
+        let checked_integer = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
             && matches!(kind, NumericKind::Int(_));
         if checked_integer {
             let NumericKind::Int(int_ty) = kind else {
@@ -605,14 +606,18 @@ impl<'a> Lowerer<'a> {
                 "  br i1 {overflow}, label %{fail_label}, label %{continue_label}"
             )
             .unwrap();
-            writeln!(self.out, "{fail_label}:").unwrap();
-            let panic_operation = match op {
-                BinOp::Add => "add",
-                BinOp::Sub => "subtract",
-                BinOp::Mul => "multiply",
+            let (panic_operation, kind) = match op {
+                BinOp::Add => ("add", abi::check_fail::ADD),
+                BinOp::Sub => ("subtract", abi::check_fail::SUBTRACT),
+                BinOp::Mul => ("multiply", abi::check_fail::MULTIPLY),
                 _ => unreachable!(),
             };
-            self.lower_panic(&format!("attempt to {panic_operation} with overflow\n"));
+            if crate::emit::want_stack_frames() {
+                writeln!(self.out, "{fail_label}:").unwrap();
+                self.lower_panic(&format!("attempt to {panic_operation} with overflow\n"));
+            } else {
+                self.branch_to_check_fail(fail_label, kind, "null".to_string(), "0".to_string());
+            }
             writeln!(self.out, "{continue_label}:").unwrap();
         }
         let instr = match (op, kind) {

@@ -326,6 +326,7 @@ pub(crate) fn collect_array(v: &Value) -> Vec<Value> {
         Value::Array(arr) => arr.as_ref().clone(),
         Value::IntArray(arr) => arr.iter().map(|&n| Value::Int(n)).collect(),
         Value::FloatVec(arr) => arr.iter().map(|&f| Value::Float(f)).collect(),
+        Value::FloatArray(_) => v.float_array_elems(),
         // Byte-packed storage holds a `u8` sequence, whose elements are
         // integers like any other numeric sequence's.
         Value::ByteArray(bytes) => bytes.iter().map(|b| Value::Int(i64::from(*b))).collect(),

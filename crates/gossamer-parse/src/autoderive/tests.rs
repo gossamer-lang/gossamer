@@ -38,15 +38,25 @@ mod autoderive_tests {
             .collect()
     }
 
+    /// A parse error elsewhere leaves the codecs unsynthesized, which says
+    /// nothing about the serde target: only the parse error is reported.
+    #[test]
+    fn a_parse_error_elsewhere_reports_no_serde_refusal() {
+        let source = "use std::regex\nstruct P { x: i64 }\n\
+                      fn main() {\n    let p = \"a\"\n    let _ = regex::compile(p)\n    \
+                      let _ = from_json::<P>(\"{}\")\n}\n";
+        assert!(serde_target_refusals(source).is_empty());
+    }
+
     /// Every refusal reports in the user's own vocabulary. A synthesized
     /// `__gos_serde_*` name reaching the user means one of these is missing.
     #[test]
     fn serde_target_outside_the_synthesizer_names_its_shape() {
         let cases = [
             (
-                "enum E { A(i64), B }\nfn main() { let _ = to_json::<E>(E::A(1)); }",
+                "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E<i64>>(E::A(1)); }",
                 "E",
-                SerdeTargetRefusal::Enum,
+                SerdeTargetRefusal::Generic,
             ),
             (
                 "struct W<T> { v: T }\nfn main() { let _ = to_json::<W<i64>>(W { v: 1 }); }",
@@ -90,11 +100,11 @@ mod autoderive_tests {
 
     #[test]
     fn unserializable_field_used_in_serde_is_reported() {
-        let src = "enum Color { Red, Green }\n\
-                   struct Paint { name: String, shade: Color }\n\
-                   fn main() { let _ = to_json::<Paint>(Paint { name: \"w\", shade: Color::Red }); }";
+        let src = "enum Tint<T> { Of(T) }\n\
+                   struct Paint { name: String, shade: Tint<i64> }\n\
+                   fn main() { let _ = to_json::<Paint>(Paint { name: \"w\", shade: Tint::Of(1) }); }";
         let errs = serde_field_errors(src);
-        assert_eq!(errs, vec![("shade".to_string(), "Color".to_string())]);
+        assert_eq!(errs, vec![("shade".to_string(), "Tint<i64>".to_string())]);
     }
 
     #[test]

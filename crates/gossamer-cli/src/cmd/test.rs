@@ -2127,7 +2127,7 @@ pub(crate) mod tier_parity {
         root: &Path,
         fixtures: BTreeMap<String, TierStatus>,
     ) -> Vec<(String, TierStatus)> {
-        use gossamer_std::manifest::feature_status::{lang_features_pinned, lang_features_used};
+        use gossamer_std::manifest::feature_status::{lang_features_used, rows_pinned};
 
         let mut by_module: BTreeMap<String, TierStatus> = BTreeMap::new();
         for (name, status) in &fixtures {
@@ -2140,7 +2140,7 @@ pub(crate) mod tier_parity {
                     merge_module_status(&mut by_module, feature, status);
                 }
             }
-            for feature in lang_features_pinned(&file) {
+            for feature in rows_pinned(&file) {
                 merge_module_status(&mut by_module, feature, status);
             }
         }
@@ -2681,9 +2681,7 @@ pub(crate) mod tier_parity {
                             &source,
                         ));
                     }
-                    used.extend(
-                        gossamer_std::manifest::feature_status::lang_features_pinned(&file),
-                    );
+                    used.extend(gossamer_std::manifest::feature_status::rows_pinned(&file));
                 }
             }
             let recorded: BTreeSet<String> = crate::cmd::feature_status::release_evidence()

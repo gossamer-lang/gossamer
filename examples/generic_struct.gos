@@ -41,14 +41,14 @@ let mixed = Pair { fst: 7, snd: "seven" }
 
 // Both fields of int_pair resolve to i64 at this site, so
 // arithmetic across them works without any extra annotation.
-println("{} + {} = {}", int_pair.fst, int_pair.snd, int_pair.fst + int_pair.snd)
-println("{} {}", str_pair.fst, str_pair.snd)
-println("{} is {}", mixed.fst, mixed.snd)
+println(f"{int_pair.fst} + {int_pair.snd} = {int_pair.fst + int_pair.snd}")
+println(f"{str_pair.fst} {str_pair.snd}")
+println(f"{mixed.fst} is {mixed.snd}")
 
 // SameType: left and right are the same concrete type here.
 let counts = SameType { left: 100, right: 200 }
-println("total: {}", counts.left + counts.right)
+println(f"total: {counts.left + counts.right}")
 
 // Triple: three independent type parameters, all inferred.
 let record = Triple { first: 1, second: "two", third: 3.0 }
-println("{} {} {}", record.first, record.second, record.third)
+println(f"{record.first} {record.second} {record.third}")

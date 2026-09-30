@@ -46,7 +46,7 @@ fn main() {
     println("leaf mode after: {:o}", fs::permissions(leaf).unwrap_or(0))
 
     let file = path::join(base, "secret.txt")
-    match fs::write_mode(file, "hello", 0o600) {
+    match fs::write_mode(file, "hello".as_bytes(), 0o600) {
         Ok(_) => println("write_mode: ok")
         Err(_) => println("write_mode: err")
     }

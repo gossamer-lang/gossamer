@@ -17,6 +17,6 @@ let prod = Config { host: base.host, port: 443, verbose: base.verbose }
 
 let remote = Config { host: "example.com", port: base.port, verbose: base.verbose }
 
-println("base:   {} {} {}", base.host, base.port, base.verbose)
-println("prod:   {} {} {}", prod.host, prod.port, prod.verbose)
-println("remote: {} {} {}", remote.host, remote.port, remote.verbose)
+println(f"base:   {base.host} {base.port} {base.verbose}")
+println(f"prod:   {prod.host} {prod.port} {prod.verbose}")
+println(f"remote: {remote.host} {remote.port} {remote.verbose}")

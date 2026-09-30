@@ -55,7 +55,7 @@ fn main() {
         println("err {i} {}", show_err(e))
     }
     let mut pats = Map::new()
-    pats.insert("p", regex::compile("b").unwrap())
+    pats.insert("p", regex::compile("b"))
     for i in 0..3 {
         let p = pats.get("p").unwrap()
         println("pat {i} {}", show_pat(p))

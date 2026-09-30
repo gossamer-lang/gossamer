@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0062]: A `#[derive(Default)]` struct has a field with no zero value. - here
+--- framed ---
+error[GP0062]: A `#[derive(Default)]` struct has a field with no zero value.
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

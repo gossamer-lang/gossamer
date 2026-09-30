@@ -1,0 +1,81 @@
+// Adapters and terminals on iterators a program declares: lazy chains over
+// root, nested-module, and generic iterators, built-in iterators as `zip`
+// partners, and a method the type defines itself taking precedence.
+mod shapes {
+    pub struct Point { pub x: i64, pub y: i64 }
+    pub struct Walk { step: i64 }
+    impl Iterator for Walk {
+        type Item = Point
+        fn next(&mut self) -> Option<Point> {
+            if self.step >= 4 { return None }
+            self.step += 1
+            Some(Point { x: self.step, y: self.step * self.step })
+        }
+    }
+    pub fn diagonal() -> Walk { Walk { step: 0 } }
+}
+
+struct Countdown { n: i64 }
+impl Iterator for Countdown {
+    type Item = i64
+    fn next(&mut self) -> Option<i64> {
+        if self.n == 0 { return None }
+        self.n -= 1
+        Some(self.n + 1)
+    }
+}
+impl Countdown {
+    fn count(self) -> i64 { 42 }
+}
+
+struct Naturals { n: i64 }
+impl Iterator for Naturals {
+    type Item = i64
+    fn next(&mut self) -> Option<i64> {
+        self.n += 1
+        Some(self.n)
+    }
+}
+
+struct Cycle<T> { items: Vec<T>, at: i64 }
+impl<T> Iterator for Cycle<T> {
+    type Item = T
+    fn next(&mut self) -> Option<T> {
+        if self.items.is_empty() { return None }
+        let v = self.items[self.at % self.items.len()]
+        self.at += 1
+        Some(v)
+    }
+}
+
+fn main() {
+    let c = Countdown { n: 5 }
+    println("{:?}", c.map(|x| x * 10).collect())
+    println("{:?}", c.filter(|x| x % 2 == 1).map(|x| format("<{}>", x)).collect())
+    println("{} {} {:?} {:?}", c.sum(), c.product(), c.min(), c.max())
+    println("{} (user count wins)", c.count())
+    println("{}", c.fold(0, |acc, x| acc * 10 + x))
+    println("{:?} {:?}", c.reduce(|a, b| a - b), c.find(|x| x < 3))
+    println("{:?} {:?} {:?}", c.position(|x| x == 2), c.last(), c.nth(1))
+    println("{} {}", c.any(|x| x > 4), c.all(|x| x > 1))
+    println("{:?}", c.enumerate().skip(1).step_by(2).collect())
+    println("{:?}", c.take_while(|x| x > 2).chain(Countdown { n: 2 }).collect())
+    println("{:?}", c.skip_while(|x| x > 3).zip(#["a", "b", "c", "d"].iter()).collect())
+    println("{:?}", c.flat_map(|x| #[x; x]).take(6).collect())
+    println("{:?}", c.filter_map(|x| if x % 2 == 0 { Some(x / 2) } else { None }).collect())
+    println("{}", c.map(|x| x.to_string()).join("+"))
+    println("{:?} {:?}", c.min_by_key(|x| (x - 3) * (x - 3)), c.max_by_key(|x| 0 - x))
+    let n = Naturals { n: 0 }
+    println("{:?}", n.filter(|x| x % 7 == 0).map(|x| x * x).take(3).collect())
+    println("{:?}", n.find_map(|x| if x * x > 50 { Some(x) } else { None }))
+    for (i, p) in shapes::diagonal().enumerate() {
+        println("{} {} {}", i, p.x, p.y)
+    }
+    println("{}", shapes::diagonal().map(|p| p.y).sum())
+    let cy = Cycle { items: #["r", "g", "b"], at: 0 }
+    println("{:?}", cy.take(7).collect())
+    println("{:?}", Cycle { items: #[1.5, 2.5], at: 1 }.take(3).map(|v| v * 2.0).collect())
+    let mut sink = #[]
+    c.for_each(|x| sink.push(x * 100))
+    println("{:?}", sink)
+}

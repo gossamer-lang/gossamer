@@ -117,6 +117,10 @@ fn guarded_page() -> GuardedPage {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "the guard page is made with `mprotect`, which Miri cannot model"
+)]
 fn measuring_a_foreign_string_never_reads_behind_it() {
     let guarded = guarded_page();
     let s = guarded.text_start();

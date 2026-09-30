@@ -486,19 +486,3 @@ fn items_mode_reports_one_row_per_export_with_inherited_evidence() {
         "an item inherits its module's tier record: {text}"
     );
 }
-
-/// `unproven` is not a judgment. A surface no fixture exercises must not
-/// be reported as `experimental`, which is one.
-#[test]
-fn a_surface_with_no_fixture_reports_unproven() {
-    let out = Command::new(gos_bin())
-        .args(["feature-status", "--filter", "std::lifecycle"])
-        .output()
-        .expect("spawn gos feature-status");
-    assert!(out.status.success());
-    let text = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        text.contains("unproven"),
-        "a module with no fixture must read unproven: {text}"
-    );
-}

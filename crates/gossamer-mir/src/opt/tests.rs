@@ -1532,6 +1532,116 @@ mod elision_tests {
         );
     }
 
+    /// `for i in 0..xs.len() { xs[i] }` with the counter stepped by `step`:
+    /// the read's callee after the branch-guarded bounds proof.
+    fn counted_read_callee_after_elim(step: BinOp) -> Operand {
+        use gossamer_types::IntTy;
+        let mut tcx = TyCtxt::new();
+        let unit = tcx.unit();
+        let i64t = tcx.int_ty(IntTy::I64);
+        let vec_i64 = tcx.intern(gossamer_types::TyKind::Vec(i64t));
+        let boolt = tcx.bool_ty();
+        let locals = vec![
+            decl(unit),
+            decl(vec_i64), // xs
+            decl(i64t),    // len
+            decl(i64t),    // idx
+            decl(boolt),   // cmp
+            decl(i64t),    // elem
+        ];
+        let sp = span();
+        let blocks = vec![
+            BasicBlock {
+                id: BlockId(0),
+                stmts: vec![assign(
+                    Place::local(Local(3)),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                )],
+                terminator: Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str("gos_rt_vec_len".to_string())),
+                    args: vec![Operand::Copy(Place::local(Local(1)))],
+                    destination: Place::local(Local(2)),
+                    target: Some(BlockId(1)),
+                },
+                ..block_at(sp)
+            },
+            BasicBlock {
+                id: BlockId(1),
+                stmts: vec![assign(
+                    Place::local(Local(4)),
+                    Rvalue::BinaryOp {
+                        op: BinOp::Lt,
+                        lhs: Operand::Copy(Place::local(Local(3))),
+                        rhs: Operand::Copy(Place::local(Local(2))),
+                    },
+                )],
+                terminator: Terminator::SwitchInt {
+                    discriminant: Operand::Copy(Place::local(Local(4))),
+                    arms: vec![(0, BlockId(4))],
+                    default: BlockId(2),
+                },
+                ..block_at(sp)
+            },
+            BasicBlock {
+                id: BlockId(2),
+                stmts: vec![],
+                terminator: Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str("gos_rt_vec_get_i64".to_string())),
+                    args: vec![
+                        Operand::Copy(Place::local(Local(1))),
+                        Operand::Copy(Place::local(Local(3))),
+                    ],
+                    destination: Place::local(Local(5)),
+                    target: Some(BlockId(3)),
+                },
+                ..block_at(sp)
+            },
+            BasicBlock {
+                id: BlockId(3),
+                stmts: vec![assign(
+                    Place::local(Local(3)),
+                    Rvalue::BinaryOp {
+                        op: step,
+                        lhs: Operand::Copy(Place::local(Local(3))),
+                        rhs: Operand::Const(ConstValue::Int(1)),
+                    },
+                )],
+                terminator: Terminator::Goto { target: BlockId(1) },
+                ..block_at(sp)
+            },
+            BasicBlock {
+                id: BlockId(4),
+                stmts: vec![],
+                terminator: Terminator::Return,
+                ..block_at(sp)
+            },
+        ];
+        let mut body = Body {
+            name: "counted".into(),
+            def: None,
+            arity: 1,
+            locals,
+            blocks,
+            span: sp,
+        };
+        local_branch_bounds_check_elim(&mut body, &tcx);
+        let Terminator::Call { callee, .. } = &body.blocks[2].terminator else {
+            panic!("expected call terminator")
+        };
+        callee.clone()
+    }
+
+    #[test]
+    fn a_counted_read_is_unchecked_whether_its_counter_steps_checked_or_wrapping() {
+        let unchecked = Operand::Const(ConstValue::Str("gos_rt_vec_get_i64_unchecked".to_string()));
+        assert_eq!(counted_read_callee_after_elim(BinOp::Add), unchecked);
+        assert_eq!(
+            counted_read_callee_after_elim(BinOp::WrappingAdd),
+            unchecked,
+            "a counter the overflow proof made wrapping is still a counter"
+        );
+    }
+
     #[test]
     fn bounds_rewrites_direct_branch_guarded_get() {
         use gossamer_types::IntTy;

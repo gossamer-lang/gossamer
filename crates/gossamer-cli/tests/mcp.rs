@@ -209,6 +209,59 @@ fn inline_source_drives_check_execute_and_lint() {
     );
 }
 
+/// Inline source is a temporary file the call removes, so a tool that
+/// rewrites it hands the rewritten text back: `check` with `fix` in its
+/// report's `source`, and `fix` and `fmt` as a second content item.
+#[test]
+fn inline_source_comes_back_rewritten() {
+    let mut client = McpClient::start();
+    let old = "use std::regex\n\nfn main() {\n    let xs = vec![1, 2]\n    \
+               let (a, b) = (1, 2)\n    let r = regex::compile(\"a+\").unwrap()\n    \
+               println(\"{} {} {} {}\", xs.len(), a, b, regex::is_match(r, \"a\"))\n}\n";
+    let arguments = format!(
+        "{{\"source\":{},\"fix\":true}}",
+        json::to_string(&Value::String(old.to_string()))
+    );
+    let result = client.call_tool_result("check", &arguments);
+    let report = json::get(&result, "structuredContent").expect("structured report");
+    let repaired = json::get(report, "source")
+        .and_then(json::as_str)
+        .expect("rewritten source")
+        .to_string();
+    assert!(repaired.contains("let xs = #[1, 2]"), "{repaired}");
+    assert!(repaired.contains("let a, b = (1, 2)"), "{repaired}");
+
+    let arguments = format!(
+        "{{\"source\":{}}}",
+        json::to_string(&Value::String(repaired))
+    );
+    let result = client.call_tool_result("fix", &arguments);
+    let content = json::get(&result, "content")
+        .and_then(json::as_array)
+        .expect("content");
+    let migrated = content
+        .get(1)
+        .and_then(|item| json::get(item, "text"))
+        .and_then(json::as_str)
+        .expect("rewritten source item");
+    assert!(
+        migrated.contains("let r = regex::compile(\"a+\")\n"),
+        "{migrated}"
+    );
+
+    let result =
+        client.call_tool_result("fmt", "{\"source\":\"fn main() {\\n  println(1)\\n}\\n\"}");
+    let content = json::get(&result, "content")
+        .and_then(json::as_array)
+        .expect("content");
+    let formatted = content
+        .get(1)
+        .and_then(|item| json::get(item, "text"))
+        .and_then(json::as_str)
+        .expect("formatted source item");
+    assert!(formatted.contains("\n    println(1)\n"), "{formatted}");
+}
+
 /// `feature_status` lets an agent see whether an API is settled before it
 /// commits to one, and `doc` answers stdlib queries without a file.
 #[test]

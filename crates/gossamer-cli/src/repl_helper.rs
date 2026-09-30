@@ -443,6 +443,8 @@ impl Highlighter for GosReplHelper {
                 TokenKind::StringLit
                 | TokenKind::RawStringLit { .. }
                 | TokenKind::TripleStringLit
+                | TokenKind::FStringLit
+                | TokenKind::FTripleStringLit
                 | TokenKind::ByteStringLit
                 | TokenKind::RawByteStringLit { .. }
                 | TokenKind::CharLit

@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use bzip2::Compression;
@@ -27,20 +25,15 @@ use bzip2::read::{BzDecoder, BzEncoder};
 // API the interpreter tier uses, so all three tiers agree bit-for-bit.
 // ---------------------------------------------------------------
 
-/// Reads a Gossamer `Vec<u8>` into owned bytes.
-unsafe fn gosvec_u8_to_vec(v: *const super::vec::GosVec) -> Vec<u8> {
-    unsafe { super::encoding::gosvec_u8(v) }
-}
-
 /// Wraps `bytes` in an `Ok(Vec<u8>)` `GosResult`.
 fn ok_bytes_result(bytes: &[u8]) -> i128 {
     let v = super::encoding::bytes_to_gosvec(bytes);
-    unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+    super::vec::gos_rt_result_new(0, v as i64)
 }
 
 fn err_bytes_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { super::vec::gos_rt_result_new(1, err as i64) }
+    super::vec::gos_rt_result_new(1, err as i64)
 }
 
 /// `compress::bzip2::compress(data, level) -> Result<[u8], Error>` -
@@ -51,7 +44,9 @@ pub unsafe extern "C" fn gos_rt_compress_bzip2_compress(
     level: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let lvl = Compression::new(level.clamp(0, 9) as u32);
         use std::io::Read;
         let mut enc = BzEncoder::new(&input[..], lvl);
@@ -67,7 +62,9 @@ pub unsafe extern "C" fn gos_rt_compress_bzip2_compress(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_compress_bzip2_decompress(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         use std::io::Read;
         let mut dec = BzDecoder::new(&input[..]);
         let mut out = Vec::new();

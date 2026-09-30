@@ -742,6 +742,16 @@ pub(super) fn lower_generic_rt_call(
             Some(a) if i == 1 && gossamer_abi::takes_key_by_address(name) => {
                 lower_key_by_address(module, builder, locals, body, tcx, a, intrinsics)?
             }
+            Some(Operand::Const(ConstValue::Str(sym)))
+                if gossamer_abi::meta_symbol_arg(name) == Some(i) =>
+            {
+                let blob = tcx
+                    .rc_meta(sym)
+                    .ok_or_else(|| anyhow!("{name} references unknown meta `{sym}`"))?;
+                let data_id = intrinsics.intern_rc_meta(module, sym, blob)?;
+                let gv = module.declare_data_in_func(data_id, builder.func);
+                builder.ins().symbol_value(ptr_ty, gv)
+            }
             Some(a) => {
                 let hint = if *param_ty == ptr_ty {
                     Some(ptr_ty)

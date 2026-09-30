@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
@@ -29,7 +28,11 @@ use std::os::raw::c_char;
 
 use super::*;
 
-fn cstr_to_string(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_string(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -54,9 +57,15 @@ pub unsafe extern "C" fn gos_rt_field_error_new(
 ) -> *mut GosFieldError {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosFieldError {
-            path: cstr_to_string(path),
-            message: cstr_to_string(message),
-            code: cstr_to_string(code),
+            // SAFETY: `path` is this shim's argument, as `cstr_to_string` requires (C-ABI
+            // contract).
+            path: unsafe { cstr_to_string(path) },
+            // SAFETY: `message` is this shim's argument, as `cstr_to_string` requires (C-ABI
+            // contract).
+            message: unsafe { cstr_to_string(message) },
+            // SAFETY: `code` is this shim's argument, as `cstr_to_string` requires (C-ABI
+            // contract).
+            code: unsafe { cstr_to_string(code) },
         }))
     })
 }
@@ -68,6 +77,7 @@ pub unsafe extern "C" fn gos_rt_field_error_path(fe: *mut GosFieldError) -> *mut
         if fe.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `fe` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { &*fe }.path.as_bytes())
     })
 }
@@ -79,6 +89,7 @@ pub unsafe extern "C" fn gos_rt_field_error_message(fe: *mut GosFieldError) -> *
         if fe.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `fe` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { &*fe }.message.as_bytes())
     })
 }
@@ -91,6 +102,7 @@ pub unsafe extern "C" fn gos_rt_field_error_code(fe: *mut GosFieldError) -> *mut
         if fe.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `fe` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { &*fe }.code.as_bytes())
     })
 }
@@ -108,7 +120,7 @@ pub struct GosErrors {
 
 /// Allocate an empty `Errors`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_validate_errors_new() -> *mut GosErrors {
+pub extern "C" fn gos_rt_validate_errors_new() -> *mut GosErrors {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosErrors {
             fields: BTreeMap::new(),
@@ -127,8 +139,11 @@ pub unsafe extern "C" fn gos_rt_validate_errors_add(
         if errs.is_null() || fe.is_null() {
             return;
         }
-        let key = cstr_to_string(field);
+        // SAFETY: `field` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let key = unsafe { cstr_to_string(field) };
+        // SAFETY: `fe` is a handle from compiled code, checked non-null above and live for the whole call.
         let value = unsafe { &*fe }.clone();
+        // SAFETY: `errs` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *errs }
             .fields
             .entry(key)
@@ -144,6 +159,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_is_empty(errs: *mut GosErrors) -
         if errs.is_null() {
             return 1;
         }
+        // SAFETY: `errs` is a handle from compiled code, checked non-null above and live for the whole call.
         i64::from(unsafe { &*errs }.fields.is_empty())
     })
 }
@@ -155,6 +171,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_len(errs: *mut GosErrors) -> i64
         if errs.is_null() {
             return 0;
         }
+        // SAFETY: `errs` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*errs }
             .fields
             .values()
@@ -173,7 +190,9 @@ pub unsafe extern "C" fn gos_rt_validate_errors_count(
         if errs.is_null() {
             return 0;
         }
-        let key = cstr_to_string(field);
+        // SAFETY: `field` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let key = unsafe { cstr_to_string(field) };
+        // SAFETY: `errs` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*errs }
             .fields
             .get(&key)
@@ -192,7 +211,9 @@ pub unsafe extern "C" fn gos_rt_validate_errors_get(
         if errs.is_null() {
             return alloc_cstring(b"");
         }
-        let key = cstr_to_string(field);
+        // SAFETY: `field` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let key = unsafe { cstr_to_string(field) };
+        // SAFETY: `errs` is a handle from compiled code, checked non-null above and live for the whole call.
         let joined = unsafe { &*errs }
             .fields
             .get(&key)
@@ -217,6 +238,7 @@ pub unsafe extern "C" fn gos_rt_validate_errors_collect(errs: *mut GosErrors) ->
             return alloc_cstring(b"");
         }
         let mut parts: Vec<String> = Vec::new();
+        // SAFETY: `errs` is a handle from compiled code, checked non-null above and live for the whole call.
         for (field, list) in &unsafe { &*errs }.fields {
             for e in list {
                 parts.push(format!("{field}: {}", e.message));

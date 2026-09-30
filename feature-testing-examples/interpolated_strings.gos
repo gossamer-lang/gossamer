@@ -1,0 +1,59 @@
+// `f"..."` interpolates the expression in each placeholder, with an optional
+// `:spec` for width, alignment, precision, radix, sign, and exponent.
+
+struct Account {
+    owner: String
+    balance: f64
+}
+
+fn describe(account: Account) -> String {
+    f"{account.owner} holds {account.balance:.2}"
+}
+
+fn main() {
+    let x = 42
+    println(f"x is: {x}")
+
+    let name = "Ada"
+    let greeting = f"hello, {name}!"
+    println(greeting)
+
+    let account = Account { owner: "Grace", balance: 1234.5 }
+    println(describe(account))
+    println(f"[{account.owner:>8}] [{account.balance:<10.1}]")
+
+    let pair = (3, "three")
+    println(f"{pair.0} is spelled {pair.1}")
+
+    let n = 255
+    println(f"hex {n:x}, binary {n:b}, padded {n:08}, signed {n:+}")
+
+    println(f"braces stay literal: {{x}} and {x}")
+
+    let rows = #[1, 2, 3]
+    let report = f"""
+    rows: {rows:?}
+    count: {x}
+    """
+    println(report)
+
+    let scores = { "ada": 91, "grace": 88 }
+    let big = 5000000000.0
+    println(f"sum {x + n}, len {rows.len()}, first {rows[0] * 10}, ada {scores["ada"]}")
+    println(f"ratio {x as f64 / 8.0:.3}, grown {big * 2.0:e}, next {x + 1:+}")
+    println(f"{if x > 40 { "big" } else { "small" }} / {name.to_uppercase():>6} / {i64::MAX}")
+    println(f"nested {f"<{name.len()}>"} and {rows.map(|r| r * r)}")
+    println(f"""
+    total: {rows.iter().sum::<i64>()}
+    owner: {account.owner.len()}
+    """)
+
+    let plain = f"no placeholders at all"
+    println(plain)
+
+    let mut log = #[]
+    for i in 0..3 {
+        log.push(f"step {i}")
+    }
+    println(log.join(", "))
+}

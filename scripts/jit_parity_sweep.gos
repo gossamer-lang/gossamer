@@ -37,6 +37,12 @@ const BOUND_SECONDS: String = "30"
 /// fixtures directly under each root are taken.
 const ROOTS: [String; 2] = ["examples", "feature-testing-examples"]
 
+/// Programs the sweep leaves to the tier-parity server smoke tests.
+/// `web_server.gos` serves until it is killed on the port
+/// `examples/http_client.gos` calls, so sweeping it beside the client would
+/// make the client's answer depend on which of them ran first.
+const LEFT_TO_SERVER_TESTS: [String; 1] = ["examples/web_server.gos"]
+
 /// One fixture's verdict: empty when the two runs agree.
 struct Divergence {
     report: String
@@ -77,8 +83,9 @@ fn fixtures(root: String) -> Vec<String> {
         match fs::read_dir(full) {
             Ok(entries) => {
                 for entry in entries {
-                    if entry.is_file && entry.name.ends_with(".gos") {
-                        files.push(path::join(directory, entry.name))
+                    let file = path::join(directory, entry.name)
+                    if entry.is_file && entry.name.ends_with(".gos") && !LEFT_TO_SERVER_TESTS.contains(file) {
+                        files.push(file)
                     }
                 }
             }

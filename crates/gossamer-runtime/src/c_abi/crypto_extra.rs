@@ -5,8 +5,8 @@
 //! natively instead of failing to link.
 //!
 //! Shapes match the interp's value model:
-//! - Digests (`insecure::md5_hex` / `sha1_hex`) read the input as raw
-//!   c-string bytes (same as the `sha256::hex` family) and return a
+//! - Digests (`insecure::md5_hex` / `sha1_hex`) read the input as a byte
+//!   vector (as the `sha256::hex` family does) and return a
 //!   freshly-allocated lowercase-hex c-string.
 //! - `kdf::pbkdf2_sha256` takes two `[u8]` byte vectors plus the
 //!   iteration count and derived-key length, and returns a `Vec<u8>`.
@@ -23,13 +23,12 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
 use std::os::raw::c_char;
 
-use super::encoding::{bytes_to_gosvec, gosvec_u8};
+use super::encoding::bytes_to_gosvec;
 use super::vec::GosVec;
 
 /// scrypt interactive cost: `log_n = 15` (N = 2^15), `r = 8`, `p = 1`.
@@ -65,32 +64,30 @@ fn kdf_err(msg: &str) -> i128 {
 }
 
 /// `crypto::insecure::md5_hex(data) -> String` - lowercase-hex MD5
-/// digest of the input c-string's bytes. MD5 is cryptographically
+/// digest of the input bytes's bytes. MD5 is cryptographically
 /// broken; provided for legacy interop only.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_crypto_md5_hex(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_crypto_md5_hex(input: *const GosVec) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes: &[u8] = if input.is_null() {
-            &[]
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_bytes(input) }
-        };
+        // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
+        let bytes = bytes.as_slice();
         let digest: [u8; 16] = <md5::Md5 as md5::Digest>::digest(bytes).into();
         super::string::alloc_cstring(hex_encode(&digest).as_bytes())
     })
 }
 
 /// `crypto::insecure::sha1_hex(data) -> String` - lowercase-hex SHA-1
-/// digest of the input c-string's bytes. SHA-1 is cryptographically
+/// digest of the input bytes's bytes. SHA-1 is cryptographically
 /// broken for collision resistance; provided for legacy interop only.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_crypto_sha1_hex(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_crypto_sha1_hex(input: *const GosVec) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes: &[u8] = if input.is_null() {
-            &[]
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_bytes(input) }
-        };
+        // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
+        let bytes = bytes.as_slice();
         let digest: [u8; 20] = <sha1::Sha1 as sha1::Digest>::digest(bytes).into();
         super::string::alloc_cstring(hex_encode(&digest).as_bytes())
     })
@@ -101,7 +98,9 @@ pub unsafe extern "C" fn gos_rt_crypto_sha1_hex(input: *const c_char) -> *mut c_
 /// (`GosVec`), so the digest covers arbitrary binary input.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_md5(input: *const GosVec) -> *mut GosVec {
-    let bytes = unsafe { gosvec_u8(input) };
+    // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `vec_bytes` accepts.
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
     let digest: [u8; 16] = <md5::Md5 as md5::Digest>::digest(&bytes).into();
     bytes_to_gosvec(&digest)
 }
@@ -111,7 +110,9 @@ pub unsafe extern "C" fn gos_rt_crypto_md5(input: *const GosVec) -> *mut GosVec 
 /// (`GosVec`), so the digest covers arbitrary binary input.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_sha1(input: *const GosVec) -> *mut GosVec {
-    let bytes = unsafe { gosvec_u8(input) };
+    // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `vec_bytes` accepts.
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
     let digest: [u8; 20] = <sha1::Sha1 as sha1::Digest>::digest(&bytes).into();
     bytes_to_gosvec(&digest)
 }
@@ -128,8 +129,12 @@ pub unsafe extern "C" fn gos_rt_crypto_pbkdf2_sha256(
     ffi_entry!(std::ptr::null_mut(), {
         use pbkdf2::pbkdf2_hmac;
         use sha2::Sha256;
-        let pw = unsafe { gosvec_u8(password) };
-        let salt = unsafe { gosvec_u8(salt) };
+        // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let pw = unsafe { crate::c_abi::vec::vec_bytes(password) };
+        // SAFETY: `salt` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let salt = unsafe { crate::c_abi::vec::vec_bytes(salt) };
         let rounds = iters.max(0) as u32;
         let out_len = dklen.max(0) as usize;
         let mut out = vec![0u8; out_len];
@@ -147,8 +152,12 @@ pub unsafe extern "C" fn gos_rt_crypto_scrypt_interactive(
 ) -> i128 {
     ffi_entry!(0i128, {
         use scrypt::{Params as ScryptParams, scrypt};
-        let pw = unsafe { gosvec_u8(password) };
-        let salt = unsafe { gosvec_u8(salt) };
+        // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let pw = unsafe { crate::c_abi::vec::vec_bytes(password) };
+        // SAFETY: `salt` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let salt = unsafe { crate::c_abi::vec::vec_bytes(salt) };
         let params = match ScryptParams::new(SCRYPT_LOG_N, SCRYPT_R, SCRYPT_P, SCRYPT_OUTPUT) {
             Ok(p) => p,
             Err(e) => return kdf_err(&format!("scrypt: params: {e}")),
@@ -168,7 +177,9 @@ pub unsafe extern "C" fn gos_rt_crypto_argon2id_hash(password: *const GosVec) ->
     ffi_entry!(0i128, {
         use argon2::password_hash::{PasswordHasher, SaltString};
         use argon2::{Algorithm, Argon2, Params, Version};
-        let pw = unsafe { gosvec_u8(password) };
+        // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let pw = unsafe { crate::c_abi::vec::vec_bytes(password) };
         let mut salt_bytes = [0u8; 16];
         if getrandom::fill(&mut salt_bytes).is_err() {
             return kdf_err("argon2: rng failure");
@@ -199,10 +210,13 @@ pub unsafe extern "C" fn gos_rt_crypto_argon2id_verify(
     ffi_entry!(0i128, {
         use argon2::Argon2;
         use argon2::password_hash::{PasswordHash, PasswordVerifier};
-        let pw = unsafe { gosvec_u8(password) };
+        // SAFETY: `password` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let pw = unsafe { crate::c_abi::vec::vec_bytes(password) };
         let phc_s = if phc.is_null() {
             String::new()
         } else {
+            // SAFETY: `phc` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(phc) }
         };
         let parsed = match PasswordHash::new(&phc_s) {

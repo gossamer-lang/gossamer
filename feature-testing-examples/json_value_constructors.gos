@@ -1,0 +1,22 @@
+// The `json::Value` constructors build the value `json::parse` answers for
+// the same document, so a built value renders, converts to text, and encodes
+// the way a parsed one does, from a `Vec` or a fixed array of parts alike.
+use std::encoding::json
+
+fn main() {
+    let parsed = json::parse("{\"a\": [1, 2.5, null, \"s\"], \"b\": {\"c\": true}}").unwrap()
+    let text = parsed.to_string()
+    println(f"{parsed} {text}")
+
+    let null = json::Value::Null
+    let one = json::Value::Int(1)
+    let from_vec = json::Value::Array(#[one, null])
+    let from_array = json::Value::Array([json::Value::Float(2.5), json::Value::String("s")])
+    println(f"{null} {one} {from_vec} {from_array}")
+
+    let built = json::Value::object(#[("a", one), ("b", json::Value::Bool(true))])
+    let pairs = [("c", json::Value::Null), ("d", from_vec)]
+    let from_pairs = json::Value::object(pairs)
+    let rendered = json::render(from_pairs)
+    println(f"{built} {from_pairs} {rendered}")
+}

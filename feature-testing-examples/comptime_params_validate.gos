@@ -31,7 +31,7 @@ fn main() {
     // the build rather than the run. `regex::compile` answers the
     // compiled pattern and `sql::statement` the statement it checked.
     let pattern = regex::compile("^\\d{4}-\\d{2}-\\d{2}$")
-    println("{}", pattern.is_ok())
+    println("{}", regex::is_match(pattern, "2026-09-29"))
     let query = sql::statement("SELECT id, name FROM users WHERE active = 1")
     println("{}", query)
 }

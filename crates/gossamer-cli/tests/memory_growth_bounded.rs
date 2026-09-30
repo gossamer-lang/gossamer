@@ -2006,3 +2006,82 @@ fn main() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Reading a line into a `String` place gives back the string it replaces.
+///
+/// The place owns a share of its text; a read that stores the longer string
+/// without returning the old share leaves one string alive per line read.
+#[test]
+fn read_line_holds_one_string_whatever_the_line_count() {
+    use std::io::Write as _;
+    use std::process::Stdio;
+
+    let dir = env::temp_dir().join(format!("gos-readline-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let source = dir.join("readline.gos");
+    std::fs::write(
+        &source,
+        "
+use std::io
+
+fn main() {
+    let stdin = io::stdin()
+    let mut buf = \"\"
+    let mut total = 0
+    while true {
+        let n = stdin.read_line(&mut buf).unwrap()
+        if n == 0 { break }
+        total += n
+    }
+    println(f\"{total}\")
+}
+",
+    )
+    .unwrap();
+    let build = Command::new(gos_bin())
+        .args(["build", "--out-dir"])
+        .arg(&dir)
+        .arg(&source)
+        .output()
+        .expect("gos build");
+    assert!(
+        build.status.success(),
+        "build failed: {}",
+        String::from_utf8_lossy(&build.stderr)
+    );
+    let binary = dir.join("readline");
+    let run = |lines: usize| -> String {
+        let mut child = Command::new(&binary)
+            .env("GOS_LEAK_LEDGER", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("run with the allocation ledger");
+        let input = (0..lines).fold(String::new(), |mut text, i| {
+            text.push_str(&i.to_string());
+            text.push('\n');
+            text
+        });
+        child
+            .stdin
+            .take()
+            .expect("piped stdin")
+            .write_all(input.as_bytes())
+            .expect("write stdin");
+        let out = child.wait_with_output().expect("wait for the reader");
+        assert!(
+            out.status.success(),
+            "run failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .find(|line| line.contains("LEAK LEDGER"))
+            .expect("ledger line")
+            .to_string()
+    };
+    let lines = [run(10), run(1000)];
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(lines[0], lines[1], "live values grew with the line count");
+}

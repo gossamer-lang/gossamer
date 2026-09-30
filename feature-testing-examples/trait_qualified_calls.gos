@@ -1,0 +1,56 @@
+// A trait-qualified call `Trait::method(receiver, args..)` reaches the same
+// body `receiver.method(args..)` does: through a `&mut` receiver, a plain
+// one, a receiver that is already a reference, a trait declared in a module,
+// extra arguments, and a default method.
+
+use shapes::Area
+
+mod shapes {
+    pub trait Area {
+        fn area(&self) -> i64
+        fn scaled(&self, factor: i64) -> i64 {
+            self.area() * factor
+        }
+    }
+}
+
+trait Counter {
+    fn bump(&mut self, by: i64) -> i64
+}
+
+struct Tally {
+    count: i64
+}
+
+impl Counter for Tally {
+    fn bump(&mut self, by: i64) -> i64 {
+        self.count += by
+        self.count
+    }
+}
+
+struct Square {
+    side: i64
+}
+
+impl Area for Square {
+    fn area(&self) -> i64 {
+        self.side * self.side
+    }
+}
+
+fn bump_through(tally: &mut Tally) -> i64 {
+    Counter::bump(tally, 10)
+}
+
+fn main() {
+    let mut tally = Tally { count: 0 }
+    println("{}", Counter::bump(&mut tally, 1))
+    println("{}", tally.bump(2))
+    println("{}", bump_through(&mut tally))
+    let square = Square { side: 3 }
+    println("{}", Area::area(square))
+    println("{}", shapes::Area::area(square))
+    println("{}", Area::scaled(square, 2))
+    println("{}", Square::area(square))
+}

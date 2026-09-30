@@ -1,0 +1,20 @@
+// `crypto::rand::bytes` answers exactly the length asked for, draws fresh
+// bytes on each call, and refuses a negative length. The draws themselves
+// differ per run, so the fixture prints only facts that hold for every draw.
+
+use std::crypto::rand
+
+fn main() {
+    let a = rand::bytes(32).unwrap_or(#[])
+    let b = rand::bytes(32).unwrap_or(#[])
+    println("lengths: {} {}", a.len(), b.len())
+    let fresh = a != b
+    println(f"fresh: {fresh}")
+    let empty = rand::bytes(0).unwrap_or(#[1])
+    println("empty: {}", empty.len())
+    let negative = match rand::bytes(-1) {
+        Ok(_) => "accepted"
+        Err(_) => "refused"
+    }
+    println(f"negative: {negative}")
+}

@@ -66,7 +66,11 @@ pub(crate) fn counted_words(
 pub(crate) unsafe fn retain_slots(slots: &[u8], desc: Option<&[u8]>, node_value: bool) {
     for (word, kind) in counted_words(slots, desc, node_value) {
         match kind {
+            // SAFETY: `word` is a counted node the slots hold live (this `unsafe fn`'s contract),
+            // and the container takes a share of it.
             CountedWord::Rc => unsafe { crate::c_abi::rc::gos_rt_rc_retain(word) },
+            // SAFETY: `word` is a counted `Vec` the slots hold live (this `unsafe fn`'s
+            // contract), and the container takes a share of it.
             CountedWord::Vec => unsafe { crate::c_abi::gos_rt_vec_retain(word.cast()) },
         }
     }
@@ -79,7 +83,11 @@ pub(crate) unsafe fn retain_slots(slots: &[u8], desc: Option<&[u8]>, node_value:
 pub(crate) unsafe fn release_slots(slots: &[u8], desc: Option<&[u8]>, node_value: bool) {
     for (word, kind) in counted_words(slots, desc, node_value) {
         match kind {
+            // SAFETY: `word` is a counted node holding a share this container took (this `unsafe
+            // fn`'s contract).
             CountedWord::Rc => unsafe { crate::c_abi::rc::gos_rt_rc_release(word) },
+            // SAFETY: `word` is a counted `Vec` holding a share this container took (this `unsafe
+            // fn`'s contract).
             CountedWord::Vec => unsafe { crate::c_abi::map::gos_rt_vec_free(word.cast()) },
         }
     }
@@ -112,7 +120,9 @@ impl UserCmp {
         type ByWord = unsafe extern "C" fn(i64, i64) -> i64;
         // SAFETY: the address is the comparator the program compiled for this
         // key type, which takes a one-word key by value.
-        let cmp: ByWord = unsafe { std::mem::transmute(self.address) };
+        let cmp: ByWord = unsafe { std::mem::transmute(crate::c_abi::code_address(self.address)) };
+        // SAFETY: `cmp` is the program's comparator for this key type, taking its one-word keys
+        // by value (this `unsafe fn`'s contract).
         unsafe { cmp(a, b) }.cmp(&0)
     }
 
@@ -126,7 +136,10 @@ impl UserCmp {
         let verdict = if self.by_address {
             // SAFETY: the address is the comparator the program compiled for
             // this key type, which takes its two aggregates by address.
-            let cmp: ByAddress = unsafe { std::mem::transmute(self.address) };
+            let cmp: ByAddress =
+                unsafe { std::mem::transmute(crate::c_abi::code_address(self.address)) };
+            // SAFETY: `cmp` is the program's comparator for this key type, and `a` and `b` are
+            // its keys' live slots.
             unsafe { cmp(a.as_ptr(), b.as_ptr()) }
         } else {
             let word = |slots: &[u8]| -> i64 {
@@ -136,7 +149,10 @@ impl UserCmp {
                     .map_or(0, i64::from_le_bytes)
             };
             // SAFETY: as above, for a key whose value is one word.
-            let cmp: ByWord = unsafe { std::mem::transmute(self.address) };
+            let cmp: ByWord =
+                unsafe { std::mem::transmute(crate::c_abi::code_address(self.address)) };
+            // SAFETY: `cmp` is the program's comparator for this key type, taking its one-word
+            // keys by value.
             unsafe { cmp(word(a), word(b)) }
         };
         verdict.cmp(&0)

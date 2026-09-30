@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -79,6 +77,8 @@ impl<T> BiasedLock<T> {
             // to `shared` happens on this goroutine before the map is
             // published to any other (see the type doc), so the load
             // above cannot miss an escape that another thread could race.
+            // SAFETY: a local (unshared) map is touched only by the goroutine that owns it, so no
+            // other borrow of `inner` exists while this guard lives.
             BiasedGuard::Local(unsafe { &mut *self.inner.data_ptr() })
         }
     }
@@ -405,6 +405,8 @@ impl MapStorage {
     /// this one when `take`, copied otherwise, each copied value taking its
     /// own share under `owner`.
     fn window(&mut self, lo: usize, hi: usize, take: bool, owner: u8) -> Self {
+        // SAFETY: every word the window copies is a value the map owns, of the owner class
+        // `owner` names.
         let word = |v: &i64| unsafe { share_owned_value_tag(owner, *v) };
         match self {
             Self::Empty => Self::Empty,
@@ -434,6 +436,8 @@ impl MapStorage {
             Self::EkeyVal { entries } => Self::EkeyVal {
                 entries: entries.window(lo, hi, take, |e| {
                     if !e.key_node.is_null() {
+                        // SAFETY: `key_node` is a live node the entry owns a share of (non-null,
+                        // checked above).
                         unsafe { crate::c_abi::rc::gos_rt_rc_retain(e.key_node) };
                     }
                     EnumEntry {
@@ -504,6 +508,7 @@ struct EnumEntry {
 // exactly as it does for the string and blob pointers the other storage
 // variants hold.
 unsafe impl Send for EnumEntry {}
+// SAFETY: as for `Send`: the map's lock serialises every access to `key_node`.
 unsafe impl Sync for EnumEntry {}
 
 #[derive(Clone)]
@@ -697,8 +702,10 @@ impl StrBytesStorage {
 }
 
 unsafe fn byte_vec_from_slice(bytes: &[u8]) -> *mut GosVec {
-    let out = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(1, bytes.len() as i64) };
+    let out = crate::c_abi::vec::gos_rt_vec_with_capacity(1, bytes.len() as i64);
     if !bytes.is_empty() {
+        // SAFETY: `out` is the fresh byte vec made above with capacity `bytes.len()`, so the copy
+        // and the new length stay inside its buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*out).ptr.as_ptr(), bytes.len());
             (*out).len = bytes.len() as i64;
@@ -739,6 +746,7 @@ unsafe fn value_part(word: i64, kind: i64, desc: *const c_char) -> EntryPart {
         if word == 0 {
             return EntryPart::Bytes(Box::default());
         }
+        // SAFETY: a non-zero `String` value word is a live string body the map owns.
         let text = unsafe { crate::c_abi::gos_str_arg_bytes(word as *const std::ffi::c_char) };
         return EntryPart::Bytes(text.to_vec().into_boxed_slice());
     }
@@ -751,6 +759,8 @@ unsafe fn value_part(word: i64, kind: i64, desc: *const c_char) -> EntryPart {
         if block.is_null() {
             return EntryPart::Bytes(Box::default());
         }
+        // SAFETY: `block` is non-null (checked above) and addresses the value's slots, laid out
+        // as `desc` describes.
         if let Some(bytes) = unsafe { build_skey_for_set(block, desc) } {
             return EntryPart::Bytes(bytes.into_boxed_slice());
         }
@@ -772,6 +782,7 @@ unsafe fn map_entry_parts(
         MapStorage::I64I64(inner) => inner
             .iter()
             .map(|(k, v)| {
+                // SAFETY: every value word is one the map owns, of the kind `value_kind` names.
                 (EntryPart::Word(*k), unsafe {
                     value_part(*v, value_kind, value_desc)
                 })
@@ -780,6 +791,7 @@ unsafe fn map_entry_parts(
         MapStorage::StrI64(inner) => inner
             .iter()
             .map(|(k, v)| {
+                // SAFETY: every value word is one the map owns, of the kind `value_kind` names.
                 (bytes(k.as_slice()), unsafe {
                     value_part(*v, value_kind, value_desc)
                 })
@@ -802,6 +814,7 @@ unsafe fn map_entry_parts(
         MapStorage::SkeyVal { entries, .. } => entries
             .iter()
             .map(|(k, v)| {
+                // SAFETY: every value word is one the map owns, of the kind `value_kind` names.
                 (bytes(k.as_slice()), unsafe {
                     value_part(*v, value_kind, value_desc)
                 })
@@ -810,6 +823,7 @@ unsafe fn map_entry_parts(
         MapStorage::EkeyVal { entries } => entries
             .iter()
             .map(|(k, entry)| {
+                // SAFETY: every value word is one the map owns, of the kind `value_kind` names.
                 (bytes(k.as_slice()), unsafe {
                     value_part(entry.value, value_kind, value_desc)
                 })
@@ -838,7 +852,11 @@ pub unsafe extern "C" fn gos_rt_map_eq(
         if a.is_null() || b.is_null() {
             return 0;
         }
+        // SAFETY: `a` is this shim's `Map` argument, non-null (checked above) and live for the
+        // call (C-ABI contract).
         let xa = unsafe { map_entry_parts(&*a, value_kind, value_desc) };
+        // SAFETY: `b` is this shim's `Map` argument, non-null (checked above) and live for the
+        // call (C-ABI contract).
         let xb = unsafe { map_entry_parts(&*b, value_kind, value_desc) };
         if xa.len() != xb.len() {
             return 0;
@@ -868,7 +886,7 @@ pub unsafe extern "C" fn gos_rt_map_eq(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mut GosMap {
+pub extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
         crate::c_abi::ledger::map_inc();
         Box::into_raw(Box::new(GosMap {
@@ -890,7 +908,7 @@ pub unsafe extern "C" fn gos_rt_map_new(_key_bytes: u32, _val_bytes: u32) -> *mu
 /// Pre-sizing avoids the doubling chain on counter-style hot
 /// loops where the caller knows the total entry count.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_new_with_capacity(
+pub extern "C" fn gos_rt_map_new_with_capacity(
     key_bytes: u32,
     val_bytes: u32,
     cap: i64,
@@ -901,11 +919,9 @@ pub unsafe extern "C" fn gos_rt_map_new_with_capacity(
         // subsequent inserts retain ordinary map growth semantics.
         const MAX_PREALLOCATED_CAPACITY: usize = 1 << 24;
         if cap < 0 {
-            unsafe {
-                crate::c_abi::panic::panic_text(
-                    "HashMap::with_capacity: capacity must be non-negative",
-                );
-            };
+            crate::c_abi::panic::panic_text(
+                "HashMap::with_capacity: capacity must be non-negative",
+            );
         }
         let cap = (cap as usize).min(MAX_PREALLOCATED_CAPACITY);
         let storage = if key_bytes == 8 && val_bytes == 8 {
@@ -930,7 +946,7 @@ pub unsafe extern "C" fn gos_rt_map_new_with_capacity(
 /// width-only constructor cannot distinguish scalar, string, and byte-vector
 /// values. Unknown kinds retain lazy generic storage.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_map_new_with_capacity_typed(
+pub extern "C" fn gos_rt_map_new_with_capacity_typed(
     key_kind: u32,
     val_kind: u32,
     cap: i64,
@@ -938,11 +954,9 @@ pub unsafe extern "C" fn gos_rt_map_new_with_capacity_typed(
     ffi_entry!(std::ptr::null_mut(), {
         const MAX_PREALLOCATED_CAPACITY: usize = 1 << 24;
         if cap < 0 {
-            unsafe {
-                crate::c_abi::panic::panic_text(
-                    "HashMap::with_capacity: capacity must be non-negative",
-                );
-            };
+            crate::c_abi::panic::panic_text(
+                "HashMap::with_capacity: capacity must be non-negative",
+            );
         }
         let cap = (cap as usize).min(MAX_PREALLOCATED_CAPACITY);
         let storage = match (key_kind, val_kind) {
@@ -973,6 +987,7 @@ pub unsafe extern "C" fn gos_rt_map_len(m: *const GosMap) -> i64 {
         if m.is_null() {
             return 0;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*m).len_cache }
     })
 }
@@ -983,8 +998,11 @@ pub unsafe extern "C" fn gos_rt_map_insert(m: *mut GosMap, key: *const u8, val: 
         if m.is_null() || key.is_null() || val.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
+        // SAFETY: `key` is this shim's 8-byte key argument (C-ABI contract).
         let k = unsafe { std::slice::from_raw_parts(key, 8) }.to_vec();
+        // SAFETY: `val` is this shim's 8-byte value argument (C-ABI contract).
         let v = unsafe { std::slice::from_raw_parts(val, 8) }.to_vec();
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -1005,7 +1023,9 @@ pub unsafe extern "C" fn gos_rt_map_get(m: *const GosMap, key: *const u8, val_ou
         if m.is_null() || key.is_null() || val_out.is_null() {
             return 0;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
+        // SAFETY: `key` is this shim's 8-byte key argument (C-ABI contract).
         let k = unsafe { std::slice::from_raw_parts(key, 8) };
         let storage = map.storage.lock();
         let MapStorage::Bytes(inner) = &*storage else {
@@ -1020,6 +1040,8 @@ pub unsafe extern "C" fn gos_rt_map_get(m: *const GosMap, key: *const u8, val_ou
             return 0;
         };
         if let Some(v) = inner.get(ByteKeyRef::new(k)) {
+            // SAFETY: every value in `Bytes` storage is the 8 bytes `gos_rt_map_insert` stored,
+            // and `val_out` addresses an 8-byte slot (C-ABI contract).
             unsafe {
                 std::ptr::copy_nonoverlapping(v.as_ptr(), val_out, v.len());
             }
@@ -1036,6 +1058,7 @@ pub unsafe extern "C" fn gos_rt_map_get_or_i64(m: *const GosMap, key: i64, defau
         if m.is_null() {
             return default;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         match &*storage {
@@ -1054,8 +1077,12 @@ unsafe fn map_get_or_str_i64_impl(m: *const GosMap, key: *const c_char, default:
         if m.is_null() || key.is_null() {
             return default;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         crate::c_abi::ledger::map_str_probe();
+        // SAFETY: `key` is null or a live string body, per this `unsafe fn`'s caller, which
+        // `gos_str_arg_bytes` accepts.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let storage = map.storage.lock();
         match &*storage {
@@ -1074,6 +1101,8 @@ pub unsafe extern "C" fn gos_rt_map_get_or_str_i64(
     key: *const c_char,
     default: i64,
 ) -> i64 {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_get_or_str_i64_impl(m, key, default) }
 }
 
@@ -1083,6 +1112,8 @@ pub unsafe extern "C" fn gos_rt_map_get_or_typed_str_i64(
     key: *const c_char,
     default: i64,
 ) -> i64 {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_get_or_str_i64_impl(m, key, default) }
 }
 
@@ -1099,12 +1130,15 @@ pub unsafe extern "C" fn gos_rt_map_get_or_str_str(
         let default_bytes: &[u8] = if default.is_null() {
             b""
         } else {
+            // SAFETY: `default` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(default) }
         };
         if m.is_null() || key.is_null() {
             return alloc_cstring(default_bytes);
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
+        // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let storage = map.storage.lock();
         let MapStorage::StrStr(inner) = &*storage else {
@@ -1128,11 +1162,13 @@ pub unsafe extern "C" fn gos_rt_map_get_or_i64_str(
         let default_bytes: &[u8] = if default.is_null() {
             b""
         } else {
+            // SAFETY: `default` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(default) }
         };
         if m.is_null() {
             return alloc_cstring(default_bytes);
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let MapStorage::I64Str(inner) = &*storage else {
@@ -1151,6 +1187,7 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_i64(m: *mut GosMap, key: i64, val
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if let MapStorage::I64Bytes(inner) = &mut *storage {
@@ -1158,6 +1195,8 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_i64(m: *mut GosMap, key: i64, val
             if vec.is_null() {
                 return;
             }
+            // SAFETY: `vec` is non-null (checked above) and is the `Vec<u8>` value this insert
+            // consumes (C-ABI contract).
             if unsafe { crate::c_abi::vec::consume_byte_vec(vec, |bytes| inner.insert(key, bytes)) }
             {
                 map.len_cache += 1;
@@ -1172,6 +1211,7 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_i64(m: *mut GosMap, key: i64, val
         };
         let copies = owner_copies_on_share(map_value_owner(map));
         let val = if copies {
+            // SAFETY: `val` is a value of the map's value class, whose share this copy takes.
             unsafe { share_owned_value(map, val) }
         } else {
             val
@@ -1188,9 +1228,11 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_i64(m: *mut GosMap, key: i64, val
         // reaches a map: a literal, a method call, and the free form. A table
         // value took its copy above.
         if owns_values && !copies && (replaced.is_some() || prev.is_none()) {
+            // SAFETY: `val` is a value of the map's value class, whose share the map now keeps.
             unsafe { share_owned_value(map, val) };
         }
         if owns_values && let Some(old) = replaced {
+            // SAFETY: `old` is the value the insert replaced, whose share the map held.
             unsafe { release_owned_value(map, old) };
         }
     });
@@ -1206,21 +1248,27 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
     if key.is_null() || desc.is_null() {
         return None;
     }
+    // SAFETY: `desc` is non-null (checked above) and a live descriptor string (this `unsafe fn`'s
+    // caller).
     let desc = unsafe { crate::c_abi::gos_str_arg_bytes(desc) };
     let mut out = Vec::with_capacity(desc.len() * 8);
     let mut off = 0usize;
     for &c in desc {
+        // SAFETY: `off` is below `desc.len() * 8`, inside the key's slots.
         let slot = unsafe { key.add(off) };
         match c {
+            // SAFETY: `slot` addresses one 8-byte slot of the key.
             b's' => out.extend_from_slice(unsafe { std::slice::from_raw_parts(slot, 8) }),
             b'S' => {
                 // The string field holds a cstring pointer exposed as an
                 // integer by the flat-slot ABI; recover its provenance.
+                // SAFETY: `slot` addresses one 8-byte slot of the key.
                 let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
                 let sptr: *const c_char = std::ptr::with_exposed_provenance(raw);
                 if sptr.is_null() {
                     out.extend_from_slice(&0u64.to_le_bytes());
                 } else {
+                    // SAFETY: a non-null `S` slot holds a live string body.
                     let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(sptr) };
                     out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
                     out.extend_from_slice(bytes);
@@ -1231,18 +1279,22 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
             // allocations key one slot exactly as the interpreter's
             // by-value keying does.
             b'V' => {
+                // SAFETY: `slot` addresses one 8-byte slot of the key.
                 let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
                 let vec: *const crate::c_abi::GosVec = std::ptr::with_exposed_provenance(raw);
                 if vec.is_null() {
                     out.extend_from_slice(&0u64.to_le_bytes());
                     out.extend_from_slice(&8u64.to_le_bytes());
                 } else {
+                    // SAFETY: a non-null `V` slot holds a live `Vec`.
                     let v = unsafe { &*vec };
                     let len = v.len.max(0) as usize;
                     let stride = (v.elem_bytes as usize).max(1);
                     out.extend_from_slice(&(len as u64).to_le_bytes());
                     out.extend_from_slice(&(stride as u64).to_le_bytes());
                     if !v.ptr.is_null() {
+                        // SAFETY: a `Vec` holds `len` elements of `stride` bytes at `ptr`
+                        // (non-null, checked above).
                         out.extend_from_slice(unsafe {
                             std::slice::from_raw_parts(v.ptr.as_ptr(), len * stride)
                         });
@@ -1261,15 +1313,20 @@ pub(crate) unsafe fn build_skey_for_set(key: *const u8, desc: *const c_char) -> 
 /// reads for a map ordered by one, and the content encoding that hashes and
 /// compares by value otherwise.
 unsafe fn skey_bytes(m: *const GosMap, key: *const u8, desc: *const c_char) -> Option<Vec<u8>> {
+    // SAFETY: `m` is non-null (checked first) and, per this `unsafe fn`'s caller, a live `Map`.
     if !m.is_null() && unsafe { &*m }.keys_are_slots() {
         if key.is_null() || desc.is_null() {
             return None;
         }
+        // SAFETY: `desc` is non-null (checked above) and a live descriptor string (this `unsafe
+        // fn`'s caller).
         let width = unsafe { crate::c_abi::gos_str_arg_len(desc) } * 8;
         // SAFETY: the key names an aggregate of the slots the descriptor
         // counts, which is the width the comparator reads.
         return Some(unsafe { std::slice::from_raw_parts(key, width) }.to_vec());
     }
+    // SAFETY: this `unsafe fn`'s caller passes `key` and `desc` live or null, which `build_skey`
+    // accepts.
     unsafe { build_skey(key, desc) }
 }
 
@@ -1277,13 +1334,18 @@ unsafe fn skey_bytes(m: *const GosMap, key: *const u8, desc: *const c_char) -> O
 /// a map ordered by one, and the canonical discriminant-and-payload encoding
 /// otherwise.
 unsafe fn ekey_bytes(m: *const GosMap, node: *mut u8, desc: *const i64) -> Option<Vec<u8>> {
+    // SAFETY: `m` is non-null (checked first) and, per this `unsafe fn`'s caller, a live `Map`.
     if !m.is_null() && unsafe { &*m }.keys_are_slots() {
         return Some((node as usize as i64).to_le_bytes().to_vec());
     }
+    // SAFETY: this `unsafe fn`'s caller passes `node` and `desc` as a live enum node and its
+    // descriptor.
     unsafe { enum_canonical_bytes(node, desc) }
 }
 
 unsafe fn build_skey(key: *const u8, desc: *const c_char) -> Option<Vec<u8>> {
+    // SAFETY: this `unsafe fn`'s caller passes `key`, `desc` live or null, which
+    // `build_skey_for_set` accepts.
     unsafe { build_skey_for_set(key, desc) }
 }
 
@@ -1299,7 +1361,11 @@ pub unsafe extern "C" fn gos_rt_map_insert_skey(
     val: i64,
 ) {
     ffi_entry!((), {
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         unsafe { insert_skey_entry(m, key, desc, val, true) };
+        // SAFETY: `key` is the moved aggregate this consuming insert received, laid out as `desc`
+        // describes (C-ABI contract).
         unsafe { consume_moved_skey(key, desc) };
     });
 }
@@ -1311,19 +1377,24 @@ pub(crate) unsafe fn consume_moved_skey(key: *const u8, desc: *const c_char) {
     if key.is_null() || desc.is_null() {
         return;
     }
+    // SAFETY: `desc` is non-null (checked above) and a live descriptor string (this `unsafe fn`'s
+    // caller).
     let desc = unsafe { crate::c_abi::gos_str_arg_bytes(desc) };
     for (index, &kind) in desc.iter().enumerate() {
         let raw =
+            // SAFETY: `index * 8` is inside the key's slots, one per descriptor character.
             unsafe { crate::c_abi::vec::slot_read_word(key.add(index * 8)) }.expose_provenance();
         match kind {
             b'S' => {
                 let text: *mut c_char = std::ptr::with_exposed_provenance_mut(raw);
                 if !text.is_null() {
+                    // SAFETY: a non-null `S` slot holds a moved string share this call consumes.
                     unsafe { crate::c_abi::string::consume_moved_string_typed(text) };
                 }
             }
             b'V' => {
                 let vec: *mut crate::c_abi::GosVec = std::ptr::with_exposed_provenance_mut(raw);
+                // SAFETY: a `V` slot holds null or a moved `Vec` share this call consumes.
                 unsafe { gos_rt_vec_free(vec) };
             }
             _ => {}
@@ -1342,6 +1413,8 @@ unsafe fn insert_skey_entry(
     retain_value: bool,
 ) {
     {
+        // SAFETY: this `unsafe fn`'s caller passes `m`, `key`, `desc` live or null, which
+        // `skey_bytes` accepts.
         let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return;
         };
@@ -1350,6 +1423,8 @@ unsafe fn insert_skey_entry(
         }
         // SAFETY: the caller supplies a live descriptor c-string.
         let desc_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(desc) };
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map` not otherwise accessed during the call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -1364,6 +1439,7 @@ unsafe fn insert_skey_entry(
         let key_slots = map.keys_are_slots();
         let copies = retain_value && owner_copies_on_share(map_value_owner(map));
         let val = if copies {
+            // SAFETY: `val` is a value of the map's value class, whose share this copy takes.
             unsafe { share_owned_value(map, val) }
         } else {
             val
@@ -1388,9 +1464,12 @@ unsafe fn insert_skey_entry(
         let owns_values = map_has_owned_values(map);
         let replaced = prev.filter(|old| *old != val);
         if retain_value && owns_values && !copies && (replaced.is_some() || prev.is_none()) {
+            // SAFETY: `val` is a value of the map's value class; this takes the map's own share
+            // of it.
             unsafe { share_owned_value(map, val) };
         }
         if owns_values && let Some(old) = replaced {
+            // SAFETY: `old` is a value the map held a share of, which it gives back here.
             unsafe { release_owned_value(map, old) };
         }
     }
@@ -1404,14 +1483,17 @@ pub unsafe extern "C" fn gos_rt_map_get_skey_opt(
     key: *const u8,
     desc: *const c_char,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
-        let none = unsafe { gos_rt_result_new(1, 0) };
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        let none = gos_rt_result_new(1, 0);
+        // SAFETY: `m`, `key`, `desc` are this shim's arguments, live for the call (C-ABI
+        // contract) or null, which `skey_bytes` accepts.
         let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return none;
         };
         if m.is_null() {
             return none;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let payload: Option<i64> = match &*storage {
@@ -1422,6 +1504,8 @@ pub unsafe extern "C" fn gos_rt_map_get_skey_opt(
         };
         // The caller's option holder receives a share of its own.
         match payload {
+            // SAFETY: `v` is a value the map owns; the caller's holder receives a share of its
+            // own.
             Some(v) => unsafe { gos_rt_result_new(0, lend_owned_value(map, v)) },
             None => none,
         }
@@ -1436,12 +1520,15 @@ pub unsafe extern "C" fn gos_rt_map_contains_skey(
     desc: *const c_char,
 ) -> bool {
     ffi_entry!(false, {
+        // SAFETY: `m`, `key`, `desc` are this shim's arguments, live for the call (C-ABI
+        // contract) or null, which `skey_bytes` accepts.
         let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return false;
         };
         if m.is_null() {
             return false;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         match &*storage {
@@ -1463,6 +1550,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_i64(m: *mut GosMap, key: i64, by: i64) -
         if m.is_null() {
             return 0;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -1486,6 +1574,7 @@ pub unsafe extern "C" fn gos_rt_map_get_i64(m: *const GosMap, key: i64) -> i64 {
         if m.is_null() {
             return 0;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         match &*storage {
@@ -1504,14 +1593,17 @@ pub unsafe extern "C" fn gos_rt_map_get_i64(m: *const GosMap, key: i64) -> i64 {
 pub unsafe extern "C" fn gos_rt_map_get_i64_opt(m: *const GosMap, key: i64) -> i128 {
     ffi_entry!(0i128, {
         if m.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let payload: Option<i64> = match &*storage {
             MapStorage::I64I64(inner) => inner.get(&key).copied(),
             MapStorage::I64Bytes(inner) => inner
                 .get(key)
+                // SAFETY: `bs` is the entry's own byte buffer, live while the storage lock is
+                // held.
                 .map(|bs| unsafe { byte_vec_from_slice(bs) } as i64),
             MapStorage::I64Str(inner) => inner.get(&key).map(|bs| alloc_cstring(bs) as i64),
             _ => None,
@@ -1519,11 +1611,13 @@ pub unsafe extern "C" fn gos_rt_map_get_i64_opt(m: *const GosMap, key: i64) -> i
         match payload {
             // Owned values: the caller's option holder receives (and later
             // releases) its own share; the map keeps its own.
+            // SAFETY: `v` is a value the map owns; the caller's holder receives a share of its
+            // own.
             Some(v) if matches!(&*storage, MapStorage::I64I64(_)) => unsafe {
                 gos_rt_result_new(0, lend_owned_value(map, v))
             },
-            Some(v) => unsafe { gos_rt_result_new(0, v) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(v) => gos_rt_result_new(0, v),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1534,6 +1628,7 @@ pub unsafe extern "C" fn gos_rt_map_contains_key_i64(m: *const GosMap, key: i64)
         if m.is_null() {
             return false;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         match &*storage {
@@ -1551,6 +1646,7 @@ pub unsafe extern "C" fn gos_rt_map_remove_i64(m: *mut GosMap, key: i64) -> bool
         if m.is_null() {
             return false;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         let owned_values = map_has_owned_values(map);
@@ -1558,6 +1654,8 @@ pub unsafe extern "C" fn gos_rt_map_remove_i64(m: *mut GosMap, key: i64) -> bool
             MapStorage::I64I64(inner) => match inner.remove(&key) {
                 Some(old) => {
                     if owned_values {
+                        // SAFETY: `old` is a value the map held a share of, which it gives back
+                        // here.
                         unsafe { release_owned_value(map, old) };
                     }
                     true
@@ -1580,8 +1678,11 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
         if m.is_null() || key.is_null() {
             return;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map` not otherwise accessed during the call.
         let map = unsafe { &mut *m };
         crate::c_abi::ledger::map_str_probe();
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let mut storage = map.storage.lock();
         if let MapStorage::StrBytes(inner) = &mut *storage {
@@ -1589,6 +1690,8 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
             if vec.is_null() {
                 return;
             }
+            // SAFETY: `vec` is non-null (checked above) and is the `Vec<u8>` value this consuming
+            // insert received (C-ABI contract).
             let inserted = unsafe {
                 crate::c_abi::vec::consume_byte_vec_preserving_source(vec, |bytes| {
                     inner.insert(key_bytes, bytes)
@@ -1600,8 +1703,12 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
             }
             drop(storage);
             if typed_key {
+                // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share
+                // it releases (C-ABI contract).
                 unsafe { crate::c_abi::string::consume_moved_string_typed(key.cast_mut()) };
             } else {
+                // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share
+                // it releases (C-ABI contract).
                 unsafe { crate::c_abi::string::consume_moved_string(key.cast_mut()) };
             }
             return;
@@ -1614,6 +1721,8 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
         };
         let copies = owner_copies_on_share(map_value_owner(map));
         let val = if copies {
+            // SAFETY: `val` is a value of the map's value class; this takes the map's own share
+            // of it.
             unsafe { share_owned_value(map, val) }
         } else {
             val
@@ -1641,16 +1750,23 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
         // it beside the map's own, so the entry needs one: without it the
         // first read to be dropped takes the stored object with it.
         if owns_values && !copies && prev != Some(val) {
+            // SAFETY: `val` is a value of the map's value class; this takes the map's own share
+            // of it.
             unsafe { share_owned_value(map, val) };
         }
         if let Some(old) = release_old {
+            // SAFETY: `old` is a value the map held a share of, which it gives back here.
             unsafe { release_owned_value(map, old) };
         }
         // Consuming insert copied the key bytes; release the moved-in gos-string
         // (rc-aware + tag-checked - safe for temps, shared, and literals).
         if typed_key {
+            // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share it
+            // releases (C-ABI contract).
             unsafe { crate::c_abi::string::consume_moved_string_typed(key.cast_mut()) };
         } else {
+            // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share it
+            // releases (C-ABI contract).
             unsafe { crate::c_abi::string::consume_moved_string(key.cast_mut()) };
         }
     });
@@ -1658,6 +1774,8 @@ unsafe fn map_insert_str_i64_impl(m: *mut GosMap, key: *const c_char, val: i64, 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_insert_str_i64(m: *mut GosMap, key: *const c_char, val: i64) {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_insert_str_i64_impl(m, key, val, false) };
 }
 
@@ -1667,6 +1785,8 @@ pub unsafe extern "C" fn gos_rt_map_insert_typed_str_i64(
     key: *const c_char,
     val: i64,
 ) {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_insert_str_i64_impl(m, key, val, true) };
 }
 
@@ -1675,8 +1795,11 @@ unsafe fn map_get_str_i64_impl(m: *const GosMap, key: *const c_char) -> i64 {
         if m.is_null() || key.is_null() {
             return 0;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         crate::c_abi::ledger::map_str_probe();
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let storage = map.storage.lock();
         match &*storage {
@@ -1690,11 +1813,15 @@ unsafe fn map_get_str_i64_impl(m: *const GosMap, key: *const c_char) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_get_str_i64(m: *const GosMap, key: *const c_char) -> i64 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_get_str_i64_impl` accepts.
     unsafe { map_get_str_i64_impl(m, key) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_get_typed_str_i64(m: *const GosMap, key: *const c_char) -> i64 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_get_str_i64_impl` accepts.
     unsafe { map_get_str_i64_impl(m, key) }
 }
 
@@ -1704,9 +1831,12 @@ pub unsafe extern "C" fn gos_rt_map_get_typed_str_i64(m: *const GosMap, key: *co
 unsafe fn map_get_str_opt_impl(m: *const GosMap, key: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if m.is_null() || key.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let storage = map.storage.lock();
         let payload: Option<i64> = match &*storage {
@@ -1716,6 +1846,8 @@ unsafe fn map_get_str_opt_impl(m: *const GosMap, key: *const c_char) -> i128 {
                 .map(|bs| alloc_cstring(bs) as i64),
             MapStorage::StrBytes(inner) => inner
                 .get(key_bytes)
+                // SAFETY: `bs` is the entry's own byte buffer, live while the storage lock is
+                // held.
                 .map(|bs| unsafe { byte_vec_from_slice(bs) } as i64),
             _ => None,
         };
@@ -1726,15 +1858,19 @@ unsafe fn map_get_str_opt_impl(m: *const GosMap, key: *const c_char) -> i128 {
         // and are not blob-values.
         let shares = matches!(&*storage, MapStorage::StrI64(_));
         match payload {
+            // SAFETY: `v` is a value the map owns; the caller's holder receives a share of its
+            // own.
             Some(v) if shares => unsafe { gos_rt_result_new(0, lend_owned_value(map, v)) },
-            Some(v) => unsafe { gos_rt_result_new(0, v) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(v) => gos_rt_result_new(0, v),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_get_str_opt(m: *const GosMap, key: *const c_char) -> i128 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_get_str_opt_impl` accepts.
     unsafe { map_get_str_opt_impl(m, key) }
 }
 
@@ -1743,6 +1879,8 @@ pub unsafe extern "C" fn gos_rt_map_get_typed_str_opt(
     m: *const GosMap,
     key: *const c_char,
 ) -> i128 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_get_str_opt_impl` accepts.
     unsafe { map_get_str_opt_impl(m, key) }
 }
 
@@ -1756,8 +1894,11 @@ pub unsafe extern "C" fn gos_rt_map_insert_str_str(
         if m.is_null() || key.is_null() || val.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
+        // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
+        // SAFETY: `val` is a String argument from compiled code, null or a live string body for the whole call.
         let val_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(val) };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -1783,6 +1924,8 @@ pub unsafe extern "C" fn gos_rt_map_insert_str_str(
         // a still-shared string only has its count decremented, and a `.rodata`
         // literal / region string is skipped. Without this the inbound
         // `format!(...)` temporaries leaked once per insert.
+        // SAFETY: `key` and `val` arrived as consuming-call arguments, so this call owns the
+        // shares it releases (C-ABI contract).
         unsafe {
             crate::c_abi::string::consume_moved_string(key.cast_mut());
             crate::c_abi::string::consume_moved_string(val.cast_mut());
@@ -1799,7 +1942,9 @@ pub unsafe extern "C" fn gos_rt_map_get_str_str(
         if m.is_null() || key.is_null() {
             return empty_cstring();
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
+        // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let storage = map.storage.lock();
         let MapStorage::StrStr(inner) = &*storage else {
@@ -1817,8 +1962,11 @@ unsafe fn map_contains_key_str_impl(m: *const GosMap, key: *const c_char) -> boo
         if m.is_null() || key.is_null() {
             return false;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         crate::c_abi::ledger::map_str_probe();
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let storage = map.storage.lock();
         match &*storage {
@@ -1832,6 +1980,8 @@ unsafe fn map_contains_key_str_impl(m: *const GosMap, key: *const c_char) -> boo
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_contains_key_str(m: *const GosMap, key: *const c_char) -> bool {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_contains_key_str_impl` accepts.
     unsafe { map_contains_key_str_impl(m, key) }
 }
 
@@ -1840,6 +1990,8 @@ pub unsafe extern "C" fn gos_rt_map_contains_key_typed_str(
     m: *const GosMap,
     key: *const c_char,
 ) -> bool {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_contains_key_str_impl` accepts.
     unsafe { map_contains_key_str_impl(m, key) }
 }
 
@@ -1848,7 +2000,10 @@ unsafe fn map_remove_str_impl(m: *mut GosMap, key: *const c_char) -> bool {
         if m.is_null() || key.is_null() {
             return false;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map` not otherwise accessed during the call.
         let map = unsafe { &mut *m };
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let mut storage = map.storage.lock();
         let owned_values = map_has_owned_values(map);
@@ -1856,6 +2011,8 @@ unsafe fn map_remove_str_impl(m: *mut GosMap, key: *const c_char) -> bool {
             MapStorage::StrI64(inner) => match inner.remove(ByteKeyRef::new(key_bytes)) {
                 Some(old) => {
                     if owned_values {
+                        // SAFETY: `old` is a value the map held a share of, which it gives back
+                        // here.
                         unsafe { release_owned_value(map, old) };
                     }
                     true
@@ -1875,11 +2032,15 @@ unsafe fn map_remove_str_impl(m: *mut GosMap, key: *const c_char) -> bool {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_remove_str(m: *mut GosMap, key: *const c_char) -> bool {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_remove_str_impl(m, key) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_remove_typed_str(m: *mut GosMap, key: *const c_char) -> bool {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_remove_str_impl(m, key) }
 }
 
@@ -1919,6 +2080,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_at_str_i64(
         // defensive registry check on general C ABI helpers while avoiding a
         // global lock for each k-mer window.
         crate::c_abi::ledger::map_str_probe();
+        // SAFETY: `seq` is a String argument from compiled code, null or a live string body for the whole call.
         let seq_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(seq) };
         let (start_u, len_u) = (start as usize, len as usize);
         let end_u = match start_u.checked_add(len_u) {
@@ -1929,6 +2091,7 @@ pub unsafe extern "C" fn gos_rt_map_inc_at_str_i64(
         if std::str::from_utf8(key_slice).is_err() {
             return 0;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -1963,7 +2126,10 @@ unsafe fn map_inc_str_i64_impl(m: *mut GosMap, key: *const c_char, by: i64) -> i
             return 0;
         }
         crate::c_abi::ledger::map_str_probe();
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map` not otherwise accessed during the call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -1989,6 +2155,8 @@ pub unsafe extern "C" fn gos_rt_map_inc_str_i64(
     key: *const c_char,
     by: i64,
 ) -> i64 {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_inc_str_i64_impl(m, key, by) }
 }
 
@@ -1998,6 +2166,8 @@ pub unsafe extern "C" fn gos_rt_map_inc_typed_str_i64(
     key: *const c_char,
     by: i64,
 ) -> i64 {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_inc_str_i64_impl(m, key, by) }
 }
 
@@ -2014,7 +2184,10 @@ unsafe fn map_or_insert_str_i64_impl(
         if m.is_null() || key.is_null() {
             return default;
         }
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map` not otherwise accessed during the call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -2029,6 +2202,8 @@ unsafe fn map_or_insert_str_i64_impl(
             let default_bytes: &[u8] = if default == 0 {
                 b""
             } else {
+                // SAFETY: a non-zero default of a `String`-valued map is a live string body
+                // (C-ABI contract).
                 unsafe { crate::c_abi::gos_str_arg_bytes(default as usize as *const c_char) }
             };
             let stored = if let Some(v) = inner.get(ByteKeyRef::new(key_bytes)) {
@@ -2041,11 +2216,17 @@ unsafe fn map_or_insert_str_i64_impl(
             };
             drop(storage);
             if typed_key {
+                // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share
+                // it releases (C-ABI contract).
                 unsafe { crate::c_abi::string::consume_moved_string_typed(key.cast_mut()) };
             } else {
+                // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share
+                // it releases (C-ABI contract).
                 unsafe { crate::c_abi::string::consume_moved_string(key.cast_mut()) };
             }
             if default != 0 {
+                // SAFETY: a non-zero `default` arrived as a consuming-call argument, so this call
+                // owns the share it releases (C-ABI contract).
                 unsafe {
                     crate::c_abi::string::consume_moved_string_typed(
                         default as usize as *mut c_char,
@@ -2069,13 +2250,18 @@ unsafe fn map_or_insert_str_i64_impl(
             // that prospective map share and leave its source owner for its
             // ordinary scope cleanup.
             if map_has_owned_values(map) && !copies && default != v {
+                // SAFETY: `default` is a value the map held a share of, which it gives back here.
                 unsafe { release_owned_value(map, default) };
             }
             // The key was retained as a consuming-call argument and copied
             // into the map's owned byte key, so release its source share.
             if typed_key {
+                // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share
+                // it releases (C-ABI contract).
                 unsafe { crate::c_abi::string::consume_moved_string_typed(key.cast_mut()) };
             } else {
+                // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share
+                // it releases (C-ABI contract).
                 unsafe { crate::c_abi::string::consume_moved_string(key.cast_mut()) };
             }
             return v;
@@ -2084,6 +2270,8 @@ unsafe fn map_or_insert_str_i64_impl(
         // map's independent value share. The return below is a borrow of
         // that stored value and therefore does not create another share.
         let stored = if copies {
+            // SAFETY: `default` is a value of the map's value class; this takes the map's own
+            // share of it.
             unsafe { share_owned_value(map, default) }
         } else {
             default
@@ -2091,8 +2279,12 @@ unsafe fn map_or_insert_str_i64_impl(
         inner.insert(crate::c_abi::string::boxed_bytes(key_bytes).into(), stored);
         map.len_cache += 1;
         if typed_key {
+            // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share it
+            // releases (C-ABI contract).
             unsafe { crate::c_abi::string::consume_moved_string_typed(key.cast_mut()) };
         } else {
+            // SAFETY: `key` arrived as a consuming-call argument, so this call owns the share it
+            // releases (C-ABI contract).
             unsafe { crate::c_abi::string::consume_moved_string(key.cast_mut()) };
         }
         stored
@@ -2105,6 +2297,8 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_str_i64(
     key: *const c_char,
     default: i64,
 ) -> i64 {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_or_insert_str_i64_impl(m, key, default, false) }
 }
 
@@ -2114,6 +2308,8 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_typed_str_i64(
     key: *const c_char,
     default: i64,
 ) -> i64 {
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live (C-ABI contract), which
+    // the implementation accepts.
     unsafe { map_or_insert_str_i64_impl(m, key, default, true) }
 }
 
@@ -2128,6 +2324,7 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
         if m.is_null() {
             return default;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -2139,6 +2336,8 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
             let default_bytes: &[u8] = if default == 0 {
                 b""
             } else {
+                // SAFETY: a non-zero default of a `String`-valued map is a live string body
+                // (C-ABI contract).
                 unsafe { crate::c_abi::gos_str_arg_bytes(default as usize as *const c_char) }
             };
             let stored = if let Some(v) = inner.get(&key) {
@@ -2150,6 +2349,8 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
             };
             drop(storage);
             if default != 0 {
+                // SAFETY: a non-zero `default` arrived as a consuming-call argument, so this call
+                // owns the share it releases (C-ABI contract).
                 unsafe {
                     crate::c_abi::string::consume_moved_string_typed(
                         default as usize as *mut c_char,
@@ -2167,11 +2368,14 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_i64_i64(
         if let Some(v) = inner.get(&key).copied() {
             // The default arrived as a moved share the entry does not keep.
             if default != v && !copies && map_has_owned_values(map) {
+                // SAFETY: `default` is a value the map held a share of, which it gives back here.
                 unsafe { release_owned_value(map, default) };
             }
             return v;
         }
         let stored = if copies {
+            // SAFETY: `default` is a value of the map's value class; this takes the map's own
+            // share of it.
             unsafe { share_owned_value(map, default) }
         } else {
             default
@@ -2189,7 +2393,9 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_str(m: *mut GosMap, key: i64, val
         if m.is_null() || val.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
+        // SAFETY: `val` is a String argument from compiled code, null or a live string body for the whole call.
         let val_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(val) };
         let mut storage = map.storage.lock();
         if matches!(*storage, MapStorage::Empty) {
@@ -2206,6 +2412,8 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_str(m: *mut GosMap, key: i64, val
         }
         drop(storage);
         // Consuming insert copied the value bytes; release the moved-in gos-string.
+        // SAFETY: `val` arrived as a consuming-call argument, so this call owns the share it
+        // releases (C-ABI contract).
         unsafe { crate::c_abi::string::consume_moved_string(val.cast_mut()) };
     });
 }
@@ -2217,6 +2425,7 @@ pub unsafe extern "C" fn gos_rt_map_get_i64_str(m: *const GosMap, key: i64) -> *
         if m.is_null() {
             return empty_cstring();
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let MapStorage::I64Str(inner) = &*storage else {
@@ -2235,27 +2444,36 @@ pub unsafe extern "C" fn gos_rt_map_clear(m: *mut GosMap) {
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         if map_has_owned_values(map) {
             match &*storage {
                 MapStorage::I64I64(inner) => {
                     for &v in inner.values() {
+                        // SAFETY: `v` is a value the map held a share of, which it gives back
+                        // here.
                         unsafe { release_owned_value(map, v) };
                     }
                 }
                 MapStorage::StrI64(inner) => {
                     for &v in inner.values() {
+                        // SAFETY: `v` is a value the map held a share of, which it gives back
+                        // here.
                         unsafe { release_owned_value(map, v) };
                     }
                 }
                 MapStorage::SkeyVal { entries, .. } => {
                     for &v in entries.values() {
+                        // SAFETY: `v` is a value the map held a share of, which it gives back
+                        // here.
                         unsafe { release_owned_value(map, v) };
                     }
                 }
                 MapStorage::EkeyVal { entries } => {
                     for entry in entries.values() {
+                        // SAFETY: `entry.value` is a value the map held a share of, which it
+                        // gives back here.
                         unsafe { release_owned_value(map, entry.value) };
                     }
                 }
@@ -2266,6 +2484,8 @@ pub unsafe extern "C" fn gos_rt_map_clear(m: *mut GosMap) {
         // independently of whether its values are owned.
         if let MapStorage::EkeyVal { entries } = &*storage {
             for entry in entries.values() {
+                // SAFETY: every entry of an enum-keyed map holds a share of its key node, which
+                // clearing gives back.
                 unsafe { crate::c_abi::rc::gos_rt_rc_release(entry.key_node) };
             }
         }
@@ -2312,24 +2532,31 @@ pub(crate) unsafe fn render_tagged_word(out: &mut String, word: i64, tag: u8) {
         5 => {
             let sp: *const c_char = std::ptr::with_exposed_provenance(word as usize);
             if !sp.is_null() {
+                // SAFETY: a non-null word of tag 5 is a live string body.
                 push_quoted_str(out, &unsafe { crate::c_abi::gos_str_arg_lossy(sp) });
             }
         }
         6 => {
             let vp = std::ptr::with_exposed_provenance(word as usize);
+            // SAFETY: a word of tag 6 is a live `Vec<i64>` or null, which the formatter accepts.
             let rendered = unsafe { crate::c_abi::gos_rt_vec_format_i64(vp, 0) };
             if !rendered.is_null() {
+                // SAFETY: `rendered` is the fresh non-null string the formatter answered.
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                 // The formatter answered a fresh rendering whose bytes are now copied.
+                // SAFETY: `rendered` is the fresh string the formatter answered, owned here.
                 unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         7 => {
             let mp = std::ptr::with_exposed_provenance(word as usize);
+            // SAFETY: a word of tag 7 is a live `Map` or null, which the formatter accepts.
             let rendered = unsafe { gos_rt_map_format(mp) };
             if !rendered.is_null() {
+                // SAFETY: `rendered` is the fresh non-null string the formatter answered.
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                 // The formatter answered a fresh rendering whose bytes are now copied.
+                // SAFETY: `rendered` is the fresh string the formatter answered, owned here.
                 unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
@@ -2343,6 +2570,8 @@ pub(crate) unsafe fn render_tagged_word(out: &mut String, word: i64, tag: u8) {
 /// is its element span repeated, and a nested tuple is its elements'.
 unsafe fn desc_slot_span(tags: DescStream, cursor: usize) -> usize {
     let mut c = cursor;
+    // SAFETY: `tags` is a compiler-emitted descriptor stream and `cursor` addresses an entry of
+    // it (this `unsafe fn`'s caller).
     unsafe { desc_slot_span_walk(tags, &mut c) }
 }
 
@@ -2355,6 +2584,8 @@ unsafe fn desc_slot_span_walk(tags: DescStream, cursor: &mut usize) -> usize {
             *cursor += 1;
             let mut total = 0usize;
             for _ in 0..arity {
+                // SAFETY: `tags` is a compiler-emitted descriptor stream and `cursor` addresses
+                // the tuple's next element entry.
                 total += unsafe { desc_slot_span_walk(tags, cursor) };
             }
             total
@@ -2365,6 +2596,7 @@ unsafe fn desc_slot_span_walk(tags: DescStream, cursor: &mut usize) -> usize {
                 as usize)
                 .max(1);
             *cursor += 4;
+            // SAFETY: `cursor` addresses the element descriptor that follows the array header.
             unsafe { skip_desc(tags, cursor) };
             count * span
         }
@@ -2380,16 +2612,20 @@ unsafe fn desc_slot_span_walk(tags: DescStream, cursor: &mut usize) -> usize {
             words
         }
         gossamer_abi::DESC_OPTION => {
+            // SAFETY: `cursor` addresses the payload descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
             2
         }
         gossamer_abi::DESC_RESULT => {
+            // SAFETY: `cursor` addresses the `Ok` payload descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
+            // SAFETY: `cursor` addresses the `Err` payload descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
             2
         }
         _ => {
             *cursor -= 1;
+            // SAFETY: `cursor` addresses the descriptor entry just stepped back to.
             unsafe { skip_desc(tags, cursor) };
             1
         }
@@ -2405,10 +2641,13 @@ unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
             let arity = tags.byte(*cursor) as usize;
             *cursor += 1;
             for _ in 0..arity {
+                // SAFETY: `cursor` addresses the tuple's next element entry.
                 unsafe { skip_desc(tags, cursor) };
             }
         }
+        // SAFETY: `cursor` addresses the element descriptor that follows.
         gossamer_abi::DESC_VEC => unsafe { skip_desc(tags, cursor) },
+        // SAFETY: `cursor` addresses the key and value descriptors that follow.
         gossamer_abi::DESC_MAP => unsafe {
             skip_desc(tags, cursor);
             skip_desc(tags, cursor);
@@ -2417,6 +2656,7 @@ unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
         gossamer_abi::DESC_CONTAINER => {
             // The byte naming the container, then one element descriptor.
             *cursor += 1;
+            // SAFETY: `cursor` addresses the element descriptor that follows the container byte.
             unsafe { skip_desc(tags, cursor) };
         }
         gossamer_abi::DESC_ADT => *cursor += 3,
@@ -2424,14 +2664,17 @@ unsafe fn skip_desc(tags: DescStream, cursor: &mut usize) {
             let leaves = tags.byte(*cursor + 1) as usize;
             *cursor += 2 + leaves * 3;
         }
+        // SAFETY: `cursor` addresses the payload descriptor that follows.
         gossamer_abi::DESC_OPTION => unsafe { skip_desc(tags, cursor) },
         gossamer_abi::DESC_ARRAY => {
             // Element count and per-element slot span, a `u16` each, then
             // one element descriptor.
             *cursor += 4;
+            // SAFETY: `cursor` addresses the element descriptor that follows the array header.
             unsafe { skip_desc(tags, cursor) };
         }
         gossamer_abi::DESC_ERROR => {}
+        // SAFETY: `cursor` addresses the `Ok` and `Err` payload descriptors that follow.
         gossamer_abi::DESC_RESULT => unsafe {
             skip_desc(tags, cursor);
             skip_desc(tags, cursor);
@@ -2456,9 +2699,13 @@ pub unsafe extern "C" fn gos_rt_tuple_format_desc(
         if slots.is_null() || desc.is_null() {
             return alloc_cstring(b"()");
         }
+        // SAFETY: `desc` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         let tags = unsafe { DescStream::new(desc) };
         let mut out = String::new();
         let mut cursor = 0usize;
+        // SAFETY: `slots` is this shim's value argument, laid out as `desc` describes (C-ABI
+        // contract), and `tags` walks `desc`.
         unsafe { render_desc_value(&mut out, slots.cast::<u8>(), tags, &mut cursor) };
         alloc_cstring(out.as_bytes())
     })
@@ -2490,9 +2737,14 @@ impl DescStream {
     /// # Safety
     /// `base` addresses a descriptor global emitted by the native backend.
     pub(crate) unsafe fn new(base: *const u8) -> Self {
+        // SAFETY: `base` is a compiler-emitted descriptor block, whose first word is its
+        // formatter count (this `unsafe fn`'s caller).
         let fn_count = unsafe { base.cast::<i64>().read_unaligned() }.max(0) as usize;
         Self {
+            // SAFETY: the formatter table follows the count word inside the block.
             fns: unsafe { base.add(8) }.cast(),
+            // SAFETY: the descriptor bytes follow the `fn_count` formatter words inside the
+            // block.
             bytes: unsafe { base.add(8 + fn_count * 8) },
             fn_count,
         }
@@ -2526,6 +2778,8 @@ pub(crate) unsafe fn render_desc_value(
     tags: DescStream,
     cursor: &mut usize,
 ) {
+    // SAFETY: this `unsafe fn`'s caller passes `slot` laid out as the entry at `cursor` in `tags`
+    // describes.
     unsafe { render_desc_storage(out, slot, tags, cursor, Storage::Inline) };
 }
 
@@ -2559,6 +2813,7 @@ pub(crate) unsafe fn render_desc_storage(
             let base: *const i64 = if storage == Storage::Inline {
                 slot.cast::<i64>()
             } else {
+                // SAFETY: `slot` holds one word, the tuple's boxed address, in by-word storage.
                 let word = unsafe { (slot as *const i64).read_unaligned() };
                 std::ptr::with_exposed_provenance(word as usize)
             };
@@ -2566,6 +2821,8 @@ pub(crate) unsafe fn render_desc_storage(
                 out.push_str("()");
             } else {
                 let mut slot_cursor = 0usize;
+                // SAFETY: `base` is non-null (checked above) and holds the tuple's slots, laid
+                // out as the descriptor describes.
                 unsafe {
                     render_tuple_elements(out, base, tags, arity, &mut slot_cursor, cursor);
                 }
@@ -2573,6 +2830,7 @@ pub(crate) unsafe fn render_desc_storage(
         }
         gossamer_abi::DESC_VEC => {
             *cursor += 1;
+            // SAFETY: `slot` holds one word, the `Vec`'s handle.
             let word = unsafe { (slot as *const i64).read_unaligned() };
             let v: *const crate::c_abi::GosVec = std::ptr::with_exposed_provenance(word as usize);
             let elem_desc = *cursor;
@@ -2581,33 +2839,47 @@ pub(crate) unsafe fn render_desc_storage(
             // representation with, which `DESC_ARRAY` names.
             out.push_str("#[");
             if !v.is_null() {
+                // SAFETY: `v` is non-null (checked above) and, as the descriptor names, a live
+                // `Vec`.
                 let vec = unsafe { &*v };
                 for i in 0..vec.len {
                     if i > 0 {
                         out.push_str(", ");
                     }
+                    // SAFETY: `i` is below the vec's length, so the element lies inside its
+                    // buffer.
                     let elem = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
                     let mut c = elem_desc;
+                    // SAFETY: `elem` is one element of the vec, laid out as the element
+                    // descriptor describes.
                     unsafe { render_desc_value(out, elem, tags, &mut c) };
                 }
             }
             out.push(']');
+            // SAFETY: `cursor` addresses the element descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
         }
         gossamer_abi::DESC_MAP => {
             *cursor += 1;
+            // SAFETY: `slot` holds one word, the `Map`'s handle.
             let word = unsafe { (slot as *const i64).read_unaligned() };
             let m: *const GosMap = std::ptr::with_exposed_provenance(word as usize);
             let key_desc = *cursor;
+            // SAFETY: `cursor` addresses the key descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
             let val_desc = *cursor;
+            // SAFETY: `cursor` addresses the value descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
+            // SAFETY: `m` is the map the descriptor names (null or live), and `key_desc` /
+            // `val_desc` address its entries in `tags`.
             let rendered = unsafe { map_format_desc_stream(m, tags, key_desc, val_desc) };
             if rendered.is_null() {
                 out.push_str("{}");
             } else {
+                // SAFETY: `rendered` is the fresh non-null string the formatter answered.
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                 // The formatter answered a fresh rendering whose bytes are now copied.
+                // SAFETY: `rendered` is the fresh string the formatter answered, owned here.
                 unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
@@ -2622,6 +2894,7 @@ pub(crate) unsafe fn render_desc_storage(
             let base = if storage == Storage::Inline {
                 slot
             } else {
+                // SAFETY: `slot` holds one word, the array's boxed address, in by-word storage.
                 let word = unsafe { (slot as *const i64).read_unaligned() };
                 std::ptr::with_exposed_provenance::<u8>(word as usize)
             };
@@ -2632,24 +2905,33 @@ pub(crate) unsafe fn render_desc_storage(
                     out.push_str(", ");
                 }
                 let mut c = elem_desc;
+                // SAFETY: `i` is below the array's length, so the element lies inside its
+                // storage.
                 let elem = unsafe { base.add(i * elem_slots * 8) };
+                // SAFETY: `elem` is one element of the array, laid out as the element descriptor
+                // describes.
                 unsafe { render_desc_value(out, elem, tags, &mut c) };
             }
             out.push(']');
+            // SAFETY: `cursor` addresses the element descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
         }
         gossamer_abi::DESC_ERROR => {
             *cursor += 1;
+            // SAFETY: `slot` holds one word, the error's handle.
             let word = unsafe { (slot as *const i64).read_unaligned() };
             if word == 0 {
                 return;
             }
+            // SAFETY: a non-zero error word is a live error cell.
             let rendered = unsafe {
                 crate::c_abi::gos_rt_error_display(std::ptr::with_exposed_provenance(word as usize))
             };
             if !rendered.is_null() {
+                // SAFETY: `rendered` is the fresh non-null string the display answered.
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                 // The formatter answered a fresh rendering whose bytes are now copied.
+                // SAFETY: `rendered` is the fresh string the display answered, owned here.
                 unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
@@ -2663,18 +2945,23 @@ pub(crate) unsafe fn render_desc_storage(
             let pair: *const i64 = if storage == Storage::Inline {
                 slot.cast::<i64>()
             } else {
+                // SAFETY: `slot` holds one word, the carrier's boxed address, in by-word storage.
                 let word = unsafe { (slot as *const i64).read_unaligned() };
                 std::ptr::with_exposed_provenance(word as usize)
             };
             let (disc, payload) = if pair.is_null() {
                 (0i64, 0i64)
             } else {
+                // SAFETY: `pair` is non-null (checked above) and addresses the carrier's two
+                // words.
                 unsafe { (pair.read_unaligned(), pair.add(1).read_unaligned()) }
             };
             let first_desc = *cursor;
+            // SAFETY: `cursor` addresses the first arm's payload descriptor.
             unsafe { skip_desc(tags, cursor) };
             let second_desc = *cursor;
             if !is_option {
+                // SAFETY: `cursor` addresses the second arm's payload descriptor.
                 unsafe { skip_desc(tags, cursor) };
             }
             let arm_desc = if disc == 0 { first_desc } else { second_desc };
@@ -2688,6 +2975,7 @@ pub(crate) unsafe fn render_desc_storage(
                 return;
             }
             let mut arm_cursor = arm_desc;
+            // SAFETY: `payload` is the live arm's value, laid out as `arm_desc` describes.
             unsafe {
                 render_desc_storage(
                     out,
@@ -2711,9 +2999,11 @@ pub(crate) unsafe fn render_desc_storage(
             let arg = if by_slot_address && storage == Storage::Inline {
                 slot
             } else {
+                // SAFETY: `slot` holds one word, the aggregate's address.
                 let word = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
                 std::ptr::with_exposed_provenance::<u8>(word)
             };
+            // SAFETY: `arg` is the aggregate `fmt` formats (the descriptor names both).
             out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
         }
         // A container whose elements live in the runtime: the slot holds
@@ -2723,13 +3013,16 @@ pub(crate) unsafe fn render_desc_storage(
             let which = tags.byte(*cursor);
             *cursor += 1;
             let elem_desc = *cursor;
+            // SAFETY: `cursor` addresses the element descriptor that follows.
             unsafe { skip_desc(tags, cursor) };
+            // SAFETY: `slot` holds one word, the container's handle.
             let word = unsafe { (slot as *const i64).read_unaligned() };
             let rendered = match which {
                 28 | 30 => {
                     let owner = if which == 28 { "MaxHeap" } else { "MinHeap" };
                     let handle: *const crate::c_abi::GosVec =
                         std::ptr::with_exposed_provenance(word as usize);
+                    // SAFETY: `handle` is the heap vec the descriptor names, null or live.
                     unsafe {
                         crate::c_abi::container_heap::bheap_format_at(
                             handle, owner, tags, elem_desc,
@@ -2744,6 +3037,8 @@ pub(crate) unsafe fn render_desc_storage(
                     };
                     let handle: *mut crate::c_abi::deque::GosDeque =
                         std::ptr::with_exposed_provenance_mut(word as usize);
+                    // SAFETY: `handle` is the deque the descriptor names, null or live, and
+                    // `elem_desc` addresses its element entry in `tags`.
                     unsafe { crate::c_abi::deque::deque_format_at(handle, owner, tags, elem_desc) }
                 }
             };
@@ -2757,26 +3052,37 @@ pub(crate) unsafe fn render_desc_storage(
             let flags = tags.byte(*cursor);
             let ordered = i32::from(flags & 1);
             *cursor += 1;
+            // SAFETY: `slot` holds one word, the set's handle.
             let word = unsafe { (slot as *const i64).read_unaligned() };
             let handle = std::ptr::with_exposed_provenance(word as usize);
             let rendered = if tag == gossamer_abi::DESC_SET_I64 && flags & 2 != 0 {
+                // SAFETY: `handle` is the set the descriptor names, null or live, which the
+                // formatter accepts.
                 unsafe { crate::c_abi::gos_rt_set_format_u64(handle, ordered) }
             } else if tag == gossamer_abi::DESC_SET_I64 {
+                // SAFETY: `handle` is the set the descriptor names, null or live, which the
+                // formatter accepts.
                 unsafe { crate::c_abi::gos_rt_set_format_i64(handle, ordered) }
             } else {
+                // SAFETY: `handle` is the set the descriptor names, null or live, which the
+                // formatter accepts.
                 unsafe { crate::c_abi::gos_rt_set_format_string(handle, ordered) }
             };
             if rendered.is_null() {
                 out.push_str("#{}");
             } else {
+                // SAFETY: `rendered` is the fresh non-null string the formatter answered.
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                 // The formatter answered a fresh rendering whose bytes are now copied.
+                // SAFETY: `rendered` is the fresh string the formatter answered, owned here.
                 unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
         }
         _ => {
             *cursor += 1;
+            // SAFETY: `slot` holds one word of the scalar kind `tag` names.
             let word = unsafe { (slot as *const i64).read_unaligned() };
+            // SAFETY: `word` is a value of the kind `tag` names.
             unsafe { render_tagged_word(out, word, tag) };
         }
     }
@@ -2800,6 +3106,8 @@ pub(crate) unsafe fn render_tuple_elements(
         if tag == TUPLE_TAG_NESTED {
             let nested = tags.byte(*tag_cursor) as usize;
             *tag_cursor += 1;
+            // SAFETY: `p` holds the nested tuple's slots from `slot_cursor`, as the descriptor
+            // describes.
             unsafe { render_tuple_elements(out, p, tags, nested, slot_cursor, tag_cursor) };
             continue;
         }
@@ -2811,15 +3119,18 @@ pub(crate) unsafe fn render_tuple_elements(
             let by_slot_address = tags.byte(*tag_cursor + 1) != 0;
             let slots = (tags.byte(*tag_cursor + 2) as usize).max(1);
             *tag_cursor += 3;
+            // SAFETY: `slot_cursor` is inside the tuple's slots, as the descriptor counts them.
             let field = unsafe { p.add(*slot_cursor) };
             *slot_cursor += slots;
             if let Some(fmt) = tags.fmt(index) {
                 let arg = if by_slot_address {
                     field.cast::<u8>()
                 } else {
+                    // SAFETY: `field` is one slot inside the tuple.
                     let word = unsafe { field.read_unaligned() };
                     std::ptr::with_exposed_provenance::<u8>(word as usize)
                 };
+                // SAFETY: `arg` is the aggregate `fmt` formats (the descriptor names both).
                 out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
             }
             continue;
@@ -2829,12 +3140,16 @@ pub(crate) unsafe fn render_tuple_elements(
         // an `Option` - which the descriptor walk renders and measures, so
         // both cursors stay on the element that follows.
         if !matches!(tag, 0..=7) {
+            // SAFETY: `slot_cursor` is inside the tuple's slots, as the descriptor counts them.
             let element = unsafe { p.add(*slot_cursor) };
             *tag_cursor -= 1;
+            // SAFETY: `tag_cursor` addresses a whole-value descriptor entry in `tags`.
             *slot_cursor += unsafe { desc_slot_span(tags, *tag_cursor) };
+            // SAFETY: `element` is the field that entry describes.
             unsafe { render_desc_value(out, element.cast::<u8>(), tags, tag_cursor) };
             continue;
         }
+        // SAFETY: `slot_cursor` is inside the tuple's slots, as the descriptor counts them.
         let word = unsafe { p.add(*slot_cursor).read_unaligned() };
         *slot_cursor += 1;
         match tag {
@@ -2848,24 +3163,32 @@ pub(crate) unsafe fn render_tuple_elements(
             5 => {
                 let sp: *const c_char = std::ptr::with_exposed_provenance(word as usize);
                 if !sp.is_null() {
+                    // SAFETY: a non-null word of tag 5 is a live string body.
                     push_quoted_str(out, &unsafe { crate::c_abi::gos_str_arg_lossy(sp) });
                 }
             }
             6 => {
                 let vp = std::ptr::with_exposed_provenance(word as usize);
+                // SAFETY: a word of tag 6 is a live `Vec<i64>` or null, which the formatter
+                // accepts.
                 let rendered = unsafe { crate::c_abi::gos_rt_vec_format_i64(vp, 0) };
                 if !rendered.is_null() {
+                    // SAFETY: `rendered` is the fresh non-null string the formatter answered.
                     out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                     // The formatter answered a fresh rendering whose bytes are now copied.
+                    // SAFETY: `rendered` is the fresh string the formatter answered, owned here.
                     unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
                 }
             }
             7 => {
                 let mp = std::ptr::with_exposed_provenance(word as usize);
+                // SAFETY: a word of tag 7 is a live `Map` or null, which the formatter accepts.
                 let rendered = unsafe { gos_rt_map_format(mp) };
                 if !rendered.is_null() {
+                    // SAFETY: `rendered` is the fresh non-null string the formatter answered.
                     out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
                     // The formatter answered a fresh rendering whose bytes are now copied.
+                    // SAFETY: `rendered` is the fresh string the formatter answered, owned here.
                     unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
                 }
             }
@@ -2908,6 +3231,8 @@ pub unsafe extern "C" fn gos_rt_tuple_format(
         let mut out = String::new();
         let mut slot_cursor = 0usize;
         let mut tag_cursor = 0usize;
+        // SAFETY: `p` is this shim's tuple argument of `n` elements, laid out as `tags` describes
+        // (C-ABI contract).
         unsafe {
             render_tuple_elements(
                 &mut out,
@@ -2941,6 +3266,8 @@ pub unsafe extern "C" fn gos_rt_tuple_cmp(
         }
         let mut slot_cursor = 0usize;
         let mut tag_cursor = 0usize;
+        // SAFETY: `a` and `b` are this shim's tuple arguments of `n` elements, laid out as `tags`
+        // describes (C-ABI contract).
         unsafe {
             compare_tuple_elements(
                 crate::c_abi::desc_cmp::CmpMode::Order,
@@ -2971,6 +3298,8 @@ pub unsafe extern "C" fn gos_rt_tuple_eq(
         }
         let mut slot_cursor = 0usize;
         let mut tag_cursor = 0usize;
+        // SAFETY: `a` and `b` are this shim's tuple arguments of `n` elements, laid out as `tags`
+        // describes (C-ABI contract).
         let code = unsafe {
             compare_tuple_elements(
                 crate::c_abi::desc_cmp::CmpMode::Equal,
@@ -3002,6 +3331,8 @@ unsafe fn compare_tuple_elements(
     use std::cmp::Ordering;
     let mut result = 0i64;
     for _ in 0..count {
+        // SAFETY: `tag_cursor` stays inside the `count` element entries of `tags` (this `unsafe
+        // fn`'s caller).
         let tag = unsafe { *tags.add(*tag_cursor) };
         // A descriptor tag names a value whose slot word is not its own
         // order - an enum reached through its RC node, a nested sequence -
@@ -3009,8 +3340,11 @@ unsafe fn compare_tuple_elements(
         // the word the slot spells.
         if tag >= gossamer_abi::DESC_VEC {
             let field = *tag_cursor;
+            // SAFETY: `field` addresses a whole-value descriptor entry in `tags`.
             let span = unsafe { crate::c_abi::desc_cmp::desc_slot_span(tags, field) };
             let mut walk = field;
+            // SAFETY: `a` and `b` hold that element at `slot_cursor`, laid out as the entry
+            // describes.
             let ord = unsafe {
                 crate::c_abi::desc_cmp::compare_desc_in(
                     mode,
@@ -3031,8 +3365,10 @@ unsafe fn compare_tuple_elements(
         }
         *tag_cursor += 1;
         if tag == TUPLE_TAG_NESTED {
+            // SAFETY: `tag_cursor` addresses the nested tuple's arity byte.
             let nested = unsafe { *tags.add(*tag_cursor) } as usize;
             *tag_cursor += 1;
+            // SAFETY: `a` and `b` hold the nested tuple's slots from `slot_cursor`.
             let ord = unsafe {
                 compare_tuple_elements(mode, a, b, tags, nested, slot_cursor, tag_cursor)
             };
@@ -3041,7 +3377,9 @@ unsafe fn compare_tuple_elements(
             }
             continue;
         }
+        // SAFETY: `slot_cursor` is inside `a`'s slots, as the descriptor counts them.
         let wa = unsafe { a.add(*slot_cursor).read_unaligned() };
+        // SAFETY: `slot_cursor` is inside `b`'s slots, as the descriptor counts them.
         let wb = unsafe { b.add(*slot_cursor).read_unaligned() };
         *slot_cursor += 1;
         if result != 0 {
@@ -3064,6 +3402,8 @@ unsafe fn compare_tuple_elements(
             5 => {
                 let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
                 let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);
+                // SAFETY: a word of tag 5 is null or a live string body, which the comparison
+                // accepts.
                 unsafe { gos_rt_str_compare(sa, sb) }.cmp(&0)
             }
             _ => wa.cmp(&wb),
@@ -3089,13 +3429,18 @@ unsafe fn sort_tuple_buffer(base: *mut u8, len: usize, stride: usize, n: i64, ta
     // operand pointers stable across swaps.
     let mut indices: Vec<usize> = (0..len).collect();
     indices.sort_by(|&ai, &bi| {
+        // SAFETY: `ai` is below `len`, so the element lies inside the buffer.
         let pa = unsafe { base.add(ai * stride).cast::<i64>() };
+        // SAFETY: `bi` is below `len`, so the element lies inside the buffer.
         let pb = unsafe { base.add(bi * stride).cast::<i64>() };
+        // SAFETY: `pa` and `pb` are elements of `n` slots, laid out as `tags` describes.
         unsafe { gos_rt_tuple_cmp(pa, pb, n, tags) }.cmp(&0)
     });
     let total = len.saturating_mul(stride);
     let mut tmp: Vec<u8> = vec![0u8; total];
     for (new_idx, &old_idx) in indices.iter().enumerate() {
+        // SAFETY: each copy moves one `stride`-byte element between indices below `len`, inside
+        // both buffers.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 base.add(old_idx * stride),
@@ -3104,6 +3449,7 @@ unsafe fn sort_tuple_buffer(base: *mut u8, len: usize, stride: usize, n: i64, ta
             );
         }
     }
+    // SAFETY: `tmp` and `base` each hold `len * stride` bytes, and they do not overlap.
     unsafe {
         std::ptr::copy_nonoverlapping(tmp.as_ptr(), base, total);
     }
@@ -3120,12 +3466,15 @@ pub unsafe extern "C" fn gos_rt_vec_sort_tuple(v: *mut GosVec, n: i64, tags: *co
         if v.is_null() || tags.is_null() || n <= 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 1 || vec.ptr.is_null() {
             return;
         }
         let len = vec.len.max(0) as usize;
         let stride = i64::from(vec.elem_bytes).max(0) as usize;
+        // SAFETY: `vec` is live and its buffer holds `len` elements of `stride` bytes, laid out
+        // as `tags` describes (C-ABI contract).
         unsafe { sort_tuple_buffer(vec.ptr.as_ptr(), len, stride, n, tags) };
     });
 }
@@ -3146,6 +3495,8 @@ pub unsafe extern "C" fn gos_rt_arr_sort_tuple(
         if p.is_null() || tags.is_null() || n <= 0 || len <= 1 || elem_bytes <= 0 {
             return;
         }
+        // SAFETY: `p` is this shim's array argument of `len` elements of `elem_bytes` bytes
+        // (non-null, checked above; C-ABI contract).
         unsafe { sort_tuple_buffer(p, len as usize, elem_bytes as usize, n, tags) };
     });
 }
@@ -3161,18 +3512,26 @@ pub unsafe extern "C" fn gos_rt_vec_eq(a: *const GosVec, b: *const GosVec, elem_
         if a.is_null() || b.is_null() {
             return std::ptr::eq(a, b);
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let la = unsafe { (*a).len };
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         if la != unsafe { (*b).len } {
             return false;
         }
         for i in 0..la {
+            // SAFETY: `i` is below both vecs' length, and `a` is non-null and live (checked
+            // above; C-ABI contract).
             let wa = unsafe { gos_rt_vec_get_i64(a, i) };
+            // SAFETY: `i` is below both vecs' length, and `b` is non-null and live (checked
+            // above; C-ABI contract).
             let wb = unsafe { gos_rt_vec_get_i64(b, i) };
             let eq = match elem_tag {
                 2 => f64::from_bits(wa as u64) == f64::from_bits(wb as u64),
                 5 => {
                     let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
                     let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);
+                    // SAFETY: elements of tag 5 are null or live string bodies, which the
+                    // comparison accepts.
                     unsafe { gos_rt_str_eq(sa, sb) }
                 }
                 _ => wa == wb,
@@ -3219,6 +3578,8 @@ pub unsafe extern "C" fn gos_rt_enum_struct_eq(a: *mut u8, b: *mut u8, desc: *co
             if tag != 0 {
                 (tag >> 1) as u8
             } else {
+                // SAFETY: an untagged node carries its discriminant in the header byte three
+                // below the payload.
                 unsafe { *base.sub(3) }
             }
         };
@@ -3227,30 +3588,46 @@ pub unsafe extern "C" fn gos_rt_enum_struct_eq(a: *mut u8, b: *mut u8, desc: *co
         if da != db {
             return 0;
         }
+        // SAFETY: `desc` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let num_variants = unsafe { *desc };
         if i64::from(da) >= num_variants {
             return 0;
         }
         let mut idx = 1usize;
         for _ in 0..da {
+            // SAFETY: `desc` is this shim's `i64` argument, non-null (checked above), live for
+            // the call (C-ABI contract).
             let nf = unsafe { *desc.add(idx) }.max(0);
             idx += 1 + nf as usize;
         }
+        // SAFETY: `desc` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let nf = unsafe { *desc.add(idx) }.max(0);
         idx += 1;
         for f in 0..nf {
+            // SAFETY: `desc` is this shim's `i64` argument, non-null (checked above), live for
+            // the call (C-ABI contract).
             let kind = unsafe { *desc.add(idx + f as usize) };
+            // SAFETY: `f` is below the variant's field count, inside `a`'s payload.
             let wa = unsafe { *(a as *const i64).add(f as usize) };
+            // SAFETY: `f` is below the variant's field count, inside `b`'s payload.
             let wb = unsafe { *(b as *const i64).add(f as usize) };
             let eq = match kind {
                 1 => f64::from_bits(wa as u64) == f64::from_bits(wb as u64),
                 2 => {
                     let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
                     let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);
+                    // SAFETY: string fields are null or live string bodies, which the comparison
+                    // accepts.
                     unsafe { gos_rt_str_eq(sa, sb) }
                 }
+                // SAFETY: a field of kind 3 is a nested node of the same descriptor.
                 3 => unsafe { gos_rt_enum_struct_eq(wa as *mut u8, wb as *mut u8, desc) != 0 },
+                // SAFETY: a field of kind 4 is a `Vec` of nodes of the same descriptor.
                 4 => unsafe { vec_self_enum_eq(wa, wb, desc) },
+                // SAFETY: a field of kind 5 is a `Vec` of `(String, node)` pairs of the same
+                // descriptor.
                 5 => unsafe { vec_str_self_enum_eq(wa, wb, desc) },
                 _ => wa == wb,
             };
@@ -3273,13 +3650,18 @@ unsafe fn vec_self_enum_eq(a_word: i64, b_word: i64, desc: *const i64) -> bool {
     if va.is_null() || vb.is_null() {
         return false;
     }
+    // SAFETY: `va` is non-null (checked above) and a live `Vec` (this `unsafe fn`'s caller).
     let la = unsafe { (*va).len };
+    // SAFETY: `vb` is non-null (checked above) and a live `Vec` (this `unsafe fn`'s caller).
     if la != unsafe { (*vb).len } {
         return false;
     }
     for i in 0..la {
+        // SAFETY: `i` is below `va`'s length.
         let ea = unsafe { gos_rt_vec_get_i64(va, i) };
+        // SAFETY: `i` is below `vb`'s length, which equals `va`'s.
         let eb = unsafe { gos_rt_vec_get_i64(vb, i) };
+        // SAFETY: the elements are nodes of `desc`'s enum.
         if unsafe { gos_rt_enum_struct_eq(ea as *mut u8, eb as *mut u8, desc) } == 0 {
             return false;
         }
@@ -3298,12 +3680,16 @@ unsafe fn vec_str_self_enum_eq(a_word: i64, b_word: i64, desc: *const i64) -> bo
     if va.is_null() || vb.is_null() {
         return false;
     }
+    // SAFETY: `va` is non-null (checked above) and a live `Vec` (this `unsafe fn`'s caller).
     let la = unsafe { (*va).len };
+    // SAFETY: `vb` is non-null (checked above) and a live `Vec` (this `unsafe fn`'s caller).
     if la != unsafe { (*vb).len } {
         return false;
     }
     for i in 0..la {
+        // SAFETY: `i` is below `va`'s length.
         let pa = unsafe { gos_rt_vec_get_ptr(va, i) };
+        // SAFETY: `i` is below `vb`'s length, which equals `va`'s.
         let pb = unsafe { gos_rt_vec_get_ptr(vb, i) };
         if pa.is_null() || pb.is_null() {
             if pa != pb {
@@ -3311,15 +3697,22 @@ unsafe fn vec_str_self_enum_eq(a_word: i64, b_word: i64, desc: *const i64) -> bo
             }
             continue;
         }
+        // SAFETY: `pa` is a non-null 16-byte pair element.
         let ka = unsafe { pa.cast::<i64>().read_unaligned() };
+        // SAFETY: `pb` is a non-null 16-byte pair element.
         let kb = unsafe { pb.cast::<i64>().read_unaligned() };
         let sa: *const c_char = std::ptr::with_exposed_provenance(ka as usize);
         let sb: *const c_char = std::ptr::with_exposed_provenance(kb as usize);
+        // SAFETY: the pair's first words are null or live string bodies, which the comparison
+        // accepts.
         if !unsafe { gos_rt_str_eq(sa, sb) } {
             return false;
         }
+        // SAFETY: `pa` is a 16-byte pair element; its second word is at offset 8.
         let ea = unsafe { pa.add(8).cast::<i64>().read_unaligned() };
+        // SAFETY: `pb` is a 16-byte pair element; its second word is at offset 8.
         let eb = unsafe { pb.add(8).cast::<i64>().read_unaligned() };
+        // SAFETY: the pair's second words are nodes of `desc`'s enum.
         if unsafe { gos_rt_enum_struct_eq(ea as *mut u8, eb as *mut u8, desc) } == 0 {
             return false;
         }
@@ -3338,6 +3731,8 @@ unsafe fn vec_str_self_enum_eq(a_word: i64, b_word: i64, desc: *const i64) -> bo
 /// string-valued maps here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_format(m: *const GosMap) -> *mut c_char {
+    // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+    // formatter accepts.
     unsafe { gos_rt_map_format_tagged(m, 0, 0, std::ptr::null(), 0) }
 }
 
@@ -3346,11 +3741,13 @@ pub unsafe extern "C" fn gos_rt_map_format(m: *const GosMap) -> *mut c_char {
 /// `aux`, and `8` through the `aux_n` tuple tags `aux` addresses.
 unsafe fn render_map_value(out: &mut String, word: i64, val_tag: i64, aux: *const u8, aux_n: i64) {
     if aux.is_null() {
+        // SAFETY: `word` is a value of the kind `val_tag` names.
         unsafe { render_tagged_word(out, word, val_tag as u8) };
         return;
     }
     if val_tag == i64::from(gossamer_abi::DEBUG_PAYLOAD_ADT) {
         let slots: *const u8 = std::ptr::with_exposed_provenance(word as usize);
+        // SAFETY: `slots` is the aggregate value and `aux` its formatter.
         out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(slots, aux.cast()) });
         return;
     }
@@ -3358,6 +3755,7 @@ unsafe fn render_map_value(out: &mut String, word: i64, val_tag: i64, aux: *cons
         let slots: *const i64 = std::ptr::with_exposed_provenance(word as usize);
         let mut slot_cursor = 0usize;
         let mut tag_cursor = 0usize;
+        // SAFETY: `slots` holds the tuple value, laid out as `aux` describes.
         unsafe {
             render_tuple_elements(
                 out,
@@ -3370,6 +3768,7 @@ unsafe fn render_map_value(out: &mut String, word: i64, val_tag: i64, aux: *cons
         }
         return;
     }
+    // SAFETY: `word` is a value of the kind `val_tag` names.
     unsafe { render_tagged_word(out, word, val_tag as u8) };
 }
 
@@ -3390,7 +3789,11 @@ pub unsafe extern "C" fn gos_rt_map_format_desc(
         if m.is_null() || tags.is_null() {
             return alloc_cstring(b"{}");
         }
+        // SAFETY: `tags` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         let tags = unsafe { DescStream::new(tags) };
+        // SAFETY: `m`, `tags` are this shim's arguments, live for the call (C-ABI contract);
+        // non-null, checked above.
         unsafe { map_format_desc_stream(m, tags, key_desc as usize, val_desc as usize) }
     })
 }
@@ -3404,6 +3807,7 @@ unsafe fn map_format_desc_stream(
     val_desc: usize,
 ) -> *mut c_char {
     {
+        // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
         let aggregate = unsafe { map_aggregate_entries(m) };
         if !aggregate.is_empty() {
             let mut out = String::from("{");
@@ -3417,6 +3821,7 @@ unsafe fn map_format_desc_stream(
                 } else {
                     Storage::Inline
                 };
+                // SAFETY: each key is laid out as `key_desc` describes.
                 unsafe {
                     render_desc_storage(
                         &mut out,
@@ -3429,6 +3834,7 @@ unsafe fn map_format_desc_stream(
                 out.push_str(": ");
                 let value = entry.value;
                 let mut c = val_desc;
+                // SAFETY: each value is laid out as `val_desc` describes.
                 unsafe {
                     render_desc_storage(
                         &mut out,
@@ -3445,6 +3851,7 @@ unsafe fn map_format_desc_stream(
         }
         // A key descriptor naming the unsigned tag orders its keys unsigned.
         let unsigned_keys = tags.byte(key_desc) == 1;
+        // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
         let entries = unsafe { map_word_entries(m, unsigned_keys) };
         let mut out = String::from("{");
         let mut first = true;
@@ -3459,11 +3866,13 @@ unsafe fn map_format_desc_stream(
             } else {
                 let mut c = key_desc;
                 let slot = std::ptr::from_ref(&key).cast::<u8>();
+                // SAFETY: `slot` addresses the key word, laid out as `key_desc` describes.
                 unsafe { render_desc_value(&mut out, slot, tags, &mut c) };
             }
             out.push_str(": ");
             let mut c = val_desc;
             let slot = std::ptr::from_ref(&value).cast::<u8>();
+            // SAFETY: `slot` addresses the value word, laid out as `val_desc` describes.
             unsafe { render_desc_storage(&mut out, slot, tags, &mut c, Storage::ByWord) };
         }
         out.push('}');
@@ -3479,6 +3888,7 @@ unsafe fn map_word_entries(
     m: *const GosMap,
     unsigned_keys: bool,
 ) -> Vec<(Option<Vec<u8>>, i64, i64)> {
+    // SAFETY: `m` is non-null (checked by the caller) and live (this `unsafe fn`'s caller).
     let map = unsafe { &*m };
     let storage = map.storage.lock();
     match &*storage {
@@ -3531,6 +3941,8 @@ impl DescEntry {
             let ptr: *mut GosVec =
                 std::ptr::with_exposed_provenance_mut(self.key_slots[index] as usize);
             if !ptr.is_null() {
+                // SAFETY: `owned_vecs` names key slots holding `Vec`s this snapshot copied, whose
+                // shares it owns.
                 unsafe { gos_rt_vec_free(ptr) };
             }
         }
@@ -3538,6 +3950,8 @@ impl DescEntry {
             let ptr: *mut c_char =
                 std::ptr::with_exposed_provenance_mut(self.key_slots[index] as usize);
             if !ptr.is_null() {
+                // SAFETY: `owned_strings` names key slots holding strings this snapshot copied,
+                // whose shares it owns.
                 unsafe { crate::c_abi::string::gos_rt_str_free(ptr) };
             }
         }
@@ -3547,6 +3961,7 @@ impl DescEntry {
 /// Every entry of an aggregate-keyed map, ordered by the stored key bytes so
 /// rendering is stable across runs the way the bytecode tier's is.
 unsafe fn map_aggregate_entries(m: *const GosMap) -> Vec<DescEntry> {
+    // SAFETY: `m` is non-null (checked by the caller) and live (this `unsafe fn`'s caller).
     let map = unsafe { &*m };
     let storage = map.storage.lock();
     match &*storage {
@@ -3646,6 +4061,7 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
         if m.is_null() {
             return alloc_cstring(b"{}");
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let entries = match &*storage {
@@ -3681,6 +4097,7 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
             // decimal, a float's value rather than the bits' integer, a
             // `bool`, or a `char`.
             let mut out = String::new();
+            // SAFETY: `k` is a key of the kind `key_tag` names.
             unsafe { render_tagged_word(&mut out, k, key_tag as u8) };
             out
         };
@@ -3703,6 +4120,8 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
                 }
                 for (k, v) in entries {
                     let mut value = String::new();
+                    // SAFETY: `v` is a value of the kind `val_tag` names, and `aux` its formatter
+                    // or descriptor.
                     unsafe { render_map_value(&mut value, v, val_tag, aux, aux_n) };
                     push_entry(&mut out, &mut first, &format_key(k), &value);
                 }
@@ -3716,6 +4135,8 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
                 for (k, v) in entries {
                     let key = quote_key(k);
                     let mut value = String::new();
+                    // SAFETY: `v` is a value of the kind `val_tag` names, and `aux` its formatter
+                    // or descriptor.
                     unsafe { render_map_value(&mut value, v, val_tag, aux, aux_n) };
                     push_entry(&mut out, &mut first, &key, &value);
                 }
@@ -3786,7 +4207,10 @@ pub unsafe extern "C" fn gos_rt_map_format_tagged(
 /// that owns a freshly-constructed map and isn't moved into the
 /// return slot. Idempotent on null.
 ///
-/// SAFETY: only call this on a pointer returned by one of the
+///
+/// # Safety
+///
+/// Only call this on a pointer returned by one of the
 /// runtime's `gos_rt_map_new*` constructors - the runtime's
 /// [`GosMap`] layout includes a `parking_lot::Mutex<...>` and
 /// dropping a binding-side `BindingGosMap` (two parallel `GosVec`
@@ -3800,6 +4224,7 @@ pub unsafe extern "C" fn gos_rt_map_set_blob_values(m: *mut GosMap) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     unsafe { &*m }
         .value_owner
         .store(MAP_VALUE_RC, Ordering::Release);
@@ -3813,6 +4238,7 @@ pub unsafe extern "C" fn gos_rt_map_set_vec_values(m: *mut GosMap) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     unsafe { &*m }
         .value_owner
         .store(MAP_VALUE_VEC, Ordering::Release);
@@ -3827,6 +4253,7 @@ pub unsafe extern "C" fn gos_rt_map_set_map_values(m: *mut GosMap) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     unsafe { &*m }
         .value_owner
         .store(MAP_VALUE_MAP, Ordering::Release);
@@ -3840,6 +4267,7 @@ pub unsafe extern "C" fn gos_rt_map_set_heap_values(m: *mut GosMap) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     unsafe { &*m }
         .value_owner
         .store(MAP_VALUE_HEAP, Ordering::Release);
@@ -3852,6 +4280,7 @@ pub unsafe extern "C" fn gos_rt_map_set_deque_values(m: *mut GosMap) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     unsafe { &*m }
         .value_owner
         .store(MAP_VALUE_DEQUE, Ordering::Release);
@@ -3864,6 +4293,7 @@ pub unsafe extern "C" fn gos_rt_map_set_set_values(m: *mut GosMap) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     unsafe { &*m }
         .value_owner
         .store(MAP_VALUE_SET, Ordering::Release);
@@ -3880,6 +4310,7 @@ fn map_has_owned_values(m: &GosMap) -> bool {
 /// Release one stored blob value word: a copy blob the map holds a share of.
 unsafe fn release_blob_value(word: i64) {
     if word != 0 {
+        // SAFETY: a non-zero blob value word is a live counted node.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(word as usize as *mut u8) };
     }
 }
@@ -3887,11 +4318,13 @@ unsafe fn release_blob_value(word: i64) {
 /// Retain one stored blob value word before handing it out.
 unsafe fn retain_blob_value(word: i64) {
     if word != 0 {
+        // SAFETY: a non-zero blob value word is a live counted node.
         unsafe { crate::c_abi::rc::gos_rt_rc_retain(word as usize as *mut u8) };
     }
 }
 
 unsafe fn release_owned_value(m: &GosMap, word: i64) {
+    // SAFETY: `word` is a value of this map's value class, whose share the caller gives back.
     unsafe { release_owned_value_tag(map_value_owner(m), word) };
 }
 
@@ -3903,10 +4336,15 @@ unsafe fn release_owned_value_tag(owner: u8, word: i64) {
         return;
     }
     match owner {
+        // SAFETY: a map of counted-node values holds a share of each value word.
         MAP_VALUE_RC => unsafe { release_blob_value(word) },
+        // SAFETY: a map of `Vec` values holds a share of each value word.
         MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe { gos_rt_vec_free(word as usize as *mut GosVec) },
+        // SAFETY: a map of `Map` values owns each value word.
         MAP_VALUE_MAP => unsafe { gos_rt_map_free(word as usize as *mut GosMap) },
+        // SAFETY: a map of `Set` values owns each value word.
         MAP_VALUE_SET => unsafe { gos_rt_set_free(word as usize as *mut GosSet) },
+        // SAFETY: a map of deque values owns each value word.
         MAP_VALUE_DEQUE => unsafe {
             crate::c_abi::deque::gos_rt_deque_free(
                 word as usize as *mut crate::c_abi::deque::GosDeque,
@@ -3920,6 +4358,8 @@ unsafe fn release_owned_value_tag(owner: u8, word: i64) {
 /// key node of every enum-keyed entry, which the map owns whether or not
 /// its values are owned.
 unsafe fn release_storage_entries(owner: u8, storage: &MapStorage) {
+    // SAFETY: every word the storage holds is a value of the owner class `owner` names, whose
+    // share the map holds.
     let release = |word: i64| unsafe { release_owned_value_tag(owner, word) };
     let values_owned = owner != MAP_VALUE_NONE;
     match storage {
@@ -3942,6 +4382,7 @@ unsafe fn release_storage_entries(owner: u8, storage: &MapStorage) {
         MapStorage::EkeyVal { entries } => {
             for entry in entries.values() {
                 release(entry.value);
+                // SAFETY: every entry of an enum-keyed map holds a share of its key node.
                 unsafe { crate::c_abi::rc::gos_rt_rc_release(entry.key_node) };
             }
         }
@@ -3957,12 +4398,14 @@ unsafe fn lend_owned_value(m: &GosMap, word: i64) -> i64 {
     if owner_copies_on_share(owner) || owner == MAP_VALUE_HEAP {
         return word;
     }
+    // SAFETY: `word` is a value of the map's value class; this takes the map's own share of it.
     unsafe { share_owned_value(m, word) }
 }
 
 /// The word a new holder of `word` keeps: a share of a counted value, or a
 /// copy of a table value.
 unsafe fn share_owned_value(m: &GosMap, word: i64) -> i64 {
+    // SAFETY: `word` is a value of this map's value class.
     unsafe { share_owned_value_tag(map_value_owner(m), word) }
 }
 
@@ -3974,18 +4417,23 @@ unsafe fn share_owned_value_tag(owner: u8, word: i64) -> i64 {
         return word;
     }
     match owner {
+        // SAFETY: a non-zero value word of a counted-node map is a live node.
         MAP_VALUE_RC => unsafe { retain_blob_value(word) },
+        // SAFETY: a non-zero value word of a `Vec` map is a live `Vec`.
         MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe {
             crate::c_abi::gos_rt_vec_retain(word as usize as *mut GosVec);
         },
         MAP_VALUE_MAP => {
+            // SAFETY: a non-zero value word of a `Map` map is a live `Map`.
             return unsafe { gos_rt_map_clone(word as usize as *const GosMap) } as i64;
         }
         MAP_VALUE_SET => {
+            // SAFETY: a non-zero value word of a `Set` map is a live `Set`.
             return unsafe { crate::c_abi::set::gos_rt_set_clone(word as usize as *const GosSet) }
                 as i64;
         }
         MAP_VALUE_DEQUE => {
+            // SAFETY: a non-zero value word of a deque map is a live deque.
             let copy = unsafe {
                 crate::c_abi::deque::gos_rt_deque_clone(
                     word as usize as *mut crate::c_abi::deque::GosDeque,
@@ -4004,8 +4452,10 @@ unsafe fn share_owned_value_tag(owner: u8, word: i64) -> i64 {
 /// hold one. Every other owned value is shared.
 unsafe fn adopt_cloned_value(owner: u8, word: i64) -> i64 {
     if word != 0 && matches!(owner, MAP_VALUE_VEC | MAP_VALUE_HEAP) {
+        // SAFETY: a non-zero value word of a `Vec` map is a live `Vec`.
         return unsafe { crate::c_abi::gos_rt_vec_clone(word as usize as *const GosVec) } as i64;
     }
+    // SAFETY: `word` is a value of the owner class `owner` names.
     unsafe { share_owned_value_tag(owner, word) }
 }
 
@@ -4021,6 +4471,7 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
             let mut cloned = m.clone();
             if value_owner != MAP_VALUE_NONE {
                 for v in cloned.values_mut() {
+                    // SAFETY: each value is one the source map owns, of class `value_owner`.
                     *v = unsafe { adopt_cloned_value(value_owner, *v) };
                 }
             }
@@ -4030,6 +4481,7 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
             let mut cloned = m.clone();
             if value_owner != MAP_VALUE_NONE {
                 for v in cloned.values_mut() {
+                    // SAFETY: each value is one the source map owns, of class `value_owner`.
                     *v = unsafe { adopt_cloned_value(value_owner, *v) };
                 }
             }
@@ -4039,6 +4491,7 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
             let mut cloned = entries.clone();
             if value_owner != MAP_VALUE_NONE {
                 for v in cloned.values_mut() {
+                    // SAFETY: each value is one the source map owns, of class `value_owner`.
                     *v = unsafe { adopt_cloned_value(value_owner, *v) };
                 }
             }
@@ -4066,11 +4519,14 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
             let mut cloned = entries.empty_like();
             for (k, e) in entries {
                 if !e.key_node.is_null() {
+                    // SAFETY: `key_node` is non-null (checked above) and a live node the source
+                    // entry holds a share of.
                     unsafe { crate::c_abi::rc::gos_rt_rc_retain(e.key_node) };
                 }
                 cloned.insert(
                     k.clone(),
                     EnumEntry {
+                        // SAFETY: the value is one the source map owns, of class `value_owner`.
                         value: unsafe { adopt_cloned_value(value_owner, e.value) },
                         key_node: e.key_node,
                     },
@@ -4097,8 +4553,9 @@ fn clone_map_storage(storage: &MapStorage, value_owner: u8) -> MapStorage {
 pub unsafe extern "C" fn gos_rt_map_clone(src: *const GosMap) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
         if src.is_null() {
-            return unsafe { gos_rt_map_new(8, 8) };
+            return gos_rt_map_new(8, 8);
         }
+        // SAFETY: `src` is a handle from compiled code, checked non-null above and live for the whole call.
         let source = unsafe { &*src };
         let owner = map_value_owner(source);
         let guard = source.storage.lock();
@@ -4130,12 +4587,14 @@ pub unsafe extern "C" fn gos_rt_map_assign(dst: *mut GosMap, src: *const GosMap)
         if dst.is_null() || src.is_null() || std::ptr::addr_eq(dst.cast_const(), src) {
             return;
         }
+        // SAFETY: `src` is a handle from compiled code, checked non-null above and live for the whole call.
         let source = unsafe { &*src };
         let owner = map_value_owner(source);
         let cloned = {
             let guard = source.storage.lock();
             clone_map_storage(&guard, owner)
         };
+        // SAFETY: `dst` is a handle from compiled code, checked non-null above and live for the whole call.
         let target = unsafe { &mut *dst };
         let old_owner = map_value_owner(target);
         let old = {
@@ -4144,6 +4603,7 @@ pub unsafe extern "C" fn gos_rt_map_assign(dst: *mut GosMap, src: *const GosMap)
         };
         target.value_owner.store(owner, Ordering::Release);
         target.len_cache = source.len_cache;
+        // SAFETY: `old` is the storage this map owned before the swap, of class `old_owner`.
         unsafe { release_storage_entries(old_owner, &old) };
     });
 }
@@ -4155,16 +4615,21 @@ unsafe fn mark_owned_value_shared(owner: u8, word: i64) {
         return;
     }
     match owner {
+        // SAFETY: a non-zero value word of a counted-node map is a live node.
         MAP_VALUE_RC => unsafe {
             crate::c_abi::rc::gos_rt_rc_mark_shared(word as usize as *mut u8);
         },
+        // SAFETY: a non-zero value word of a `Vec` map is a live `Vec`.
         MAP_VALUE_VEC | MAP_VALUE_HEAP => unsafe {
             crate::c_abi::vec::gos_rt_vec_mark_shared(word as usize as *mut GosVec);
         },
+        // SAFETY: a non-zero value word of a `Map` map is a live `Map`.
         MAP_VALUE_MAP => unsafe { gos_rt_map_mark_shared(word as usize as *mut GosMap) },
+        // SAFETY: a non-zero value word of a `Set` map is a live `Set`.
         MAP_VALUE_SET => unsafe {
             crate::c_abi::set::gos_rt_set_mark_shared(word as usize as *mut GosSet);
         },
+        // SAFETY: a non-zero value word of a deque map is a live deque.
         MAP_VALUE_DEQUE => unsafe {
             crate::c_abi::deque::deque_mark_shared(
                 word as usize as *mut crate::c_abi::deque::GosDeque,
@@ -4188,10 +4653,12 @@ pub unsafe extern "C" fn gos_rt_map_mark_shared(m: *mut GosMap) {
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let owner = map_value_owner(map);
         if owner != MAP_VALUE_NONE {
             let storage = map.storage.lock();
+            // SAFETY: every value word is one the map owns, of class `owner`.
             let mark = |v: i64| unsafe { mark_owned_value_shared(owner, v) };
             match &*storage {
                 MapStorage::I64I64(inner) => inner.values().for_each(|&v| mark(v)),
@@ -4212,9 +4679,12 @@ pub unsafe extern "C" fn gos_rt_map_free(m: *mut GosMap) {
             return;
         }
         crate::c_abi::ledger::map_dec();
+        // SAFETY: `m` is non-null (checked above) and is the map `gos_rt_map_new` boxed, whose
+        // last owner frees it here (C-ABI contract).
         let boxed = unsafe { Box::from_raw(m) };
         {
             let storage = boxed.storage.lock();
+            // SAFETY: the storage belonged to the map being freed, of its value class.
             unsafe { release_storage_entries(map_value_owner(&boxed), &storage) };
         }
         drop(boxed);
@@ -4232,11 +4702,16 @@ pub unsafe extern "C" fn gos_rt_map_field_release(slot: *mut *mut GosMap) {
         if slot.is_null() {
             return;
         }
+        // SAFETY: `slot` is this shim's field argument, non-null (checked above), holding a `Map`
+        // handle (C-ABI contract).
         let m = unsafe { slot.read_unaligned() };
         if m.is_null() {
             return;
         }
+        // SAFETY: `slot` is the field read just above.
         unsafe { slot.write_unaligned(std::ptr::null_mut()) };
+        // SAFETY: `m` is non-null (checked above) and is the field's own map, which it held
+        // alone.
         unsafe { gos_rt_map_free(m) };
     });
 }
@@ -4253,11 +4728,15 @@ pub unsafe extern "C" fn gos_rt_map_field_clone(slot: *mut *mut GosMap) {
         if slot.is_null() {
             return;
         }
+        // SAFETY: `slot` is this shim's field argument, non-null (checked above), holding a `Map`
+        // handle (C-ABI contract).
         let m = unsafe { slot.read_unaligned() };
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is non-null (checked above) and the field's live map.
         let cloned = unsafe { crate::c_abi::gos_rt_map_clone(m) };
+        // SAFETY: `slot` is the field read just above.
         unsafe { slot.write_unaligned(cloned) };
     });
 }
@@ -4292,7 +4771,10 @@ pub unsafe extern "C" fn gos_rt_binding_map_free(m: *mut u8) {
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is non-null (checked above) and is the binding layout
+        // `gos_rt_binding_map_new` boxed (C-ABI contract).
         let boxed = unsafe { Box::from_raw(m.cast::<BindingGosMapLayout>()) };
+        // SAFETY: the layout's fields are the buffers the binding boxed alongside it.
         unsafe {
             gos_rt_vec_free(boxed.keys);
             gos_rt_vec_free(boxed.values);
@@ -4331,6 +4813,7 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         // wholesale at `arena_pop` - never individually. Touching them here
         // via `Box::from_raw` / `Vec::from_raw_parts` would corrupt the
         // global allocator (the memory isn't its).
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         if crate::c_abi::vec::vec_is_region(unsafe { &*v }) {
             return;
         }
@@ -4342,6 +4825,7 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         // Arc drop discipline, without which a weakly-ordered target (aarch64,
         // a shipped tier) could reclaim a buffer while a peer's store is still
         // in flight.
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let old_rc = crate::c_abi::vec::vec_rc_atomic(unsafe { &*v })
             .fetch_sub(1, std::sync::atomic::Ordering::Release);
         if crate::c_abi::vec::rc_trace_enabled() {
@@ -4373,8 +4857,10 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         // the header block, including any inline buffer); a separately
         // allocated (split) buffer is reclaimed explicitly via
         // `free_vec_buffer`.
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let compact_header = crate::c_abi::vec::vec_has_compact_header(unsafe { &*v });
         let inline_ptr = v.cast::<crate::c_abi::vec::InlineVec>();
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let boxed = unsafe { &*v };
         if !boxed.ptr.is_null() && boxed.cap > 0 {
             // Deep-free pointer-bearing element payloads BEFORE
@@ -4386,25 +4872,29 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
             // copy-blob children (set-gated in the walk) before the
             // buffer goes away.
             if boxed.elem_kind == vec_elem_kind::AGGR_GUARDED {
+                // SAFETY: the vec being freed holds guarded aggregate elements, as its kind says.
                 unsafe { crate::c_abi::vec::vec_release_guarded_elements(boxed) };
             }
             // Owned-slot-children elements (materializer shims): free
             // each live embedded string / nested vec, including slots a
             // consumer loop never reached (the early-`break` path).
             if boxed.elem_kind == vec_elem_kind::AGGR_OWNED {
+                // SAFETY: the vec being freed holds owned-slot aggregate elements, as its kind
+                // says.
                 unsafe { crate::c_abi::vec::vec_release_owned_children(boxed) };
             }
             if boxed.elem_kind != vec_elem_kind::PRIMITIVE && boxed.elem_bytes as usize == 8 {
                 let count = boxed.len.max(0) as usize;
-                // SAFETY: ptr is non-null + cap > 0 (checked above);
-                // we only read `count <= len <= cap` slots of 8 bytes
-                // each, all initialised by construction.
+                // `ptr` is non-null and `cap > 0` (checked above); the loop
+                // reads only the `count <= len <= cap` initialised 8-byte slots.
                 let base = boxed.ptr;
                 for i in 0..count {
                     // Slots hold child pointers exposed as integers by the
                     // flat-slot ABI in a byte buffer with no 8-byte
                     // alignment guarantee; read unaligned and recover
                     // provenance before the dereferencing free.
+                    // SAFETY: slot `i` is below `count`, inside the initialised
+                    // part of the buffer.
                     let raw = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
                         .expose_provenance();
                     if raw == 0 {
@@ -4422,24 +4912,30 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
                             };
                         }
                         vec_elem_kind::VEC => {
+                            // SAFETY: a `VEC`-kind vec owns each non-null element.
                             unsafe { gos_rt_vec_free(slot.cast::<GosVec>()) };
                         }
                         vec_elem_kind::MAP => {
+                            // SAFETY: a `MAP`-kind vec owns each non-null element.
                             unsafe { gos_rt_map_free(slot.cast::<GosMap>()) };
                         }
                         vec_elem_kind::ERROR => {
                             // Each element is a share of an error cell.
+                            // SAFETY: an `ERROR`-kind vec holds a share of each non-null element.
                             unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
                         }
                         vec_elem_kind::RC_ENUM => {
                             // The vec owns each enum-node element (the push
                             // moved the frame's share in); release cascades
                             // through the node's own child meta.
+                            // SAFETY: an `RC_ENUM`-kind vec holds a share of each non-null
+                            // element.
                             unsafe { crate::c_abi::rc::gos_rt_rc_release(slot) };
                         }
                         vec_elem_kind::JSON => {
                             // Each element is a handle holding a share of the
                             // document's tree; the tree dies with its last one.
+                            // SAFETY: a `JSON`-kind vec owns each non-null element's handle.
                             unsafe { crate::c_abi::json::gos_rt_json_free(slot.cast()) };
                         }
                         _ => {}
@@ -4462,12 +4958,15 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         // the header itself, never an address-keyed side table. Pass the
         // `Box`'s own borrow, not the raw `v`, so the read of `elem_kind`
         // stays under the Box's exclusive ownership.
+        // SAFETY: `v` is the vec being freed, held alone here.
         unsafe { crate::c_abi::vec::drop_vec_owner(&mut *v) };
         // Reconstruct the owning box now that the self-referential walk is
         // done, so its drop reclaims the header block (and any inline buffer).
         if compact_header {
+            // SAFETY: `v` is a compact header `Box::into_raw` made, freed only here.
             drop(unsafe { Box::from_raw(v) });
         } else {
+            // SAFETY: `inline_ptr` is the inline header `Box::into_raw` made, freed only here.
             drop(unsafe { Box::from_raw(inline_ptr) });
         }
     });
@@ -4481,6 +4980,8 @@ pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
             return;
         }
         crate::c_abi::ledger::set_dec();
+        // SAFETY: `s` is non-null (checked above) and is the set `gos_rt_set_new` boxed, whose
+        // last owner frees it here (C-ABI contract).
         drop(unsafe { Box::from_raw(s) });
     });
 }
@@ -4493,6 +4994,8 @@ pub unsafe extern "C" fn gos_rt_set_free(s: *mut GosSet) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_i64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_keys_ordered(m, KeyOrder::Signed) }
     })
 }
@@ -4502,6 +5005,8 @@ pub unsafe extern "C" fn gos_rt_map_keys_i64(m: *const GosMap) -> *mut GosVec {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_u64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_keys_ordered(m, KeyOrder::Unsigned) }
     })
 }
@@ -4554,6 +5059,7 @@ pub unsafe extern "C" fn gos_rt_map_set_float_keys(m: *mut GosMap) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     let map = unsafe { &*m };
     map.float_keys.store(true, Ordering::Release);
     let mut storage = map.storage.lock();
@@ -4571,6 +5077,7 @@ pub unsafe extern "C" fn gos_rt_map_set_ordered(m: *mut GosMap, unsigned: i64) {
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     let map = unsafe { &*m };
     let order = if unsigned == 0 {
         MAP_ORDERED_SIGNED
@@ -4598,9 +5105,11 @@ unsafe fn map_range(
     rank: impl Fn(&MapStorage, bool, bool) -> usize,
 ) -> *mut GosMap {
     if m.is_null() {
-        return unsafe { gos_rt_map_new(8, 8) };
+        return gos_rt_map_new(8, 8);
     }
     let (lo, hi) = {
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let storage = unsafe { &*m }.storage.lock();
         let lo = if mode & RANGE_HAS_LO != 0 {
             rank(&storage, true, false)
@@ -4614,6 +5123,7 @@ unsafe fn map_range(
         };
         (lo, hi)
     };
+    // SAFETY: this `unsafe fn`'s caller passes `m` null or live, which the window accepts.
     unsafe { gos_rt_map_window(m, lo as i64, hi.min(i64::MAX as usize) as i64, 0) }
 }
 
@@ -4627,6 +5137,7 @@ pub unsafe extern "C" fn gos_rt_map_range_i64(
     mode: i64,
 ) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
         unsafe {
             map_range(m, mode, |s, low, incl| {
                 s.rank_word(if low { lo } else { hi }, incl)
@@ -4648,10 +5159,13 @@ pub unsafe extern "C" fn gos_rt_map_range_typed_str(
             if p.is_null() {
                 &[]
             } else {
+                // SAFETY: `p` is non-null (checked above) and one of this shim's string arguments
+                // (C-ABI contract).
                 unsafe { crate::c_abi::gos_str_arg_bytes(p) }
             }
         };
         let (lo, hi) = (bytes(lo), bytes(hi));
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
         unsafe {
             map_range(m, mode, |s, low, incl| {
                 s.rank_bytes(if low { lo } else { hi }, incl)
@@ -4670,8 +5184,13 @@ pub unsafe extern "C" fn gos_rt_map_range_skey(
     mode: i64,
 ) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m`, `lo`, `desc` are this shim's arguments, live for the call (C-ABI contract)
+        // or null, which `skey_bytes` accepts.
         let lo = unsafe { skey_bytes(m, lo, desc) }.unwrap_or_default();
+        // SAFETY: `m`, `hi`, `desc` are this shim's arguments, live for the call (C-ABI contract)
+        // or null, which `skey_bytes` accepts.
         let hi = unsafe { skey_bytes(m, hi, desc) }.unwrap_or_default();
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
         unsafe {
             map_range(m, mode, |s, low, incl| {
                 s.rank_bytes(if low { &lo } else { &hi }, incl)
@@ -4690,8 +5209,13 @@ pub unsafe extern "C" fn gos_rt_map_range_ekey(
     mode: i64,
 ) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m`, `lo`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract), which `ekey_bytes` accepts.
         let lo = unsafe { ekey_bytes(m, lo, desc) }.unwrap_or_default();
+        // SAFETY: `m`, `hi`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract), which `ekey_bytes` accepts.
         let hi = unsafe { ekey_bytes(m, hi, desc) }.unwrap_or_default();
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
         unsafe {
             map_range(m, mode, |s, low, incl| {
                 s.rank_bytes(if low { &lo } else { &hi }, incl)
@@ -4712,8 +5236,9 @@ pub unsafe extern "C" fn gos_rt_map_window(
 ) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
         if m.is_null() {
-            return unsafe { gos_rt_map_new(8, 8) };
+            return gos_rt_map_new(8, 8);
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let len = map.len_cache.max(0) as usize;
         // A negative `lo` counts back from the end: `-1` is the last entry.
@@ -4759,24 +5284,30 @@ pub unsafe extern "C" fn gos_rt_map_set_ordered_by(
     if m.is_null() {
         return;
     }
+    // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
     let map = unsafe { &*m };
     map.user_cmp
         .store(cmp_addr.max(0) as usize, Ordering::Release);
     map.user_cmp_by_address
         .store(by_address != 0, Ordering::Release);
+    // SAFETY: `m` is this shim's `Map` argument, non-null and live (checked above; C-ABI
+    // contract).
     unsafe { gos_rt_map_set_ordered(m, unsigned) };
 }
 
 unsafe fn map_keys_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
     {
-        let out = unsafe { gos_rt_vec_new(8) };
+        let out = gos_rt_vec_new(8);
         if m.is_null() {
             return out;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let push_key = |k: &i64| {
             let bytes = k.to_ne_bytes();
+            // SAFETY: `out` is the live vec made above, and `bytes` one 8-byte key.
             unsafe { gos_rt_vec_push(out, bytes.as_ptr()) };
         };
         // Sort by key for deterministic order that matches `values()`,
@@ -4802,6 +5333,8 @@ unsafe fn map_keys_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_i64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_values_ordered(m, KeyOrder::Signed) }
     })
 }
@@ -4811,6 +5344,8 @@ pub unsafe extern "C" fn gos_rt_map_values_i64(m: *const GosMap) -> *mut GosVec 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_u64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_values_ordered(m, KeyOrder::Unsigned) }
     })
 }
@@ -4825,6 +5360,8 @@ pub unsafe extern "C" fn gos_rt_map_values_u64(m: *const GosMap) -> *mut GosVec 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_carrier(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_values_carrier_ordered(m, KeyOrder::Signed) }
     })
 }
@@ -4834,16 +5371,20 @@ pub unsafe extern "C" fn gos_rt_map_values_carrier(m: *const GosMap) -> *mut Gos
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_carrier_u64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_values_carrier_ordered(m, KeyOrder::Unsigned) }
     })
 }
 
 unsafe fn map_values_carrier_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
     let boxes = unsafe { map_values_ordered(m, order) };
-    let out = unsafe { crate::c_abi::vec::gos_rt_vec_new_typed(16, vec_elem_kind::PRIMITIVE) };
+    let out = crate::c_abi::vec::gos_rt_vec_new_typed(16, vec_elem_kind::PRIMITIVE);
     if boxes.is_null() {
         return out;
     }
+    // SAFETY: `boxes` is non-null (checked above), the vec the snapshot just built.
     let words = unsafe { &*boxes };
     let boxed_at = |index: usize| -> *mut u8 {
         // SAFETY: a values snapshot holds one 8-byte word per entry.
@@ -4861,6 +5402,7 @@ unsafe fn map_values_carrier_ordered(m: *const GosMap, order: KeyOrder) -> *mut 
     let child_kind = (0..count)
         .map(boxed_at)
         .find(|boxed| !boxed.is_null())
+        // SAFETY: `boxed` is non-null (the filter above) and a stored carrier box.
         .and_then(|boxed| unsafe { crate::c_abi::rc::boxed_carrier_child_kind(boxed) })
         .and_then(|kind| match kind {
             gossamer_abi::rc::RC_CHILD_RC => Some(vec_elem_kind::STRING),
@@ -4868,15 +5410,18 @@ unsafe fn map_values_carrier_ordered(m: *const GosMap, order: KeyOrder) -> *mut 
             _ => None,
         });
     if let Some(child_kind) = child_kind {
-        crate::c_abi::vec::vec_own_slot_children(
-            out,
-            Box::new([crate::c_abi::vec::VecSlotChild {
-                gate: 0,
-                disc_word: 0,
-                word: 1,
-                kind: child_kind,
-            }]),
-        );
+        // SAFETY: `out` is the live vec built above.
+        unsafe {
+            crate::c_abi::vec::vec_own_slot_children(
+                out,
+                Box::new([crate::c_abi::vec::VecSlotChild {
+                    gate: 0,
+                    disc_word: 0,
+                    word: 1,
+                    kind: child_kind,
+                }]),
+            );
+        }
     }
     for index in 0..count {
         let boxed = boxed_at(index);
@@ -4886,22 +5431,26 @@ unsafe fn map_values_carrier_ordered(m: *const GosMap, order: KeyOrder) -> *mut 
         // SAFETY: the stored word addresses the entry's two-word carrier.
         unsafe { gos_rt_vec_push(out, boxed.cast_const()) };
     }
+    // SAFETY: `boxes` is the snapshot built above, owned here.
     unsafe { gos_rt_vec_free(boxes) };
     out
 }
 
 unsafe fn map_values_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
     {
-        let out = unsafe { gos_rt_vec_new(8) };
+        let out = gos_rt_vec_new(8);
         if m.is_null() {
             return out;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         // Emit values in key-sorted order so `keys()` / `values()` /
         // `iter()` agree and the order is deterministic across tiers.
         let push_val = |v: i64| {
             let bytes = v.to_ne_bytes();
+            // SAFETY: `out` is the live vec made above, and `bytes` one 8-byte value.
             unsafe { gos_rt_vec_push(out, bytes.as_ptr()) };
         };
         match &*storage {
@@ -4959,15 +5508,17 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         // STRING-typed: the snapshot owns its key strings, so
         // `gos_rt_vec_free` reclaims them even on early `break`.
-        let out = unsafe { crate::c_abi::vec::gos_rt_vec_new_typed(8, vec_elem_kind::STRING) };
+        let out = crate::c_abi::vec::gos_rt_vec_new_typed(8, vec_elem_kind::STRING);
         if m.is_null() {
             return out;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let push_key = |k: &[u8]| {
             let cstr = alloc_cstring(k);
             let slot = (cstr as usize as i64).to_ne_bytes();
+            // SAFETY: `out` is the live vec made above, and `slot` one 8-byte string word.
             unsafe { gos_rt_vec_push(out, slot.as_ptr()) };
         };
         // Sort by key (lexicographic byte order, matching the VM's
@@ -4981,6 +5532,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
             }
             _ => Vec::new(),
         };
+        // SAFETY: `out` is the live vec made above.
         unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(out, keys.len() as i64) };
         for (_, k, ()) in keys {
             push_key(k);
@@ -4994,6 +5546,8 @@ pub unsafe extern "C" fn gos_rt_map_keys_str(m: *const GosMap) -> *mut GosVec {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_str(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_values_str_ordered(m, KeyOrder::Signed) }
     })
 }
@@ -5001,15 +5555,18 @@ pub unsafe extern "C" fn gos_rt_map_values_str(m: *const GosMap) -> *mut GosVec 
 unsafe fn map_values_str_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
     {
         // STRING-typed - same ownership contract as `gos_rt_map_keys_str`.
-        let out = unsafe { crate::c_abi::vec::gos_rt_vec_new_typed(8, vec_elem_kind::STRING) };
+        let out = crate::c_abi::vec::gos_rt_vec_new_typed(8, vec_elem_kind::STRING);
         if m.is_null() {
             return out;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let push_val = |v: &[u8]| {
             let cstr = alloc_cstring(v);
             let slot = (cstr as usize as i64).to_ne_bytes();
+            // SAFETY: `out` is the live vec made above, and `slot` one 8-byte string word.
             unsafe { gos_rt_vec_push(out, slot.as_ptr()) };
         };
         // Values in key-sorted order so `keys()` / `values()` / `iter()`
@@ -5146,6 +5703,8 @@ impl<T> RadixRow for (u64, &[u8], T) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_entries_into(m: *const GosMap, out: *mut GosVec) {
     ffi_entry!((), {
+        // SAFETY: `m` and `out` are this shim's arguments, each null or live (C-ABI contract),
+        // which the snapshot accepts.
         unsafe { map_entries_ordered(m, out, KeyOrder::Signed) }
     });
 }
@@ -5158,6 +5717,8 @@ pub unsafe extern "C" fn gos_rt_map_entries_into(m: *const GosMap, out: *mut Gos
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_entries_into_u64(m: *const GosMap, out: *mut GosVec) {
     ffi_entry!((), {
+        // SAFETY: `m` and `out` are this shim's arguments, each null or live (C-ABI contract),
+        // which the snapshot accepts.
         unsafe { map_entries_ordered(m, out, KeyOrder::Unsigned) }
     });
 }
@@ -5167,10 +5728,14 @@ unsafe fn map_entries_ordered(m: *const GosMap, out: *mut GosVec, order: KeyOrde
         if m.is_null() || out.is_null() {
             return;
         }
+        // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Vec`.
         if unsafe { (*out).elem_bytes } != 16 {
             crate::c_abi::panic::panic_text("map entries need a two-word pair slot");
             return;
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let string_word = |bytes: &[u8]| alloc_cstring(bytes) as usize as i64;
@@ -5211,20 +5776,31 @@ unsafe fn map_entries_ordered(m: *const GosMap, out: *mut GosVec, order: KeyOrde
             }
         };
         drop(storage);
+        // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Vec`.
         let len = unsafe { (*out).len };
+        // SAFETY: `out` is non-null and live (checked above).
         unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(out, len + pairs.len() as i64) };
+        // SAFETY: `out` is non-null and live, and `pairs` its new elements.
         unsafe { append_pair_slots(out, &pairs) };
     }
 }
 
 /// Appends two-word pair slots to a vec whose element is exactly one pair.
 ///
-/// SAFETY: `out` is a live vec with a 16-byte element, and any string pointer a
+///
+/// # Safety
+///
+/// `out` is a live vec with a 16-byte element, and any string pointer a
 /// pair carries is a share the vec takes over.
 unsafe fn append_pair_slots(out: *mut GosVec, pairs: &[[i64; 2]]) {
+    // SAFETY: this `unsafe fn`'s caller passes `out` a live 16-byte-element `Vec`.
     let len = unsafe { (*out).len };
+    // SAFETY: `out` is a live `Vec`.
     unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(out, len + pairs.len() as i64) };
+    // SAFETY: `out` is a live `Vec`, not otherwise accessed during this call.
     let vec = unsafe { &mut *out };
+    // SAFETY: the reserve above made room for `pairs.len()` more 16-byte elements past `len`.
     let base = unsafe { vec.ptr.as_ptr().add(vec.len as usize * 16) };
     // SAFETY: the reserve above leaves room for every pair past `len`, and a
     // pair is exactly the vec's 16-byte slot.
@@ -5256,11 +5832,13 @@ pub unsafe extern "C" fn gos_rt_map_select_by_key_into(
         if m.is_null() || out.is_null() {
             return;
         }
+        // SAFETY: `out` is a handle from compiled code, checked non-null above and live for the whole call.
         if unsafe { (*out).elem_bytes } != 16 {
             crate::c_abi::panic::panic_text("map entries need a two-word pair slot");
             return;
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return;
         };
         let (key_is_f64, want_max) = (key_is_f64 != 0, want_max != 0);
@@ -5274,6 +5852,7 @@ pub unsafe extern "C" fn gos_rt_map_select_by_key_into(
             let ord = key.order(best);
             (if want_max { ord.is_gt() } else { ord.is_lt() }) || (ord.is_eq() && key_first)
         };
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let winner: Option<[i64; 2]> = match &*storage {
@@ -5309,6 +5888,7 @@ pub unsafe extern "C" fn gos_rt_map_select_by_key_into(
         };
         drop(storage);
         if let Some(pair) = winner {
+            // SAFETY: `out` is this shim's `Vec` argument, live for the call (C-ABI contract).
             unsafe { append_pair_slots(out, &[pair]) };
         }
     });
@@ -5330,12 +5910,13 @@ fn empty_cstring() -> *mut c_char {
 pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if m.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let MapStorage::SkeyVal { entries, desc } = &*storage else {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         };
         let slots = desc.len();
         // A field-less key occupies the one slot every inline aggregate is
@@ -5345,7 +5926,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
         if !entries.is_ordered() {
             keys.sort_by_cached_key(|key| skey_order(key, desc));
         }
-        let out = unsafe {
+        let out = {
             crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                 elem_bytes,
                 keys.len() as i64,
@@ -5361,12 +5942,14 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
                 // words it names.
                 // SAFETY: the slots hold the words the descriptor names.
                 unsafe { crate::c_abi::slot_key::retain_slots(key, Some(desc), false) };
+                // SAFETY: `out` is the live vec made above, and `key` one element of its width.
                 unsafe { gos_rt_vec_push(out, key.as_ptr()) };
                 continue;
             }
             if !decode_skey_into(key, desc, &mut slot_buf) {
                 continue;
             }
+            // SAFETY: `out` is the live vec made above, and `slot_buf` one element of its width.
             unsafe { gos_rt_vec_push(out, slot_buf.as_ptr().cast::<u8>()) };
         }
         // String and sequence slots hold a freshly allocated c-string or vec
@@ -5386,6 +5969,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_skey(m: *const GosMap) -> *mut GosVec {
             let mut meta = Vec::with_capacity(string_slots.len() + 1);
             meta.push((string_slots.len() / 4) as i64);
             meta.extend_from_slice(&string_slots);
+            // SAFETY: `out` is the live vec made above, and `meta` its slot-child table.
             unsafe { crate::c_abi::vec::gos_rt_vec_set_slot_children(out, meta.as_ptr()) };
         }
         out
@@ -5556,13 +6140,15 @@ fn decode_skey_into(key: &[u8], desc: &[u8], slots: &mut [i64]) -> bool {
                     return false;
                 };
                 cursor += len * stride;
-                let vec = unsafe {
+                let vec = {
                     crate::c_abi::vec::gos_rt_vec_new_typed(
                         stride as u32,
                         crate::c_abi::vec::vec_elem_kind::PRIMITIVE,
                     )
                 };
                 for chunk in bytes.chunks_exact(stride) {
+                    // SAFETY: `vec` is the live vec made above, and `chunk` one element of its
+                    // stride.
                     unsafe { crate::c_abi::vec::gos_rt_vec_push(vec, chunk.as_ptr()) };
                 }
                 slots[index] = vec as usize as i64;
@@ -5579,6 +6165,8 @@ fn decode_skey_into(key: &[u8], desc: &[u8], slots: &mut [i64]) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_keys_vec_ordered(m, KeyOrder::Signed) }
     })
 }
@@ -5588,6 +6176,8 @@ pub unsafe extern "C" fn gos_rt_map_keys_vec(m: *const GosMap) -> *mut GosVec {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_keys_vec_u64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_keys_vec_ordered(m, KeyOrder::Unsigned) }
     })
 }
@@ -5595,13 +6185,16 @@ pub unsafe extern "C" fn gos_rt_map_keys_vec_u64(m: *const GosMap) -> *mut GosVe
 unsafe fn map_keys_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
     {
         if m.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         match &*storage {
             MapStorage::I64I64(_) | MapStorage::I64Bytes(_) | MapStorage::I64Str(_) => {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
                 unsafe { map_keys_ordered(m, order) }
             }
             MapStorage::StrI64(_)
@@ -5609,17 +6202,20 @@ unsafe fn map_keys_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec
             | MapStorage::StrBytes(_)
             | MapStorage::Bytes(_) => {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` live; non-null, checked above.
                 unsafe { gos_rt_map_keys_str(m) }
             }
             MapStorage::SkeyVal { .. } => {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` live; non-null, checked above.
                 unsafe { gos_rt_map_keys_skey(m) }
             }
             MapStorage::EkeyVal { .. } => {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` live; non-null, checked above.
                 unsafe { gos_rt_map_keys_ekey(m) }
             }
-            MapStorage::Empty => unsafe { gos_rt_vec_new(8) },
+            MapStorage::Empty => gos_rt_vec_new(8),
         }
     }
 }
@@ -5629,6 +6225,8 @@ unsafe fn map_keys_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_values_vec_ordered(m, KeyOrder::Signed) }
     })
 }
@@ -5638,6 +6236,8 @@ pub unsafe extern "C" fn gos_rt_map_values_vec(m: *const GosMap) -> *mut GosVec 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_values_vec_u64(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which the
+        // snapshot accepts.
         unsafe { map_values_vec_ordered(m, KeyOrder::Unsigned) }
     })
 }
@@ -5646,17 +6246,21 @@ pub unsafe extern "C" fn gos_rt_map_values_vec_u64(m: *const GosMap) -> *mut Gos
 /// each: the snapshot is a `Vec<Vec<_>>` of its own, whose elements a write
 /// through (`vals[0].push(x)`) must not reach the map's entries with.
 unsafe fn owned_vec_values(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
+    // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
     let words = unsafe { map_values_ordered(m, order) };
+    // SAFETY: `words` is the snapshot just built.
     let len = unsafe { (*words).len.max(0) } as usize;
-    let out = unsafe {
-        crate::c_abi::vec::gos_rt_vec_with_capacity_typed(8, len as i64, vec_elem_kind::VEC)
-    };
+    let out =
+        { crate::c_abi::vec::gos_rt_vec_with_capacity_typed(8, len as i64, vec_elem_kind::VEC) };
     for i in 0..len {
         // SAFETY: `words` holds `len` eight-byte value words.
         let word = unsafe { (*words).ptr.add(i * 8).cast::<i64>().read_unaligned() };
+        // SAFETY: each value word of a `Vec`-valued map is a live `Vec`.
         let copy = unsafe { crate::c_abi::gos_rt_vec_clone(word as usize as *const GosVec) };
+        // SAFETY: `out` is the live vec made above, and `copy` one 8-byte element.
         unsafe { gos_rt_vec_push(out, (&raw const copy).cast()) };
     }
+    // SAFETY: `words` is the snapshot built above, owned here.
     unsafe { gos_rt_vec_free(words) };
     out
 }
@@ -5664,8 +6268,10 @@ unsafe fn owned_vec_values(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
 unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosVec {
     {
         if m.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map`.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         match &*storage {
@@ -5676,10 +6282,12 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
                 if map_value_owner(map) == MAP_VALUE_VEC =>
             {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
                 unsafe { owned_vec_values(m, order) }
             }
             MapStorage::I64I64(_) | MapStorage::StrI64(_) => {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
                 unsafe { map_values_ordered(m, order) }
             }
             MapStorage::I64Bytes(inner) => {
@@ -5689,10 +6297,11 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
                 }
                 let values: Vec<*mut GosVec> = entries
                     .into_iter()
+                    // SAFETY: `value` is the entry's own byte buffer.
                     .map(|(_, value)| unsafe { byte_vec_from_slice(value) })
                     .collect();
                 drop(storage);
-                let out = unsafe {
+                let out = {
                     crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                         8,
                         values.len() as i64,
@@ -5700,12 +6309,14 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
                     )
                 };
                 for value in values {
+                    // SAFETY: `out` is the live vec made above, and `value` one 8-byte element.
                     unsafe { gos_rt_vec_push(out, (&raw const value).cast()) };
                 }
                 out
             }
             MapStorage::StrStr(_) | MapStorage::I64Str(_) | MapStorage::Bytes(_) => {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
                 unsafe { map_values_str_ordered(m, order) }
             }
             MapStorage::StrBytes(inner) => {
@@ -5715,10 +6326,11 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
                 }
                 let values: Vec<*mut GosVec> = entries
                     .into_iter()
+                    // SAFETY: `value` is the entry's own byte buffer.
                     .map(|(_, value)| unsafe { byte_vec_from_slice(value) })
                     .collect();
                 drop(storage);
-                let out = unsafe {
+                let out = {
                     crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                         8,
                         values.len() as i64,
@@ -5726,6 +6338,7 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
                     )
                 };
                 for value in values {
+                    // SAFETY: `out` is the live vec made above, and `value` one 8-byte element.
                     unsafe { gos_rt_vec_push(out, (&raw const value).cast()) };
                 }
                 out
@@ -5735,9 +6348,10 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
             // m.values()` see the real values instead of an empty Vec.
             MapStorage::SkeyVal { .. } | MapStorage::EkeyVal { .. } => {
                 drop(storage);
+                // SAFETY: this `unsafe fn`'s caller passes `m` null or live.
                 unsafe { map_values_ordered(m, order) }
             }
-            MapStorage::Empty => unsafe { gos_rt_vec_new(8) },
+            MapStorage::Empty => gos_rt_vec_new(8),
         }
     }
 }
@@ -5749,14 +6363,16 @@ unsafe fn map_values_vec_ordered(m: *const GosMap, order: KeyOrder) -> *mut GosV
 pub unsafe extern "C" fn gos_rt_map_pop_i64(m: *mut GosMap, key: i64) -> i128 {
     ffi_entry!(0i128, {
         if m.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         let popped: Option<i64> = match &mut *storage {
             MapStorage::I64I64(inner) => inner.remove(&key),
             MapStorage::I64Bytes(inner) => inner
                 .remove(key)
+                // SAFETY: `bs` is the removed entry's byte buffer.
                 .map(|bs| unsafe { byte_vec_from_slice(bs.as_slice()) } as i64),
             MapStorage::I64Str(inner) => inner.remove(&key).map(|bs| {
                 let cstr = alloc_cstring(&bs);
@@ -5768,8 +6384,8 @@ pub unsafe extern "C" fn gos_rt_map_pop_i64(m: *mut GosMap, key: i64) -> i128 {
             map.len_cache = map.len_cache.saturating_sub(1);
         }
         match popped {
-            Some(v) => unsafe { gos_rt_result_new(0, v) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(v) => gos_rt_result_new(0, v),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -5781,9 +6397,12 @@ pub unsafe extern "C" fn gos_rt_map_pop_i64(m: *mut GosMap, key: i64) -> i128 {
 unsafe fn map_pop_str_impl(m: *mut GosMap, key: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if m.is_null() || key.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // `Map` not otherwise accessed during the call.
         let map = unsafe { &mut *m };
+        // SAFETY: this `unsafe fn`'s caller passes `key` live; non-null, checked above.
         let key_bytes = unsafe { crate::c_abi::gos_str_arg_bytes(key) };
         let mut storage = map.storage.lock();
         let popped: Option<i64> = match &mut *storage {
@@ -5796,6 +6415,7 @@ unsafe fn map_pop_str_impl(m: *mut GosMap, key: *const c_char) -> i128 {
             }
             MapStorage::StrBytes(inner) => inner
                 .remove(key_bytes)
+                // SAFETY: `bs` is the removed entry's byte buffer.
                 .map(|bs| unsafe { byte_vec_from_slice(bs.as_slice()) } as i64),
             _ => None,
         };
@@ -5803,19 +6423,23 @@ unsafe fn map_pop_str_impl(m: *mut GosMap, key: *const c_char) -> i128 {
             map.len_cache = map.len_cache.saturating_sub(1);
         }
         match popped {
-            Some(v) => unsafe { gos_rt_result_new(0, v) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(v) => gos_rt_result_new(0, v),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_pop_str(m: *mut GosMap, key: *const c_char) -> i128 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_pop_str_impl` accepts.
     unsafe { map_pop_str_impl(m, key) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_pop_typed_str(m: *mut GosMap, key: *const c_char) -> i128 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_pop_str_impl` accepts.
     unsafe { map_pop_str_impl(m, key) }
 }
 
@@ -5830,14 +6454,17 @@ pub unsafe extern "C" fn gos_rt_map_pop_skey(
     key: *const u8,
     desc: *const c_char,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
-        let none = unsafe { gos_rt_result_new(1, 0) };
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        let none = gos_rt_result_new(1, 0);
+        // SAFETY: `m`, `key`, `desc` are this shim's arguments, live for the call (C-ABI
+        // contract) or null, which `skey_bytes` accepts.
         let Some(k) = (unsafe { skey_bytes(m, key, desc) }) else {
             return none;
         };
         if m.is_null() {
             return none;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
         let mut storage = map.storage.lock();
         let key_slots = map.keys_are_slots();
@@ -5861,7 +6488,7 @@ pub unsafe extern "C" fn gos_rt_map_pop_skey(
             map.len_cache = map.len_cache.saturating_sub(1);
         }
         match popped {
-            Some(v) => unsafe { gos_rt_result_new(0, v) },
+            Some(v) => gos_rt_result_new(0, v),
             None => none,
         }
     })
@@ -5873,7 +6500,9 @@ pub unsafe extern "C" fn gos_rt_map_remove(m: *mut GosMap, key: *const u8) -> i3
         if m.is_null() || key.is_null() {
             return 0;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &mut *m };
+        // SAFETY: `key` is this shim's 8-byte key argument (C-ABI contract).
         let k = unsafe { std::slice::from_raw_parts(key, 8) };
         let mut storage = map.storage.lock();
         let removed = match &mut *storage {
@@ -5892,7 +6521,9 @@ pub unsafe extern "C" fn gos_rt_map_remove(m: *mut GosMap, key: *const u8) -> i3
 /// Inserts into an i64-keyed, word-valued map and returns the previous value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_map_insert_i64_i64_opt(m: *mut GosMap, key: i64, val: i64) -> i128 {
+    // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
     let previous = unsafe { gos_rt_map_get_i64_opt(m, key) };
+    // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
     unsafe { gos_rt_map_insert_i64_i64(m, key, val) };
     previous
 }
@@ -5904,7 +6535,11 @@ pub unsafe extern "C" fn gos_rt_map_insert_str_i64_opt(
     key: *const c_char,
     val: i64,
 ) -> i128 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `gos_rt_map_get_str_opt` accepts.
     let previous = unsafe { gos_rt_map_get_str_opt(m, key) };
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live, and `key` arrives as a
+    // consuming-call argument (C-ABI contract).
     unsafe { gos_rt_map_insert_str_i64(m, key, val) };
     previous
 }
@@ -5915,7 +6550,11 @@ pub unsafe extern "C" fn gos_rt_map_insert_typed_str_i64_opt(
     key: *const c_char,
     val: i64,
 ) -> i128 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `map_get_str_opt_impl` accepts.
     let previous = unsafe { map_get_str_opt_impl(m, key) };
+    // SAFETY: `m` and `key` are this shim's arguments, each null or live, and `key` arrives as a
+    // consuming-call argument (C-ABI contract).
     unsafe { map_insert_str_i64_impl(m, key, val, true) };
     previous
 }
@@ -5927,7 +6566,10 @@ pub unsafe extern "C" fn gos_rt_map_insert_i64_str_opt(
     key: i64,
     val: *const c_char,
 ) -> i128 {
+    // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract).
     let previous = unsafe { gos_rt_map_get_i64_opt(m, key) };
+    // SAFETY: `m` and `val` are this shim's arguments, each null or live, and `val` arrives as a
+    // consuming-call argument (C-ABI contract).
     unsafe { gos_rt_map_insert_i64_str(m, key, val) };
     previous
 }
@@ -5939,7 +6581,11 @@ pub unsafe extern "C" fn gos_rt_map_insert_str_str_opt(
     key: *const c_char,
     val: *const c_char,
 ) -> i128 {
+    // SAFETY: `m`, `key` are this shim's arguments, live for the call (C-ABI contract) or null,
+    // which `gos_rt_map_get_str_opt` accepts.
     let previous = unsafe { gos_rt_map_get_str_opt(m, key) };
+    // SAFETY: `m`, `key`, `val` are this shim's arguments, live for the call (C-ABI contract) or
+    // null, which `gos_rt_map_insert_str_str` accepts.
     unsafe { gos_rt_map_insert_str_str(m, key, val) };
     previous
 }
@@ -5952,7 +6598,11 @@ pub unsafe extern "C" fn gos_rt_map_insert_skey_opt(
     desc: *const c_char,
     val: i64,
 ) -> i128 {
+    // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+    // contract).
     let previous = unsafe { gos_rt_map_get_skey_opt(m, key, desc) };
+    // SAFETY: `m`, `key`, and `desc` are this shim's arguments, and `key` arrives as a
+    // consuming-call argument (C-ABI contract).
     unsafe { gos_rt_map_insert_skey(m, key, desc, val) };
     previous
 }
@@ -5967,6 +6617,8 @@ pub unsafe extern "C" fn gos_rt_map_get_or_skey(
     default: i64,
 ) -> i64 {
     ffi_entry!(default, {
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         unsafe { skey_lookup(m, key, desc) }.unwrap_or(default)
     })
 }
@@ -5984,25 +6636,40 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_skey(
         // The key and the value arrive as moved shares: the key is folded into
         // the entry's own bytes either way, and the value share becomes the
         // entry's when the key is absent.
+        // SAFETY: `m` is non-null (checked first) and this shim's live `Map` argument (C-ABI
+        // contract).
         let copies = !m.is_null() && owner_copies_on_share(map_value_owner(unsafe { &*m }));
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         if let Some(found) = unsafe { skey_lookup(m, key, desc) } {
             if !m.is_null() && default != found && !copies {
+                // SAFETY: `m` is non-null (checked above) and live (C-ABI contract).
                 let map = unsafe { &*m };
                 if map_has_owned_values(map) {
+                    // SAFETY: `default` is a value the map held a share of, which it gives back
+                    // here.
                     unsafe { release_owned_value(map, default) };
                 }
             }
+            // SAFETY: `key` arrived as a consuming-call argument laid out as `desc` describes
+            // (C-ABI contract).
             unsafe { consume_moved_skey(key, desc) };
             return found;
         }
         // A table value arrives as the caller's own, which the caller frees,
         // so the entry keeps a copy.
         let stored = if copies {
+            // SAFETY: `default` is a value of the map's value class; this takes the map's own
+            // share of it.
             unsafe { share_owned_value(&*m, default) }
         } else {
             default
         };
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments; `stored` already carries the
+        // map's share.
         unsafe { insert_skey_entry(m, key, desc, stored, false) };
+        // SAFETY: `key` arrived as a consuming-call argument laid out as `desc` describes (C-ABI
+        // contract).
         unsafe { consume_moved_skey(key, desc) };
         stored
     })
@@ -6018,9 +6685,13 @@ pub unsafe extern "C" fn gos_rt_map_inc_skey(
     by: i64,
 ) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         let next = unsafe { skey_lookup(m, key, desc) }
             .unwrap_or(0)
             .wrapping_add(by);
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         unsafe { insert_skey_entry(m, key, desc, next, true) };
         next
     })
@@ -6041,11 +6712,15 @@ pub unsafe extern "C" fn gos_rt_map_inc_skey(
 /// # Safety
 /// `node` is an enum node and `desc` its variant-layout descriptor.
 pub(crate) unsafe fn enum_canonical_key(node: *mut u8, desc: *const i64) -> Option<Vec<u8>> {
+    // SAFETY: this `unsafe fn`'s caller passes `node` and `desc` as a live enum node and its
+    // descriptor.
     unsafe { enum_canonical_bytes(node, desc) }
 }
 
 unsafe fn enum_canonical_bytes(node: *mut u8, desc: *const i64) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(16);
+    // SAFETY: this `unsafe fn`'s caller passes `node` and `desc` as a live enum node and its
+    // descriptor.
     unsafe { append_enum_canonical(node, desc, &mut out) }.then_some(out)
 }
 
@@ -6069,8 +6744,12 @@ unsafe fn append_enum_canonical(node: *mut u8, desc: *const i64, out: &mut Vec<u
     let disc = if tag != 0 {
         (tag >> 1) as u8
     } else {
+        // SAFETY: an untagged node carries its discriminant in the header byte three below the
+        // payload.
         unsafe { *base.sub(3) }
     };
+    // SAFETY: `desc` is non-null (checked above) and, per this `unsafe fn`'s caller, the enum's
+    // descriptor table, which the variant and field counts it records keep this read inside.
     let num_variants = unsafe { *desc };
     if i64::from(disc) >= num_variants {
         return false;
@@ -6078,13 +6757,22 @@ unsafe fn append_enum_canonical(node: *mut u8, desc: *const i64, out: &mut Vec<u
     out.push(disc);
     let mut idx = 1usize;
     for _ in 0..disc {
+        // SAFETY: `desc` is non-null (checked above) and, per this `unsafe fn`'s caller, the
+        // enum's descriptor table, which the variant and field counts it records keep this read
+        // inside.
         let nf = unsafe { *desc.add(idx) }.max(0);
         idx += 1 + nf as usize;
     }
+    // SAFETY: `desc` is non-null (checked above) and, per this `unsafe fn`'s caller, the enum's
+    // descriptor table, which the variant and field counts it records keep this read inside.
     let nf = unsafe { *desc.add(idx) }.max(0);
     idx += 1;
     for f in 0..nf {
+        // SAFETY: `desc` is non-null (checked above) and, per this `unsafe fn`'s caller, the
+        // enum's descriptor table, which the variant and field counts it records keep this read
+        // inside.
         let kind = unsafe { *desc.add(idx + f as usize) };
+        // SAFETY: `f` is below the variant's field count, inside the node's payload.
         let word = unsafe { *(base as *const i64).add(f as usize) };
         match kind {
             // A `String` field folds by content, like the `'S'` slot of an
@@ -6094,12 +6782,14 @@ unsafe fn append_enum_canonical(node: *mut u8, desc: *const i64, out: &mut Vec<u
                 if sptr.is_null() {
                     out.extend_from_slice(&0u64.to_le_bytes());
                 } else {
+                    // SAFETY: `sptr` is non-null (checked above) and a string field's live body.
                     let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(sptr) };
                     out.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
                     out.extend_from_slice(bytes);
                 }
             }
             3 => {
+                // SAFETY: a field of kind 3 is a nested node of the same descriptor.
                 if !unsafe { append_enum_canonical(word as *mut u8, desc, out) } {
                     return false;
                 }
@@ -6123,6 +6813,8 @@ unsafe fn with_ekey_entries<R>(
     if m.is_null() {
         return None;
     }
+    // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Map`
+    // not otherwise accessed during the call.
     let map = unsafe { &mut *m };
     let mut storage = map.storage.lock();
     if install && matches!(*storage, MapStorage::Empty) {
@@ -6143,10 +6835,13 @@ unsafe fn with_ekey_entries<R>(
 /// value back from a snapshot. Returns the previous value word, if the key was
 /// already present.
 unsafe fn ekey_insert(m: *mut GosMap, key: *mut u8, desc: *const i64, val: i64) -> Option<i64> {
+    // SAFETY: this `unsafe fn`'s caller passes `m`, `key`, and `desc` null or live.
     let bytes = unsafe { ekey_bytes(m, key, desc) }?;
+    // SAFETY: this `unsafe fn`'s caller passes `m` null or live, which `with_ekey_entries`
+    // accepts, and `key` a live node, whose share the entry takes.
     unsafe {
         with_ekey_entries(m, true, |entries, len| {
-            unsafe { crate::c_abi::rc::gos_rt_rc_retain(key) };
+            crate::c_abi::rc::gos_rt_rc_retain(key);
             let replaced = entries.insert(
                 bytes.into(),
                 EnumEntry {
@@ -6156,7 +6851,7 @@ unsafe fn ekey_insert(m: *mut GosMap, key: *mut u8, desc: *const i64, val: i64) 
             );
             // The replaced entry's own share of its key node is done.
             if let Some(prev) = &replaced {
-                unsafe { crate::c_abi::rc::gos_rt_rc_release(prev.key_node) };
+                crate::c_abi::rc::gos_rt_rc_release(prev.key_node);
             } else {
                 *len += 1;
             }
@@ -6168,10 +6863,12 @@ unsafe fn ekey_insert(m: *mut GosMap, key: *mut u8, desc: *const i64, val: i64) 
 
 /// The value word stored under an enum key, or `None` when absent.
 unsafe fn ekey_lookup(m: *const GosMap, key: *mut u8, desc: *const i64) -> Option<i64> {
+    // SAFETY: this `unsafe fn`'s caller passes `m`, `key`, and `desc` null or live.
     let bytes = unsafe { ekey_bytes(m, key, desc) }?;
     if m.is_null() {
         return None;
     }
+    // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Map`.
     let map = unsafe { &*m };
     let storage = map.storage.lock();
     let MapStorage::EkeyVal { entries } = &*storage else {
@@ -6191,22 +6888,27 @@ pub unsafe extern "C" fn gos_rt_map_insert_ekey_opt(
     desc: *const i64,
     val: i64,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
         // An owning map keeps a share of the stored value, and a replaced value
         // leaves with the share the entry held, so the caller owns what comes
         // back - including the stored value itself when it is inserted again.
         let val = if m.is_null() {
             val
         } else {
+            // SAFETY: `val` is a value of the map's value class; this takes the map's own share
+            // of it.
             unsafe { share_owned_value(&*m, val) }
         };
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         let previous = unsafe { ekey_insert(m, key, desc, val) };
         // The entry took its own share of the key node; the caller's moved
         // share goes back.
+        // SAFETY: `key` arrived as a consuming-call argument; the entry took its own share.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
         match previous {
-            Some(prev) => unsafe { gos_rt_result_new(0, prev) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(prev) => gos_rt_result_new(0, prev),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -6218,12 +6920,15 @@ pub unsafe extern "C" fn gos_rt_map_get_ekey_opt(
     key: *mut u8,
     desc: *const i64,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
         // The caller's option holder receives a share of its own, as every
         // other key shape's `get` gives it.
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         match unsafe { ekey_lookup(m, key, desc) } {
+            // SAFETY: `m` is live (the lookup found an entry), and `v` a value the map owns.
             Some(v) => unsafe { gos_rt_result_new(0, lend_owned_value(&*m, v)) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -6235,6 +6940,8 @@ pub unsafe extern "C" fn gos_rt_map_contains_ekey(
     key: *mut u8,
     desc: *const i64,
 ) -> bool {
+    // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+    // contract).
     ffi_entry!(false, { unsafe { ekey_lookup(m, key, desc) }.is_some() })
 }
 
@@ -6245,23 +6952,27 @@ pub unsafe extern "C" fn gos_rt_map_pop_ekey(
     key: *mut u8,
     desc: *const i64,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
-        let none = unsafe { gos_rt_result_new(1, 0) };
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        let none = gos_rt_result_new(1, 0);
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         let Some(bytes) = (unsafe { ekey_bytes(m, key, desc) }) else {
             return none;
         };
+        // SAFETY: `m` is this shim's `Map` argument, null or live (C-ABI contract), which
+        // `with_ekey_entries` accepts; each removed entry's key-node share is given back once.
         let popped = unsafe {
             with_ekey_entries(m, false, |entries, len| {
                 entries
                     .remove(ByteKeyRef::new(bytes.as_slice()))
                     .inspect(|entry| {
                         *len = len.saturating_sub(1);
-                        unsafe { crate::c_abi::rc::gos_rt_rc_release(entry.key_node) };
+                        crate::c_abi::rc::gos_rt_rc_release(entry.key_node);
                     })
             })
         };
         match popped.flatten() {
-            Some(entry) => unsafe { gos_rt_result_new(0, entry.value) },
+            Some(entry) => gos_rt_result_new(0, entry.value),
             None => none,
         }
     })
@@ -6276,6 +6987,8 @@ pub unsafe extern "C" fn gos_rt_map_get_or_ekey(
     default: i64,
 ) -> i64 {
     ffi_entry!(default, {
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         unsafe { ekey_lookup(m, key, desc) }.unwrap_or(default)
     })
 }
@@ -6292,25 +7005,38 @@ pub unsafe extern "C" fn gos_rt_map_or_insert_ekey(
         // The key node and the value arrive as moved shares. The entry takes a
         // key share of its own, and keeps the value share only when the key is
         // absent.
+        // SAFETY: `m` is non-null (checked first) and this shim's live `Map` argument (C-ABI
+        // contract).
         let copies = !m.is_null() && owner_copies_on_share(map_value_owner(unsafe { &*m }));
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         if let Some(found) = unsafe { ekey_lookup(m, key, desc) } {
             if !m.is_null() && default != found && !copies {
+                // SAFETY: `m` is non-null (checked above) and live (C-ABI contract).
                 let map = unsafe { &*m };
                 if map_has_owned_values(map) {
+                    // SAFETY: `default` is a value the map held a share of, which it gives back
+                    // here.
                     unsafe { release_owned_value(map, default) };
                 }
             }
+            // SAFETY: `key` arrived as a consuming-call argument, whose share this gives back.
             unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
             return found;
         }
         // A table value arrives as the caller's own, which the caller frees,
         // so the entry keeps a copy.
         let stored = if copies {
+            // SAFETY: `default` is a value of the map's value class; this takes the map's own
+            // share of it.
             unsafe { share_owned_value(&*m, default) }
         } else {
             default
         };
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments; `stored` already carries the
+        // map's share.
         unsafe { ekey_insert(m, key, desc, stored) };
+        // SAFETY: `key` arrived as a consuming-call argument; the entry took its own share.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(key) };
         stored
     })
@@ -6325,9 +7051,13 @@ pub unsafe extern "C" fn gos_rt_map_inc_ekey(
     by: i64,
 ) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         let next = unsafe { ekey_lookup(m, key, desc) }
             .unwrap_or(0)
             .wrapping_add(by);
+        // SAFETY: `m`, `key`, and `desc` are this shim's arguments, each null or live (C-ABI
+        // contract).
         unsafe { ekey_insert(m, key, desc, next) };
         next
     })
@@ -6339,12 +7069,13 @@ pub unsafe extern "C" fn gos_rt_map_inc_ekey(
 pub unsafe extern "C" fn gos_rt_map_keys_ekey(m: *const GosMap) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if m.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let map = unsafe { &*m };
         let storage = map.storage.lock();
         let MapStorage::EkeyVal { entries } = &*storage else {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         };
         let mut rows: Vec<(&[u8], *mut u8)> = entries
             .iter()
@@ -6353,7 +7084,7 @@ pub unsafe extern "C" fn gos_rt_map_keys_ekey(m: *const GosMap) -> *mut GosVec {
         if !entries.is_ordered() {
             rows.sort_by(|a, b| a.0.cmp(b.0));
         }
-        let out = unsafe {
+        let out = {
             crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                 8,
                 rows.len() as i64,
@@ -6362,8 +7093,10 @@ pub unsafe extern "C" fn gos_rt_map_keys_ekey(m: *const GosMap) -> *mut GosVec {
         };
         for (_, node) in rows {
             // The snapshot hands out its own share of each node.
+            // SAFETY: `node` is a key node the map holds a share of.
             unsafe { crate::c_abi::rc::gos_rt_rc_retain(node) };
             let word = node as i64;
+            // SAFETY: `out` is the live vec made above, and `word` one 8-byte element.
             unsafe { gos_rt_vec_push(out, std::ptr::addr_of!(word).cast::<u8>()) };
         }
         out
@@ -6372,10 +7105,13 @@ pub unsafe extern "C" fn gos_rt_map_keys_ekey(m: *const GosMap) -> *mut GosVec {
 
 /// The raw value word stored under an aggregate key, or `None` when absent.
 unsafe fn skey_lookup(m: *const GosMap, key: *const u8, desc: *const c_char) -> Option<i64> {
+    // SAFETY: this `unsafe fn`'s caller passes `m`, `key`, `desc` live or null, which
+    // `skey_bytes` accepts.
     let k = unsafe { skey_bytes(m, key, desc) }?;
     if m.is_null() {
         return None;
     }
+    // SAFETY: `m` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Map`.
     let map = unsafe { &*m };
     let storage = map.storage.lock();
     match &*storage {
@@ -6390,17 +7126,25 @@ mod map_iter_tests {
     use std::ffi::CStr;
 
     unsafe fn formatted_map(map: *const GosMap) -> String {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let rendered = unsafe { gos_rt_map_format(map) };
         assert!(!rendered.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let text = unsafe { CStr::from_ptr(rendered) }
             .to_string_lossy()
             .into_owned();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::gos_rt_str_free(rendered) };
         text
     }
 
     #[test]
     fn map_format_quotes_and_sorts_string_keys() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let map = gos_rt_map_new(8, 8);
             gos_rt_map_insert_str_i64(map, crate::c_abi::string::test_gos_str("zebra"), 1);
@@ -6417,6 +7161,8 @@ mod map_iter_tests {
 
     #[test]
     fn map_keys_i64_snapshots_inserted_keys() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let m = gos_rt_map_new(8, 8);
             gos_rt_map_insert_i64_i64(m, 1, 100);
@@ -6438,6 +7184,8 @@ mod map_iter_tests {
 
     #[test]
     fn typed_capacity_constructor_preserves_string_key_layout() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let m = gos_rt_map_new_with_capacity_typed(1, 0, 8);
             // `insert` takes ownership of the key, so the lookup needs its own.
@@ -6451,6 +7199,8 @@ mod map_iter_tests {
 
     #[test]
     fn typed_byte_values_use_compact_storage_across_map_operations() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let m = gos_rt_map_new_with_capacity_typed(1, 2, 4);
             let first = byte_vec_from_slice(&[1, 2, 3]);
@@ -6536,6 +7286,8 @@ mod map_iter_tests {
 
     #[test]
     fn entries_into_writes_string_keyed_pairs_in_key_order() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let m = gos_rt_map_new(0, 0);
             for (key, value) in [("pear", 3), ("apple", 1), ("fig", 2)] {
@@ -6566,5 +7318,75 @@ mod map_iter_tests {
             gos_rt_vec_free(out);
             gos_rt_map_free(m);
         }
+    }
+}
+
+#[cfg(test)]
+mod miri_core_tests {
+    use super::*;
+    use crate::c_abi::string::test_gos_str;
+
+    #[test]
+    fn integer_keys_survive_growth_and_removal() {
+        let m = gos_rt_map_new(8, 8);
+        for k in 0..300i64 {
+            // SAFETY: `m` is the live map made above.
+            unsafe { gos_rt_map_insert_i64_i64(m, k * 7, k) };
+        }
+        for k in (0..300i64).step_by(3) {
+            // SAFETY: `m` is the live map made above.
+            unsafe { gos_rt_map_remove_i64(m, k * 7) };
+        }
+        // SAFETY: `m` is the live map made above.
+        assert_eq!(unsafe { gos_rt_map_len(m) }, 200);
+        for k in 0..300i64 {
+            // SAFETY: `m` is the live map made above.
+            let present = unsafe { gos_rt_map_contains_key_i64(m, k * 7) };
+            assert_eq!(present, k % 3 != 0, "key {k}");
+        }
+        // SAFETY: `m` is the live map made above; the clone is its own.
+        let copy = unsafe { gos_rt_map_clone(m) };
+        // SAFETY: `m` is the live map this test owns, freed once.
+        unsafe { gos_rt_map_free(m) };
+        // SAFETY: `copy` is the live clone.
+        assert_eq!(unsafe { gos_rt_map_get_i64(copy, 7 * 5) }, 5);
+        // SAFETY: `copy` is the live clone this test owns, freed once.
+        unsafe { gos_rt_map_free(copy) };
+    }
+
+    #[test]
+    fn string_keys_and_values_are_owned_by_the_map() {
+        let m = gos_rt_map_new(8, 8);
+        for (k, v) in [("one", "uno"), ("two", "dos"), ("three", "tres")] {
+            // SAFETY: `m` is the live map made above, and the key and value are fresh strings
+            // whose shares it takes.
+            unsafe {
+                gos_rt_map_insert_str_str(
+                    m,
+                    test_gos_str(k),
+                    crate::c_abi::string::alloc_cstring(v.as_bytes()),
+                );
+            }
+        }
+        // Replacing a value gives back the one it held.
+        // SAFETY: as above.
+        unsafe {
+            gos_rt_map_insert_str_str(
+                m,
+                test_gos_str("two"),
+                crate::c_abi::string::alloc_cstring(b"zwei"),
+            );
+        }
+        // SAFETY: `m` is live and the probe is a fresh string.
+        unsafe { gos_rt_map_remove_str(m, test_gos_str("one")) };
+        // SAFETY: `m` is live and the probe is a fresh string.
+        let found = unsafe { gos_rt_map_get_str_str(m, test_gos_str("two")) };
+        // SAFETY: the lookup answers a live string body.
+        let text = unsafe { crate::c_abi::gos_str_arg_string(found) };
+        assert_eq!(text, "zwei");
+        // SAFETY: `m` is live.
+        assert_eq!(unsafe { gos_rt_map_len(m) }, 2);
+        // SAFETY: `m` is the live map this test owns, freed once.
+        unsafe { gos_rt_map_free(m) };
     }
 }

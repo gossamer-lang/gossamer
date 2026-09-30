@@ -1,10 +1,11 @@
 """MkDocs build hook.
 
-Highlights ```gossamer fenced blocks with Pygments' Rust lexer.
-Gossamer's surface syntax is Rust-flavoured, so the Rust lexer is a
-close fit and avoids shipping a custom Pygments lexer. pymdownx
-imports `get_lexer_by_name` as a module global, so aliasing it there
-covers every fenced block the theme renders.
+Highlights ```gossamer fenced blocks with Pygments' Rust lexer, extended
+with Gossamer's interpolated strings: an `f"..."` placeholder holds any
+expression, which highlights as code, and may hold strings of its own.
+Gossamer's surface syntax is otherwise Rust-flavoured, so the Rust lexer
+is a close fit. pymdownx imports `get_lexer_by_name` as a module global, so
+aliasing it there covers every fenced block the theme renders.
 
 Also patches the version tag in landing/index.html to match the
 workspace version in Cargo.toml so the two never drift.
@@ -17,7 +18,52 @@ docs should stay clean under `git diff --check`.
 import os
 import re
 
+from pygments.lexer import include, inherit
 from pygments.lexers.rust import RustLexer
+from pygments.token import Punctuation, String
+
+# The literal text of an interpolated string, shared by both quote forms.
+_INTERPOLATED_TEXT = [
+    (r"\{\{|\}\}", String.Escape),
+    (r"\\.", String.Escape),
+    (r"\{", String.Interpol, "interpolation"),
+    (r'[^"{}\\]+', String),
+    (r"\}", String),
+]
+
+
+class GossamerLexer(RustLexer):
+    """Rust's lexer with Gossamer's `f"..."` and `f\"\"\"...\"\"\"` strings."""
+
+    name = "Gossamer"
+    aliases = ["gossamer", "gos"]
+
+    tokens = {
+        "base": [
+            (r'\bf"""', String, "interpolated-triple"),
+            (r'\bf"', String, "interpolated"),
+            inherit,
+        ],
+        "interpolated": [(r'"', String, "#pop"), *_INTERPOLATED_TEXT],
+        "interpolated-triple": [
+            (r'"""', String, "#pop"),
+            (r'"', String),
+            *_INTERPOLATED_TEXT,
+        ],
+        # A placeholder: code up to its own `}`, whose first top-level
+        # single `:` starts the format spec.
+        "interpolation": [
+            (r"\}", String.Interpol, "#pop"),
+            (r":(?!:)[^{}\n]*(?=\})", String.Interpol),
+            (r"\{", Punctuation, "interpolation-block"),
+            include("base"),
+        ],
+        "interpolation-block": [
+            (r"\}", Punctuation, "#pop"),
+            (r"\{", Punctuation, "#push"),
+            include("base"),
+        ],
+    }
 
 
 def _workspace_version(config_file_path: str) -> str:
@@ -71,7 +117,7 @@ def on_config(config):
 
     def get_lexer_by_name(name, **options):
         if name in ("gossamer", "gos"):
-            return RustLexer(**options)
+            return GossamerLexer(**options)
         return original(name, **options)
 
     highlight.get_lexer_by_name = get_lexer_by_name

@@ -8,6 +8,7 @@ A trait declares method signatures; a type provides them with `impl Trait
 for Type`. A generic function bounds a parameter by a trait and calls its
 methods (`fn report<T: Shape>(s: T)`) - see [generics](generics.md).
 
+<!-- fragment -->
 ```gossamer
 trait Area { fn area(&self) -> f64 }
 
@@ -50,6 +51,7 @@ which an impl inherits unless it restates it.
 When several impls supply different types, pin the projection with an
 equality constraint on the bound:
 
+<!-- fragment -->
 ```gossamer
 fn sum_of<T: Source<Item = i64>>(source: T) -> T::Item { source.take() + 1 }
 ```

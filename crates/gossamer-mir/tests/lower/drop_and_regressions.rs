@@ -2325,10 +2325,9 @@ fn a_sequence_payload_bound_out_of_a_carrier_is_released() {
 }
 
 #[test]
-fn a_sequence_wrapped_into_a_returned_carrier_mints_no_extra_share() {
-    // The wrap hands the payload's share to the caller with the carrier. A
-    // retain there is a share the frame never gets back, since the local's own
-    // release is suppressed for the same reason.
+fn a_sequence_wrapped_into_a_returned_carrier_is_balanced() {
+    // A sequence is counted: the wrap mints the answer's share of it, and the
+    // frame releases its own on every path, so the caller holds exactly one.
     let (bodies, _) = build(CARRIER_PAYLOAD_SOURCE);
     let make = bodies
         .iter()
@@ -2339,9 +2338,12 @@ fn a_sequence_wrapped_into_a_returned_carrier_mints_no_extra_share() {
         calls.iter().any(|name| name == "gos_rt_result_new"),
         "make wraps its sequence in a carrier: {calls:?}",
     );
+    let minted = calls.iter().filter(|name| *name == "gos_rt_vec_retain").count();
+    let released = calls.iter().filter(|name| *name == "gos_rt_vec_free").count();
+    assert_eq!(minted, 1, "the wrap mints the answer's share: {calls:?}");
     assert!(
-        !calls.iter().any(|name| name == "gos_rt_vec_retain"),
-        "no share is minted for a payload the caller takes over: {calls:?}",
+        released >= 1,
+        "the frame releases its own share: {calls:?}",
     );
 }
 

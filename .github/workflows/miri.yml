@@ -53,6 +53,10 @@ jobs:
             crates: gossamer-mir gossamer-types gossamer-resolve
           - shard: runtime
             crates: gossamer-runtime gossamer-coro gossamer-sched
+            integration: >-
+              vec_swap vec_reserve vec_flat_elements vec_owned_children string_append
+              string_case strconv_bytes foreign_string_prefix user_ordered_map
+              user_ordered_set
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@nightly
@@ -83,6 +87,14 @@ jobs:
             cargo miri test -p "$crate" --lib --no-fail-fast -- --nocapture --test-threads=1 \
               || failed="$failed $crate"
           done
+          # The runtime's `vec`, `string`, and `map` integration suites drive the
+          # C-ABI shims the way compiled code does, so they run here too.
+          if [ -n "${{ matrix.integration }}" ]; then
+            for suite in ${{ matrix.integration }}; do
+              cargo miri test -p gossamer-runtime --test "$suite" --no-fail-fast -- --test-threads=1 \
+                || failed="$failed $suite"
+            done
+          fi
           if [ -n "$failed" ]; then
             echo "miri failed for:$failed"
             exit 1

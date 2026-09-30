@@ -3,6 +3,7 @@
 Every eager walk over a collection has a parallel twin. Change `map` to
 `par_map` and the walk runs on every core the machine has:
 
+<!-- fragment -->
 ```gossamer
 let scaled = xs.par_map(|v| v * 2.0)
 let kept = xs.par_filter(|v| v > 0.0)

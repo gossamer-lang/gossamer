@@ -1,14 +1,65 @@
 /// The classified body of one struct the synthesizer may emit for.
 enum SerdeShape {
-    Named(Vec<(String, FieldKind)>, HashSet<String>),
+    Named(Vec<(String, FieldKind)>, HashSet<String>, HashMap<String, FieldOptions>),
     Tuple(Vec<FieldKind>),
+    Enum(Vec<(String, VariantPayload)>),
+}
+
+/// How one variant of an enum carries its payload.
+enum VariantPayload {
+    Unit,
+    Tuple(Vec<FieldKind>),
+    Named(Vec<(String, FieldKind)>),
+}
+
+/// How a named field appears in its serialized form, from its attributes:
+/// `#[rename("key")]` spells its key, `#[skip]` leaves it out and fills it
+/// with its type's zero value when read, and `#[default]` reads a missing
+/// key as that zero value.
+#[derive(Debug, Clone, Default)]
+struct FieldOptions {
+    key: Option<String>,
+    skip: bool,
+    default: bool,
+}
+
+impl FieldOptions {
+    fn of(attrs: &gossamer_ast::Attrs) -> Self {
+        let mut options = Self::default();
+        for attr in &attrs.outer {
+            let Some(name) = attr.path.segments.last().map(|s| s.name.name.as_str()) else {
+                continue;
+            };
+            match name {
+                "rename" => {
+                    options.key = attr
+                        .tokens
+                        .as_deref()
+                        .map(|text| text.trim().trim_matches('"').to_string())
+                        .filter(|key| !key.is_empty());
+                }
+                "skip" => options.skip = true,
+                "default" => options.default = true,
+                _ => {}
+            }
+        }
+        options
+    }
 }
 
 impl SerdeShape {
     fn kinds(&self) -> Box<dyn Iterator<Item = &FieldKind> + '_> {
         match self {
-            Self::Named(fields, _) => Box::new(fields.iter().map(|(_, kind)| kind)),
+            Self::Named(fields, _, _) => Box::new(fields.iter().map(|(_, kind)| kind)),
             Self::Tuple(fields) => Box::new(fields.iter()),
+            Self::Enum(variants) => Box::new(variants.iter().flat_map(|(_, payload)| {
+                let kinds: Box<dyn Iterator<Item = &FieldKind> + '_> = match payload {
+                    VariantPayload::Unit => Box::new(std::iter::empty()),
+                    VariantPayload::Tuple(fields) => Box::new(fields.iter()),
+                    VariantPayload::Named(fields) => Box::new(fields.iter().map(|(_, k)| k)),
+                };
+                kinds
+            })),
         }
     }
 }
@@ -17,7 +68,7 @@ impl SerdeShape {
 /// serializer of its own, so the emitted body can call it.
 fn kind_is_emittable(kind: &FieldKind, emittable: &HashSet<String>) -> bool {
     match kind {
-        FieldKind::Struct(ty) => emittable.contains(&ty.symbol),
+        FieldKind::Struct(ty) | FieldKind::Enum(ty) => emittable.contains(&ty.symbol),
         FieldKind::Vec(inner) | FieldKind::Option(inner) | FieldKind::Map(inner) => {
             kind_is_emittable(inner, emittable)
         }
@@ -45,7 +96,33 @@ pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
     let aliases = alias_targets(&parsed.items);
     let opaque = opaque_alias_names(&parsed.items);
 
-    let mut classified: Vec<(TyId, SerdeShape)> = Vec::new();
+    let mut classified = classify_structs(parsed, &struct_names, &aliases, &opaque);
+    classified.extend(classify_enums(parsed, &struct_names, &aliases));
+    let emittable = settle_emittable(&classified);
+
+    for (ty, shape) in &classified {
+        if !emittable.contains(&ty.symbol) {
+            continue;
+        }
+        match shape {
+            SerdeShape::Named(typed, opaque_fields, options) => {
+                emit_impl(&mut out, ty, typed, opaque_fields, options);
+            }
+            SerdeShape::Tuple(typed) => emit_tuple_impl(&mut out, ty, typed),
+            SerdeShape::Enum(variants) => emit_enum_impl(&mut out, ty, variants),
+        }
+    }
+    out
+}
+
+/// The serde shape of every non-generic struct whose fields all classify.
+fn classify_structs(
+    parsed: &SourceFile,
+    struct_names: &StructIdentities,
+    aliases: &HashMap<String, gossamer_ast::Type>,
+    opaque: &HashSet<String>,
+) -> Vec<(TyId, SerdeShape)> {
+    let mut classified = Vec::new();
     for (module, item) in flatten_items_with_modules(&parsed.items) {
         let ItemKind::Struct(decl) = &item.kind else {
             continue;
@@ -59,23 +136,27 @@ pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
                 let typed: Option<Vec<(String, FieldKind)>> = fields
                     .iter()
                     .map(|f| {
-                        FieldKind::from_type(&f.ty, &module, &struct_names, &aliases)
+                        FieldKind::from_type(&f.ty, &module, struct_names, aliases)
                             .map(|k| (f.name.name.clone(), k))
                     })
                     .collect();
                 let opaque_fields: HashSet<String> = fields
                     .iter()
-                    .filter(|f| type_names_opaque_alias(&f.ty, &opaque))
+                    .filter(|f| type_names_opaque_alias(&f.ty, opaque))
                     .map(|f| f.name.name.clone())
                     .collect();
+                let options: HashMap<String, FieldOptions> = fields
+                    .iter()
+                    .map(|f| (f.name.name.clone(), FieldOptions::of(&f.attrs)))
+                    .collect();
                 if let Some(typed) = typed {
-                    classified.push((ty, SerdeShape::Named(typed, opaque_fields)));
+                    classified.push((ty, SerdeShape::Named(typed, opaque_fields, options)));
                 }
             }
             StructBody::Tuple(fields) => {
                 let typed: Option<Vec<FieldKind>> = fields
                     .iter()
-                    .map(|f| FieldKind::from_type(&f.ty, &module, &struct_names, &aliases))
+                    .map(|f| FieldKind::from_type(&f.ty, &module, struct_names, aliases))
                     .collect();
                 if let Some(typed) = typed {
                     classified.push((ty, SerdeShape::Tuple(typed)));
@@ -84,20 +165,68 @@ pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
             // A unit struct is the zero-field named shape, so it encodes as
             // the empty object `Unit {}` encodes as.
             StructBody::Unit => {
-                classified.push((ty, SerdeShape::Named(Vec::new(), HashSet::new())));
+                classified.push((
+                    ty,
+                    SerdeShape::Named(Vec::new(), HashSet::new(), HashMap::new()),
+                ));
             }
         }
     }
+    classified
+}
 
-    // A field naming a user struct is emittable only when that struct's own
-    // serializer is emitted. Classification answers per type, so the set has
-    // to settle: dropping one type can drop the types that reach it, however
-    // deep the nesting runs.
+/// The serde shape of every non-generic enum whose payloads all classify.
+fn classify_enums(
+    parsed: &SourceFile,
+    struct_names: &StructIdentities,
+    aliases: &HashMap<String, gossamer_ast::Type>,
+) -> Vec<(TyId, SerdeShape)> {
+    let mut classified = Vec::new();
+    for (module, item) in flatten_items_with_modules(&parsed.items) {
+        let ItemKind::Enum(decl) = &item.kind else {
+            continue;
+        };
+        if !decl.generics.params.is_empty() {
+            continue;
+        }
+        let classify =
+            |ty: &gossamer_ast::Type| FieldKind::from_type(ty, &module, struct_names, aliases);
+        let variants: Option<Vec<(String, VariantPayload)>> = decl
+            .variants
+            .iter()
+            .map(|variant| {
+                let payload = match &variant.body {
+                    StructBody::Unit => VariantPayload::Unit,
+                    StructBody::Tuple(fields) => VariantPayload::Tuple(
+                        fields.iter().map(|f| classify(&f.ty)).collect::<Option<_>>()?,
+                    ),
+                    StructBody::Named(fields) => VariantPayload::Named(
+                        fields
+                            .iter()
+                            .map(|f| classify(&f.ty).map(|k| (f.name.name.clone(), k)))
+                            .collect::<Option<_>>()?,
+                    ),
+                };
+                Some((variant.name.name.clone(), payload))
+            })
+            .collect();
+        if let Some(variants) = variants {
+            classified.push((TyId::new(&module, &decl.name.name), SerdeShape::Enum(variants)));
+        }
+    }
+    classified
+}
+
+/// The types whose serializers are emitted. A field naming a user struct is
+/// emittable only when that struct's own serializer is emitted, and
+/// classification answers per type, so the set has to settle: dropping one
+/// type can drop the types that reach it, however deep the nesting runs.
+fn settle_emittable(classified: &[(TyId, SerdeShape)]) -> HashSet<String> {
     let mut emittable: HashSet<String> =
         classified.iter().map(|(ty, _)| ty.symbol.clone()).collect();
     loop {
         let mut dropped = false;
-        for (ty, shape) in &classified {
+        for (ty, shape) in classified {
             if !emittable.contains(&ty.symbol) {
                 continue;
             }
@@ -107,22 +236,9 @@ pub fn synthesize_serde_impls(parsed: &SourceFile) -> String {
             }
         }
         if !dropped {
-            break;
+            return emittable;
         }
     }
-
-    for (ty, shape) in &classified {
-        if !emittable.contains(&ty.symbol) {
-            continue;
-        }
-        match shape {
-            SerdeShape::Named(typed, opaque_fields) => {
-                emit_impl(&mut out, ty, typed, opaque_fields);
-            }
-            SerdeShape::Tuple(typed) => emit_tuple_impl(&mut out, ty, typed),
-        }
-    }
-    out
 }
 
 /// Emits the serde free functions for a tuple struct: a JSON object keyed
@@ -201,16 +317,22 @@ fn emit_impl(
     ty: &TyId,
     fields: &[(String, FieldKind)],
     opaque: &HashSet<String>,
+    options: &HashMap<String, FieldOptions>,
 ) {
-    emit_to_json(out, ty, fields);
-    emit_from_json(out, ty, fields, opaque);
+    emit_to_json(out, ty, fields, options);
+    emit_from_json(out, ty, fields, opaque, options);
     emit_to_toml(out, ty);
     emit_from_toml(out, ty);
     emit_to_yaml(out, ty);
     emit_from_yaml(out, ty);
 }
 
-fn emit_to_json(out: &mut String, ty: &TyId, fields: &[(String, FieldKind)]) {
+fn emit_to_json(
+    out: &mut String,
+    ty: &TyId,
+    fields: &[(String, FieldKind)],
+    options: &HashMap<String, FieldOptions>,
+) {
     let name = ty.path.as_str();
     out.push_str(
         "// Render a value as a JSON object. Auto-derived; reached via `to_json::<T>(value)`.\n",
@@ -221,11 +343,18 @@ fn emit_to_json(out: &mut String, ty: &TyId, fields: &[(String, FieldKind)]) {
     ));
     out.push_str("    let mut out = \"\"\n");
     out.push_str("    out += \"{\"\n");
-    for (i, (fname, kind)) in fields.iter().enumerate() {
+    let written = fields
+        .iter()
+        .filter(|(fname, _)| !options.get(fname).is_some_and(|o| o.skip));
+    for (i, (fname, kind)) in written.enumerate() {
         if i > 0 {
             out.push_str("    out += \",\"\n");
         }
-        out.push_str(&format!("    out += \"\\\"{fname}\\\":\"\n"));
+        let key = options
+            .get(fname)
+            .and_then(|o| o.key.clone())
+            .unwrap_or_else(|| fname.clone());
+        out.push_str(&format!("    out += {}\n", json_key_literal(&key)));
         let lit = kind.render_to_json(&format!("value.{fname}"));
         out.push_str(&format!("    out += {lit}\n"));
     }
@@ -291,6 +420,7 @@ fn emit_from_json(
     ty: &TyId,
     fields: &[(String, FieldKind)],
     opaque: &HashSet<String>,
+    options: &HashMap<String, FieldOptions>,
 ) {
     let name = ty.path.as_str();
     out.push_str(
@@ -319,16 +449,26 @@ fn emit_from_json(
     // make the compiler emit code that fails its own check, reported
     // against a line of the user's file that does not exist.
     for (index, (fname, kind)) in fields.iter().enumerate() {
-        let path = format!("field `{fname}`");
+        let field_options = options.get(fname).cloned().unwrap_or_default();
+        if field_options.skip {
+            out.push_str(&format!("    let __f{index} = {}\n", kind.default_literal()));
+            continue;
+        }
+        let key = field_options.key.clone().unwrap_or_else(|| fname.clone());
+        let path = format!("field `{key}`");
         let extract = kind.extract_strict("__child", &path);
-        // A missing `Option` field decodes to `None` rather than erroring.
-        let missing = if kind.tolerates_missing_key() {
+        // A missing `Option` field decodes to `None`, and a `#[default]` one
+        // to its type's zero value, rather than erroring.
+        let missing = if field_options.default {
+            kind.default_literal()
+        } else if kind.tolerates_missing_key() {
             "None".to_string()
         } else {
-            format!("return Err(errors::new(\"missing field `{fname}`\"))")
+            format!("return Err(errors::new(\"missing field `{key}`\"))")
         };
         out.push_str(&format!(
-            "    let __f{index} = match json::get(v, \"{fname}\") {{\n        Some(__child) => {extract},\n        None => {missing},\n    }}\n"
+            "    let __f{index} = match json::get(v, {}) {{\n        Some(__child) => {extract},\n        None => {missing},\n    }}\n",
+            string_literal(&key)
         ));
     }
     // The extracted local carries the representation; an opaque alias
@@ -352,6 +492,208 @@ fn emit_from_json(
         .collect::<Vec<_>>();
     out.push_str(&format!("    Ok({})\n", named_struct_literal(name, &fields)));
     out.push_str("}\n\n");
+}
+
+/// `text` as a Gossamer string literal.
+fn string_literal(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// The Gossamer string literal that writes `"key":` into JSON text.
+fn json_key_literal(key: &str) -> String {
+    string_literal(&format!("{}:", serde_json_string(key)))
+}
+
+/// `text` as a JSON string, quotes included.
+fn serde_json_string(text: &str) -> String {
+    let mut out = String::from("\"");
+    for c in text.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// Emits the serde functions for an enum, externally tagged: a unit variant
+/// is its name as a JSON string, a one-field variant is `{"Name": value}`, a
+/// several-field variant is `{"Name": [..]}`, and a struct variant is
+/// `{"Name": {..}}`, the shape `{:?}` prints.
+/// Emits the serde free functions for an enum, externally tagged: a unit
+/// variant is its name, any other `{"Variant": payload}`.
+fn emit_enum_impl(out: &mut String, ty: &TyId, variants: &[(String, VariantPayload)]) {
+    emit_enum_to_json(out, ty, variants);
+    emit_enum_from_json(out, ty, variants);
+    emit_to_toml(out, ty);
+    emit_from_toml(out, ty);
+    emit_to_yaml(out, ty);
+    emit_from_yaml(out, ty);
+}
+
+fn emit_enum_to_json(out: &mut String, ty: &TyId, variants: &[(String, VariantPayload)]) {
+    let name = ty.path.as_str();
+    out.push_str(&format!(
+        "pub fn {}(value: {name}) -> Result<String, errors::Error> {{\n    match value {{\n",
+        to_json_fn(&ty.symbol)
+    ));
+    for (variant, payload) in variants {
+        let tag = serde_json_string(variant);
+        match payload {
+            VariantPayload::Unit => {
+                out.push_str(&format!(
+                    "        {name}::{variant} => Ok({}),\n",
+                    string_literal(&tag)
+                ));
+            }
+            VariantPayload::Tuple(fields) => {
+                let binds: Vec<String> = (0..fields.len()).map(|i| format!("__p{i}")).collect();
+                out.push_str(&format!(
+                    "        {name}::{variant}({}) => {{\n            let mut out = {}\n",
+                    binds.join(", "),
+                    string_literal(&format!("{{{tag}:"))
+                ));
+                if fields.len() == 1 {
+                    let lit = fields[0].render_to_json("__p0");
+                    out.push_str(&format!("            out += {lit}\n"));
+                } else {
+                    out.push_str("            out += \"[\"\n");
+                    for (i, kind) in fields.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str("            out += \",\"\n");
+                        }
+                        let lit = kind.render_to_json(&format!("__p{i}"));
+                        out.push_str(&format!("            out += {lit}\n"));
+                    }
+                    out.push_str("            out += \"]\"\n");
+                }
+                out.push_str("            out += \"}\"\n            Ok(out)\n        }\n");
+            }
+            VariantPayload::Named(fields) => {
+                let binds: Vec<String> = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (field, _))| format!("{field}: __p{i}"))
+                    .collect();
+                out.push_str(&format!(
+                    "        {name}::{variant} {{ {} }} => {{\n            let mut out = {}\n",
+                    binds.join(", "),
+                    string_literal(&format!("{{{tag}:{{"))
+                ));
+                for (i, (field, kind)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str("            out += \",\"\n");
+                    }
+                    out.push_str(&format!("            out += {}\n", json_key_literal(field)));
+                    let lit = kind.render_to_json(&format!("__p{i}"));
+                    out.push_str(&format!("            out += {lit}\n"));
+                }
+                out.push_str("            out += \"}}\"\n            Ok(out)\n        }\n");
+            }
+        }
+    }
+    out.push_str("    }\n}\n\n");
+}
+
+fn emit_enum_from_json(out: &mut String, ty: &TyId, variants: &[(String, VariantPayload)]) {
+    let name = ty.path.as_str();
+    out.push_str(&format!(
+        "pub fn {}(text: &String) -> Result<{name}, errors::Error> {{\n    let v = json::parse(text)?\n    {}(v)\n}}\n\n",
+        from_json_fn(&ty.symbol),
+        from_json_value_fn(&ty.symbol)
+    ));
+    let unknown = format!(
+        "Err(errors::new(format(\"unknown variant `{{}}` of `{}`\", __tag)))",
+        ty.bare
+    );
+    out.push_str(&format!(
+        "pub fn {}(v: json::Value) -> Result<{name}, errors::Error> {{\n",
+        from_json_value_fn(&ty.symbol)
+    ));
+    out.push_str("    if let Some(__tag) = json::as_str(v) {\n        return match __tag {\n");
+    for (variant, payload) in variants {
+        if matches!(payload, VariantPayload::Unit) {
+            out.push_str(&format!(
+                "            {} => Ok({name}::{variant}),\n",
+                string_literal(variant)
+            ));
+        }
+    }
+    out.push_str(&format!("            _ => {unknown},\n        }}\n    }}\n"));
+    out.push_str(&format!(
+        "    let __keys = json::keys(v).unwrap_or(#[])\n    if __keys.len() != 1 {{\n        return Err(errors::new(\"expected a variant of `{}`: a name, or an object with one key\"))\n    }}\n",
+        ty.bare
+    ));
+    out.push_str("    let __tag = __keys[0]\n");
+    out.push_str("    let __payload = match json::get(v, __tag) {\n        Some(__p) => __p,\n        None => return Err(errors::new(\"variant payload is missing\")),\n    }\n");
+    out.push_str("    match __tag {\n");
+    for (variant, payload) in variants {
+        let path = format!("variant `{variant}`");
+        match payload {
+            VariantPayload::Unit => {}
+            VariantPayload::Tuple(fields) if fields.len() == 1 => {
+                let extract = fields[0].extract_strict("__payload", &path);
+                out.push_str(&format!(
+                    "        {} => {{\n            let __p0 = {extract}\n            Ok({name}::{variant}(__p0))\n        }}\n",
+                    string_literal(variant)
+                ));
+            }
+            VariantPayload::Tuple(fields) => {
+                out.push_str(&format!("        {} => {{\n", string_literal(variant)));
+                for (i, kind) in fields.iter().enumerate() {
+                    let extract = kind.extract_strict(&format!("__e{i}"), &path);
+                    out.push_str(&format!(
+                        "            let __e{i} = json::at(__payload, {i})\n            let __p{i} = {extract}\n"
+                    ));
+                }
+                let binds: Vec<String> = (0..fields.len()).map(|i| format!("__p{i}")).collect();
+                out.push_str(&format!(
+                    "            Ok({name}::{variant}({}))\n        }}\n",
+                    binds.join(", ")
+                ));
+            }
+            VariantPayload::Named(fields) => {
+                out.push_str(&format!("        {} => {{\n", string_literal(variant)));
+                for (i, (field, kind)) in fields.iter().enumerate() {
+                    let field_path = format!("variant `{variant}` field `{field}`");
+                    let extract = kind.extract_strict("__child", &field_path);
+                    let missing = if kind.tolerates_missing_key() {
+                        "None".to_string()
+                    } else {
+                        format!(
+                            "return Err(errors::new(\"missing field `{field}` of variant `{variant}`\"))"
+                        )
+                    };
+                    out.push_str(&format!(
+                        "            let __p{i} = match json::get(__payload, {}) {{\n                Some(__child) => {extract},\n                None => {missing},\n            }}\n",
+                        string_literal(field)
+                    ));
+                }
+                let binds: Vec<String> = fields
+                    .iter()
+                    .enumerate()
+                    .map(|(i, (field, _))| format!("{field}: __p{i}"))
+                    .collect();
+                out.push_str(&format!(
+                    "            Ok({name}::{variant} {{ {} }})\n        }}\n",
+                    binds.join(", ")
+                ));
+            }
+        }
+    }
+    out.push_str(&format!("        _ => {unknown},\n    }}\n}}\n\n"));
 }
 
 /// Whether `ty` is written as the bare name of an opaque alias.
@@ -828,6 +1170,106 @@ fn types_with_user_debug(parsed: &SourceFile) -> HashSet<String> {
     out
 }
 
+/// Bare names of the types that have a `default()`: a `#[derive(Default)]`,
+/// an `impl Default`, or an inherent `fn default`.
+fn types_with_default(parsed: &SourceFile) -> HashSet<String> {
+    let mut out = types_with_user_method(parsed, "default");
+    for item in flatten_items(&parsed.items) {
+        let (attrs, name) = match &item.kind {
+            ItemKind::Struct(decl) => (&item.attrs, &decl.name.name),
+            ItemKind::Enum(decl) => (&item.attrs, &decl.name.name),
+            _ => continue,
+        };
+        if derive_list(attrs).iter().any(|d| d == "Default") {
+            out.insert(name.clone());
+        }
+    }
+    out
+}
+
+/// A field's zero value for `#[derive(Default)]`, or `None` when a user
+/// type it reaches has no `default()` to call.
+fn checked_default_literal(kind: &FieldKind, with_default: &HashSet<String>) -> Option<String> {
+    match kind {
+        FieldKind::Struct(ty) | FieldKind::Enum(ty) => {
+            with_default.contains(&ty.bare).then(|| kind.default_literal())
+        }
+        FieldKind::Tuple(elems) => {
+            let parts: Option<Vec<String>> = elems
+                .iter()
+                .map(|e| checked_default_literal(e, with_default))
+                .collect();
+            Some(format!("({})", parts?.join(", ")))
+        }
+        _ => Some(kind.default_literal()),
+    }
+}
+
+/// The first field of a `#[derive(Default)]` struct that the derive cannot
+/// fill, with the type that lacks a zero value.
+pub(crate) fn derive_default_gap(
+    decl: &StructDecl,
+    module: &str,
+    structs: &StructIdentities,
+    aliases: &HashMap<String, gossamer_ast::Type>,
+    with_default: &HashSet<String>,
+) -> Option<(String, String)> {
+    let fields: Vec<(String, &gossamer_ast::Type)> = match &decl.body {
+        StructBody::Named(fields) => fields.iter().map(|f| (f.name.name.clone(), &f.ty)).collect(),
+        StructBody::Tuple(fields) => fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (i.to_string(), &f.ty))
+            .collect(),
+        StructBody::Unit => Vec::new(),
+    };
+    for (field, ty) in fields {
+        let written = {
+            let mut printer = gossamer_ast::Printer::new();
+            printer.print_type(ty);
+            printer.finish()
+        };
+        match FieldKind::from_type(ty, module, structs, aliases) {
+            Some(kind) if checked_default_literal(&kind, with_default).is_some() => {}
+            _ => return Some((field, written)),
+        }
+    }
+    None
+}
+
+/// `#[derive(Default)]` on a struct a field of which has no zero value,
+/// reported at the struct: the derive would otherwise be skipped and the
+/// first `S::default()` would fail to resolve.
+pub(crate) fn derive_default_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
+    let structs = struct_identities(&sf.items);
+    let aliases = alias_targets(&sf.items);
+    let with_default = types_with_default(sf);
+    let mut out = Vec::new();
+    for (module, item) in flatten_items_with_modules(&sf.items) {
+        let ItemKind::Struct(decl) = &item.kind else {
+            continue;
+        };
+        if !decl.generics.params.is_empty()
+            || !derive_list(&item.attrs).iter().any(|d| d == "Default")
+        {
+            continue;
+        }
+        if let Some((field, ty)) =
+            derive_default_gap(decl, &module, &structs, &aliases, &with_default)
+        {
+            out.push(ParseDiagnostic::new(
+                crate::diagnostic::ParseError::DeriveDefaultField {
+                    ty: decl.name.name.clone(),
+                    field,
+                    field_ty: ty,
+                },
+                item.span,
+            ));
+        }
+    }
+    out
+}
+
 /// Synthesizes `impl` blocks for the `#[derive(...)]` traits, plus a
 /// structural `fmt` for every struct / enum that is formattable but has no
 /// `fmt` of its own, so `{}` / `{:?}` lowers on the compiled tiers exactly as
@@ -838,6 +1280,7 @@ fn types_with_user_debug(parsed: &SourceFile) -> HashSet<String> {
     reason = "linear orchestration: collect names, fields, formattable + comparable sets, then emit"
 )]
 pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
+    let with_default = types_with_default(parsed);
     let struct_names = struct_identities(&parsed.items);
     let aliases = alias_targets(&parsed.items);
     let user_fmt = types_with_user_debug(parsed);
@@ -1037,7 +1480,13 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
                 StructBody::Named(fields) => {
                     let ty = TyId::new(&module, &decl.name.name);
                     emit_struct_derive_impl(
-                        &mut out, decl, &ty, fields, &derives, &struct_names, &aliases,
+                        &mut out,
+                        decl,
+                        &ty,
+                        fields,
+                        &derives,
+                        (&struct_names, &with_default),
+                        &aliases,
                     );
                 }
                 StructBody::Tuple(fields) => {
@@ -1048,7 +1497,7 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
                         &ty,
                         fields,
                         &derives,
-                        &struct_names,
+                        (&struct_names, &with_default),
                         &aliases,
                     );
                 }
@@ -1058,7 +1507,13 @@ pub fn synthesize_derive_impls(parsed: &SourceFile) -> String {
                 StructBody::Unit => {
                     let ty = TyId::new(&module, &decl.name.name);
                     emit_struct_derive_impl(
-                        &mut out, decl, &ty, &[], &derives, &struct_names, &aliases,
+                        &mut out,
+                        decl,
+                        &ty,
+                        &[],
+                        &derives,
+                        (&struct_names, &with_default),
+                        &aliases,
                     );
                 }
             },
@@ -1491,7 +1946,7 @@ fn emit_tuple_struct_derive_impl(
     ty: &TyId,
     fields: &[gossamer_ast::TupleField],
     derives: &[String],
-    structs: &StructIdentities,
+    (structs, with_default): (&StructIdentities, &HashSet<String>),
     aliases: &HashMap<String, gossamer_ast::Type>,
 ) {
     let name = ty.path.as_str();
@@ -1549,8 +2004,13 @@ fn emit_tuple_struct_derive_impl(
             .iter()
             .map(|f| FieldKind::from_type(&f.ty, &ty.module, structs, aliases))
             .collect();
-        if let Some(typed) = typed {
-            let init: Vec<String> = typed.iter().map(FieldKind::default_literal).collect();
+        let init: Option<Vec<String>> = typed.and_then(|typed| {
+            typed
+                .iter()
+                .map(|k| checked_default_literal(k, with_default))
+                .collect()
+        });
+        if let Some(init) = init {
             out.push_str(&format!(
                 "    fn default() -> {self_ty} {{ {bare}({}) }}\n",
                 init.join(", ")
@@ -1582,7 +2042,7 @@ fn emit_struct_derive_impl(
     ty: &TyId,
     fields: &[gossamer_ast::StructField],
     derives: &[String],
-    structs: &StructIdentities,
+    (structs, with_default): (&StructIdentities, &HashSet<String>),
     aliases: &HashMap<String, gossamer_ast::Type>,
 ) {
     let name = ty.path.as_str();
@@ -1663,11 +2123,15 @@ fn emit_struct_derive_impl(
                     .map(|k| (f.name.name.clone(), k))
             })
             .collect();
-        if let Some(typed) = typed {
-            let init: Vec<(String, String)> = typed
+        let init: Option<Vec<(String, String)>> = typed.and_then(|typed| {
+            typed
                 .iter()
-                .map(|(field, k)| (field.clone(), k.default_literal()))
-                .collect();
+                .map(|(field, k)| {
+                    checked_default_literal(k, with_default).map(|v| (field.clone(), v))
+                })
+                .collect()
+        });
+        if let Some(init) = init {
             let init_refs = init
                 .iter()
                 .map(|(field, value)| (field.as_str(), value.as_str()))

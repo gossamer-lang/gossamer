@@ -20,7 +20,7 @@ fn into_gos_string(text: &str) -> *mut c_char {
 
 /// `pprof::goroutine_profile() -> String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_pprof_goroutine_profile() -> *mut c_char {
+pub extern "C" fn gos_rt_pprof_goroutine_profile() -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         into_gos_string(&crate::pprof::goroutine_profile())
     })
@@ -28,7 +28,7 @@ pub unsafe extern "C" fn gos_rt_pprof_goroutine_profile() -> *mut c_char {
 
 /// `pprof::mutex_profile() -> String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_pprof_mutex_profile() -> *mut c_char {
+pub extern "C" fn gos_rt_pprof_mutex_profile() -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         into_gos_string(&crate::pprof::mutex_profile())
     })
@@ -36,7 +36,7 @@ pub unsafe extern "C" fn gos_rt_pprof_mutex_profile() -> *mut c_char {
 
 /// `pprof::block_profile() -> String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_pprof_block_profile() -> *mut c_char {
+pub extern "C" fn gos_rt_pprof_block_profile() -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         into_gos_string(&crate::pprof::block_profile())
     })
@@ -45,7 +45,7 @@ pub unsafe extern "C" fn gos_rt_pprof_block_profile() -> *mut c_char {
 /// `pprof::execution_trace(millis: i64) -> String`. A negative window
 /// captures nothing.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_pprof_execution_trace(millis: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_pprof_execution_trace(millis: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let window = Duration::from_millis(millis.max(0) as u64);
         into_gos_string(&crate::pprof::execution_trace(window))
@@ -54,7 +54,7 @@ pub unsafe extern "C" fn gos_rt_pprof_execution_trace(millis: i64) -> *mut c_cha
 
 /// `pprof::cpu_profile(millis: i64) -> String`. Blocks for the window.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_pprof_cpu_profile(millis: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_pprof_cpu_profile(millis: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let window = Duration::from_millis(millis.max(0) as u64);
         into_gos_string(&crate::pprof::cpu_profile(window))
@@ -63,7 +63,7 @@ pub unsafe extern "C" fn gos_rt_pprof_cpu_profile(millis: i64) -> *mut c_char {
 
 /// `pprof::heap_profile(millis: i64) -> String`. Blocks for the window.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_pprof_heap_profile(millis: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_pprof_heap_profile(millis: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let window = Duration::from_millis(millis.max(0) as u64);
         into_gos_string(&crate::pprof::heap_profile(window))
@@ -76,20 +76,22 @@ pub unsafe extern "C" fn gos_rt_pprof_heap_profile(millis: i64) -> *mut c_char {
 pub unsafe extern "C" fn gos_rt_pprof_route(path: *const c_char, query: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if path.is_null() {
-            return unsafe { crate::c_abi::gos_rt_result_new(1, 0) };
+            return crate::c_abi::gos_rt_result_new(1, 0);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let path = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let query = if query.is_null() {
             String::new()
         } else {
+            // SAFETY: `query` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(query) }
         };
         match crate::pprof::route(&path, &query) {
             Some(body) => {
                 let cs = crate::c_abi::alloc_cstring(body.as_bytes());
-                unsafe { crate::c_abi::gos_rt_result_new(0, cs as i64) }
+                crate::c_abi::gos_rt_result_new(0, cs as i64)
             }
-            None => unsafe { crate::c_abi::gos_rt_result_new(1, 0) },
+            None => crate::c_abi::gos_rt_result_new(1, 0),
         }
     })
 }

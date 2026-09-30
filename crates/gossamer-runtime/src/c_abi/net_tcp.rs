@@ -44,7 +44,6 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::doc_markdown)]
@@ -78,7 +77,11 @@ fn next_handle() -> i64 {
     NEXT_TCP_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
 
-fn cstr_to_str(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_str(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -286,7 +289,8 @@ static TLS_CLIENT_CONFIG: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(||
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_start_tls(h: i64, host: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        start_tls_with(h, host, Arc::clone(&TLS_CLIENT_CONFIG))
+        // SAFETY: `host` is this shim's argument, null or a live string body (C-ABI contract).
+        unsafe { start_tls_with(h, host, Arc::clone(&TLS_CLIENT_CONFIG)) }
     })
 }
 
@@ -296,7 +300,8 @@ pub unsafe extern "C" fn gos_rt_tcp_start_tls(h: i64, host: *const c_char) -> i1
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_start_tls_insecure(h: i64, host: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        start_tls_with(h, host, Arc::clone(&TLS_CLIENT_CONFIG_INSECURE))
+        // SAFETY: `host` is this shim's argument, null or a live string body (C-ABI contract).
+        unsafe { start_tls_with(h, host, Arc::clone(&TLS_CLIENT_CONFIG_INSECURE)) }
     })
 }
 
@@ -311,12 +316,14 @@ pub unsafe extern "C" fn gos_rt_tcp_start_tls_ca(
     ca_pem: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let ca = cstr_to_str(ca_pem);
+        // SAFETY: `ca_pem` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let ca = unsafe { cstr_to_str(ca_pem) };
         let config = match tls_config_ca(ca.as_bytes()) {
             Ok(c) => c,
             Err(e) => return tcp_err(&format!("io: start_tls_ca: {e}")),
         };
-        start_tls_with(h, host, config)
+        // SAFETY: `host` is this shim's argument, null or a live string body (C-ABI contract).
+        unsafe { start_tls_with(h, host, config) }
     })
 }
 
@@ -329,7 +336,7 @@ pub unsafe extern "C" fn gos_rt_tcp_start_tls_ca(
 /// the same one. The bytes are handed over unhashed: which digest the
 /// binding calls for is the caller's rule, not the socket's.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_tls_peer_cert(h: i64) -> *mut super::vec::GosVec {
+pub extern "C" fn gos_rt_tcp_tls_peer_cert(h: i64) -> *mut super::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         let Some(stream) = tls_clone(h) else {
             return crate::c_abi::encoding::bytes_to_gosvec(&[]);
@@ -357,11 +364,16 @@ pub unsafe extern "C" fn gos_rt_tcp_tls_peer_cert(h: i64) -> *mut super::vec::Go
 /// Shared TLS upgrade: duplicate the connected socket, drop the
 /// plaintext handle so no caller reads cleartext on it, and register a
 /// rustls client session built from `config` under a fresh handle.
-fn start_tls_with(h: i64, host: *const c_char, config: Arc<rustls::ClientConfig>) -> i128 {
+///
+/// # Safety
+///
+/// `host` is null or a live string body.
+unsafe fn start_tls_with(h: i64, host: *const c_char, config: Arc<rustls::ClientConfig>) -> i128 {
     let Some(stream) = stream_clone(h) else {
         return tcp_err("TcpStream::start_tls: stale handle");
     };
-    let host = cstr_to_str(host);
+    // SAFETY: this function's contract covers `host`, as `cstr_to_str` requires.
+    let host = unsafe { cstr_to_str(host) };
     let sock = match stream.try_clone() {
         Ok(s) => s,
         Err(e) => return tcp_err(&socket_error(&e, "start_tls")),
@@ -475,7 +487,8 @@ impl ServerCertVerifier for NoCertVerify {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_listener_bind(addr: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let a = cstr_to_str(addr);
+        // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let a = unsafe { cstr_to_str(addr) };
         match crate::listen::bind_tcp(&a) {
             Ok(l) => {
                 let h = next_handle();
@@ -495,7 +508,7 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_bind(addr: *const c_char) -> i128 {
 /// the 2-slot tuple `(TcpStream-handle, peer-address-string)` exactly
 /// as `gos_rt_regex_find_opt` packs its triple.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
+pub extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
     ffi_entry!(0i128, {
         let Some(listener) = listener_clone(h) else {
             return tcp_err("TcpListener::accept: stale handle");
@@ -528,7 +541,7 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
 
 /// `net::TcpListener::local_addr(handle) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_listener_local_addr(h: i64) -> i128 {
+pub extern "C" fn gos_rt_tcp_listener_local_addr(h: i64) -> i128 {
     ffi_entry!(0i128, {
         let Some(listener) = listener_clone(h) else {
             return tcp_err("TcpListener::local_addr: stale handle");
@@ -545,7 +558,7 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_local_addr(h: i64) -> i128 {
 
 /// `net::TcpListener::close(handle)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_listener_close(h: i64) {
+pub extern "C" fn gos_rt_tcp_listener_close(h: i64) {
     ffi_entry!((), {
         if let Some(m) = TCP_LISTENERS.lock().as_mut() {
             m.remove(&h);
@@ -557,7 +570,8 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_close(h: i64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_connect(addr: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let a = cstr_to_str(addr);
+        // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let a = unsafe { cstr_to_str(addr) };
         let dialed = a.clone();
         match crate::sched_global::run_blocking("tcp-connect", move || TcpStream::connect(&a)) {
             Ok(Ok(s)) => {
@@ -575,7 +589,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_connect(addr: *const c_char) -> i128 
 /// `net::TcpStream::read(handle, max) -> Result<[u8], Error>`. One read,
 /// up to `max` bytes (clamped to a 16 MiB ceiling, matching the VM).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_stream_read(h: i64, max: i64) -> i128 {
+pub extern "C" fn gos_rt_tcp_stream_read(h: i64, max: i64) -> i128 {
     ffi_entry!(0i128, {
         let cap = max.clamp(1, 1 << 24) as usize;
         let buf = if let Some(tls) = tls_clone(h) {
@@ -622,19 +636,28 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, m
         if max <= 0 {
             return tcp_err("TcpStream::read_into: size must be positive");
         }
+        // The read fills one byte per element, which is the packed layout a
+        // `Vec<u8>` has; a buffer whose slots are wider names a different
+        // element type than this read can fill.
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
+        if unsafe { (*buf).elem_bytes } != 1 {
+            return tcp_err("TcpStream::read_into: buffer must be a Vec<u8>");
+        }
         let cap = max.min(1 << 24);
+        // SAFETY: `buf` is non-null (checked above), live for the call and read by nothing else
+        // meanwhile (C-ABI contract).
         unsafe { super::vec::gos_rt_vec_reserve_at_least(buf, cap) };
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         let dst = unsafe { (*buf).ptr.as_ptr() };
         if dst.is_null() {
             return tcp_err("TcpStream::read_into: buffer has no storage");
         }
-        // The read fills one byte per element, which is the packed layout a
-        // `Vec<u8>` has; a buffer whose slots are wider names a different
-        // element type than this read can fill.
-        if unsafe { (*buf).elem_bytes } != 1 {
-            return tcp_err("TcpStream::read_into: buffer must be a Vec<u8>");
-        }
-        let slot = unsafe { std::slice::from_raw_parts_mut(dst, cap as usize) };
+        // SAFETY: the reserve left room for `cap` bytes at `dst`, which nothing else reaches during
+        // the call; they are zeroed before a slice is formed over them.
+        let slot = unsafe {
+            std::ptr::write_bytes(dst, 0, cap as usize);
+            std::slice::from_raw_parts_mut(dst, cap as usize)
+        };
         let read = if let Some(tls) = tls_clone(h) {
             let window = cap as usize;
             match crate::sched_global::run_blocking("tls-stream-read-into", move || {
@@ -666,6 +689,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, m
         } else {
             return tcp_err("TcpStream::read_into: stale handle");
         };
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*buf).len = read as i64 };
         super::vec::gos_rt_result_new(0, read as i64)
     })
@@ -674,7 +698,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, m
 /// `net::TcpStream::read_to_string(handle) -> Result<String, Error>`.
 /// Reads until the peer closes (EOF); UTF-8-lossy, matching the VM.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_stream_read_to_string(h: i64) -> i128 {
+pub extern "C" fn gos_rt_tcp_stream_read_to_string(h: i64) -> i128 {
     ffi_entry!(0i128, {
         let mut out = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -720,7 +744,9 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_to_string(h: i64) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_write(h: i64, data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let bytes = unsafe { super::encoding::gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let bytes_len = bytes.len() as i64;
         if let Some(tls) = tls_clone(h) {
             // rustls buffers plaintext until flushed; flush so the
@@ -765,7 +791,7 @@ fn timeout_duration(ms: i64) -> Option<Duration> {
 
 /// `net::TcpStream::set_read_timeout_ms(handle, ms) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_stream_set_read_timeout_ms(h: i64, ms: i64) -> i128 {
+pub extern "C" fn gos_rt_tcp_stream_set_read_timeout_ms(h: i64, ms: i64) -> i128 {
     ffi_entry!(0i128, {
         let timeout = timeout_duration(ms);
         if let Some(tls) = tls_clone(h) {
@@ -786,7 +812,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_set_read_timeout_ms(h: i64, ms: i64) 
 
 /// `net::TcpStream::set_write_timeout_ms(handle, ms) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_stream_set_write_timeout_ms(h: i64, ms: i64) -> i128 {
+pub extern "C" fn gos_rt_tcp_stream_set_write_timeout_ms(h: i64, ms: i64) -> i128 {
     ffi_entry!(0i128, {
         let timeout = timeout_duration(ms);
         if let Some(tls) = tls_clone(h) {
@@ -811,7 +837,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_set_write_timeout_ms(h: i64, ms: i64)
 /// wants it back on: a bulk writer sending many small pieces of one payload,
 /// where coalescing them costs nothing and saves packets.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_stream_set_nodelay(h: i64, on: i64) -> i128 {
+pub extern "C" fn gos_rt_tcp_stream_set_nodelay(h: i64, on: i64) -> i128 {
     ffi_entry!(0i128, {
         let on = on != 0;
         if let Some(tls) = tls_clone(h) {
@@ -833,18 +859,18 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_set_nodelay(h: i64, on: i64) -> i128 
 /// `net::TcpStream::clear_read_timeout(handle) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_clear_read_timeout(h: i64) -> i128 {
-    unsafe { gos_rt_tcp_stream_set_read_timeout_ms(h, 0) }
+    gos_rt_tcp_stream_set_read_timeout_ms(h, 0)
 }
 
 /// `net::TcpStream::clear_write_timeout(handle) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tcp_stream_clear_write_timeout(h: i64) -> i128 {
-    unsafe { gos_rt_tcp_stream_set_write_timeout_ms(h, 0) }
+    gos_rt_tcp_stream_set_write_timeout_ms(h, 0)
 }
 
 /// `net::TcpStream::close(handle)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_tcp_stream_close(h: i64) {
+pub extern "C" fn gos_rt_tcp_stream_close(h: i64) {
     ffi_entry!((), {
         if let Some(m) = TCP_STREAMS.lock().as_mut() {
             m.remove(&h);
@@ -867,6 +893,8 @@ pub unsafe extern "C" fn gos_rt_smtp_send(
     body: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: the five strings are this shim's arguments, each null or a live string body
+        // (C-ABI contract), which `smtp_send` accepts.
         unsafe { smtp_send(addr, from, to, subject, body, None) }
     })
 }
@@ -886,20 +914,34 @@ pub unsafe extern "C" fn gos_rt_smtp_send_auth(
     password: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `username` and `password` are this shim's arguments, each null or a live string
+        // body (C-ABI contract), which `cstr_or_empty` accepts.
         let credentials = unsafe { (cstr_or_empty(username), cstr_or_empty(password)) };
+        // SAFETY: the five strings are this shim's arguments, each null or a live string body
+        // (C-ABI contract), which `smtp_send` accepts.
         unsafe { smtp_send(addr, from, to, subject, body, Some(credentials)) }
     })
 }
 
+/// The text of `p`, or empty for null.
+///
+/// # Safety
+/// `p` is null or a live string.
 #[cfg(not(target_arch = "wasm32"))]
 unsafe fn cstr_or_empty(p: *const c_char) -> String {
     if p.is_null() {
         String::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_string`
+        // accepts.
         unsafe { crate::c_abi::gos_str_arg_string(p) }
     }
 }
 
+/// Sends one message over SMTP to `addr`, logging in with `credentials` when given.
+///
+/// # Safety
+/// Each string argument is null or a live string.
 #[cfg(not(target_arch = "wasm32"))]
 unsafe fn smtp_send(
     addr: *const c_char,
@@ -909,6 +951,8 @@ unsafe fn smtp_send(
     body: *const c_char,
     credentials: Option<(String, String)>,
 ) -> i128 {
+    // SAFETY: this `unsafe fn`'s caller passes each string null or live, which `cstr_or_empty`
+    // accepts.
     let (addr, from, to, subject, body) = unsafe {
         (
             cstr_or_empty(addr),

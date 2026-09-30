@@ -464,23 +464,47 @@ fn const_int_max_emits_max_literal() {
     );
 }
 
+/// A checked `add` tests for overflow with the intrinsic, whose value is
+/// the result; the wrapping form is the plain instruction.
 #[test]
 fn binop_add_i64_emits_add_instruction() {
     let (body, tcx) = build_binop_main(BinOp::Add, 3, 4);
     let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
+    assert!(
+        ir.contains("@llvm.sadd.with.overflow.i64(i64"),
+        "IR was:\n{ir}"
+    );
+    let (body, tcx) = build_binop_main(BinOp::WrappingAdd, 3, 4);
+    let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
     assert!(ir.contains("add i64"), "IR was:\n{ir}");
 }
 
+/// A checked `sub` tests for overflow with the intrinsic, whose value is
+/// the result; the wrapping form is the plain instruction.
 #[test]
 fn binop_sub_i64_emits_sub_instruction() {
     let (body, tcx) = build_binop_main(BinOp::Sub, 10, 3);
     let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
+    assert!(
+        ir.contains("@llvm.ssub.with.overflow.i64(i64"),
+        "IR was:\n{ir}"
+    );
+    let (body, tcx) = build_binop_main(BinOp::WrappingSub, 10, 3);
+    let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
     assert!(ir.contains("sub i64"), "IR was:\n{ir}");
 }
 
+/// A checked `mul` tests for overflow with the intrinsic, whose value is
+/// the result; the wrapping form is the plain instruction.
 #[test]
 fn binop_mul_i64_emits_mul_instruction() {
     let (body, tcx) = build_binop_main(BinOp::Mul, 6, 7);
+    let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
+    assert!(
+        ir.contains("@llvm.smul.with.overflow.i64(i64"),
+        "IR was:\n{ir}"
+    );
+    let (body, tcx) = build_binop_main(BinOp::WrappingMul, 6, 7);
     let ir = render_ir_to_string(&[body], &tcx, false).unwrap();
     assert!(ir.contains("mul i64"), "IR was:\n{ir}");
 }

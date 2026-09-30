@@ -14,10 +14,10 @@ fn label(n: i64) -> String {
         (0, 0) => "FizzBuzz"
         (0, _) => "Fizz"
         (_, 0) => "Buzz"
-        (_, _) => format("{}", n)
+        (_, _) => f"{n}"
     }
 }
 
 for n in 1..=20 {
-    println("{}: {}", n, label(n))
+    println(f"{n}: {label(n)}")
 }

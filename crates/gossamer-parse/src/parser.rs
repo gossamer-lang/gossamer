@@ -554,6 +554,7 @@ fn token_text(token: Token) -> String {
         TokenKind::StringLit | TokenKind::RawStringLit { .. } | TokenKind::TripleStringLit => {
             "string literal".to_string()
         }
+        TokenKind::FStringLit | TokenKind::FTripleStringLit => "interpolated string".to_string(),
         TokenKind::CharLit => "char literal".to_string(),
         TokenKind::ByteLit => "byte literal".to_string(),
         TokenKind::ByteStringLit | TokenKind::RawByteStringLit { .. } => {

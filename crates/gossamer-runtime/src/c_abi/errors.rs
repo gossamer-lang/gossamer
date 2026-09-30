@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -60,7 +58,12 @@ static ERROR_META: [i64; 7] = [
 /// Allocates an error cell owning `message`, the share of `cause` the caller
 /// hands over, and `fields`. The cell lives outside any region, since an
 /// error routinely outlives the loop iteration that raised it.
-pub(crate) fn error_alloc(
+///
+/// # Safety
+///
+/// `cause` is null or a live `errors::Error` cell; `message` is a live string
+/// body.
+pub(crate) unsafe fn error_alloc(
     message: *mut c_char,
     cause: *mut GosError,
     fields: ErrorFields,
@@ -99,7 +102,11 @@ fn error_fields(err: &GosError) -> &[(String, String)] {
 }
 
 /// Takes a share of `err` for a holder that keeps it. Null-safe.
-fn retain_error(err: *mut GosError) {
+///
+/// # Safety
+///
+/// `err` is null or a live `errors::Error` cell.
+unsafe fn retain_error(err: *mut GosError) {
     if !err.is_null() {
         // SAFETY: a non-null error is a live error cell.
         unsafe { crate::c_abi::rc::gos_rt_rc_retain(err.cast()) };
@@ -112,7 +119,8 @@ fn retain_error(err: *mut GosError) {
 /// error this way rather than through a host C string, which the string ABI
 /// would have to measure with `strlen`.
 pub(crate) fn error_new_from_bytes(text: &[u8]) -> *mut GosError {
-    error_alloc(alloc_cstring(text), std::ptr::null_mut(), Vec::new())
+    // SAFETY: the message is a fresh string and there is no cause.
+    unsafe { error_alloc(alloc_cstring(text), std::ptr::null_mut(), Vec::new()) }
 }
 
 #[unsafe(no_mangle)]
@@ -121,6 +129,7 @@ pub unsafe extern "C" fn gos_rt_error_new(msg: *const c_char) -> *mut GosError {
         let text = if msg.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `msg` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(msg) }.to_vec()
         };
         error_new_from_bytes(&text)
@@ -141,9 +150,11 @@ pub unsafe extern "C" fn gos_rt_error_from(value: *const c_char) -> *mut GosErro
         let text = if value.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `value` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(value) }.to_vec()
         };
-        error_alloc(alloc_cstring(&text), std::ptr::null_mut(), Vec::new())
+        // SAFETY: the message is a fresh string and there is no cause.
+        unsafe { error_alloc(alloc_cstring(&text), std::ptr::null_mut(), Vec::new()) }
     })
 }
 
@@ -156,10 +167,14 @@ pub unsafe extern "C" fn gos_rt_error_wrap(
         let text = if msg.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `msg` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(msg) }.to_vec()
         };
-        retain_error(cause);
-        error_alloc(alloc_cstring(&text), cause, Vec::new())
+        // SAFETY: `cause` is this shim's argument, as `retain_error` requires (C-ABI contract).
+        unsafe { retain_error(cause) };
+        // SAFETY: the message is a fresh string, and `cause` is this shim's argument, null or a
+        // live error (C-ABI contract).
+        unsafe { error_alloc(alloc_cstring(&text), cause, Vec::new()) }
     })
 }
 
@@ -169,32 +184,42 @@ pub unsafe extern "C" fn gos_rt_error_message(err: *const GosError) -> *mut c_ch
         if err.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `err` is a handle from compiled code, checked non-null above and live for the whole call.
         let m = unsafe { (*err).message };
         if m.is_null() {
             return alloc_cstring(b"");
         }
         // Re-leak a copy so the caller can hold the string past the
         // GosError's lifetime if it ever gets reclaimed.
+        // SAFETY: a non-null message is the runtime string the error owns.
         alloc_cstring(unsafe { crate::c_abi::gos_str_arg_bytes(m.as_ptr()) })
     })
 }
 
 /// The colon-joined cause chain of `err` as Rust text, for a runtime
 /// caller that already holds the error pointer and reports it itself.
+///
+/// # Safety
+/// `err` is null or a live error.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn error_chain_text(err: *const GosError) -> String {
+pub(crate) unsafe fn error_chain_text(err: *const GosError) -> String {
     let mut text = String::new();
     let mut cur = err;
     while !cur.is_null() {
         if !text.is_empty() {
             text.push_str(": ");
         }
+        // SAFETY: `cur` is non-null (the loop condition) and a live error: `err` per this `unsafe
+        // fn`'s contract, then each cause.
         let m = unsafe { (*cur).message };
         if !m.is_null() {
+            // SAFETY: a non-null message is the runtime string the error owns.
             text.push_str(&String::from_utf8_lossy(unsafe {
                 crate::c_abi::gos_str_arg_bytes(m.as_ptr())
             }));
         }
+        // SAFETY: `cur` is non-null (the loop condition), and a live error's `cause` is null or a
+        // share of a live error, so the chain walk only reaches live errors.
         cur = unsafe { (*cur).cause.as_ptr() };
     }
     text
@@ -215,10 +240,15 @@ pub unsafe extern "C" fn gos_rt_error_display(err: *const GosError) -> *mut c_ch
                 text.extend_from_slice(b": ");
             }
             first = false;
+            // SAFETY: `cur` is non-null (the loop condition) and a live error: `err` per the
+            // C-ABI contract, then each cause.
             let m = unsafe { (*cur).message };
             if !m.is_null() {
+                // SAFETY: a non-null message is the runtime string the error owns.
                 text.extend_from_slice(unsafe { crate::c_abi::gos_str_arg_bytes(m.as_ptr()) });
             }
+            // SAFETY: `cur` is non-null (the loop condition), and a live error's `cause` is null
+            // or a share of a live error, so the chain walk only reaches live errors.
             cur = unsafe { (*cur).cause.as_ptr() };
         }
         alloc_cstring(&text)
@@ -253,15 +283,22 @@ pub unsafe extern "C" fn gos_rt_error_with_field(
     value: *const c_char,
 ) -> *mut GosError {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `cstr_owned` accepts.
         let key = unsafe { cstr_owned(key) };
+        // SAFETY: `value` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `cstr_owned` accepts.
         let value = unsafe { cstr_owned(value) };
         let (message, cause, mut fields) = if err.is_null() {
             (Vec::new(), std::ptr::null_mut(), Vec::new())
         } else {
+            // SAFETY: `err` is non-null (checked above) and live for the call (C-ABI contract).
             let e = unsafe { &*err };
             let msg = if e.message.as_ptr().is_null() {
                 Vec::new()
             } else {
+                // SAFETY: a non-null message is the runtime string the error owns, non-null here
+                // (checked above).
                 unsafe { crate::c_abi::gos_str_arg_bytes(e.message.as_ptr()) }.to_vec()
             };
             (msg, e.cause.as_ptr(), error_fields(e).to_vec())
@@ -270,8 +307,11 @@ pub unsafe extern "C" fn gos_rt_error_with_field(
             Some((_, current)) => *current = value,
             None => fields.push((key, value)),
         }
-        retain_error(cause);
-        error_alloc(alloc_cstring(&message), cause, fields)
+        // SAFETY: `cause` is null or a live error (C-ABI contract).
+        unsafe { retain_error(cause) };
+        // SAFETY: the message is a fresh string, and `cause` is this shim's argument, null or a
+        // live error (C-ABI contract).
+        unsafe { error_alloc(alloc_cstring(&message), cause, fields) }
     })
 }
 
@@ -279,19 +319,22 @@ pub unsafe extern "C" fn gos_rt_error_with_field(
 /// under `key` on this error, ignoring the cause chain.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_field(err: *const GosError, key: *const c_char) -> i128 {
-    ffi_entry!(unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) }, {
+    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
         if err.is_null() {
-            return unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) };
+            return crate::c_abi::vec::gos_rt_result_new(1, 0);
         }
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `cstr_owned` accepts.
         let key = unsafe { cstr_owned(key) };
+        // SAFETY: `err` is a handle from compiled code, checked non-null above and live for the whole call.
         match error_fields(unsafe { &*err })
             .iter()
             .find(|(n, _)| *n == key)
         {
-            Some((_, value)) => unsafe {
+            Some((_, value)) => {
                 crate::c_abi::vec::gos_rt_result_new(0, alloc_cstring(value.as_bytes()) as i64)
-            },
-            None => unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) },
+            }
+            None => crate::c_abi::vec::gos_rt_result_new(1, 0),
         }
     })
 }
@@ -301,17 +344,21 @@ pub unsafe extern "C" fn gos_rt_error_field(err: *const GosError, key: *const c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_fields(err: *const GosError) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(16, 0) };
+        let out = crate::c_abi::vec::gos_rt_vec_with_capacity(16, 0);
         if !err.is_null() {
+            // SAFETY: `err` is non-null (checked above) and live for the call (C-ABI contract).
             for (key, value) in error_fields(unsafe { &*err }) {
                 let pair: [i64; 2] = [
                     alloc_cstring(key.as_bytes()) as i64,
                     alloc_cstring(value.as_bytes()) as i64,
                 ];
+                // SAFETY: `out` is the fresh vec of 16-byte elements made above, or null, which
+                // `gos_rt_vec_push` accepts, and `pair` is one element.
                 unsafe { crate::c_abi::vec::gos_rt_vec_push(out, pair.as_ptr().cast::<u8>()) };
             }
         }
-        crate::c_abi::vec::vec_set_slot_children(out, &ERROR_FIELDS_SLOT_CHILDREN);
+        // SAFETY: `out` is the live vec built above.
+        unsafe { crate::c_abi::vec::vec_set_slot_children(out, &ERROR_FIELDS_SLOT_CHILDREN) };
         out
     })
 }
@@ -323,16 +370,20 @@ pub unsafe extern "C" fn gos_rt_error_chain(err: *const GosError) -> *mut GosVec
     ffi_entry!(std::ptr::null_mut(), {
         // Each element is a share of its own, so the vector's teardown gives
         // every link back.
-        let out = unsafe {
-            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::ERROR)
-        };
+        let out =
+            { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::ERROR) };
         let mut cur = err;
         while !cur.is_null() {
-            retain_error(cur.cast_mut());
+            // SAFETY: `cur` is non-null (the loop condition) and a live error in `err`'s chain.
+            unsafe { retain_error(cur.cast_mut()) };
             let slot = cur as i64;
+            // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push`
+            // accepts, and `slot` is one 8-byte element.
             unsafe {
                 crate::c_abi::vec::gos_rt_vec_push(out, std::ptr::addr_of!(slot).cast::<u8>());
             }
+            // SAFETY: `cur` is non-null (the loop condition), and a live error's `cause` is null
+            // or a share of a live error, so the chain walk only reaches live errors.
             cur = unsafe { (*cur).cause.as_ptr() };
         }
         out
@@ -357,6 +408,8 @@ pub unsafe extern "C" fn gos_rt_error_is_sentinel(
             if std::ptr::eq(cur, sentinel) {
                 return 1;
             }
+            // SAFETY: `cur` is non-null (the loop condition), and a live error's `cause` is null
+            // or a share of a live error, so the chain walk only reaches live errors.
             cur = unsafe { (*cur).cause.as_ptr() };
         }
         0
@@ -368,6 +421,7 @@ unsafe fn cstr_owned(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
     }
+    // SAFETY: this `unsafe fn`'s caller passes `p` live; non-null, checked above.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -384,14 +438,22 @@ mod tests {
     use std::ffi::CStr;
 
     fn render(f: unsafe extern "C" fn(*const GosError) -> *mut c_char, e: *mut GosError) -> String {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let p = unsafe { f(e) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(p) };
         s
     }
 
     #[test]
     fn error_new_displays_message_only() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let e = unsafe { gos_rt_error_new(gos_str("boom")) };
         assert_eq!(render(gos_rt_error_display, e), "boom");
         assert_eq!(render(gos_rt_error_message, e), "boom");
@@ -399,15 +461,25 @@ mod tests {
 
     #[test]
     fn wrap_two_deep_displays_colon_joined_chain() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let root = unsafe { gos_rt_error_new(gos_str("root")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let mid = unsafe { gos_rt_error_wrap(root, gos_str("mid")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let outer = unsafe { gos_rt_error_wrap(mid, gos_str("outer")) };
         assert_eq!(render(gos_rt_error_display, outer), "outer: mid: root");
     }
 
     #[test]
     fn wrap_keeps_message_top_level_only() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let root = unsafe { gos_rt_error_new(gos_str("root")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let outer = unsafe { gos_rt_error_wrap(root, gos_str("outer")) };
         assert_eq!(render(gos_rt_error_message, outer), "outer");
     }

@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::must_use_candidate)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::cmp::Ordering;
@@ -53,50 +52,77 @@ pub(crate) enum CmpStorage {
 /// inline, leaving the cursor untouched.
 pub(crate) unsafe fn desc_slot_span(tags: *const u8, cursor: usize) -> usize {
     let mut c = cursor;
+    // SAFETY: this `unsafe fn`'s caller passes `tags` a compiler-emitted descriptor and `cursor`
+    // one of its entries.
     unsafe { desc_span_walk(tags, &mut c) }
 }
 
 unsafe fn desc_span_walk(tags: *const u8, cursor: &mut usize) -> usize {
+    // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s caller), and
+    // the read stays inside the entry at `cursor`.
     let tag = unsafe { *tags.add(*cursor) };
     *cursor += 1;
     match tag {
         gossamer_abi::TUPLE_TAG_NESTED => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let arity = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
             let mut total = 0usize;
             for _ in 0..arity {
+                // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+                // `tags`.
                 total += unsafe { desc_span_walk(tags, cursor) };
             }
             total
         }
         gossamer_abi::DESC_ARRAY => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let count = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let span = (unsafe { *tags.add(*cursor) } as usize).max(1);
             *cursor += 1;
+            // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+            // `tags`.
             unsafe { skip_cmp_desc(tags, cursor) };
             count * span
         }
         gossamer_abi::DESC_OPTION | gossamer_abi::DESC_RESULT => {
+            // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+            // `tags`.
             unsafe { skip_cmp_desc(tags, cursor) };
             if tag == gossamer_abi::DESC_RESULT {
+                // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+                // `tags`.
                 unsafe { skip_cmp_desc(tags, cursor) };
             }
             2
         }
         gossamer_abi::DESC_ENUM => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let inline = unsafe { *tags.add(*cursor) } != 0;
             *cursor -= 1;
+            // SAFETY: `cursor` addresses the enum entry just stepped back to.
             unsafe { skip_cmp_desc(tags, cursor) };
             if inline { 2 } else { 1 }
         }
         gossamer_abi::DESC_VEC => {
+            // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+            // `tags`.
             unsafe { skip_cmp_desc(tags, cursor) };
             1
         }
         gossamer_abi::DESC_SELF => 1,
         gossamer_abi::DESC_PACKED => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let words = unsafe { *tags.add(*cursor) } as usize;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let leaves = unsafe { *tags.add(*cursor + 1) } as usize;
             *cursor += 2 + leaves * 3;
             words
@@ -107,39 +133,57 @@ unsafe fn desc_span_walk(tags: *const u8, cursor: &mut usize) -> usize {
 
 /// Advances `cursor` past one whole descriptor.
 pub(crate) unsafe fn skip_cmp_desc(tags: *const u8, cursor: &mut usize) {
+    // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s caller), and
+    // the read stays inside the entry at `cursor`.
     let tag = unsafe { *tags.add(*cursor) };
     *cursor += 1;
     match tag {
         gossamer_abi::TUPLE_TAG_NESTED => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let arity = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
             for _ in 0..arity {
+                // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+                // `tags`.
                 unsafe { skip_cmp_desc(tags, cursor) };
             }
         }
         gossamer_abi::DESC_ARRAY => {
             *cursor += 2;
+            // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+            // `tags`.
             unsafe { skip_cmp_desc(tags, cursor) };
         }
+        // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor `tags`.
         gossamer_abi::DESC_VEC | gossamer_abi::DESC_OPTION => unsafe {
             skip_cmp_desc(tags, cursor);
         },
+        // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor `tags`.
         gossamer_abi::DESC_RESULT => unsafe {
             skip_cmp_desc(tags, cursor);
             skip_cmp_desc(tags, cursor);
         },
         gossamer_abi::DESC_PACKED => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let leaves = unsafe { *tags.add(*cursor + 1) } as usize;
             *cursor += 2 + leaves * 3;
         }
         gossamer_abi::DESC_ENUM => {
             *cursor += 1;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let variants = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
             for _ in 0..variants {
+                // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+                // caller), and the read stays inside the entry at `cursor`.
                 let fields = unsafe { *tags.add(*cursor) } as usize;
                 *cursor += 1;
                 for _ in 0..fields {
+                    // SAFETY: `cursor` addresses the next entry of the compiler-emitted
+                    // descriptor `tags`.
                     unsafe { skip_cmp_desc(tags, cursor) };
                 }
             }
@@ -170,6 +214,8 @@ const fn desc_tag_is_flat(tag: u8) -> bool {
 /// # Safety
 /// `a` and `b` address one slot each, holding a value of the tag's kind.
 pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `a` and `b` one word each, of the kind `tag`
+    // names.
     unsafe { compare_flat_in(CmpMode::Order, tag, a, b) }
 }
 
@@ -178,7 +224,9 @@ pub(crate) unsafe fn compare_flat(tag: u8, a: *const u8, b: *const u8) -> i64 {
 /// # Safety
 /// As for [`compare_flat`].
 pub(crate) unsafe fn compare_flat_in(mode: CmpMode, tag: u8, a: *const u8, b: *const u8) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `a` addressing one word.
     let wa = unsafe { (a as *const i64).read_unaligned() };
+    // SAFETY: this `unsafe fn`'s caller passes `b` addressing one word.
     let wb = unsafe { (b as *const i64).read_unaligned() };
     match tag {
         1 => ord_code((wa as u64).cmp(&(wb as u64))),
@@ -190,6 +238,8 @@ pub(crate) unsafe fn compare_flat_in(mode: CmpMode, tag: u8, a: *const u8, b: *c
         5 => {
             let sa: *const c_char = std::ptr::with_exposed_provenance(wa as usize);
             let sb: *const c_char = std::ptr::with_exposed_provenance(wb as usize);
+            // SAFETY: words of tag 5 are null or live string bodies, which the comparison
+            // accepts.
             ord_code(unsafe { crate::c_abi::gos_rt_str_compare(sa, sb) }.cmp(&0))
         }
         _ => ord_code(wa.cmp(&wb)),
@@ -279,6 +329,8 @@ unsafe fn node_disc(raw: usize, base: *const u8) -> i64 {
     } else if base.is_null() {
         0
     } else {
+        // SAFETY: an untagged node carries its discriminant in the header byte three below the
+        // payload.
         i64::from(unsafe { *base.sub(3) })
     }
 }
@@ -294,6 +346,8 @@ pub(crate) unsafe fn compare_desc(
     storage: CmpStorage,
     self_desc: Option<usize>,
 ) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry at
+    // `cursor` describes.
     unsafe { compare_desc_in(CmpMode::Order, a, b, tags, cursor, storage, self_desc) }
 }
 
@@ -310,25 +364,34 @@ pub(crate) unsafe fn compare_desc_in(
     storage: CmpStorage,
     self_desc: Option<usize>,
 ) -> i64 {
+    // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s caller), and
+    // the read stays inside the entry at `cursor`.
     let tag = unsafe { *tags.add(*cursor) };
     match tag {
         gossamer_abi::TUPLE_TAG_NESTED => {
             *cursor += 1;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let arity = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
             // A tuple reached by word - a carrier's payload - keeps its slots
             // in the block that word addresses.
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let (a, b) = unsafe { inline_bases(a, b, storage) };
             // Where every field is one byte of descriptor over one slot, the
             // field's descriptor is at a known offset and its span is one, so
             // the ordering is read straight off the slots. The general walk
             // below re-derives both per field, per comparison, which is what
             // an ordered container spends its time on.
+            // SAFETY: `i` is below the tuple's arity, inside the entry.
             let flat = (0..arity).all(|i| desc_tag_is_flat(unsafe { *tags.add(*cursor + i) }));
             if flat {
                 let mut result = 0i64;
                 for i in 0..arity {
+                    // SAFETY: `i` is below the tuple's arity, inside the entry.
                     let tag = unsafe { *tags.add(*cursor + i) };
+                    // SAFETY: each flat field is one word at slot `i` of the tuple.
                     let ord = unsafe { compare_flat_in(mode, tag, a.add(i * 8), b.add(i * 8)) };
                     if result == 0 {
                         result = ord;
@@ -340,11 +403,15 @@ pub(crate) unsafe fn compare_desc_in(
             let mut result = 0i64;
             let mut slot = 0usize;
             for _ in 0..arity {
+                // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+                // `tags`.
                 let span = unsafe { desc_slot_span(tags, *cursor) };
                 // Field order decides the ordering, so once a field has
                 // answered the rest are only walked past, not compared.
                 if result == 0 {
                     let mut c = *cursor;
+                    // SAFETY: each field lies at slot `slot` of the tuple, laid out as its entry
+                    // describes.
                     result = unsafe {
                         compare_desc_in(
                             mode,
@@ -357,6 +424,8 @@ pub(crate) unsafe fn compare_desc_in(
                         )
                     };
                 }
+                // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+                // `tags`.
                 unsafe { skip_cmp_desc(tags, cursor) };
                 slot += span;
             }
@@ -364,15 +433,23 @@ pub(crate) unsafe fn compare_desc_in(
         }
         gossamer_abi::DESC_ARRAY => {
             *cursor += 1;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let count = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let span = (unsafe { *tags.add(*cursor) } as usize).max(1);
             *cursor += 1;
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let (base_a, base_b) = unsafe { inline_bases(a, b, storage) };
             let elem_desc = *cursor;
             let mut result = 0i64;
             for i in 0..count {
                 let mut c = elem_desc;
+                // SAFETY: element `i` lies at `i * span` slots, laid out as the element entry
+                // describes.
                 let ord = unsafe {
                     compare_desc_in(
                         mode,
@@ -388,28 +465,45 @@ pub(crate) unsafe fn compare_desc_in(
                     result = ord;
                 }
             }
+            // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+            // `tags`.
             unsafe { skip_cmp_desc(tags, cursor) };
             result
         }
         gossamer_abi::DESC_VEC => {
             *cursor += 1;
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let va: *const GosVec = unsafe { word_ptr(a) };
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let vb: *const GosVec = unsafe { word_ptr(b) };
             let elem_desc = *cursor;
+            // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+            // `tags`.
             unsafe { skip_cmp_desc(tags, cursor) };
+            // SAFETY: `va` and `vb` are the vecs the values name, null or live.
             unsafe { compare_vec_in(mode, va, vb, tags, elem_desc, self_desc) }
         }
         gossamer_abi::DESC_OPTION | gossamer_abi::DESC_RESULT => {
             *cursor += 1;
             let is_option = tag == gossamer_abi::DESC_OPTION;
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let (pa, pb) = unsafe { carrier_pairs(a, b, storage) };
             let first = *cursor;
+            // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+            // `tags`.
             unsafe { skip_cmp_desc(tags, cursor) };
             let second = *cursor;
             if !is_option {
+                // SAFETY: `cursor` addresses the next entry of the compiler-emitted descriptor
+                // `tags`.
                 unsafe { skip_cmp_desc(tags, cursor) };
             }
+            // SAFETY: `pa` is a carrier pair or null, which `carrier_words` accepts.
             let (da, payload_a) = unsafe { carrier_words(pa) };
+            // SAFETY: `pb` is a carrier pair or null, which `carrier_words` accepts.
             let (db, payload_b) = unsafe { carrier_words(pb) };
             if da != db {
                 // `None` ranks after `Some`, and `Err` after `Ok`, which is
@@ -421,6 +515,7 @@ pub(crate) unsafe fn compare_desc_in(
             }
             let arm = if da == 0 { first } else { second };
             let mut c = arm;
+            // SAFETY: both payloads have the arm's shape, laid out as its entry describes.
             unsafe {
                 compare_desc_in(
                     mode,
@@ -436,8 +531,12 @@ pub(crate) unsafe fn compare_desc_in(
         gossamer_abi::DESC_ENUM => {
             let own = *cursor;
             *cursor += 1;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let inline = unsafe { *tags.add(*cursor) } != 0;
             *cursor += 1;
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let variants = unsafe { *tags.add(*cursor) } as usize;
             *cursor += 1;
             // Variant descriptors are indexed by discriminant, so record
@@ -445,13 +544,21 @@ pub(crate) unsafe fn compare_desc_in(
             let mut starts = Vec::with_capacity(variants);
             for _ in 0..variants {
                 starts.push(*cursor);
+                // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+                // caller), and the read stays inside the entry at `cursor`.
                 let fields = unsafe { *tags.add(*cursor) } as usize;
                 *cursor += 1;
                 for _ in 0..fields {
+                    // SAFETY: `cursor` addresses the next entry of the compiler-emitted
+                    // descriptor `tags`.
                     unsafe { skip_cmp_desc(tags, cursor) };
                 }
             }
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let (da, fields_a) = unsafe { enum_parts(a, storage, inline) };
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let (db, fields_b) = unsafe { enum_parts(b, storage, inline) };
             if da != db {
                 return ord_code(da.cmp(&db));
@@ -460,12 +567,15 @@ pub(crate) unsafe fn compare_desc_in(
                 return 0;
             };
             let mut c = start;
+            // SAFETY: `c` addresses the variant's entry, inside the descriptor.
             let count = unsafe { *tags.add(c) } as usize;
             c += 1;
             // An inline enum keeps a single-field variant's field in the
             // payload word itself; a variant with more fields keeps them in
             // a block the payload word addresses.
             let (fields_a, fields_b) = if inline && count > 1 {
+                // SAFETY: a multi-field inline variant keeps its fields in the block the payload
+                // word addresses.
                 (unsafe { word_ptr::<u8>(fields_a) }, unsafe {
                     word_ptr::<u8>(fields_b)
                 })
@@ -475,8 +585,10 @@ pub(crate) unsafe fn compare_desc_in(
             let mut result = 0i64;
             let mut slot = 0usize;
             for _ in 0..count {
+                // SAFETY: `c` addresses the field's entry.
                 let span = unsafe { desc_slot_span(tags, c) };
                 let mut field_cursor = c;
+                // SAFETY: each field lies at slot `slot` of the variant's fields.
                 let ord = unsafe {
                     compare_desc_in(
                         mode,
@@ -488,6 +600,7 @@ pub(crate) unsafe fn compare_desc_in(
                         Some(own),
                     )
                 };
+                // SAFETY: `c` addresses the field's entry.
                 unsafe { skip_cmp_desc(tags, &mut c) };
                 slot += span;
                 if result == 0 {
@@ -497,16 +610,23 @@ pub(crate) unsafe fn compare_desc_in(
             result
         }
         gossamer_abi::DESC_PACKED => {
+            // SAFETY: `tags` is a compiler-emitted ordering descriptor (this `unsafe fn`'s
+            // caller), and the read stays inside the entry at `cursor`.
             let leaves = unsafe { *tags.add(*cursor + 2) } as usize;
             let first = *cursor + 3;
             *cursor = first + leaves * 3;
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             let (base_a, base_b) = unsafe { inline_bases(a, b, storage) };
             for leaf in 0..leaves {
                 let at = first + leaf * 3;
+                // SAFETY: each leaf entry is three bytes inside the descriptor.
                 let offset = usize::from(u16::from_le_bytes([unsafe { *tags.add(at) }, unsafe {
                     *tags.add(at + 1)
                 }]));
+                // SAFETY: each leaf entry is three bytes inside the descriptor.
                 let kind = unsafe { *tags.add(at + 2) };
+                // SAFETY: each leaf lies at its offset inside the packed value.
                 let ord = unsafe {
                     compare_packed_leaf(mode, kind, base_a.add(offset), base_b.add(offset))
                 };
@@ -522,10 +642,14 @@ pub(crate) unsafe fn compare_desc_in(
                 return 0;
             };
             let mut c = start;
+            // SAFETY: a self-reference names the enclosing descriptor entry, and the values are
+            // nodes of it.
             unsafe { compare_desc_in(mode, a, b, tags, &mut c, CmpStorage::ByWord, self_desc) }
         }
         _ => {
             *cursor += 1;
+            // SAFETY: this `unsafe fn`'s caller passes `a` and `b` values laid out as the entry
+            // at `cursor` describes.
             unsafe { compare_flat_in(mode, tag, a, b) }
         }
     }
@@ -536,12 +660,14 @@ unsafe fn inline_bases(a: *const u8, b: *const u8, storage: CmpStorage) -> (*con
     if storage == CmpStorage::Inline {
         (a, b)
     } else {
+        // SAFETY: in by-word storage each value is one word addressing its block.
         (unsafe { word_ptr(a) }, unsafe { word_ptr(b) })
     }
 }
 
 /// The value a slot's word addresses.
 unsafe fn word_ptr<T>(slot: *const u8) -> *const T {
+    // SAFETY: this `unsafe fn`'s caller passes `slot` addressing one word.
     let word = unsafe { (slot as *const i64).read_unaligned() };
     std::ptr::with_exposed_provenance(word as usize)
 }
@@ -555,6 +681,7 @@ unsafe fn carrier_pairs(
     if storage == CmpStorage::Inline {
         (a.cast::<i64>(), b.cast::<i64>())
     } else {
+        // SAFETY: in by-word storage each value is one word addressing its pair.
         (unsafe { word_ptr(a) }, unsafe { word_ptr(b) })
     }
 }
@@ -563,6 +690,7 @@ unsafe fn carrier_words(pair: *const i64) -> (i64, i64) {
     if pair.is_null() {
         (0, 0)
     } else {
+        // SAFETY: `pair` is non-null (checked above) and addresses two words.
         unsafe { (pair.read_unaligned(), pair.add(1).read_unaligned()) }
     }
 }
@@ -575,16 +703,21 @@ unsafe fn enum_parts(slot: *const u8, storage: CmpStorage, inline: bool) -> (i64
         let base = if storage == CmpStorage::Inline {
             slot
         } else {
+            // SAFETY: in by-word storage the value is one word addressing its block.
             unsafe { word_ptr::<u8>(slot) }
         };
         if base.is_null() {
             return (0, base);
         }
+        // SAFETY: `base` is non-null (checked above) and addresses the enum's discriminant word.
         let disc = unsafe { (base as *const i64).read_unaligned() };
+        // SAFETY: the enum's fields follow its discriminant word.
         (disc, unsafe { base.add(8) })
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `slot` addressing one word.
         let raw = unsafe { crate::c_abi::vec::slot_read_word(slot) }.expose_provenance();
         let base: *const u8 = std::ptr::with_exposed_provenance(raw & !7usize);
+        // SAFETY: `base` is the node the word addresses, or null.
         (unsafe { node_disc(raw, base) }, base)
     }
 }
@@ -598,6 +731,8 @@ unsafe fn compare_vec(
     elem_desc: usize,
     self_desc: Option<usize>,
 ) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `a` and `b` null or live vecs laid out as
+    // `elem_desc` describes.
     unsafe { compare_vec_in(CmpMode::Order, a, b, tags, elem_desc, self_desc) }
 }
 
@@ -610,15 +745,20 @@ unsafe fn compare_vec_in(
     self_desc: Option<usize>,
 ) -> i64 {
     let (la, lb) = (
+        // SAFETY: `a` is non-null (checked) and, per this `unsafe fn`'s caller, a live vec.
         if a.is_null() { 0 } else { unsafe { (*a).len } },
+        // SAFETY: `b` is non-null (checked) and, per this `unsafe fn`'s caller, a live vec.
         if b.is_null() { 0 } else { unsafe { (*b).len } },
     );
     let shared = la.min(lb);
     for i in 0..shared {
+        // SAFETY: `i` is below `a`'s length.
         let ea = unsafe { elem_addr(a, i) };
+        // SAFETY: `i` is below `b`'s length.
         let eb = unsafe { elem_addr(b, i) };
         let mut c = elem_desc;
         let ord =
+            // SAFETY: `ea` and `eb` are elements laid out as `elem_desc` describes.
             unsafe { compare_desc_in(mode, ea, eb, tags, &mut c, CmpStorage::Inline, self_desc) };
         if ord != 0 {
             return ord;
@@ -628,7 +768,9 @@ unsafe fn compare_vec_in(
 }
 
 unsafe fn elem_addr(v: *const GosVec, idx: i64) -> *const u8 {
+    // SAFETY: this `unsafe fn`'s caller passes `v` a live vec.
     let vec = unsafe { &*v };
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     unsafe { vec.ptr.add((idx as usize) * (vec.elem_bytes as usize)) }
 }
 
@@ -661,7 +803,9 @@ const DESC_TAG_INT: u8 = 0;
 /// `a` and `b` address one slot each.
 #[inline]
 pub(crate) unsafe fn compare_int_word(a: *const u8, b: *const u8) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `a` addressing one word.
     let wa = unsafe { (a as *const i64).read_unaligned() };
+    // SAFETY: this `unsafe fn`'s caller passes `b` addressing one word.
     let wb = unsafe { (b as *const i64).read_unaligned() };
     ord_code(wa.cmp(&wb))
 }
@@ -673,6 +817,7 @@ pub(crate) unsafe fn compare_int_word(a: *const u8, b: *const u8) -> i64 {
 #[inline]
 pub(crate) unsafe fn compare_int_slots(slots: usize, a: *const u8, b: *const u8) -> i64 {
     for i in 0..slots {
+        // SAFETY: this `unsafe fn`'s caller passes `a` and `b` addressing `slots` words each.
         let ord = unsafe { compare_int_word(a.add(i * 8), b.add(i * 8)) };
         if ord != 0 {
             return ord;
@@ -688,6 +833,7 @@ pub(crate) unsafe fn compare_int_slots(slots: usize, a: *const u8, b: *const u8)
 #[inline]
 pub(crate) unsafe fn compare_whole(a: *const u8, b: *const u8, tags: *const u8) -> i64 {
     let mut cursor = 0usize;
+    // SAFETY: this `unsafe fn`'s caller passes `a` and `b` laid out as `tags` describes.
     unsafe { compare_desc(a, b, tags, &mut cursor, CmpStorage::Inline, None) }
 }
 
@@ -699,6 +845,8 @@ pub(crate) unsafe fn plan_cmp<'a>(tags: *const u8) -> CmpPlan<'a> {
     if tags.is_null() {
         return CmpPlan::Walk;
     }
+    // SAFETY: `tags` is non-null (checked above) and, per this `unsafe fn`'s contract, a whole
+    // ordering descriptor, whose first entry this read stays inside.
     let tag = unsafe { *tags };
     if tag == DESC_TAG_INT {
         return CmpPlan::IntWord;
@@ -707,7 +855,10 @@ pub(crate) unsafe fn plan_cmp<'a>(tags: *const u8) -> CmpPlan<'a> {
         return CmpPlan::Flat(tag);
     }
     if tag == gossamer_abi::TUPLE_TAG_NESTED {
+        // SAFETY: `tags` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+        // whole ordering descriptor, whose first entry this read stays inside.
         let arity = unsafe { *tags.add(1) } as usize;
+        // SAFETY: a nested tuple entry lists its `arity` field tags after the arity byte.
         let fields = unsafe { std::slice::from_raw_parts(tags.add(2), arity) };
         if fields.iter().all(|&t| t == DESC_TAG_INT) {
             return CmpPlan::IntTuple(arity);
@@ -726,6 +877,7 @@ pub(crate) unsafe fn plan_cmp<'a>(tags: *const u8) -> CmpPlan<'a> {
 #[inline]
 pub(crate) unsafe fn compare_flat_slots(fields: &[u8], a: *const u8, b: *const u8) -> i64 {
     for (i, &tag) in fields.iter().enumerate() {
+        // SAFETY: this `unsafe fn`'s caller passes `a` and `b` holding one word per field.
         let ord = unsafe { compare_flat(tag, a.add(i * 8), b.add(i * 8)) };
         if ord != 0 {
             return ord;
@@ -746,6 +898,8 @@ pub unsafe extern "C" fn gos_rt_desc_cmp(a: *const u8, b: *const u8, tags: *cons
             return 0;
         }
         let mut cursor = 0usize;
+        // SAFETY: `a`, `b`, and `tags` are this shim's non-null arguments (checked above), laid
+        // out as `tags` describes (C-ABI contract).
         unsafe { compare_desc(a, b, tags, &mut cursor, CmpStorage::Inline, None) }
     })
 }
@@ -763,6 +917,8 @@ pub unsafe extern "C" fn gos_rt_desc_eq(a: *const u8, b: *const u8, tags: *const
             return i64::from(a == b);
         }
         let mut cursor = 0usize;
+        // SAFETY: `a`, `b`, and `tags` are this shim's non-null arguments (checked above), laid
+        // out as `tags` describes (C-ABI contract).
         let code = unsafe {
             compare_desc_in(
                 CmpMode::Equal,
@@ -795,6 +951,8 @@ pub unsafe extern "C" fn gos_rt_vec_desc_cmp(
         if elem_tags.is_null() {
             return 0;
         }
+        // SAFETY: `a` and `b` are this shim's `Vec` arguments, null or live, with elements laid
+        // out as `elem_tags` describes (C-ABI contract).
         unsafe { compare_vec(a, b, elem_tags, 0, None) }
     })
 }

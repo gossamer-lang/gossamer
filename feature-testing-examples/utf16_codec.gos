@@ -1,0 +1,21 @@
+// `std::utf16`: encoding a string to code units, decoding them back, and the
+// surrogate-pair helpers, over ASCII, a BMP character, and a character that
+// needs a surrogate pair.
+
+use std::utf16
+
+fn main() {
+    let text = "a\u{e9}\u{1F600}"
+    let units = utf16::encode_string(text)
+    println("units: {}", units.len())
+    let hex = units.map(|u| format("{:04x}", u)).join(" ")
+    println(f"hex: {hex}")
+    let round_trip = utf16::decode_to_string(units) == text
+    println(f"round trip: {round_trip}")
+    println("lens: {} {}", utf16::rune_len('a'), utf16::rune_len('\u{1F600}'))
+    println("surrogate: {} {}", utf16::is_surrogate(0xD83D), utf16::is_surrogate(0x0061))
+    println("pair: {}", utf16::decode_surrogate_pair(0xD83D, 0xDE00))
+    println("not a pair: {}", utf16::decode_surrogate_pair(0x0061, 0xDE00))
+    let lone = utf16::decode_to_string(#[0x0061, 0xD83D])
+    println("lone surrogate: {} chars, last {}", lone.len(), lone[1] as i64)
+}

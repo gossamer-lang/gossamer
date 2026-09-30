@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::sync::atomic::Ordering;
@@ -47,5 +45,7 @@ pub unsafe extern "C" fn gos_rt_arr_len(p: *const i64) -> i64 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_len(p: *const i64) -> i64 {
+    // SAFETY: `p` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `gos_rt_arr_len` accepts.
     ffi_entry!(-1, { unsafe { gos_rt_arr_len(p) } })
 }

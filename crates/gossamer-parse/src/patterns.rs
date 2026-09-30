@@ -478,7 +478,7 @@ pub(crate) fn string_literal_value(source: &str) -> String {
     source.to_string()
 }
 
-fn decode_string_escapes(body: &str) -> String {
+pub(crate) fn decode_string_escapes(body: &str) -> String {
     let mut output = String::with_capacity(body.len());
     let mut chars = body.chars().peekable();
     while let Some(current) = chars.next() {

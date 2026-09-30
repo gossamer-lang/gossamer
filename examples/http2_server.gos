@@ -28,7 +28,7 @@ struct App { }
 impl App {
     fn serve(&self, request: http::Request) -> Result<http::Response, http::Error> {
         if request.path == "/echo" {
-            return Ok(http::Response::text(200, format("echo: {}", request.body)))
+            return Ok(http::Response::text(200, f"echo: {request.body}"))
         }
         Ok(http::Response::text(200, "Gossamer HTTP/2 (h2c). Try POST /echo with a body."))
     }

@@ -6,7 +6,7 @@ use std::regex
 fn tally(p: regex::Pattern, text: String) -> i64 { regex::count(p, text) }
 
 fn main() {
-    let digits = regex::compile("[0-9]+").unwrap()
+    let digits = regex::compile("[0-9]+")
     let text = "a1 bb22 ccc333 dddd4444"
     println("free: {}", regex::count(digits, text))
     println("method: {}", digits.count(text))
@@ -15,7 +15,7 @@ fn main() {
     println("none: {}", regex::count(digits, "no digits here"))
     println("empty text: {}", regex::count(digits, ""))
 
-    let word = regex::compile("\\w+").unwrap()
+    let word = regex::compile("\\w+")
     println("words: {}", word.count("one two three four five"))
 
     let mut total = 0

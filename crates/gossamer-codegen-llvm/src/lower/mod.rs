@@ -104,6 +104,19 @@ fn declare_rt(refs: &mut std::collections::BTreeSet<String>, name: &str) {
 
 /// Emits one function's LLVM IR text, including the required
 /// `declare` statements for any `gos_rt_*` symbols it calls.
+/// A failed release-build check's branch into the body's shared report block.
+#[derive(Debug, Clone)]
+pub(crate) struct CheckFailEdge {
+    /// The block the branch leaves from.
+    pub(crate) label: String,
+    /// The [`gossamer_abi::check_fail`] kind of the check.
+    pub(crate) kind: i64,
+    /// The vector a bounds check read, or `null`.
+    pub(crate) seq: String,
+    /// The index a bounds check read, or `0`.
+    pub(crate) index: String,
+}
+
 pub(crate) struct Lowerer<'a> {
     pub(crate) body: &'a Body,
     pub(crate) tcx: &'a TyCtxt,
@@ -127,9 +140,8 @@ pub(crate) struct Lowerer<'a> {
     /// they hold do not make the hot path write a frame line. Recorded by
     /// [`Lowerer::mark_cold`] and consumed once per statement.
     pub(crate) cold_spans: Vec<(usize, usize)>,
-    /// `(predecessor label, vector handle, index)` for each failed bounds check that
-    /// branches to the body's shared report block.
-    pub(crate) bounds_fail_edges: Vec<(String, String, String)>,
+    /// Each failed check that branches to the body's shared report block.
+    pub(crate) check_fail_edges: Vec<CheckFailEdge>,
     /// Whether any call this body makes can reach a panic report, which is
     /// what a call-stack frame for this body is read by. A body that makes
     /// no such call raises only from its own cold blocks, which name the
@@ -162,8 +174,9 @@ pub(crate) struct Lowerer<'a> {
     /// MIR block currently being lowered. Terminator lowering compares jump
     /// targets against it to detect back-edges and place the cooperative poll.
     pub(crate) current_block: Option<u32>,
-    /// Unique suffix for native preemption blocks in the emitted LLVM IR.
-    pub(crate) preempt_seq: u32,
+    /// Loop headers that poll for preemption on entry, from
+    /// [`Lowerer::plan_preemption_polls`].
+    pub(crate) preempt_headers: std::collections::HashSet<u32>,
     /// Inter-procedural capture summary. The emitter populates
     /// this once per module (via `build_capture_summary`) and the
     /// cleanup pass uses it to skip escape marks for callee

@@ -148,37 +148,37 @@ pub fn notify_status(message: &str) {
 
 /// `lifecycle::ready()` - declare the process ready to serve.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lifecycle_ready() {
+pub extern "C" fn gos_rt_lifecycle_ready() {
     ffi_entry!((), { set_ready(true) });
 }
 
 /// `lifecycle::set_ready(ready)` - set readiness explicitly.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lifecycle_set_ready(ready: i64) {
+pub extern "C" fn gos_rt_lifecycle_set_ready(ready: i64) {
     ffi_entry!((), { set_ready(ready != 0) });
 }
 
 /// `lifecycle::is_ready() -> bool`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lifecycle_is_ready() -> i64 {
+pub extern "C" fn gos_rt_lifecycle_is_ready() -> i64 {
     ffi_entry!(0, { i64::from(is_ready()) })
 }
 
 /// `lifecycle::shutdown()` - begin the shutdown sequence.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lifecycle_shutdown() {
+pub extern "C" fn gos_rt_lifecycle_shutdown() {
     ffi_entry!((), { begin_shutdown() });
 }
 
 /// `lifecycle::is_shutting_down() -> bool`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lifecycle_is_shutting_down() -> i64 {
+pub extern "C" fn gos_rt_lifecycle_is_shutting_down() -> i64 {
     ffi_entry!(0, { i64::from(is_shutting_down()) })
 }
 
 /// `lifecycle::await_shutdown()` - block until shutdown begins.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_lifecycle_await_shutdown() {
+pub extern "C" fn gos_rt_lifecycle_await_shutdown() {
     ffi_entry!((), { await_shutdown() });
 }
 
@@ -190,6 +190,7 @@ pub unsafe extern "C" fn gos_rt_lifecycle_notify_status(message: *const c_char) 
         let text = if message.is_null() {
             String::new()
         } else {
+            // SAFETY: `message` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(message) }
         };
         notify_status(&text);

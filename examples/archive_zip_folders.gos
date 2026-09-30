@@ -34,7 +34,7 @@ fn files_under(folder: String) -> Result<Vec<String>, errors::Error> {
             found.push(entry.path)
         }
         Ok(())
-    }).map_err(|e| errors::wrap(e, format("walking {}", folder)))?
+    }).map_err(|e| errors::wrap(e, f"walking {folder}"))?
     found.sort()
     Ok(found)
 }
@@ -43,23 +43,23 @@ fn files_under(folder: String) -> Result<Vec<String>, errors::Error> {
 fn zip_folder(folder: String, dest: String) -> Result<i64, errors::Error> {
     let mut entries = #[]
     for file in files_under(folder)? {
-        let data = fs::read(file).map_err(|e| errors::wrap(e, format("reading {}", file)))?
+        let data = fs::read(file).map_err(|e| errors::wrap(e, f"reading {file}"))?
         entries.push((archive_name(folder, file), data))
     }
     let bytes = archive::zip::write(entries)?
-    fs::write(dest, bytes).map_err(|e| errors::wrap(e, format("writing {}", dest)))?
+    fs::write(dest, bytes).map_err(|e| errors::wrap(e, f"writing {dest}"))?
     Ok(bytes.len())
 }
 
 /// Writes one zip per immediate subdirectory of `root`, beside it.
 fn zip_each_folder(root: String) -> Result<Vec<String>, errors::Error> {
     let mut made = #[]
-    let children = fs::read_dir(root).map_err(|e| errors::wrap(e, format("listing {}", root)))?
+    let children = fs::read_dir(root).map_err(|e| errors::wrap(e, f"listing {root}"))?
     for child in children {
         if child.is_dir {
             let dest = path::join(root, child.name + ".zip")
             let size = zip_folder(child.path, dest)?
-            made.push(format("{}.zip: {} bytes", child.name, size))
+            made.push(f"{child.name}.zip: {size} bytes")
         }
     }
     made.sort()
@@ -79,19 +79,19 @@ let tree = #[
 for (name, body) in tree {
     let full = path::join(root, name)
     let dir, _ = path::split(full)
-    fs::create_dir_all(dir).map_err(|e| errors::wrap(e, format("mkdir {}", dir)))?
-    fs::write(full, body.as_bytes()).map_err(|e| errors::wrap(e, format("write {}", full)))?
+    fs::create_dir_all(dir).map_err(|e| errors::wrap(e, f"mkdir {dir}"))?
+    fs::write(full, body.as_bytes()).map_err(|e| errors::wrap(e, f"write {full}"))?
 }
 
 for line in zip_each_folder(root)? {
-    println("{}", line)
+    println(line)
 }
 
 let packed = fs::read(path::join(root, "images.zip"))
     .map_err(|e| errors::wrap(e, "reading images.zip"))?
 println("images.zip holds:")
 for entry in archive::zip::read(packed)? {
-    println("  {} ({} bytes)", entry.name, entry.data.len())
+    println(f"  {entry.name} ({entry.data.len()} bytes)")
 }
 
 fs::remove_dir_all(root).map_err(|e| errors::wrap(e, "cleanup"))?

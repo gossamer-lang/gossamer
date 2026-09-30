@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::wildcard_imports)]
 #![allow(clippy::cast_possible_truncation)]
@@ -285,30 +284,33 @@ unsafe fn borrowed(p: *const c_char) -> String {
     if p.is_null() {
         return String::new();
     }
+    // SAFETY: this `unsafe fn`'s caller passes `p` live; non-null, checked above.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
 /// `io::string_reader(text) -> Reader` handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_string_reader(text: *const c_char) -> i64 {
+    // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `borrowed` accepts.
     ffi_entry!(0, { string_reader(&unsafe { borrowed(text) }) })
 }
 
 /// `io::buffer_writer() -> Writer` handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_buffer_writer() -> i64 {
+pub extern "C" fn gos_rt_io_buffer_writer() -> i64 {
     ffi_entry!(0, { buffer_writer() })
 }
 
 /// `io::limit_reader(src, limit) -> Reader` handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_limit_reader(src: i64, limit: i64) -> i64 {
+pub extern "C" fn gos_rt_io_limit_reader(src: i64, limit: i64) -> i64 {
     ffi_entry!(0, { limit_reader(src, limit) })
 }
 
 /// `io::tee_reader(src, sink) -> Reader` handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_tee_reader(src: i64, sink: i64) -> i64 {
+pub extern "C" fn gos_rt_io_tee_reader(src: i64, sink: i64) -> i64 {
     ffi_entry!(0, { tee_reader(src, sink) })
 }
 
@@ -316,22 +318,21 @@ pub unsafe extern "C" fn gos_rt_io_tee_reader(src: i64, sink: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_multi_reader(sources: *const GosVec) -> i64 {
     ffi_entry!(0, {
-        let mut ids: Vec<i64> = Vec::new();
-        if !sources.is_null() {
-            let header = unsafe { &*sources };
-            let len = header.len.max(0) as usize;
-            if header.elem_bytes == 8 {
-                let slots = unsafe { std::slice::from_raw_parts(header.ptr.cast::<i64>(), len) };
-                ids.extend_from_slice(slots);
-            }
-        }
+        // SAFETY: `sources` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract).
+        let ids: Vec<i64> = unsafe { sources.as_ref() }.map_or_else(Vec::new, |header| {
+            (0..header.len)
+                // SAFETY: `i` counts below the vec's length.
+                .map(|i| unsafe { crate::c_abi::vec::vec_elem_load_i64(header, i) })
+                .collect()
+        });
         multi_reader(ids)
     })
 }
 
 /// `io::pipe() -> (Reader, Writer)` - the pair packed as a 2-slot tuple.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_pipe() -> *mut i64 {
+pub extern "C" fn gos_rt_io_pipe() -> *mut i64 {
     ffi_entry!(std::ptr::null_mut(), {
         let (reader, writer) = pipe();
         #[repr(C)]
@@ -349,20 +350,20 @@ pub unsafe extern "C" fn gos_rt_io_pipe() -> *mut i64 {
 
 /// `io::copy_n(dst, src, n) -> Result<i64, errors::Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_copy_n(dst: i64, src: i64, n: i64) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+pub extern "C" fn gos_rt_io_copy_n(dst: i64, src: i64, n: i64) -> i128 {
+    ffi_entry!(gos_rt_result_new(1, 0), {
         if n < 0 {
             let err =
                 crate::c_abi::errors::error_new_from_bytes(b"io::copy_n: negative byte count");
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
-        unsafe { gos_rt_result_new(0, copy_n(dst, src, n)) }
+        gos_rt_result_new(0, copy_n(dst, src, n))
     })
 }
 
 /// `io::drain(src) -> String` - reads the handle to end of stream.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_drain(src: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_io_drain(src: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         alloc_cstring(drain(src).as_bytes())
     })
@@ -370,7 +371,7 @@ pub unsafe extern "C" fn gos_rt_io_drain(src: i64) -> *mut c_char {
 
 /// `io::contents(writer) -> String` - everything written so far.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_contents(writer: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_io_contents(writer: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         alloc_cstring(contents(writer).as_bytes())
     })
@@ -380,12 +381,14 @@ pub unsafe extern "C" fn gos_rt_io_contents(writer: i64) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_write_str(writer: i64, text: *const c_char) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `text` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `borrowed` accepts.
         write(writer, unsafe { borrowed(text) }.as_bytes()) as i64
     })
 }
 
 /// `io::close_writer(writer)` - signals end of stream on a pipe.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_close_writer(writer: i64) {
+pub extern "C" fn gos_rt_io_close_writer(writer: i64) {
     ffi_entry!((), { close_writer(writer) });
 }

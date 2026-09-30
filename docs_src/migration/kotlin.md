@@ -21,10 +21,12 @@ JVM-hosted and does not use exceptions or `suspend`; it uses explicit
 | `T?` | `Option<T>` |
 | `try` / `catch` | `Result<T, E>` |
 | `launch { ... }` | `spawn(|| { ... })` |
-| `async { ... }.await()` | channel send and receive |
-| `println("$name")` | `println("{name}")` |
+| `async { ... }.await()` | `spawn(|| ...)` then `.join()` |
+| `coroutineScope { ... }` | `cohort { ... }` |
+| `"$name is $age"` | `f"{name} is {age}"` |
+| `"${a + b}"` | `f"{a + b}"` |
 
-## Gossamer 0.47 Syntax At A Glance
+## Syntax At A Glance
 
 Kotlin uses semicolons optionally and commas in parameter lists, data classes,
 and collection literals. Gossamer accepts semicolons only as same-line
@@ -76,10 +78,11 @@ val enabled = pair.second
 val cached = byName["Ada"] // User?
 ```
 
+<!-- fragment -->
 ```gos
 let users = #[user, rename(user, "Grace")]
 let first = users[0]              // List/Vec index; traps if out of bounds
-let initial = first.name[0]       // String index is a UTF-8 byte as i64
+let initial = first.name[0]       // String index is a char; byte_at(i) is the byte
 let pair = (first.name, first.active)
 let enabled = pair.1
 let mut by_name: Map<String, User> = Map::new()
@@ -90,6 +93,27 @@ let found = Lookup::Found {
     user: cached.unwrap()
 }
 ```
+
+## String Templates To Interpolated Strings
+
+A Kotlin string template becomes an `f"..."` string. Both `$name` and
+`${expr}` become `{..}`, and a placeholder takes a format spec after a `:`,
+so `String.format` inside a template is not needed:
+
+```kotlin
+val line = "${user.name} is ${user.age} (${String.format("%.2f", ratio)})"
+val size = "${items.size} items"
+```
+
+<!-- fragment -->
+```gos
+let line = f"{user.name} is {user.age} ({ratio:.2})"
+let size = f"{items.len()} items"
+```
+
+`{}` renders any value, collections and structs included, the way a data
+class's `toString()` does; `{:?}` quotes strings and shows structure. `{{`
+and `}}` write braces, and `f"""..."""` is the multiline form.
 
 ## Null Safety To Option
 
@@ -103,6 +127,7 @@ val forced = name!!.uppercase()
 
 Gossamer:
 
+<!-- fragment -->
 ```gos
 let len = name.map(|s: String| s.len())
 let display = name.unwrap_or("anonymous")
@@ -145,6 +170,7 @@ data class Loss(val message: String) : Outcome()
 object Draw : Outcome()
 ```
 
+<!-- fragment -->
 ```gos
 enum Outcome {
     Win(String)
@@ -175,6 +201,7 @@ fun readConfig(path: String): Config {
 
 Gossamer:
 
+<!-- fragment -->
 ```gos
 use std::{errors, fs}
 
@@ -186,6 +213,7 @@ fn read_config(path: String) -> Result<Config, errors::Error> {
 
 Use `match` when a caller should recover locally:
 
+<!-- fragment -->
 ```gos
 let cfg = match read_config(path) {
     Ok(v) => v
@@ -198,16 +226,27 @@ let cfg = match read_config(path) {
 
 ## Collections
 
-Kotlin collection chains become `std::iter` pipelines. The pipe operator
-passes the value on the left into a free function: a bare callable takes
-it as its only argument, and a closure names the slot it fills (`v`
-below), so a data-first callee reads left to right.
+Kotlin collection chains port as method chains. `map` and `filter` on a
+`Vec` answer a `Vec`, as Kotlin's list operations do; `iter()` makes the
+chain lazy, like `asSequence()`. Collecting into `Option<Vec<T>>` stops at
+the first `None`, which replaces `mapNotNull` plus a size check.
 
 ```kotlin
 val total = listOf(1, 2, 3, 4)
     .filter { it % 2 == 0 }
     .sumOf { it * it }
+val parsed = words.map { it.toIntOrNull() }
 ```
+
+```gos
+let total = #[1, 2, 3, 4].iter().filter(|n| n % 2 == 0).map(|n| n * n).sum()
+let words = #["1", "2"]
+let parsed: Option<Vec<i64>> = words.iter().map(|w| w.to_i64()).collect()
+```
+
+Free functions compose with the pipe operator, which passes the value on the
+left into a function: a bare callable takes it as its only argument, and a
+closure names the slot it fills.
 
 ```gos
 use std::iter
@@ -234,21 +273,42 @@ fun main() = runBlocking {
 }
 ```
 
+<!-- fragment -->
 ```gos
 let tx, rx = channel()
 
 spawn(|| {
     tx.send(fetch_data(url))
     tx.close()
-}()
+})
 
 if let Some(result) = rx.recv() {
     println("{result}")
 }
 ```
 
-For fan-out and fan-in, use `sync::WaitGroup`:
+Structured concurrency is `cohort { }`, Kotlin's `coroutineScope`: it joins
+every goroutine spawned in it on every exit, and its value is the first
+failure, which cancels the rest. Outside `main`, a `spawn` sits inside one
+(GT0086). `async` / `await` are declined keywords (GP0061); a `spawn` answers
+a handle whose `join()` is the await.
 
+```gos
+use std::{errors, http}
+
+fn fetch_both(a: String, b: String) -> Result<(), errors::Error> {
+    cohort {
+        let first = spawn(|| http::get(a, #[]))
+        let second = spawn(|| http::get(b, #[]))
+        let _ = first.join()
+        let _ = second.join()
+    }
+}
+```
+
+For fan-out and fan-in over a channel, `sync::WaitGroup` also works:
+
+<!-- fragment -->
 ```gos
 let wg = sync::WaitGroup::new()
 let tx, rx = channel()
@@ -259,13 +319,13 @@ for url in urls {
     spawn(|| {
         defer wg.done()
         tx.send(http::get(url, #[]))
-    }()
+    })
 }
 
 spawn(|| {
     wg.wait()
     tx.close()
-}()
+})
 
 while let Some(result) = rx.recv() {
     handle(result)
@@ -292,17 +352,18 @@ const DEFAULT_PORT: i64 = 5432
 
 Kotlin's `Int` and `Long` arithmetic wraps silently on overflow, and
 `Math.addExact` / `Math.multiplyExact` throw instead. Gossamer's plain `+`,
-`-`, and `*` behave like the `Exact` forms under `gos run`, the JIT, and
-`gos build` - an overflow panics - and wrap only under
-`gos build --release`. Code that relies on the JVM's wrapping (hashes,
-`hashCode` combinations, pseudo-random generators) ports to the wrapping
-operators, which wrap at the declared width on every tier and in every
-profile.
+`-`, and `*` behave like the `Exact` forms on every tier and in every
+profile, release builds included: an overflow panics. Code that relies on
+the JVM's wrapping (hashes, `hashCode` combinations, pseudo-random
+generators) ports to the wrapping operators, which wrap at the declared
+width everywhere. There is no switch that makes every plain operator wrap:
+wrapping is written where it is intended.
 
 | Kotlin | Gossamer |
 | --- | --- |
 | `a + b`, `a - b`, `a * b` (wrapping) | `a +% b`, `a -% b`, `a *% b` |
-| `Math.addExact(a, b)` | `a + b` (panics on overflow outside release builds) |
+| `Math.addExact(a, b)` | `a + b` (panics on overflow) |
+| `Math.addExact` inside `try` | `a.checked_add(b)`, an `Option` |
 | `h = 31 * h + x` | `h = 31 *% h +% x` |
 | `Int`, `Long` | `i32`, `i64` |
 
@@ -385,14 +446,13 @@ Kotlin defaults to public, Gossamer defaults to private. There is no
 | `System.getenv("X")` | `env::var("X")` |
 | `ProcessBuilder(cmd).start()` | `process::run(cmd, args)` |
 | `System.exit(0)` | `process::exit(0)` |
-| `println(x)` | `println("{x}")` |
-| `Regex(pattern)` | `regex::compile(pattern)` |
-| `s.trim()` | `strings::trim(s)` |
-| `s.uppercase()` | `strings::to_uppercase(s)` |
-| `s.toInt()` | `strconv::parse_i64(s)` |
-| `listOf(...)` | `[...]` |
-| `mutableListOf(...)` | `let mut xs = [...]` |
-| `arrayOf(...)` | `#[...]` |
+| `println(x)` | `println(f"{x}")` |
+| `Regex(pattern)` | `regex::compile("literal")`, or `regex::new(pattern)?` for a pattern built at run time |
+| `s.trim()` | `s.trim()` |
+| `s.uppercase()` | `s.to_uppercase()` |
+| `s.toInt()` / `s.toIntOrNull()` | `s.to_i64()`, an `Option<i64>` |
+| `listOf(...)`, `mutableListOf(...)` | `#[...]`, a `Vec`; `let mut` to change it |
+| `arrayOf(...)` | `[...]`, a fixed array |
 | `mapOf(k to v)` | `{key: value}` or `{}` for an empty `Map` |
 | `setOf(...)` | `#{...}` for `Set`, or typed `BTreeSet` |
 | `ArrayDeque` as queue | `Queue<i64>` from `Queue::from([a, b])`, `push`, and FIFO `pop` |
@@ -401,7 +461,9 @@ Kotlin defaults to public, Gossamer defaults to private. There is no
 | `PriorityQueue` | `MinHeap::from([...])`, or `MaxHeap::from([...])` for max-first order |
 | `OkHttp` / `Ktor HttpClient` | `http::Client::new()` or `http::get(url, [])` |
 | `ktor server { ... }` | `http::serve(addr, handler)` |
-| `kotlinx.serialization` | `encoding::json` |
+| `Json.encodeToString(v)` / `decodeFromString` | `json::to_json::<T>(v)?` / `json::from_json::<T>(text)?` |
+| `@SerialName("key")` / `@Transient` | `#[rename("key")]` / `#[skip]` |
+| `CRC32().apply { update(b) }.value` | `hash::crc32::checksum(b)`, a `u32` |
 | `kotlinx.coroutines.launch` | `spawn(|| { ... })` |
 | `Mutex()` | `sync::Mutex::new()` |
 | `CountDownLatch(n)` | `sync::WaitGroup::new()` |

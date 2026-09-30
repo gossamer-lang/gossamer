@@ -1,15 +1,45 @@
 //! C-ABI runtime surface linked into every native Gossamer program.
 //! Every symbol in this module is exported under the `gos_rt_*`
-//! prefix so the Cranelift codegen can call them by name. All
-//! `extern "C"` functions run in unsafe context - the compiler emits
-//! raw pointers and trusts the contract described next to each
-//! symbol. Failure modes are documented per symbol; they never
-//! panic across the FFI boundary.
+//! prefix so the Cranelift codegen can call them by name. Failure
+//! modes are documented per symbol; they never panic across the FFI
+//! boundary.
+//!
+//! # The C-ABI contract
+//!
+//! Compiled code calls a `gos_rt_*` shim only with arguments of the
+//! types its registry row names, and the `SAFETY` comments in this
+//! module cite that as "the C-ABI contract":
+//!
+//! - A pointer or handle argument is null or addresses a live value of
+//!   the declared type (a `GosVec`, a string body, a `GosMap`, ...) for
+//!   the whole call. A shim whose argument may be null checks it.
+//! - A pointer passed beside an element count (a fixed array, a byte
+//!   window) addresses that many initialized elements of the width the
+//!   shim reads, and a container's slots hold live values of its
+//!   element type.
+//! - A word argument that holds a value of a counted type (a `String`,
+//!   a `Vec`, a node) holds a live one, and a carrier's payload holds a
+//!   live value of the shape its arm names.
+//! - A value a consuming call receives arrives with the share the call
+//!   gives back.
+//! - Nothing else reads or writes a value a shim writes through for the
+//!   duration of the call: a value shared between goroutines serializes
+//!   access with its own lock.
+//! - A function address is the entry of a compiled function of the
+//!   signature the shim calls it through, and its environment is live
+//!   for as long as the shim may call it.
+//!
+//! A shim converts a handle argument once, at its entry, into a typed
+//! view: `as_ref` for a handle that is a Rust value (a `GosMap`, a
+//! `GosSet`, a `GosJson`), [`vec::VecView::of`] or
+//! [`vec::StrVecView::of`] for a `Vec`, whose elements it then reads
+//! through bounds-checked safe code. That conversion is the `unsafe`
+//! step the contract above justifies; a callable word is turned back
+//! into a function pointer through [`code_address`].
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 // FFI signatures must match the Cranelift / LLVM call sites
 // exactly. Keep these allows at file scope rather than dotting
@@ -51,7 +81,18 @@
 // loudest. Keep the existing `unsafe { ... }` wrappers in callers
 // for now; the rustc warning is silenced here so the lint comes
 // back when we tighten the fn-level `unsafe` story (Stage 6).
-#![allow(unused_unsafe)]
+
+/// The code address `addr` names, carrying the provenance its function
+/// exposed when compiled code stored it as a word.
+///
+/// A callable crosses the C ABI as an integer (a closure environment's first
+/// word, a registered handler address), and turning an integer back into a
+/// function pointer by `transmute` alone yields one with no provenance; every
+/// call through such a word goes through this first.
+#[inline]
+pub(crate) fn code_address(addr: usize) -> *const () {
+    std::ptr::with_exposed_provenance(addr)
+}
 
 /// Wraps an FFI body in `catch_unwind`, returning `$sentinel` on
 /// panic. Without this, a panic inside the body crosses the
@@ -137,6 +178,8 @@ pub struct SyncRawPtr<T>(pub *mut T);
 // struct's API - this impl declares the FFI handle can move
 // between threads, not that the pointee can be mutated concurrently.
 unsafe impl<T> Send for SyncRawPtr<T> {}
+// SAFETY: as for `Send`: the impl lets the handle be shared between threads;
+// the owning type's API serializes every access to the pointee.
 unsafe impl<T> Sync for SyncRawPtr<T> {}
 
 impl<T> SyncRawPtr<T> {
@@ -254,6 +297,8 @@ pub mod http_ws_accept;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod image;
 pub mod io_handles;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod iter;
 pub mod iter_cross;
 pub mod json;
 pub mod lcg;
@@ -317,6 +362,8 @@ pub mod xml_codec;
 pub mod yaml_enc;
 
 pub use encoding::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use iter::*;
 pub use sql::*;
 pub use unicode::*;
 pub use utf8::*;

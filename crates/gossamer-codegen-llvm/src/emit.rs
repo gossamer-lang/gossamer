@@ -451,6 +451,8 @@ fn codegen_configuration_fingerprint_uncached(triple: &str, profile: OptProfile)
         want_race_instrumentation(),
         static_musl_link_enabled(),
     );
+    text.push_str("|options=");
+    text.push_str(&llvm_pass_options(triple, profile).join(","));
     let selected_pgo = pgo_mode();
     match selected_pgo {
         Some(PgoMode::Collect(path)) => {
@@ -1628,6 +1630,7 @@ fn render_module_to_path(
     // given symbol; the calls themselves are individually typed and
     // the ABI tolerates the i64/ptr substitution on x86_64.
     let mut emitted_decls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut emitted_lines: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for g in &globals {
         validate_global_decl_shape(g)?;
         if let Some(rest) = g.strip_prefix("declare ") {
@@ -1642,6 +1645,8 @@ fn render_module_to_path(
                     continue;
                 }
             }
+        } else if !emitted_lines.insert(g.as_str()) {
+            continue;
         }
         writeln!(ll_w, "{g}")?;
     }
@@ -2045,16 +2050,89 @@ pub(crate) fn want_dwarf() -> bool {
 /// instruction that follows, up to the next one.
 pub(crate) const DEBUG_LOCATION_MARKER: &str = "; gos.loc ";
 
+/// Comment line the lowerer writes in a function's entry block for each
+/// source-level local when the build carries DWARF:
+/// `; gos.var <slot> <arg> <line> <column> <type> <name>`, with `arg` the
+/// parameter's 1-based position or `0` for a local. [`emit_dwarf_metadata`]
+/// turns it into the variable's `DILocalVariable` and the `llvm.dbg.declare`
+/// that places it in its slot.
+pub(crate) const DEBUG_VARIABLE_MARKER: &str = "; gos.var ";
+
 /// Debug-info metadata nodes numbered as they are first needed.
 struct DebugMetadata {
     directory: String,
     lines: Vec<String>,
     files: HashMap<String, u32>,
     locations: HashMap<(u32, u32, u32), u32>,
+    types: HashMap<String, u32>,
     next_id: u32,
 }
 
 impl DebugMetadata {
+    fn fresh(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    /// The type node for a [`DEBUG_VARIABLE_MARKER`] type token.
+    fn debug_type(&mut self, token: &str) -> u32 {
+        if let Some(&id) = self.types.get(token) {
+            return id;
+        }
+        let basic = |name: &str, bits: u32, encoding: &str| {
+            format!("!DIBasicType(name: \"{name}\", size: {bits}, encoding: {encoding})")
+        };
+        let node = match token {
+            "bool" => basic("bool", 8, "DW_ATE_boolean"),
+            "char" => basic("char32_t", 32, "DW_ATE_UTF"),
+            "f32" => basic("f32", 32, "DW_ATE_float"),
+            "f64" => basic("f64", 64, "DW_ATE_float"),
+            _ if token.starts_with('s') || token.starts_with('u') => {
+                let signed = token.starts_with('s');
+                let bits: u32 = token[1..].parse().unwrap_or(64);
+                let name = format!("{}{bits}", if signed { "i" } else { "u" });
+                basic(
+                    &name,
+                    bits,
+                    if signed {
+                        "DW_ATE_signed"
+                    } else {
+                        "DW_ATE_unsigned"
+                    },
+                )
+            }
+            _ => {
+                if let Some((words, name)) = token
+                    .strip_prefix("words")
+                    .and_then(|rest| rest.split_once(':'))
+                {
+                    let count: u32 = words.parse().unwrap_or(1);
+                    let word = self.debug_type("u64");
+                    let range = self.fresh();
+                    self.lines
+                        .push(format!("!{range} = !{{!DISubrange(count: {count})}}"));
+                    format!(
+                        "!DICompositeType(tag: DW_TAG_array_type, name: \"{}\", baseType: !{word}, \
+                         size: {bits}, elements: !{range})",
+                        escape_metadata_string(name),
+                        bits = count * 64,
+                    )
+                } else {
+                    let name = token.strip_prefix("ptr:").unwrap_or(token);
+                    format!(
+                        "!DIDerivedType(tag: DW_TAG_pointer_type, name: \"{}\", baseType: null, size: 64)",
+                        escape_metadata_string(name)
+                    )
+                }
+            }
+        };
+        let id = self.fresh();
+        self.lines.push(format!("!{id} = {node}"));
+        self.types.insert(token.to_string(), id);
+        id
+    }
+
     fn file(&mut self, name: &str) -> u32 {
         if let Some(&id) = self.files.get(name) {
             return id;
@@ -2139,9 +2217,12 @@ fn emit_dwarf_metadata(out: &mut String, bodies: &[Body]) {
         lines: Vec::new(),
         files: HashMap::new(),
         locations: HashMap::new(),
+        types: HashMap::new(),
         next_id: first_free,
     };
+    let mut declares_variables = false;
     let mut subprograms: HashMap<String, (u32, u32, u32)> = HashMap::new();
+    let mut subprogram_files: HashMap<u32, u32> = HashMap::new();
     let mut unit_file = None;
     for (idx, body) in bodies.iter().enumerate() {
         let id = 100u32 + u32::try_from(idx).unwrap_or(u32::MAX);
@@ -2160,6 +2241,7 @@ fn emit_dwarf_metadata(out: &mut String, bodies: &[Body]) {
             lname = escape_metadata_string(&llvm_name),
         ));
         subprograms.insert(llvm_name, (id, line, column));
+        subprogram_files.insert(id, file_id);
     }
     let unit_file = unit_file.unwrap_or_else(|| meta.file("main.gos"));
 
@@ -2190,6 +2272,41 @@ fn emit_dwarf_metadata(out: &mut String, bodies: &[Body]) {
         if line == "}" {
             current = None;
             in_switch = false;
+        } else if let Some(variable) = trimmed.strip_prefix(DEBUG_VARIABLE_MARKER) {
+            let parts: Vec<&str> = variable.split_whitespace().collect();
+            if let [slot, arg, var_line, var_column, ty, name] = parts.as_slice()
+                && let (Ok(arg), Ok(var_line), Ok(var_column)) = (
+                    arg.parse::<u32>(),
+                    var_line.parse::<u32>(),
+                    var_column.parse::<u32>(),
+                )
+            {
+                let scope_id = *scope;
+                let file = subprogram_files
+                    .get(&scope_id)
+                    .copied()
+                    .unwrap_or(unit_file);
+                let type_id = meta.debug_type(ty);
+                let var_id = meta.fresh();
+                let arg_field = if arg > 0 {
+                    format!("arg: {arg}, ")
+                } else {
+                    String::new()
+                };
+                meta.lines.push(format!(
+                    "!{var_id} = !DILocalVariable(name: \"{}\", {arg_field}scope: !{scope_id}, \
+                     file: !{file}, line: {var_line}, type: !{type_id})",
+                    escape_metadata_string(name)
+                ));
+                let at = meta.location(var_line, var_column, scope_id);
+                let _ = writeln!(
+                    rewritten,
+                    "  call void @llvm.dbg.declare(metadata ptr {slot}, metadata !{var_id}, \
+                     metadata !DIExpression()), !dbg !{at}"
+                );
+                declares_variables = true;
+            }
+            continue;
         } else if let Some(position) = trimmed.strip_prefix(DEBUG_LOCATION_MARKER) {
             let mut parts = position.split_whitespace().map(str::parse::<u32>);
             if let (Some(Ok(l)), Some(Ok(c))) = (parts.next(), parts.next()) {
@@ -2223,6 +2340,13 @@ fn emit_dwarf_metadata(out: &mut String, bodies: &[Body]) {
     *out = rewritten;
 
     writeln!(out).unwrap();
+    if declares_variables && !out.contains("declare void @llvm.dbg.declare(") {
+        writeln!(
+            out,
+            "declare void @llvm.dbg.declare(metadata, metadata, metadata)"
+        )
+        .unwrap();
+    }
     writeln!(out, "!llvm.module.flags = !{{!40, !41}}").unwrap();
     writeln!(out, "!llvm.dbg.cu = !{{!51}}").unwrap();
     writeln!(out, "!40 = !{{i32 7, !\"Dwarf Version\", i32 4}}").unwrap();
@@ -2999,12 +3123,14 @@ fn shape_char_to_llvm_ty(c: char) -> Option<&'static str> {
 
 fn validate_global_decl_shape(g: &str) -> Result<()> {
     let trimmed = g.trim_start();
-    let valid =
-        trimmed.starts_with('@') || trimmed.starts_with('$') || trimmed.starts_with("declare ");
+    let valid = trimmed.starts_with('@')
+        || trimmed.starts_with('$')
+        || trimmed.starts_with("declare ")
+        || trimmed.starts_with("define internal ");
     if !valid {
         return Err(anyhow!(
             "llvm backend: malformed module-level entry (expected `@symbol = ...`, \
-             `$comdat = ...`, or `declare ...`, got: {snippet:?}). This is the same shape regression that \
+             `$comdat = ...`, `declare ...`, or `define internal ...`, got: {snippet:?}). This is the same shape regression that \
              caused the 2026-04-28 / 2026-04-30 silent Cranelift-fallback incidents.",
             snippet = if trimmed.len() > 80 {
                 &trimmed[..80]
@@ -3204,9 +3330,7 @@ fn invoke_llc_pipeline(
         // benchmarks. The narrower `disable-memcpy-idiom` flag
         // no longer takes effect under LLVM 18's new pass manager.
         ;
-    if matches!(profile, OptProfile::Release) && disable_loop_idiom_for_target(triple) {
-        opt_cmd.arg("--disable-loop-idiom-all");
-    }
+    opt_cmd.args(llvm_pass_options(triple, profile));
     // PGO instrumentation builds an instrumented binary that emits raw
     // profile data when the program exits. Link with
     // `libclang_rt.profile-x86_64.a` (handled in
@@ -3318,6 +3442,16 @@ fn invoke_llc_pipeline(
 /// `opt` then `llc` sequence for non-PGO builds while avoiding a second child
 /// launch and the intermediate bitcode file. The split-tool path remains the
 /// compatibility route for PGO and installations without Clang.
+/// Optimiser options both pipelines hand LLVM, `opt` directly and `clang`
+/// through `-mllvm`.
+fn llvm_pass_options(triple: &str, profile: OptProfile) -> Vec<&'static str> {
+    let mut options = Vec::new();
+    if matches!(profile, OptProfile::Release) && disable_loop_idiom_for_target(triple) {
+        options.push("-disable-loop-idiom-all");
+    }
+    options
+}
+
 fn invoke_clang_pipeline(
     clang: &std::path::Path,
     ll_path: &std::path::Path,
@@ -3344,8 +3478,8 @@ fn invoke_clang_pipeline(
     if !triple.contains("windows") {
         cmd.arg("-fPIC");
     }
-    if matches!(profile, OptProfile::Release) && disable_loop_idiom_for_target(triple) {
-        cmd.arg("-mllvm").arg("-disable-loop-idiom-all");
+    for option in llvm_pass_options(triple, profile) {
+        cmd.arg("-mllvm").arg(option);
     }
     if want_dwarf() {
         cmd.arg("-gdwarf-4");
@@ -3812,6 +3946,8 @@ fn find_llvm_tool(
     // IR whoever chose it.
     let found = if let Ok(path) = std::env::var(env_var) {
         PathBuf::from(path)
+    } else if let Some(bundled) = bundled_llvm_tool(tool) {
+        bundled
     } else {
         candidates
             .iter()
@@ -3950,6 +4086,65 @@ const CLANG_CANDIDATES: &[&str] = &[
     "C:\\Program Files (x86)\\LLVM\\bin\\clang.exe",
 ];
 
+/// Directories a release archive places its own LLVM tools in, relative to
+/// the directory holding `gos`: beside it, or under an install prefix's
+/// `lib/gossamer`. A bundled tool is the version the toolchain was built
+/// against, so it is preferred over whatever the host has installed.
+const BUNDLED_LLVM_DIRS: &[&str] = &["llvm/bin", "../lib/gossamer/llvm/bin"];
+
+/// `tool` from an LLVM bundled with this `gos`, when one is.
+fn bundled_llvm_tool(tool: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let exe_dir = exe.parent()?;
+    let file = if cfg!(windows) {
+        format!("{tool}.exe")
+    } else {
+        tool.to_string()
+    };
+    BUNDLED_LLVM_DIRS
+        .iter()
+        .map(|dir| exe_dir.join(dir).join(&file))
+        .find(|candidate| candidate.is_file())
+}
+
+/// One LLVM tool as a native build would resolve it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlvmToolStatus {
+    /// The tool's name: `opt`, `llc`, or `clang`.
+    pub tool: &'static str,
+    /// The resolved path and its reported LLVM major, or the reason the
+    /// tool cannot be used.
+    pub resolved: std::result::Result<(PathBuf, Option<u32>), String>,
+}
+
+/// How `gos build` would resolve each LLVM tool on this host, with the
+/// version each reports. Nothing is compiled.
+#[must_use]
+pub fn llvm_toolchain_status() -> Vec<LlvmToolStatus> {
+    let resolve = |found: Result<PathBuf>| {
+        found
+            .map(|path| {
+                let major = llvm_tool_major(&path);
+                (path, major)
+            })
+            .map_err(|e| e.to_string())
+    };
+    vec![
+        LlvmToolStatus {
+            tool: "opt",
+            resolved: resolve(find_opt()),
+        },
+        LlvmToolStatus {
+            tool: "llc",
+            resolved: resolve(find_llc()),
+        },
+        LlvmToolStatus {
+            tool: "clang",
+            resolved: resolve(find_clang()),
+        },
+    ]
+}
+
 fn missing_llvm_tool_message(tool: &str, env_var: &str) -> String {
     format!(
         "{tool} (LLVM toolchain) not found. Install LLVM {MINIMUM_LLVM_MAJOR} or \
@@ -4031,6 +4226,16 @@ fn detect_host_triple() -> String {
         _ => "unknown-linux-gnu",
     };
     format!("{arch}-{os}")
+}
+
+/// Whether the build target's LLVM backend implements `preserve_mostcc`, the
+/// convention under which a call leaves the caller's general-purpose
+/// registers intact.
+pub(crate) fn target_has_preserve_most() -> bool {
+    matches!(
+        target_arch_from_triple(&llvm_target_triple_for(&host_triple())),
+        "x86_64" | "aarch64"
+    )
 }
 
 /// True when the build target is `x86_64-pc-windows-*`, driving the

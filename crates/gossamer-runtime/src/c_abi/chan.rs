@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
@@ -146,7 +144,7 @@ impl GosChan {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
+pub extern "C" fn gos_rt_chan_new(elem_bytes: u32, cap: i64) -> *mut GosChan {
     ffi_entry!(std::ptr::null_mut(), {
         let buf = if elem_bytes == 8 {
             ChanStorage::I64(VecDeque::new())
@@ -188,6 +186,8 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
         if c.is_null() || val.is_null() {
             return false;
         }
+        // SAFETY: `c` is this shim's channel argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let chan = unsafe { &*c };
         if *chan.closed.lock() {
             return true;
@@ -216,7 +216,9 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
             }
             chan.sync_ready(storage_len(&guard));
             if chan.cap == 0 && !queued_unbuffered {
-                push_back(&mut guard, send_id, val, bytes_len);
+                // SAFETY: `val` is this shim's element argument, addressing one element of the
+                // channel's width (C-ABI contract).
+                unsafe { push_back(&mut guard, send_id, val, bytes_len) };
                 queued_unbuffered = true;
                 chan.sync_ready(storage_len(&guard));
                 drop(guard);
@@ -225,7 +227,9 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_send(c: *mut GosChan, val: *const u8
                 wake_one_recv(chan);
                 continue;
             } else if chan.cap != 0 && (chan.cap < 0 || (storage_len(&guard) as i64) < chan.cap) {
-                push_back(&mut guard, 0, val, bytes_len);
+                // SAFETY: `val` is this shim's element argument, addressing one element of the
+                // channel's width (C-ABI contract).
+                unsafe { push_back(&mut guard, 0, val, bytes_len) };
                 chan.sync_ready(storage_len(&guard));
                 drop(guard);
                 chan.last_sender
@@ -391,6 +395,8 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_try_send(c: *mut GosChan, val: *cons
         if c.is_null() || val.is_null() {
             return 0;
         }
+        // SAFETY: `c` is this shim's channel argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let chan = unsafe { &*c };
         if *chan.closed.lock() {
             return CLOSED_SEND;
@@ -403,12 +409,16 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_try_send(c: *mut GosChan, val: *cons
             if !has_receiver {
                 return 0;
             }
-            push_back(&mut guard, 0, val, bytes_len);
+            // SAFETY: `val` is this shim's element argument, addressing one element of the
+            // channel's width (C-ABI contract).
+            unsafe { push_back(&mut guard, 0, val, bytes_len) };
         } else {
             if chan.cap > 0 && storage_len(&guard) as i64 >= chan.cap {
                 return 0;
             }
-            push_back(&mut guard, 0, val, bytes_len);
+            // SAFETY: `val` is this shim's element argument, addressing one element of the
+            // channel's width (C-ABI contract).
+            unsafe { push_back(&mut guard, 0, val, bytes_len) };
         }
         drop(guard);
         chan.last_sender
@@ -434,6 +444,7 @@ pub unsafe extern "C" fn gos_rt_chan_recv(c: *mut GosChan, out: *mut u8) -> i32 
         if c.is_null() || out.is_null() {
             return 0;
         }
+        // SAFETY: `c` is a handle from compiled code, checked non-null above and live for the whole call.
         let chan = unsafe { &*c };
         let bytes_len = chan.elem_bytes as usize;
         loop {
@@ -447,7 +458,9 @@ pub unsafe extern "C" fn gos_rt_chan_recv(c: *mut GosChan, out: *mut u8) -> i32 
             if super::cohort::current_is_cancelled() {
                 let mut guard = chan.buf.lock();
                 chan.sync_ready(storage_len(&guard));
-                if let Some(consumed_id) = pop_front(&mut guard, out, bytes_len) {
+                // SAFETY: `out` is this shim's receive slot, one element of the channel's width
+                // (C-ABI contract).
+                if let Some(consumed_id) = unsafe { pop_front(&mut guard, out, bytes_len) } {
                     chan.sync_ready(storage_len(&guard));
                     drop(guard);
                     record_chan_handoff(chan);
@@ -458,7 +471,9 @@ pub unsafe extern "C" fn gos_rt_chan_recv(c: *mut GosChan, out: *mut u8) -> i32 
             }
             let mut guard = chan.buf.lock();
             chan.sync_ready(storage_len(&guard));
-            if let Some(consumed_id) = pop_front(&mut guard, out, bytes_len) {
+            // SAFETY: `out` is this shim's receive slot, one element of the channel's width
+            // (C-ABI contract).
+            if let Some(consumed_id) = unsafe { pop_front(&mut guard, out, bytes_len) } {
                 chan.sync_ready(storage_len(&guard));
                 drop(guard);
                 record_chan_handoff(chan);
@@ -513,10 +528,13 @@ pub unsafe extern "C" fn gos_rt_chan_try_recv(c: *mut GosChan, out: *mut u8) -> 
         if c.is_null() || out.is_null() {
             return 0;
         }
+        // SAFETY: `c` is a handle from compiled code, checked non-null above and live for the whole call.
         let chan = unsafe { &*c };
         let bytes_len = chan.elem_bytes as usize;
         let mut guard = chan.buf.lock();
-        if let Some(consumed_id) = pop_front(&mut guard, out, bytes_len) {
+        // SAFETY: `out` is this shim's receive slot, one element of the channel's width (C-ABI
+        // contract).
+        if let Some(consumed_id) = unsafe { pop_front(&mut guard, out, bytes_len) } {
             drop(guard);
             record_chan_handoff(chan);
             wake_send_after_consume(chan, consumed_id);
@@ -533,6 +551,8 @@ pub unsafe extern "C" fn gos_rt_chan_try_recv(c: *mut GosChan, out: *mut u8) -> 
 pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
     ffi_entry!(0i128, {
         let mut out = 0i64;
+        // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract), which
+        // `gos_rt_chan_recv` accepts, and `out` is a local word that holds a one-word element.
         let status = unsafe { gos_rt_chan_recv(c, std::ptr::addr_of_mut!(out).cast::<u8>()) };
         let disc = 1 - i64::from(status);
         let payload = if status == 1 { out } else { 0 };
@@ -546,6 +566,9 @@ pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
 pub unsafe extern "C" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> i128 {
     ffi_entry!(0i128, {
         let mut out = 0i64;
+        // SAFETY: `c` is this shim's argument, null or live for the call (C-ABI contract), which
+        // `gos_rt_chan_try_recv` accepts, and `out` is a local word that holds a one-word
+        // element.
         let status = unsafe { gos_rt_chan_try_recv(c, std::ptr::addr_of_mut!(out).cast::<u8>()) };
         let disc = 1 - i64::from(status);
         let payload = if status == 1 { out } else { 0 };
@@ -607,6 +630,8 @@ fn ctx_deregister_hook() -> Option<CtxDeregisterFn> {
     if p.is_null() {
         None
     } else {
+        // SAFETY: `p` was stored as a `CtxDeregisterFn` by `install_ctx_hooks` and is read back
+        // as the same function-pointer type.
         Some(unsafe { std::mem::transmute::<*mut (), CtxDeregisterFn>(p) })
     }
 }
@@ -616,6 +641,8 @@ fn ctx_is_cancelled_hook() -> Option<CtxIsCancelledFn> {
     if p.is_null() {
         None
     } else {
+        // SAFETY: `p` was stored as a `CtxIsCancelledFn` by `install_ctx_hooks` and is read back
+        // as the same function-pointer type.
         Some(unsafe { std::mem::transmute::<*mut (), CtxIsCancelledFn>(p) })
     }
 }
@@ -638,6 +665,8 @@ pub unsafe extern "C" fn gos_rt_chan_recv_ctx_option(
     ctx_handle: *const u8,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `c` and `ctx_handle` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `chan_recv_ctx_core` accepts.
         let (disc, payload) = unsafe { chan_recv_ctx_core(c, ctx_handle) };
         crate::c_abi::vec::pack_result(disc, payload)
     })
@@ -660,9 +689,13 @@ pub unsafe extern "C" fn gos_rt_chan_recv_ctx(
     out: *mut i64,
 ) -> i32 {
     ffi_entry!(0, {
+        // SAFETY: `c` and `ctx_handle` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `chan_recv_ctx_core` accepts.
         let (disc, payload) = unsafe { chan_recv_ctx_core(c, ctx_handle) };
         if disc == 0 {
             if !out.is_null() {
+                // SAFETY: `out` is non-null (checked above) and addresses the caller's result
+                // word (C-ABI contract).
                 unsafe { out.write(payload) };
             }
             1
@@ -672,11 +705,26 @@ pub unsafe extern "C" fn gos_rt_chan_recv_ctx(
     })
 }
 
+/// The element width of a channel whose receive lands in one `i64`. Every
+/// channel compiled code builds carries one-word elements; a wider one reaching
+/// a one-word receive is refused rather than written past its slot.
+fn one_word_width(chan: &GosChan) -> usize {
+    let width = chan.elem_bytes as usize;
+    if width > std::mem::size_of::<i64>() {
+        crate::c_abi::panic::panic_text(
+            "channel element is wider than the word this receive holds",
+        );
+    }
+    width
+}
+
 /// Receives with cancellation, answering `(disc, payload)` where `disc` is
 /// `0` for a value and `1` for a closed channel or a cancelled context.
 unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i64) {
     {
         if ctx_handle.is_null() {
+            // SAFETY: this `unsafe fn`'s caller passes `c` null or live, which
+            // `gos_rt_chan_recv_option` accepts.
             let packed = unsafe { gos_rt_chan_recv_option(c) };
             return (
                 (packed & 0xFFFF_FFFF_FFFF_FFFF) as u64 as i64,
@@ -689,18 +737,24 @@ unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i6
         // receive through the same loop below.
         let addr = ctx_handle as usize;
         let register: Box<dyn Fn(*const u8, u32)> = match ctx_register_hook() {
+            // SAFETY: the hook is the installed context runtime's register function, called with
+            // the live context handle and a goroutine id.
             Some(hook) => Box::new(move |h, g| unsafe { hook(h, g) }),
             None => Box::new(move |_, g| {
                 super::context::register_waiter(addr, crate::sched::Gid(g));
             }),
         };
         let deregister: Box<dyn Fn(*const u8, u32)> = match ctx_deregister_hook() {
+            // SAFETY: the hook is the installed context runtime's deregister function, called
+            // with the live context handle and a goroutine id.
             Some(hook) => Box::new(move |h, g| unsafe { hook(h, g) }),
             None => Box::new(move |_, g| {
                 super::context::deregister_waiter(addr, crate::sched::Gid(g));
             }),
         };
         let is_cancelled: Box<dyn Fn(*const u8) -> i32> = match ctx_is_cancelled_hook() {
+            // SAFETY: the hook is the installed context runtime's cancellation query, called with
+            // the live context handle.
             Some(hook) => Box::new(move |h| unsafe { hook(h) }),
             None => Box::new(move |_| i32::from(super::context::addr_is_cancelled(addr))),
         };
@@ -712,8 +766,10 @@ unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i6
         if c.is_null() {
             return (1, 0);
         }
+        // SAFETY: `c` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // channel.
         let chan = unsafe { &*c };
-        let bytes_len = chan.elem_bytes as usize;
+        let bytes_len = one_word_width(chan);
         let gid = crate::sched_global::current_gid();
         if let Some(g) = gid {
             register(ctx_handle, g.as_u32());
@@ -728,7 +784,9 @@ unsafe fn chan_recv_ctx_core(c: *mut GosChan, ctx_handle: *const u8) -> (i64, i6
         let (result_disc, result_payload) = loop {
             let mut guard = chan.buf.lock();
             chan.sync_ready(storage_len(&guard));
-            if let Some(consumed_id) = pop_front(&mut guard, out_ptr, bytes_len) {
+            // SAFETY: `out_ptr` addresses the live local `out_val`, `bytes_len`
+            // bytes wide.
+            if let Some(consumed_id) = unsafe { pop_front(&mut guard, out_ptr, bytes_len) } {
                 chan.sync_ready(storage_len(&guard));
                 drop(guard);
                 record_chan_handoff(chan);
@@ -795,12 +853,17 @@ fn storage_contains_id(storage: &ChanStorage, id: u64) -> bool {
     }
 }
 
-fn push_back(storage: &mut ChanStorage, id: u64, val: *const u8, bytes_len: usize) {
+/// # Safety
+///
+/// `val` addresses `bytes_len` readable bytes.
+unsafe fn push_back(storage: &mut ChanStorage, id: u64, val: *const u8, bytes_len: usize) {
     match storage {
         ChanStorage::I64(deque) => {
             // Read 8 bytes from `val` into an i64 in a way that
             // doesn't assume natural alignment of the source.
             let mut tmp = [0u8; 8];
+            // SAFETY: a word-wide channel's elements are 8 bytes, so `val` addresses 8 readable
+            // bytes (this `unsafe fn`'s contract).
             unsafe {
                 std::ptr::copy_nonoverlapping(val, tmp.as_mut_ptr(), 8);
             }
@@ -808,6 +871,8 @@ fn push_back(storage: &mut ChanStorage, id: u64, val: *const u8, bytes_len: usiz
         }
         ChanStorage::Bytes(deque) => {
             let mut data = vec![0u8; bytes_len];
+            // SAFETY: `val` addresses `bytes_len` readable bytes (this `unsafe fn`'s contract),
+            // and `data` holds as many.
             unsafe {
                 std::ptr::copy_nonoverlapping(val, data.as_mut_ptr(), bytes_len);
             }
@@ -818,16 +883,24 @@ fn push_back(storage: &mut ChanStorage, id: u64, val: *const u8, bytes_len: usiz
 
 /// Moves the front value into `out`, returning its send id so the
 /// caller can wake the sender that queued it. `None` when empty.
-fn pop_front(storage: &mut ChanStorage, out: *mut u8, bytes_len: usize) -> Option<u64> {
+///
+/// # Safety
+///
+/// `out` addresses `bytes_len` writable bytes.
+unsafe fn pop_front(storage: &mut ChanStorage, out: *mut u8, bytes_len: usize) -> Option<u64> {
     match storage {
         ChanStorage::I64(deque) => deque.pop_front().map(|(id, n)| {
             let bytes = n.to_ne_bytes();
+            // SAFETY: a word-wide channel's elements are 8 bytes, so `out` addresses 8 writable
+            // bytes (this `unsafe fn`'s contract).
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), out, 8);
             }
             id
         }),
         ChanStorage::Bytes(deque) => deque.pop_front().map(|(id, item)| {
+            // SAFETY: `out` addresses `bytes_len` writable bytes (this `unsafe fn`'s contract),
+            // and the queued item holds as many.
             unsafe {
                 std::ptr::copy_nonoverlapping(item.as_ptr(), out, bytes_len);
             }
@@ -891,6 +964,7 @@ pub unsafe extern "C-unwind" fn gos_rt_chan_close(c: *mut GosChan) -> i32 {
         if c.is_null() {
             None
         } else {
+            // SAFETY: `c` is non-null (checked above) and live for the call (C-ABI contract).
             Some(chan_close_idempotent(unsafe { &*c }))
         }
     });
@@ -930,6 +1004,7 @@ pub unsafe extern "C" fn gos_rt_chan_set_elem_kind(c: *mut GosChan, kind: i64) {
         if c.is_null() {
             return;
         }
+        // SAFETY: `c` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*c }.elem_kind.store(kind, Ordering::Relaxed);
     });
 }
@@ -949,13 +1024,19 @@ pub unsafe extern "C" fn gos_rt_chan_set_elem_desc(c: *mut GosChan, desc: *const
         // element type; read through the length header like any other string
         // argument.
         let bytes = unsafe { crate::c_abi::string::gos_str_arg_bytes(desc) }.to_vec();
+        // SAFETY: `c` is a handle from compiled code, checked non-null above and live for the whole call.
         *unsafe { &*c }.elem_desc.lock() = bytes;
     });
 }
 
 /// Gives back the shares an aggregate element's slots hold, then the copy the
 /// channel carries.
-fn release_aggregate(base: i64, desc: &[u8]) {
+///
+/// # Safety
+///
+/// A non-zero `base` addresses a live heap copy laid out as `desc` describes,
+/// holding the shares this releases.
+unsafe fn release_aggregate(base: i64, desc: &[u8]) {
     if base == 0 {
         return;
     }
@@ -964,18 +1045,27 @@ fn release_aggregate(base: i64, desc: &[u8]) {
         // SAFETY: the descriptor has one character per slot of the heap copy
         // the send made, so every offset it names is inside that allocation.
         let word = unsafe { std::ptr::read_unaligned(word_at) };
-        match kind {
-            b'S' => release_elem(1, word),
-            b'V' => release_elem(2, word),
-            b'R' => release_elem(3, word),
-            _ => {}
-        }
+        let shape = match kind {
+            b'S' => 1,
+            b'V' => 2,
+            b'R' => 3,
+            _ => continue,
+        };
+        // SAFETY: the slot's descriptor character names the shape of the
+        // share the send stored in it.
+        unsafe { release_elem(shape, word) };
     }
-    release_elem(3, base);
+    // SAFETY: `base` is the counted heap copy the send made.
+    unsafe { release_elem(3, base) };
 }
 
 /// Gives back the share the send minted for one queued element word.
-fn release_elem(kind: i64, word: i64) {
+///
+/// # Safety
+///
+/// A non-zero `word` is a value of the shape `kind` names, holding the share
+/// this releases.
+unsafe fn release_elem(kind: i64, word: i64) {
     if word == 0 {
         return;
     }
@@ -985,9 +1075,13 @@ fn release_elem(kind: i64, word: i64) {
         1 => unsafe {
             crate::c_abi::string::gos_rt_str_free_typed(word as usize as *mut std::ffi::c_char);
         },
+        // SAFETY: a kind-`2` word is a `Vec` holding the share the send minted (this `unsafe
+        // fn`'s contract).
         2 => unsafe {
             crate::c_abi::gos_rt_vec_free(word as usize as *mut crate::c_abi::vec::GosVec);
         },
+        // SAFETY: a kind-`3` word is a counted node holding the share the send minted (this
+        // `unsafe fn`'s contract).
         3 => unsafe {
             crate::c_abi::rc::gos_rt_rc_release(word as usize as *mut u8);
         },
@@ -1020,6 +1114,8 @@ pub(crate) unsafe fn chan_release(chan: *mut GosChan) {
     // `GosChan` repeats the close+notify, harmlessly, because callers
     // may also drop a `Box<GosChan>` directly in tests without going
     // through this entry point.
+    // SAFETY: this party held the last reference, so nothing else reaches the channel, and the
+    // caller's reference kept it live until now.
     unsafe {
         // Idempotent close for reclamation - must not panic if the user
         // already closed this channel explicitly (the user-facing
@@ -1116,7 +1212,7 @@ pub struct SelectBuilder {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_select_new(n: i64) -> *mut SelectBuilder {
+pub extern "C" fn gos_rt_select_new(n: i64) -> *mut SelectBuilder {
     ffi_entry!(std::ptr::null_mut(), {
         let cap = usize::try_from(n).unwrap_or(0);
         Box::into_raw(Box::new(SelectBuilder {
@@ -1132,6 +1228,7 @@ pub unsafe extern "C" fn gos_rt_select_arm_recv(b: *mut SelectBuilder, c: *mut G
         if b.is_null() {
             return;
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.arms.push(SelectArmRt::Recv(c));
     });
 }
@@ -1142,6 +1239,7 @@ pub unsafe extern "C" fn gos_rt_select_arm_send(b: *mut SelectBuilder, c: *mut G
         if b.is_null() {
             return;
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.arms.push(SelectArmRt::Send(c, val));
     });
 }
@@ -1152,6 +1250,7 @@ pub unsafe extern "C" fn gos_rt_select_arm_default(b: *mut SelectBuilder) {
         if b.is_null() {
             return;
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.arms.push(SelectArmRt::Default);
     });
 }
@@ -1186,6 +1285,7 @@ pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
         if b.is_null() {
             return -1;
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         let builder = unsafe { &mut *b };
         // Snapshot (kind, chan, send_val) so the poll/park loops don't hold a
         // borrow of `builder` across the `last_value` write. 0=recv, 1=send,
@@ -1207,14 +1307,15 @@ pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
                     if c.is_null() {
                         continue;
                     }
+                    // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
                     let chan = unsafe { &*c };
+                    let width = one_word_width(chan);
                     let mut tmp = 0i64;
                     let mut guard = chan.buf.lock();
-                    if let Some(consumed_id) = pop_front(
-                        &mut guard,
-                        std::ptr::addr_of_mut!(tmp).cast::<u8>(),
-                        chan.elem_bytes as usize,
-                    ) {
+                    // SAFETY: `tmp` is a live local of `width` bytes.
+                    if let Some(consumed_id) = unsafe {
+                        pop_front(&mut guard, std::ptr::addr_of_mut!(tmp).cast::<u8>(), width)
+                    } {
                         drop(guard);
                         record_chan_handoff(chan);
                         wake_send_after_consume(chan, consumed_id);
@@ -1236,6 +1337,8 @@ pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
                         continue;
                     }
                     let send_val = v;
+                    // SAFETY: `c` is a non-null arm channel, live for the select (C-ABI
+                    // contract), and `send_val` is one local word.
                     if unsafe { gos_rt_chan_try_send(c, std::ptr::addr_of!(send_val).cast::<u8>()) }
                         == 1
                     {
@@ -1271,6 +1374,7 @@ pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
                         if c.is_null() {
                             continue;
                         }
+                        // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
                         let chan = unsafe { &**c };
                         if *kind == 0 {
                             chan.recv_waiters.fetch_add(1, Ordering::AcqRel);
@@ -1289,6 +1393,7 @@ pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
                     // all entries exist; `unpark` records a pre-unpark wake
                     // until this coroutine has actually suspended.
                     if arms.iter().any(|(kind, c, _)| {
+                        // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
                         !c.is_null() && select_arm_is_ready(*kind, unsafe { &**c })
                     }) {
                         crate::sched_global::scheduler().unpark(parker.gid);
@@ -1300,6 +1405,7 @@ pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
                         if c.is_null() {
                             continue;
                         }
+                        // SAFETY: a non-null arm channel is live for the select (C-ABI contract).
                         let chan = unsafe { &**c };
                         if *kind == 0 {
                             chan.recv_waiters.fetch_sub(1, Ordering::AcqRel);
@@ -1319,6 +1425,8 @@ pub unsafe extern "C" fn gos_rt_select_wait(b: *mut SelectBuilder) -> i64 {
                     .find(|(kind, c, _)| *kind != 2 && !c.is_null())
                     .map(|(_, c, _)| *c);
                 if let Some(c) = first {
+                    // SAFETY: `c` is a non-null arm channel, live for the select (C-ABI
+                    // contract).
                     let chan = unsafe { &*c };
                     let mut guard = chan.buf.lock();
                     chan.not_empty
@@ -1340,6 +1448,7 @@ pub unsafe extern "C" fn gos_rt_select_value(b: *mut SelectBuilder) -> i64 {
         if b.is_null() {
             return 0;
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*b }.last_value
     })
 }
@@ -1350,6 +1459,8 @@ pub unsafe extern "C" fn gos_rt_select_free(b: *mut SelectBuilder) {
         if b.is_null() {
             return;
         }
+        // SAFETY: `b` is non-null (checked above), the builder `gos_rt_select_new` boxed, which
+        // this call consumes (C-ABI contract).
         unsafe {
             drop(Box::from_raw(b));
         }
@@ -1366,13 +1477,15 @@ mod tests {
 
     #[test]
     fn cap_zero_channel_send_waits_for_receiver() {
-        let chan = unsafe { gos_rt_chan_new(8, 0) };
+        let chan = gos_rt_chan_new(8, 0);
         assert!(!chan.is_null());
         let done = Arc::new(AtomicBool::new(false));
         let done_tx = Arc::clone(&done);
         let addr = chan as usize;
         let sender = std::thread::spawn(move || {
             let value = 77_i64;
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe {
                 gos_rt_chan_send(addr as *mut GosChan, std::ptr::addr_of!(value).cast());
             }
@@ -1384,11 +1497,15 @@ mod tests {
             "unbuffered send returned before recv"
         );
         let mut out = 0_i64;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let ok = unsafe { gos_rt_chan_recv(chan, std::ptr::addr_of_mut!(out).cast()) };
         assert_eq!(ok, 1);
         assert_eq!(out, 77);
         sender.join().expect("sender");
         assert!(done.load(Ordering::Acquire));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_chan_drop(chan) };
     }
 
@@ -1469,7 +1586,7 @@ mod tests {
         const SENDERS: i64 = 8;
         const PER_SENDER: i64 = 20;
 
-        let chan = unsafe { gos_rt_chan_new(8, 0) };
+        let chan = gos_rt_chan_new(8, 0);
         assert!(!chan.is_null());
         let addr = chan as usize;
         let senders: Vec<_> = (0..SENDERS)
@@ -1477,6 +1594,8 @@ mod tests {
                 std::thread::spawn(move || {
                     for i in 0..PER_SENDER {
                         let value = id * 100 + i;
+                        // SAFETY: every pointer argument is a value this test built above and
+                        // still holds live; a null one is accepted by the callee.
                         unsafe {
                             gos_rt_chan_send(
                                 addr as *mut GosChan,
@@ -1492,6 +1611,8 @@ mod tests {
         for _ in 0..SENDERS * PER_SENDER {
             let mut out = 0i64;
             assert_eq!(
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { gos_rt_chan_recv(chan, std::ptr::addr_of_mut!(out).cast()) },
                 1
             );
@@ -1508,39 +1629,55 @@ mod tests {
             .flat_map(|id| (0..PER_SENDER).map(move |i| id * 100 + i))
             .sum();
         assert_eq!(sum, expected);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_chan_drop(chan) };
     }
 
     #[test]
     fn cap_negative_channel_is_explicitly_unbounded() {
-        let chan = unsafe { gos_rt_chan_new(8, -1) };
+        let chan = gos_rt_chan_new(8, -1);
         assert!(!chan.is_null());
         let value = 11_i64;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let sent = unsafe { gos_rt_chan_try_send(chan, std::ptr::addr_of!(value).cast()) };
         assert_eq!(sent, 1);
         let mut out = 0_i64;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let got = unsafe { gos_rt_chan_try_recv(chan, std::ptr::addr_of_mut!(out).cast()) };
         assert_eq!(got, 1);
         assert_eq!(out, 11);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_chan_drop(chan) };
     }
 
     #[test]
     fn a_retained_channel_outlives_the_first_drop() {
-        let chan = unsafe { gos_rt_chan_new(8, 1) };
+        let chan = gos_rt_chan_new(8, 1);
         assert!(!chan.is_null());
         // SAFETY: `chan` is the channel constructed above, still live.
         unsafe { chan_retain(&*chan) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_chan_drop(chan) };
         // The second party still reaches the channel: sending and
         // receiving here would fault if the first drop had reclaimed it.
         let value = 5_i64;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let sent = unsafe { gos_rt_chan_try_send(chan, std::ptr::addr_of!(value).cast()) };
         assert_eq!(sent, 1);
         let mut out = 0_i64;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let got = unsafe { gos_rt_chan_try_recv(chan, std::ptr::addr_of_mut!(out).cast()) };
         assert_eq!(got, 1);
         assert_eq!(out, 5);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_chan_drop(chan) };
     }
 }

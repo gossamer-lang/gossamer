@@ -28,7 +28,7 @@ use gossamer_std::context::{Context, with_cancel};
 #[test]
 fn chan_recv_ctx_returns_some_value_when_send_happens_before_cancel() {
     #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
-    let chan: *mut u8 = unsafe { gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast() };
+    let chan: *mut u8 = gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast();
     assert!(!chan.is_null(), "chan_new returned null");
 
     let (ctx, _cancel) = with_cancel(&Context::background());
@@ -59,7 +59,7 @@ fn chan_recv_ctx_returns_some_value_when_send_happens_before_cancel() {
 #[test]
 fn chan_recv_ctx_returns_none_when_context_is_already_cancelled_at_entry() {
     #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
-    let chan: *mut u8 = unsafe { gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast() };
+    let chan: *mut u8 = gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast();
     assert!(!chan.is_null(), "chan_new returned null");
 
     let (ctx, cancel) = with_cancel(&Context::background());
@@ -93,7 +93,7 @@ fn chan_recv_ctx_returns_none_when_cancel_fires_mid_recv_from_os_thread() {
     use std::sync::atomic::{AtomicI64, Ordering};
 
     #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
-    let chan: *mut u8 = unsafe { gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast() };
+    let chan: *mut u8 = gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast();
     assert!(!chan.is_null());
 
     let (ctx, cancel) = with_cancel(&Context::background());
@@ -126,7 +126,7 @@ fn chan_recv_ctx_returns_none_when_cancel_fires_mid_recv_from_os_thread() {
 #[test]
 fn chan_recv_ctx_returns_none_when_channel_is_closed_with_no_value() {
     #[allow(unsafe_code, reason = "the test drives the raw channel C-ABI directly")]
-    let chan: *mut u8 = unsafe { gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast() };
+    let chan: *mut u8 = gossamer_runtime::c_abi::gos_rt_chan_new(8, 0).cast();
     assert!(!chan.is_null(), "chan_new returned null");
 
     // Close the channel without sending anything.

@@ -324,11 +324,13 @@ pub struct Vm {
     /// allocate a heap String per frame.
     pub(crate) call_stack: RefCell<Vec<VmCallStackFrame>>,
     /// Current Gossamer call depth for this goroutine's VM. Incremented
-    /// on every `apply` entry, decremented on return. When it reaches
-    /// `MAX_CALL_DEPTH` the call is refused with `RuntimeError::StackOverflow`
-    /// so unbounded mutual or direct recursion aborts instead of spinning
-    /// the CPU indefinitely through heap-allocated frame allocation.
+    /// on every `apply` entry, decremented on return.
     pub(crate) call_depth: Cell<usize>,
+    /// Bytes held by this goroutine's suspended heap frames. A call that
+    /// would take it past `MAX_HEAP_FRAME_BYTES` is refused with
+    /// `RuntimeError::StackOverflow`, so recursion depth is bounded by the
+    /// memory the frames occupy rather than by how many there are.
+    pub(crate) heap_frame_bytes: Cell<usize>,
     /// Source map published before [`Vm::load`]. The compiler resolves
     /// expression locations for runtime tracebacks whenever it is present.
     /// When runtime coverage is also enabled, statement spans additionally
@@ -1079,13 +1081,19 @@ pub(crate) enum Global {
     MutStatic(Arc<parking_lot::Mutex<Value>>),
 }
 
-/// Maximum Gossamer call frames per goroutine before `StackOverflow`.
+/// Maximum Gossamer call frames per goroutine on a thread whose native
+/// stack guard is not armed.
 ///
-/// Direct named bytecode calls live in heap-owned VM frames, so they do not
-/// consume the Rust stack. A finite cap still bounds adversarial recursion's
-/// register-file memory and gives programs a deterministic `GX0008` rather
-/// than exhausting process memory.
-const MAX_CALL_DEPTH: usize = 4_096;
+/// Every `apply` entry nests Rust frames, and without the byte-budget guard
+/// nothing else stops that recursion before the native stack overflows. The
+/// `gos` binary arms the guard on every VM thread, so there the limit is
+/// [`MAX_HEAP_FRAME_BYTES`] and the stack guard instead.
+const MAX_UNGUARDED_CALL_DEPTH: usize = 4_096;
+
+/// Bytes of suspended heap frames one goroutine may hold, the ceiling Go
+/// places on a goroutine's stack on 64-bit hosts. Deep recursion is bounded
+/// by the memory its frames occupy, and exceeding it is `GX0008`.
+const MAX_HEAP_FRAME_BYTES: usize = 1 << 30;
 
 /// Native-stack depth at which direct bytecode calls switch to the heap-frame
 /// trampoline.

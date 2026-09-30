@@ -43,5 +43,5 @@ let inputs = #[
 ]
 for s in inputs {
     let stats = analyse(s)
-    println("chars={}, words={}: {}", stats.chars, stats.words, s)
+    println(f"chars={stats.chars}, words={stats.words}: {s}")
 }

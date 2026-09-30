@@ -14,4 +14,4 @@ fn count_newlines(text: String) -> i64 {
 
 let sample = "alpha\nbeta\ngamma\ndelta\n"
 let n = count_newlines(sample)
-println("lines: {}", n)
+println(f"lines: {n}")

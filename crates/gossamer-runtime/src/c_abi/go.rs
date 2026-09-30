@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 // ---------------------------------------------------------------
@@ -42,7 +40,11 @@ struct SpawnOutcome {
 }
 
 /// Sends a boxed `SpawnOutcome` over the one-shot handle channel.
-fn deliver_outcome(ch_addr: usize, disc: i64, payload: i64) {
+///
+/// # Safety
+///
+/// `ch_addr` addresses a live channel whose element is one 8-byte word.
+unsafe fn deliver_outcome(ch_addr: usize, disc: i64, payload: i64) {
     let boxed = Box::new(SpawnOutcome { disc, payload });
     let outcome_ptr = Box::into_raw(boxed) as i64;
     let bytes = outcome_ptr.to_ne_bytes();
@@ -114,7 +116,9 @@ impl Drop for SpawnOutcomeGuard {
         let msg = super::panic::peek_last_goroutine_panic()
             .unwrap_or_else(|| "spawned goroutine panicked".to_string());
         let cstr = super::string::alloc_cstring(msg.as_bytes());
-        deliver_outcome(self.ch_addr, 1, cstr as i64);
+        // SAFETY: the guard holds the one-shot channel it was armed with,
+        // which stays live until an outcome is delivered on it.
+        unsafe { deliver_outcome(self.ch_addr, 1, cstr as i64) };
     }
 }
 
@@ -190,7 +194,11 @@ fn box_two_word_value(disc: i64, payload: i64) -> i64 {
 }
 
 /// Renders a failed child's `Err` payload for the cohort's report.
-fn child_error_message(payload: i64, err_kind: i64) -> String {
+///
+/// # Safety
+///
+/// A non-zero `payload` is a live value of the shape `err_kind` names.
+unsafe fn child_error_message(payload: i64, err_kind: i64) -> String {
     if payload == 0 {
         return "cohort child failed".to_string();
     }
@@ -209,6 +217,8 @@ fn child_error_message(payload: i64, err_kind: i64) -> String {
             // Gossamer string. Read through the length header so a
             // message carrying an interior NUL is not truncated.
             let text = unsafe { super::gos_str_arg_string(rendered) };
+            // SAFETY: `rendered` is the fresh non-null string `gos_rt_error_display` answered,
+            // owned here and not read again.
             unsafe { super::string::gos_rt_str_free(rendered) };
             text
         }
@@ -236,6 +246,8 @@ fn child_error_message(payload: i64, err_kind: i64) -> String {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_spawn(code: usize, env: usize) -> *mut super::chan::GosChan {
     // The one-word form: a callable whose return fits a single slot.
+    // SAFETY: `code` and `env` are this shim's closure, a callable whose one-word return this
+    // form names (C-ABI contract), which `gos_rt_spawn_ex` accepts.
     unsafe {
         gos_rt_spawn_ex(
             code,
@@ -278,7 +290,7 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
         // One-shot, capacity-1 channel carrying a single SpawnOutcome
         // pointer. Capacity 1 lets the worker deposit the outcome
         // without waiting for the joiner to arrive.
-        let ch = unsafe { super::chan::gos_rt_chan_new(8, 1) };
+        let ch = super::chan::gos_rt_chan_new(8, 1);
         if ch.is_null() {
             return std::ptr::null_mut();
         }
@@ -301,6 +313,7 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
             let label = if reason.is_null() {
                 String::new()
             } else {
+                // SAFETY: `reason` is a String argument from compiled code, null or a live string body for the whole call.
                 unsafe { super::gos_str_arg_string(reason) }
             };
             super::cohort::register_child(cohort, label)
@@ -334,33 +347,47 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
                 ch_addr,
                 armed: true,
             };
-            // SAFETY: `code` is the callable's entry address; the
-            // closure ABI calls it as `fn(env) -> T` with the
-            // environment blob as the implicit argument, and `ret_words`
-            // reports T's register shape. The `C-unwind` ABI lets a
-            // goroutine panic propagate across this call into the
-            // Drop-guards above.
+            // `code` is the callable's entry address; the closure ABI calls it
+            // as `fn(env) -> T` with the environment blob as the implicit
+            // argument, and `ret_words` reports T's register shape. The
+            // `C-unwind` ABI lets a goroutine panic propagate across this
+            // call into the Drop-guards above.
             let value = if ret_words == RET_WORDS_F64 {
                 // A float answer arrives in a floating-point register, so the
                 // call has to be made through a float-returning signature; the
                 // bits are what the joiner's carrier holds, symmetric with
                 // `gos_rt_result_new_f64`.
                 type Fn1F64 = unsafe extern "C-unwind" fn(usize) -> f64;
+                // SAFETY: `code` is the entry address of a closure-ABI `fn(env)` whose
+                // answer has the register shape `ret_words` names, which is this type.
                 let f: Fn1F64 = unsafe { std::mem::transmute(code) };
+                // SAFETY: `env` is the callable's environment blob, which `_env_ref`
+                // keeps live until the goroutine leaves.
                 unsafe { f(env) }.to_bits() as i64
             } else if ret_words >= 2 {
                 type Fn1Wide = unsafe extern "C-unwind" fn(usize) -> i128;
+                // SAFETY: `code` is the entry address of a closure-ABI `fn(env)` whose
+                // answer has the register shape `ret_words` names, which is this type.
                 let f: Fn1Wide = unsafe { std::mem::transmute(code) };
+                // SAFETY: `env` is the callable's environment blob, which `_env_ref`
+                // keeps live until the goroutine leaves.
                 let wide = unsafe { f(env) };
                 let disc = super::vec::result_disc_of(wide);
                 let payload = super::vec::result_payload_of(wide);
                 if disc == 1 && err_kind != SPAWN_ERR_KIND_NONE {
-                    cohort_guard.failure = Some(child_error_message(payload, err_kind));
+                    // SAFETY: `err_kind` is the callable's static `Err` type, so
+                    // the child's `Err` payload has that shape.
+                    let message = unsafe { child_error_message(payload, err_kind) };
+                    cohort_guard.failure = Some(message);
                 }
                 box_two_word_value(disc, payload)
             } else {
                 type Fn1 = unsafe extern "C-unwind" fn(usize) -> i64;
+                // SAFETY: `code` is the entry address of a closure-ABI `fn(env)` whose
+                // answer has the register shape `ret_words` names, which is this type.
                 let f: Fn1 = unsafe { std::mem::transmute(code) };
+                // SAFETY: `env` is the callable's environment blob, which `_env_ref`
+                // keeps live until the goroutine leaves.
                 unsafe { f(env) }
             };
             // Normal completion. The outcome reaches the handle before the
@@ -371,7 +398,9 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
             // `leave_child` picks up when it records the failure.
             guard.armed = false;
             cohort_guard.completed = true;
-            deliver_outcome(ch_addr, 0, value);
+            // SAFETY: `ch_addr` is the spawn's one-shot handle channel, live
+            // until an outcome is delivered on it.
+            unsafe { deliver_outcome(ch_addr, 0, value) };
             cohort_guard.report();
         };
         if cohort != 0 && super::cohort::current_isolation() == super::cohort::ISOLATION_THREAD {
@@ -420,7 +449,7 @@ pub unsafe extern "C" fn gos_rt_join(ch: *mut super::chan::GosChan) -> i128 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_go_yield() {
+pub extern "C" fn gos_rt_go_yield() {
     ffi_entry!((), {
         // Real coroutine yield - suspend this goroutine and let the
         // worker M run another. The scheduler immediately re-enqueues
@@ -437,7 +466,7 @@ pub unsafe extern "C" fn gos_rt_go_yield() {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sleep_ns(ns: i64) {
+pub extern "C" fn gos_rt_sleep_ns(ns: i64) {
     ffi_entry!((), {
         if ns <= 0 {
             return;
@@ -485,12 +514,10 @@ pub unsafe extern "C" fn gos_rt_sleep_ns(ns: i64) {
 pub unsafe extern "C" fn gos_rt_sleep_ms_ctx(ctx_handle: *const u8, ms: i64) -> i64 {
     ffi_entry!(0, {
         if ms < 0 {
-            unsafe {
-                crate::c_abi::panic::panic_text(
-                    "time::sleep_ctx: duration_ms must be non-negative",
-                );
-            };
+            crate::c_abi::panic::panic_text("time::sleep_ctx: duration_ms must be non-negative");
         }
+        // SAFETY: `ctx_handle` is this shim's argument, null or an opaque context handle (C-ABI
+        // contract), which `gos_rt_sleep_ns_ctx` accepts.
         unsafe { gos_rt_sleep_ns_ctx(ctx_handle, ms.saturating_mul(1_000_000)) }
     })
 }
@@ -510,7 +537,7 @@ pub unsafe extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const u8, ns: i64) -> 
             return 0;
         }
         if addr == 0 {
-            unsafe { gos_rt_sleep_ns(ns) };
+            gos_rt_sleep_ns(ns);
             return 1;
         }
         let deadline =
@@ -546,17 +573,15 @@ pub unsafe extern "C" fn gos_rt_sleep_ns_ctx(ctx_handle: *const u8, ns: i64) -> 
 pub unsafe extern "C" fn gos_rt_sleep_ms(ms: i64) {
     ffi_entry!((), {
         if ms < 0 {
-            unsafe {
-                crate::c_abi::panic::panic_text("time::sleep: duration_ms must be non-negative");
-            };
+            crate::c_abi::panic::panic_text("time::sleep: duration_ms must be non-negative");
         }
         let ns = ms.saturating_mul(1_000_000);
-        unsafe { gos_rt_sleep_ns(ns) }
+        gos_rt_sleep_ns(ns);
     });
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_now_ns() -> i64 {
+pub extern "C" fn gos_rt_now_ns() -> i64 {
     ffi_entry!(-1, {
         use std::time::UNIX_EPOCH;
         crate::platform::system_time_now()

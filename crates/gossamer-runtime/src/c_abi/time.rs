@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 // ---------------------------------------------------------------
@@ -20,7 +18,7 @@
 // ---------------------------------------------------------------
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_time_now() -> f64 {
+pub extern "C" fn gos_rt_time_now() -> f64 {
     ffi_entry!(f64::NAN, {
         use std::time::UNIX_EPOCH;
         crate::platform::system_time_now()
@@ -40,7 +38,7 @@ fn monotonic_base() -> crate::platform::Instant {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_monotonic_ms() -> i64 {
+pub extern "C" fn gos_rt_monotonic_ms() -> i64 {
     ffi_entry!(-1, {
         i64::try_from(monotonic_base().elapsed().as_millis()).unwrap_or(i64::MAX)
     })
@@ -48,14 +46,14 @@ pub unsafe extern "C" fn gos_rt_monotonic_ms() -> i64 {
 
 /// `time::now_nanos() -> i64` - nanoseconds since the UNIX epoch.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_time_now_nanos() -> i64 {
+pub extern "C" fn gos_rt_time_now_nanos() -> i64 {
     ffi_entry!(-1, { crate::clock::wall_nanos() })
 }
 
 /// `time::since_ms(start) -> i64` - monotonic milliseconds elapsed
 /// since the `start` value previously returned by `monotonic_ms`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_time_since_ms(start: i64) -> i64 {
+pub extern "C" fn gos_rt_time_since_ms(start: i64) -> i64 {
     ffi_entry!(-1, {
         let now = i64::try_from(monotonic_base().elapsed().as_millis()).unwrap_or(i64::MAX);
         now.saturating_sub(start)
@@ -63,7 +61,7 @@ pub unsafe extern "C" fn gos_rt_time_since_ms(start: i64) -> i64 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_monotonic_nanos() -> i64 {
+pub extern "C" fn gos_rt_monotonic_nanos() -> i64 {
     ffi_entry!(-1, {
         i64::try_from(monotonic_base().elapsed().as_nanos()).unwrap_or(i64::MAX)
     })
@@ -142,19 +140,19 @@ pub extern "C" fn gos_rt_duration_as_secs_f64(ns: i64) -> f64 {
 /// `time::Instant::now()`: the monotonic clock in nanoseconds.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_instant_now() -> i64 {
-    unsafe { gos_rt_monotonic_nanos() }
+    gos_rt_monotonic_nanos()
 }
 
 /// `inst.elapsed()`: nanoseconds since `start`, never negative.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_instant_elapsed(start: i64) -> i64 {
-    gos_rt_instant_duration_since(unsafe { gos_rt_monotonic_nanos() }, start)
+pub extern "C" fn gos_rt_instant_elapsed(start: i64) -> i64 {
+    gos_rt_instant_duration_since(gos_rt_monotonic_nanos(), start)
 }
 
 /// `inst.elapsed_ms()`: whole milliseconds since `start`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_instant_elapsed_ms(start: i64) -> i64 {
-    (unsafe { gos_rt_instant_elapsed(start) }) / NANOS_PER_MILLI
+    (gos_rt_instant_elapsed(start)) / NANOS_PER_MILLI
 }
 
 /// `later.duration_since(earlier)`: the nanoseconds between two readings,
@@ -182,10 +180,14 @@ enum CivilLocation {
     Fixed(FixedOffset),
 }
 
-fn read_time_string(ptr: *const c_char) -> Result<String, String> {
+/// # Safety
+///
+/// `ptr` is null or a live string body.
+unsafe fn read_time_string(ptr: *const c_char) -> Result<String, String> {
     if ptr.is_null() {
         return Err("time: null string".to_string());
     }
+    // SAFETY: this `unsafe fn`'s caller passes `ptr` live; non-null, checked above.
     Ok(unsafe { crate::c_abi::gos_str_arg_string(ptr) })
 }
 
@@ -269,7 +271,9 @@ fn resolve_civil(location: &CivilLocation, civil: NaiveDateTime) -> LocalResult<
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_time_location_raw(name: *const c_char) -> i128 {
     ffi_entry!(time_error("time: runtime panic"), {
-        match read_time_string(name).and_then(|name| {
+        // SAFETY: `name` is this shim's argument, as `read_time_string` requires (C-ABI
+        // contract).
+        match unsafe { read_time_string(name) }.and_then(|name| {
             parse_location(&name)?;
             Ok(name)
         }) {
@@ -280,7 +284,7 @@ pub unsafe extern "C" fn gos_rt_time_location_raw(name: *const c_char) -> i128 {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_time_fixed_location_raw(offset_seconds: i64) -> i128 {
+pub extern "C" fn gos_rt_time_fixed_location_raw(offset_seconds: i64) -> i128 {
     ffi_entry!(time_error("time: runtime panic"), {
         let Ok(offset) = i32::try_from(offset_seconds) else {
             return time_error("time: fixed offset out of range");
@@ -301,7 +305,9 @@ pub unsafe extern "C" fn gos_rt_time_fixed_location_raw(offset_seconds: i64) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_time_civil_raw(ms: i64, location: *const c_char) -> i128 {
     ffi_entry!(time_error("time: runtime panic"), {
-        let result = read_time_string(location)
+        // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
+        // contract).
+        let result = unsafe { read_time_string(location) }
             .and_then(|spec| parse_location(&spec))
             .and_then(|location| {
                 let utc = DateTime::<Utc>::from_timestamp_millis(ms)
@@ -358,7 +364,9 @@ pub unsafe extern "C" fn gos_rt_time_resolve_raw(
     nanos: i64,
 ) -> i128 {
     ffi_entry!(time_error("time: runtime panic"), {
-        let result = read_time_string(location)
+        // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
+        // contract).
+        let result = unsafe { read_time_string(location) }
             .and_then(|spec| parse_location(&spec))
             .and_then(|location| {
                 let civil = naive_civil(year, month, day, hour, minute, second, nanos)?;
@@ -412,8 +420,12 @@ pub unsafe extern "C" fn gos_rt_time_format_in_raw(
     location: *const c_char,
 ) -> i128 {
     ffi_entry!(time_error("time: runtime panic"), {
-        let result = read_time_string(layout).and_then(|layout| {
-            let spec = read_time_string(location)?;
+        // SAFETY: `layout` is this shim's argument, as `read_time_string` requires (C-ABI
+        // contract).
+        let result = unsafe { read_time_string(layout) }.and_then(|layout| {
+            // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
+            // contract).
+            let spec = unsafe { read_time_string(location) }?;
             let location = parse_location(&spec)?;
             let utc = DateTime::<Utc>::from_timestamp_millis(ms)
                 .ok_or_else(|| "time: timestamp out of range".to_string())?;
@@ -441,7 +453,9 @@ pub unsafe extern "C" fn gos_rt_time_add_date_raw(
     days: i64,
 ) -> i128 {
     ffi_entry!(time_error("time: runtime panic"), {
-        let result = read_time_string(location)
+        // SAFETY: `location` is this shim's argument, as `read_time_string` requires (C-ABI
+        // contract).
+        let result = unsafe { read_time_string(location) }
             .and_then(|spec| parse_location(&spec))
             .and_then(|location| {
                 let utc = DateTime::<Utc>::from_timestamp_millis(ms)

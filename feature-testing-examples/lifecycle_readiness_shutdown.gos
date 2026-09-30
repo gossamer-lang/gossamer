@@ -34,11 +34,11 @@ fn main() {
 }
 
 fn serve() {
-    let _ = http::serve("127.0.0.1:23895", healthz)
+    let _ = http::serve("127.0.0.1:23889", healthz)
 }
 
 fn probe() -> i64 {
-    match http::get("http://127.0.0.1:23895/healthz", Vec::from([])) {
+    match http::get("http://127.0.0.1:23889/healthz", Vec::from([])) {
         Ok(r) => r.status
         Err(_) => -1
     }

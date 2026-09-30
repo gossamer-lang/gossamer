@@ -816,37 +816,42 @@ fn builtin_to_vec_v(args: &[Value]) -> RuntimeResult<Value> {
     Ok(args.first().cloned().unwrap_or(Value::Unit))
 }
 
+/// A `json::Value::Int` / `Float` / `String` / `Bool` / `Array` value: the
+/// payload as the JSON value `json::parse` answers for the same document.
 fn builtin_json_value_passthrough(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(args.first().cloned().unwrap_or(Value::Unit))
+    let payload = args.first().map_or(json_std::Value::Null, gossamer_to_json_value);
+    Ok(json_value(payload))
 }
 
-fn builtin_json_value_null(_args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Unit)
+/// `json::Value::Null`, the JSON value `json::parse("null")` answers.
+pub(crate) fn json_null_value() -> Value {
+    json_value(json_std::Value::Null)
 }
 
+fn json_value(value: json_std::Value) -> Value {
+    Value::Json(Arc::new(JsonInner::new(value)))
+}
+
+/// `json::Value::object(pairs)`: an object holding each `(name, value)`
+/// pair, a later pair replacing an earlier one of the same name.
 fn builtin_json_value_object(args: &[Value]) -> RuntimeResult<Value> {
-    let Some(Value::Array(parts)) = args.first() else {
-        return Ok(Value::struct_(
-            "json::Object",
-            Arc::unwrap_or_clone(Arc::new(Vec::new())),
-        ));
-    };
-    let mut fields: Vec<(&'static str, Value)> = Vec::with_capacity(parts.len());
-    for entry in parts.iter() {
+    let mut entries = std::collections::BTreeMap::new();
+    for entry in args
+        .first()
+        .map(crate::stdlib_builtins::encoding_pem::collect_array)
+        .unwrap_or_default()
+    {
         let Value::Tuple(pair) = entry else { continue };
-        if pair.len() < 2 {
+        let [name, member] = pair.as_slice() else {
             continue;
-        }
-        let key = match &pair[0] {
-            Value::String(s) => s.as_str().to_string(),
-            other => format!("{other:?}"),
         };
-        fields.push((crate::value::intern_type_name(&key), pair[1].clone()));
+        let key = match name {
+            Value::String(s) => s.as_str().to_string(),
+            other => format!("{other}"),
+        };
+        entries.insert(key, gossamer_to_json_value(member));
     }
-    Ok(Value::struct_(
-        "json::Object",
-        Arc::unwrap_or_clone(Arc::new(fields)),
-    ))
+    Ok(json_value(json_std::Value::Object(entries)))
 }
 
 /// `json::set(obj, key, value) -> json::Value` - append or
@@ -873,24 +878,7 @@ fn builtin_json_set(args: &[Value]) -> RuntimeResult<Value> {
             json_std::Value::Object(updated),
         ))));
     }
-    let Value::Struct(inner) = &receiver else {
-        return Ok(receiver);
-    };
-    // `json::parse` builds objects named `Object`; the `Value::object`
-    // constructor builds `json::Object`. Both are object-shaped.
-    if inner.name != "json::Object" && inner.name != "Object" {
-        return Ok(receiver);
-    }
-    let mut fields: Vec<(&'static str, Value)> = inner.fields.to_vec();
-    if let Some(slot) = fields.iter_mut().find(|(name, _)| *name == key) {
-        slot.1 = value;
-    } else {
-        fields.push((crate::value::intern_type_name(&key), value));
-    }
-    Ok(Value::struct_(
-        "json::Object",
-        Arc::unwrap_or_clone(Arc::new(fields)),
-    ))
+    Ok(receiver)
 }
 
 fn builtin_variant_unwrap(args: &[Value]) -> RuntimeResult<Value> {

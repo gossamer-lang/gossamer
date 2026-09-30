@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -17,33 +16,19 @@ use super::vec::{GosVec, gos_rt_result_new, gos_rt_vec_push};
 
 /// Reads a `GosVec<String>` (elements are c-string pointers) into
 /// owned strings.
+///
+/// # Safety
+/// `v` is null or a live `Vec<String>`.
 unsafe fn read_str_vec(v: *const GosVec) -> Vec<String> {
-    if v.is_null() {
-        return Vec::new();
-    }
-    let vref = unsafe { &*v };
-    if vref.ptr.is_null() || vref.len <= 0 {
-        return Vec::new();
-    }
-    let len = vref.len as usize;
-    let words = unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr().cast::<i64>(), len) };
-    words
-        .iter()
-        .map(|&w| {
-            let p = w as *const c_char;
-            if p.is_null() {
-                String::new()
-            } else {
-                unsafe { crate::c_abi::gos_str_arg_string(p) }
-            }
-        })
-        .collect()
+    // SAFETY: this `unsafe fn`'s caller passes `v` null or a live `Vec<String>`.
+    unsafe { crate::c_abi::vec::StrVecView::of(v) }
+        .map_or_else(Vec::new, |row| row.texts().collect())
 }
 
 /// Builds a `GosVec<String>` from owned strings. STRING-typed: the
 /// vec owns each element, so `gos_rt_vec_free` deep-frees them.
 fn build_str_vec(parts: &[String]) -> *mut GosVec {
-    let vec = unsafe {
+    let vec = {
         crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
             8,
             parts.len() as i64,
@@ -52,6 +37,8 @@ fn build_str_vec(parts: &[String]) -> *mut GosVec {
     };
     for p in parts {
         let pv = alloc_cstring(p.as_bytes()) as i64;
+        // SAFETY: `vec` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts,
+        // and `pv` is one 8-byte element.
         unsafe { gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>()) };
     }
     vec
@@ -131,17 +118,20 @@ fn parse_line(line: &str) -> Vec<String> {
 /// allocated once at its final length. STRING-typed: the vec owns each
 /// element, so `gos_rt_vec_free` deep-frees them.
 fn build_record(line: &str, scratch: &mut String) -> *mut GosVec {
-    let vec = unsafe {
-        crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
-    };
+    let vec =
+        { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING) };
     for_each_field(line, scratch, |field| {
         let pv = alloc_cstring(field) as i64;
+        // SAFETY: `vec` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts,
+        // and `pv` is one 8-byte element.
         unsafe { gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>()) };
     });
     vec
 }
 
 unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_text`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_text(p) }
 }
 
@@ -149,6 +139,8 @@ unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_csv_parse_line(line: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `line` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr` accepts.
         build_str_vec(&parse_line(unsafe { cstr(line) }))
     })
 }
@@ -157,14 +149,15 @@ pub unsafe extern "C" fn gos_rt_csv_parse_line(line: *const c_char) -> *mut GosV
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `input` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr` accepts.
         let input = unsafe { cstr(input) };
         // Build the outer GosVec of inner GosVec<String> pointers.
         // VEC-typed: the outer vec owns each row, so `gos_rt_vec_free`
         // cascades through unvisited rows (the early-`break` path)
         // instead of leaking them and their field strings.
-        let outer = unsafe {
-            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC)
-        };
+        let outer =
+            { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC) };
         let mut scratch = String::new();
         for line in input.lines() {
             if line.trim().is_empty() {
@@ -177,13 +170,17 @@ pub unsafe extern "C" fn gos_rt_csv_read(input: *const c_char) -> i128 {
             if quote_count % 2 != 0 {
                 let msg = format!("csv: unterminated quoted field in: {line}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
+                // SAFETY: `outer` is the fresh vec made above, owned here alone and not read
+                // again.
                 unsafe { crate::c_abi::map::gos_rt_vec_free(outer) };
-                return unsafe { gos_rt_result_new(1, err as i64) };
+                return gos_rt_result_new(1, err as i64);
             }
             let inner = build_record(line, &mut scratch) as i64;
+            // SAFETY: `outer` is the fresh vec made above, or null, which `gos_rt_vec_push`
+            // accepts, and `inner` is one 8-byte element.
             unsafe { gos_rt_vec_push(outer, std::ptr::addr_of!(inner).cast::<u8>()) };
         }
-        unsafe { gos_rt_result_new(0, outer as i64) }
+        gos_rt_result_new(0, outer as i64)
     })
 }
 
@@ -194,15 +191,21 @@ pub unsafe extern "C" fn gos_rt_csv_write(records: *const GosVec) -> *mut c_char
         let rows: Vec<Vec<String>> = if records.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `records` is non-null (checked above) and live for the call (C-ABI
+            // contract).
             let vref = unsafe { &*records };
             if vref.ptr.is_null() || vref.len <= 0 {
                 Vec::new()
             } else {
                 let len = vref.len as usize;
                 let words =
+                    // SAFETY: the buffer is non-null (checked above) and holds `len` words, one
+                    // per `Vec<Vec<String>>` element.
                     unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr().cast::<i64>(), len) };
                 words
                     .iter()
+                    // SAFETY: each element of a `Vec<Vec<String>>` is null or a live
+                    // `Vec<String>` (C-ABI contract), which `read_str_vec` accepts.
                     .map(|&w| unsafe { read_str_vec(w as *const GosVec) })
                     .collect()
             }
@@ -237,17 +240,25 @@ mod tests {
     /// Refcount word of an `alloc_cstring` builder-layout string:
     /// `[rc:u32][cap:u32][len:u32][tag][content][NUL]`, body at +13.
     unsafe fn str_rc(s: *const c_char) -> u32 {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let hdr = unsafe { s.cast::<u8>().sub(13) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] })
     }
 
     #[test]
     fn csv_read_outer_vec_is_vec_typed_and_deep_frees_unvisited_rows() {
-        let input = std::ffi::CString::new("a,b\nc,d\ne,f").unwrap();
-        let r = unsafe { gos_rt_csv_read(crate::c_abi::string::test_gos_ptr(&input)) };
+        let input = crate::c_abi::string::test_gos_str("a,b\nc,d\ne,f");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let r = unsafe { gos_rt_csv_read(input) };
         assert_eq!(crate::c_abi::vec::gos_rt_result_disc(r), 0);
         let outer = crate::c_abi::vec::gos_rt_result_payload(r) as *mut GosVec;
         assert!(!outer.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let o = unsafe { &*outer };
         assert_eq!(o.len, 3);
         assert_eq!(o.elem_kind, crate::c_abi::vec::vec_elem_kind::VEC);
@@ -257,30 +268,50 @@ mod tests {
         // (leak) and not 0 (double free).
         // Slots hold child pointers exposed as i64 by the flat-slot ABI;
         // read the address and recover its provenance.
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let row1: *mut GosVec = std::ptr::with_exposed_provenance_mut(unsafe {
             crate::c_abi::vec::slot_read_word(o.ptr.add(8)).expose_provenance()
         });
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let field: *mut c_char = std::ptr::with_exposed_provenance_mut(unsafe {
             crate::c_abi::vec::slot_read_word((*row1).ptr.as_ptr()).expose_provenance()
         });
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_retain(field) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { str_rc(field) }, 2);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(outer) };
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { str_rc(field) },
             1,
             "outer free must cascade exactly once"
         );
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { CStr::from_ptr(field) }.to_str().unwrap(), "c");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(field) };
     }
 
     #[test]
     fn csv_read_borrow_all_rows_then_free_is_balanced() {
-        let input = std::ffi::CString::new("x,y\nz,w").unwrap();
-        let r = unsafe { gos_rt_csv_read(crate::c_abi::string::test_gos_ptr(&input)) };
+        let input = crate::c_abi::string::test_gos_str("x,y\nz,w");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let r = unsafe { gos_rt_csv_read(input) };
         assert_eq!(crate::c_abi::vec::gos_rt_result_disc(r), 0);
         let outer = crate::c_abi::vec::gos_rt_result_payload(r) as *mut GosVec;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let o = unsafe { &*outer };
         // Full-iteration consumer shape: every read is an interior
         // borrow (the drop pass never releases container loads), so a
@@ -291,18 +322,28 @@ mod tests {
             // ABI; read the address and recover its provenance so the
             // borrow is sound under strict provenance.
             let raw =
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { crate::c_abi::vec::slot_read_word(o.ptr.add(i * 8)).expose_provenance() };
             let row: *mut GosVec = std::ptr::with_exposed_provenance_mut(raw);
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let rv = unsafe { &*row };
             for j in 0..rv.len as usize {
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 let raw = unsafe {
                     crate::c_abi::vec::slot_read_word(rv.ptr.add(j * 8)).expose_provenance()
                 };
                 let f: *mut c_char = std::ptr::with_exposed_provenance_mut(raw);
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 fields.push(unsafe { CStr::from_ptr(f) }.to_str().unwrap().to_string());
             }
         }
         assert_eq!(fields, ["x", "y", "z", "w"]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(outer) };
     }
 }

@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
@@ -48,7 +46,7 @@ pub struct GosI64Vec {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_heap_i64_new(len: i64) -> *mut GosI64Vec {
+pub extern "C" fn gos_rt_heap_i64_new(len: i64) -> *mut GosI64Vec {
     ffi_entry!(std::ptr::null_mut(), {
         if len < 0 {
             return std::ptr::null_mut();
@@ -67,9 +65,13 @@ pub unsafe extern "C" fn gos_rt_heap_i64_free(v: *mut GosI64Vec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is non-null (checked above), the vector `gos_rt_heap_i64_new` boxed, which
+        // this call consumes (C-ABI contract).
         let v = unsafe { Box::from_raw(v) };
         if !v.data.is_null() {
             let n = v.len as usize;
+            // SAFETY: `data` is the `Vec<i64>` allocation of `len` words and capacity
+            // `gos_rt_heap_i64_new` made.
             unsafe {
                 let _ = Vec::from_raw_parts(v.data, n, n);
             }
@@ -83,10 +85,13 @@ pub unsafe extern "C" fn gos_rt_heap_i64_get(v: *const GosI64Vec, idx: i64) -> i
         if v.is_null() || idx < 0 {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         if idx >= v.len || v.data.is_null() {
             return 0;
         }
+        // SAFETY: `v` is this shim's `GosI64Vec` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         unsafe { *v.data.add(idx as usize) }
     })
 }
@@ -97,10 +102,12 @@ pub unsafe extern "C" fn gos_rt_heap_i64_set(v: *mut GosI64Vec, idx: i64, val: i
         if v.is_null() || idx < 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if idx >= v_ref.len || v_ref.data.is_null() {
             return;
         }
+        // SAFETY: `idx` is in `[0, len)` and `data` is non-null (checked above).
         unsafe { *v_ref.data.add(idx as usize) = val };
     });
 }
@@ -113,6 +120,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_len(v: *const GosI64Vec) -> i64 {
         if v.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*v).len }
     })
 }
@@ -133,6 +141,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_lines_to_stdout(
         if v.is_null() || start < 0 || count <= 0 || line_width <= 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if v_ref.data.is_null() {
             return;
@@ -144,6 +153,8 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_lines_to_stdout(
         let _guard = StdoutGuard::acquire();
         let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
         let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         let mut cur = unsafe { *len_ptr };
         let mut col: i64 = 0;
         let mut idx = start as usize;
@@ -151,6 +162,8 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_lines_to_stdout(
         while idx < end {
             // Need at least 1 byte; if buffer full, flush.
             if cur >= STDOUT_BUF_SIZE {
+                // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                // length alone, and its first `cur` bytes are written.
                 unsafe {
                     raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 }
@@ -162,6 +175,9 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_lines_to_stdout(
             let chars_to_eol = (line_width - col) as usize;
             let chars_left = end - idx;
             let take = std::cmp::min(chars_to_eol, std::cmp::min(chars_left, avail));
+            // SAFETY: `idx + take` is at most `end`, within the vector's `len` (checked above),
+            // and `cur + take` is at most the buffer's size; the held `StdoutGuard` gives this
+            // thread the stdout buffer and its length alone.
             unsafe {
                 for i in 0..take {
                     *(*bytes_ptr).as_mut_ptr().add(cur + i) = *v_ref.data.add(idx + i) as u8;
@@ -173,11 +189,15 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_lines_to_stdout(
             if col >= line_width {
                 // Append newline if room (otherwise flush first).
                 if cur >= STDOUT_BUF_SIZE {
+                    // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                    // length alone, and its first `cur` bytes are written.
                     unsafe {
                         raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                     }
                     cur = 0;
                 }
+                // SAFETY: `cur` is below the buffer's size (flushed above when full); the held
+                // `StdoutGuard` gives this thread the stdout buffer and its length alone.
                 unsafe {
                     *(*bytes_ptr).as_mut_ptr().add(cur) = b'\n';
                 }
@@ -190,16 +210,22 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_lines_to_stdout(
         // but still terminated with '\n').
         if col > 0 {
             if cur >= STDOUT_BUF_SIZE {
+                // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                // length alone, and its first `cur` bytes are written.
                 unsafe {
                     raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 }
                 cur = 0;
             }
+            // SAFETY: `cur` is below the buffer's size (flushed above when full); the held
+            // `StdoutGuard` gives this thread the stdout buffer and its length alone.
             unsafe {
                 *(*bytes_ptr).as_mut_ptr().add(cur) = b'\n';
             }
             cur += 1;
         }
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         unsafe { *len_ptr = cur };
     });
 }
@@ -219,6 +245,7 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_bytes_to_stdout(
         if v.is_null() || start < 0 || count <= 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if v_ref.data.is_null() {
             return;
@@ -230,6 +257,8 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_bytes_to_stdout(
         let _guard = StdoutGuard::acquire();
         let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
         let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         let mut cur = unsafe { *len_ptr };
         let n = count as usize;
         let mut idx = start as usize;
@@ -237,6 +266,9 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_bytes_to_stdout(
         while written < n {
             let avail = STDOUT_BUF_SIZE - cur;
             let take = std::cmp::min(avail, n - written);
+            // SAFETY: `idx + take` is at most the checked `end`, within the vector's `len`, and
+            // `cur + take` is at most the buffer's size; the held `StdoutGuard` gives this thread
+            // the stdout buffer and its length alone.
             unsafe {
                 for i in 0..take {
                     *(*bytes_ptr).as_mut_ptr().add(cur + i) = *v_ref.data.add(idx + i) as u8;
@@ -246,12 +278,16 @@ pub unsafe extern "C" fn gos_rt_heap_i64_write_bytes_to_stdout(
             idx += take;
             written += take;
             if cur == STDOUT_BUF_SIZE {
+                // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                // length alone, and it holds `cur` written bytes.
                 unsafe {
                     raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 }
                 cur = 0;
             }
         }
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         unsafe { *len_ptr = cur };
     });
 }

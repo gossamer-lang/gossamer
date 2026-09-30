@@ -23,12 +23,13 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-/// The MIR dispatch files whose `match` arms key on the joined stdlib
-/// path. Their string-literal patterns are the enumerable set of
-/// compiled-lowerable free-function paths.
+/// The MIR dispatch files, and module directories, whose `match` arms key
+/// on the joined stdlib path. Their string-literal patterns are the
+/// enumerable set of compiled-lowerable free-function paths.
 const DISPATCH_SOURCES: &[&str] = &[
     "crates/gossamer-mir/src/lower/builder/stdlib_free.rs",
     "crates/gossamer-mir/src/lower/builder/intrinsic.rs",
+    "crates/gossamer-mir/src/lower/builder/intrinsic",
     "crates/gossamer-mir/src/lower/builder/expr_call.rs",
 ];
 
@@ -226,15 +227,43 @@ fn has_compiled_dispatch(path: &str, reachable: &BTreeSet<String>) -> bool {
             .is_some_and(|canonical| reachable.contains(canonical))
 }
 
+/// The text of every `.rs` file a dispatch source names: the file itself, or
+/// each file under it when it is a module directory.
+fn source_texts(root: &std::path::Path, rel: &str) -> Vec<String> {
+    let path = root.join(rel);
+    if path.is_file() {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        return vec![text];
+    }
+    let mut texts = Vec::new();
+    let mut pending = vec![path];
+    while let Some(dir) = pending.pop() {
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.expect("a directory entry").path();
+            if entry.is_dir() {
+                pending.push(entry);
+            } else if entry.extension().and_then(|e| e.to_str()) == Some("rs") {
+                texts.push(
+                    std::fs::read_to_string(&entry)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", entry.display())),
+                );
+            }
+        }
+    }
+    texts
+}
+
 #[test]
 fn stdlib_compiled_coverage() {
     let root = workspace_root();
     let mut reachable: BTreeSet<String> = BTreeSet::new();
     for rel in DISPATCH_SOURCES {
-        let path = root.join(rel);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        reachable.extend(dispatch_paths(&src));
+        for src in source_texts(&root, rel) {
+            reachable.extend(dispatch_paths(&src));
+        }
     }
     for entry in COMPILED_VIA_SPECIAL_MECHANISM {
         reachable.insert((*entry).to_string());

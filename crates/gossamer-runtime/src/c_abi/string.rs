@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::alloc::{Layout, handle_alloc_error};
@@ -196,6 +194,8 @@ fn str_owner(s: *const c_char) -> Option<&'static StringOwner> {
     }
     // The read stays inside heap memory, and an owner naming this very body
     // proves the pointer was returned from `alloc_growable_with_fill`.
+    // SAFETY: the probe above found `s` inside heap memory with a body's shape, so the owner
+    // bytes before it are readable heap memory.
     let owner = unsafe { &*s.cast::<u8>().sub(STRING_BODY_OFFSET).cast::<StringOwner>() };
     (owner.abi_version == STRING_OWNER_VERSION
         && owner.kind == STRING_OWNER_KIND
@@ -209,6 +209,8 @@ unsafe fn typed_str_owner(s: *const c_char) -> Option<&'static StringOwner> {
     if s.is_null() || !has_body_shape(s) {
         return None;
     }
+    // SAFETY: `s` is non-null (checked above), and this `unsafe fn`'s caller passes a live string
+    // body.
     let owner = unsafe { &*s.cast::<u8>().sub(STRING_BODY_OFFSET).cast::<StringOwner>() };
     (owner.abi_version == STRING_OWNER_VERSION
         && owner.kind == STRING_OWNER_KIND
@@ -226,6 +228,7 @@ fn managed_string_owner(s: *const c_char) -> Option<&'static StringOwner> {
 
 #[inline]
 unsafe fn typed_managed_string_owner(s: *const c_char) -> Option<&'static StringOwner> {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_owner` accepts.
     unsafe { typed_str_owner(s) }.filter(|owner| owner.destructor == STRING_DTOR_HEAP)
 }
 
@@ -237,6 +240,8 @@ pub(crate) unsafe fn c_str_len(s: *const c_char) -> usize {
     if s.is_null() {
         return 0;
     }
+    // SAFETY: `s` is non-null (checked above) and, per this `unsafe fn`'s caller, a
+    // NUL-terminated string.
     unsafe { CStr::from_ptr(s).to_bytes().len() }
 }
 
@@ -245,22 +250,30 @@ pub(crate) unsafe fn c_str_len(s: *const c_char) -> usize {
 /// Heap builders, static literals, and region strings carry a length header;
 /// reading it rather than scanning for a NUL is what lets a `String` hold
 /// interior NUL bytes. The body shape selects the carrier before the header
-/// read, so a foreign C string - one a runtime shim received from a host API,
-/// or a `c"..."` literal the runtime passes itself - takes the `strlen`
-/// fallback without any backwards probe.
+/// read, so a foreign C string - one a runtime shim received from a host API -
+/// takes the `strlen` fallback without any backwards probe. A host allocation
+/// is at least 8-byte aligned, so its address never has a body's shape; a
+/// foreign pointer that is not so aligned must not reach this reader.
 #[inline]
 unsafe fn typed_str_len(s: *const c_char) -> usize {
     if s.is_null() {
         return 0;
     }
     if !has_body_shape(s) {
+        // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
         return unsafe { c_str_len(s) };
     }
+    // SAFETY: `s` is non-null (checked above), and this `unsafe fn`'s caller passes a live string
+    // body.
     let tag = unsafe { *s.cast::<u8>().sub(1) };
     if matches!(tag, STR_BUILDER_TAG | STR_STATIC_TAG | STR_REGION_TAG) {
+        // SAFETY: a typed body (tag checked above) carries its length in the four bytes before
+        // the tag.
         let p = unsafe { s.cast::<u8>().sub(5) };
+        // SAFETY: `p` addresses those four length bytes.
         return u32::from_le_bytes(unsafe { [*p, *p.add(1), *p.add(2), *p.add(3)] }) as usize;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
     unsafe { c_str_len(s) }
 }
 
@@ -271,7 +284,9 @@ unsafe fn typed_str_bytes<'a>(s: *const c_char) -> &'a [u8] {
     if s.is_null() {
         return &[];
     }
+    // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
     let len = unsafe { typed_str_len(s) };
+    // SAFETY: `s` is a live string body whose first `len` bytes are its content.
     unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) }
 }
 
@@ -283,52 +298,77 @@ unsafe fn typed_str_bytes<'a>(s: *const c_char) -> &'a [u8] {
 /// the length header. `CStr::from_ptr` is reserved for the few parameters that
 /// are genuinely host C strings (an `environ` entry, an OS callback argument).
 ///
-/// SAFETY: `s` is null or points at a Gossamer string body, or at a
-/// NUL-terminated buffer when it carries no length header. The returned slice
+///
+/// # Safety
+///
+/// `s` is null or points at a Gossamer string body, or at an 8-byte-aligned
+/// NUL-terminated host buffer when it carries no length header. The returned slice
 /// borrows `s`; the caller keeps `s` alive for the borrow.
 #[inline]
 pub(crate) unsafe fn gos_str_arg_bytes<'a>(s: *const c_char) -> &'a [u8] {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_bytes` accepts.
     unsafe { typed_str_bytes(s) }
 }
 
 /// Borrows a Gossamer `String` argument as UTF-8 text, yielding the empty
 /// string when the bytes are not valid UTF-8.
 ///
-/// SAFETY: see [`gos_str_arg_bytes`].
+///
+/// # Safety
+///
+/// See [`gos_str_arg_bytes`].
 #[inline]
 pub(crate) unsafe fn gos_str_arg_text<'a>(s: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_text` accepts.
     unsafe { typed_str_text(s) }
 }
 
 /// Borrows a Gossamer `String` argument as UTF-8 text, replacing invalid
 /// sequences with `U+FFFD`.
 ///
-/// SAFETY: see [`gos_str_arg_bytes`].
+///
+/// # Safety
+///
+/// See [`gos_str_arg_bytes`].
 #[inline]
 pub(crate) unsafe fn gos_str_arg_lossy<'a>(s: *const c_char) -> std::borrow::Cow<'a, str> {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_bytes`
+    // accepts.
     String::from_utf8_lossy(unsafe { gos_str_arg_bytes(s) })
 }
 
 /// Copies a Gossamer `String` argument into an owned `String`, replacing
 /// invalid sequences with `U+FFFD`.
 ///
-/// SAFETY: see [`gos_str_arg_bytes`].
+///
+/// # Safety
+///
+/// See [`gos_str_arg_bytes`].
 #[inline]
 pub(crate) unsafe fn gos_str_arg_string(s: *const c_char) -> String {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_lossy`
+    // accepts.
     unsafe { gos_str_arg_lossy(s) }.into_owned()
 }
 
 /// Byte length of a Gossamer `String` argument arriving over the C ABI.
 ///
-/// SAFETY: see [`gos_str_arg_bytes`].
+///
+/// # Safety
+///
+/// See [`gos_str_arg_bytes`].
 #[inline]
 pub(crate) unsafe fn gos_str_arg_len(s: *const c_char) -> usize {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_len` accepts.
     unsafe { typed_str_len(s) }
 }
 
 #[inline]
 unsafe fn typed_str_text<'a>(s: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_bytes` accepts.
     let bytes = unsafe { typed_str_bytes(s) };
+    // SAFETY: this `unsafe fn`'s caller passes `s` null or live, which `typed_str_known_utf8`
+    // accepts.
     if unsafe { typed_str_known_utf8(s) } {
         // SAFETY: an index footer other than `u32::MAX` is written only for
         // content that was validated, or built from validated pieces, as
@@ -341,13 +381,20 @@ unsafe fn typed_str_text<'a>(s: *const c_char) -> &'a str {
 /// Whether `s` carries a character index, which is written only for content
 /// known to be UTF-8.
 ///
-/// SAFETY: `s` is null or a Gossamer string body.
+///
+/// # Safety
+///
+/// `s` is null or a Gossamer string body.
 #[inline]
 unsafe fn typed_str_known_utf8(s: *const c_char) -> bool {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_cap` accepts.
     let Some(cap) = (unsafe { typed_str_cap(s) }) else {
         return false;
     };
+    // SAFETY: the string's capacity is `cap` (read above), so its index footer follows the `cap +
+    // 1` content bytes inside the allocation.
     let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+    // SAFETY: `footer` addresses the footer's first word.
     (unsafe { footer.read_unaligned() }) != u32::MAX
 }
 
@@ -415,10 +462,16 @@ fn utf8_offset_of_char(bytes: &[u8], from_byte: usize, steps: usize) -> Option<u
 
 #[inline]
 unsafe fn typed_str_char_len(s: *const c_char) -> usize {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_cap` accepts.
     if let Some(cap) = unsafe { typed_str_cap(s) } {
+        // SAFETY: the string's capacity is `cap` (read above), so its index footer follows the
+        // `cap + 1` content bytes inside the allocation.
         let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+        // SAFETY: `footer` addresses the footer's first word.
         let char_len = unsafe { footer.read_unaligned() };
         if char_len == STR_INDEX_ASCII {
+            // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_bytes`
+            // accepts.
             return unsafe { typed_str_bytes(s) }.len();
         }
         return if char_len == u32::MAX {
@@ -427,15 +480,22 @@ unsafe fn typed_str_char_len(s: *const c_char) -> usize {
             char_len as usize
         };
     }
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_text` accepts.
     unsafe { typed_str_text(s) }.chars().count()
 }
 
 #[inline]
 unsafe fn typed_str_char_boundary(s: *const c_char, index: usize) -> Option<usize> {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_cap` accepts.
     if let Some(cap) = unsafe { typed_str_cap(s) } {
+        // SAFETY: the string's capacity is `cap` (read above), so its index footer follows the
+        // `cap + 1` content bytes inside the allocation.
         let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+        // SAFETY: `footer` addresses the footer's first word.
         let raw_char_len = unsafe { footer.read_unaligned() };
         if raw_char_len == STR_INDEX_ASCII {
+            // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_bytes`
+            // accepts.
             let len = unsafe { typed_str_bytes(s) }.len();
             return (index <= len).then_some(index);
         }
@@ -443,6 +503,8 @@ unsafe fn typed_str_char_boundary(s: *const c_char, index: usize) -> Option<usiz
         if char_len == u32::MAX as usize {
             return None;
         }
+        // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_bytes`
+        // accepts.
         let bytes = unsafe { typed_str_bytes(s) };
         if index > char_len {
             return None;
@@ -452,11 +514,14 @@ unsafe fn typed_str_char_boundary(s: *const c_char, index: usize) -> Option<usiz
         }
         let block = index / STR_INDEX_STRIDE;
         let block_char = block * STR_INDEX_STRIDE;
+        // SAFETY: a UTF-8 index holds one word per stride block after its first word, and `block`
+        // is below the block count for `index`.
         let byte = unsafe { footer.add(1 + block).read_unaligned() } as usize;
         return utf8_offset_of_char(bytes, byte, index - block_char);
     }
     // No index to start from, so the walk is the content's own. A string
     // reaching here is a foreign C pointer, which no Gossamer value names.
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_bytes` accepts.
     let bytes = unsafe { typed_str_bytes(s) };
     if index == 0 {
         return Some(0);
@@ -466,17 +531,23 @@ unsafe fn typed_str_char_boundary(s: *const c_char, index: usize) -> Option<usiz
 
 #[inline]
 unsafe fn typed_str_next_char_boundary(s: *const c_char, index: usize) -> Option<usize> {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_bytes` accepts.
     utf8_boundary_at_or_after(unsafe { typed_str_bytes(s) }, index)
 }
 
 /// Tests the private builder tag on a compiler-typed string.
 ///
-/// SAFETY: `s` comes from a slot the compiler typed as `String`, so it carries
+///
+/// # Safety
+///
+/// `s` comes from a slot the compiler typed as `String`, so it carries
 /// the owner prefix every runtime string allocator writes. Region- and
 /// static-backed strings fail the heap-destructor filter and route to the
 /// copying path, exactly as the registry-backed probe does.
 #[inline]
 unsafe fn is_typed_builder(s: *const c_char) -> bool {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which
+    // `typed_managed_string_owner` accepts.
     unsafe { typed_managed_string_owner(s) }.is_some()
         && unsafe { *s.cast::<u8>().sub(1) == STR_BUILDER_TAG }
 }
@@ -528,13 +599,19 @@ const fn str_index_bytes(cap: usize) -> usize {
 }
 
 unsafe fn rebuild_str_index(s: *mut c_char, len: usize, cap: usize) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` a string body of `len` content bytes and
+    // capacity `cap`.
     let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
     // `is_ascii` is a vectorised scan, where validation walks sequences.
     if !bytes.is_ascii() && std::str::from_utf8(bytes).is_err() {
+        // SAFETY: the index footer follows the `cap + 1` content bytes inside the allocation.
         let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+        // SAFETY: `footer` addresses the footer's first word.
         unsafe { footer.write_unaligned(u32::MAX) };
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `s` a string body of `len` content bytes and
+    // capacity `cap`.
     unsafe { index_utf8_content(s, len, cap) };
 }
 
@@ -543,12 +620,19 @@ unsafe fn rebuild_str_index(s: *mut c_char, len: usize, cap: usize) {
 /// Every character starts at a byte that is not a continuation byte, so the
 /// index reads leading bytes rather than decoding each scalar.
 ///
-/// SAFETY: `s` is a string body with `cap` bytes of content capacity whose
+///
+/// # Safety
+///
+/// `s` is a string body with `cap` bytes of content capacity whose
 /// first `len` bytes are UTF-8.
 unsafe fn index_utf8_content(s: *mut c_char, len: usize, cap: usize) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` a string body of `len` content bytes and
+    // capacity `cap`.
     let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
+    // SAFETY: the index footer follows the `cap + 1` content bytes inside the allocation.
     let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
     if bytes.is_ascii() {
+        // SAFETY: `footer` addresses the footer's first word.
         unsafe { footer.write_unaligned(STR_INDEX_ASCII) };
         return;
     }
@@ -566,14 +650,19 @@ unsafe fn index_utf8_content(s: *mut c_char, len: usize, cap: usize) {
             chars += leads;
         } else {
             for (at, &byte) in word.iter().enumerate() {
+                // SAFETY: `footer` addresses an index sized for the string's capacity, which
+                // covers every char start.
                 chars = unsafe { index_char_start(footer, chars, offset + at, byte) };
             }
         }
         offset += 8;
     }
     for (at, &byte) in bytes[rest_at..].iter().enumerate() {
+        // SAFETY: `footer` addresses an index sized for the string's capacity, which covers every
+        // char start.
         chars = unsafe { index_char_start(footer, chars, rest_at + at, byte) };
     }
+    // SAFETY: `footer` addresses the footer's first word.
     unsafe { footer.write_unaligned(chars as u32) };
 }
 
@@ -592,7 +681,10 @@ fn utf8_continuation_bytes(word: &[u8]) -> usize {
 /// Counts `byte`, at `offset`, toward the character index: a character that
 /// starts a block records the block's byte offset. Answers the new count.
 ///
-/// SAFETY: `footer` is the index footer of a string with room for the entry
+///
+/// # Safety
+///
+/// `footer` is the index footer of a string with room for the entry
 /// of the block `chars` falls in.
 #[inline]
 unsafe fn index_char_start(footer: *mut u32, chars: usize, offset: usize, byte: u8) -> usize {
@@ -600,6 +692,8 @@ unsafe fn index_char_start(footer: *mut u32, chars: usize, offset: usize, byte: 
         return chars;
     }
     if chars.is_multiple_of(STR_INDEX_STRIDE) {
+        // SAFETY: this `unsafe fn`'s caller passes `footer` an index sized for the string's
+        // capacity, whose block for `chars` exists.
         unsafe {
             footer
                 .add(1 + chars / STR_INDEX_STRIDE)
@@ -614,9 +708,14 @@ unsafe fn index_char_start(footer: *mut u32, chars: usize, offset: usize, byte: 
 /// amortized string builders quadratic.
 #[inline]
 unsafe fn extend_str_index(s: *mut c_char, old_len: usize, added: &[u8], cap: usize) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` a body of capacity `cap`, whose index footer
+    // follows its content.
     let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+    // SAFETY: `footer` addresses the footer's first word.
     let old_chars = unsafe { footer.read_unaligned() };
     if old_chars == u32::MAX {
+        // SAFETY: this `unsafe fn`'s caller passes `s` a body of capacity `cap` holding `old_len
+        // + added.len()` content bytes.
         unsafe { rebuild_str_index(s, old_len + added.len(), cap) };
         return;
     }
@@ -626,10 +725,13 @@ unsafe fn extend_str_index(s: *mut c_char, old_len: usize, added: &[u8], cap: us
         if added.is_ascii() {
             return;
         }
+        // SAFETY: this `unsafe fn`'s caller passes `s` a body of capacity `cap` holding `old_len
+        // + added.len()` content bytes.
         unsafe { rebuild_str_index(s, old_len + added.len(), cap) };
         return;
     }
     let Ok(text) = std::str::from_utf8(added) else {
+        // SAFETY: `footer` addresses the footer's first word.
         unsafe { footer.write_unaligned(u32::MAX) };
         return;
     };
@@ -637,6 +739,7 @@ unsafe fn extend_str_index(s: *mut c_char, old_len: usize, added: &[u8], cap: us
     for (byte_offset, _) in text.char_indices() {
         let char_index = old_chars as usize + added_chars;
         if char_index.is_multiple_of(STR_INDEX_STRIDE) {
+            // SAFETY: the index is sized for the capacity, so the block for `char_index` exists.
             unsafe {
                 footer
                     .add(1 + char_index / STR_INDEX_STRIDE)
@@ -645,6 +748,7 @@ unsafe fn extend_str_index(s: *mut c_char, old_len: usize, added: &[u8], cap: us
         }
         added_chars += 1;
     }
+    // SAFETY: `footer` addresses the footer's first word.
     unsafe { footer.write_unaligned(old_chars.saturating_add(added_chars as u32)) };
 }
 
@@ -653,28 +757,40 @@ unsafe fn typed_str_cap(s: *const c_char) -> Option<usize> {
     if s.is_null() || !has_body_shape(s) {
         return None;
     }
+    // SAFETY: `s` is non-null (checked above), and this `unsafe fn`'s caller passes a live string
+    // body.
     let tag = unsafe { *s.cast::<u8>().sub(1) };
     if !matches!(tag, STR_BUILDER_TAG | STR_STATIC_TAG | STR_REGION_TAG) {
         return None;
     }
+    // SAFETY: a typed body (tag checked above) carries its capacity nine bytes before the body.
     let p = unsafe { s.cast::<u8>().sub(9) };
+    // SAFETY: `p` addresses those four capacity bytes.
     Some(u32::from_le_bytes(unsafe { [*p, *p.add(1), *p.add(2), *p.add(3)] }) as usize)
 }
 
 /// Whether `s` carries a character index that records its content as ASCII.
 ///
-/// SAFETY: `s` is null or a Gossamer string body.
+///
+/// # Safety
+///
+/// `s` is null or a Gossamer string body.
 #[inline]
 unsafe fn typed_str_is_ascii(s: *const c_char) -> bool {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_cap` accepts.
     let Some(cap) = (unsafe { typed_str_cap(s) }) else {
         return false;
     };
+    // SAFETY: the string's capacity is `cap` (read above), so its index footer follows the `cap +
+    // 1` content bytes inside the allocation.
     let footer = unsafe { s.cast::<u8>().add(cap + 1).cast::<u32>() };
+    // SAFETY: `footer` addresses the footer's first word.
     (unsafe { footer.read_unaligned() }) == STR_INDEX_ASCII
 }
 
 #[inline]
 fn is_managed_string(s: *const c_char) -> bool {
+    // SAFETY: a managed string (checked first) is a typed body whose tag byte precedes it.
     managed_string_owner(s).is_some() && unsafe { *s.cast::<u8>().sub(1) == STR_BUILDER_TAG }
 }
 
@@ -687,10 +803,15 @@ fn is_managed_string(s: *const c_char) -> bool {
 /// dominates and the call is amortised. This mirrors how the Go runtime's
 /// `memmove` and optimised libc `memcpy`s special-case small sizes.
 ///
-/// SAFETY: `src` is readable and `dst` writable for `n` bytes, and the two
+///
+/// # Safety
+///
+/// `src` is readable and `dst` writable for `n` bytes, and the two
 /// ranges do not overlap.
 #[inline]
 pub(crate) unsafe fn copy_small_bytes(src: *const u8, dst: *mut u8, n: usize) {
+    // SAFETY: this `unsafe fn`'s caller passes `src` and `dst` each addressing `n` bytes, not
+    // overlapping.
     unsafe {
         if n >= 32 {
             std::ptr::copy_nonoverlapping(src, dst, n);
@@ -788,21 +909,30 @@ pub(crate) fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     }
 }
 
-/// SAFETY: `p` is readable for 8 bytes.
+/// # Safety
+///
+/// `p` is readable for 8 bytes.
 #[inline]
 unsafe fn load64(p: *const u8) -> u64 {
+    // SAFETY: this `unsafe fn`'s caller passes `p` addressing eight readable bytes.
     unsafe { p.cast::<u64>().read_unaligned() }
 }
 
-/// SAFETY: `p` is readable for 4 bytes.
+/// # Safety
+///
+/// `p` is readable for 4 bytes.
 #[inline]
 unsafe fn load32(p: *const u8) -> u32 {
+    // SAFETY: this `unsafe fn`'s caller passes `p` addressing four readable bytes.
     unsafe { p.cast::<u32>().read_unaligned() }
 }
 
-/// SAFETY: `p` is readable for 2 bytes.
+/// # Safety
+///
+/// `p` is readable for 2 bytes.
 #[inline]
 unsafe fn load16(p: *const u8) -> u16 {
+    // SAFETY: this `unsafe fn`'s caller passes `p` addressing two readable bytes.
     unsafe { p.cast::<u16>().read_unaligned() }
 }
 
@@ -859,10 +989,12 @@ fn alloc_growable(parts: &[&[u8]], cap: usize) -> *mut c_char {
 fn string_body_alloc(layout: Layout) -> *mut u8 {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
+        // SAFETY: `mi_malloc` accepts any size and answers null on failure.
         unsafe { libmimalloc_sys::mi_malloc(layout.size()).cast() }
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
     {
+        // SAFETY: `layout` has a non-zero size (a string's header and terminator at least).
         unsafe { alloc(layout) }
     }
 }
@@ -873,10 +1005,14 @@ unsafe fn string_body_free(base: *mut u8, layout: Layout) {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
         let _ = layout;
+        // SAFETY: this `unsafe fn`'s caller passes `base` a string allocation that nothing uses
+        // afterwards.
         unsafe { libmimalloc_sys::mi_free(base.cast()) };
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
     {
+        // SAFETY: this `unsafe fn`'s caller passes `base` as a block allocated with `layout`, not
+        // freed before.
         unsafe { dealloc(base, layout) };
     }
 }
@@ -964,9 +1100,11 @@ fn alloc_ascii_cstring(bytes: &[u8]) -> *mut c_char {
 /// from within its content.
 #[inline]
 pub(crate) unsafe fn alloc_slice_cstring(source: *const c_char, bytes: &[u8]) -> *mut c_char {
+    // SAFETY: this `unsafe fn`'s caller passes `source` null or live, which the probe accepts.
     if unsafe { typed_str_is_ascii(source) } {
         return alloc_ascii_cstring(bytes);
     }
+    // SAFETY: this `unsafe fn`'s caller passes `source` null or live, which the probe accepts.
     if unsafe { typed_str_known_utf8(source) } && utf8_slice_is_whole(bytes) {
         let force_heap = crate::c_abi::rc::in_region_arena(bytes.as_ptr());
         return alloc_growable_filled(
@@ -1051,7 +1189,7 @@ where
     let promoted = force_heap && crate::c_abi::rc::region_is_active();
     let (base, tag, zero_tail) = if region_base.is_null() {
         let layout = Layout::from_size_align(total, 8).expect("string layout is valid");
-        // SAFETY: `layout` has non-zero size and a power-of-two alignment. The
+        // `layout` has non-zero size and a power-of-two alignment. The
         // matching `dealloc` below reconstructs the exact same layout.
         let base = string_body_alloc(layout);
         if base.is_null() {
@@ -1127,13 +1265,19 @@ where
 /// Retain and release never reach a promoted string, so its reference count is
 /// not consulted here: the region is its one owner, and pop is its one free.
 ///
-/// SAFETY: `body` was recorded by `region_track_promoted` while this region was
+///
+/// # Safety
+///
+/// `body` was recorded by `region_track_promoted` while this region was
 /// open, and is freed exactly once, here.
 pub(crate) unsafe fn free_promoted_string(body: *mut c_char) {
     if body.is_null() {
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `body` a promoted string, whose legacy header
+    // precedes it.
     let hdr = unsafe { body.cast::<u8>().sub(STRING_LEGACY_HEADER_BYTES) };
+    // SAFETY: `hdr` addresses the 13-byte legacy header.
     let cap = u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
         as usize;
     let total = STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap);
@@ -1153,7 +1297,10 @@ pub(crate) unsafe fn free_promoted_string(body: *mut c_char) {
 /// owning bindings reach this path so the drop never observes an
 /// aliased pointer.
 ///
-/// SAFETY: caller guarantees that `s` remains a valid C string for this call
+///
+/// # Safety
+///
+/// Caller guarantees that `s` remains a valid C string for this call
 /// and that it owns one live runtime reference. Foreign, static, and
 /// region-backed strings are ignored without probing a private prefix. As with
 /// every raw-pointer ABI, a stale pointer whose address has been reused cannot
@@ -1164,6 +1311,7 @@ unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
             return;
         }
         let is_managed = if typed {
+            // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
             unsafe { typed_managed_string_owner(s) }.is_some()
         } else {
             is_managed_string(s)
@@ -1175,9 +1323,14 @@ unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
         // Refcounted carrier: [owner][rc:u32][cap:u32][len:u32][tag][content][NUL].
         // Carrier validation above establishes that the legacy suffix belongs
         // to a live runtime allocation.
+        // SAFETY: the carrier check above found a live runtime string, whose 13-byte header
+        // precedes the body.
         let hdr = unsafe { s.cast::<u8>().sub(13) };
+        // SAFETY: `hdr` addresses the header's count bytes.
         let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
         if rc & STR_SHARED != 0 {
+            // SAFETY: `hdr` is the allocation-aligned count word, only ever accessed atomically
+            // once shared.
             let cell = unsafe { AtomicU32::from_ptr(hdr.cast::<u32>()) };
             let prev = cell.fetch_sub(1, Ordering::Release);
             if prev & !STR_SHARED != 1 {
@@ -1185,20 +1338,22 @@ unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
             }
             std::sync::atomic::fence(Ordering::Acquire);
         } else if rc > 1 {
+            // SAFETY: the string is thread-local, so no other thread writes its count.
             unsafe {
                 std::ptr::copy_nonoverlapping((rc - 1).to_le_bytes().as_ptr(), hdr, 4);
             }
             return;
         }
         let cap =
+            // SAFETY: `hdr` addresses the header's capacity bytes.
             u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
                 as usize;
         let total = STRING_BODY_OFFSET + cap + 1 + str_index_bytes(cap);
         let layout = Layout::from_size_align(total, 8).expect("string layout is valid");
+        unregister_heap_string_body(s);
         // SAFETY: builder allocation uses this exact layout, and this is the
         // last strong reference after the count logic above. The carrier owns
         // the allocation base; `hdr` is only its legacy suffix.
-        unregister_heap_string_body(s);
         unsafe { string_body_free(s.cast::<u8>().sub(STRING_BODY_OFFSET), layout) };
         crate::c_abi::ledger::str_dec();
     });
@@ -1206,11 +1361,13 @@ unsafe fn str_free_impl(s: *mut c_char, typed: bool) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_free(s: *mut c_char) {
+    // SAFETY: `s` is this shim's string argument, null or a share it gives back (C-ABI contract).
     unsafe { str_free_impl(s, false) };
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_free_typed(s: *mut c_char) {
+    // SAFETY: `s` is this shim's string argument, null or a share it gives back (C-ABI contract).
     unsafe { str_free_impl(s, true) };
 }
 
@@ -1223,31 +1380,40 @@ pub unsafe extern "C" fn gos_rt_str_free_typed(s: *mut c_char) {
 /// release: the count carries the rest, and any other live holder keeps the
 /// value alive.
 unsafe fn consume_moved_string_impl(s: *mut c_char, typed: bool) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` null or a share it gives back.
     unsafe { str_free_impl(s, typed) };
 }
 
 pub(crate) unsafe fn consume_moved_string(s: *mut c_char) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` null or a moved share it gives back.
     unsafe { consume_moved_string_impl(s, false) };
 }
 
 pub(crate) unsafe fn consume_moved_string_typed(s: *mut c_char) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` null or a moved share it gives back.
     unsafe { consume_moved_string_impl(s, true) };
 }
 
 /// True when `s` is a string value inside a compiler-typed Gossamer object.
 ///
-/// SAFETY: unlike public raw C-string entry points, this internal RC dispatch
+///
+/// # Safety
+///
+/// Unlike public raw C-string entry points, this internal RC dispatch
 /// helper may only receive a pointer whose surrounding typed metadata already
 /// establishes it as a valid Gossamer value. Static and region strings have no
 /// registry entry, so their compiler-owned tag is read here to route cleanup
 /// away from the RC header path. Do not use this to validate a foreign pointer.
 #[inline]
 pub unsafe fn is_gos_string(s: *const c_char) -> bool {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_owner` accepts.
     unsafe { typed_str_owner(s).is_some() }
 }
 
 unsafe fn str_retain_impl(s: *const c_char, typed: bool) {
     let is_managed = if typed {
+        // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which
+        // `typed_managed_string_owner` accepts.
         unsafe { typed_managed_string_owner(s) }.is_some()
     } else {
         is_managed_string(s)
@@ -1256,16 +1422,21 @@ unsafe fn str_retain_impl(s: *const c_char, typed: bool) {
         return;
     }
     crate::c_abi::ledger::benchmark_arc_retain();
+    // SAFETY: `s` is a managed string (checked above), whose 13-byte header precedes the body.
     let hdr = unsafe { s.cast::<u8>().sub(13) };
+    // SAFETY: `hdr` addresses the header's count bytes.
     let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
     if rc & STR_SHARED != 0 {
         // Goroutine-shared: atomic increment of the low-31-bit count. `hdr` is
         // the allocation base (allocator-aligned >= 4), so the cast is sound;
         // the count cannot reach the shared bit, so `fetch_add` preserves it.
+        // SAFETY: `hdr` is the allocation-aligned count word, only ever accessed atomically once
+        // shared.
         let cell = unsafe { AtomicU32::from_ptr(hdr.cast_mut().cast::<u32>()) };
         cell.fetch_add(1, Ordering::Relaxed);
         return;
     }
+    // SAFETY: the string is thread-local, so no other thread writes its count.
     unsafe {
         std::ptr::copy_nonoverlapping(
             rc.saturating_add(1).to_le_bytes().as_ptr(),
@@ -1277,11 +1448,13 @@ unsafe fn str_retain_impl(s: *const c_char, typed: bool) {
 
 /// Increment a heap (`STR_BUILDER_TAG`) string's refcount; no-op otherwise.
 pub(crate) unsafe fn gos_rt_str_retain(s: *const c_char) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` null or live, which the retain accepts.
     unsafe { str_retain_impl(s, false) };
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_retain_typed(s: *const c_char) {
+    // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
     unsafe { str_retain_impl(s, true) };
 }
 
@@ -1296,6 +1469,7 @@ pub unsafe extern "C" fn gos_rt_str_retain_typed(s: *const c_char) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_clone(s: *const c_char) -> *const c_char {
     ffi_entry!(std::ptr::null(), {
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
         unsafe { str_retain_impl(s, true) };
         s
     })
@@ -1309,7 +1483,9 @@ pub(crate) unsafe fn gos_rt_str_mark_shared(s: *const c_char) {
     if !is_managed_string(s) {
         return;
     }
+    // SAFETY: `s` is a managed string (checked above), whose 13-byte header precedes the body.
     let hdr = unsafe { s.cast::<u8>().sub(13) };
+    // SAFETY: `hdr` is the allocation-aligned count word, accessed atomically from here on.
     let cell = unsafe { AtomicU32::from_ptr(hdr.cast_mut().cast::<u32>()) };
     cell.fetch_or(STR_SHARED, Ordering::Relaxed);
 }
@@ -1387,33 +1563,45 @@ fn alloc_ascii_upper_cstring(src: &[u8]) -> *mut c_char {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_len(s: *const c_char) -> i64 {
+    // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
     ffi_entry!(-1, { unsafe { typed_str_char_len(s) as i64 } })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_byte_len(s: *const c_char) -> i64 {
+    // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
     ffi_entry!(-1, { unsafe { typed_str_len(s) as i64 } })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_is_empty(s: *const c_char) -> bool {
+    // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
     ffi_entry!(false, { unsafe { gos_rt_str_len(s) == 0 } })
 }
 
 /// The capacity and length of `s` when it is a heap builder this reference
 /// holds alone, so its bytes may be rewritten in place.
 ///
-/// SAFETY: `s` is null or a Gossamer string body.
+///
+/// # Safety
+///
+/// `s` is null or a Gossamer string body.
 unsafe fn unique_builder_cap_len(s: *const c_char) -> Option<(usize, usize)> {
+    // SAFETY: this `unsafe fn`'s caller passes `s` null or live, which the probe accepts.
     if !unsafe { is_typed_builder(s) } {
         return None;
     }
+    // SAFETY: `s` is a typed builder (checked above), so its 13-byte header of count, capacity,
+    // length, and tag precedes the body.
     let hdr = unsafe { s.cast::<u8>().sub(13) };
+    // SAFETY: `hdr` addresses the header's count bytes.
     let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
     if rc != 1 {
         return None;
     }
+    // SAFETY: `hdr` addresses the header's capacity bytes.
     let cap = u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] });
+    // SAFETY: `hdr` addresses the header's length bytes.
     let len = u32::from_le_bytes(unsafe { [*hdr.add(8), *hdr.add(9), *hdr.add(10), *hdr.add(11)] });
     Some((cap as usize, len as usize))
 }
@@ -1421,8 +1609,13 @@ unsafe fn unique_builder_cap_len(s: *const c_char) -> Option<(usize, usize)> {
 /// Sets the length of the unique builder `s` to `len`, which must not exceed
 /// its current length and must fall on a character boundary.
 ///
-/// SAFETY: `unique_builder_cap_len(s)` answered `Some((cap, _))`.
+///
+/// # Safety
+///
+/// `unique_builder_cap_len(s)` answered `Some((cap, _))`.
 unsafe fn shorten_unique_builder(s: *mut c_char, len: usize, cap: usize) {
+    // SAFETY: this `unsafe fn`'s caller passes `s` a uniquely held builder of capacity `cap` and
+    // `len <= cap`.
     unsafe {
         *s.cast::<u8>().add(len) = 0;
         let hdr = s.cast::<u8>().sub(13);
@@ -1442,9 +1635,13 @@ unsafe fn shorten_unique_builder(s: *mut c_char, len: usize, cap: usize) {
 /// the new length, with the character index left saying every byte is one
 /// character. Answers whether it appended; `acc` is untouched otherwise.
 ///
-/// SAFETY: `acc` is null or a Gossamer string body, and every part is ASCII.
+///
+/// # Safety
+///
+/// `acc` is null or a Gossamer string body, and every part is ASCII.
 #[inline]
 unsafe fn append_ascii_in_place(acc: *const c_char, parts: &[&[u8]]) -> bool {
+    // SAFETY: this `unsafe fn`'s caller passes `acc` null or live, which the probe accepts.
     let Some((cap, len)) = (unsafe { unique_builder_cap_len(acc) }) else {
         return false;
     };
@@ -1452,6 +1649,7 @@ unsafe fn append_ascii_in_place(acc: *const c_char, parts: &[&[u8]]) -> bool {
     if len + added > cap {
         return false;
     }
+    // SAFETY: `acc` is a uniquely held builder with room for `added` more bytes (checked above).
     unsafe {
         let footer = acc.cast::<u8>().add(cap + 1).cast::<u32>();
         if footer.read_unaligned() != STR_INDEX_ASCII {
@@ -1473,7 +1671,10 @@ unsafe fn append_ascii_in_place(acc: *const c_char, parts: &[&[u8]]) -> bool {
 /// The window `buf[start..end]` of a buffer whose slots are bytes, or `None`
 /// for a wide buffer or a window that does not lie within it.
 ///
-/// SAFETY: `buf` is null or a live `GosVec` whose storage outlives the slice.
+///
+/// # Safety
+///
+/// `buf` is null or a live `GosVec` whose storage outlives the slice.
 #[inline]
 unsafe fn packed_byte_window<'a>(
     buf: *const crate::c_abi::vec::GosVec,
@@ -1483,11 +1684,15 @@ unsafe fn packed_byte_window<'a>(
     if buf.is_null() || start < 0 || end < start {
         return None;
     }
+    // SAFETY: `buf` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `Vec`.
     let header = unsafe { &*buf };
     if header.elem_bytes != 1 || end > header.len || header.ptr.is_null() {
         return None;
     }
     let (lo, hi) = (start as usize, end as usize);
+    // SAFETY: `start..end` lies inside the byte vec's `len` bytes at a non-null `ptr` (checked
+    // above).
     Some(unsafe { std::slice::from_raw_parts(header.ptr.as_const_ptr().add(lo), hi - lo) })
 }
 
@@ -1500,16 +1705,23 @@ pub unsafe extern "C" fn gos_rt_str_clear(s: *const c_char) -> *mut c_char {
     // Bare (no `ffi_entry!`), as `gos_rt_str_concat_drop_a` is: a buffer
     // cleared per request sits on the hot path, and nothing here unwinds -
     // header reads and writes, and an allocation whose failure aborts.
+    // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
     if let Some((cap, _)) = unsafe { unique_builder_cap_len(s) } {
+        // SAFETY: `s` is a uniquely held builder of capacity `cap`.
         unsafe { shorten_unique_builder(s.cast_mut(), 0, cap) };
         return s.cast_mut();
     }
+    // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
     let cleared = if unsafe { is_typed_builder(s) } {
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `typed_str_cap` accepts.
         alloc_growable(&[], unsafe { typed_str_cap(s) }.unwrap_or(0))
     } else {
         alloc_cstring(b"")
     };
     if is_managed_string(s) {
+        // SAFETY: `s` arrived as a consuming-call argument, so this call owns the share it
+        // releases (C-ABI contract).
         unsafe { gos_rt_str_free(s.cast_mut()) };
     }
     cleared
@@ -1544,22 +1756,31 @@ pub unsafe extern "C" fn gos_rt_str_truncate(s: *const c_char, n: i64) -> *mut c
         if s.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         let len = unsafe { gos_str_arg_len(s) };
         let limit = usize::try_from(n).unwrap_or(0).min(len);
+        // SAFETY: `s` is non-null (checked above) and its first `len` bytes are its content.
         let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) };
         let end = if limit == len {
             len
         } else {
             utf8_boundary_at_or_before(bytes, limit)
         };
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         if let Some((cap, _)) = unsafe { unique_builder_cap_len(s) } {
             if end < len {
+                // SAFETY: `s` is a uniquely held builder of capacity `cap`, and `end < len <=
+                // cap`.
                 unsafe { shorten_unique_builder(s.cast_mut(), end, cap) };
             }
             return s.cast_mut();
         }
         let kept = alloc_cstring_from_slices(&[&bytes[..end]]);
         if is_managed_string(s) {
+            // SAFETY: `s` arrived as a consuming-call argument, so this call owns the share it
+            // releases (C-ABI contract).
             unsafe { gos_rt_str_free(s.cast_mut()) };
         }
         kept
@@ -1584,20 +1805,22 @@ fn utf8_boundary_at_or_before(bytes: &[u8], limit: usize) -> usize {
 pub unsafe extern "C" fn gos_rt_string_from_utf8(bytes: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
         if bytes.is_null() {
-            return unsafe { gos_rt_result_new(0, alloc_cstring(b"") as i64) };
+            return gos_rt_result_new(0, alloc_cstring(b"") as i64);
         }
+        // SAFETY: `bytes` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*bytes };
         let mut out = Vec::with_capacity(vec.len.max(0) as usize);
         for idx in 0..vec.len.max(0) {
+            // SAFETY: `idx` is below the vec's length.
             let b = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, idx) };
             out.push(b as u8);
         }
         match std::str::from_utf8(&out) {
-            Ok(_) => unsafe { gos_rt_result_new(0, alloc_cstring_from_slices(&[&out]) as i64) },
+            Ok(_) => gos_rt_result_new(0, alloc_cstring_from_slices(&[&out]) as i64),
             Err(e) => {
                 let msg = format!("String::from_utf8: {e}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -1608,6 +1831,7 @@ pub unsafe extern "C" fn gos_rt_string_from_utf8(bytes: *const GosVec) -> i128 {
 /// (Vec / array / slice / hashmap …).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_len_is_zero(p: *const i64) -> bool {
+    // SAFETY: `p` is this shim's argument, null or a live sized value (C-ABI contract).
     ffi_entry!(false, { unsafe { gos_rt_len(p) == 0 } })
 }
 
@@ -1631,20 +1855,24 @@ pub unsafe extern "C" fn gos_rt_len_is_zero(p: *const i64) -> bool {
 pub unsafe extern "C" fn gos_rt_vec_clone(src: *const GosVec) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if src.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `src` is a handle from compiled code, checked non-null above and live for the whole call.
         let s = unsafe { &*src };
         let bytes = (s.len as usize) * (s.elem_bytes as usize);
         // Header + element buffer in one `Box<InlineVec>` (inline for a
         // small vec, else a separate buffer), then copy the source slots
         // into whichever data region `ptr` lands at. Ledger + strong count
         // are set by `alloc_box_vec`, symmetric with `gos_rt_vec_free`.
-        let out =
-            unsafe { crate::c_abi::vec::alloc_box_vec(s.elem_bytes, s.elem_kind, s.len, s.len) };
+        let out = crate::c_abi::vec::alloc_box_vec(s.elem_bytes, s.elem_kind, s.len, s.len);
+        // SAFETY: `out` is the vec `alloc_box_vec` just made.
         let data = unsafe { (*out).ptr.as_ptr() };
         if bytes > 0 && !s.ptr.is_null() && !data.is_null() {
+            // SAFETY: `out`'s buffer holds `len` elements of the source's width, and the two do
+            // not overlap.
             unsafe { std::ptr::copy_nonoverlapping(s.ptr.as_ptr(), data, bytes) };
         }
+        // SAFETY: `src` is live and `out` holds raw copies of its elements.
         unsafe { crate::c_abi::vec::vec_adopt_element_shares(src, out) };
         out
     })
@@ -1664,11 +1892,14 @@ pub unsafe extern "C" fn gos_rt_str_as_bytes(s: *const c_char) -> *mut GosVec {
         let len = if s.is_null() {
             0
         } else {
+            // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null,
+            // which `gos_str_arg_len` accepts.
             unsafe { gos_str_arg_len(s) }
         };
         let bytes = if len == 0 || s.is_null() {
             &[][..]
         } else {
+            // SAFETY: `s` is non-null (checked above) and its first `len` bytes are its content.
             unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len) }
         };
         super::encoding::bytes_to_gosvec(bytes)
@@ -1688,15 +1919,17 @@ pub unsafe extern "C" fn gos_rt_str_chars(s: *const c_char) -> *mut GosVec {
         let st = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         // A UTF-8 string has at most one scalar per byte, so its byte length is
         // a safe capacity upper bound. Allocate once and discover the exact
         // scalar count while filling instead of scanning the string twice.
-        let v = unsafe { gos_rt_vec_with_capacity(8, st.len() as i64) };
+        let v = gos_rt_vec_with_capacity(8, st.len() as i64);
         if v.is_null() {
             return v;
         }
+        // SAFETY: `v` is the fresh non-null vec with capacity for every char.
         unsafe {
             let header = &mut *v;
             let dst = header.ptr.cast::<i64>();
@@ -1719,10 +1952,11 @@ pub unsafe extern "C" fn gos_rt_i64_chars(n: i64) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         let mut buffer = itoa::Buffer::new();
         let bytes = buffer.format(n).as_bytes();
-        let v = unsafe { gos_rt_vec_with_capacity(8, bytes.len() as i64) };
+        let v = gos_rt_vec_with_capacity(8, bytes.len() as i64);
         if v.is_null() {
             return v;
         }
+        // SAFETY: `v` is the fresh non-null vec with capacity for every digit.
         unsafe {
             let header = &mut *v;
             let dst = header.ptr.cast::<i64>();
@@ -1744,6 +1978,8 @@ pub unsafe extern "C" fn gos_rt_str_byte_at(s: *const c_char, i: i64) -> i64 {
     if s.is_null() || i < 0 {
         return 0;
     }
+    // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract); non-null, checked
+    // above.
     let len = unsafe { typed_str_len(s) };
     if i as usize >= len {
         return 0;
@@ -1762,13 +1998,18 @@ pub unsafe extern "C" fn gos_rt_str_char_at(s: *const c_char, i: i64) -> i64 {
     if s.is_null() {
         crate::c_abi::panic::panic_oob_text("vec index", i, 0);
     }
+    // SAFETY: `s` is non-null (checked above) and this shim's live string argument (C-ABI
+    // contract).
     let char_len = unsafe { typed_str_char_len(s) };
     if i < 0 || i as usize >= char_len {
         crate::c_abi::panic::panic_oob_text("vec index", i, char_len as i64);
     }
+    // SAFETY: `s` is live, and `i` is below its char length (checked above).
     let Some(byte) = (unsafe { typed_str_char_boundary(s, i as usize) }) else {
         crate::c_abi::panic::panic_oob_text("vec index", i, char_len as i64);
     };
+    // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `typed_str_bytes` accepts.
     let bytes = unsafe { typed_str_bytes(s) };
     utf8_scalar_at(bytes, byte).map_or(0, |ch| i64::from(u32::from(ch)))
 }
@@ -1785,6 +2026,7 @@ pub unsafe extern "C" fn gos_rt_os_read_dir(path: *const c_char) -> *mut GosVec 
         let p = if path.is_null() {
             std::path::PathBuf::from(".")
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             let encoded = unsafe { gos_str_arg_lossy(path) };
             super::args::decode_os_path(&encoded)
         };
@@ -1800,11 +2042,12 @@ pub unsafe extern "C" fn gos_rt_os_read_dir(path: *const c_char) -> *mut GosVec 
             Err(_) => Vec::new(),
         };
         // STRING-typed: the vec owns the entry-name strings.
-        let out = unsafe {
+        let out = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
         for name in entries {
             let cs = alloc_cstring(name.as_bytes()) as i64;
+            // SAFETY: `vec` is the live vec made above, and `cs` one 8-byte element.
             unsafe {
                 gos_rt_vec_push_i64(out, cs);
             }
@@ -1834,7 +2077,10 @@ pub unsafe extern "C" fn gos_rt_str_substring(
         if s.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `s` is non-null (checked above) and this shim's live string argument (C-ABI
+        // contract).
         let bytes = unsafe { substring_bytes(s, start, end) };
+        // SAFETY: `s` is live, and `bytes` is a window of its content.
         unsafe { alloc_slice_cstring(s, bytes) }
     })
 }
@@ -1858,12 +2104,16 @@ unsafe fn substring_bytes<'a>(s: *const c_char, start: i64, end: i64) -> &'a [u8
     // strlen. Sizing the slice from the header keeps `substring`
     // proportional to the slice length, not the source length, so a
     // sliding-window scan over one string stays linear.
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `typed_str_len` accepts.
     let byte_len = unsafe { typed_str_len(s) };
     let len_i = byte_len as i64;
     let lo = start.clamp(0, len_i) as usize;
     let hi = end.clamp(0, len_i).max(start.clamp(0, len_i)) as usize;
+    // SAFETY: this `unsafe fn`'s caller passes `s` a live string body.
     let lo_byte = unsafe { typed_str_next_char_boundary(s, lo) }.unwrap_or(byte_len);
+    // SAFETY: this `unsafe fn`'s caller passes `s` a live string body.
     let hi_byte = unsafe { typed_str_next_char_boundary(s, hi) }.unwrap_or(byte_len);
+    // SAFETY: `s` is a live string body whose first `byte_len` bytes are its content.
     let bytes = unsafe { std::slice::from_raw_parts(s.cast::<u8>(), byte_len) };
     &bytes[lo_byte..hi_byte]
 }
@@ -1885,11 +2135,16 @@ pub unsafe extern "C" fn gos_rt_str_push_substring(
         let bytes: &[u8] = if src.is_null() {
             &[]
         } else {
+            // SAFETY: `src` is non-null (checked above) and this shim's live string argument
+            // (C-ABI contract).
             unsafe { substring_bytes(src, start, end) }
         };
         // A slice of ASCII text is ASCII, so the accumulator's index is
         // extended without scanning the bytes appended.
+        // SAFETY: `src` is this shim's string argument, null or live (C-ABI contract).
         let ascii = unsafe { typed_str_is_ascii(src) };
+        // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
+        // contract).
         unsafe { str_append_parts(acc, &[bytes], ascii) }
     })
 }
@@ -1902,12 +2157,16 @@ pub unsafe extern "C" fn gos_rt_str_concat(a: *const c_char, b: *const c_char) -
         // interior NULs, and one that starts with a NUL is not empty.
         // Writing into the destination directly sizes the allocation from
         // the two lengths without an intermediate `Vec`.
+        // SAFETY: `a` is a String argument from compiled code, null or a live string body for the whole call.
         let a_bytes: &[u8] = unsafe { gos_str_arg_bytes(a) };
+        // SAFETY: `b` is a String argument from compiled code, null or a live string body for the whole call.
         let b_bytes: &[u8] = unsafe { gos_str_arg_bytes(b) };
         let force_heap = crate::c_abi::rc::in_region_arena(a.cast())
             || crate::c_abi::rc::in_region_arena(b.cast());
         // Two ASCII operands concatenate to ASCII, so the index is written
         // without reading the copied bytes again.
+        // SAFETY: `a` and `b` are this shim's string arguments, each null or live (C-ABI
+        // contract).
         if unsafe { typed_str_is_ascii(a) && typed_str_is_ascii(b) } {
             let len = a_bytes.len() + b_bytes.len();
             return alloc_growable_filled(len, len, force_heap, KnownText::Ascii, |out| unsafe {
@@ -1928,11 +2187,16 @@ pub unsafe extern "C" fn gos_rt_str_concat(a: *const c_char, b: *const c_char) -
 /// Answers the concatenation of `a` with an empty right side: `a` itself when
 /// it is already owned, and an owned copy otherwise.
 ///
-/// SAFETY: `a` is null or a Gossamer string body.
+///
+/// # Safety
+///
+/// `a` is null or a Gossamer string body.
 unsafe fn concat_with_empty(a: *const c_char) -> *mut c_char {
     if is_managed_string(a) {
         return a.cast_mut();
     }
+    // SAFETY: this `unsafe fn`'s caller passes `a` live or null, which `gos_str_arg_bytes`
+    // accepts.
     let a_bytes: &[u8] = unsafe { gos_str_arg_bytes(a) };
     let force_heap = crate::c_abi::rc::in_region_arena(a.cast());
     alloc_growable_forced(&[a_bytes], 64.max(a_bytes.len()), force_heap)
@@ -1961,10 +2225,14 @@ pub unsafe extern "C" fn gos_rt_str_concat_drop_a(
     {
         // Emptiness is a header length of zero. A `String` whose first byte
         // is a NUL still has content to append.
+        // SAFETY: `b` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `typed_str_bytes` accepts.
         let b_bytes: &[u8] = unsafe { typed_str_bytes(b) };
         let len_b = b_bytes.len();
 
         if len_b == 0 {
+            // SAFETY: `a` is this shim's accumulator argument, null or a share it hands on (C-ABI
+            // contract).
             return unsafe { concat_with_empty(a) };
         }
 
@@ -1972,12 +2240,18 @@ pub unsafe extern "C" fn gos_rt_str_concat_drop_a(
         // Region- and static-backed pointers carry a non-heap destructor and
         // take the copying path below, which keeps their compiler-owned
         // storage immutable.
+        // SAFETY: `a` is this shim's accumulator argument, null or live (C-ABI contract).
         if unsafe { is_typed_builder(a) } {
+            // SAFETY: `a` is a typed builder (checked above), so its 13-byte header of count,
+            // capacity, length, and tag precedes the body.
             let hdr = unsafe { a.cast::<u8>().sub(13) };
+            // SAFETY: `hdr` addresses the header's count bytes.
             let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
             let cap =
+                // SAFETY: `hdr` addresses the header's capacity bytes.
                 u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
                     as usize;
+            // SAFETY: `hdr` addresses the header's length bytes.
             let len_a = u32::from_le_bytes(unsafe {
                 [*hdr.add(8), *hdr.add(9), *hdr.add(10), *hdr.add(11)]
             }) as usize;
@@ -1985,6 +2259,8 @@ pub unsafe extern "C" fn gos_rt_str_concat_drop_a(
             // In-place only when sole owner (rc == 1): mutating a shared
             // buffer would corrupt other holders.
             if new_len <= cap && rc == 1 {
+                // SAFETY: `a` is a uniquely held builder (rc 1) with room for the new length
+                // (checked above).
                 unsafe {
                     let dst = (a as *mut u8).add(len_a);
                     copy_small_bytes(b_bytes.as_ptr(), dst, len_b);
@@ -2000,14 +2276,18 @@ pub unsafe extern "C" fn gos_rt_str_concat_drop_a(
                 return a.cast_mut();
             }
             // Shared or capacity exhausted: copy, allocate fresh, drop one ref.
+            // SAFETY: `a`'s first `len_a` bytes are its content.
             let a_content = unsafe { std::slice::from_raw_parts(a.cast::<u8>(), len_a) };
             let new_cap = (new_len * 2).max(64);
             let result = alloc_growable(&[a_content, b_bytes], new_cap);
+            // SAFETY: `a` arrived as a consuming accumulator, so this call owns the share it
+            // releases (C-ABI contract).
             unsafe { gos_rt_str_free(a.cast_mut()) };
             return result;
         }
 
         // a is null, a literal, or a fixed heap string - allocate fresh growable.
+        // SAFETY: `a` is a String argument from compiled code, null or a live string body for the whole call.
         let a_bytes: &[u8] = unsafe { gos_str_arg_bytes(a) };
         let new_len = a_bytes.len() + len_b;
         let new_cap = (new_len * 2).max(64);
@@ -2015,6 +2295,8 @@ pub unsafe extern "C" fn gos_rt_str_concat_drop_a(
             || crate::c_abi::rc::in_region_arena(b.cast());
         let result = alloc_growable_forced(&[a_bytes, b_bytes], new_cap, force_heap);
         if is_managed_string(a) {
+            // SAFETY: `a` arrived as a consuming accumulator, so this call owns the share it
+            // releases (C-ABI contract).
             unsafe { gos_rt_str_free(a.cast_mut()) };
         }
         result
@@ -2034,23 +2316,34 @@ pub unsafe extern "C" fn gos_rt_str_append_bytes(
 ) -> *mut c_char {
     let len_b = if len < 0 { 0 } else { len as usize };
     if len_b == 0 {
+        // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
+        // contract).
         return unsafe { concat_with_empty(acc) };
     }
+    // SAFETY: `b` is this shim's byte argument, addressing `len` bytes (C-ABI contract).
     let b_bytes: &[u8] = unsafe { std::slice::from_raw_parts(b, len_b) };
 
     // Generated code supplies a typed String, so its private tag is directly
     // available without a global allocation-registry lookup.
+    // SAFETY: `acc` is this shim's accumulator argument, null or live (C-ABI contract).
     if unsafe { is_typed_builder(acc) } {
+        // SAFETY: `acc` is a typed builder (checked above), so its 13-byte header of count,
+        // capacity, length, and tag precedes the body.
         let hdr = unsafe { acc.cast::<u8>().sub(13) };
+        // SAFETY: `hdr` addresses the header's count bytes.
         let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
         let cap =
+            // SAFETY: `hdr` addresses the header's capacity bytes.
             u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
                 as usize;
         let len_a =
+            // SAFETY: `hdr` addresses the header's length bytes.
             u32::from_le_bytes(unsafe { [*hdr.add(8), *hdr.add(9), *hdr.add(10), *hdr.add(11)] })
                 as usize;
         let new_len = len_a + len_b;
         if new_len <= cap && rc == 1 {
+            // SAFETY: `acc` is a uniquely held builder (rc 1) with room for the new length
+            // (checked above).
             unsafe {
                 let dst = (acc as *mut u8).add(len_a);
                 copy_small_bytes(b_bytes.as_ptr(), dst, len_b);
@@ -2065,12 +2358,16 @@ pub unsafe extern "C" fn gos_rt_str_append_bytes(
             }
             return acc.cast_mut();
         }
+        // SAFETY: `acc`'s first `len_a` bytes are its content.
         let a_content = unsafe { std::slice::from_raw_parts(acc.cast::<u8>(), len_a) };
         let result = alloc_growable(&[a_content, b_bytes], (new_len * 2).max(64));
+        // SAFETY: `acc` arrived as a consuming accumulator, so this call owns the share it
+        // releases (C-ABI contract).
         unsafe { gos_rt_str_free(acc.cast_mut()) };
         return result;
     }
 
+    // SAFETY: `acc` is a String argument from compiled code, null or a live string body for the whole call.
     let a_bytes: &[u8] = unsafe { gos_str_arg_bytes(acc) };
     let force_heap =
         crate::c_abi::rc::in_region_arena(acc.cast()) || crate::c_abi::rc::in_region_arena(b);
@@ -2080,6 +2377,8 @@ pub unsafe extern "C" fn gos_rt_str_append_bytes(
         force_heap,
     );
     if is_managed_string(acc) {
+        // SAFETY: `acc` arrived as a consuming accumulator, so this call owns the share it
+        // releases (C-ABI contract).
         unsafe { gos_rt_str_free(acc.cast_mut()) };
     }
     result
@@ -2100,8 +2399,11 @@ pub(crate) unsafe fn str_builder_write_reserved(acc: *mut c_char, offset: usize,
     let new_len = offset
         .checked_add(bytes.len())
         .expect("reserved string length overflow");
+    // SAFETY: this `unsafe fn`'s caller passes `acc` a live string body.
     debug_assert!(unsafe { is_typed_builder(acc) });
     debug_assert!(u32::try_from(new_len).is_ok());
+    // SAFETY: this `unsafe fn`'s caller passes `acc` a uniquely held builder whose reserved
+    // capacity covers `offset + bytes.len()`.
     unsafe {
         let dst = acc.cast::<u8>().add(offset);
         copy_small_bytes(bytes.as_ptr(), dst, bytes.len());
@@ -2134,6 +2436,8 @@ pub unsafe extern "C" fn gos_rt_str_append_i64(acc: *const c_char, n: i64) -> *m
     // machinery; this is the hot fused path for `s += format!("{}", i)`.
     let mut buf = itoa::Buffer::new();
     let digits = buf.format(n);
+    // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
+    // contract).
     unsafe { append_ascii_text(acc, digits.as_bytes()) }
 }
 
@@ -2141,12 +2445,18 @@ pub unsafe extern "C" fn gos_rt_str_append_i64(acc: *const c_char, n: i64) -> *m
 /// exclusively held ASCII builder has room, through the general append
 /// otherwise.
 ///
-/// SAFETY: as [`gos_rt_str_append_bytes`], with `text` ASCII.
+///
+/// # Safety
+///
+/// As [`gos_rt_str_append_bytes`], with `text` ASCII.
 #[inline]
 unsafe fn append_ascii_text(acc: *const c_char, text: &[u8]) -> *mut c_char {
+    // SAFETY: this `unsafe fn`'s caller passes `acc` null or a share it hands on.
     if unsafe { append_ascii_in_place(acc, &[text]) } {
         return acc.cast_mut();
     }
+    // SAFETY: this `unsafe fn`'s caller passes `acc` null or a share it hands on, and `text` is a
+    // live slice.
     unsafe { gos_rt_str_append_bytes(acc, text.as_ptr(), text.len() as i64) }
 }
 
@@ -2157,6 +2467,8 @@ unsafe fn append_ascii_text(acc: *const c_char, text: &[u8]) -> *mut c_char {
 pub unsafe extern "C" fn gos_rt_str_append_u64(acc: *const c_char, n: u64) -> *mut c_char {
     let mut buf = itoa::Buffer::new();
     let digits = buf.format(n);
+    // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
+    // contract).
     unsafe { append_ascii_text(acc, digits.as_bytes()) }
 }
 
@@ -2165,6 +2477,8 @@ pub unsafe extern "C" fn gos_rt_str_append_u64(acc: *const c_char, n: u64) -> *m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_append_bool(acc: *const c_char, b: i32) -> *mut c_char {
     let text: &[u8] = if b == 0 { b"false" } else { b"true" };
+    // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
+    // contract).
     unsafe { append_ascii_text(acc, text) }
 }
 
@@ -2174,6 +2488,8 @@ pub unsafe extern "C" fn gos_rt_str_append_bool(acc: *const c_char, b: i32) -> *
 pub unsafe extern "C" fn gos_rt_str_append_f64(acc: *const c_char, x: f64) -> *mut c_char {
     let mut text = crate::builtins::FloatText::new();
     let digits = crate::builtins::f64_display(x, &mut text);
+    // SAFETY: `acc` is this shim's accumulator argument, null or a share it hands on (C-ABI
+    // contract).
     unsafe { append_ascii_text(acc, digits) }
 }
 
@@ -2183,8 +2499,11 @@ pub unsafe extern "C" fn gos_rt_str_trim(s: *const c_char) -> *mut c_char {
         let st = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract), and the
+        // trimmed text is a window of it.
         unsafe { alloc_slice_cstring(s, st.trim().as_bytes()) }
     })
 }
@@ -2197,8 +2516,11 @@ pub unsafe extern "C" fn gos_rt_str_trim_start(s: *const c_char) -> *mut c_char 
         let st = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract), and the
+        // trimmed text is a window of it.
         unsafe { alloc_slice_cstring(s, st.trim_start().as_bytes()) }
     })
 }
@@ -2211,8 +2533,11 @@ pub unsafe extern "C" fn gos_rt_str_trim_end(s: *const c_char) -> *mut c_char {
         let st = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract), and the
+        // trimmed text is a window of it.
         unsafe { alloc_slice_cstring(s, st.trim_end().as_bytes()) }
     })
 }
@@ -2223,6 +2548,7 @@ pub unsafe extern "C" fn gos_rt_str_to_upper(s: *const c_char) -> *mut c_char {
         let bytes = if s.is_null() {
             b"" as &[u8]
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_bytes(s) }
         };
         if bytes.is_ascii() {
@@ -2231,6 +2557,7 @@ pub unsafe extern "C" fn gos_rt_str_to_upper(s: *const c_char) -> *mut c_char {
         let st = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         alloc_cstring(st.to_uppercase().as_bytes())
@@ -2243,6 +2570,7 @@ pub unsafe extern "C" fn gos_rt_str_to_lower(s: *const c_char) -> *mut c_char {
         let st = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         alloc_cstring(st.to_lowercase().as_bytes())
@@ -2255,7 +2583,9 @@ pub unsafe extern "C" fn gos_rt_str_contains(s: *const c_char, needle: *const c_
         if s.is_null() || needle.is_null() {
             return 0;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { gos_str_arg_bytes(s) };
+        // SAFETY: `needle` is a String argument from compiled code, null or a live string body for the whole call.
         let n = unsafe { gos_str_arg_bytes(needle) };
         if n.is_empty() {
             return 1;
@@ -2278,7 +2608,9 @@ pub unsafe extern "C" fn gos_rt_str_starts_with(s: *const c_char, prefix: *const
         if s.is_null() || prefix.is_null() {
             return 0;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { gos_str_arg_bytes(s) };
+        // SAFETY: `prefix` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { gos_str_arg_bytes(prefix) };
         i32::from(s.starts_with(p))
     })
@@ -2290,7 +2622,9 @@ pub unsafe extern "C" fn gos_rt_str_ends_with(s: *const c_char, suffix: *const c
         if s.is_null() || suffix.is_null() {
             return 0;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { gos_str_arg_bytes(s) };
+        // SAFETY: `suffix` is a String argument from compiled code, null or a live string body for the whole call.
         let suf = unsafe { gos_str_arg_bytes(suffix) };
         i32::from(s.ends_with(suf))
     })
@@ -2302,7 +2636,9 @@ pub unsafe extern "C" fn gos_rt_str_find(s: *const c_char, needle: *const c_char
         if s.is_null() || needle.is_null() {
             return -1;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { gos_str_arg_bytes(s) };
+        // SAFETY: `needle` is a String argument from compiled code, null or a live string body for the whole call.
         let n = unsafe { gos_str_arg_bytes(needle) };
         if n.is_empty() {
             return 0;
@@ -2312,6 +2648,8 @@ pub unsafe extern "C" fn gos_rt_str_find(s: *const c_char, needle: *const c_char
         }
         for i in 0..=(s.len() - n.len()) {
             if &s[i..i + n.len()] == n {
+                // SAFETY: `s` is valid UTF-8 and `i` is where a match of the UTF-8 needle starts,
+                // a char boundary.
                 let prefix = unsafe { std::str::from_utf8_unchecked(&s[..i]) };
                 return prefix.chars().count() as i64;
             }
@@ -2330,11 +2668,13 @@ pub unsafe extern "C" fn gos_rt_str_find(s: *const c_char, needle: *const c_char
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_find_opt(s: *const c_char, needle: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s`, `needle` are this shim's arguments, live for the call (C-ABI contract) or
+        // null, which `gos_rt_str_find` accepts.
         let idx = unsafe { gos_rt_str_find(s, needle) };
         if idx < 0 {
-            unsafe { gos_rt_result_new(1, 0) }
+            gos_rt_result_new(1, 0)
         } else {
-            unsafe { gos_rt_result_new(0, idx) }
+            gos_rt_result_new(0, idx)
         }
     })
 }
@@ -2345,11 +2685,12 @@ pub unsafe extern "C" fn gos_rt_str_find_opt(s: *const c_char, needle: *const c_
 pub unsafe extern "C" fn gos_rt_str_to_i64_opt(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if s.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         match parse_i64_bytes(unsafe { gos_str_arg_bytes(s) }) {
-            Some(n) => unsafe { gos_rt_result_new(0, n) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(n) => gos_rt_result_new(0, n),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -2391,12 +2732,13 @@ fn parse_i64_bytes(bytes: &[u8]) -> Option<i64> {
 pub unsafe extern "C" fn gos_rt_str_to_f64_opt(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if s.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { gos_str_arg_lossy(s) };
         match text.parse::<f64>() {
             Ok(f) => crate::c_abi::gos_rt_result_new_f64(0, f),
-            Err(_) => unsafe { gos_rt_result_new(1, 0) },
+            Err(_) => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -2406,13 +2748,14 @@ pub unsafe extern "C" fn gos_rt_str_to_f64_opt(s: *const c_char) -> i128 {
 pub unsafe extern "C" fn gos_rt_str_to_bool_opt(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if s.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { gos_str_arg_lossy(s) };
         match text.as_ref() {
-            "true" => unsafe { gos_rt_result_new(0, 1) },
-            "false" => unsafe { gos_rt_result_new(0, 0) },
-            _ => unsafe { gos_rt_result_new(1, 0) },
+            "true" => gos_rt_result_new(0, 1),
+            "false" => gos_rt_result_new(0, 0),
+            _ => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -2425,24 +2768,29 @@ pub unsafe extern "C" fn gos_rt_str_to_bool_opt(s: *const c_char) -> i128 {
 pub unsafe extern "C" fn gos_rt_str_rfind_opt(s: *const c_char, needle: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if s.is_null() || needle.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let hay = unsafe { gos_str_arg_bytes(s) };
+        // SAFETY: `needle` is a String argument from compiled code, null or a live string body for the whole call.
         let n = unsafe { gos_str_arg_bytes(needle) };
         if n.is_empty() {
+            // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
             return unsafe { gos_rt_result_new(0, typed_str_char_len(s) as i64) };
         }
         if hay.len() < n.len() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
         let upper = hay.len() - n.len();
         for i in (0..=upper).rev() {
             if &hay[i..i + n.len()] == n {
+                // SAFETY: `hay` is valid UTF-8 text and `i` is where a match of the UTF-8 needle
+                // starts, a char boundary.
                 let prefix = unsafe { std::str::from_utf8_unchecked(&hay[..i]) };
-                return unsafe { gos_rt_result_new(0, prefix.chars().count() as i64) };
+                return gos_rt_result_new(0, prefix.chars().count() as i64);
             }
         }
-        unsafe { gos_rt_result_new(1, 0) }
+        gos_rt_result_new(1, 0)
     })
 }
 
@@ -2451,6 +2799,7 @@ pub unsafe extern "C" fn gos_rt_str_rfind_opt(s: *const c_char, needle: *const c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_eq(a: *const c_char, b: *const c_char) -> bool {
     ffi_entry!(false, {
+        // SAFETY: `a` is a String argument from compiled code, null or a live string body for the whole call.
         unsafe { gos_str_arg_bytes(a) == gos_str_arg_bytes(b) }
     })
 }
@@ -2465,11 +2814,13 @@ pub unsafe extern "C" fn gos_rt_str_compare(a: *const c_char, b: *const c_char) 
         let a = if a.is_null() {
             b""
         } else {
+            // SAFETY: `a` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_bytes(a) }
         };
         let b = if b.is_null() {
             b""
         } else {
+            // SAFETY: `b` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_bytes(b) }
         };
         match a.cmp(b) {
@@ -2490,16 +2841,19 @@ pub unsafe extern "C" fn gos_rt_str_replace(
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         let f = if from.is_null() {
             ""
         } else {
+            // SAFETY: `from` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(from) }
         };
         let t = if to.is_null() {
             ""
         } else {
+            // SAFETY: `to` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(to) }
         };
         alloc_cstring(s.replace(f, t).as_bytes())
@@ -2515,13 +2869,15 @@ pub unsafe extern "C" fn gos_rt_str_replace(
 pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if s.is_null() || sep.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
         let source = s;
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { gos_str_arg_text(s) };
+        // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
         let sep = unsafe { gos_str_arg_text(sep) };
         match s.split_once(sep) {
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
             Some((a, b)) => {
                 #[repr(C)]
                 struct Pair {
@@ -2529,10 +2885,14 @@ pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_c
                     b: i64,
                 }
                 let pair = Box::into_raw(Box::new(Pair {
+                    // SAFETY: `source` is this shim's live string argument, and `a` a window of
+                    // it.
                     a: unsafe { alloc_slice_cstring(source, a.as_bytes()) } as i64,
+                    // SAFETY: `source` is this shim's live string argument, and `b` a window of
+                    // it.
                     b: unsafe { alloc_slice_cstring(source, b.as_bytes()) } as i64,
                 }));
-                unsafe { gos_rt_result_new(0, pair as i64) }
+                gos_rt_result_new(0, pair as i64)
             }
         }
     })
@@ -2544,13 +2904,15 @@ pub unsafe extern "C" fn gos_rt_str_split_once(s: *const c_char, sep: *const c_c
 pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if s.is_null() || sep.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
         let source = s;
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { gos_str_arg_text(s) };
+        // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
         let sep = unsafe { gos_str_arg_text(sep) };
         match s.rsplit_once(sep) {
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
             Some((a, b)) => {
                 #[repr(C)]
                 struct Pair {
@@ -2558,10 +2920,14 @@ pub unsafe extern "C" fn gos_rt_str_rsplit_once(s: *const c_char, sep: *const c_
                     b: i64,
                 }
                 let pair = Box::into_raw(Box::new(Pair {
+                    // SAFETY: `source` is this shim's live string argument, and `a` a window of
+                    // it.
                     a: unsafe { alloc_slice_cstring(source, a.as_bytes()) } as i64,
+                    // SAFETY: `source` is this shim's live string argument, and `b` a window of
+                    // it.
                     b: unsafe { alloc_slice_cstring(source, b.as_bytes()) } as i64,
                 }));
-                unsafe { gos_rt_result_new(0, pair as i64) }
+                gos_rt_result_new(0, pair as i64)
             }
         }
     })
@@ -2576,7 +2942,9 @@ pub unsafe extern "C" fn gos_rt_str_count(s: *const c_char, needle: *const c_cha
         if s.is_null() || needle.is_null() {
             return 0;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { gos_str_arg_text(s) };
+        // SAFETY: `needle` is a String argument from compiled code, null or a live string body for the whole call.
         let n = unsafe { gos_str_arg_text(needle) };
         if n.is_empty() {
             return 0;
@@ -2596,11 +2964,13 @@ pub unsafe extern "C" fn gos_rt_str_strip_chars(
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         let cutset = if cutset.is_null() {
             ""
         } else {
+            // SAFETY: `cutset` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(cutset) }
         };
         if cutset.is_empty() {
@@ -2620,11 +2990,13 @@ pub unsafe extern "C" fn gos_rt_str_lstrip_chars(
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         let cutset = if cutset.is_null() {
             ""
         } else {
+            // SAFETY: `cutset` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(cutset) }
         };
         if cutset.is_empty() {
@@ -2644,11 +3016,13 @@ pub unsafe extern "C" fn gos_rt_str_rstrip_chars(
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         let cutset = if cutset.is_null() {
             ""
         } else {
+            // SAFETY: `cutset` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(cutset) }
         };
         if cutset.is_empty() {
@@ -2667,6 +3041,7 @@ pub unsafe extern "C" fn gos_rt_str_zfill(s: *const c_char, width: i64) -> *mut 
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         if width < 0 {
@@ -2701,6 +3076,7 @@ pub unsafe extern "C" fn gos_rt_str_center(
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         if width <= 0 {
@@ -2739,6 +3115,8 @@ pub unsafe extern "C" fn gos_rt_str_slice(s: *const c_char, start: i64, end: i64
         let byte_len = if s.is_null() {
             0usize
         } else {
+            // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null,
+            // which `typed_str_len` accepts.
             unsafe { typed_str_len(s) }
         };
         let len_bytes = byte_len as i64;
@@ -2747,16 +3125,20 @@ pub unsafe extern "C" fn gos_rt_str_slice(s: *const c_char, start: i64, end: i64
             // against is the byte length.
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len_bytes}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
         let bytes: &[u8] = if s.is_null() {
             &[]
         } else {
+            // SAFETY: `s` is non-null (checked above) and its first `byte_len` bytes are its
+            // content.
             unsafe { std::slice::from_raw_parts(s.cast::<u8>(), byte_len) }
         };
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
         let lo = unsafe { typed_str_next_char_boundary(s, start as usize) }.unwrap_or(byte_len);
+        // SAFETY: `s` is this shim's string argument, null or live (C-ABI contract).
         let hi = unsafe { typed_str_next_char_boundary(s, end as usize) }.unwrap_or(byte_len);
-        unsafe { gos_rt_result_new(0, alloc_cstring(&bytes[lo..hi]) as i64) }
+        gos_rt_result_new(0, alloc_cstring(&bytes[lo..hi]) as i64)
     })
 }
 
@@ -2774,20 +3156,24 @@ pub unsafe extern "C" fn gos_rt_str_split(s: *const c_char, sep: *const c_char) 
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         let sep = if sep.is_null() {
             ""
         } else {
+            // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(sep) }
         };
         let parts: Vec<*mut c_char> = s
             .split(sep)
+            // SAFETY: `source` is this shim's live string argument, and each piece a window of
+            // it.
             .map(|p| unsafe { alloc_slice_cstring(source, p.as_bytes()) })
             .collect();
         // STRING-typed: the vec owns the pieces, so `gos_rt_vec_free`
         // reclaims them even when a consumer loop breaks early.
-        let vec = unsafe {
+        let vec = {
             crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                 8,
                 parts.len() as i64,
@@ -2796,6 +3182,7 @@ pub unsafe extern "C" fn gos_rt_str_split(s: *const c_char, sep: *const c_char) 
         };
         for p in &parts {
             let pv = *p as i64;
+            // SAFETY: `vec` is the live vec made above, and `pv` one 8-byte element.
             unsafe {
                 gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>());
             }
@@ -2817,10 +3204,12 @@ pub unsafe extern "C" fn gos_rt_strings_join(
         if parts.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `parts` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*parts };
         let sep_str = if sep.is_null() {
             ""
         } else {
+            // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(sep) }
         };
         let len = vec.len.max(0) as usize;
@@ -2829,12 +3218,15 @@ pub unsafe extern "C" fn gos_rt_strings_join(
             if i > 0 {
                 out.push_str(sep_str);
             }
+            // SAFETY: `i` is below the vec's length, so the element lies inside its buffer.
             let p = unsafe { vec.ptr.add(i * (vec.elem_bytes as usize)) };
             // Each element is a `*const c_char` stored as i64 in the
             // Vec slot (matches `gos_rt_str_split` / `gos_rt_str_lines`
             // packing).
+            // SAFETY: `p` addresses one 8-byte element.
             let elem_ptr = unsafe { (p as *const i64).read_unaligned() } as *const c_char;
             if !elem_ptr.is_null() {
+                // SAFETY: a non-null element of a `String` vec is a live string body.
                 let s = unsafe { gos_str_arg_text(elem_ptr) };
                 out.push_str(s);
             }
@@ -2846,10 +3238,13 @@ pub unsafe extern "C" fn gos_rt_strings_join(
 /// Reads element `i` of a scalar Vec at its declared stride: 1-byte
 /// slots widen from `u8`, everything else reads the full 8-byte word.
 unsafe fn vec_scalar_word(vec: &GosVec, i: usize) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `i` below the vec's length.
     let p = unsafe { vec.ptr.add(i * (vec.elem_bytes as usize)) };
     if vec.elem_bytes == 1 {
+        // SAFETY: `p` addresses one element.
         i64::from(unsafe { *p })
     } else {
+        // SAFETY: `p` addresses one 8-byte element.
         unsafe { (p as *const i64).read_unaligned() }
     }
 }
@@ -2862,10 +3257,12 @@ pub unsafe extern "C" fn gos_rt_vec_join_i64(v: *const GosVec, sep: *const c_cha
         if v.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         let sep_str = if sep.is_null() {
             ""
         } else {
+            // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(sep) }
         };
         let len = vec.len.max(0) as usize;
@@ -2874,6 +3271,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_i64(v: *const GosVec, sep: *const c_cha
             if i > 0 {
                 out.push_str(sep_str);
             }
+            // SAFETY: `i` is below the vec's length.
             let n = unsafe { vec_scalar_word(vec, i) };
             out.push_str(&format!("{n}"));
         }
@@ -2885,6 +3283,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_i64(v: *const GosVec, sep: *const c_cha
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_f64(v: *const GosVec, sep: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `v` and `sep` are this shim's arguments, each null or live (C-ABI contract).
         unsafe { join_float_elements(v, sep, |f, out| out.push_str(&format!("{f}"))) }
     })
 }
@@ -2894,6 +3293,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_f64(v: *const GosVec, sep: *const c_cha
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_join_f32(v: *const GosVec, sep: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `v` and `sep` are this shim's arguments, each null or live (C-ABI contract).
         unsafe {
             join_float_elements(v, sep, |f, out| {
                 out.push_str(&crate::builtins::format_f32(f));
@@ -2911,10 +3311,13 @@ unsafe fn join_float_elements(
     if v.is_null() {
         return alloc_cstring(b"");
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let vec = unsafe { &*v };
     let sep_str = if sep.is_null() {
         ""
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `sep` live or null, which `gos_str_arg_text`
+        // accepts.
         unsafe { gos_str_arg_text(sep) }
     };
     let len = vec.len.max(0) as usize;
@@ -2923,6 +3326,7 @@ unsafe fn join_float_elements(
         if i > 0 {
             out.push_str(sep_str);
         }
+        // SAFETY: `i` is below the vec's length.
         let bits = unsafe { vec_scalar_word(vec, i) };
         render(f64::from_bits(bits as u64), &mut out);
     }
@@ -2936,10 +3340,12 @@ pub unsafe extern "C" fn gos_rt_vec_join_bool(v: *const GosVec, sep: *const c_ch
         if v.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         let sep_str = if sep.is_null() {
             ""
         } else {
+            // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(sep) }
         };
         let len = vec.len.max(0) as usize;
@@ -2948,6 +3354,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_bool(v: *const GosVec, sep: *const c_ch
             if i > 0 {
                 out.push_str(sep_str);
             }
+            // SAFETY: `i` is below the vec's length.
             let raw = unsafe { vec_scalar_word(vec, i) };
             out.push_str(if raw & 1 != 0 { "true" } else { "false" });
         }
@@ -2962,10 +3369,12 @@ pub unsafe extern "C" fn gos_rt_vec_join_char(v: *const GosVec, sep: *const c_ch
         if v.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         let sep_str = if sep.is_null() {
             ""
         } else {
+            // SAFETY: `sep` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(sep) }
         };
         let len = vec.len.max(0) as usize;
@@ -2974,6 +3383,7 @@ pub unsafe extern "C" fn gos_rt_vec_join_char(v: *const GosVec, sep: *const c_ch
             if i > 0 {
                 out.push_str(sep_str);
             }
+            // SAFETY: `i` is below the vec's length.
             let raw = unsafe { vec_scalar_word(vec, i) };
             let ch = char::from_u32(raw as u32).unwrap_or('\u{FFFD}');
             out.push(ch);
@@ -2992,14 +3402,16 @@ pub unsafe extern "C" fn gos_rt_str_lines(s: *const c_char) -> *mut GosVec {
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         let parts: Vec<*mut c_char> = s
             .lines()
+            // SAFETY: `source` is this shim's live string argument, and each line a window of it.
             .map(|l| unsafe { alloc_slice_cstring(source, l.as_bytes()) })
             .collect();
         // STRING-typed - same ownership contract as `gos_rt_str_split`.
-        let vec = unsafe {
+        let vec = {
             crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                 8,
                 parts.len() as i64,
@@ -3008,6 +3420,7 @@ pub unsafe extern "C" fn gos_rt_str_lines(s: *const c_char) -> *mut GosVec {
         };
         for p in &parts {
             let pv = *p as i64;
+            // SAFETY: `vec` is the live vec made above, and `pv` one 8-byte element.
             unsafe {
                 gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>());
             }
@@ -3026,6 +3439,8 @@ pub unsafe extern "C" fn gos_rt_str_push_char(s: *const c_char, c: i32) -> *mut 
         let ch = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
         let mut encoded = [0u8; 4];
         let bytes = ch.encode_utf8(&mut encoded).as_bytes();
+        // SAFETY: `s` is this shim's accumulator argument, null or a share it hands on (C-ABI
+        // contract).
         unsafe { gos_rt_str_append_bytes(s, bytes.as_ptr(), bytes.len() as i64) }
     })
 }
@@ -3038,6 +3453,8 @@ pub unsafe extern "C" fn gos_rt_str_push_byte(s: *const c_char, b: i32) -> *mut 
         let ch = char::from(b as u8);
         let mut encoded = [0u8; 2];
         let bytes = ch.encode_utf8(&mut encoded).as_bytes();
+        // SAFETY: `s` is this shim's accumulator argument, null or a share it hands on (C-ABI
+        // contract).
         unsafe { gos_rt_str_append_bytes(s, bytes.as_ptr(), bytes.len() as i64) }
     })
 }
@@ -3051,6 +3468,7 @@ pub unsafe extern "C" fn gos_rt_str_repeat(s: *const c_char, n: i64) -> *mut c_c
         let s = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         if n < 0 {
@@ -3069,18 +3487,25 @@ pub unsafe extern "C" fn gos_rt_parse_i64(s: *const c_char, ok_out: *mut i32) ->
     ffi_entry!(-1, {
         if s.is_null() {
             if !ok_out.is_null() {
+                // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
+                // contract).
                 unsafe { *ok_out = 0 };
             }
             return 0;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { gos_str_arg_text(s) }.trim();
         if let Ok(n) = text.parse::<i64>() {
             if !ok_out.is_null() {
+                // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
+                // contract).
                 unsafe { *ok_out = 1 };
             }
             n
         } else {
             if !ok_out.is_null() {
+                // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
+                // contract).
                 unsafe { *ok_out = 0 };
             }
             0
@@ -3096,18 +3521,19 @@ pub unsafe extern "C" fn gos_rt_parse_i64_result(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if s.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"parse: null input");
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { gos_str_arg_text(s) }.trim();
         if let Ok(n) = text.parse::<i64>() {
-            unsafe { gos_rt_result_new(0, n) }
+            gos_rt_result_new(0, n)
         } else {
             let msg = format!(
                 "unexpected byte 0x{:x} at 1:1",
                 text.as_bytes().first().copied().unwrap_or(0)
             );
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            unsafe { gos_rt_result_new(1, err as i64) }
+            gos_rt_result_new(1, err as i64)
         }
     })
 }
@@ -3129,9 +3555,12 @@ pub unsafe extern "C" fn gos_rt_result_map_err(result: i128, closure: *const u8)
         // function pointer is target-pointer-width (32-bit on wasm32),
         // so narrow through `usize` before reinterpreting. Identity on
         // 64-bit native.
-        let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(fn_addr as usize) };
+        // SAFETY: a non-zero entry word is the address of the compiled closure, of the signature
+        // this shim calls it through (C-ABI contract).
+        let f: extern "C" fn(i64, i64) -> i64 =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr as usize)) };
         let new_payload = f(closure as i64, gos_rt_result_payload(result));
-        unsafe { gos_rt_result_new(1, new_payload) }
+        gos_rt_result_new(1, new_payload)
     })
 }
 
@@ -3148,6 +3577,8 @@ pub unsafe extern "C" fn gos_rt_result_map(result: i128, closure: *const u8) -> 
         if gos_rt_result_disc(result) != 0 || closure.is_null() {
             return result;
         }
+        // SAFETY: `closure` is this shim's `u8` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let fn_addr = unsafe { *closure.cast::<i64>() };
         if fn_addr == 0 {
             return result;
@@ -3156,9 +3587,12 @@ pub unsafe extern "C" fn gos_rt_result_map(result: i128, closure: *const u8) -> 
         // function pointer is target-pointer-width (32-bit on wasm32),
         // so narrow through `usize` before reinterpreting. Identity on
         // 64-bit native.
-        let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(fn_addr as usize) };
+        // SAFETY: a non-zero entry word is the address of the compiled closure, of the signature
+        // this shim calls it through (C-ABI contract).
+        let f: extern "C" fn(i64, i64) -> i64 =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr as usize)) };
         let new_payload = f(closure as i64, gos_rt_result_payload(result));
-        unsafe { gos_rt_result_new(0, new_payload) }
+        gos_rt_result_new(0, new_payload)
     })
 }
 
@@ -3176,6 +3610,8 @@ pub unsafe extern "C" fn gos_rt_result_default_with(result: i128, closure: *cons
         if closure.is_null() {
             return 0;
         }
+        // SAFETY: `closure` is this shim's `u8` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let fn_addr = unsafe { *closure.cast::<i64>() };
         if fn_addr == 0 {
             return 0;
@@ -3184,7 +3620,10 @@ pub unsafe extern "C" fn gos_rt_result_default_with(result: i128, closure: *cons
         // function pointer is target-pointer-width (32-bit on wasm32),
         // so narrow through `usize` before reinterpreting. Identity on
         // 64-bit native.
-        let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(fn_addr as usize) };
+        // SAFETY: a non-zero entry word is the address of the compiled closure, of the signature
+        // this shim calls it through (C-ABI contract).
+        let f: extern "C" fn(i64, i64) -> i64 =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr as usize)) };
         f(closure as i64, gos_rt_result_payload(result))
     })
 }
@@ -3224,12 +3663,19 @@ pub extern "C" fn gos_rt_result_default_f64(fallback: f64, result: i128) -> f64 
 /// when the closure arg has a recorded `local_fn_name` (i.e. is
 /// a direct path to a lifted function rather than a heap-allocated
 /// env+code blob).
+///
+/// # Safety
+///
+/// A non-zero `fn_addr` is the entry address of a compiled `extern "C" fn(i64)
+/// -> i64`.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i128 {
+pub unsafe extern "C" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i128 {
     ffi_entry!(0i128, {
         if gos_rt_result_disc(result) != 0 || fn_addr == 0 {
             return result;
         }
+        // SAFETY: this shim's contract makes a non-zero `fn_addr` a compiled `extern "C" fn(i64)
+        // -> i64`.
         let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(fn_addr as *const ()) };
         let new_payload = f(gos_rt_result_payload(result));
         gos_rt_result_new(0, new_payload)
@@ -3237,12 +3683,19 @@ pub extern "C" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i128 {
 }
 
 /// `result.map_err(closure)` for **non-capturing** closures.
+///
+/// # Safety
+///
+/// A non-zero `fn_addr` is the entry address of a compiled `extern "C" fn(i64)
+/// -> i64`.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_map_err_bare(result: i128, fn_addr: i64) -> i128 {
+pub unsafe extern "C" fn gos_rt_result_map_err_bare(result: i128, fn_addr: i64) -> i128 {
     ffi_entry!(0i128, {
         if gos_rt_result_disc(result) == 0 || fn_addr == 0 {
             return result;
         }
+        // SAFETY: this shim's contract makes a non-zero `fn_addr` a compiled `extern "C" fn(i64)
+        // -> i64`.
         let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(fn_addr as *const ()) };
         let new_payload = f(gos_rt_result_payload(result));
         gos_rt_result_new(1, new_payload)
@@ -3256,6 +3709,8 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_str(cell: *const *const c_char) -
         if cell.is_null() {
             return std::ptr::null();
         }
+        // SAFETY: `cell` is this shim's string body argument, non-null (checked above), live for
+        // the call (C-ABI contract).
         unsafe { *cell }
     })
 }
@@ -3267,6 +3722,8 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_i64(cell: *const i64) -> i64 {
         if cell.is_null() {
             return 0;
         }
+        // SAFETY: `cell` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         unsafe { *cell }
     })
 }
@@ -3278,6 +3735,8 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_bool(cell: *const bool) -> i64 {
         if cell.is_null() {
             return 0;
         }
+        // SAFETY: `cell` is this shim's `bool` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         i64::from(unsafe { *cell })
     })
 }
@@ -3307,21 +3766,31 @@ pub unsafe extern "C" fn gos_rt_flag_parse(decls: *mut GosVec) -> *mut GosFlagMa
     ffi_entry!(std::ptr::null_mut(), {
         let mut entries: Vec<GosFlagMapEntry> = Vec::new();
         if !decls.is_null() {
+            // SAFETY: `decls` is this shim's argument, live for the call (C-ABI contract) or
+            // null, which `gos_rt_vec_len` accepts.
             let len = unsafe { gos_rt_vec_len(decls) };
             for i in 0..len {
+                // SAFETY: `i` is below `decls`'s length.
                 let raw = unsafe { gos_rt_vec_get_i64(decls, i) };
                 if raw == 0 {
                     continue;
                 }
                 let blob = raw as *const i64;
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
                 let name_cs = unsafe { *blob.add(0) } as *const c_char;
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
                 let short_raw = unsafe { *blob.add(1) };
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
                 let kind_tag = unsafe { *blob.add(2) };
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
                 let int_val = unsafe { *blob.add(3) };
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
                 let str_cs = unsafe { *blob.add(4) } as *const c_char;
                 let name = if name_cs.is_null() {
                     String::new()
                 } else {
+                    // SAFETY: `name_cs` is non-null (checked above), the declaration's live name
+                    // string.
                     unsafe { gos_str_arg_string(name_cs) }
                 };
                 let short = u32::try_from(short_raw).ok().and_then(char::from_u32);
@@ -3332,6 +3801,8 @@ pub unsafe extern "C" fn gos_rt_flag_parse(decls: *mut GosVec) -> *mut GosFlagMa
                     _ => FlagKind::String,
                 };
                 let str_val = if matches!(kind, FlagKind::String) && !str_cs.is_null() {
+                    // SAFETY: `str_cs` is non-null (checked above), the declaration's live
+                    // default string.
                     Some(unsafe { gos_str_arg_bytes(str_cs) }.to_vec())
                 } else {
                     None
@@ -3345,11 +3816,15 @@ pub unsafe extern "C" fn gos_rt_flag_parse(decls: *mut GosVec) -> *mut GosFlagMa
                 });
             }
         }
-        let positional = parse_argv_flag_values(
-            &mut entries,
-            ARGS_PTR.load(Ordering::SeqCst),
-            ARGS_LEN.load(Ordering::SeqCst),
-        );
+        // SAFETY: `ARGS_PTR` / `ARGS_LEN` hold the process's argument vector,
+        // recorded at startup and live for the whole process.
+        let positional = unsafe {
+            parse_argv_flag_values(
+                &mut entries,
+                ARGS_PTR.load(Ordering::SeqCst),
+                ARGS_LEN.load(Ordering::SeqCst),
+            )
+        };
         Box::into_raw(Box::new(GosFlagMap {
             entries,
             positional,
@@ -3360,22 +3835,37 @@ pub unsafe extern "C" fn gos_rt_flag_parse(decls: *mut GosVec) -> *mut GosFlagMa
 /// Parse `argv`/`argc` into positional strings, applying flag values
 /// to `entries` in place.
 /// HOST-CSTRING: every read below is of a libc-owned `argv` entry.
-fn parse_argv_flag_values(entries: &mut [GosFlagMapEntry], argv: usize, argc: i64) -> Vec<String> {
+///
+/// # Safety
+///
+/// `argv` addresses `argc` readable pointers to NUL-terminated strings that
+/// outlive the call.
+unsafe fn parse_argv_flag_values(
+    entries: &mut [GosFlagMapEntry],
+    argv: usize,
+    argc: i64,
+) -> Vec<String> {
     let argv = argv as *const *const c_char;
     let mut idx: i64 = 0;
     let mut positional: Vec<String> = Vec::new();
     while idx < argc {
+        // SAFETY: `idx` is below `argc`, so the entry is one of `argv`'s `argc` pointers (this
+        // `unsafe fn`'s contract).
         let p = unsafe { *argv.offset(idx as isize) };
         if p.is_null() {
             idx += 1;
             continue;
         }
+        // SAFETY: `p` is non-null (checked above), a NUL-terminated argument string (this `unsafe
+        // fn`'s contract).
         let arg = unsafe { CStr::from_ptr(p).to_string_lossy().into_owned() };
         if arg == "--" {
             idx += 1;
             while idx < argc {
+                // SAFETY: `idx` is below `argc`, so the entry is one of `argv`'s `argc` pointers.
                 let q = unsafe { *argv.offset(idx as isize) };
                 if !q.is_null() {
+                    // SAFETY: `q` is non-null (checked above), a NUL-terminated argument string.
                     let s = unsafe { CStr::from_ptr(q).to_string_lossy().into_owned() };
                     positional.push(s);
                 }
@@ -3395,10 +3885,14 @@ fn parse_argv_flag_values(entries: &mut [GosFlagMapEntry], argv: usize, argc: i6
                     "true".to_string()
                 } else if idx + 1 < argc {
                     idx += 1;
+                    // SAFETY: `idx` is below `argc` (checked above), so the entry is one of
+                    // `argv`'s `argc` pointers.
                     let q = unsafe { *argv.offset(idx as isize) };
                     if q.is_null() {
                         String::new()
                     } else {
+                        // SAFETY: `q` is non-null (checked above), a NUL-terminated argument
+                        // string.
                         unsafe { CStr::from_ptr(q).to_string_lossy().into_owned() }
                     }
                 } else {
@@ -3425,10 +3919,14 @@ fn parse_argv_flag_values(entries: &mut [GosFlagMapEntry], argv: usize, argc: i6
                     "true".to_string()
                 } else if idx + 1 < argc {
                     idx += 1;
+                    // SAFETY: `idx` is below `argc` (checked above), so the entry is one of
+                    // `argv`'s `argc` pointers.
                     let q = unsafe { *argv.offset(idx as isize) };
                     if q.is_null() {
                         String::new()
                     } else {
+                        // SAFETY: `q` is non-null (checked above), a NUL-terminated argument
+                        // string.
                         unsafe { CStr::from_ptr(q).to_string_lossy().into_owned() }
                     }
                 } else {
@@ -3470,9 +3968,11 @@ fn apply_decl_value(entry: &mut GosFlagMapEntry, raw: &str) {
 pub unsafe extern "C" fn gos_rt_flag_map_get(map: *const GosFlagMap, key: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if map.is_null() || key.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `map` is a handle from compiled code, checked non-null above and live for the whole call.
         let m = unsafe { &*map };
+        // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
         let k = unsafe { gos_str_arg_string(key) };
         if let Some(entry) = m.entries.iter().find(|e| e.name == k) {
             let payload = match entry.kind {
@@ -3482,12 +3982,12 @@ pub unsafe extern "C" fn gos_rt_flag_map_get(map: *const GosFlagMap, key: *const
                 }
                 _ => entry.int_val,
             };
-            return unsafe { gos_rt_result_new(0, payload) };
+            return gos_rt_result_new(0, payload);
         }
         // Suppress unused-field warning on positional (kept for
         // future surface - `flag::parse(...)?.positional`).
         let _ = &m.positional;
-        unsafe { gos_rt_result_new(1, 0) }
+        gos_rt_result_new(1, 0)
     })
 }
 
@@ -3495,7 +3995,7 @@ pub unsafe extern "C" fn gos_rt_flag_map_get(map: *const GosFlagMap, key: *const
 /// Renders a UTC RFC 3339 timestamp from a unix-milliseconds
 /// instant. Mirrors the interpreter builtin.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_time_format_rfc3339(unix_ms: i64) -> i128 {
+pub extern "C" fn gos_rt_time_format_rfc3339(unix_ms: i64) -> i128 {
     ffi_entry!(0i128, {
         let secs = unix_ms.div_euclid(1_000);
         let nanos = (unix_ms.rem_euclid(1_000) * 1_000_000) as u32;
@@ -3541,7 +4041,7 @@ pub unsafe extern "C" fn gos_rt_time_format_rfc3339(unix_ms: i64) -> i128 {
         let se = s % 60;
         let s_str = format!("{y:04}-{m:02}-{day:02}T{h:02}:{mi:02}:{se:02}Z");
         let cs = alloc_cstring(s_str.as_bytes());
-        unsafe { gos_rt_result_new(0, cs as i64) }
+        gos_rt_result_new(0, cs as i64)
     })
 }
 
@@ -3558,14 +4058,15 @@ pub unsafe extern "C" fn gos_rt_time_parse_rfc3339(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         let err = || -> i128 {
             let cs = alloc_cstring(b"time::parse: bad input");
-            unsafe { gos_rt_result_new(1, cs as i64) }
+            gos_rt_result_new(1, cs as i64)
         };
         if s.is_null() {
             return err();
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { gos_str_arg_text(s) };
         match parse_rfc3339_ms(text) {
-            Some(ms) => unsafe { gos_rt_result_new(0, ms) },
+            Some(ms) => gos_rt_result_new(0, ms),
             None => err(),
         }
     })
@@ -3697,6 +4198,8 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_f64(cell: *const f64) -> f64 {
         if cell.is_null() {
             return 0.0;
         }
+        // SAFETY: `cell` is this shim's `f64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         unsafe { *cell }
     })
 }
@@ -3709,6 +4212,8 @@ pub unsafe extern "C" fn gos_rt_flag_cell_load_vec(cell: *const *mut GosVec) -> 
         if cell.is_null() {
             return std::ptr::null_mut();
         }
+        // SAFETY: `cell` is this shim's `Vec` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         unsafe { *cell }
     })
 }
@@ -3718,18 +4223,25 @@ pub unsafe extern "C" fn gos_rt_parse_f64(s: *const c_char, ok_out: *mut i32) ->
     ffi_entry!(f64::NAN, {
         if s.is_null() {
             if !ok_out.is_null() {
+                // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
+                // contract).
                 unsafe { *ok_out = 0 };
             }
             return 0.0;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { gos_str_arg_text(s) }.trim();
         if let Ok(x) = text.parse::<f64>() {
             if !ok_out.is_null() {
+                // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
+                // contract).
                 unsafe { *ok_out = 1 };
             }
             x
         } else {
             if !ok_out.is_null() {
+                // SAFETY: `ok_out` is non-null (checked above) and this shim's out-slot (C-ABI
+                // contract).
                 unsafe { *ok_out = 0 };
             }
             0.0
@@ -3738,7 +4250,7 @@ pub unsafe extern "C" fn gos_rt_parse_f64(s: *const c_char, ok_out: *mut i32) ->
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_i64_to_str(n: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_i64_to_str(n: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let mut digits = [0u8; 20];
         alloc_cstring(i64_digits(n, &mut digits))
@@ -3776,7 +4288,7 @@ fn i64_digits(n: i64, out: &mut [u8; 20]) -> &[u8] {
 /// Used by the cranelift + LLVM lowerers when the source TyKind
 /// resolves to `u8/u16/u32/u64/u128/usize`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_u64_to_str(n: u64) -> *mut c_char {
+pub extern "C" fn gos_rt_u64_to_str(n: u64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         alloc_cstring(n.to_string().as_bytes())
     })
@@ -3785,7 +4297,7 @@ pub unsafe extern "C" fn gos_rt_u64_to_str(n: u64) -> *mut c_char {
 /// `x.to_string()` for an `f64`: [`crate::builtins::f64_display`]'s text in
 /// one allocation. Nothing here can unwind, so it carries no panic guard.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_f64_to_str(x: f64) -> *mut c_char {
+pub extern "C" fn gos_rt_f64_to_str(x: f64) -> *mut c_char {
     let mut text = crate::builtins::FloatText::new();
     alloc_ascii_cstring(crate::builtins::f64_display(x, &mut text))
 }
@@ -3793,7 +4305,7 @@ pub unsafe extern "C" fn gos_rt_f64_to_str(x: f64) -> *mut c_char {
 /// `x.to_string()` for an `f32`: the shortest digits that read back as the
 /// single-precision value its double-width slot holds.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_f32_to_str(x: f64) -> *mut c_char {
+pub extern "C" fn gos_rt_f32_to_str(x: f64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         alloc_cstring(crate::builtins::format_f32(x).as_bytes())
     })
@@ -3802,7 +4314,7 @@ pub unsafe extern "C" fn gos_rt_f32_to_str(x: f64) -> *mut c_char {
 /// `{:?}` of an `f32`: [`gos_rt_f32_to_str`]'s digits, keeping a fractional
 /// part or an exponent so the text reads back as a float.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_f32_debug_to_str(x: f64) -> *mut c_char {
+pub extern "C" fn gos_rt_f32_debug_to_str(x: f64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         alloc_cstring(crate::builtins::format_f32_debug(x).as_bytes())
     })
@@ -3814,7 +4326,7 @@ pub unsafe extern "C" fn gos_rt_f32_debug_to_str(x: f64) -> *mut c_char {
 /// `{:.N}` Display output bit-for-bit. Very large `prec` is clamped
 /// to a sane upper bound to keep the allocation bounded.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_f64_prec_to_str(x: f64, prec: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         if prec < 0 {
             crate::c_abi::panic::panic_text("__fmt_prec: precision must be non-negative");
@@ -3833,6 +4345,8 @@ pub unsafe extern "C" fn gos_rt_str_prec_to_str(s: *const c_char, prec: i64) -> 
         if prec < 0 {
             crate::c_abi::panic::panic_text("__fmt_prec: precision must be non-negative");
         }
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `typed_str_bytes` accepts.
         let bytes = unsafe { typed_str_bytes(s) };
         let text = String::from_utf8_lossy(bytes);
         let taken: String = text.chars().take(prec as usize).collect();
@@ -3860,15 +4374,16 @@ pub unsafe extern "C" fn gos_rt_str_push_utf8(
 ) -> i128 {
     // An ASCII window is valid UTF-8 and keeps an ASCII builder's index, so
     // it is appended with one scan and one copy ahead of the general path.
+    // SAFETY: `buf` is this shim's byte vec argument, null or live (C-ABI contract).
     if let Some(window) = unsafe { packed_byte_window(buf, start, end) }
         && window.is_ascii()
+        // SAFETY: `s` is this shim's accumulator argument, null or live (C-ABI contract).
         && unsafe { append_ascii_in_place(s, &[window]) }
     {
-        return unsafe { crate::c_abi::vec::gos_rt_result_new(0, s as i64) };
+        return crate::c_abi::vec::gos_rt_result_new(0, s as i64);
     }
     ffi_entry!(0i128, {
-        let unchanged =
-            |ok: bool| unsafe { crate::c_abi::vec::gos_rt_result_new(i64::from(!ok), s as i64) };
+        let unchanged = |ok: bool| crate::c_abi::vec::gos_rt_result_new(i64::from(!ok), s as i64);
         if buf.is_null() || start < 0 || end < start {
             return unchanged(false);
         }
@@ -3876,6 +4391,7 @@ pub unsafe extern "C" fn gos_rt_str_push_utf8(
         // A packed buffer is read where it lies; a buffer whose slots are
         // wider than a byte has its window gathered - the window, not the
         // buffer, so appending a record out of a large file costs the record.
+        // SAFETY: `buf` is this shim's byte vec argument, null or live (C-ABI contract).
         let Some(bytes) = (unsafe { crate::c_abi::vec::vec_bytes_window(buf, lo, hi) }) else {
             return unchanged(false);
         };
@@ -3886,8 +4402,10 @@ pub unsafe extern "C" fn gos_rt_str_push_utf8(
         if std::str::from_utf8(window).is_err() {
             return unchanged(false);
         }
+        // SAFETY: `s` is this shim's accumulator argument, null or a share it hands on (C-ABI
+        // contract).
         let appended = unsafe { gos_rt_str_append_bytes(s, window.as_ptr(), (hi - lo) as i64) };
-        unsafe { crate::c_abi::vec::gos_rt_result_new(0, appended as i64) }
+        crate::c_abi::vec::gos_rt_result_new(0, appended as i64)
     })
 }
 
@@ -3901,15 +4419,22 @@ pub unsafe extern "C" fn gos_rt_str_push_utf8(
 unsafe fn str_append_parts(acc: *const c_char, parts: &[&[u8]], ascii: bool) -> *mut c_char {
     let added: usize = parts.iter().map(|p| p.len()).sum();
     if added == 0 {
+        // SAFETY: this `unsafe fn`'s caller passes `acc` null or a share it hands on.
         return unsafe { concat_with_empty(acc) };
     }
+    // SAFETY: this `unsafe fn`'s caller passes `acc` null or live, which the probe accepts.
     if unsafe { is_typed_builder(acc) } {
+        // SAFETY: `acc` is a typed builder (checked above), so its 13-byte header of count,
+        // capacity, length, and tag precedes the body.
         let hdr = unsafe { acc.cast::<u8>().sub(13) };
+        // SAFETY: `hdr` addresses the header's count bytes.
         let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
         let cap =
+            // SAFETY: `hdr` addresses the header's capacity bytes.
             u32::from_le_bytes(unsafe { [*hdr.add(4), *hdr.add(5), *hdr.add(6), *hdr.add(7)] })
                 as usize;
         let len_a =
+            // SAFETY: `hdr` addresses the header's length bytes.
             u32::from_le_bytes(unsafe { [*hdr.add(8), *hdr.add(9), *hdr.add(10), *hdr.add(11)] })
                 as usize;
         if len_a + added <= cap && rc == 1 {
@@ -3936,14 +4461,19 @@ unsafe fn str_append_parts(acc: *const c_char, parts: &[&[u8]], ascii: bool) -> 
             }
             return acc.cast_mut();
         }
+        // SAFETY: `acc`'s first `len_a` bytes are its content.
         let a_content = unsafe { std::slice::from_raw_parts(acc.cast::<u8>(), len_a) };
         let mut all: Vec<&[u8]> = Vec::with_capacity(parts.len() + 1);
         all.push(a_content);
         all.extend_from_slice(parts);
         let result = alloc_growable(&all, ((len_a + added) * 2).max(64));
+        // SAFETY: `acc` arrived as a consuming accumulator, so this call owns the share it
+        // releases.
         unsafe { gos_rt_str_free(acc.cast_mut()) };
         return result;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `acc` live or null, which `gos_str_arg_bytes`
+    // accepts.
     let a_bytes: &[u8] = unsafe { gos_str_arg_bytes(acc) };
     let force_heap = crate::c_abi::rc::in_region_arena(acc.cast())
         || parts
@@ -3954,6 +4484,8 @@ unsafe fn str_append_parts(acc: *const c_char, parts: &[&[u8]], ascii: bool) -> 
     all.extend_from_slice(parts);
     let result = alloc_growable_forced(&all, ((a_bytes.len() + added) * 2).max(64), force_heap);
     if is_managed_string(acc) {
+        // SAFETY: `acc` arrived as a consuming accumulator, so this call owns the share it
+        // releases.
         unsafe { gos_rt_str_free(acc.cast_mut()) };
     }
     result
@@ -4109,11 +4641,14 @@ pub unsafe extern "C" fn gos_rt_str_push_json_quoted(
     // Plain ASCII onto an exclusively held ASCII builder with room is the
     // common shape: the window is checked and copied in one pass. Nothing on
     // this path unwinds, so it stays out of the frame the general path needs.
+    // SAFETY: `buf` is this shim's byte vec argument, null or live (C-ABI contract).
     if let Some(window) = unsafe { packed_byte_window(buf, start, end) }
+        // SAFETY: `s` is this shim's accumulator argument, null or live (C-ABI contract).
         && unsafe { json_quote_ascii_in_place(s, window) }
     {
-        return unsafe { crate::c_abi::vec::gos_rt_result_new(0, s as i64) };
+        return crate::c_abi::vec::gos_rt_result_new(0, s as i64);
     }
+    // SAFETY: `s` and `buf` are this shim's arguments, each null or live (C-ABI contract).
     unsafe { push_json_quoted_general(s, buf, start, end) }
 }
 
@@ -4123,9 +4658,13 @@ pub unsafe extern "C" fn gos_rt_str_push_json_quoted(
 /// length is published only on success, so bytes written past it before a
 /// special byte turned up are not part of the string.
 ///
-/// SAFETY: `acc` is null or a Gossamer string body.
+///
+/// # Safety
+///
+/// `acc` is null or a Gossamer string body.
 #[inline]
 unsafe fn json_quote_ascii_in_place(acc: *const c_char, window: &[u8]) -> bool {
+    // SAFETY: this `unsafe fn`'s caller passes `acc` null or live, which the probe accepts.
     let Some((cap, len)) = (unsafe { unique_builder_cap_len(acc) }) else {
         return false;
     };
@@ -4133,6 +4672,7 @@ unsafe fn json_quote_ascii_in_place(acc: *const c_char, window: &[u8]) -> bool {
     if len + n + 2 > cap {
         return false;
     }
+    // SAFETY: `acc` is a uniquely held builder with room for the quoted window (checked above).
     unsafe {
         let footer = acc.cast::<u8>().add(cap + 1).cast::<u32>();
         if footer.read_unaligned() != STR_INDEX_ASCII {
@@ -4179,7 +4719,10 @@ unsafe fn json_quote_ascii_in_place(acc: *const c_char, window: &[u8]) -> bool {
 /// The general `push_json_quoted`: a wide buffer, text that needs escaping or
 /// is not ASCII, or a builder that is shared, full, or not ASCII.
 ///
-/// SAFETY: as [`gos_rt_str_push_json_quoted`].
+///
+/// # Safety
+///
+/// As [`gos_rt_str_push_json_quoted`].
 #[cold]
 #[inline(never)]
 unsafe fn push_json_quoted_general(
@@ -4189,18 +4732,19 @@ unsafe fn push_json_quoted_general(
     end: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let unchanged =
-            |ok: bool| unsafe { crate::c_abi::vec::gos_rt_result_new(i64::from(!ok), s as i64) };
+        let unchanged = |ok: bool| crate::c_abi::vec::gos_rt_result_new(i64::from(!ok), s as i64);
         if buf.is_null() || start < 0 || end < start {
             return unchanged(false);
         }
         let (lo, hi) = (start as usize, end as usize);
+        // SAFETY: `buf` is non-null (checked above) and this shim's live byte vec argument.
         let Some(bytes) = (unsafe { crate::c_abi::vec::vec_bytes_window(buf, lo, hi) }) else {
             return unchanged(false);
         };
         let window = &bytes[..];
         let first = first_json_special(window);
         let appended = if first == window.len() {
+            // SAFETY: this `unsafe fn`'s caller passes `s` null or a share it hands on.
             unsafe { str_append_parts(s, &[b"\"", window, b"\""], true) }
         } else {
             let rest = &window[first..];
@@ -4212,16 +4756,17 @@ unsafe fn push_json_quoted_general(
             quoted.extend_from_slice(&window[..first]);
             json_escape_into(rest, &mut quoted);
             quoted.push(b'"');
+            // SAFETY: this `unsafe fn`'s caller passes `s` null or a share it hands on.
             unsafe { str_append_parts(s, &[&quoted], false) }
         };
-        unsafe { crate::c_abi::vec::gos_rt_result_new(0, appended as i64) }
+        crate::c_abi::vec::gos_rt_result_new(0, appended as i64)
     })
 }
 
 /// Stringifies a bool (passed as i32: nonzero = true). Used by
 /// codegen to assemble multi-arg panic / format-style messages.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bool_to_str(b: i32) -> *mut c_char {
+pub extern "C" fn gos_rt_bool_to_str(b: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         alloc_cstring(if b == 0 { b"false" } else { b"true" })
     })
@@ -4231,7 +4776,7 @@ pub unsafe extern "C" fn gos_rt_bool_to_str(b: i32) -> *mut c_char {
 /// heap-allocated UTF-8 c-string. Invalid scalars (surrogates,
 /// > U+10FFFF) render as `\u{FFFD}` (REPLACEMENT CHARACTER).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_char_to_str(c: i32) -> *mut c_char {
+pub extern "C" fn gos_rt_char_to_str(c: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let scalar = u32::try_from(c)
             .ok()
@@ -4252,6 +4797,7 @@ pub unsafe extern "C" fn gos_rt_char_to_str(c: i32) -> *mut c_char {
 // produce identical output.
 
 unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `typed_str_text` accepts.
     unsafe { typed_str_text(p) }
 }
 
@@ -4271,7 +4817,7 @@ fn alloc_str_vec<'a>(parts: impl Iterator<Item = &'a str>) -> *mut GosVec {
 /// Wraps already-allocated string pointers in a STRING-typed vec that owns
 /// them, writing the slots in one copy.
 fn str_vec_from_words(parts: &[i64]) -> *mut GosVec {
-    let vec = unsafe {
+    let vec = {
         crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
             8,
             parts.len() as i64,
@@ -4330,6 +4876,8 @@ pub unsafe extern "C" fn gos_rt_str_splitn(
             crate::c_abi::panic::panic_text("strings::splitn: count must be non-negative");
         }
         let n = usize::try_from(n).unwrap_or(0);
+        // SAFETY: `s` and `sep` are this shim's string arguments, each null or live (C-ABI
+        // contract), which `cstr` accepts.
         alloc_str_vec(unsafe { cstr(s) }.splitn(n, unsafe { cstr(sep) }))
     })
 }
@@ -4338,6 +4886,8 @@ pub unsafe extern "C" fn gos_rt_str_splitn(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         split_whitespace_vec(unsafe { cstr(s) })
     })
 }
@@ -4347,6 +4897,8 @@ pub unsafe extern "C" fn gos_rt_str_split_whitespace(s: *const c_char) -> *mut G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_fields(s: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         split_whitespace_vec(unsafe { cstr(s) })
     })
 }
@@ -4364,6 +4916,8 @@ pub unsafe extern "C" fn gos_rt_str_replacen(
             crate::c_abi::panic::panic_text("strings::replacen: count must be non-negative");
         }
         let n = usize::try_from(n).unwrap_or(0);
+        // SAFETY: `s`, `from`, and `to` are this shim's string arguments, each null or live
+        // (C-ABI contract), which `cstr` accepts.
         let out = unsafe { cstr(s) }.replacen(unsafe { cstr(from) }, unsafe { cstr(to) }, n);
         alloc_cstring(out.as_bytes())
     })
@@ -4374,6 +4928,8 @@ pub unsafe extern "C" fn gos_rt_str_replacen(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_to_title(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let text = unsafe { cstr(s) };
         let mut result = String::with_capacity(text.len());
         let mut capitalize_next = true;
@@ -4399,7 +4955,11 @@ pub unsafe extern "C" fn gos_rt_str_trim_matches(
     cutset: *const c_char,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `cutset` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let cutset = unsafe { cstr(cutset) };
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let out = unsafe { cstr(s) }.trim_matches(|c| cutset.contains(c));
         alloc_cstring(out.as_bytes())
     })
@@ -4412,6 +4972,8 @@ pub unsafe extern "C" fn gos_rt_str_trim_matches(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_first_codepoint(s: *const c_char) -> i64 {
     ffi_entry!(32, {
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         unsafe { cstr(s) }.chars().next().map_or(32, |c| c as i64)
     })
 }
@@ -4425,6 +4987,8 @@ pub unsafe extern "C" fn gos_rt_str_pad_left(
     pad_char: i64,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let text = unsafe { cstr(s) };
         if width < 0 {
             crate::c_abi::panic::panic_text("strings::pad_left: width must be non-negative");
@@ -4457,6 +5021,8 @@ pub unsafe extern "C" fn gos_rt_str_pad_right(
     pad_char: i64,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let text = unsafe { cstr(s) };
         if width < 0 {
             crate::c_abi::panic::panic_text("strings::pad_right: width must be non-negative");
@@ -4497,6 +5063,7 @@ pub unsafe extern "C" fn gos_rt_fmt_pad(
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { gos_str_arg_text(s) }
         };
         if width < 0 {
@@ -4569,10 +5136,16 @@ pub unsafe extern "C" fn gos_rt_fmt_pad_i64(
             let split = gossamer_abi::format_pad::sign_aware_prefix_len(rendered);
             let output_len = rendered.len().saturating_add(total);
             return alloc_growable_with_fill(output_len, output_len, false, |out| {
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe { copy_small_bytes(rendered.as_ptr(), out, split) };
                 for index in 0..total {
+                    // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                    // closure, and every write stays below that length.
                     unsafe { out.add(split + index).write(b'0') };
                 }
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe {
                     copy_small_bytes(
                         rendered.as_ptr().add(split),
@@ -4595,12 +5168,18 @@ pub unsafe extern "C" fn gos_rt_fmt_pad_i64(
         alloc_growable_with_fill(output_len, output_len, false, |out| {
             let mut offset = 0;
             for _ in 0..left {
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe { copy_small_bytes(fill_bytes.as_ptr(), out.add(offset), fill_bytes.len()) };
                 offset += fill_bytes.len();
             }
+            // SAFETY: `out` addresses the `output_len` bytes the allocation handed this closure,
+            // and every write stays below that length.
             unsafe { copy_small_bytes(rendered.as_ptr(), out.add(offset), rendered.len()) };
             offset += rendered.len();
             for _ in 0..right {
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe { copy_small_bytes(fill_bytes.as_ptr(), out.add(offset), fill_bytes.len()) };
                 offset += fill_bytes.len();
             }
@@ -4621,6 +5200,8 @@ pub unsafe extern "C" fn gos_rt_concat_pad_i64(
         if width < 0 {
             crate::c_abi::panic::panic_text("__fmt_pad: width must be non-negative");
         }
+        // SAFETY: `prefix` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let prefix = unsafe { cstr(prefix) }.as_bytes();
         let mut number = itoa::Buffer::new();
         let rendered = number.format(value);
@@ -4637,12 +5218,20 @@ pub unsafe extern "C" fn gos_rt_concat_pad_i64(
                 .saturating_add(rendered.len())
                 .saturating_add(total);
             return alloc_growable_with_fill(output_len, output_len, false, |out| {
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe { copy_small_bytes(prefix.as_ptr(), out, prefix.len()) };
                 let base = prefix.len();
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe { copy_small_bytes(rendered.as_ptr(), out.add(base), split) };
                 for index in 0..total {
+                    // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                    // closure, and every write stays below that length.
                     unsafe { out.add(base + split + index).write(b'0') };
                 }
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe {
                     copy_small_bytes(
                         rendered.as_ptr().add(split),
@@ -4665,15 +5254,23 @@ pub unsafe extern "C" fn gos_rt_concat_pad_i64(
             .saturating_add(rendered.len())
             .saturating_add(padding_len);
         alloc_growable_with_fill(output_len, output_len, false, |out| {
+            // SAFETY: `out` addresses the `output_len` bytes the allocation handed this closure,
+            // and every write stays below that length.
             unsafe { copy_small_bytes(prefix.as_ptr(), out, prefix.len()) };
             let mut offset = prefix.len();
             for _ in 0..left {
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe { copy_small_bytes(fill_bytes.as_ptr(), out.add(offset), fill_bytes.len()) };
                 offset += fill_bytes.len();
             }
+            // SAFETY: `out` addresses the `output_len` bytes the allocation handed this closure,
+            // and every write stays below that length.
             unsafe { copy_small_bytes(rendered.as_ptr(), out.add(offset), rendered.len()) };
             offset += rendered.len();
             for _ in 0..right {
+                // SAFETY: `out` addresses the `output_len` bytes the allocation handed this
+                // closure, and every write stays below that length.
                 unsafe { copy_small_bytes(fill_bytes.as_ptr(), out.add(offset), fill_bytes.len()) };
                 offset += fill_bytes.len();
             }
@@ -4688,6 +5285,8 @@ pub unsafe extern "C" fn gos_rt_str_contains_rune(s: *const c_char, r: i64) -> i
         let Some(rc) = u32::try_from(r).ok().and_then(char::from_u32) else {
             return 0;
         };
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         i32::from(unsafe { cstr(s) }.contains(rc))
     })
 }
@@ -4696,7 +5295,11 @@ pub unsafe extern "C" fn gos_rt_str_contains_rune(s: *const c_char, r: i64) -> i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_contains_any(s: *const c_char, chars: *const c_char) -> i32 {
     ffi_entry!(-1, {
+        // SAFETY: `chars` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let chars = unsafe { cstr(chars) };
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         i32::from(unsafe { cstr(s) }.chars().any(|c| chars.contains(c)))
     })
 }
@@ -4709,7 +5312,11 @@ pub unsafe extern "C" fn gos_rt_str_contains_any(s: *const c_char, chars: *const
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_equal_fold(a: *const c_char, b: *const c_char) -> i32 {
     ffi_entry!(-1, {
+        // SAFETY: `a` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let mut ac = unsafe { cstr(a) }.chars();
+        // SAFETY: `b` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let mut bc = unsafe { cstr(b) }.chars();
         loop {
             match (ac.next(), bc.next()) {
@@ -4727,9 +5334,11 @@ pub unsafe extern "C" fn gos_rt_str_equal_fold(a: *const c_char, b: *const c_cha
 pub unsafe extern "C" fn gos_rt_str_index_rune(s: *const c_char, r: i64) -> i128 {
     ffi_entry!(0i128, {
         let rc = u32::try_from(r).ok().and_then(char::from_u32);
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         match rc.and_then(|rc| unsafe { cstr(s) }.find(rc)) {
-            Some(i) => unsafe { gos_rt_result_new(0, i as i64) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(i) => gos_rt_result_new(0, i as i64),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -4739,14 +5348,18 @@ pub unsafe extern "C" fn gos_rt_str_index_rune(s: *const c_char, r: i64) -> i128
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_index_any(s: *const c_char, chars: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `chars` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let chars = unsafe { cstr(chars) };
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         match unsafe { cstr(s) }
             .char_indices()
             .find(|(_, c)| chars.contains(*c))
             .map(|(i, _)| i)
         {
-            Some(i) => unsafe { gos_rt_result_new(0, i as i64) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(i) => gos_rt_result_new(0, i as i64),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -4756,15 +5369,19 @@ pub unsafe extern "C" fn gos_rt_str_index_any(s: *const c_char, chars: *const c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_last_index_any(s: *const c_char, chars: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `chars` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         let chars = unsafe { cstr(chars) };
+        // SAFETY: `s` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `cstr` accepts.
         match unsafe { cstr(s) }
             .char_indices()
             .rev()
             .find(|(_, c)| chars.contains(*c))
             .map(|(i, _)| i)
         {
-            Some(i) => unsafe { gos_rt_result_new(0, i as i64) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(i) => gos_rt_result_new(0, i as i64),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -4774,12 +5391,14 @@ pub unsafe extern "C" fn gos_rt_str_last_index_any(s: *const c_char, chars: *con
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_strip_prefix(s: *const c_char, prefix: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` and `prefix` are this shim's string arguments, each null or live (C-ABI
+        // contract), which `cstr` accepts.
         match unsafe { cstr(s) }.strip_prefix(unsafe { cstr(prefix) }) {
             Some(stripped) => {
                 let p = alloc_cstring(stripped.as_bytes()) as i64;
-                unsafe { gos_rt_result_new(0, p) }
+                gos_rt_result_new(0, p)
             }
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -4788,12 +5407,14 @@ pub unsafe extern "C" fn gos_rt_str_strip_prefix(s: *const c_char, prefix: *cons
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_str_strip_suffix(s: *const c_char, suffix: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` and `suffix` are this shim's string arguments, each null or live (C-ABI
+        // contract), which `cstr` accepts.
         match unsafe { cstr(s) }.strip_suffix(unsafe { cstr(suffix) }) {
             Some(stripped) => {
                 let p = alloc_cstring(stripped.as_bytes()) as i64;
-                unsafe { gos_rt_result_new(0, p) }
+                gos_rt_result_new(0, p)
             }
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -4847,6 +5468,8 @@ mod ascii_index_tests {
         let a = alloc_cstring_from_slices(&[b"abc"]);
         let b = alloc_cstring_from_slices(&[b"de"]);
         let wide = alloc_cstring_from_slices(&["\u{e9}t\u{e9}".as_bytes()]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             assert!(typed_str_is_ascii(a) && typed_str_is_ascii(b));
             let ab = gos_rt_str_concat(a, b);
@@ -4930,6 +5553,8 @@ mod json_quote_tests {
                     let mut want = b"ab\"".to_vec();
                     json_escape_into(&bytes, &mut want);
                     want.push(b'"');
+                    // SAFETY: every pointer argument is a value this test built above and still
+                    // holds live; a null one is accepted by the callee.
                     unsafe {
                         let buf = crate::c_abi::encoding::bytes_to_gosvec(&bytes);
                         let acc = super::gos_rt_str_with_capacity(128);
@@ -5055,6 +5680,8 @@ mod char_index_tests {
                 .map(|(at, _)| at)
                 .chain(std::iter::once(text.len()))
                 .collect();
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe {
                 let source = super::alloc_cstring(text.as_bytes());
                 for (from, to) in [(0, len), (1.min(len), len), (0, len / 2), (len / 3, len)] {
@@ -5083,5 +5710,70 @@ mod char_index_tests {
             &text.as_bytes()[..text.len() - 1]
         ));
         assert!(super::utf8_slice_is_whole(b""));
+    }
+}
+
+#[cfg(test)]
+mod miri_core_tests {
+    use super::*;
+
+    /// The text of a runtime string, for asserting on a shim's answer.
+    fn text_of(s: *const c_char) -> String {
+        // SAFETY: the shims under test answer live string bodies.
+        unsafe { crate::c_abi::gos_str_arg_string(s) }
+    }
+
+    #[test]
+    fn appends_grow_a_builder_and_keep_its_character_index() {
+        let mut acc = gos_rt_str_with_capacity(4);
+        let mut expect = String::new();
+        for (i, piece) in ["ab", "cé", "∑", "xyz", "日本"]
+            .iter()
+            .cycle()
+            .take(40)
+            .enumerate()
+        {
+            // SAFETY: `acc` is the builder this test holds, whose share the append consumes and
+            // answers; `piece` is live for the call.
+            acc = unsafe {
+                gos_rt_str_append_bytes(acc, piece.as_ptr(), i64::try_from(piece.len()).unwrap())
+            };
+            expect.push_str(piece);
+            if i % 7 == 0 {
+                let n = expect.chars().count() as i64;
+                // SAFETY: `acc` is the live builder.
+                assert_eq!(unsafe { gos_rt_str_len(acc) }, n);
+                // SAFETY: `acc` is the live builder and `n - 1` is its last character.
+                let last = unsafe { gos_rt_str_char_at(acc, n - 1) };
+                assert_eq!(char::from_u32(last as u32), expect.chars().last());
+            }
+        }
+        assert_eq!(text_of(acc), expect);
+        // SAFETY: `acc` is the builder this test holds, freed once.
+        unsafe { gos_rt_str_free(acc) };
+    }
+
+    #[test]
+    fn slices_and_concatenations_are_strings_of_their_own() {
+        let whole = alloc_cstring("héllo wörld".as_bytes());
+        let slice = |lo: i64, hi: i64| -> *mut c_char {
+            // SAFETY: `whole` is the live string made above; the answer is a `Result` whose `Ok`
+            // payload is a fresh string.
+            let answer = unsafe { gos_rt_str_slice(whole, lo, hi) };
+            assert_eq!(crate::c_abi::vec::gos_rt_result_disc(answer), 0);
+            crate::c_abi::vec::gos_rt_result_payload(answer) as *mut c_char
+        };
+        let (left, right) = (slice(0, 6), slice(7, 13));
+        // SAFETY: `whole` is the live string this test owns, freed once.
+        unsafe { gos_rt_str_free(whole) };
+        // SAFETY: `left` and `right` are live strings; the answer is a fresh one.
+        let joined = unsafe { gos_rt_str_concat(left, right) };
+        assert_eq!(text_of(joined), "héllowörld");
+        // SAFETY: each is a live string this test owns, freed once.
+        unsafe {
+            gos_rt_str_free(left);
+            gos_rt_str_free(right);
+            gos_rt_str_free(joined);
+        }
     }
 }

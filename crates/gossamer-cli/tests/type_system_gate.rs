@@ -434,9 +434,9 @@ fn trait_bounds_are_authoritative() {
                 Expect::Reject("GT0056"),
             ),
             (
-                "a built-in iterator cannot instantiate an iteration bound",
-                "fn total<T: Iterator>(it: T) -> i64 { let mut s = 0\n for x in it { s += x }\n s }\nfn main() { println(\"{}\", total(0..5)) }\n",
-                Expect::Reject("GT0057"),
+                "a built-in iterator instantiates an iteration bound",
+                "fn total<T: Iterator<Item = i64>>(it: T) -> i64 { let mut s = 0\n for x in it { s += x }\n s }\nfn main() { println(\"{}\", total(0..5)) }\n",
+                Expect::Accept,
             ),
             (
                 "naming the iterator on the parameter is accepted",
@@ -614,8 +614,8 @@ fn refused_serde_targets_report_without_leaking_a_synthesized_name() {
             "GP0039",
         ),
         (
-            "enum",
-            "enum E { A(i64), B }\nfn main() { let _ = to_json::<E>(E::A(1)) }",
+            "generic enum",
+            "enum E<T> { A(T), B }\nfn main() { let _ = to_json::<E<i64>>(E::A(1)) }",
             "GP0039",
         ),
         (
@@ -704,6 +704,134 @@ fn a_builtin_type_path_names_a_function_it_has() {
             (
                 "a constructor and a qualified method",
                 "fn main() { let mut v: Vec<i64> = Vec::with_capacity(2)\n let _ = Vec::insert(&mut v, 0, 1)\n let s = String::from_utf8(#[104u8]).unwrap_or(\"\")\n println(\"{:?} {s}\", v) }\n",
+                Expect::Accept,
+            ),
+        ],
+    );
+}
+
+#[test]
+fn every_declined_control_feature_is_named_where_it_is_written() {
+    gate(
+        "declined control features",
+        &[
+            (
+                "async functions",
+                "async fn f() -> i64 { 1 }\nfn main() { println(\"{}\", f()) }\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "await",
+                "fn f() -> i64 { 1 }\nfn main() { let x = f().await\n println(\"{}\", x) }\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "yield",
+                "fn g() -> i64 { yield 1 }\nfn main() { println(\"{}\", g()) }\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "gen fn",
+                "gen fn g() -> i64 { 1 }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "try and catch",
+                "fn main() { try { println(\"x\") } catch e { println(\"y\") } }\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "throw",
+                "fn main() { throw \"x\" }\n",
+                Expect::Reject("GP0061"),
+            ),
+        ],
+    );
+}
+
+#[test]
+fn every_declined_type_and_declaration_is_named_where_it_is_written() {
+    gate(
+        "declined types and declarations",
+        &[
+            (
+                "a lifetime parameter",
+                "fn f<'a>(x: i64) -> i64 { x }\nfn main() { println(\"{}\", f(1)) }\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a move closure",
+                "fn main() { let x = 1\n let f = move || x\n println(\"{}\", f()) }\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a dyn trait object",
+                "trait T { fn a(&self) -> i64 }\nfn f(x: Box<dyn T>) -> i64 { 1 }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "an impl Trait type",
+                "trait T { fn a(&self) -> i64 }\nfn f() -> impl T { 1 }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a generic associated type",
+                "trait T { type Item<X>\n fn a(&self) -> i64 }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "specialization",
+                "trait T { fn a(&self) -> i64 }\nstruct S {}\nimpl T for S { default fn a(&self) -> i64 { 1 } }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a blanket impl",
+                "trait T { fn a(&self) -> i64 }\nimpl<X> T for X { fn a(&self) -> i64 { 1 } }\nfn main() {}\n",
+                Expect::Reject("GT0095"),
+            ),
+            (
+                "a union declaration",
+                "union U { a: i64, b: f64 }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a union type",
+                "fn f(x: i64 | String) -> i64 { 1 }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "i128",
+                "fn main() { let x: i128 = 1\n println(\"{}\", x) }\n",
+                Expect::Reject("GT0014"),
+            ),
+            (
+                "nil",
+                "fn main() { let x = nil\n println(\"{}\", x) }\n",
+                Expect::Reject("GR0001"),
+            ),
+            (
+                "a class",
+                "class A { }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a user macro",
+                "macro_rules! m { () => { 1 } }\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a procedural macro",
+                "#[proc_macro]\nfn m() {}\nfn main() {}\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "a comprehension",
+                "fn main() { let v = [x * 2 for x in 0..3]\n println(\"{:?}\", v) }\n",
+                Expect::Reject("GP0061"),
+            ),
+            (
+                "names a declined word leaves an ordinary binding alone",
+                "fn main() { let gen = 1\n let union = 2\n let class = 3\n let default = 4\n let move = 5\n let dyn = 6\n let throw = 7\n let try = 8\n println(\"{}\", gen + union + class + default + move + dyn + throw + try) }\n",
                 Expect::Accept,
             ),
         ],

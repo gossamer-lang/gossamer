@@ -12,33 +12,33 @@ enum Piece { Empty, Pawn(i64) }
 let mut grid: Map<(i64, i64), String> = Map::new()
 grid.insert((0, 0), "origin")
 grid.insert((2, 3), "target")
-println("at (2, 3): {}", grid.get((2, 3)).unwrap_or("empty"))
+println(f"at (2, 3): {grid.get((2, 3)).unwrap_or("empty")}")
 
 // keys() hands back the tuples, not an opaque handle.
 for key in grid.keys() {
-    println("occupied {} {}", key.0, key.1)
+    println(f"occupied {key.0} {key.1}")
 }
 
 // A struct key works the same way, and an equal struct built later
 // finds the entry the first one created.
 let mut visited: Map<Cell, i64> = Map::new()
 visited.insert(Cell { row: 1, col: 2 }, 5)
-println("revisit: {}", visited.get(Cell { row: 1, col: 2 }).unwrap_or(-1))
+println(f"revisit: {visited.get(Cell { row: 1, col: 2 }).unwrap_or(-1)}")
 
 // Enum keys hash by discriminant and payload.
 let mut counts: Map<Piece, i64> = Map::new()
 counts.inc(Piece::Empty)
 counts.inc(Piece::Pawn(1))
 counts.inc(Piece::Pawn(1))
-println("empty {}", counts.get_or(Piece::Empty, 0))
-println("pawn 1 {}", counts.get_or(Piece::Pawn(1), 0))
-println("pawn 2 {}", counts.get_or(Piece::Pawn(2), 0))
+println(f"empty {counts.get_or(Piece::Empty, 0)}")
+println(f"pawn 1 {counts.get_or(Piece::Pawn(1), 0)}")
+println(f"pawn 2 {counts.get_or(Piece::Pawn(2), 0)}")
 
 // A fixed array keys by its elements.
 let mut spans: Map<[i64; 2], String> = Map::new()
 spans.insert([10, 20], "first")
-println("span: {}", spans.get([10, 20]).unwrap_or("none"))
+println(f"span: {spans.get([10, 20]).unwrap_or("none")}")
 
 // Sets take the same key types.
 let corners = #{ (0, 0), (0, 9), (9, 0), (9, 9) }
-println("corners {} has (9, 9): {}", corners.len(), corners.contains((9, 9)))
+println(f"corners {corners.len()} has (9, 9): {corners.contains((9, 9))}")

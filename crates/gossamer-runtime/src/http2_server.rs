@@ -283,7 +283,8 @@ async fn serve_one_stream(
         // The transmute reconstructs that typed pointer. The
         // handler is called once and its return value is owned by
         // this frame.
-        let handler: HandlerFn = unsafe { std::mem::transmute(fn_addr) };
+        let handler: HandlerFn =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr)) };
         let env_ptr = env_addr as *mut u8;
         let req_ptr: *mut GosHttpRequest = &raw mut gos_req;
         // SAFETY: env_ptr and req_ptr are valid for the duration of
@@ -294,7 +295,9 @@ async fn serve_one_stream(
         // HTTP/2 frames each stream itself and carries no connection
         // header, so the h1 writer is asked for its keep-alive form and
         // the header is dropped with the rest of the h1 head below.
-        let ok = extract_response_into(result_ptr, &mut wire_buf, &mut true, false);
+        // SAFETY: the compiled handler answered `result_ptr`, a
+        // `Result<http::Response, _>` carrier.
+        let ok = unsafe { extract_response_into(result_ptr, &mut wire_buf, &mut true, false) };
         // SAFETY: drop_handler_result frees the GosResult* the
         // handler returned. result_ptr is non-null and owned by
         // this frame (extracted above without taking ownership).

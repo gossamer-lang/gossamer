@@ -15,6 +15,8 @@ mod lower;
 mod monomorph;
 mod opt;
 mod ownership;
+pub mod preempt;
+pub mod rc_verify;
 pub mod uniqueness;
 pub mod verify;
 

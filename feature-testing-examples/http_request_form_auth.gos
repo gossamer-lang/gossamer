@@ -38,7 +38,7 @@ impl http::Handler for App {
 }
 
 fn serve_app() {
-    if let Err(e) = http::serve("127.0.0.1:23896", App { }) {
+    if let Err(e) = http::serve("127.0.0.1:23898", App { }) {
         eprintln("serve failed: {e}")
     }
 }
@@ -58,18 +58,18 @@ fn await_ready(url: String) {
 
 fn main() {
     spawn(|| serve_app())
-    await_ready("http://127.0.0.1:23896/x")
+    await_ready("http://127.0.0.1:23898/x")
     // "admin:s3cret" base64-encoded is "YWRtaW46czNjcmV0".
     let hdr: Vec<(String, String)> = Vec::from([
         ("Content-Type", "application/x-www-form-urlencoded")
         ("Authorization", "Basic YWRtaW46czNjcmV0")
     ])
-    match http::request("POST", "http://127.0.0.1:23896/x", "user=alice&role=admin", hdr) {
+    match http::request("POST", "http://127.0.0.1:23898/x", "user=alice&role=admin", hdr) {
         Ok(r) => println("status={} body={}", r.status, r.body)
         Err(e) => println("error: {}", e)
     }
     // No-auth, no-body request: both conveniences degrade gracefully.
-    match http::get("http://127.0.0.1:23896/x", Vec::from([])) {
+    match http::get("http://127.0.0.1:23898/x", Vec::from([])) {
         Ok(r) => println("status={} body={}", r.status, r.body)
         Err(e) => println("error: {}", e)
     }

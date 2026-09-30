@@ -39,9 +39,9 @@ fn main() {
     println("byte_at={} {}", literal.byte_at(3), literal.byte_at(7))
 
     // Digests read the whole buffer, so a truncating read changes them.
-    println("sha256_literal={}", sha256::hex(literal))
-    println("sha256_built={}", sha256::hex(built))
-    println("blake3={}", blake3::hex(literal))
+    println("sha256_literal={}", sha256::hex(literal.as_bytes()))
+    println("sha256_built={}", sha256::hex(built.as_bytes()))
+    println("blake3={}", blake3::hex(literal.as_bytes()))
     println("crc32={}", crc32::checksum_string(literal))
     println("adler32={}", adler32::checksum_string(literal))
     println("fnv={}", fnv::hash_string(literal))
@@ -95,7 +95,7 @@ fn main() {
     let target = path::join(env::temp_dir(), "gossamer_test_nul_in_strings.bin")
     match fs::write(target, literal.as_bytes()) {
         Ok(_) => match fs::read_to_string(target) {
-            Ok(back) => println("file={} {}", back.len(), sha256::hex(back))
+            Ok(back) => println("file={} {}", back.len(), sha256::hex(back.as_bytes()))
             Err(e) => println("file_read_error={}", e)
         }
         Err(e) => println("file_write_error={}", e)

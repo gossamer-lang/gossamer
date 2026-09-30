@@ -167,19 +167,6 @@ pub enum RustBindingSpec {
         /// the scaffolded crate's `[dependencies]` table.
         deps: String,
     },
-    /// `{ prebuilt = "path/to/lib.a", abi = "1.0" }` - a
-    /// pre-built static archive (Phase 4 of rustergo.md). `gos
-    /// build` links the archive directly; `gos` requires
-    /// the JIT-resolvable `gos_binding_*` thunks to be exposed
-    /// from the produced binary.
-    Prebuilt {
-        /// Path to the static archive (`.a` / `.lib`).
-        archive: String,
-        /// Declared ABI version the archive was built against
-        /// (sniffed against `__gos_binding_abi_version` at load
-        /// time).
-        abi: String,
-    },
 }
 
 /// Reference for a `git` rust-binding.
@@ -285,6 +272,15 @@ pub enum ManifestError {
     /// A `[rust-bindings]` key violates the Cargo package-name regex.
     #[error("invalid rust-binding name {0:?}: must match [A-Za-z_][A-Za-z0-9_-]*")]
     BadBindingName(String),
+    /// `[rust-bindings]` entry named a pre-built archive. A binding is
+    /// compiled from source against the toolchain building the program, so
+    /// its wire layout is always the toolchain's own; an archive built by
+    /// another toolchain has no layout anything could check it against.
+    #[error(
+        "rust-binding {0}: `prebuilt` archives are not supported; a binding is built from source \
+         against the toolchain in use, so name its crate with `path`, `git`, `version`, or `src`"
+    )]
+    PrebuiltRustBinding(String),
     /// `[rust-bindings]` entry mixed `path`, `git`, and version-only.
     #[error("ambiguous rust-binding for {0}: pick exactly one of path/git/version")]
     AmbiguousRustBinding(String),
@@ -664,10 +660,6 @@ fn render_rust_binding(spec: &RustBindingSpec) -> String {
                 parts.push(format!("deps = \"{}\"", deps.replace('"', "\\\"")));
             }
         }
-        RustBindingSpec::Prebuilt { archive, abi } => {
-            parts.push(format!("prebuilt = \"{archive}\""));
-            parts.push(format!("abi = \"{abi}\""));
-        }
     }
     format!("{{ {} }}", parts.join(", "))
 }
@@ -734,12 +726,6 @@ fn canonical_binding_kv(spec: &RustBindingSpec, manifest_dir: &std::path::Path) 
             let resolved = resolve_path(manifest_dir, src);
             entries.push(format!("src={}", resolved.display()));
             entries.push(format!("deps={deps}"));
-        }
-        RustBindingSpec::Prebuilt { archive, abi } => {
-            entries.push("kind=prebuilt".to_string());
-            let resolved = resolve_path(manifest_dir, archive);
-            entries.push(format!("archive={}", resolved.display()));
-            entries.push(format!("abi={abi}"));
         }
     }
     entries.sort();
@@ -994,16 +980,13 @@ fn parse_rust_binding_toml(
     let path = optional_toml_str(table, "path", &format!("rust-bindings.{key}.path"))?;
     let git = optional_toml_str(table, "git", &format!("rust-bindings.{key}.git"))?;
     let src = optional_toml_str(table, "src", &format!("rust-bindings.{key}.src"))?;
-    let prebuilt = optional_toml_str(table, "prebuilt", &format!("rust-bindings.{key}.prebuilt"))?;
-    let active = [
-        path.is_some(),
-        git.is_some(),
-        src.is_some(),
-        prebuilt.is_some(),
-    ]
-    .iter()
-    .filter(|b| **b)
-    .count();
+    if table.contains_key("prebuilt") {
+        return Err(ManifestError::PrebuiltRustBinding(key.to_string()));
+    }
+    let active = [path.is_some(), git.is_some(), src.is_some()]
+        .iter()
+        .filter(|b| **b)
+        .count();
     if active > 1 {
         return Err(ManifestError::AmbiguousRustBinding(key.to_string()));
     }
@@ -1035,11 +1018,6 @@ fn parse_rust_binding_toml(
         let deps = optional_toml_str(table, "deps", &format!("rust-bindings.{key}.deps"))?
             .unwrap_or_default();
         return Ok(RustBindingSpec::Src { src, deps });
-    }
-    if let Some(archive) = prebuilt {
-        let abi = optional_toml_str(table, "abi", &format!("rust-bindings.{key}.abi"))?
-            .unwrap_or_else(|| "1.0".to_string());
-        return Ok(RustBindingSpec::Prebuilt { archive, abi });
     }
     if let Some(path) = path {
         return Ok(RustBindingSpec::Path {

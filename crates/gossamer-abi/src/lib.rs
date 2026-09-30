@@ -152,6 +152,7 @@ pub const I128_CALLBACK_SHIMS: &[&str] = &[
     "gos_rt_fs_walk_dir_raw",
     "gos_rt_lazy_iter_filter_map_i64",
     "gos_rt_lazy_iter_filter_map_str",
+    "gos_rt_lazy_iter_map_carrier",
     "gos_rt_option_and_then",
     "gos_rt_option_or_else",
     "gos_rt_result_and_then",
@@ -225,6 +226,33 @@ pub const ELEM_BY_ADDRESS: &[&str] = &["gos_rt_bheap_max_push_desc", "gos_rt_bhe
 #[must_use]
 pub fn takes_elem_by_address(name: &str) -> bool {
     ELEM_BY_ADDRESS.contains(&name)
+}
+
+/// Which check failed, the first argument of `gos_rt_panic_check`: a vector
+/// index out of bounds, or an integer operation that overflowed.
+pub mod check_fail {
+    /// A `Vec` index outside `[0, len)`; the vector and index follow.
+    pub const INDEX: i64 = 0;
+    /// An `+` whose result does not fit its type.
+    pub const ADD: i64 = 1;
+    /// A `-` whose result does not fit its type.
+    pub const SUBTRACT: i64 = 2;
+    /// A `*` whose result does not fit its type.
+    pub const MULTIPLY: i64 = 3;
+}
+
+/// Runtime entry points one of whose arguments is the address of a registered
+/// reference-count meta blob, paired with that argument's position. The MIR
+/// names the blob by its symbol in a string constant, and a back end passes
+/// the blob's address there rather than the text.
+pub const META_SYMBOL_ARGS: &[(&str, usize)] = &[("gos_rt_lazy_iter_map_carrier", 2)];
+
+/// The position of `name`'s meta-blob argument. See [`META_SYMBOL_ARGS`].
+#[must_use]
+pub fn meta_symbol_arg(name: &str) -> Option<usize> {
+    META_SYMBOL_ARGS
+        .iter()
+        .find_map(|&(entry, index)| (entry == name).then_some(index))
 }
 
 /// Runtime registration shims that store a gossamer handler's address and
@@ -313,6 +341,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A back end passes a meta blob's address at the listed position, so the
+    /// entry point must exist and declare a pointer there.
+    #[test]
+    fn every_meta_symbol_argument_is_a_declared_pointer() {
+        for &(name, index) in META_SYMBOL_ARGS {
+            let entry = lookup(name).unwrap_or_else(|| panic!("{name} is not registered"));
+            assert_eq!(
+                entry.sig.params.get(index),
+                Some(&types::AbiType::Ptr),
+                "{name} takes its meta blob at argument {index}"
+            );
+        }
+        assert_eq!(meta_symbol_arg("gos_rt_lazy_iter_map_carrier"), Some(2));
+        assert_eq!(meta_symbol_arg("gos_rt_lazy_iter_map_aggr"), None);
     }
 
     /// A callback that answers a word agrees on the register already, so

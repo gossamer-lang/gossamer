@@ -162,7 +162,11 @@ pub(super) fn build_offline_module(
         populate_fn(func_id);
     }
     let mut data_info: HashMap<u32, (bool, bool)> = HashMap::new();
-    for &data_id in intrinsics.strings.values() {
+    for &data_id in intrinsics
+        .strings
+        .values()
+        .chain(intrinsics.preempt_requested.iter())
+    {
         let decl = decls.get_data_decl(data_id);
         data_info.insert(data_id.as_u32(), (decl.linkage.is_final(), decl.tls));
     }
@@ -695,6 +699,11 @@ pub(crate) fn lower_program_full(
     for entry in gossamer_abi::REGISTRY {
         intrinsics.extern_fn_by_name(module, entry.name)?;
     }
+    intrinsics.preempt_requested = Some(
+        module
+            .declare_data("gos_rt_preempt_requested", Linkage::Import, true, false)
+            .map_err(|e| anyhow!("declare gos_rt_preempt_requested: {e}"))?,
+    );
     intrinsics.extern_fn(module, "malloc", &[ptr_ty], &[ptr_ty])?;
     intrinsics.extern_fn(module, "strlen", &[ptr_ty], &[types::I64])?;
     intrinsics.extern_fn(module, "calloc", &[ptr_ty, ptr_ty], &[ptr_ty])?;

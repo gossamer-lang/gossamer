@@ -1,2 +1,2 @@
 // Semicolons may replace newlines only between statements on one line.
-let width = 6; let height = 7; println("area: {}", width * height)
+let width = 6; let height = 7; println(f"area: {width * height}")

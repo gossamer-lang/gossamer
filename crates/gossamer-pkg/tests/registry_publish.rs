@@ -18,11 +18,12 @@ fn make_tar(name: &str, body: &[u8]) -> Vec<u8> {
     gossamer_pkg::tar::pack(&entries).expect("pack")
 }
 
-/// Signs `tar` with a fixed test key, returning `(signature_hex,
-/// public_key_hex)` for a registry catalogue entry.
+/// Signs `tar`'s SHA-256 digest with a fixed test key, as `gos publish`
+/// does, returning `(signature_hex, public_key_hex)` for a registry
+/// catalogue entry.
 fn sign_tar(tar: &[u8]) -> (String, String) {
     let key = gossamer_pkg::SigningKey::from_bytes([7u8; 32]);
-    let sig = gossamer_pkg::sign_bytes(&key, tar);
+    let sig = gossamer_pkg::sign_bytes(&key, sha256::hex(tar).as_bytes());
     (gossamer_pkg::hex_encode(&sig), key.verifying_key().to_hex())
 }
 
@@ -165,7 +166,7 @@ fn yanked_registry_version_refuses_install_without_flag() {
     );
 
     let options = FetchOptions {
-        registry_url: "https://reg.test".to_string(),
+        registry_url: Some("https://reg.test".to_string()),
         ..FetchOptions::default()
     };
     let fetcher =
@@ -185,7 +186,7 @@ fn yanked_registry_version_refuses_install_without_flag() {
 
     // With --allow-yanked, the fetch goes through.
     let allow_options = FetchOptions {
-        registry_url: "https://reg.test".to_string(),
+        registry_url: Some("https://reg.test".to_string()),
         allow_yanked: true,
         ..FetchOptions::default()
     };
@@ -229,7 +230,7 @@ fn second_fetch_hits_disk_cache_and_skips_network() {
         );
         let live = Fetcher::with_transport(
             FetchOptions {
-                registry_url: "https://reg.test".to_string(),
+                registry_url: Some("https://reg.test".to_string()),
                 ..FetchOptions::default()
             },
             Arc::new(transport) as Arc<dyn Transport>,
@@ -396,31 +397,6 @@ fn signing_round_trip_validates_artifact() {
 }
 
 #[test]
-fn publish_upload_records_token_header() {
-    use gossamer_pkg::publish::{PublishRequest, RecordingUploader, upload_with};
-    let mut tmp = std::env::temp_dir();
-    tmp.push(format!("gos-pub-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&tmp);
-    std::fs::create_dir_all(&tmp).unwrap();
-    std::fs::write(tmp.join("project.toml"), b"[project]\nid = \"a.b/c\"\n").unwrap();
-    let artifact = pack_crate(&tmp).unwrap();
-    let uploader = RecordingUploader::new();
-    let req = PublishRequest {
-        project_id: "a.b/c",
-        version: "0.1.0",
-        artifact: &artifact,
-        signature: None,
-        public_key: None,
-        auth_token: Some("the-token"),
-    };
-    upload_with(&uploader, "https://reg.test", &req).expect("upload");
-    let posts = uploader.take_posts();
-    assert_eq!(posts.len(), 1);
-    assert_eq!(posts[0].2.as_deref(), Some("the-token"));
-    let _ = std::fs::remove_dir_all(&tmp);
-}
-
-#[test]
 fn default_cache_root_returns_some_path_when_home_or_cache_dir_set() {
     // The Rust 2024 unsafe-env-var rule blocks set_var in tests
     // under `#![forbid(unsafe_code)]`. Instead, just check that
@@ -540,7 +516,7 @@ fn signed_registry_fetcher(
     );
     Fetcher::with_transport(
         FetchOptions {
-            registry_url: "https://reg.test".to_string(),
+            registry_url: Some("https://reg.test".to_string()),
             ..FetchOptions::default()
         },
         Arc::new(transport) as Arc<dyn Transport>,

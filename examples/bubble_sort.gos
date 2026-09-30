@@ -20,7 +20,7 @@ fn sorted_ascending(xs: [i64]) -> Vec<i64> {
 }
 
 fn print_array(xs: [i64]) {
-    println("[{}]", xs.join(", "))
+    println(f"[{xs.join(", ")}]")
 }
 
 let inputs: [i64; 9] = #[7, 2, 9, 1, 5, 3, 8, 4, 6]

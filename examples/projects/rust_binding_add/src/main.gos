@@ -16,8 +16,8 @@ use addlib::add
 
 fn main() {
     let total = add(2, 3)
-    println("2 + 3 = {}", total)
-    println("100 + 250 = {}", add(100, 250))
+    println(f"2 + 3 = {total}")
+    println(f"100 + 250 = {add(100, 250)}")
 }
 
 #[cfg(test)]

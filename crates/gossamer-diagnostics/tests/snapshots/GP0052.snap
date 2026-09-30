@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GP0052]: `sql::statement` was handed something other than a literal. The - here
+error[GP0052]: A build-time validated call was handed something other than a - here
 --- framed ---
-error[GP0052]: `sql::statement` was handed something other than a literal. The
+error[GP0052]: A build-time validated call was handed something other than a
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

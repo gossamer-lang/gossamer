@@ -239,6 +239,7 @@ char_lit    = "'" ( unicode_char | byte_escape | unicode_escape ) "'"
 string_lit  = "\"" { string_char | escape } "\""
 triple_str  = "\"\"\"" { string_char | escape | newline } "\"\"\""
 raw_string  = "r\"" { raw_char } "\"" | "r#\"" { raw_char } "\"#"
+interp_str  = "f" ( string_lit | triple_str )
 
 byte_lit    = "b'" byte_char "'"
 byte_string = "b\"" { byte_char } "\""
@@ -257,6 +258,23 @@ delimiter's line, compared as text so tabs and spaces never merge. A
 whitespace-only line becomes empty. Escapes are decoded after the
 indentation is removed, so `\n` in the body is a newline escape rather
 than a line break. A single-line `"""..."""` takes its body verbatim.
+
+An interpolated string `f"..."` (or `f"""..."""`) is a `String` built from
+its body the way `format` builds one from a template: text outside braces
+is copied, `{{` and `}}` write a brace, and each placeholder renders the
+value of the expression inside it. A placeholder is `{expr}` or
+`{expr:spec}` (`{total:>8}`, `{xs.len()}`, `{price * qty:.2}`,
+`{m["k"]}`, `{n:x}`, `{v:?}`). The placeholder ends at the `}` that closes
+it, past the expression's own brackets, strings, character literals, and
+nested interpolated strings. The first `:` at the expression's top level
+that is not half of a `::` starts the spec, which runs to that `}`; an
+expression with a top-level `:` of its own is written in parentheses. In a
+single-line literal a placeholder ends on its own line. Expressions are
+evaluated left to right, each once, and rendered as `{}` (or the spec)
+renders them. A placeholder with no expression (`{}`, `{:.2}`) is
+`GP0063`, and a `{` or `}` that neither opens a placeholder nor is doubled
+is `GP0065`. `f"x is: {x}"` is the value `format("x is: {x}")` answers, on
+every tier.
 
 Literal suffixes disambiguate type:
 
@@ -372,10 +390,12 @@ explicit `as` cast truncates to the target width and then extends by
 the target's signedness (`300 as u8 == 44`, `200 as i8 == -56`).
 Consequences of the model:
 
-- `+`, `-`, and `*` follow Rust's profile-sensitive integer overflow
-  behavior at the declared type width. Debug execution, including `gos`
-  and `gos build`, panics on overflow. `gos build --release` wraps at the
-  declared width, so a release `200u8 + 200u8` evaluates to `144`.
+- `+`, `-`, and `*` raise the overflow panic when the result leaves the
+  declared type width, on every tier and in every build profile: `gos`,
+  `gos build`, and `gos build --release` all stop `200u8 + 200u8` with
+  `attempt to add with overflow`. `+%`, `-%`, and `*%` are the wrapping
+  spelling, and the only one: no setting makes the plain operators wrap, so
+  `a + b` means the same thing in every program and every package.
 - Unary `-`, unary `!` (the bitwise complement on an integer), `<<`,
   and a signed `MIN / -1` wrap at the declared width in every profile:
   `-(-128i8) == -128`, `!5u8 == 250`, `200u8 << 2 == 32`,
@@ -392,8 +412,7 @@ Consequences of the model:
   type's range (`300.7 as u8 == 255`, `-5.0 as u8 == 0`,
   `1e20 as i64 == i64::MAX`, NaN → 0).
 
-The VM, Cranelift JIT, and LLVM debug backend all enforce the same checked
-behavior.
+The VM, the Cranelift JIT, and both LLVM profiles enforce the same behavior.
 
 **Wrapping arithmetic.** `+%`, `-%`, and `*%` add, subtract, and multiply with
 two's-complement wrapping at the operands' declared integer width, on every
@@ -433,9 +452,11 @@ silent truncation, silent sign changes, and surprise precision loss.
 **The `as` whitelist.** `as` is whitelist-checked (`GT0005`). The
 permitted shapes are: numeric ↔ numeric (any integer or float type on
 either side, `f32` sources included; float → int truncates toward zero
-and saturates as above), `bool` → integer, `char` → integer, `u8` →
-`char`, and same-type no-ops. Every other `as` shape is a compile-time
-error.
+and saturates as above), `bool` → integer, `char` → integer, integer →
+`char`, and same-type no-ops. An integer → `char` cast reads the value's low
+byte as a Latin-1 character, the way `s.byte_at(i) as char` renders a byte;
+`char::from_u32(n)` converts a Unicode code point, answering `None` for a
+value that is not one. Every other `as` shape is a compile-time error.
 
 ### 3.2 Strings
 
@@ -1774,6 +1795,25 @@ From highest to lowest:
 | 15 | `\|>` pipe | left |
 | 16 | `=`, `+=`, `-=`, etc. (statement-only) | right |
 
+**Operator impls.** On a user type, `a + b` calls the `add` method of an
+`impl Add` for the left operand's type, and likewise `Sub`, `Mul`, `Div`,
+`Rem`, `BitAnd`, `BitOr`, `BitXor`, `Shl`, `Shr`, and the unary `Neg` and
+`Not`; `a += b` writes back what the same method answers. The right operand
+is the method's argument and is checked against its parameter. A type takes
+one impl of an operator per right-hand type: `impl Mul for V2` answers
+`v * w`, and `impl Mul<f64> for V2` answers `v * 2.0`, the right operand's type
+choosing between them. An impl may write `type Output = T`, which must name
+the type its method returns.
+
+```gossamer
+struct V2 { x: f64, y: f64 }
+
+impl Mul<f64> for V2 {
+    type Output = V2
+    fn mul(self, k: f64) -> V2 { V2 { x: self.x * k, y: self.y * k } }
+}
+```
+
 ---
 
 ## 5. Patterns
@@ -2177,10 +2217,11 @@ stack-allocated (escape analysis). The escape rules are:
 Memory management is deterministic reference counting for heap enums
 and runtime containers, drop-pass reclamation for value aggregates,
 weak references, an on-demand cycle collector
-(`runtime::collect_cycles()`), and `arena { }` regions. Cycle collection and
-collection-driven `Weak<T>` invalidation are Experimental: the compiled
-runtime collects thread-local RC graphs, while the bytecode VM currently has
-no cycle collector. They are not part of the Stable cross-tier contract.
+(`runtime::collect_cycles()`), and `arena { }` regions. Cycle collection is
+Experimental: the compiled runtime collects thread-local RC graphs, while the
+bytecode VM currently has no cycle collector, so the memory a cycle holds
+differs by tier. No program observes the difference through a `Weak<T>`:
+see the weak-reference rule below.
 There is no tracing collector: no pacer, no write barrier, and no GC
 pause.
 
@@ -2194,7 +2235,11 @@ Memory is reclaimed deterministically, without a tracing collector:
   the interpreter tier's shared-ownership model.
 - **Weak references.** A weak reference does not contribute to the
   strong count; upgrading after the payload is destroyed yields
-  `None` (Swift-ARC model).
+  `None` (Swift-ARC model). `x.downgrade()` pins its referent for the
+  scope that took the weak, and storing an aggregate stores a copy, so no
+  weak reference observes a member of a reference cycle: `upgrade()`
+  answers the same on every tier, whenever and whether cycles are
+  collected.
 - **Cycle collection.** On the compiled tiers, thread-local reference cycles
   are reclaimed on demand by `runtime::collect_cycles()` (Bacon-Rajan trial
   deletion). Values shared across goroutines are excluded from this pass and
@@ -2334,7 +2379,12 @@ require non-lexical lifetime inference or arbitrary alias reasoning.
 ### 8.1 Goroutines
 
 A goroutine is a stackful coroutine scheduled cooperatively by the
-runtime. `spawn(|| expr)` starts one. Each goroutine owns a fixed-size
+runtime. It yields at channel, `select`, lock, and `sleep` operations, and a
+watchdog asks a goroutine that holds its worker too long to yield at its next
+safepoint. Compiled code has a safepoint at the head of the outermost loop of
+each loop nest; a nest that is counted all the way down and calls none of the
+program's functions runs to completion first. The bytecode VM yields on every
+loop back edge. `spawn(|| expr)` starts one. Each goroutine owns a fixed-size
 mmap'd stack (default 1 MiB; override with `GOSSAMER_GOROUTINE_STACK`,
 clamped to a 32 KiB minimum). The operating system commits pages on demand.
 A byte-budget guard reports `GX0008` before the hardware guard page; the stack
@@ -2645,6 +2695,8 @@ This is an outline; full API docs ship with the first implementation.
 - `eprintln(args...)`.
 - `format(fmt_str, args...)` - returns `String`. `fmt_str` is a
   compile-time-validated format string (`{}` placeholders).
+- `f"..."` - an interpolated string whose placeholders hold any
+  expression (§2, string literals).
 - `print`, `eprint` without newline.
 - `Display`, `Debug` traits with derive support.
 
@@ -2908,8 +2960,8 @@ compatibility promise without improving fidelity.
   `json::render(value) -> String`, plus the `json::{get, at, len,
   is_null, as_str, as_i64, as_f64, as_bool, as_array, keys}` query
   helpers.
-- Strict, typed surface: every named struct in the program
-  auto-derives a pair of generic serializer free functions, invoked
+- Strict, typed surface: every concrete named struct and enum in the
+  program auto-derives a pair of generic serializer free functions, invoked
   with a turbofish type argument (there are no `Type::from_json`
   methods):
   - `from_json::<Type>(text: &String) -> Result<Type, errors::Error>`
@@ -2923,13 +2975,21 @@ compatibility promise without improving fidelity.
   `Result::Err(errors::Error)` with a path-qualified message.
 - Serialization is automatic (every struct gets `to_json::<T>` /
   `from_json::<T>` using the source field names verbatim);
-  `#[derive(Serialize, Deserialize)]` is rejected (`GT0025`).
+  `#[derive(Serialize, Deserialize)]` is rejected (`GT0025`). A field
+  attribute changes one field: `#[rename("key")]` spells its JSON key,
+  `#[skip]` leaves it out when writing and reads it back as its type's zero
+  value, and `#[default]` reads a missing key as that zero value.
+- An enum is externally tagged, the shape `{:?}` prints: a unit variant is
+  its name as a string (`"Red"`), a one-field variant `{"Circle": 1.5}`, a
+  several-field variant `{"Pair": [7, "x"]}`, and a struct variant
+  `{"Rect": {"w": 2, "h": 3}}`. An unknown variant or a malformed payload is
+  an `Err` naming it.
 - The turbofish may spell its target through a type alias of either form
   (§3.12); the codec is the target struct's, and an opaque alias
   serializes as its representation.
-- The typed surface covers a concrete struct whose fields it can
-  classify. A generic struct, an enum, or a name that is not a struct
-  has no codec and is reported as `GP0039`, and a struct with one
+- The typed surface covers a concrete struct or enum whose fields it can
+  classify. A generic type, or a name that is not a declared struct or
+  enum, has no codec and is reported as `GP0039`, and a struct with one
   unclassifiable field as `GP0022`; read those shapes with `json::parse`
   instead, or hand-write the function.
 
@@ -3003,7 +3063,7 @@ must be installed to compile natively on the Pi.
 | Mode | Command | Backend | Pipeline | Speed | Output quality |
 |---|---|---|---|---|---|
 | Interpret | `gos run file.gos` | Bytecode VM | Direct dispatch; in-process Cranelift JIT tiers up hot bodies | Fastest cold start | No native codegen |
-| Debug build | `gos build` | LLVM | checked arithmetic, `opt -O1`, then `llc -O0` | Sub-second for small programs | Optimized enough for development while preserving debug overflow traps |
+| Debug build | `gos build` | LLVM | `opt -O1`, then `llc -O0` | Sub-second for small programs | Optimized enough for development, with panic frames |
 | Release build | `gos build --release` | LLVM | `opt -O3 \| llc -O3 -mcpu=native -mattr=+prefer-256-bit` | Seconds for thousands of LoC | Vectorised, inlined |
 
 LLVM is the canonical native backend; the Cranelift code path is
@@ -3200,7 +3260,10 @@ substituted in for a generic instantiation - so a `comptime fn` can
 generate per-type code. A type with nothing to reflect is `GR0012`. The
 `regex::compile` / `sql::statement` calls check a literal argument while
 the program is parsed, failing the build on a pattern that does not compile
-(`GP0057`) or a malformed statement (`GP0058`). See the
+(`GP0057`) or a malformed statement (`GP0058`), and answer the checked value:
+a `regex::Pattern` or the statement `String`. Either one handed anything but
+a literal is `GP0052`; `regex::new(pattern)` compiles a pattern built at run
+time and answers `Result<regex::Pattern, errors::Error>`. See the
 [`comptime` language page](docs_src/language/comptime.md).
 
 Gossamer does not provide runtime reflection. Programs that require dynamic
@@ -3233,11 +3296,11 @@ Item         = FnDecl | StructDecl | EnumDecl | TraitDecl | ImplDecl
              | TypeAlias | ConstDecl | StaticDecl
              | ModDecl | AttrItem
 
-FnDecl       = [Attrs] [ "pub" ] [ "unsafe" ] "fn" Ident [ Generics ]
+FnDecl       = [Attrs] [ "pub" ] "fn" Ident [ Generics ]
                "(" [ ParamList ] ")" [ "->" Type ] [ WhereClause ] Block
                // `-> Type` is omitted only when the body answers a unit;
                // a body whose tail expression yields a value without it
-               // is GT0074
+               // is the GL0055 warning
 ParamList    = SingleLineParams | MultiLineParams
 SingleLineParams = Param { "," Param }
 MultiLineParams  = newline Param { [ "," ] newline Param } [ "," ] newline
@@ -3465,7 +3528,9 @@ holds its values traverses through its own methods (`xs.map(f)`, `xs.sum()`).
 The features below are **permanently declined**, not planned or deferred.
 They are recorded here so their absence reads as a decision rather than a
 gap, and so a proposal to add one starts from the stated reason. Each is
-rejected at parse or check time with a diagnostic naming the alternative.
+rejected where it is written with a diagnostic naming the alternative:
+`GP0061` for a declined spelling, `GT0095` for a blanket impl, `GT0014` for
+`i128` / `u128`, and a `GR0001` whose help names `Option` for `nil`.
 
 Power, but not complexity: a feature earns its place by making correct
 code the shortest code, without adding a second spelling of an existing
@@ -3477,6 +3542,10 @@ idiom, a new type-system theory, or machinery the reader cannot see.
   obligations, and runtime fragmentation are the most-documented regret
   surface in both Rust and Python. Goroutines and channels (§8) cover the
   same ground with no colored functions.
+- **Detached goroutines (`go expr`).** A goroutine nothing joins can outlive
+  the code that started it and lose its failure. `spawn(|| expr)` inside a
+  `cohort { }` (or `main`) is the one way to start one, and `GP0061` carries
+  that rewrite for `gos check --fix`.
 - **`panic` / `recover` at function level.** A panic is a violated
   invariant; recoverable failure is `Result` (§9). Containment is the
   goroutine boundary (§8.5).

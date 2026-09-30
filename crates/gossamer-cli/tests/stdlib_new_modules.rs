@@ -568,7 +568,7 @@ fn crypto_sha256_hex() {
         r#"
 use std::crypto
 fn main() {
-    let h = crypto::sha256::hex("hello")
+    let h = crypto::sha256::hex("hello".as_bytes())
     println("{}", h.len())
 }
 "#,
@@ -805,7 +805,7 @@ fn crypto_sha512_hex() {
         r#"
 use std::crypto
 fn main() {
-    let h = crypto::sha512::hex("abc")
+    let h = crypto::sha512::hex("abc".as_bytes())
     println("{}", h.len())
     println("{}", h.starts_with("dd"))
 }
@@ -821,7 +821,7 @@ fn crypto_blake3_hex() {
         r#"
 use std::crypto
 fn main() {
-    let h = crypto::blake3::hex("")
+    let h = crypto::blake3::hex("".as_bytes())
     println("{}", h.len())
     println("{}", h.starts_with("af"))
 }
@@ -1377,7 +1377,7 @@ fn crypto_insecure_md5_hex() {
         r#"
 use std::crypto
 fn main() {
-    let h = crypto::insecure::md5_hex("")
+    let h = crypto::insecure::md5_hex("".as_bytes())
     println("{}", h)
 }
 "#,
@@ -1392,7 +1392,7 @@ fn crypto_insecure_sha1_hex() {
         r#"
 use std::crypto
 fn main() {
-    let h = crypto::insecure::sha1_hex("abc")
+    let h = crypto::insecure::sha1_hex("abc".as_bytes())
     println("{}", h)
 }
 "#,

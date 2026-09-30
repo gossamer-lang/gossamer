@@ -9,27 +9,27 @@
 
 use std::net::netip
 
-println("v4 valid: {}", netip::is_valid("127.0.0.1"))
-println("v6 valid: {}", netip::is_valid("::1"))
-println("garbage valid: {}", netip::is_valid("not-an-ip"))
+println(f"v4 valid: {netip::is_valid("127.0.0.1")}")
+println(f"v6 valid: {netip::is_valid("::1")}")
+println(f"garbage valid: {netip::is_valid("not-an-ip")}")
 
-println("127.0.0.1 is v4: {}", netip::is_v4("127.0.0.1"))
-println("::1 is v6: {}", netip::is_v6("::1"))
+println(f"127.0.0.1 is v4: {netip::is_v4("127.0.0.1")}")
+println(f"::1 is v6: {netip::is_v6("::1")}")
 
-println("127.0.0.1 loopback: {}", netip::is_loopback("127.0.0.1"))
-println("::1 loopback: {}", netip::is_loopback("::1"))
-println("10.0.0.1 private: {}", netip::is_private("10.0.0.1"))
-println("8.8.8.8 private: {}", netip::is_private("8.8.8.8"))
+println(f"127.0.0.1 loopback: {netip::is_loopback("127.0.0.1")}")
+println(f"::1 loopback: {netip::is_loopback("::1")}")
+println(f"10.0.0.1 private: {netip::is_private("10.0.0.1")}")
+println(f"8.8.8.8 private: {netip::is_private("8.8.8.8")}")
 
 // Canonical form collapses the long v6 shape.
 let n = netip::normalize("2001:0db8:0000:0000:0000:0000:0000:0001")
-println("normalize: {}", n)
+println(f"normalize: {n}")
 
 // Split + compose round-trip.
 let host = netip::host_of("127.0.0.1:8080")
 let port = netip::port_of("127.0.0.1:8080")
-println("host: {}", host)
-println("port: {}", port)
+println(f"host: {host}")
+println(f"port: {port}")
 
 let rejoined = netip::join_addr_port(host, port)
-println("rejoined: {}", rejoined)
+println(f"rejoined: {rejoined}")

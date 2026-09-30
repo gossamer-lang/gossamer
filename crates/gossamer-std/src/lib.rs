@@ -37,8 +37,6 @@ pub mod encoding_toml;
 pub mod env;
 pub mod errors;
 pub mod exec;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod ffi;
 pub mod flag;
 pub mod fmt;
 pub mod fs;

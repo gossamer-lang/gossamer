@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -76,12 +74,12 @@ fn json_value_to_toml_value(v: &serde_json::Value) -> Result<toml::Value, String
 }
 
 fn toml_result_ok(s: &str) -> i128 {
-    unsafe { gos_rt_result_new(0, alloc_cstring(s.as_bytes()) as i64) }
+    gos_rt_result_new(0, alloc_cstring(s.as_bytes()) as i64)
 }
 
 fn toml_result_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
 #[unsafe(no_mangle)]
@@ -90,6 +88,7 @@ pub unsafe extern "C" fn gos_rt_toml_to_json(s: *const c_char) -> i128 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         let value: toml::Value = match toml::from_str(text) {
@@ -110,6 +109,7 @@ pub unsafe extern "C" fn gos_rt_toml_from_json(s: *const c_char) -> i128 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         let v: serde_json::Value = match serde_json::from_str(text) {
@@ -133,6 +133,7 @@ pub unsafe extern "C" fn gos_rt_toml_is_valid(s: *const c_char) -> i64 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         i64::from(toml::from_str::<toml::Value>(text).is_ok())
@@ -145,6 +146,7 @@ pub unsafe extern "C" fn gos_rt_toml_pretty(s: *const c_char) -> i128 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         let value: toml::Value = match toml::from_str(text) {

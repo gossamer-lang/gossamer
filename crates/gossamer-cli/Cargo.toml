@@ -93,6 +93,8 @@ gossamer-std = { workspace = true }
 
 [dev-dependencies]
 gossamer-abi = { workspace = true }
+# Bounds how long a liveness test waits for a program that would hang.
+wait-timeout = { workspace = true }
 # Reads the zlib-compressed debug sections a `-g` build links.
 flate2 = { workspace = true }
 # In-process HTTP/2 conformance test consumes the h2 crate's

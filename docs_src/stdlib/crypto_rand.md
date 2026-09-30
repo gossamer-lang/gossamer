@@ -1,15 +1,13 @@
 # `std::crypto::rand`
 
-Status: unproven
+Status: experimental
 
 Secure random bytes from the host CSPRNG.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/crypto.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`bytes`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/crypto.rs) | `fn bytes(n: i64) -> Result<Vec<u8>, errors::Error>` | Returns a fresh random byte vector. |
+| `bytes` | `fn bytes(n: i64) -> Result<Vec<u8>, errors::Error>` | Returns a fresh random byte vector. |
+
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

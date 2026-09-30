@@ -17,16 +17,16 @@ use std::uuid
 let id4 = uuid::v4()
 let id7 = uuid::v7()
 
-println("v4 length: {}", id4.len())
-println("v7 length: {}", id7.len())
+println(f"v4 length: {id4.len()}")
+println(f"v7 length: {id7.len()}")
 
-println("v4 valid: {}", uuid::is_valid(id4))
-println("v7 valid: {}", uuid::is_valid(id7))
-println("garbage valid: {}", uuid::is_valid("not-a-uuid"))
+println(f"v4 valid: {uuid::is_valid(id4)}")
+println(f"v7 valid: {uuid::is_valid(id7)}")
+println(f"garbage valid: {uuid::is_valid("not-a-uuid")}")
 
 let mixed_case = "550E8400-E29B-41D4-A716-446655440000"
-println("normalize: {}", uuid::normalize(mixed_case))
-println("simple: {}", uuid::simple(mixed_case))
+println(f"normalize: {uuid::normalize(mixed_case)}")
+println(f"simple: {uuid::simple(mixed_case)}")
 
 let two_uniques = uuid::v4() != uuid::v4()
-println("two v4s differ: {}", two_uniques)
+println(f"two v4s differ: {two_uniques}")

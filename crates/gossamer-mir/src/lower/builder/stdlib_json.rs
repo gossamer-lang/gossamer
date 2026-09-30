@@ -305,6 +305,7 @@ impl<'a> Builder<'a> {
             let rt_name = match last {
                 "String" => "gos_rt_json_value_string",
                 "Int" => "gos_rt_json_value_int",
+                "Float" => "gos_rt_json_value_float",
                 "Bool" => "gos_rt_json_value_bool",
                 "Null" => "gos_rt_json_value_null",
                 "Array" => "gos_rt_json_value_array",
@@ -313,7 +314,21 @@ impl<'a> Builder<'a> {
             };
             let mut arg_locals = Vec::with_capacity(args.len());
             for arg in args {
-                arg_locals.push(self.lower_expr(arg)?);
+                let local = self.lower_expr(arg)?;
+                // The array and object constructors read a `Vec` header, so a
+                // fixed array crosses as the `Vec` of its elements.
+                let local = match self.tcx.kind_of(arg.ty).clone() {
+                    gossamer_types::TyKind::Array { elem, len }
+                        if matches!(
+                            rt_name,
+                            "gos_rt_json_value_array" | "gos_rt_json_value_object"
+                        ) =>
+                    {
+                        self.fixed_array_to_vec(local, elem, len, span)
+                    }
+                    _ => local,
+                };
+                arg_locals.push(local);
             }
             let ret_ty = self.tcx.json_value_ty();
             let dest = self.fresh(ret_ty);

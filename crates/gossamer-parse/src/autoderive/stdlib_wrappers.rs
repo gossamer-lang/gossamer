@@ -188,11 +188,17 @@ fn synthesize_stdlib_wrappers(source: &str) -> String {
     {
         stdlib_wrappers.push_str(SYNC_TIMEOUT_WRAPPERS);
     }
-    if item_imported(TIME_CIVIL_WRAPPERS)
+    let wants_time = item_imported(TIME_TIME_WRAPPERS)
+        || (mentions_path(source, "time::Time") && from_std("time"));
+    if wants_time
+        || item_imported(TIME_CIVIL_WRAPPERS)
         || (TIME_CIVIL_MARKERS.iter().any(|marker| source.contains(marker))
             && from_std("time"))
     {
         stdlib_wrappers.push_str(TIME_CIVIL_WRAPPERS);
+    }
+    if wants_time {
+        stdlib_wrappers.push_str(TIME_TIME_WRAPPERS);
     }
     stdlib_wrappers
 }
@@ -328,6 +334,211 @@ fn __gos_time_format_in(layout: String, unix_ms: i64, location: __gos_time_Locat
 }
 fn __gos_time_add_date(unix_ms: i64, location: __gos_time_Location, years: i64, months: i64, days: i64) -> Result<i64, errors::Error> {
     __gos_time_add_date_raw(unix_ms, location.spec, years, months, days)
+}
+"#;
+
+/// `time::Time`: a wall-clock instant in nanoseconds since the Unix epoch
+/// together with the location it is read in. Arithmetic takes a
+/// `Duration`, two instants subtract to one, and RFC 3339 text keeps the
+/// offset it was written with. Written over the civil-time wrappers, so
+/// every tier runs the same code.
+const TIME_TIME_WRAPPERS: &str = r#"
+struct __gos_time_Time { unix_ns: i64, location: __gos_time_Location }
+fn __gos_time_floor_div(n: i64, d: i64) -> i64 {
+    if n >= 0 { n / d } else { 0 - ((0 - n + d - 1) / d) }
+}
+fn __gos_time_days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year }
+    let era = __gos_time_floor_div(y, 400)
+    let yoe = y - era * 400
+    let mp = (month + 9) % 12
+    let doy = (153 * mp + 2) / 5 + day - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+fn __gos_time_digits(text: String, at: i64, count: i64) -> Result<i64, errors::Error> {
+    let mut value = 0
+    let mut i = 0
+    while i < count {
+        let b = text.byte_at(at + i)
+        if b < 48 || b > 57 {
+            return Err(errors::new(format("time::Time::parse_rfc3339: expected a digit at byte {} of `{}`", at + i, text)))
+        }
+        value = value * 10 + (b - 48)
+        i += 1
+    }
+    Ok(value)
+}
+fn __gos_time_days_in_month(year: i64, month: i64) -> i64 {
+    if month == 2 {
+        if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 { 29 } else { 28 }
+    } else if month == 4 || month == 6 || month == 9 || month == 11 {
+        30
+    } else {
+        31
+    }
+}
+fn __gos_time_two(n: i64) -> String {
+    if n < 10 { format("0{}", n) } else { format("{}", n) }
+}
+impl __gos_time_Time {
+    fn now() -> __gos_time_Time {
+        __gos_time_Time { unix_ns: time::now_nanos(), location: __gos_time_Location::utc() }
+    }
+    fn from_unix(secs: i64) -> __gos_time_Time {
+        __gos_time_Time { unix_ns: secs * 1000000000, location: __gos_time_Location::utc() }
+    }
+    fn from_unix_ms(ms: i64) -> __gos_time_Time {
+        __gos_time_Time { unix_ns: ms * 1000000, location: __gos_time_Location::utc() }
+    }
+    fn from_unix_nanos(ns: i64) -> __gos_time_Time {
+        __gos_time_Time { unix_ns: ns, location: __gos_time_Location::utc() }
+    }
+    fn unix(&self) -> i64 { __gos_time_floor_div(self.unix_ns, 1000000000) }
+    fn unix_ms(&self) -> i64 { __gos_time_floor_div(self.unix_ns, 1000000) }
+    fn unix_nanos(&self) -> i64 { self.unix_ns }
+    fn location(&self) -> __gos_time_Location { self.location }
+    fn in_location(&self, location: __gos_time_Location) -> __gos_time_Time {
+        __gos_time_Time { unix_ns: self.unix_ns, location: location }
+    }
+    fn utc(&self) -> __gos_time_Time {
+        __gos_time_Time { unix_ns: self.unix_ns, location: __gos_time_Location::utc() }
+    }
+    fn civil(&self) -> Result<__gos_time_CivilTime, errors::Error> {
+        let mut c = self.location.civil(self.unix_ms())?
+        c.nanosecond = self.unix_ns - __gos_time_floor_div(self.unix_ns, 1000000000) * 1000000000
+        Ok(c)
+    }
+    fn duration_since(&self, earlier: __gos_time_Time) -> time::Duration {
+        time::Duration::from_nanos(self.unix_ns - earlier.unix_ns)
+    }
+    fn before(&self, other: __gos_time_Time) -> bool { self.unix_ns < other.unix_ns }
+    fn after(&self, other: __gos_time_Time) -> bool { self.unix_ns > other.unix_ns }
+    fn eq(&self, other: __gos_time_Time) -> bool { self.unix_ns == other.unix_ns }
+    fn cmp(&self, other: __gos_time_Time) -> i64 {
+        if self.unix_ns < other.unix_ns { -1 } else if self.unix_ns > other.unix_ns { 1 } else { 0 }
+    }
+    fn parse_rfc3339(text: String) -> Result<__gos_time_Time, errors::Error> {
+        let n = text.byte_len()
+        if n < 20 {
+            return Err(errors::new(format("time::Time::parse_rfc3339: `{}` is too short for RFC 3339", text)))
+        }
+        let year = __gos_time_digits(text, 0, 4)?
+        let month = __gos_time_digits(text, 5, 2)?
+        let day = __gos_time_digits(text, 8, 2)?
+        let hour = __gos_time_digits(text, 11, 2)?
+        let minute = __gos_time_digits(text, 14, 2)?
+        let second = __gos_time_digits(text, 17, 2)?
+        let t = text.byte_at(10)
+        if text.byte_at(4) != 45 || text.byte_at(7) != 45 || (t != 84 && t != 116 && t != 32) || text.byte_at(13) != 58 || text.byte_at(16) != 58 {
+            return Err(errors::new(format("time::Time::parse_rfc3339: `{}` is not `YYYY-MM-DDTHH:MM:SS`", text)))
+        }
+        if month < 1 || month > 12 || day < 1 || day > __gos_time_days_in_month(year, month) || hour > 23 || minute > 59 || second > 59 {
+            return Err(errors::new(format("time::Time::parse_rfc3339: `{}` names no calendar instant", text)))
+        }
+        let mut at = 19
+        let mut nanos = 0
+        if at < n && text.byte_at(at) == 46 {
+            at += 1
+            let mut digits = 0
+            while at < n && text.byte_at(at) >= 48 && text.byte_at(at) <= 57 {
+                if digits < 9 {
+                    nanos = nanos * 10 + (text.byte_at(at) - 48)
+                    digits += 1
+                }
+                at += 1
+            }
+            if digits == 0 {
+                return Err(errors::new(format("time::Time::parse_rfc3339: `{}` has an empty fraction", text)))
+            }
+            while digits < 9 {
+                nanos *= 10
+                digits += 1
+            }
+        }
+        if at >= n {
+            return Err(errors::new(format("time::Time::parse_rfc3339: `{}` has no offset", text)))
+        }
+        let zone = text.byte_at(at)
+        let mut offset = 0
+        let mut utc = false
+        if zone == 90 || zone == 122 {
+            utc = true
+            at += 1
+        } else if (zone == 43 || zone == 45) && at + 6 == n && text.byte_at(at + 3) == 58 {
+            let oh = __gos_time_digits(text, at + 1, 2)?
+            let om = __gos_time_digits(text, at + 4, 2)?
+            if oh > 23 || om > 59 {
+                return Err(errors::new(format("time::Time::parse_rfc3339: `{}` has an offset out of range", text)))
+            }
+            offset = oh * 3600 + om * 60
+            if zone == 45 {
+                offset = 0 - offset
+            }
+            at += 6
+        } else {
+            return Err(errors::new(format("time::Time::parse_rfc3339: `{}` has no valid offset", text)))
+        }
+        if at != n {
+            return Err(errors::new(format("time::Time::parse_rfc3339: `{}` has text after the offset", text)))
+        }
+        let days = __gos_time_days_from_civil(year, month, day)
+        let secs = days * 86400 + hour * 3600 + minute * 60 + second - offset
+        let location = if utc { __gos_time_Location::utc() } else { __gos_time_Location::fixed(offset)? }
+        Ok(__gos_time_Time { unix_ns: secs * 1000000000 + nanos, location: location })
+    }
+    fn format_rfc3339(&self) -> Result<String, errors::Error> {
+        let c = self.civil()?
+        let mut out = format("{:04}-{}-{}T{}:{}:{}", c.year, __gos_time_two(c.month), __gos_time_two(c.day), __gos_time_two(c.hour), __gos_time_two(c.minute), __gos_time_two(c.second))
+        if c.nanosecond != 0 {
+            let mut frac = format("{:09}", c.nanosecond)
+            while frac.ends_with("0") {
+                frac = frac.substring(0, frac.byte_len() - 1)
+            }
+            out += "."
+            out += frac
+        }
+        if c.offset_seconds == 0 && self.location.spec == "UTC" {
+            out += "Z"
+        } else {
+            let sign = if c.offset_seconds < 0 { "-" } else { "+" }
+            let a = if c.offset_seconds < 0 { 0 - c.offset_seconds } else { c.offset_seconds }
+            out += format("{}{}:{}", sign, __gos_time_two(a / 3600), __gos_time_two((a % 3600) / 60))
+        }
+        Ok(out)
+    }
+}
+impl Add<time::Duration> for __gos_time_Time {
+    fn add(self, d: time::Duration) -> __gos_time_Time {
+        __gos_time_Time { unix_ns: self.unix_ns + d.as_nanos(), location: self.location }
+    }
+}
+impl Sub<time::Duration> for __gos_time_Time {
+    fn sub(self, d: time::Duration) -> __gos_time_Time {
+        __gos_time_Time { unix_ns: self.unix_ns - d.as_nanos(), location: self.location }
+    }
+}
+impl Sub for __gos_time_Time {
+    type Output = time::Duration
+    fn sub(self, other: __gos_time_Time) -> time::Duration {
+        time::Duration::from_nanos(self.unix_ns - other.unix_ns)
+    }
+}
+impl Display for __gos_time_Time {
+    fn fmt(&self) -> String {
+        match self.format_rfc3339() {
+            Ok(text) => text,
+            Err(_) => format("{}ns", self.unix_ns),
+        }
+    }
+}
+impl Debug for __gos_time_Time {
+    fn fmt(&self) -> String {
+        match self.format_rfc3339() {
+            Ok(text) => format("Time({})", text),
+            Err(_) => format("Time({}ns)", self.unix_ns),
+        }
+    }
 }
 "#;
 

@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::ffi::CStr;
@@ -70,9 +68,8 @@ pub unsafe extern "C" fn gos_rt_set_args(argc: c_int, argv: *const *const c_char
         #[cfg(not(target_arch = "wasm32"))]
         startup_trace("runtime_init", startup_started.elapsed());
         // Capture argv[0] as the program name whenever argv has any
-        // entries - previously this only happened when argc > 1, so
-        // a binary run with no user args had `env::program_name()`
-        // return null and stringify to an empty string.
+        // entries, so `env::program_name()` answers it even with no user
+        // arguments.
         if argc >= 1 && !argv.is_null() {
             // SAFETY: libc guarantees argv[0..argc] is valid when
             // argc >= 1. The pointer at `*argv` is the program name.
@@ -84,6 +81,8 @@ pub unsafe extern "C" fn gos_rt_set_args(argc: c_int, argv: *const *const c_char
                 // as an RC header. The stored copy holds the base reference for
                 // the process lifetime (I4: string boundaries own their values).
                 // HOST-CSTRING: libc owns `argv[0]`.
+                // SAFETY: `name_ptr` is `argv[0]`, non-null (checked above), a NUL-terminated
+                // string libc keeps for the process.
                 let bytes = unsafe { CStr::from_ptr(name_ptr).to_bytes() };
                 let owned = alloc_cstring(bytes);
                 PROGRAM_NAME_PTR.store(owned as usize, Ordering::SeqCst);
@@ -114,7 +113,7 @@ pub unsafe extern "C" fn gos_rt_set_args(argc: c_int, argv: *const *const c_char
             // tagged copies makes every RC op land on a real header; the vec
             // holds the base reference for the process lifetime (I4: string
             // boundaries own their values), mirroring the `argv[0]` copy above.
-            let vec = unsafe { gos_rt_vec_new_typed(8, vec_elem_kind::STRING) };
+            let vec = gos_rt_vec_new_typed(8, vec_elem_kind::STRING);
             if !vec.is_null() {
                 for i in 0..len {
                     // SAFETY: `user_argv[0..len]` is valid (see above).
@@ -123,9 +122,13 @@ pub unsafe extern "C" fn gos_rt_set_args(argc: c_int, argv: *const *const c_char
                     let bytes = if p.is_null() {
                         &b""[..]
                     } else {
+                        // SAFETY: `p` is a non-null `argv` entry (checked above), a
+                        // NUL-terminated string libc keeps for the process.
                         unsafe { CStr::from_ptr(p).to_bytes() }
                     };
                     let cs = alloc_cstring(bytes) as i64;
+                    // SAFETY: `vec` is the fresh non-null vec made above, and `cs` is one 8-byte
+                    // element.
                     unsafe { gos_rt_vec_push(vec, std::ptr::addr_of!(cs).cast::<u8>()) };
                 }
             }
@@ -137,7 +140,7 @@ pub unsafe extern "C" fn gos_rt_set_args(argc: c_int, argv: *const *const c_char
             // `Vec<String>` so callers iterating `for a in env::args()` see
             // len=0 instead of dereferencing a null header, and so the
             // element kind matches the populated branch.
-            let vec = unsafe { gos_rt_vec_new_typed(8, vec_elem_kind::STRING) };
+            let vec = gos_rt_vec_new_typed(8, vec_elem_kind::STRING);
             ARGS_VEC.store(vec as usize, Ordering::SeqCst);
         }
         #[cfg(not(target_arch = "wasm32"))]
@@ -238,6 +241,8 @@ fn runtime_init() {
         // `signal` foreign function; SIGPIPE delivery is moot in the
         // interpreter anyway.
         #[cfg(all(unix, not(miri)))]
+        // SAFETY: `signal` with `SIG_IGN` installs no handler code; it only changes the
+        // disposition of `SIGPIPE`.
         unsafe {
             libc::signal(libc::SIGPIPE, libc::SIG_IGN);
         }
@@ -306,6 +311,9 @@ pub unsafe extern "C" fn gos_rt_os_args() -> *mut GosVec {
 /// knows the script path (e.g. `gos run examples/cat.gos`). The
 /// provided string is copied into a leaked `CString` so the pointer
 /// is process-lifetime safe.
+///
+/// # Safety
+/// `name` is null or a NUL-terminated string live for the call.
 pub unsafe fn set_program_name(name: *const c_char) {
     ffi_entry!((), {
         if name.is_null() {
@@ -313,6 +321,8 @@ pub unsafe fn set_program_name(name: *const c_char) {
         }
         // HOST-CSTRING: the interpreter passes a Rust `CString` for the script
         // path, not a Gossamer `String`.
+        // SAFETY: `name` is non-null (checked above), and the interpreter passes a NUL-terminated
+        // `CString` (this function's contract).
         let bytes = unsafe { CStr::from_ptr(name).to_bytes() };
         let owned = alloc_cstring(bytes);
         PROGRAM_NAME_PTR.store(owned as usize, Ordering::SeqCst);
@@ -333,7 +343,7 @@ pub unsafe extern "C" fn gos_rt_os_program_name() -> *const c_char {
 /// on Windows. Mirrors Rust's `std::env::temp_dir`; the caller owns
 /// the returned String.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_env_temp_dir() -> *const c_char {
+pub extern "C" fn gos_rt_env_temp_dir() -> *const c_char {
     ffi_entry!(std::ptr::null(), {
         let path = crate::platform::temp_dir();
         let bytes = path.to_string_lossy();
@@ -347,10 +357,12 @@ pub unsafe extern "C" fn gos_rt_env_temp_dir() -> *const c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_env_vars() -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { crate::c_abi::map::gos_rt_map_new(8, 8) };
+        let out = crate::c_abi::map::gos_rt_map_new(8, 8);
         for (name, value) in std::env::vars() {
             let key = alloc_cstring(name.as_bytes());
             let val = alloc_cstring(value.as_bytes());
+            // SAFETY: `out` is the fresh map made above, or null, which
+            // `gos_rt_map_insert_str_str` accepts, and `key` and `val` are fresh strings.
             unsafe { crate::c_abi::map::gos_rt_map_insert_str_str(out, key, val) };
         }
         out
@@ -362,7 +374,7 @@ pub unsafe extern "C" fn gos_rt_env_vars() -> *mut GosMap {
 /// payload's disc-0/disc-1 convention mirrors `gos_rt_os_env` so
 /// `if let Some(h) = env::home_dir()` works the same way.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_env_home_dir() -> i128 {
+pub extern "C" fn gos_rt_env_home_dir() -> i128 {
     ffi_entry!(0i128, {
         #[allow(
             deprecated,
@@ -372,9 +384,9 @@ pub unsafe extern "C" fn gos_rt_env_home_dir() -> i128 {
             Some(path) => {
                 let bytes = path.to_string_lossy();
                 let cs = alloc_cstring(bytes.as_bytes());
-                unsafe { gos_rt_result_new(0, cs as i64) }
+                gos_rt_result_new(0, cs as i64)
             }
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -385,15 +397,16 @@ pub unsafe extern "C" fn gos_rt_env_home_dir() -> i128 {
 pub unsafe extern "C" fn gos_rt_os_env(name: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if name.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
         let key = unsafe { crate::c_abi::gos_str_arg_string(name) };
         match std::env::var(&key) {
             Ok(value) => {
                 let cs = alloc_cstring(value.as_bytes());
-                unsafe { gos_rt_result_new(0, cs as i64) }
+                gos_rt_result_new(0, cs as i64)
             }
-            Err(_) => unsafe { gos_rt_result_new(1, 0) },
+            Err(_) => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -401,17 +414,17 @@ pub unsafe extern "C" fn gos_rt_os_env(name: *const c_char) -> i128 {
 /// `os::cwd() -> Result<String, errors::Error>`. Compiled tier
 /// returns a `*mut GosResult` (disc 0 = Ok, 1 = Err).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_os_cwd() -> i128 {
+pub extern "C" fn gos_rt_os_cwd() -> i128 {
     ffi_entry!(0i128, {
         match std::env::current_dir() {
             Ok(path) => {
                 let cs = alloc_cstring(path.to_string_lossy().as_bytes());
-                unsafe { gos_rt_result_new(0, cs as i64) }
+                gos_rt_result_new(0, cs as i64)
             }
             Err(e) => {
                 let msg = format!("cwd: {e}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -599,22 +612,26 @@ pub unsafe extern "C" fn gos_rt_fs_read_dir_raw(path: *const c_char) -> i128 {
         let p = if path.is_null() {
             ".".to_string()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         match list_dir_data(&p) {
             Ok(entries) => {
-                let out = unsafe { gos_rt_vec_with_capacity(56, entries.len() as i64) };
+                let out = gos_rt_vec_with_capacity(56, entries.len() as i64);
                 for entry in &entries {
                     let words = dir_entry_words(entry);
+                    // SAFETY: `out` is the fresh vec of 56-byte elements made above, or null,
+                    // which `gos_rt_vec_push` accepts, and `words` is one 56-byte element.
                     unsafe { gos_rt_vec_push(out, words.as_ptr().cast::<u8>()) };
                 }
-                crate::c_abi::vec::vec_set_slot_children(out, &DIR_ENTRY_SLOT_CHILDREN);
-                unsafe { gos_rt_result_new(0, out as i64) }
+                // SAFETY: `out` is the live vec built above.
+                unsafe { crate::c_abi::vec::vec_set_slot_children(out, &DIR_ENTRY_SLOT_CHILDREN) };
+                gos_rt_result_new(0, out as i64)
             }
             Err(e) => {
                 let msg = format!("fs::read_dir({p}): {e}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -673,24 +690,34 @@ pub unsafe extern "C" fn gos_rt_fs_walk_dir_raw(path: *const c_char, env: *const
         let root = if path.is_null() {
             ".".to_string()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         if env.is_null() {
-            return unsafe { gos_rt_result_new(0, 0) };
+            return gos_rt_result_new(0, 0);
         }
         type VisitFn = unsafe extern "C" fn(env: *const u8, entry: i64) -> i128;
+        // SAFETY: `env` is non-null (checked above) and a live closure environment, whose first
+        // word is the body address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
         if fn_addr_raw == 0 {
-            return unsafe { gos_rt_result_new(0, 0) };
+            return gos_rt_result_new(0, 0);
         }
         super::fn_registry::verify(fn_addr_raw, super::fn_registry::FnKind::WalkVisit);
-        let visit: VisitFn = unsafe { std::mem::transmute(fn_addr_raw) };
+        // SAFETY: the address is a compiled visitor of `VisitFn`'s signature (C-ABI contract),
+        // which `fn_registry::verify` has checked.
+        let visit: VisitFn =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr_raw)) };
         let result = walk_dir_visit(&root, |info| {
             // The visitor reads the entry without keeping it, so the blob's
             // share is given back once it has answered; a field it keeps takes
             // a share of its own.
             let blob = crate::c_abi::rc::counted_words(&dir_entry_words(info), &DIR_ENTRY_META);
+            // SAFETY: `visit` is the visitor whose environment `env` is live for the call, and
+            // `blob` is a live counted entry.
             let r = unsafe { visit(env, blob as i64) };
+            // SAFETY: `blob` holds the share `counted_words` minted, which the visitor did not
+            // keep.
             unsafe { crate::c_abi::rc::gos_rt_rc_release(blob) };
             if super::vec::result_disc_of(r) == 0 {
                 Ok(())
@@ -699,11 +726,11 @@ pub unsafe extern "C" fn gos_rt_fs_walk_dir_raw(path: *const c_char, env: *const
             }
         });
         match result {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
-            Ok(Err(payload)) => unsafe { gos_rt_result_new(1, payload) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
+            Ok(Err(payload)) => gos_rt_result_new(1, payload),
             Err(e) => {
                 let err = crate::c_abi::errors::error_new_from_bytes(format!("{e}").as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -719,6 +746,7 @@ pub unsafe extern "C" fn gos_rt_os_exists(path: *const c_char) -> i64 {
         if path.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         i64::from(std::path::Path::new(&p).exists())
     })
@@ -731,6 +759,7 @@ pub unsafe extern "C" fn gos_rt_os_is_file(path: *const c_char) -> i64 {
         if path.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         i64::from(std::fs::metadata(&p).is_ok_and(|m| m.is_file()))
     })
@@ -743,6 +772,7 @@ pub unsafe extern "C" fn gos_rt_os_is_dir(path: *const c_char) -> i64 {
         if path.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         i64::from(std::fs::metadata(&p).is_ok_and(|m| m.is_dir()))
     })
@@ -755,6 +785,7 @@ pub unsafe extern "C" fn gos_rt_os_is_symlink(path: *const c_char) -> i64 {
         if path.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         i64::from(std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()))
     })
@@ -768,6 +799,7 @@ pub unsafe extern "C" fn gos_rt_os_file_size(path: *const c_char) -> i64 {
         if path.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         std::fs::metadata(&p).map_or(0, |m| i64::try_from(m.len()).unwrap_or(i64::MAX))
     })
@@ -789,18 +821,19 @@ pub unsafe extern "C" fn gos_rt_fs_metadata(path: *const c_char) -> i128 {
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("fs::metadata: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         match std::fs::metadata(&p) {
             Ok(m) => {
                 let size = i64::try_from(m.len()).unwrap_or(i64::MAX);
-                unsafe { gos_rt_result_new(0, size) }
+                gos_rt_result_new(0, size)
             }
             Err(e) => {
                 let msg = format!("fs::metadata({p}): {e}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -818,8 +851,9 @@ pub unsafe extern "C" fn gos_rt_fs_metadata_raw(path: *const c_char) -> i128 {
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("fs::metadata: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         match std::fs::metadata(&p) {
             Ok(m) => {
@@ -842,14 +876,14 @@ pub unsafe extern "C" fn gos_rt_fs_metadata_raw(path: *const c_char) -> i128 {
                     let err = crate::c_abi::errors::error_new_from_bytes(
                         "fs::metadata: alloc failed".as_bytes(),
                     );
-                    return unsafe { gos_rt_result_new(1, err as i64) };
+                    return gos_rt_result_new(1, err as i64);
                 }
-                unsafe { gos_rt_result_new(0, blob as i64) }
+                gos_rt_result_new(0, blob as i64)
             }
             Err(e) => {
                 let msg = format!("fs::metadata({p}): {e}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -889,6 +923,8 @@ pub(crate) static OUTPUT_META: [i64; 6] = [
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_run_raw(prog: *const c_char, args: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `prog` and `args` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `exec_run_with` accepts with no directory or environment.
         unsafe {
             exec_run_with(
                 "exec::run",
@@ -916,11 +952,17 @@ pub unsafe extern "C" fn gos_rt_exec_run_in_raw(
     env: *mut GosVec,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `prog`, `args`, `dir`, and `env` are this shim's arguments, each null or live
+        // for the call (C-ABI contract), which `exec_run_with` accepts.
         unsafe { exec_run_with("process::run_in", prog, args, dir, env) }
     })
 }
 
 /// Runs a child and packs its output, for whichever entry point asked.
+///
+/// # Safety
+/// `prog` and `dir` are each null or a live string, and `args` and `env`
+/// each null or a live `Vec` of the shapes the entry points name.
 unsafe fn exec_run_with(
     operation: &str,
     prog: *const c_char,
@@ -931,37 +973,24 @@ unsafe fn exec_run_with(
     let prog_str = if prog.is_null() {
         let msg = format!("{operation}: program is null");
         let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-        return unsafe { gos_rt_result_new(1, err as i64) };
+        return gos_rt_result_new(1, err as i64);
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `prog` live or null, which
+        // `gos_str_arg_string` accepts.
         unsafe { crate::c_abi::gos_str_arg_string(prog) }
     };
-    let mut cmd_args: Vec<String> = Vec::new();
-    if !args.is_null() {
-        let v = unsafe { &*args };
-        let elem_bytes = v.elem_bytes as usize;
-        if elem_bytes != 0 && !v.ptr.is_null() {
-            for i in 0..v.len {
-                let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
-                let cstr_ptr = unsafe {
-                    crate::c_abi::vec::slot_read_word(slot)
-                        .cast_const()
-                        .cast::<c_char>()
-                };
-                if cstr_ptr.is_null() {
-                    cmd_args.push(String::new());
-                    continue;
-                }
-                let arg_str = unsafe { crate::c_abi::gos_str_arg_string(cstr_ptr) };
-                cmd_args.push(arg_str);
-            }
-        }
-    }
+    // SAFETY: this `unsafe fn`'s caller passes `args` null or a live `Vec<String>`, which
+    // `argv_strings` accepts.
+    let cmd_args = unsafe { crate::c_abi::exec::argv_strings(args) };
     let working_directory = if dir.is_null() {
         String::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `dir` live or null, which `gos_str_arg_string`
+        // accepts.
         unsafe { crate::c_abi::gos_str_arg_string(dir) }
     };
-    let environment = crate::c_abi::vec::decode_header_tuple_vec(env);
+    // SAFETY: this function's contract covers `env`, as `decode_header_tuple_vec` requires.
+    let environment = unsafe { crate::c_abi::vec::decode_header_tuple_vec(env) };
     let display_prog = prog_str.clone();
     let operation = operation.to_string();
     let reported = operation.clone();
@@ -991,19 +1020,19 @@ unsafe fn exec_run_with(
                 let err = crate::c_abi::errors::error_new_from_bytes(
                     format!("{reported}({display_prog}): out of memory").as_bytes(),
                 );
-                return unsafe { gos_rt_result_new(1, err as i64) };
+                return gos_rt_result_new(1, err as i64);
             }
-            unsafe { gos_rt_result_new(0, blob as i64) }
+            gos_rt_result_new(0, blob as i64)
         }
         Ok(Err(e)) => {
             let msg = format!("{reported}({display_prog}): {e}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            unsafe { gos_rt_result_new(1, err as i64) }
+            gos_rt_result_new(1, err as i64)
         }
         Err(e) => {
             let msg = format!("{reported}({display_prog}): {e}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            unsafe { gos_rt_result_new(1, err as i64) }
+            gos_rt_result_new(1, err as i64)
         }
     }
 }
@@ -1051,20 +1080,32 @@ mod args_tests {
         let base = block.as_ptr();
         let argv: Vec<*const c_char> = offsets
             .iter()
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             .map(|&o| unsafe { base.add(o) }.cast::<c_char>())
             .collect();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_set_args(argv.len() as c_int, argv.as_ptr()) };
 
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec = unsafe { gos_rt_os_args() };
         assert!(!vec.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let len = unsafe { gos_rt_vec_len(vec) };
         assert_eq!(len, 5, "argv[0] is the program name; 5 user args remain");
 
         // Every element is a gos-owned (tagged) string: RC dispatch reads a
         // real header instead of fabricating one from libc bytes.
         for i in 0..len {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let p = unsafe { gos_rt_vec_get_i64(vec, i) } as *const c_char;
             assert!(
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { crate::c_abi::string::is_gos_string(p) },
                 "arg {i} must be a gos-owned string, not a raw argv pointer"
             );
@@ -1073,13 +1114,25 @@ mod args_tests {
         // Retaining and releasing every other arg must leave arg 0 byte-for-byte
         // intact - on the raw-pointer design the retain wrote an RC header into
         // the contiguous neighbour and mutated it.
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let arg0 = unsafe { gos_rt_vec_get_i64(vec, 0) } as *const c_char;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let before = unsafe { CStr::from_ptr(arg0) }.to_bytes().to_vec();
         for i in 1..len {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let p = unsafe { gos_rt_vec_get_i64(vec, i) } as *mut u8;
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_rc_retain(p) };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_rc_release(p) };
         }
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let after = unsafe { CStr::from_ptr(arg0) }.to_bytes().to_vec();
         assert_eq!(before, after, "retaining neighbours must not mutate arg 0");
         assert_eq!(after, b"Qwen3.6-35B");

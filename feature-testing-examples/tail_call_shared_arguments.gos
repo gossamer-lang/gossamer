@@ -1,0 +1,25 @@
+// Two arguments of one call in tail position read the same register; each
+// receives the value, on every tier.
+
+impl i64 {
+    fn twice(&self) -> String { format("{}{}", self, self) }
+}
+impl char {
+    fn twice(&self) -> String { format("{}|{}", self, self) }
+}
+impl String {
+    fn twice(&self) -> String { format("{}+{}", self, self) }
+}
+impl bool {
+    fn twice(&self) -> String { format("{}{}", self, self) }
+}
+
+fn total(a: Vec<i64>, b: Vec<i64>) -> i64 { a.len() * 10 + b.len() }
+
+fn pair(v: Vec<i64>) -> i64 { total(v, v) }
+
+fn main() {
+    let n: i64 = 7
+    println("{} {} {} {}", n.twice(), 'q'.twice(), "ab".twice(), true.twice())
+    println("{}", pair(#[1, 2, 3]))
+}

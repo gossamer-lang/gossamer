@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::wildcard_imports)]
 
@@ -35,7 +34,12 @@ use std::os::raw::c_char;
 use super::*;
 
 /// Owns a borrowed C-string into a Rust `String`; null → empty.
-fn cstr_to_string(p: *const c_char) -> String {
+///
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_string(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -53,8 +57,11 @@ pub unsafe extern "C" fn gos_rt_http_request_set_value(
         if req.is_null() {
             return req;
         }
-        let k = cstr_to_string(key);
-        let v = cstr_to_string(value);
+        // SAFETY: `key` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let k = unsafe { cstr_to_string(key) };
+        // SAFETY: `value` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let v = unsafe { cstr_to_string(value) };
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &mut *req };
         r.values.retain(|(ek, _)| *ek != k);
         r.values.push((k, v));
@@ -75,7 +82,9 @@ pub unsafe extern "C" fn gos_rt_http_request_value(
         if req.is_null() || key.is_null() {
             return alloc_cstring(b"");
         }
-        let wanted = cstr_to_string(key);
+        // SAFETY: `key` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let wanted = unsafe { cstr_to_string(key) };
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &*req };
         let found = r
             .values
@@ -111,7 +120,9 @@ pub unsafe extern "C" fn gos_rt_http_request_form_value(
         if req.is_null() || key.is_null() {
             return alloc_cstring(b"");
         }
-        let wanted = cstr_to_string(key);
+        // SAFETY: `key` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let wanted = unsafe { cstr_to_string(key) };
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let body = crate::c_abi::http_client::request_body_slice(unsafe { &*req });
         let body = std::str::from_utf8(body).unwrap_or("");
         alloc_cstring(form_lookup(body, &wanted).as_bytes())
@@ -125,10 +136,11 @@ pub unsafe extern "C" fn gos_rt_http_request_form_value(
 /// `(String, String)` pair pointer), mirroring `gos_rt_str_split_once`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpRequest) -> i128 {
-    ffi_entry!(unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) }, {
+    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
         if req.is_null() {
-            return unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) };
+            return crate::c_abi::vec::gos_rt_result_new(1, 0);
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &*req };
         let header = r
             .headers
@@ -136,7 +148,7 @@ pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpReque
             .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
             .map_or("", |(_, v)| v.as_str());
         let Some((user, pass)) = decode_basic_credentials(header) else {
-            return unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) };
+            return crate::c_abi::vec::gos_rt_result_new(1, 0);
         };
         #[repr(C)]
         struct Pair {
@@ -147,7 +159,7 @@ pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpReque
             a: alloc_cstring(user.as_bytes()) as i64,
             b: alloc_cstring(pass.as_bytes()) as i64,
         }));
-        unsafe { crate::c_abi::vec::gos_rt_result_new(0, pair as i64) }
+        crate::c_abi::vec::gos_rt_result_new(0, pair as i64)
     })
 }
 

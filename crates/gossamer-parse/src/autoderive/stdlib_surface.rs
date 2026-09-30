@@ -214,6 +214,7 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
             let public_type = path.segments[n - 2].name.name.as_str();
             if let Some(mangled) = match public_type {
                 "Location" => Some("__gos_time_Location"),
+                "Time" => Some("__gos_time_Time"),
                 "CivilResolution" => Some("__gos_time_CivilResolution"),
                 _ => None,
             } {

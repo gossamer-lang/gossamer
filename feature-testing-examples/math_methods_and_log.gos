@@ -13,7 +13,7 @@ fn methods() {
     println("{} {} {} {}", g.hypot(f), g.is_nan(), g.log10(), g.log2())
     println("{} {} {} {}", g.positive_diff(f), g.pow(2.0), g.rem(f), g.round())
     println("{} {} {} {}", f.sinh(), f.tan(), f.tanh(), g.trunc())
-    println("{} {} {}", n.pow(2.0), n.sqrt(), n.cbrt())
+    println("{} {} {}", (n as f64).pow(2.0), n.sqrt(), n.cbrt())
     println("{} {}", (-g).round(), (0.5).round())
 }
 

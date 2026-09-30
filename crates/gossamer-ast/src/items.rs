@@ -27,6 +27,11 @@ pub const STRUCTURAL_COMPARATOR_PREFIX: &str = "__gos_ord_";
 /// comparator.
 pub const BINARY_SEARCH_PREFIX: &str = "__gos_bsearch_";
 
+/// Prefix of the inherent method an operator impl with a right-hand type of
+/// its own becomes (`impl Mul<f64> for V2` -> `__gos_op_mul_f64`). The
+/// operator's method name and the right-hand type follow it.
+pub const OPERATOR_METHOD_PREFIX: &str = "__gos_op_";
+
 /// Name prefix of the synthesized sorted-sequence insertion-point search.
 pub const PARTITION_POINT_PREFIX: &str = "__gos_ppoint_";
 

@@ -32,11 +32,8 @@ use crate::sha256;
 use crate::tar;
 use crate::transport::{StaticTransport, Transport, TransportError};
 
-/// Default registry URL for the public Gossamer package server.
-pub const DEFAULT_REGISTRY_URL: &str = "https://pkg.gossamer.dev";
-
 /// Fetcher configuration.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct FetchOptions {
     /// When `true`, the fetcher refuses to populate cache entries it
     /// does not already have. Mirrors the SPEC §16.x `--offline` flag.
@@ -44,9 +41,10 @@ pub struct FetchOptions {
     /// When `true`, fetches a yanked registry version succeed.
     /// Default is to error with [`CacheError::Yanked`].
     pub allow_yanked: bool,
-    /// Registry URL used for catalogue lookups (e.g. download URLs
-    /// and sha256 pins). Defaults to [`DEFAULT_REGISTRY_URL`].
-    pub registry_url: String,
+    /// Registry URL used for catalogue lookups (e.g. download URLs and
+    /// sha256 pins). `None` when no registry is configured, which only a
+    /// registry dependency needs.
+    pub registry_url: Option<String>,
     /// Optional bearer token sent on registry requests. The CLI loads
     /// this from `~/.gossamer/credentials.toml`.
     pub auth_token: Option<String>,
@@ -66,23 +64,12 @@ impl std::fmt::Debug for FetchOptions {
     }
 }
 
-impl Default for FetchOptions {
-    fn default() -> Self {
-        Self {
-            offline: false,
-            allow_yanked: false,
-            registry_url: DEFAULT_REGISTRY_URL.to_string(),
-            auth_token: None,
-        }
-    }
-}
-
 impl FetchOptions {
     /// Builds a default `FetchOptions` with a registry URL set.
     #[must_use]
     pub fn with_registry(registry_url: impl Into<String>) -> Self {
         Self {
-            registry_url: registry_url.into(),
+            registry_url: Some(registry_url.into()),
             ..Self::default()
         }
     }
@@ -289,7 +276,7 @@ impl Fetcher {
 
     /// Downloads `url`, verifies its sha256, and - when `signature` is
     /// supplied (registry sources) - authenticates the publisher
-    /// signature over the raw bytes before unpacking. Both checks run
+    /// signature over that verified digest before unpacking. Both checks run
     /// before [`tar::unpack`], so a tampered or unsigned payload never
     /// reaches the filesystem.
     fn fetch_tarball(
@@ -309,11 +296,7 @@ impl Fetcher {
                 });
             }
             if let Some(check) = signature {
-                let mut file = File::open(&path).map_err(|e| CacheError::CacheIo {
-                    path: path.display().to_string(),
-                    reason: e.to_string(),
-                })?;
-                check.verify_reader(&resolved.id, &mut file)?;
+                check.verify_digest(&resolved.id, &actual)?;
             }
             let file = File::open(&path).map_err(|e| CacheError::CacheIo {
                 path: path.display().to_string(),
@@ -380,7 +363,7 @@ impl Fetcher {
                     .unwrap_or_else(|| "(no reason given)".to_string()),
             });
         }
-        let url = registry_download_url(&self.options.registry_url, &resolved.id, entry);
+        let url = registry_download_url(self.options.registry_url.as_deref(), &resolved.id, entry)?;
         let expected = entry.tarball_sha256.clone().ok_or_else(|| {
             CacheError::Unsupported(format!(
                 "{}: registry entry for {version} is missing a sha256 pin",
@@ -526,7 +509,8 @@ impl Write for HashingFile {
 
 /// Publisher-signature inputs for a registry tarball.
 struct SignatureCheck<'a> {
-    /// Hex ed25519 signature over the tarball bytes.
+    /// Hex ed25519 signature over the tarball's lowercase SHA-256 hex digest,
+    /// which is what `gos publish` signs.
     signature_hex: &'a str,
     /// Hex ed25519 public key the registry advertises.
     public_key_hex: &'a str,
@@ -535,14 +519,10 @@ struct SignatureCheck<'a> {
 }
 
 impl SignatureCheck<'_> {
-    /// Rejects a key that disagrees with the lockfile pin, then
-    /// verifies the signature over `bytes`. Public keys are not secret,
-    /// so the pin comparison need not be constant-time.
-    fn verify_reader<R: std::io::Read>(
-        &self,
-        id: &crate::id::ProjectId,
-        reader: &mut R,
-    ) -> Result<(), CacheError> {
+    /// Rejects a key that disagrees with the lockfile pin, then verifies
+    /// the signature over `digest`, the archive's verified SHA-256. Public
+    /// keys are not secret, so the pin comparison need not be constant-time.
+    fn verify_digest(&self, id: &crate::id::ProjectId, digest: &str) -> Result<(), CacheError> {
         if !self.trusted_key.eq_ignore_ascii_case(self.public_key_hex) {
             return Err(CacheError::KeyMismatch {
                 id: id.as_str().to_string(),
@@ -550,25 +530,30 @@ impl SignatureCheck<'_> {
                 offered: self.public_key_hex.to_string(),
             });
         }
-        crate::signing::verify_signature_hex_reader(self.public_key_hex, reader, self.signature_hex)
-            .map_err(|_| CacheError::SignatureInvalid(id.as_str().to_string()))
+        crate::signing::verify_signature_hex(
+            self.public_key_hex,
+            digest.to_ascii_lowercase().as_bytes(),
+            self.signature_hex,
+        )
+        .map_err(|_| CacheError::SignatureInvalid(id.as_str().to_string()))
     }
 }
 
 fn registry_download_url(
-    registry_url: &str,
+    registry_url: Option<&str>,
     id: &crate::id::ProjectId,
     entry: &CatalogueEntry,
-) -> String {
+) -> Result<String, CacheError> {
     if let Some(url) = &entry.download_url {
-        return url.clone();
+        return Ok(url.clone());
     }
-    format!(
+    let base = registry_url.ok_or_else(|| CacheError::NoRegistry(id.as_str().to_string()))?;
+    Ok(format!(
         "{base}/v1/download/{id}/{version}.tar",
-        base = registry_url.trim_end_matches('/'),
+        base = base.trim_end_matches('/'),
         id = id.as_str(),
         version = entry.version,
-    )
+    ))
 }
 
 fn map_transport_error(id: &crate::id::ProjectId, err: TransportError) -> CacheError {

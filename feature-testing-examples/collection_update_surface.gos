@@ -1,0 +1,38 @@
+// `Vec::retain`, `contains` on a range written in place, indexing a `Map`
+// to read and to update what it stores, and `expect` messages.
+
+struct Account { balance: i64, tags: Vec<String> }
+
+fn main() {
+    let mut xs = #[1, 2, 3, 4, 5, 6]
+    xs.retain(|v| v % 3 != 0)
+    println("{:?}", xs)
+    let mut words: Vec<String> = #["a", "bb", "ccc"]
+    words.retain(|w| w.len() != 2)
+    println("{:?}", words)
+
+    let x = 7
+    println("{} {} {} {}", (1..10).contains(x), (1..7).contains(x), (1..=7).contains(x), (8..).contains(x))
+    let grade = 83
+    let letter = if (90..=100).contains(grade) { 'A' } else if (80..90).contains(grade) { 'B' } else { 'C' }
+    println("{letter}")
+
+    let mut counts: Map<String, i64> = { "a": 1 }
+    counts["a"] += 5
+    counts["b"] = 10
+    println("{} {}", counts["a"], counts["b"])
+    let mut accounts: Map<String, Account> = Map::new()
+    accounts.insert("x", Account { balance: 10, tags: #[] })
+    accounts["x"].balance -= 3
+    accounts["x"].tags.push("vip")
+    println("{} {:?}", accounts["x"].balance, accounts["x"].tags)
+    let mut lists: Map<i64, Vec<i64>> = Map::new()
+    lists[1] = #[1]
+    lists[1].push(2)
+    println("{:?}", lists[1])
+
+    let found: Option<i64> = Some(4)
+    println("{}", found.expect("present"))
+    let parsed: Result<i64, String> = Ok(9)
+    println("{}", parsed.expect("parses"))
+}

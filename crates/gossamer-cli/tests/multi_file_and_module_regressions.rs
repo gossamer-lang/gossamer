@@ -1144,7 +1144,7 @@ use std::regex
 use std::testing
 
 fn empty_pattern() -> regex::Pattern {
-    regex::compile("").unwrap_or(regex::compile("a").unwrap())
+    regex::compile("")
 }
 
 pub fn substring(s: String, start: i64, end: i64) -> String {
@@ -1154,10 +1154,10 @@ pub fn substring(s: String, start: i64, end: i64) -> String {
     if a < 0 { a = 0 }
     if b > n { b = n }
     if a >= b { return "" }
-    let drop_pat = regex::compile(format("(?s)^.{{0,{}}}", a)).unwrap_or(empty_pattern())
+    let drop_pat = regex::new(format("(?s)^.{{0,{}}}", a)).unwrap_or(empty_pattern())
     let after = regex::replace(drop_pat, s, "")
     let len = b - a
-    let take_pat = regex::compile(format("(?s)^(.{{0,{}}})", len)).unwrap_or(empty_pattern())
+    let take_pat = regex::new(format("(?s)^(.{{0,{}}})", len)).unwrap_or(empty_pattern())
     let row = regex::captures(take_pat, after).map(|r| r.clone()).unwrap_or([].to_vec())
     if row.len() < 2 { return "" }
     row[1].clone().map(|x| x.clone()).unwrap_or("")
@@ -1941,7 +1941,7 @@ fn regex_replace_singular_native() {
     let src = r#"
 use std::regex
 fn main() {
-    let pat = regex::compile("foo").unwrap()
+    let pat = regex::compile("foo")
     let s = "foo and foo"
     let one = pat.replace(s, "BAR")
     let all = pat.replace_all(s, "BAR")

@@ -31,10 +31,13 @@ pub enum SigningError {
     BadSignature,
     /// `$GOS_PUBLISH_KEY` and `~/.gossamer/keys/<id>.ed25519` are
     /// both missing.
-    #[error(
-        "no signing key available for {0} (set $GOS_PUBLISH_KEY or write ~/.gossamer/keys/{0}.ed25519)"
-    )]
+    #[error("no signing key available for {0}: run `gos keygen {0}`, or set $GOS_PUBLISH_KEY")]
     Missing(String),
+    /// `gos keygen` found a key already in place, which it never replaces:
+    /// every consumer that trusts the old public key would reject packages
+    /// signed by a new one.
+    #[error("a signing key for {0} already exists at {1}")]
+    Exists(String, String),
 }
 
 /// Owned signing key handle.
@@ -50,6 +53,14 @@ pub struct VerifyingKey {
 }
 
 impl SigningKey {
+    /// A fresh key from the operating system's random source.
+    #[must_use]
+    pub fn generate() -> Self {
+        Self {
+            inner: DalekSigningKey::generate(&mut rand_core::OsRng),
+        }
+    }
+
     /// Builds a signing key from 32 bytes of raw secret material.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self {
@@ -207,6 +218,21 @@ pub fn load_publish_key(project_id: &str) -> Result<SigningKey, SigningError> {
         return SigningKey::from_path(&path);
     }
     Err(SigningError::Missing(project_id.to_string()))
+}
+
+/// Writes `key` as `project_id`'s publish key, readable by the current user
+/// only, and answers where. An existing key is never replaced.
+pub fn save_publish_key(project_id: &str, key: &SigningKey) -> Result<PathBuf, SigningError> {
+    let path = key_path(project_id)?;
+    if path.exists() {
+        return Err(SigningError::Exists(
+            project_id.to_string(),
+            path.display().to_string(),
+        ));
+    }
+    crate::credentials::write_private_file(&path, hex_encode(&key.to_bytes()).as_bytes())
+        .map_err(|e| SigningError::Io(e.to_string()))?;
+    Ok(path)
 }
 
 /// Returns the canonical key path for `project_id` (replaces `/`

@@ -16,5 +16,5 @@ fn factorial_iterative(n: i64) -> i64 {
 }
 
 for n in [0, 1, 5, 10, 12, 20] {
-    println("{}! = recursive {}, iterative {}", n, factorial_recursive(n), factorial_iterative(n))
+    println(f"{n}! = recursive {factorial_recursive(n)}, iterative {factorial_iterative(n)}")
 }

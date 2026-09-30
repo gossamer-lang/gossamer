@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -184,7 +182,7 @@ pub static GOS_RT_STDOUT_LEN: GosRtStdoutLen = GosRtStdoutLen(core::cell::Unsafe
 /// `gos_rt_flush_stdout`) remain safe to call from inside an
 /// outer acquire.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_stdout_acquire() {
+pub extern "C" fn gos_rt_stdout_acquire() {
     ffi_entry!((), {
         stdout_lock_acquire();
     });
@@ -195,7 +193,7 @@ pub unsafe extern "C" fn gos_rt_stdout_acquire() {
 /// prior acquire is a programming error; the codegen always
 /// emits matched pairs.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_stdout_release() {
+pub extern "C" fn gos_rt_stdout_release() {
     ffi_entry!((), {
         stdout_lock_release();
     });
@@ -264,6 +262,7 @@ fn write_terminal_direct(fd: i32, bytes: &[u8]) -> std::io::Result<()> {
 /// The process ignores `SIGPIPE` so that a closed socket or child pipe is an
 /// error the program can handle; the standard streams are the exception,
 /// since nothing is left to read what the program goes on to write.
+#[cfg(not(target_arch = "wasm32"))]
 pub fn end_on_closed_stdio(err: &std::io::Error) {
     if err.kind() != std::io::ErrorKind::BrokenPipe {
         return;
@@ -277,9 +276,14 @@ pub fn end_on_closed_stdio(err: &std::io::Error) {
     }
     // No signal carries this on other hosts, so the process ends with a
     // failing status of its own.
-    #[cfg(all(not(unix), not(target_arch = "wasm32")))]
+    #[cfg(not(unix))]
     std::process::exit(1);
 }
+
+/// A wasm build has no process of its own to end: the host that embeds it
+/// sees the failed write.
+#[cfg(target_arch = "wasm32")]
+pub fn end_on_closed_stdio(_err: &std::io::Error) {}
 
 /// Drives the process's own stdout buffer out to the descriptor.
 ///
@@ -321,18 +325,25 @@ pub fn raw_write_stdout(bytes: &[u8]) {
 /// terminal alike. The check is on the final byte only: the
 /// byte-at-a-time and byte-range writers are the throughput path and
 /// never reach here, so no hot loop grows a scan.
+///
+/// # Safety
+/// The caller holds `STDOUT_LOCK` for the call.
 pub unsafe fn write_stdout_locked(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
     let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
     let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+    // SAFETY: this `unsafe fn`'s caller holds `STDOUT_LOCK`, so this thread alone reaches the
+    // stdout buffer and its length.
     let len = unsafe { *len_ptr };
     // Flush and bypass the buffer entirely for chunks that
     // don't fit - a single large chunk costs one syscall
     // either way.
     if bytes.len() >= STDOUT_BUF_SIZE {
         if len > 0 {
+            // SAFETY: the buffer's first `len` bytes are written; this `unsafe fn`'s caller holds
+            // `STDOUT_LOCK`, so this thread alone reaches the stdout buffer and its length.
             unsafe {
                 raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), len));
                 *len_ptr = 0;
@@ -342,12 +353,18 @@ pub unsafe fn write_stdout_locked(bytes: &[u8]) {
         return;
     }
     if len + bytes.len() > STDOUT_BUF_SIZE {
+        // SAFETY: the buffer's first `len` bytes are written and `bytes` fits an empty buffer
+        // (checked above), apart from it; this `unsafe fn`'s caller holds `STDOUT_LOCK`, so this
+        // thread alone reaches the stdout buffer and its length.
         unsafe {
             raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), len));
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), (*bytes_ptr).as_mut_ptr(), bytes.len());
             *len_ptr = bytes.len();
         }
     } else {
+        // SAFETY: `len + bytes.len()` fits the buffer (checked above), and `bytes` lies apart
+        // from it; this `unsafe fn`'s caller holds `STDOUT_LOCK`, so this thread alone reaches
+        // the stdout buffer and its length.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 bytes.as_ptr(),
@@ -358,8 +375,12 @@ pub unsafe fn write_stdout_locked(bytes: &[u8]) {
         }
     }
     if bytes.last() == Some(&b'\n') {
+        // SAFETY: this `unsafe fn`'s caller holds `STDOUT_LOCK`, so this thread alone reaches the
+        // stdout buffer and its length.
         let pending = unsafe { *len_ptr };
         if pending > 0 {
+            // SAFETY: the buffer's first `pending` bytes are written; this `unsafe fn`'s caller
+            // holds `STDOUT_LOCK`, so this thread alone reaches the stdout buffer and its length.
             unsafe {
                 raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), pending));
                 *len_ptr = 0;
@@ -368,11 +389,12 @@ pub unsafe fn write_stdout_locked(bytes: &[u8]) {
     }
 }
 
-pub unsafe fn write_stdout(bytes: &[u8]) {
+pub fn write_stdout(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
     let _guard = StdoutGuard::acquire();
+    // SAFETY: the guard just acquired holds `STDOUT_LOCK`, as `write_stdout_locked` requires.
     unsafe { write_stdout_locked(bytes) };
 }
 
@@ -383,8 +405,11 @@ pub fn flush_stdout_buffer() {
     let _guard = StdoutGuard::acquire();
     let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
     let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+    // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length alone.
     let len = unsafe { *len_ptr };
     if len > 0 {
+        // SAFETY: the buffer's first `len` bytes are written; the held `StdoutGuard` gives this
+        // thread the buffer alone.
         unsafe {
             raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), len));
             *len_ptr = 0;
@@ -395,7 +420,7 @@ pub fn flush_stdout_buffer() {
 /// Flushes the process-global stdout buffer. Called by explicit stream flushes,
 /// stderr writers that must preserve output order, and process exit.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_flush_stdout() {
+pub extern "C" fn gos_rt_flush_stdout() {
     ffi_entry!((), {
         if std::env::var_os("GOS_RC_DEBUG").is_some() {
             let live = crate::c_abi::rc::rc_live_count();
@@ -424,28 +449,29 @@ pub unsafe extern "C" fn gos_rt_print_str(s: *const c_char) {
         let bytes = if s.is_null() {
             b"" as &[u8]
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(s) }
         };
-        unsafe { write_stdout(bytes) };
+        write_stdout(bytes);
     });
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_print_i64(n: i64) {
+pub extern "C" fn gos_rt_print_i64(n: i64) {
     ffi_entry!((), {
         // Format on the stack - avoid the per-call heap allocation
         // that `n.to_string()` would incur.
         let mut buf = itoa::Buffer::new();
         let text = buf.format(n);
-        unsafe { write_stdout(text.as_bytes()) };
+        write_stdout(text.as_bytes());
     });
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println_fn_i64(n: i64) -> i64 {
     ffi_entry!(0, {
-        unsafe { gos_rt_print_i64(n) };
-        unsafe { write_stdout(b"\n") };
+        gos_rt_print_i64(n);
+        write_stdout(b"\n");
         0
     })
 }
@@ -453,8 +479,8 @@ pub unsafe extern "C" fn gos_rt_println_fn_i64(n: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println_fn_f64(x: f64) -> i64 {
     ffi_entry!(0, {
-        unsafe { gos_rt_print_f64(x) };
-        unsafe { write_stdout(b"\n") };
+        gos_rt_print_f64(x);
+        write_stdout(b"\n");
         0
     })
 }
@@ -462,8 +488,10 @@ pub unsafe extern "C" fn gos_rt_println_fn_f64(x: f64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println_fn_str_word(s: i64) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `s` is this shim's string word, null or a live string body (C-ABI contract),
+        // which `gos_rt_print_str` accepts.
         unsafe { gos_rt_print_str(s as usize as *const c_char) };
-        unsafe { write_stdout(b"\n") };
+        write_stdout(b"\n");
         0
     })
 }
@@ -477,23 +505,23 @@ pub unsafe extern "C" fn gos_rt_print_u64(n: u64) {
     ffi_entry!((), {
         let mut buf = itoa::Buffer::new();
         let text = buf.format(n);
-        unsafe { write_stdout(text.as_bytes()) };
+        write_stdout(text.as_bytes());
     });
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_print_f64(x: f64) {
+pub extern "C" fn gos_rt_print_f64(x: f64) {
     ffi_entry!((), {
         // Match the interpreter's `{}` Display output.
         let text = format!("{x}");
-        unsafe { write_stdout(text.as_bytes()) };
+        write_stdout(text.as_bytes());
     });
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_print_bool(b: i32) {
     ffi_entry!((), {
-        unsafe { write_stdout(if b != 0 { b"true" } else { b"false" }) };
+        write_stdout(if b != 0 { b"true" } else { b"false" });
     });
 }
 
@@ -503,7 +531,7 @@ pub unsafe extern "C" fn gos_rt_print_char(c: i32) {
         if let Some(ch) = char::from_u32(c as u32) {
             let mut buf = [0u8; 4];
             let s = ch.encode_utf8(&mut buf);
-            unsafe { write_stdout(s.as_bytes()) };
+            write_stdout(s.as_bytes());
         }
     });
 }
@@ -519,9 +547,10 @@ pub unsafe extern "C" fn gos_rt_eprint_str(s: *const c_char) {
         let bytes = if s.is_null() {
             b"" as &[u8]
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(s) }
         };
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         write_terminal(2, bytes);
     });
 }
@@ -529,7 +558,7 @@ pub unsafe extern "C" fn gos_rt_eprint_str(s: *const c_char) {
 /// `eprint_str` followed by a newline. Mirrors `gos_rt_println`
 /// for the stderr path.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_eprintln() {
+pub extern "C" fn gos_rt_eprintln() {
     ffi_entry!((), {
         write_terminal(2, b"\n");
     });

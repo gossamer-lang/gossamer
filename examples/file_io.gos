@@ -26,7 +26,7 @@ fs::write(text_path, "hello, gossamer\n".as_bytes())
     .map_err(|e| errors::wrap(e, "write text"))?
 let contents = fs::read_to_string(text_path)
     .map_err(|e| errors::wrap(e, "read text"))?
-println("read {} bytes: {}", contents.len(), contents.trim())
+println(f"read {contents.len()} bytes: {contents.trim()}")
 
 // --- JSON ---
 let features = #[
@@ -46,6 +46,6 @@ let parsed_text = fs::read_to_string(json_path)
     .map_err(|e| errors::wrap(e, "read json"))?
 let parsed = json::parse(parsed_text)
     .map_err(|e| errors::wrap(e, "parse json"))?
-println("parsed json: {}", json::render(parsed))
+println(f"parsed json: {json::render(parsed)}")
 
 fs::remove_dir_all(dir).map_err(|e| errors::wrap(e, "cleanup"))?

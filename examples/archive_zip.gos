@@ -15,9 +15,9 @@ let files = #[
     ("readme.md", "# demo\n\nA tiny archive.\n".as_bytes())
 ]
 let bytes = archive::zip::write(files).unwrap()
-println("zip size: {} bytes", bytes.len())
+println(f"zip size: {bytes.len()} bytes")
 
 let entries = archive::zip::read(bytes).unwrap()
 for entry in entries {
-    println("- {}: {} bytes", entry.name, entry.data.len())
+    println(f"- {entry.name}: {entry.data.len()} bytes")
 }

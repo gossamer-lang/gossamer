@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::doc_markdown)]
 
 //! C-ABI shims for `std::encoding::*` free functions so the compiled
@@ -16,10 +15,13 @@ use super::string::alloc_cstring;
 
 fn err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { super::vec::gos_rt_result_new(1, err as i64) }
+    super::vec::gos_rt_result_new(1, err as i64)
 }
 
-fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
+/// # Safety
+///
+/// `s` is null or a live string body that outlives the returned borrow.
+unsafe fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
     // SAFETY: callers pass a Gossamer `String`, read through its length
     // header so interior NUL bytes survive; non-UTF-8 falls back to empty.
     unsafe { crate::c_abi::gos_str_arg_text(s) }
@@ -30,7 +32,8 @@ fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_xml_escape(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let input = cstr_to_str(s);
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let input = unsafe { cstr_to_str(s) };
         let mut out = String::with_capacity(input.len());
         for ch in input.chars() {
             match ch {
@@ -46,31 +49,16 @@ pub unsafe extern "C" fn gos_rt_encoding_xml_escape(s: *const c_char) -> *mut c_
     })
 }
 
-/// Reads a `*mut GosVec` of `u8` into an owned `Vec<u8>`. Canonical byte
-/// vectors use packed one-byte elements. The word-stride branch accepts legacy
-/// or foreign ABI values at runtime boundaries.
-pub(crate) unsafe fn gosvec_u8(v: *const super::vec::GosVec) -> Vec<u8> {
-    if v.is_null() {
-        return Vec::new();
-    }
-    let vref = unsafe { &*v };
-    if vref.ptr.is_null() || vref.len <= 0 {
-        return Vec::new();
-    }
-    let len = vref.len as usize;
-    if vref.elem_bytes == 1 {
-        return unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr(), len) }.to_vec();
-    }
-    let words = unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr().cast::<i64>(), len) };
-    words.iter().map(|&w| w as u8).collect()
-}
-
 /// Builds a canonical packed Gossamer `Vec<u8>` from raw bytes.
 pub(crate) fn bytes_to_gosvec(bytes: &[u8]) -> *mut super::vec::GosVec {
-    let v = unsafe { super::vec::gos_rt_vec_with_capacity(1, bytes.len() as i64) };
+    let v = super::vec::gos_rt_vec_with_capacity(1, bytes.len() as i64);
     if !bytes.is_empty() {
+        // SAFETY: `gos_rt_vec_with_capacity` answers a live header for a non-negative capacity,
+        // owned here alone.
         let vref = unsafe { &mut *v };
         if !vref.ptr.is_null() {
+            // SAFETY: the buffer is non-null (checked above) with room for `bytes.len()` bytes,
+            // apart from `bytes`.
             unsafe {
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), vref.ptr.as_ptr(), bytes.len());
             }
@@ -86,7 +74,9 @@ pub unsafe extern "C" fn gos_rt_encoding_hex_encode(
     data: *const super::vec::GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = unsafe { gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let mut out = String::with_capacity(bytes.len() * 2);
         for b in &bytes {
             out.push(char::from_digit(u32::from(b >> 4), 16).unwrap_or('0'));
@@ -102,7 +92,9 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_encode(
     data: *const super::vec::GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = unsafe { gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         alloc_cstring(base32_encode(&bytes).as_bytes())
     })
 }
@@ -114,7 +106,9 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_encode_hex(
     data: *const super::vec::GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = unsafe { gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         alloc_cstring(base32_encode_with(&bytes, BASE32_HEX_ALPHA).as_bytes())
     })
 }
@@ -125,7 +119,8 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_encode_hex(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_html_escape(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let input = cstr_to_str(s);
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let input = unsafe { cstr_to_str(s) };
         let mut out = String::with_capacity(input.len());
         for ch in input.chars() {
             match ch {
@@ -150,7 +145,9 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_encode(
     data: *const super::vec::GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = unsafe { gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         alloc_cstring(base64_encode(&bytes).as_bytes())
     })
 }
@@ -161,28 +158,33 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_encode(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_base64_decode(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { crate::c_abi::gos_str_arg_bytes(s) };
         // Decoding straight into the answer's own storage is what keeps the
         // result one allocation: an intermediate `Vec` would be built and
         // then copied whole into it.
-        let v = unsafe {
-            super::vec::gos_rt_vec_with_capacity(1, base64_decoded_bound(text.len()) as i64)
-        };
+        let v =
+            { super::vec::gos_rt_vec_with_capacity(1, base64_decoded_bound(text.len()) as i64) };
+        // SAFETY: `gos_rt_vec_with_capacity` answers a live header for a non-negative capacity,
+        // owned here alone.
         let vref = unsafe { &mut *v };
         if vref.ptr.is_null() {
-            return unsafe { super::vec::gos_rt_result_new(0, v as i64) };
+            return super::vec::gos_rt_result_new(0, v as i64);
         }
-        // SAFETY: the vec was just built with room for the decoded bound, and
-        // its buffer is live and uniquely held here.
+        let bound = base64_decoded_bound(text.len());
+        // SAFETY: the vec was just built with room for the decoded bound, and its buffer is live
+        // and uniquely held here; the bytes are zeroed before a slice is formed over them.
         let out = unsafe {
-            std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), base64_decoded_bound(text.len()))
+            std::ptr::write_bytes(vref.ptr.as_ptr(), 0, bound);
+            std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), bound)
         };
         match base64_decode_into(text, out) {
             Ok(written) => {
                 vref.len = written as i64;
-                unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+                super::vec::gos_rt_result_new(0, v as i64)
             }
             Err(e) => {
+                // SAFETY: `v` is the fresh vec made above, owned here alone and not read again.
                 unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
                 err_result(&e)
             }
@@ -195,10 +197,11 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_decode(s: *const c_char) -> i128
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_hex_decode(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match hex_decode(cstr_to_str(s)) {
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        match hex_decode(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+                super::vec::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -211,7 +214,8 @@ pub unsafe extern "C" fn gos_rt_encoding_hex_decode(s: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_html_unescape(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let input = cstr_to_str(s);
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let input = unsafe { cstr_to_str(s) };
         alloc_cstring(html_unescape(input).as_bytes())
     })
 }
@@ -229,12 +233,15 @@ pub unsafe extern "C" fn gos_rt_html_template_render_json(
     json_data: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let source = cstr_to_str(source);
-        let json_data = cstr_to_str(json_data);
+        // SAFETY: `source` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let source = unsafe { cstr_to_str(source) };
+        // SAFETY: `json_data` is this shim's argument, as `cstr_to_str` requires (C-ABI
+        // contract).
+        let json_data = unsafe { cstr_to_str(json_data) };
         match gossamer_template::html::render_json(source, json_data) {
             Ok(text) => {
                 let p = alloc_cstring(text.as_bytes());
-                unsafe { super::vec::gos_rt_result_new(0, p as i64) }
+                super::vec::gos_rt_result_new(0, p as i64)
             }
             Err(e) => err_result(&format!("{e}")),
         }
@@ -553,7 +560,8 @@ fn base32_decode_hex(s: &str) -> Result<Vec<u8>, String> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_base32_encode_string(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let encoded = base32_encode(cstr_to_str(s).as_bytes());
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let encoded = base32_encode(unsafe { cstr_to_str(s) }.as_bytes());
         alloc_cstring(encoded.as_bytes())
     })
 }
@@ -564,11 +572,12 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_encode_string(s: *const c_char) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_base32_decode_string(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match base32_decode(cstr_to_str(s)) {
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        match base32_decode(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => {
                     let p = alloc_cstring(text.as_bytes());
-                    unsafe { super::vec::gos_rt_result_new(0, p as i64) }
+                    super::vec::gos_rt_result_new(0, p as i64)
                 }
                 Err(e) => err_result(&format!("base32: {e}")),
             },
@@ -582,10 +591,11 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_decode_string(s: *const c_char) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_base32_decode(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match base32_decode(cstr_to_str(s)) {
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        match base32_decode(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+                super::vec::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -597,10 +607,11 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_decode(s: *const c_char) -> i128
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_base32_decode_hex(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match base32_decode_hex(cstr_to_str(s)) {
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        match base32_decode_hex(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+                super::vec::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -698,7 +709,9 @@ pub unsafe extern "C" fn gos_rt_encoding_ascii85_encode(
     data: *const super::vec::GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes = unsafe { gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         alloc_cstring(ascii85_encode(&bytes).as_bytes())
     })
 }
@@ -707,10 +720,11 @@ pub unsafe extern "C" fn gos_rt_encoding_ascii85_encode(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_encoding_ascii85_decode(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match ascii85_decode(cstr_to_str(s)) {
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        match ascii85_decode(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+                super::vec::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -751,14 +765,16 @@ macro_rules! get_fixed {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(data: *const super::vec::GosVec) -> i128 {
             ffi_entry!(0i128, {
-                let bytes = unsafe { gosvec_u8(data) };
+                // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call
+                // (C-ABI contract), which `vec_bytes` accepts.
+                let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
                 if bytes.len() < $n {
                     return err_result("binary: buffer too short");
                 }
                 let mut arr = [0u8; $n];
                 arr.copy_from_slice(&bytes[..$n]);
                 let v = <$ty>::$from(arr);
-                unsafe { super::vec::gos_rt_result_new(0, i64::from(v)) }
+                super::vec::gos_rt_result_new(0, i64::from(v))
             })
         }
     };
@@ -776,14 +792,16 @@ macro_rules! get_u64 {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $name(data: *const super::vec::GosVec) -> i128 {
             ffi_entry!(0i128, {
-                let bytes = unsafe { gosvec_u8(data) };
+                // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call
+                // (C-ABI contract), which `vec_bytes` accepts.
+                let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
                 if bytes.len() < 8 {
                     return err_result("binary: buffer too short");
                 }
                 let mut arr = [0u8; 8];
                 arr.copy_from_slice(&bytes[..8]);
                 let v = u64::$from(arr);
-                unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+                super::vec::gos_rt_result_new(0, v as i64)
             })
         }
     };
@@ -802,6 +820,9 @@ get_u64!(gos_rt_bin_get_u64_le, from_le_bytes);
 
 /// Bytes `[offset, offset + width)` of `data`, or the diagnostic when
 /// that window is not entirely inside the buffer.
+///
+/// # Safety
+/// `data` is null or a live `Vec`.
 unsafe fn read_window(
     data: *const super::vec::GosVec,
     offset: i64,
@@ -816,6 +837,8 @@ unsafe fn read_window(
     // The window is read straight out of the caller's buffer: materialising
     // the whole buffer to take a few bytes from it would make every fixed
     // width read cost the buffer's length.
+    // SAFETY: `data` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `Vec`.
     let vref = unsafe { &*data };
     let len = if vref.ptr.is_null() || vref.len <= 0 {
         0
@@ -849,6 +872,9 @@ unsafe fn read_window(
 /// Writes `bytes` into `[offset, offset + bytes.len())` of a GosVec whose
 /// elements are single bytes, or answers the diagnostic when that window
 /// is not entirely inside the buffer.
+///
+/// # Safety
+/// `data` is null or a live `Vec` nothing else accesses during the call.
 unsafe fn write_window(
     data: *mut super::vec::GosVec,
     offset: i64,
@@ -860,6 +886,8 @@ unsafe fn write_window(
     if data.is_null() {
         return Err(err_result("binary: null buffer"));
     }
+    // SAFETY: `data` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `Vec`.
     let header = unsafe { &*data };
     if header.elem_bytes != 1 || header.ptr.is_null() {
         return Err(err_result("binary: buffer is not a byte sequence"));
@@ -872,6 +900,8 @@ unsafe fn write_window(
     if end > len {
         return Err(err_result("binary: write past the end of the buffer"));
     }
+    // SAFETY: `start..end` lies inside the byte vec's `len` bytes (checked above), and `bytes` is
+    // the caller's own buffer.
     unsafe {
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), header.ptr.as_ptr().add(start), bytes.len());
     }
@@ -886,10 +916,12 @@ macro_rules! get_fixed_at {
         pub unsafe extern "C" fn $name(data: *const super::vec::GosVec, offset: i64) -> i128 {
             ffi_entry!(0i128, {
                 let mut arr = [0u8; $n];
+                // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call
+                // (C-ABI contract), which `read_window` accepts.
                 if let Err(packed) = unsafe { read_window(data, offset, &mut arr) } {
                     return packed;
                 }
-                unsafe { super::vec::gos_rt_result_new(0, <$ty>::$from(arr) as i64) }
+                super::vec::gos_rt_result_new(0, <$ty>::$from(arr) as i64)
             })
         }
     };
@@ -915,8 +947,10 @@ macro_rules! put_fixed_at {
         ) -> i128 {
             ffi_entry!(0i128, {
                 let bytes = (value as $ty).$to();
+                // SAFETY: `buf` is this shim's argument, null or a live `Vec` nothing else
+                // accesses during the call (C-ABI contract), which `write_window` accepts.
                 match unsafe { write_window(buf, offset, &bytes) } {
-                    Ok(()) => unsafe { super::vec::gos_rt_result_new(0, 0) },
+                    Ok(()) => super::vec::gos_rt_result_new(0, 0),
                     Err(packed) => packed,
                 }
             })
@@ -954,7 +988,7 @@ fn uvarint_decode(buf: &[u8]) -> Result<(u64, usize), String> {
 /// laid out by `meta`, which owns whatever children the words name.
 fn ok_pair(a: i64, b: i64, meta: &'static [i64]) -> i128 {
     let blob = crate::c_abi::rc::counted_words(&[a, b], meta);
-    unsafe { super::vec::gos_rt_result_new(0, blob as i64) }
+    super::vec::gos_rt_result_new(0, blob as i64)
 }
 
 /// Layout of the `(String, [u8])` pem pair: the label string and the body
@@ -972,7 +1006,9 @@ static PEM_PAIR_META: [i64; 6] = [
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bin_uvarint(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        match uvarint_decode(&unsafe { gosvec_u8(data) }) {
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        match uvarint_decode(&unsafe { crate::c_abi::vec::vec_bytes(data) }) {
             Ok((v, n)) => ok_pair(v as i64, n as i64, &crate::c_abi::rc::LEAF_BLOB_META),
             Err(e) => err_result(&e),
         }
@@ -984,7 +1020,9 @@ pub unsafe extern "C" fn gos_rt_bin_uvarint(data: *const super::vec::GosVec) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bin_varint(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        match uvarint_decode(&unsafe { gosvec_u8(data) }) {
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        match uvarint_decode(&unsafe { crate::c_abi::vec::vec_bytes(data) }) {
             Ok((ux, n)) => {
                 let x = if ux & 1 == 0 {
                     (ux >> 1) as i64
@@ -1067,7 +1105,8 @@ fn pem_decode_one(input: &str) -> Result<(String, Vec<u8>), String> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_pem_decode_raw(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match pem_decode_one(cstr_to_str(s)) {
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        match pem_decode_one(unsafe { cstr_to_str(s) }) {
             Ok((label, bytes)) => {
                 let t = alloc_cstring(label.as_bytes()) as i64;
                 let b = bytes_to_gosvec(&bytes) as i64;
@@ -1104,8 +1143,9 @@ static PEM_SLOT_CHILDREN: [crate::c_abi::vec::VecSlotChild; 2] = [
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_pem_decode_all_raw(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let mut remaining = cstr_to_str(s);
-        let out = unsafe { super::vec::gos_rt_vec_with_capacity(16, 0) };
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let mut remaining = unsafe { cstr_to_str(s) };
+        let out = super::vec::gos_rt_vec_with_capacity(16, 0);
         while let Some(begin) = remaining.find("-----BEGIN ") {
             let rest = &remaining[begin + 11..];
             let Some(end_label) = rest.find("-----") else {
@@ -1131,6 +1171,8 @@ pub unsafe extern "C" fn gos_rt_pem_decode_all_raw(s: *const c_char) -> i128 {
                 alloc_cstring(label.as_bytes()) as i64,
                 bytes_to_gosvec(&bytes) as i64,
             ];
+            // SAFETY: `out` is the fresh vec of 16-byte elements made above, or null, which
+            // `gos_rt_vec_push` accepts, and `pair` is one element.
             unsafe { super::vec::gos_rt_vec_push(out, pair.as_ptr().cast::<u8>()) };
             let consumed = begin + 11 + end_label + 5 + end_pos + end_marker.len();
             if consumed >= remaining.len() {
@@ -1138,8 +1180,9 @@ pub unsafe extern "C" fn gos_rt_pem_decode_all_raw(s: *const c_char) -> i128 {
             }
             remaining = &remaining[consumed..];
         }
-        super::vec::vec_set_slot_children(out, &PEM_SLOT_CHILDREN);
-        unsafe { super::vec::gos_rt_result_new(0, out as i64) }
+        // SAFETY: `out` is the live vec built above.
+        unsafe { super::vec::vec_set_slot_children(out, &PEM_SLOT_CHILDREN) };
+        super::vec::gos_rt_result_new(0, out as i64)
     })
 }
 
@@ -1150,8 +1193,12 @@ pub unsafe extern "C" fn gos_rt_pem_encode_raw(
     bytes: *const super::vec::GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let label = cstr_to_str(block_type);
-        let data = unsafe { gosvec_u8(bytes) };
+        // SAFETY: `block_type` is this shim's argument, as `cstr_to_str` requires (C-ABI
+        // contract).
+        let label = unsafe { cstr_to_str(block_type) };
+        // SAFETY: `bytes` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let data = unsafe { crate::c_abi::vec::vec_bytes(bytes) };
         let b64 = base64_encode(&data);
         let mut out = format!("-----BEGIN {label}-----\n");
         for chunk in b64.as_bytes().chunks(64) {

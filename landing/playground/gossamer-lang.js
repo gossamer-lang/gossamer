@@ -1,8 +1,8 @@
 // CodeMirror 6 StreamLanguage tokenizer + highlight style for Gossamer.
 // Pragmatic regex/state tokenizer (not a full parser): it covers the
 // surface tokens the playground needs - comments, keywords, types,
-// strings, numbers, the |> pipe, _ placeholder, format-macros, and
-// #! comments.
+// strings and interpolated strings (whose placeholders highlight as code),
+// numbers, the |> pipe, the _ pattern, and #! comments.
 
 import {
   StreamLanguage,
@@ -15,14 +15,15 @@ import { tags as t } from "https://esm.sh/@lezer/highlight@1";
 const KEYWORDS = new Set([
   "let", "mut", "fn", "if", "else", "match", "for", "while", "loop",
   "return", "break", "continue", "struct", "enum", "trait", "impl",
-  "use", "const", "static", "go", "spawn", "defer", "arena", "pub",
-  "move", "as", "in", "where", "select", "self",
+  "use", "const", "static", "spawn", "defer", "arena", "cohort", "comptime",
+  "newtype", "pub", "as", "in", "where", "select", "self", "type", "mod",
 ]);
 
 const BUILTIN_TYPES = new Set([
   "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "usize", "isize",
   "f32", "f64", "bool", "char", "String", "Option", "Result", "Vec",
-  "HashMap",
+  "Map", "Set", "BTreeMap", "BTreeSet", "Deque", "Queue", "Stack", "MinHeap",
+  "MaxHeap",
 ]);
 
 const MACROS = new Set([
@@ -64,14 +65,87 @@ function consumeTripleString(stream, state) {
   }
 }
 
+/// The innermost open interpolated string, or `undefined` outside one.
+function openInterpolation(state) {
+  return state.interpolations[state.interpolations.length - 1];
+}
+
+/// Tokenize inside an interpolated string whose literal text is next:
+/// text up to a placeholder or the closing quote is one string token, a
+/// placeholder's `{` opens code, and the closing quote pops the frame.
+function interpolatedText(stream, state, frame) {
+  const close = frame.triple ? '"""' : '"';
+  if (stream.match(close)) {
+    state.interpolations.pop();
+    return "string";
+  }
+  if (stream.match("{{") || stream.match("}}")) return "string";
+  if (stream.peek() === "{") {
+    stream.next();
+    frame.inCode = true;
+    frame.depth = 0;
+    return "meta";
+  }
+  while (!stream.eol()) {
+    if (stream.match(close, false) || stream.match("{{", false) || stream.match("}}", false)) {
+      break;
+    }
+    if (stream.peek() === "{") break;
+    if (stream.peek() === "\\") stream.next();
+    stream.next();
+  }
+  return "string";
+}
+
 const gossamerStreamParser = {
   name: "gossamer",
 
   startState() {
-    return { inBlockComment: false, inTripleString: false };
+    return { inBlockComment: false, inTripleString: false, interpolations: [] };
+  },
+
+  copyState(state) {
+    return {
+      inBlockComment: state.inBlockComment,
+      inTripleString: state.inTripleString,
+      interpolations: state.interpolations.map((frame) => ({ ...frame })),
+    };
   },
 
   token(stream, state) {
+    const frame = openInterpolation(state);
+    if (frame && !frame.inCode) {
+      return interpolatedText(stream, state, frame);
+    }
+    if (frame && frame.depth === 0) {
+      // A placeholder closes at its own `}`; a single `:` starts its spec.
+      if (stream.peek() === "}") {
+        stream.next();
+        frame.inCode = false;
+        return "meta";
+      }
+      if (stream.peek() === ":" && !stream.match("::", false)) {
+        while (!stream.eol() && stream.peek() !== "}") stream.next();
+        return "meta";
+      }
+    }
+    const style = tokenCode(stream, state);
+    if (frame && frame === openInterpolation(state)) {
+      const text = stream.current();
+      if (text === "{" || text === "(" || text === "[") frame.depth += 1;
+      if (text === "}" || text === ")" || text === "]") frame.depth = Math.max(0, frame.depth - 1);
+    }
+    return style;
+  },
+
+  languageData: {
+    commentTokens: { line: "//", block: { open: "/*", close: "*/" } },
+    closeBrackets: { brackets: ["(", "[", "{", '"'] },
+  },
+};
+
+/// Tokenize one token of ordinary code.
+function tokenCode(stream, state) {
     if (state.inBlockComment) {
       consumeBlockComment(stream, state);
       return "comment";
@@ -111,6 +185,17 @@ const gossamerStreamParser = {
     if (ch === "'") {
       if (stream.match(/^'(?:\\.|[^'\\])'/)) return "string";
       stream.next();
+      return "string";
+    }
+
+    // Interpolated string: its literal text and placeholders tokenize in
+    // turn until its closing quote pops the frame.
+    if (ch === "f" && (stream.match('f"""') || stream.match('f"'))) {
+      state.interpolations.push({
+        triple: stream.current().length === 4,
+        inCode: false,
+        depth: 0,
+      });
       return "string";
     }
 
@@ -169,13 +254,7 @@ const gossamerStreamParser = {
     // Punctuation and anything else - consume one char, leave unstyled.
     stream.next();
     return null;
-  },
-
-  languageData: {
-    commentTokens: { line: "//", block: { open: "/*", close: "*/" } },
-    closeBrackets: { brackets: ["(", "[", "{", '"'] },
-  },
-};
+}
 
 /// The Gossamer stream language (no highlighting attached).
 export const gossamerLanguage = StreamLanguage.define(gossamerStreamParser);

@@ -25,9 +25,9 @@ fn fib_iterative(n: i64) -> i64 {
 }
 
 for n in [0, 1, 5, 10, 20] {
-    println("fib({}) = recursive {}, iterative {}", n, fib_recursive(n), fib_iterative(n))
+    println(f"fib({n}) = recursive {fib_recursive(n)}, iterative {fib_iterative(n)}")
 }
 
 // Iterative fits comfortably in i64 up to fib(92).
-println("fib(40) = {}", fib_iterative(40))
-println("fib(60) = {}", fib_iterative(60))
+println(f"fib(40) = {fib_iterative(40)}")
+println(f"fib(60) = {fib_iterative(60)}")

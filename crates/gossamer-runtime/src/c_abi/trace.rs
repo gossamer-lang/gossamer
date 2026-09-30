@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(dead_code)]
@@ -36,6 +35,8 @@ use super::string::alloc_cstring;
 static SPAN_SEQ: AtomicU64 = AtomicU64::new(1);
 
 unsafe fn read_cstr(s: *const c_char) -> String {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_string`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_string(s) }
 }
 
@@ -67,7 +68,7 @@ pub struct GosEndedSpan {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_trace_tracer_new() -> *mut GosTracer {
+pub extern "C" fn gos_rt_trace_tracer_new() -> *mut GosTracer {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosTracer {
             _seq: AtomicU64::new(0),
@@ -83,6 +84,8 @@ pub unsafe extern "C" fn gos_rt_trace_tracer_start_span(
     ffi_entry!(std::ptr::null_mut(), {
         let seq = SPAN_SEQ.fetch_add(1, Ordering::Relaxed);
         Box::into_raw(Box::new(GosSpan {
+            // SAFETY: `name` is this shim's argument, null or a live string body for the call
+            // (C-ABI contract), which `read_cstr` accepts.
             name: unsafe { read_cstr(name) },
             trace_id: format!("{:032x}", u128::from(seq).wrapping_mul(0x9e37_79b9)),
             span_id: format!("{:016x}", seq.wrapping_mul(0x9e37_79b9_7f4a_7c15)),
@@ -99,7 +102,11 @@ pub unsafe extern "C" fn gos_rt_trace_span_set_attribute(
     value: *const c_char,
 ) {
     ffi_entry!((), {
+        // SAFETY: `s` is this shim's argument, null or a live span (C-ABI contract), which
+        // `as_ref` accepts.
         if let Some(span) = unsafe { s.as_ref() } {
+            // SAFETY: `key` and `value` are this shim's arguments, each null or a live string
+            // body (C-ABI contract), which `read_cstr` accepts.
             let (k, v) = unsafe { (read_cstr(key), read_cstr(value)) };
             let mut attrs = span.attributes.lock();
             if let Some(slot) = attrs.iter_mut().find(|(ek, _)| *ek == k) {
@@ -118,7 +125,11 @@ pub unsafe extern "C" fn gos_rt_trace_span_set_status(
     message: *const c_char,
 ) {
     ffi_entry!((), {
+        // SAFETY: `s` is this shim's argument, null or a live span (C-ABI contract), which
+        // `as_ref` accepts.
         if let Some(span) = unsafe { s.as_ref() } {
+            // SAFETY: `message` is this shim's argument, null or a live string body for the call
+            // (C-ABI contract), which `read_cstr` accepts.
             *span.status.lock() = (ok != 0, unsafe { read_cstr(message) });
         }
     });
@@ -127,6 +138,8 @@ pub unsafe extern "C" fn gos_rt_trace_span_set_status(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_trace_span_end(s: *mut GosSpan) -> *mut GosEndedSpan {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's argument, null or a live span (C-ABI contract), which
+        // `as_ref` accepts.
         let Some(span) = (unsafe { s.as_ref() }) else {
             return std::ptr::null_mut();
         };
@@ -145,6 +158,8 @@ pub unsafe extern "C" fn gos_rt_trace_span_end(s: *mut GosSpan) -> *mut GosEnded
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_trace_ended_to_otlp_json(e: *mut GosEndedSpan) -> *mut c_char {
     ffi_entry!(alloc_cstring(b""), {
+        // SAFETY: `e` is this shim's argument, null or a live ended span (C-ABI contract), which
+        // `as_ref` accepts.
         let Some(span) = (unsafe { e.as_ref() }) else {
             return alloc_cstring(b"");
         };

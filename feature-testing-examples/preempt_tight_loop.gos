@@ -1,0 +1,28 @@
+// A goroutine spinning in a loop that calls nothing must not hold the only
+// worker: with one scheduler worker, the peer that sleeps and then sends can
+// run only if the spinner is preempted. Driven with `GOSSAMER_MAX_PROCS=1` by
+// `crates/gossamer-cli/tests/preemption.rs` on every tier.
+
+use std::process
+use std::sync::channel
+use std::time
+
+fn spin(seed: i64) -> i64 {
+    let mut x = seed
+    while x != -1 {
+        x = (x *% 1103515245 +% 12345) % 2147483648
+    }
+    x
+}
+
+fn main() {
+    let tx, rx = channel()
+    spawn(|| spin(1))
+    spawn(|| {
+        time::sleep(20)
+        tx.send(1)
+    })
+    let got = rx.recv()
+    println("peer ran: {}", got)
+    process::exit(0)
+}

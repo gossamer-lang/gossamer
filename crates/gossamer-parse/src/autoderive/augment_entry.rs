@@ -13,6 +13,11 @@ pub fn augment_source(source: &str) -> String {
     // (in parse_with_autoderive) redirects the user's
     // `encoding::pem::*` call / literal / type sites onto these.
     let stdlib_wrappers = synthesize_stdlib_wrappers(source);
+    // `char` and integer methods written in Gossamer, for the names the
+    // program calls.
+    let mut primitive_surface = synthesize_primitive_surface(source);
+    primitive_surface.push_str(&synthesize_format_helpers(source));
+    primitive_surface.push_str(&synthesize_collect_helpers(source));
     let (serde, derives, type_info) = if source_may_need_ast_synthesis(source) {
         let mut probe_map = SourceMap::new();
         let probe_file = probe_map.add_file("<autoderive-probe>", source.to_string());
@@ -27,7 +32,8 @@ pub fn augment_source(source: &str) -> String {
             return source.to_string();
         }
         let serde = synthesize_serde_impls(&parsed);
-        let derives = synthesize_derive_impls(&parsed);
+        let mut derives = synthesize_derive_impls(&parsed);
+        derives.push_str(&synthesize_iterator_adapters(&parsed, source));
         // Field-reflection functions for `typeInfo::<T>()`, emitted only
         // when the source reflects (keeps non-reflecting programs lean).
         let type_info = if source.contains("typeInfo") {
@@ -41,6 +47,7 @@ pub fn augment_source(source: &str) -> String {
     };
     if synth_is_empty(&serde)
         && stdlib_wrappers.is_empty()
+        && primitive_surface.is_empty()
         && derives.is_empty()
         && type_info.is_empty()
         && validators.is_empty()
@@ -48,10 +55,17 @@ pub fn augment_source(source: &str) -> String {
         return source.to_string();
     }
     if std::env::var_os("GOS_AUTODERIVE_DEBUG").is_some() {
-        eprintln!("=== autoderive synth ===\n{serde}{derives}{stdlib_wrappers}=== /autoderive ===");
+        eprintln!(
+            "=== autoderive synth ===\n{serde}{derives}{stdlib_wrappers}{primitive_surface}=== /autoderive ==="
+        );
     }
     let mut combined = String::with_capacity(
-        source.len() + serde.len() + derives.len() + stdlib_wrappers.len() + 2,
+        source.len()
+            + serde.len()
+            + derives.len()
+            + stdlib_wrappers.len()
+            + primitive_surface.len()
+            + 2,
     );
     combined.push_str(source);
     if !combined.ends_with('\n') {
@@ -63,6 +77,7 @@ pub fn augment_source(source: &str) -> String {
     }
     combined.push_str(&derives);
     combined.push_str(&stdlib_wrappers);
+    combined.push_str(&primitive_surface);
     combined.push_str(&type_info);
     combined.push_str(&validators);
     combined

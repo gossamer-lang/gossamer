@@ -340,7 +340,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         doc: "What unary `!value` answers for this type. Without an `impl` the \
               operator is rejected: a struct has no negation of its own.",
         instead: "",
-        example: "impl Not for Mask { fn not(&self) -> Mask { Mask { bits: !self.bits } } }",
+        example: "impl Not for Flags { fn not(&self) -> Flags { Flags { bits: !self.bits } } }",
     },
     BuiltinTrait {
         name: "BitAnd",
@@ -352,7 +352,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         doc: "What `a & b` answers for this type. Without an `impl` the operator \
               is rejected: a struct carries no bitwise meaning of its own.",
         instead: "",
-        example: "impl BitAnd for Mask { fn bitand(&self, other: Mask) -> Mask { Mask { bits: self.bits & other.bits } } }",
+        example: "impl BitAnd for Flags { fn bitand(&self, other: Flags) -> Flags { Flags { bits: self.bits & other.bits } } }",
     },
     BuiltinTrait {
         name: "BitOr",
@@ -364,7 +364,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         doc: "What `a | b` answers for this type. Without an `impl` the operator \
               is rejected: a struct carries no bitwise meaning of its own.",
         instead: "",
-        example: "impl BitOr for Mask { fn bitor(&self, other: Mask) -> Mask { Mask { bits: self.bits | other.bits } } }",
+        example: "impl BitOr for Flags { fn bitor(&self, other: Flags) -> Flags { Flags { bits: self.bits | other.bits } } }",
     },
     BuiltinTrait {
         name: "BitXor",
@@ -376,7 +376,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         doc: "What `a ^ b` answers for this type. Without an `impl` the operator \
               is rejected: a struct carries no bitwise meaning of its own.",
         instead: "",
-        example: "impl BitXor for Mask { fn bitxor(&self, other: Mask) -> Mask { Mask { bits: self.bits ^ other.bits } } }",
+        example: "impl BitXor for Flags { fn bitxor(&self, other: Flags) -> Flags { Flags { bits: self.bits ^ other.bits } } }",
     },
     BuiltinTrait {
         name: "Shl",
@@ -388,7 +388,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         doc: "What `a << b` answers for this type. Without an `impl` the operator \
               is rejected: a struct carries no shift of its own.",
         instead: "",
-        example: "impl Shl for Mask { fn shl(&self, other: Mask) -> Mask { Mask { bits: self.bits << other.bits } } }",
+        example: "impl Shl for Flags { fn shl(&self, other: Flags) -> Flags { Flags { bits: self.bits << other.bits } } }",
     },
     BuiltinTrait {
         name: "Shr",
@@ -400,7 +400,7 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         doc: "What `a >> b` answers for this type. Without an `impl` the operator \
               is rejected: a struct carries no shift of its own.",
         instead: "",
-        example: "impl Shr for Mask { fn shr(&self, other: Mask) -> Mask { Mask { bits: self.bits >> other.bits } } }",
+        example: "impl Shr for Flags { fn shr(&self, other: Flags) -> Flags { Flags { bits: self.bits >> other.bits } } }",
     },
     BuiltinTrait {
         name: "Index",
@@ -697,9 +697,11 @@ fn push_kind_section(out: &mut String, kind: BuiltinTraitKind, title: &str, blur
             out.push_str(&format!("Declared by `{module}`.\n\n"));
         }
         out.push_str(&format!("{}\n", entry.doc));
+        // Both fences are single `impl` blocks over a type the prose names,
+        // so each is marked a fragment for the docs fence check.
         if !entry.signature.is_empty() {
             out.push_str(&format!(
-                "\n```gossamer\nimpl {} for Type {}\n```\n",
+                "\n<!-- fragment -->\n```gossamer\nimpl {} for Type {}\n```\n",
                 entry.name, entry.signature
             ));
         }
@@ -707,7 +709,10 @@ fn push_kind_section(out: &mut String, kind: BuiltinTraitKind, title: &str, blur
             out.push_str(&format!("\nInstead: {}\n", entry.instead));
         }
         if !entry.example.is_empty() {
-            out.push_str(&format!("\n```gossamer\n{}\n```\n", entry.example));
+            out.push_str(&format!(
+                "\n<!-- fragment -->\n```gossamer\n{}\n```\n",
+                entry.example
+            ));
         }
         if !entry.bound_methods.is_empty() {
             let methods: Vec<String> = entry

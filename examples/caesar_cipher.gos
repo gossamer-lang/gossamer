@@ -35,7 +35,7 @@ let key: i64 = 7
 let encrypted = shift_codes(plain, key)
 let decrypted = shift_codes(encrypted, -key)
 
-println("plain     length = {}", plain.len())
+println(f"plain     length = {plain.len()}")
 println("plain[0..5] codes = {} {} {} {} {}"
     plain[0], plain[1], plain[2], plain[3], plain[4])
 println("encrypted[0..5]   = {} {} {} {} {}"

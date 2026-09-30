@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 
 //! `std::crypto::x509::parse_pem` leaf intrinsic. Returns a 7-slot
@@ -24,6 +23,8 @@ use super::string::alloc_cstring;
 use super::vec::{GosVec, gos_rt_result_new, gos_rt_vec_push};
 
 unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_text`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_text(p) }
 }
 
@@ -34,7 +35,7 @@ fn byte_vec(bytes: &[u8]) -> *mut GosVec {
 // STRING-typed: the vec owns each element, so `gos_rt_vec_free`
 // deep-frees them.
 fn str_vec(items: &[String]) -> *mut GosVec {
-    let v = unsafe {
+    let v = {
         crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
             8,
             items.len() as i64,
@@ -43,6 +44,8 @@ fn str_vec(items: &[String]) -> *mut GosVec {
     };
     for s in items {
         let pv = alloc_cstring(s.as_bytes()) as i64;
+        // SAFETY: `v` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts, and
+        // `pv` is one 8-byte element.
         unsafe { gos_rt_vec_push(v, std::ptr::addr_of!(pv).cast::<u8>()) };
     }
     v
@@ -50,7 +53,7 @@ fn str_vec(items: &[String]) -> *mut GosVec {
 
 fn err(msg: &str) -> i128 {
     let e = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, e as i64) }
+    gos_rt_result_new(1, e as i64)
 }
 
 /// Layout of the parsed certificate tuple `(subject, issuer, serial,
@@ -73,6 +76,8 @@ static CERT_INFO_META: [i64; 9] = [
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_x509_parse_pem_raw(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr` accepts.
         let pem = unsafe { cstr(s) }.as_bytes();
         let der = match x509_parser::pem::parse_x509_pem(pem) {
             Ok((_, p)) => p.contents,
@@ -110,7 +115,7 @@ pub unsafe extern "C" fn gos_rt_x509_parse_pem_raw(s: *const c_char) -> i128 {
         if blob.is_null() {
             return err("x509: alloc failed");
         }
-        unsafe { gos_rt_result_new(0, blob as i64) }
+        gos_rt_result_new(0, blob as i64)
     })
 }
 
@@ -128,6 +133,8 @@ pub unsafe extern "C" fn gos_rt_x509_verify_server_certificate_with_crls(
     crl_pem: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `chain_pem` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr` accepts.
         let chain = match CertificateDer::pem_slice_iter(unsafe { cstr(chain_pem) }.as_bytes())
             .collect::<Result<Vec<_>, _>>()
         {
@@ -137,6 +144,8 @@ pub unsafe extern "C" fn gos_rt_x509_verify_server_certificate_with_crls(
         };
         let (leaf, intermediates) = chain.split_first().expect("checked non-empty chain");
 
+        // SAFETY: `roots_pem` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr` accepts.
         let root_certs = match CertificateDer::pem_slice_iter(unsafe { cstr(roots_pem) }.as_bytes())
             .collect::<Result<Vec<_>, _>>()
         {
@@ -152,6 +161,8 @@ pub unsafe extern "C" fn gos_rt_x509_verify_server_certificate_with_crls(
         }
 
         let crls =
+            // SAFETY: `crl_pem` is this shim's argument, null or a live string body for the call
+            // (C-ABI contract), which `cstr` accepts.
             match CertificateRevocationListDer::pem_slice_iter(unsafe { cstr(crl_pem) }.as_bytes())
                 .collect::<Result<Vec<_>, _>>()
             {
@@ -167,12 +178,14 @@ pub unsafe extern "C" fn gos_rt_x509_verify_server_certificate_with_crls(
             Ok(verifier) => verifier,
             Err(e) => return err(&format!("x509: verifier: {e}")),
         };
+        // SAFETY: `hostname` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr` accepts.
         let server_name = match ServerName::try_from(unsafe { cstr(hostname) }.to_owned()) {
             Ok(server_name) => server_name,
             Err(e) => return err(&format!("x509: hostname: {e}")),
         };
         match verifier.verify_server_cert(leaf, intermediates, &server_name, &[], UnixTime::now()) {
-            Ok(_) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(_) => gos_rt_result_new(0, 0),
             Err(e) => err(&format!("x509: verify server certificate: {e}")),
         }
     })

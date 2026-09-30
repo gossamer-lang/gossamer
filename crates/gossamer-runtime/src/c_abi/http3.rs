@@ -13,7 +13,6 @@
 //! `Fn(H3Request) -> H3Response` callback.
 
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 use std::os::raw::c_char;
 
@@ -26,10 +25,16 @@ type HandlerFn = unsafe extern "C-unwind" fn(env: *mut u8, req: *mut GosHttpRequ
 
 /// Reads a nullable C string into an owned `String`; an empty
 /// default is substituted for a null pointer.
-fn cstr_or(ptr: *const c_char, default: &str) -> String {
+///
+/// # Safety
+///
+/// `ptr` is null or a live string body.
+unsafe fn cstr_or(ptr: *const c_char, default: &str) -> String {
     if ptr.is_null() {
         default.to_string()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `ptr` live or null, which `gos_str_arg_string`
+        // accepts.
         unsafe { crate::c_abi::gos_str_arg_string(ptr) }
     }
 }
@@ -63,7 +68,12 @@ fn gos_request_from_wire(req: H3Request) -> GosHttpRequest {
 /// Invokes the Gossamer handler for one request and lowers its
 /// result into an engine response. A null `fn_addr` (legacy stub),
 /// an `Err` result, or a null response all resolve to a 500.
-fn dispatch(env_addr: usize, fn_addr: usize, req: H3Request) -> H3Response {
+///
+/// # Safety
+///
+/// `env_addr` is a live handler environment and `fn_addr` the entry address of
+/// its compiled handler method.
+unsafe fn dispatch(env_addr: usize, fn_addr: usize, req: H3Request) -> H3Response {
     if fn_addr == 0 {
         return H3Response {
             status: 200,
@@ -83,7 +93,9 @@ fn dispatch(env_addr: usize, fn_addr: usize, req: H3Request) -> H3Response {
     // SAFETY: `env_ptr` and `req_ptr` are valid for this call frame;
     // the handler consumes them inline or copies.
     let result_ptr = unsafe { handler(env_ptr, req_ptr) };
-    let extracted = extract_response_struct(result_ptr);
+    // SAFETY: the compiled handler answered `result_ptr`, a
+    // `Result<http::Response, _>` carrier.
+    let extracted = unsafe { extract_response_struct(result_ptr) };
     // SAFETY: `drop_handler_result` frees the response box the
     // handler returned. `result_ptr` is owned by this frame (the
     // extraction above clones out, it does not take ownership).
@@ -91,7 +103,7 @@ fn dispatch(env_addr: usize, fn_addr: usize, req: H3Request) -> H3Response {
     // The handler may have allocated into the per-worker arena;
     // reset it after the response has been copied out so a
     // long-lived connection does not grow the arena without bound.
-    unsafe { super::gc::gos_rt_gc_reset() };
+    super::gc::gos_rt_gc_reset();
     match extracted {
         Some((status, headers, body)) => H3Response {
             status,
@@ -125,16 +137,21 @@ pub unsafe extern "C-unwind" fn gos_rt_http3_serve(
     handler_env: *mut u8,
     handler_fn: i64,
 ) -> i128 {
-    let addr_s = cstr_or(addr, "0.0.0.0:8443");
-    let cert_s = cstr_or(cert_path, "");
-    let key_s = cstr_or(key_path, "");
+    // SAFETY: `addr` is this shim's argument, null or a live string body (C-ABI contract).
+    let addr_s = unsafe { cstr_or(addr, "0.0.0.0:8443") };
+    // SAFETY: `cert_path` is this shim's argument, null or a live string body (C-ABI contract).
+    let cert_s = unsafe { cstr_or(cert_path, "") };
+    // SAFETY: `key_path` is this shim's argument, null or a live string body (C-ABI contract).
+    let key_s = unsafe { cstr_or(key_path, "") };
     let env_addr = handler_env as usize;
     let fn_addr = handler_fn as usize;
     // `serve_files` reads the keypair and produces the same error
     // wording the interpreter adapter does, so a cert / key / bind
     // failure renders byte-identically across tiers.
     match gossamer_http3::serve_files(&addr_s, &cert_s, &key_s, move |req: H3Request| {
-        dispatch(env_addr, fn_addr, req)
+        // SAFETY: the caller keeps the handler environment live while the
+        // server runs, and `handler_fn` is its compiled method.
+        unsafe { dispatch(env_addr, fn_addr, req) }
     }) {
         Ok(()) => super::vec::pack_result(0, 0),
         Err(e) => http3_serve_err_result(&format!("http_h3::serve: {e}")),

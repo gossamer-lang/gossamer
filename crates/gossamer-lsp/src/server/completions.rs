@@ -164,7 +164,28 @@ fn receiver_descriptor(doc: &DocumentAnalysis, offset: u32) -> ReceiverDescripto
     let receiver = std::str::from_utf8(&bytes[start..dot_pos])
         .unwrap_or("")
         .trim();
-    classify_receiver(doc, receiver)
+    let descriptor = classify_receiver(doc, receiver);
+    if descriptor.type_name.is_some() || !matches!(descriptor.builtin, BuiltinReceiver::Unknown) {
+        return descriptor;
+    }
+    checked_receiver(doc, dot_pos).unwrap_or(descriptor)
+}
+
+/// The receiver ending just before the `.` at `dot_pos`, classified by the
+/// type the checker gave it: a local, a field, or anything else the cursor
+/// locator names, however the binding was written.
+fn checked_receiver(doc: &DocumentAnalysis, dot_pos: usize) -> Option<ReceiverDescriptor> {
+    let before = u32::try_from(dot_pos.checked_sub(1)?).ok()?;
+    let expr_id = match crate::navigation::locate(&doc.sf, doc.source(), before)? {
+        crate::navigation::Locate::PathExpr { expr_id, .. } => expr_id,
+        crate::navigation::Locate::Field {
+            access_id: Some(id),
+            ..
+        } => id,
+        _ => return None,
+    };
+    let ty = doc.types.get(expr_id)?;
+    Some(classify_type_string(&render_public_ty(&doc.tcx, ty)))
 }
 
 fn classify_receiver(doc: &DocumentAnalysis, expr: &str) -> ReceiverDescriptor {
@@ -1279,6 +1300,51 @@ struct UserMethod {
     signature: String,
     doc: String,
     is_associated: bool,
+}
+
+/// A named field of a struct declared in this file.
+struct UserField {
+    name: String,
+    ty: String,
+}
+
+/// The named fields of the struct `type_name` declares in this file.
+fn user_fields_for(doc: &DocumentAnalysis, type_name: &str) -> Vec<UserField> {
+    use gossamer_ast::{ItemKind, StructBody};
+    doc.sf
+        .items
+        .iter()
+        .filter_map(|item| match &item.kind {
+            ItemKind::Struct(decl) if decl.name.name == type_name => Some(decl),
+            _ => None,
+        })
+        .flat_map(|decl| match &decl.body {
+            StructBody::Named(fields) => fields.as_slice(),
+            _ => &[],
+        })
+        .map(|field| {
+            let mut printer = gossamer_ast::Printer::new();
+            printer.print_type(&field.ty);
+            UserField {
+                name: field.name.name.clone(),
+                ty: printer.finish(),
+            }
+        })
+        .collect()
+}
+
+/// A completion item for a struct field: its name, with its type as the
+/// detail.
+fn user_field_completion_item(field: &UserField) -> Value {
+    let mut item = BTreeMap::new();
+    item.insert("label".to_string(), Value::String(field.name.clone()));
+    // LSP `CompletionItemKind.Field`.
+    item.insert("kind".to_string(), Value::Number(5.0));
+    item.insert(
+        "detail".to_string(),
+        Value::String(format!("{}: {}", field.name, field.ty)),
+    );
+    Value::Object(item)
 }
 
 fn user_methods_for(doc: &DocumentAnalysis, type_name: &str) -> Vec<UserMethod> {

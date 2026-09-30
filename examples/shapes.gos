@@ -33,6 +33,6 @@ let circle = Circle { radius: 3.0 }
 let rect = Rectangle { width: 4.0, height: 5.0 }
 let tri = Triangle { base: 6.0, height: 4.0 }
 
-println("{}: area = {}", circle.name(), circle.area())
-println("{}: area = {}", rect.name(), rect.area())
-println("{}: area = {}", tri.name(), tri.area())
+println(f"{circle.name()}: area = {circle.area()}")
+println(f"{rect.name()}: area = {rect.area()}")
+println(f"{tri.name()}: area = {tri.area()}")

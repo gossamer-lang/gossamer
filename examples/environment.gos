@@ -10,15 +10,15 @@ use std::{env, iter}
 
 fn report_env(name: String) {
     match env::var(name) {
-        Some(v) => println("  {name} = {v}")
-        None => println("  {name} (unset)")
+        Some(v) => println(f"  {name} = {v}")
+        None => println(f"  {name} (unset)")
     }
 }
 
 println("argv:")
 let args = env::args()
 for i in 0..args.len() {
-    println("  argv[{i}] = {}", args[i])
+    println(f"  argv[{i}] = {args[i]}")
 }
 
 println("\nenvironment (selected):")
@@ -26,6 +26,6 @@ let env_vars = #["PATH", "HOME", "USER", "GOSSAMER_DEBUG"]
 env_vars |> |v| iter::for_each(v, |name| report_env(name))
 
 match env::current_dir() {
-    Ok(dir) => println("\ncwd: {dir}")
-    Err(e) => println("\ncwd error: {e}")
+    Ok(dir) => println(f"\ncwd: {dir}")
+    Err(e) => println(f"\ncwd error: {e}")
 }

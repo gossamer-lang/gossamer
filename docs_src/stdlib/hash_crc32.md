@@ -4,14 +4,13 @@ Status: experimental
 
 CRC-32 (IEEE) checksums.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/hash/crc32.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`checksum`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/hash/crc32.rs) | `fn checksum(data: Vec<u8>) -> i64` | CRC-32 checksum of a byte slice. |
-| [`checksum_string`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/hash/crc32.rs) | `fn checksum_string(text: String) -> i64` | CRC-32 checksum of a String. |
-| [`update`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/hash/crc32.rs) | `fn update(seed: i64, data: Vec<u8>) -> i64` | Continues a CRC-32 from a running value over more bytes. |
+| `checksum` | `fn checksum(data: Vec<u8>) -> u32` | CRC-32 checksum of a byte slice. |
+| `checksum_string` | `fn checksum_string(text: String) -> u32` | CRC-32 checksum of a String. |
+| `update` | `fn update(seed: u32, data: Vec<u8>) -> u32` | Continues a CRC-32 from a running value over more bytes. |
+| `update_window` | `fn update_window(seed: u32, data: Vec<u8>, start: i64, end: i64) -> u32` | Continues a CRC-32 over `data[start..end]`, checking a record where it lies rather than copying the window out first. |
+
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_possible_wrap)]
@@ -17,25 +16,9 @@
 
 use std::os::raw::c_char;
 
-/// Reads the byte payload of a `GosVec` regardless of whether it is
-/// stored as packed `u8` or boxed `i64` words.
-unsafe fn vec_u8(v: *const super::vec::GosVec) -> Vec<u8> {
-    if v.is_null() {
-        return Vec::new();
-    }
-    let vref = unsafe { &*v };
-    if vref.ptr.is_null() || vref.len <= 0 {
-        return Vec::new();
-    }
-    let len = vref.len as usize;
-    if vref.elem_bytes == 1 {
-        return unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr(), len) }.to_vec();
-    }
-    let words = unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr().cast::<i64>(), len) };
-    words.iter().map(|&w| w as u8).collect()
-}
-
 unsafe fn cstr_bytes<'a>(s: *const c_char) -> &'a [u8] {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_bytes`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_bytes(s) }
 }
 
@@ -106,12 +89,20 @@ fn crc32_update(crc: u32, data: &[u8]) -> u32 {
 /// `hash::crc32::checksum(data) -> i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_crc32_checksum(data: *const super::vec::GosVec) -> i64 {
-    ffi_entry!(0, { i64::from(crc32_update(0, &unsafe { vec_u8(data) })) })
+    ffi_entry!(0, {
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        i64::from(crc32_update(0, &unsafe {
+            crate::c_abi::vec::vec_bytes_cow(data)
+        }))
+    })
 }
 
 /// `hash::crc32::checksum_string(s) -> i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_crc32_checksum_string(s: *const c_char) -> i64 {
+    // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
+    // `cstr_bytes` accepts.
     ffi_entry!(0, { i64::from(crc32_update(0, unsafe { cstr_bytes(s) })) })
 }
 
@@ -122,7 +113,11 @@ pub unsafe extern "C" fn gos_rt_hash_crc32_update(
     data: *const super::vec::GosVec,
 ) -> i64 {
     ffi_entry!(0, {
-        i64::from(crc32_update(crc as u32, &unsafe { vec_u8(data) }))
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        i64::from(crc32_update(crc as u32, &unsafe {
+            crate::c_abi::vec::vec_bytes_cow(data)
+        }))
     })
 }
 
@@ -143,6 +138,8 @@ pub unsafe extern "C" fn gos_rt_hash_crc32_update_window(
             return i64::from(crc as u32);
         }
         let (lo, hi) = (start as usize, end as usize);
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_window` accepts.
         let Some(bytes) = (unsafe { crate::c_abi::vec::vec_bytes_window(data, lo, hi) }) else {
             return i64::from(crc as u32);
         };
@@ -154,7 +151,11 @@ pub unsafe extern "C" fn gos_rt_hash_crc32_update_window(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_crc32c_checksum(data: *const super::vec::GosVec) -> i64 {
     ffi_entry!(0, {
-        i64::from(crate::crc32c::update(0, &unsafe { vec_u8(data) }))
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        i64::from(crate::crc32c::update(0, &unsafe {
+            crate::c_abi::vec::vec_bytes_cow(data)
+        }))
     })
 }
 
@@ -162,6 +163,8 @@ pub unsafe extern "C" fn gos_rt_hash_crc32c_checksum(data: *const super::vec::Go
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_crc32c_checksum_string(s: *const c_char) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
+        // `cstr_bytes` accepts.
         i64::from(crate::crc32c::update(0, unsafe { cstr_bytes(s) }))
     })
 }
@@ -173,7 +176,11 @@ pub unsafe extern "C" fn gos_rt_hash_crc32c_update(
     data: *const super::vec::GosVec,
 ) -> i64 {
     ffi_entry!(0, {
-        i64::from(crate::crc32c::update(crc as u32, &unsafe { vec_u8(data) }))
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        i64::from(crate::crc32c::update(crc as u32, &unsafe {
+            crate::c_abi::vec::vec_bytes_cow(data)
+        }))
     })
 }
 
@@ -191,6 +198,8 @@ pub unsafe extern "C" fn gos_rt_hash_crc32c_update_window(
             return i64::from(crc as u32);
         }
         let (lo, hi) = (start as usize, end as usize);
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_window` accepts.
         let Some(bytes) = (unsafe { crate::c_abi::vec::vec_bytes_window(data, lo, hi) }) else {
             return i64::from(crc as u32);
         };
@@ -218,7 +227,11 @@ fn adler32_update(adler: u32, data: &[u8]) -> u32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_adler32_checksum(data: *const super::vec::GosVec) -> i64 {
     ffi_entry!(0, {
-        i64::from(adler32_update(1, &unsafe { vec_u8(data) }))
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        i64::from(adler32_update(1, &unsafe {
+            crate::c_abi::vec::vec_bytes_cow(data)
+        }))
     })
 }
 
@@ -226,6 +239,8 @@ pub unsafe extern "C" fn gos_rt_hash_adler32_checksum(data: *const super::vec::G
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_adler32_checksum_string(s: *const c_char) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
+        // `cstr_bytes` accepts.
         i64::from(adler32_update(1, unsafe { cstr_bytes(s) }))
     })
 }
@@ -237,7 +252,11 @@ pub unsafe extern "C" fn gos_rt_hash_adler32_update(
     data: *const super::vec::GosVec,
 ) -> i64 {
     ffi_entry!(0, {
-        i64::from(adler32_update(adler as u32, &unsafe { vec_u8(data) }))
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        i64::from(adler32_update(adler as u32, &unsafe {
+            crate::c_abi::vec::vec_bytes_cow(data)
+        }))
     })
 }
 
@@ -271,18 +290,28 @@ fn fnv32(data: &[u8]) -> u32 {
 /// `hash::fnv::hash32(data) -> i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_fnv32(data: *const super::vec::GosVec) -> i64 {
-    ffi_entry!(0, { i64::from(fnv32(&unsafe { vec_u8(data) })) })
+    ffi_entry!(0, {
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        i64::from(fnv32(&unsafe { crate::c_abi::vec::vec_bytes_cow(data) }))
+    })
 }
 
 /// `hash::fnv::hash64(data) -> u64`, carried as its bits in an `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_fnv64(data: *const super::vec::GosVec) -> i64 {
-    ffi_entry!(0, { fnv64(&unsafe { vec_u8(data) }) as i64 })
+    ffi_entry!(0, {
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        fnv64(&unsafe { crate::c_abi::vec::vec_bytes_cow(data) }) as i64
+    })
 }
 
 /// `hash::fnv::hash_string(s) -> u64`, carried as its bits in an `i64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hash_fnv_string(s: *const c_char) -> i64 {
+    // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
+    // `cstr_bytes` accepts.
     ffi_entry!(0, { fnv64(unsafe { cstr_bytes(s) }) as i64 })
 }
 
@@ -295,8 +324,12 @@ pub unsafe extern "C" fn gos_rt_crypto_subtle_ct_eq(
     b: *const super::vec::GosVec,
 ) -> i32 {
     ffi_entry!(-1, {
-        let a = unsafe { vec_u8(a) };
-        let b = unsafe { vec_u8(b) };
+        // SAFETY: `a` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        let a = unsafe { crate::c_abi::vec::vec_bytes_cow(a) };
+        // SAFETY: `b` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes_cow` accepts.
+        let b = unsafe { crate::c_abi::vec::vec_bytes_cow(b) };
         if a.len() != b.len() {
             return 0;
         }

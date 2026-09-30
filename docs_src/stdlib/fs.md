@@ -2,50 +2,44 @@
 
 Filesystem reading, writing, and traversal (Rust std::fs shape).
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`File`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `type File` | Streaming file handle. Reads and writes at its own cursor (`read`, `read_to_string`, `write`, `write_bytes`, `seek`), positionally (`read_at`, `write_at`), and reports size (`len`, `set_len`). Durability is `sync_all` / `sync_data`; multi-process safety is the `try_lock_*` / `unlock` family. |
-| [`OpenOptions`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `type OpenOptions` | Builder for opening files with read/write/append/create/truncate flags. |
-| [`canonicalize`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn canonicalize(path: String) -> Result<String, io::Error>` | Resolves a path to an absolute, symlink-free canonical form. |
-| [`copy`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn copy(src: String, dst: String) -> Result<i64, io::Error>` | Copies a file, creating parent dirs as needed. |
-| [`create`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn create(path: String) -> Result<fs::File, io::Error>` | Creates or truncates a file and returns a streaming file handle. |
-| [`create_dir`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn create_dir(path: String) -> Result<(), io::Error>` | Creates a single directory. Fails if any parent is missing. |
-| [`create_dir_all`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn create_dir_all(path: String) -> Result<(), io::Error>` | Creates a directory and any missing ancestors. |
-| [`create_dir_mode`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn create_dir_mode(path: String, mode: i64) -> Result<(), errors::Error>` | Creates a single directory with exactly this mode. The mode is applied after the directory exists, so the umask cannot mask a bit out of it. On Windows only the owner write bit is meaningful: it sets or clears the read-only attribute. |
-| [`create_dir_all_mode`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn create_dir_all_mode(path: String, mode: i64) -> Result<(), errors::Error>` | Creates a directory and any missing ancestors, giving each one it creates exactly this mode and leaving one that already existed as it is. |
-| [`write_mode`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn write_mode(path: String, contents: String, mode: i64) -> Result<(), errors::Error>` | Writes a file and leaves it at exactly this mode. The file is created with the mode and then set to it, so it is never more permissive than asked for and the umask cannot leave it less permissive. |
-| [`permissions`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn permissions(path: String) -> Result<i64, errors::Error>` | The permission bits of a path, in the chmod(2) encoding, including the setuid, setgid, and sticky bits. On Windows the read-only attribute is widened into the bits an equivalent Unix path would carry: `0o666` / `0o777` when writable, `0o444` / `0o555` when read-only. |
-| [`set_permissions`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn set_permissions(path: String, mode: i64) -> Result<(), errors::Error>` | Sets the permission bits of a path, in the chmod(2) encoding. On Windows only the owner write bit is meaningful: it sets or clears the read-only attribute and every other bit is ignored. |
-| [`sync_dir`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn sync_dir(path: String) -> Result<(), errors::Error>` | Makes a directory's own entries durable - the barrier a create, rename, or delete needs after the file itself is synced. On Windows NTFS metadata ordering supplies it and the call performs no flush. |
-| [`SEEK_SET`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `const SEEK_SET: i64` | `File::seek` whence: the offset is absolute from the start of the file. |
-| [`SEEK_CUR`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `const SEEK_CUR: i64` | `File::seek` whence: the offset is relative to the current position. |
-| [`SEEK_END`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `const SEEK_END: i64` | `File::seek` whence: the offset is relative to the end of the file. |
-| [`temp_dir`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn temp_dir(prefix: String) -> Result<String, io::Error>` | Creates a unique directory under the system temporary root. The caller removes it explicitly. |
-| [`temp_file`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn temp_file(prefix: String) -> Result<(fs::File, String), io::Error>` | Creates a unique temporary file and returns its streaming handle plus path. Close and remove it explicitly. |
-| [`exists`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn exists(path: String) -> bool` | Returns whether a path exists on the filesystem. |
-| [`file_size`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn file_size(path: String) -> i64` | Returns the file's size in bytes; 0 on error. |
-| [`is_dir`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn is_dir(path: String) -> bool` | Returns whether a path exists and is a directory. |
-| [`is_file`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn is_file(path: String) -> bool` | Returns whether a path exists and is a regular file. |
-| [`is_symlink`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn is_symlink(path: String) -> bool` | Returns whether a path exists and is a symbolic link. |
-| [`metadata`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn metadata(path: String) -> Result<fs::Metadata, io::Error>` | Returns filesystem metadata for a path. |
-| [`open`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn open(path: String) -> Result<fs::File, io::Error>` | Opens a file for streaming reads. |
-| [`read`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn read(path: String) -> Result<Vec<u8>, io::Error>` | Reads an entire file into memory as bytes. |
-| [`read_dir`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn read_dir(path: String) -> Result<Vec<fs::DirInfo>, io::Error>` | Returns DirInfo metadata for the immediate children of a directory. |
-| [`read_to_string`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn read_to_string(path: String) -> Result<String, io::Error>` | Reads an entire file into memory as UTF-8 text. |
-| [`remove_dir`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn remove_dir(path: String) -> Result<(), io::Error>` | Removes an empty directory. |
-| [`remove_dir_all`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn remove_dir_all(path: String) -> Result<(), io::Error>` | Recursively removes a directory and its contents. |
-| [`remove_file`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn remove_file(path: String) -> Result<(), io::Error>` | Removes a single file. |
-| [`rename`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn rename(src: String, dst: String) -> Result<(), io::Error>` | Renames a file or directory. |
-| [`walk_dir`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn walk_dir(path: String, visit: Fn(fs::DirInfo) -> Result<(), io::Error>) -> Result<(), io::Error>` | Recursively visits every descendant entry. |
-| [`write`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/fs.rs) | `fn write(path: String, contents: Vec<u8>) -> Result<(), io::Error>` | Writes bytes to a file, creating or truncating it. |
+| `File` | `type File` | Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. |
+| `DirInfo` | `type DirInfo` | Directory entry yielded by read_dir and walk_dir; carries path, name, is_file, is_dir, is_symlink, and size. |
+| `OpenOptions` | `type OpenOptions` | Builder for opening files with read/write/append/create/truncate flags. |
+| `open` | `fn open(path: String) -> Result<fs::File, io::Error>` | Opens a file for streaming reads. |
+| `create` | `fn create(path: String) -> Result<fs::File, io::Error>` | Creates or truncates a file and returns a streaming file handle. |
+| `temp_dir` | `fn temp_dir(prefix: String) -> Result<String, io::Error>` | Creates a unique temporary directory; the caller removes it explicitly. |
+| `temp_file` | `fn temp_file(prefix: String) -> Result<(fs::File, String), io::Error>` | Creates a unique temporary file and returns its handle plus path. |
+| `read` | `fn read(path: String) -> Result<Vec<u8>, io::Error>` | Reads an entire file into memory as bytes. |
+| `read_to_string` | `fn read_to_string(path: String) -> Result<String, io::Error>` | Reads an entire file into memory as UTF-8 text. |
+| `write` | `fn write(path: String, contents: Vec<u8>) -> Result<(), io::Error>` | Writes bytes to a file, creating or truncating it. |
+| `read_dir` | `fn read_dir(path: String) -> Result<Vec<fs::DirInfo>, io::Error>` | Returns immediate children as DirInfo values. Inspect their metadata fields directly; each path can be passed back to filesystem APIs. |
+| `walk_dir` | `fn walk_dir(path: String, visit: Fn(fs::DirInfo) -> Result<(), io::Error>) -> Result<(), io::Error>` | Recursively visits every descendant entry. |
+| `create_dir` | `fn create_dir(path: String) -> Result<(), io::Error>` | Creates a single directory. Fails if any parent is missing. |
+| `create_dir_all` | `fn create_dir_all(path: String) -> Result<(), io::Error>` | Creates a directory and any missing ancestors. |
+| `create_dir_mode` | `fn create_dir_mode(path: String, mode: i64) -> Result<(), io::Error>` | Creates a single directory with exactly this mode, whatever the umask is. On Windows only the owner write bit is meaningful: it sets the read-only attribute. |
+| `create_dir_all_mode` | `fn create_dir_all_mode(path: String, mode: i64) -> Result<(), io::Error>` | Creates a directory and any missing ancestors, giving each one it creates exactly this mode. |
+| `write_mode` | `fn write_mode(path: String, contents: Vec<u8>, mode: i64) -> Result<(), io::Error>` | Writes a file and leaves it at exactly this mode, whatever the umask is. |
+| `permissions` | `fn permissions(path: String) -> Result<i64, io::Error>` | The permission bits of a path, in the chmod(2) encoding. On Windows the read-only attribute is widened into the bits an equivalent Unix path would carry. |
+| `set_permissions` | `fn set_permissions(path: String, mode: i64) -> Result<(), io::Error>` | Sets the permission bits of a path, in the chmod(2) encoding. On Windows only the owner write bit is meaningful: it sets or clears the read-only attribute. |
+| `remove_file` | `fn remove_file(path: String) -> Result<(), io::Error>` | Removes a single file. |
+| `remove_dir` | `fn remove_dir(path: String) -> Result<(), io::Error>` | Removes an empty directory. |
+| `remove_dir_all` | `fn remove_dir_all(path: String) -> Result<(), io::Error>` | Recursively removes a directory and its contents. |
+| `copy` | `fn copy(src: String, dst: String) -> Result<i64, io::Error>` | Copies a file, creating parent dirs as needed. |
+| `rename` | `fn rename(src: String, dst: String) -> Result<(), io::Error>` | Renames a file or directory. |
+| `exists` | `fn exists(path: String) -> bool` | Returns whether a path exists on the filesystem. |
+| `is_file` | `fn is_file(path: String) -> bool` | Returns whether a path exists and is a regular file. |
+| `is_dir` | `fn is_dir(path: String) -> bool` | Returns whether a path exists and is a directory. |
+| `is_symlink` | `fn is_symlink(path: String) -> bool` | Returns whether a path exists and is a symbolic link. |
+| `file_size` | `fn file_size(path: String) -> i64` | Returns the file's size in bytes; 0 on error. |
+| `metadata` | `fn metadata(path: String) -> Result<fs::Metadata, io::Error>` | Returns filesystem metadata for a path. |
+| `sync_dir` | `fn sync_dir(path: String) -> Result<(), io::Error>` | Makes a directory's own entries durable - the barrier a create, rename, or delete needs after the file itself is synced. On Windows this is satisfied by NTFS metadata ordering and performs no flush. |
+| `SEEK_SET` | `const SEEK_SET` | File::seek whence: the offset is absolute from the start of the file. |
+| `SEEK_CUR` | `const SEEK_CUR` | File::seek whence: the offset is relative to the current position. |
+| `SEEK_END` | `const SEEK_END` | File::seek whence: the offset is relative to the end of the file. |
+| `canonicalize` | `fn canonicalize(path: String) -> Result<String, io::Error>` | Resolves a path to an absolute, symlink-free canonical form. |
 
-`DirInfo.path` is safe to pass back to `fs::read_dir` and `fs::walk_dir`
-even when the operating-system path is not valid UTF-8. Such paths use an
-internal reversible string encoding; applications should treat the field as
-an opaque filesystem path rather than user-facing display text.
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

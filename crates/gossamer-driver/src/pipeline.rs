@@ -325,6 +325,7 @@ fn lower_to_mir_reporting_prune(
             }
         }
     }
+    gossamer_mir::rc_verify::check_program(&bodies);
     phases.passes = started.elapsed();
     (bodies, tcx, prune, phases)
 }

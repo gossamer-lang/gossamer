@@ -414,14 +414,23 @@ pub unsafe extern "C-unwind" fn gos_rt_par_run(env: *const u8, len: i64, mode: i
     // fault to pass through and the call is made directly.
     #[cfg(target_arch = "wasm32")]
     {
+        // SAFETY: `env` is this shim's closure environment, null or live for the call with a leaf
+        // body of the `LeafFn` shape (C-ABI contract), which `par_run` accepts.
         unsafe { par_run(env, len, mode) }
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
+        // SAFETY: `env` is this shim's closure environment, null or live for the call with a leaf
+        // body of the `LeafFn` shape (C-ABI contract), which `par_run` accepts.
         ffi_entry_passthrough!(std::ptr::null_mut(), { unsafe { par_run(env, len, mode) } })
     }
 }
 
+/// Runs the parallel leaf body in `env` over `0..len` in the split `mode` names.
+///
+/// # Safety
+/// `env` is null or a live closure environment whose first word is a leaf body
+/// of the `LeafFn` shape.
 unsafe fn par_run(env: *const u8, len: i64, mode: i64) -> *mut GosVec {
     arm_stats_report();
     if env.is_null() {
@@ -431,7 +440,8 @@ unsafe fn par_run(env: *const u8, len: i64, mode: i64) -> *mut GosVec {
     // first word is the leaf body.
     let code = unsafe { (env as *const usize).read() };
     // SAFETY: as above, the word is a leaf body of the `LeafFn` shape.
-    let leaf_fn: LeafFn = unsafe { std::mem::transmute::<usize, LeafFn>(code) };
+    let leaf_fn: LeafFn =
+        unsafe { std::mem::transmute::<*const (), LeafFn>(crate::c_abi::code_address(code)) };
     let workers = compiled_workers();
     let leaves = Leaves::new(len, Mode::from_code(mode), workers);
     if leaves.count() == 1 {
@@ -485,8 +495,14 @@ unsafe fn concat_parts(parts: &[Part], helpers: usize) -> *mut GosVec {
     let Some(&first) = vecs.first() else {
         return std::ptr::null_mut();
     };
-    // SAFETY: every part is a live `Vec` a leaf answered.
-    let len_of = |v: *mut GosVec| if v.is_null() { 0 } else { unsafe { (*v).len } };
+    let len_of = |v: *mut GosVec| {
+        if v.is_null() {
+            0
+        } else {
+            // SAFETY: every part is a live `Vec` a leaf answered.
+            unsafe { (*v).len }
+        }
+    };
     let base_index = vecs.iter().position(|&v| len_of(v) > 0).unwrap_or(0);
     let base = vecs[base_index];
     if base.is_null() {

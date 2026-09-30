@@ -221,6 +221,7 @@ peaks rather than assuming RSS immediately follows the live object graph.
 
 A typical HTTP service exposes `/healthz`:
 
+<!-- fragment -->
 ```gos
 fn handler(req: http::Request) -> http::Response {
     match req.path() {

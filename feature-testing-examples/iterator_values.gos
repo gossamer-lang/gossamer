@@ -1,0 +1,66 @@
+// Iterators held as values: bound and advanced one element at a time, kept in
+// struct fields, passed and returned by value, and copied, over word, string,
+// pair, and aggregate elements.
+struct Point { x: i64, name: String }
+struct Holder { it: Iterator<String> }
+
+fn words(xs: Vec<String>) -> Holder {
+    let it = xs.iter()
+    Holder { it: it }
+}
+
+fn first_len(mut it: Iterator<String>) -> i64 {
+    it.next().unwrap_or("").len()
+}
+
+fn tagged(i: i64) -> Iterator<(i64, String)> {
+    let xs = #[(i, format("t{}", i)), (i + 1, "u")]
+    xs.iter()
+}
+
+fn pairs(i: i64) -> Iterator<(i64, i64)> {
+    #[(i, 1), (2, 3)].iter()
+}
+
+fn main() {
+    let mut w = #[10, 20, 30].iter()
+    println("{:?} {:?}", w.next(), w.next())
+    while let Some(v) = w.next() {
+        println("rest {}", v)
+    }
+
+    let mut h = words(#["a", "bb", "ccc"])
+    println("{:?} {:?}", h.it.next(), h.it.next())
+    let mut copy = h
+    println("{:?} {:?}", copy.it.next(), h.it.next())
+
+    println("{}", first_len(#["four", "x"].iter()))
+
+    let pts = #[Point { x: 1, name: "one" }, Point { x: 2, name: "two" }, Point { x: 3, name: "three" }]
+    let mut a = pts.iter()
+    println("{} {}", a.next().unwrap().name, a.next().unwrap().x)
+    while let Some(p) = a.next() {
+        println("last {}", p.name)
+    }
+    let b = pts.iter()
+    println("{:?}", b.map(|p| p.x * 10).collect())
+    let c = pts.iter()
+    for (i, p) in c.enumerate() {
+        print("{}:{} ", i, p.name)
+    }
+    println("")
+
+    let mut t = tagged(7)
+    println("{:?} {:?} {:?}", t.next(), t.next(), t.next())
+    let mut q = pairs(4)
+    println("{:?} {:?}", q.next(), q.next())
+    let mut local = #[(1, 2), (3, 4)].iter()
+    while let Some(pair) = local.next() {
+        print("{} ", pair.0 + pair.1)
+    }
+    println("")
+    let mut e = #["p", "q"].iter().enumerate()
+    println("{:?} {:?}", e.next(), e.next())
+    let mut z = #[1, 2].iter().zip(#[5, 6].iter())
+    println("{:?} {:?} {:?}", z.next(), z.next(), z.next())
+}

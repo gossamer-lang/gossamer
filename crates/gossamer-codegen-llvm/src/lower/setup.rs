@@ -86,7 +86,7 @@ impl<'a> Lowerer<'a> {
             last_frame_line: None,
             pending_frame_line: None,
             cold_spans: Vec::new(),
-            bounds_fail_edges: Vec::new(),
+            check_fail_edges: Vec::new(),
             frame_observed: false,
             frame_globals: None,
             fn_name_by_def: std::collections::HashMap::new(),
@@ -94,7 +94,7 @@ impl<'a> Lowerer<'a> {
             payload_views: std::collections::HashMap::new(),
             strings: std::rc::Rc::new(std::cell::RefCell::new(StringPool::default())),
             current_block: None,
-            preempt_seq: 0,
+            preempt_headers: std::collections::HashSet::new(),
             capture_summary: gossamer_mir::CaptureSummary::default(),
             cabi_handlers: std::collections::BTreeMap::new(),
             cabi_thunk_sites: std::collections::BTreeSet::new(),
@@ -152,6 +152,8 @@ impl<'a> Lowerer<'a> {
         self.emit_prelude();
         // Entry block opens with `alloca`s for every local.
         self.emit_allocas();
+        self.emit_debug_variables();
+        self.plan_preemption_polls();
         // Copy function parameters into their local slots so
         // the rest of the body uniformly reads through
         // `local_slot`. MIR reserves `_1..=_arity` as
@@ -167,7 +169,7 @@ impl<'a> Lowerer<'a> {
         for block in &self.body.blocks {
             self.lower_block(block)?;
         }
-        self.emit_shared_bounds_fail();
+        self.emit_shared_check_fail();
         writeln!(self.out, "}}").unwrap();
         if !self.entry_allocas.is_empty() {
             let hoisted = std::mem::take(&mut self.entry_allocas).concat();
@@ -492,6 +494,91 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+    }
+
+    /// Names each source-level local and parameter for the debugger: one
+    /// [`crate::emit::DEBUG_VARIABLE_MARKER`] line per binding, which the
+    /// DWARF pass turns into its `DILocalVariable` and the declaration that
+    /// ties it to its slot.
+    pub(crate) fn emit_debug_variables(&mut self) {
+        if !crate::emit::want_dwarf() {
+            return;
+        }
+        for (i, decl) in self.body.locals.iter().enumerate() {
+            let Some(name) = &decl.debug_name else {
+                continue;
+            };
+            if is_unit(self.tcx, decl.ty) || name.name.starts_with("__") || name.is_error() {
+                continue;
+            }
+            let local = Local(i as u32);
+            let arg = if (1..=self.body.arity as usize).contains(&i) {
+                i
+            } else {
+                0
+            };
+            let offset = self
+                .body
+                .blocks
+                .iter()
+                .flat_map(|block| &block.stmts)
+                .find(|stmt| {
+                    matches!(&stmt.kind, gossamer_mir::StatementKind::Assign { place, .. }
+                        if place.local == local && place.projection.is_empty())
+                })
+                .map_or(self.body.span.start, |stmt| stmt.span.start);
+            let Some((_, line, column)) = crate::emit::source_position(offset) else {
+                continue;
+            };
+            let ty = self.debug_type_descriptor(decl.ty);
+            writeln!(
+                self.out,
+                "  {marker}{slot} {arg} {line} {column} {ty} {name}",
+                marker = crate::emit::DEBUG_VARIABLE_MARKER,
+                slot = local_slot(local),
+                name = name.name,
+            )
+            .unwrap();
+        }
+    }
+
+    /// How the debugger reads a value of `ty` from its slot, as one token:
+    /// `s<bits>` / `u<bits>` / `f<bits>` / `bool` / `char` for a scalar,
+    /// `words<N>:<name>` for an aggregate held inline, and `ptr:<name>` for
+    /// anything reached through a handle.
+    fn debug_type_descriptor(&self, ty: Ty) -> String {
+        use gossamer_types::{FloatTy, IntTy};
+        let name = gossamer_types::render_ty(self.tcx, ty)
+            .chars()
+            .map(|c| if c.is_whitespace() { '_' } else { c })
+            .collect::<String>();
+        match self.tcx.kind(ty) {
+            Some(TyKind::Bool) => "bool".to_string(),
+            Some(TyKind::Char) => "char".to_string(),
+            Some(TyKind::Float(FloatTy::F32)) => "f32".to_string(),
+            Some(TyKind::Float(_)) => "f64".to_string(),
+            Some(TyKind::Int(int)) => match int {
+                IntTy::I8 => "s8",
+                IntTy::I16 => "s16",
+                IntTy::I32 => "s32",
+                IntTy::I64 | IntTy::Isize | IntTy::I128 => "s64",
+                IntTy::U8 => "u8",
+                IntTy::U16 => "u16",
+                IntTy::U32 => "u32",
+                IntTy::U64 | IntTy::Usize | IntTy::U128 => "u64",
+            }
+            .to_string(),
+            _ if is_aggregate(self.tcx, ty) && self.heap_spilled_local_bytes_of(ty).is_none() => {
+                let words = slot_count(self.tcx, ty).unwrap_or(1).max(1);
+                format!("words{words}:{name}")
+            }
+            _ => format!("ptr:{name}"),
+        }
+    }
+
+    fn heap_spilled_local_bytes_of(&self, ty: Ty) -> Option<u64> {
+        let bytes = aggregate_storage_bytes(self.tcx, ty)?;
+        (bytes > STACK_AGGREGATE_SPILL_BYTES).then_some(bytes)
     }
 
     pub(crate) fn heap_spilled_local_bytes(&self, local: Local) -> Option<u64> {

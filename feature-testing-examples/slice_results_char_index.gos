@@ -24,7 +24,7 @@ fn main() {
     for piece in built.split("|") { describe("split-built", piece) }
     for line in "α\nbeta\nγδ".lines() { describe("line", line) }
 
-    let re = regex::compile("w.rld|[a-z]+").unwrap()
+    let re = regex::compile("w.rld|[a-z]+")
     for (start, end, m) in re.find_all(lit) { describe(format("re {}..{}", start, end), m) }
 
     let mut grown = ascii.trim()

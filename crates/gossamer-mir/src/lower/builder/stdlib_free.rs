@@ -1300,13 +1300,16 @@ impl<'a> Builder<'a> {
                     ("gos_rt_error_is", self.tcx.bool_ty())
                 }
             }
-            // Result-shaped so an invalid pattern lands in the Err arm
-            // on the compiled tiers exactly as it does on the VM; the
-            // bare-pointer `gos_rt_regex_compile` shim made every
-            // compile look like Ok, with a null handle on bad input.
-            // `regex::Pattern::compile(p)` is the type-qualified spelling of
-            // the same call; both answer `Result<Pattern, errors::Error>`.
-            "regex::compile" | "regex::Pattern::compile" | "Pattern::compile" => {
+            // A `regex::compile` literal was validated while parsing with the
+            // engine the shim compiles it with, so the handle is the answer.
+            "regex::compile" => (
+                "gos_rt_regex_compile",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
+            // A pattern built at run time can be refused: the Err arm carries
+            // the engine's reason on every tier. `regex::Pattern::new(p)` is
+            // the type-qualified spelling of the same call.
+            "regex::new" | "regex::Pattern::new" | "Pattern::new" => {
                 let handle = self.tcx.int_ty(gossamer_types::IntTy::I64);
                 let ty = self.result_payload_string_error_ty(handle);
                 ("gos_rt_regex_compile_result", ty)
@@ -1810,51 +1813,51 @@ impl<'a> Builder<'a> {
             // 0.10.0 - hash::* checksums previously VM-only.
             "hash::crc32::checksum" => (
                 "gos_rt_hash_crc32_checksum",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::crc32::checksum_string" => (
                 "gos_rt_hash_crc32_checksum_string",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::crc32::update" => (
                 "gos_rt_hash_crc32_update",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::crc32::update_window" => (
                 "gos_rt_hash_crc32_update_window",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::crc32c::checksum" => (
                 "gos_rt_hash_crc32c_checksum",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::crc32c::checksum_string" => (
                 "gos_rt_hash_crc32c_checksum_string",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::crc32c::update" => (
                 "gos_rt_hash_crc32c_update",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::crc32c::update_window" => (
                 "gos_rt_hash_crc32c_update_window",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::adler32::checksum" => (
                 "gos_rt_hash_adler32_checksum",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::adler32::checksum_string" => (
                 "gos_rt_hash_adler32_checksum_string",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::adler32::update" => (
                 "gos_rt_hash_adler32_update",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::fnv::hash32" => (
                 "gos_rt_hash_fnv32",
-                self.tcx.int_ty(gossamer_types::IntTy::I64),
+                self.tcx.int_ty(gossamer_types::IntTy::U32),
             ),
             "hash::fnv::hash64" => (
                 "gos_rt_hash_fnv64",
@@ -3988,7 +3991,15 @@ impl<'a> Builder<'a> {
                     def: gossamer_resolve::DefId::local(u32::MAX),
                     substs,
                 });
-                ("gos_rt_vec_insert_safe", result)
+                // A struct, tuple, or array element reaches the runtime as the
+                // address of its slot block, as in the method form.
+                let elem = self.vec_receiver_elem_ty(args[0].ty);
+                let symbol = if self.is_inline_slot_block(elem) {
+                    "gos_rt_vec_insert_slots_safe"
+                } else {
+                    "gos_rt_vec_insert_safe"
+                };
+                (symbol, result)
             }
             "Vec::remove" | "collections::Vec::remove" if args.len() == 2 => {
                 let elem = self.vec_receiver_elem_ty(args[0].ty);

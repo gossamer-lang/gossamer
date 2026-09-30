@@ -24,7 +24,7 @@ let mut scores: Map<String, i64> = Map::new()
 scores.insert("alice", 95)
 scores.insert("bob", 87)
 if let Some(n) = scores.get("alice") {
-    println("alice -> {n}")
+    println(f"alice -> {n}")
 } else {
     println("alice missing")
 }
@@ -43,7 +43,7 @@ ranked.insert("c", 3)
 ranked.insert("a", 1)
 ranked.insert("b", 2)
 for (key, value) in ranked.iter() {
-    println("  {} = {}", key, value)
+    println(f"  {key} = {value}")
 }
 
 // --- set ---
@@ -51,10 +51,10 @@ let mut seen: Set<String> = Set::new()
 seen.insert("alpha")
 seen.insert("beta")
 seen.insert("alpha")
-println("unique tags: {}", seen.len())
+println(f"unique tags: {seen.len()}")
 
 // --- tuple destructuring at the call site ---
 let x, y = origin()
-println("origin = ({}, {})", x, y)
+println(f"origin = ({x}, {y})")
 
 fn origin() -> (f64, f64) { (0.0, 0.0) }

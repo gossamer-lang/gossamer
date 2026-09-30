@@ -12,7 +12,7 @@
 use std::{env, errors, fs, iter, result}
 
 fn cat(f: String) -> Result<(), errors::Error> {
-    fs::read_to_string(f) |> |v| result::map(v, |s| print("{}", s))
+    fs::read_to_string(f) |> |v| result::map(v, |s| print(s))
 }
 
-env::args() |> |v| iter::for_each(v, |f| cat(f) |> |v| result::unwrap_or_else(v, |e| eprintln("{f}: {e}")))
+env::args() |> |v| iter::for_each(v, |f| cat(f) |> |v| result::unwrap_or_else(v, |e| eprintln(f"{f}: {e}")))

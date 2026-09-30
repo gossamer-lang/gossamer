@@ -55,6 +55,24 @@ fn probes() -> Vec<(String, String)> {
             println("{}", acc)
         }
         """)
+        ("borrowed_element_unwrap", """
+        enum Shape { Rect(i64, i64), Square(i64) }
+        fn area(s: Shape) -> i64 { match s { Rect(w, h) => w * h, Square(x) => x * x } }
+        fn main() {
+            let shapes = #[Rect(3, 4), Square(5)]
+            let none: Vec<Shape> = #[]
+            let words = #["alpha", "beta"]
+            let mut acc = 0
+            for i in 0..COUNT {
+                let a = shapes.first().unwrap()
+                let b = shapes.max_by_key(|s| area(s)).unwrap_or(Square(i % 7))
+                let c = none.first().unwrap_or(Square(i % 5))
+                let w = words.last().unwrap_or(f"w{i}")
+                acc += area(a) + area(b) + area(c) + w.len()
+            }
+            println(acc)
+        }
+        """)
         ("tuple_vec_element", """
         fn main() {
             let mut acc = 0

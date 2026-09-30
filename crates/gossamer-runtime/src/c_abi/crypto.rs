@@ -1,43 +1,37 @@
-//! C-ABI dispatch shims for `std::crypto::*`. Each helper takes a
-//! NUL-terminated c-string input and returns a freshly-allocated
-//! NUL-terminated hex c-string (the canonical wire shape for
-//! crypto digests through the Gossamer String surface). Returning
-//! hex rather than raw bytes lets compiled programs route through
-//! `gos_rt_str_*` without needing a separate `Bytes` shape.
+//! C-ABI dispatch shims for `std::crypto::*`. Hash and MAC inputs are
+//! byte vectors (`GosVec`), so a digest covers any binary input; a `hex`
+//! helper answers a freshly-allocated lowercase-hex c-string.
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_truncation)]
 
 use std::os::raw::c_char;
 
 use super::vec::GosVec;
 
-/// Returns SHA-256 of the input c-string as lowercase hex.
+/// Returns SHA-256 of the input bytes as lowercase hex.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sha256_hex(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_sha256_hex(input: *const GosVec) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes: &[u8] = if input.is_null() {
-            &[]
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_bytes(input) }
-        };
+        // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
+        let bytes = bytes.as_slice();
         let hex = gossamer_pkg::sha256::hex(bytes);
         super::string::alloc_cstring(hex.as_bytes())
     })
 }
 
-/// Returns SHA-512 of the input c-string as lowercase hex.
+/// Returns SHA-512 of the input bytes as lowercase hex.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sha512_hex(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_sha512_hex(input: *const GosVec) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         use sha2::Digest;
-        let bytes: &[u8] = if input.is_null() {
-            &[]
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_bytes(input) }
-        };
+        // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
+        let bytes = bytes.as_slice();
         let mut h = sha2::Sha512::new();
         h.update(bytes);
         let digest: [u8; 64] = h.finalize().into();
@@ -45,15 +39,14 @@ pub unsafe extern "C" fn gos_rt_sha512_hex(input: *const c_char) -> *mut c_char 
     })
 }
 
-/// Returns BLAKE3 of the input c-string as lowercase hex.
+/// Returns BLAKE3 of the input bytes as lowercase hex.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_blake3_hex(input: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn gos_rt_blake3_hex(input: *const GosVec) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let bytes: &[u8] = if input.is_null() {
-            &[]
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_bytes(input) }
-        };
+        // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
+        let bytes = bytes.as_slice();
         let mut hasher = ::blake3::Hasher::new();
         hasher.update(bytes);
         let digest: [u8; 32] = *hasher.finalize().as_bytes();
@@ -65,21 +58,17 @@ pub unsafe extern "C" fn gos_rt_blake3_hex(input: *const c_char) -> *mut c_char 
 /// Reference: RFC 2104. Mirrors `std::crypto::hmac::sha256_mac`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_hmac_sha256_hex(
-    key: *const c_char,
-    message: *const c_char,
+    key: *const GosVec,
+    message: *const GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        let key_bytes: &[u8] = if key.is_null() {
-            &[]
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_bytes(key) }
-        };
-        let msg_bytes: &[u8] = if message.is_null() {
-            &[]
-        } else {
-            unsafe { crate::c_abi::gos_str_arg_bytes(message) }
-        };
-        let mac = hmac_sha256(key_bytes, msg_bytes);
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key_bytes = unsafe { crate::c_abi::vec::vec_bytes(key) };
+        // SAFETY: `message` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let msg_bytes = unsafe { crate::c_abi::vec::vec_bytes(message) };
+        let mac = hmac_sha256(&key_bytes, &msg_bytes);
         super::string::alloc_cstring(hex_encode(&mac).as_bytes())
     })
 }
@@ -95,8 +84,12 @@ pub unsafe extern "C" fn gos_rt_crypto_hmac_sha256_mac(
     key: *const GosVec,
     message: *const GosVec,
 ) -> *mut GosVec {
-    let key_bytes = unsafe { super::encoding::gosvec_u8(key) };
-    let msg_bytes = unsafe { super::encoding::gosvec_u8(message) };
+    // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `vec_bytes` accepts.
+    let key_bytes = unsafe { crate::c_abi::vec::vec_bytes(key) };
+    // SAFETY: `message` is this shim's argument, live for the call (C-ABI contract) or null,
+    // which `vec_bytes` accepts.
+    let msg_bytes = unsafe { crate::c_abi::vec::vec_bytes(message) };
     let mac = hmac_sha256(&key_bytes, &msg_bytes);
     super::encoding::bytes_to_gosvec(&mac)
 }
@@ -107,7 +100,9 @@ pub unsafe extern "C" fn gos_rt_crypto_hmac_sha256_mac(
 /// embedded NUL.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_sha256_digest(input: *const GosVec) -> *mut GosVec {
-    let bytes = unsafe { super::encoding::gosvec_u8(input) };
+    // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `vec_bytes` accepts.
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
     super::encoding::bytes_to_gosvec(&gossamer_pkg::sha256::digest(&bytes))
 }
 
@@ -116,7 +111,9 @@ pub unsafe extern "C" fn gos_rt_crypto_sha256_digest(input: *const GosVec) -> *m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_sha512_digest(input: *const GosVec) -> *mut GosVec {
     use sha2::Digest;
-    let bytes = unsafe { super::encoding::gosvec_u8(input) };
+    // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `vec_bytes` accepts.
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
     let mut h = sha2::Sha512::new();
     h.update(&bytes);
     let digest: [u8; 64] = h.finalize().into();
@@ -127,7 +124,9 @@ pub unsafe extern "C" fn gos_rt_crypto_sha512_digest(input: *const GosVec) -> *m
 /// digest (not the hex string), mirroring `gos_rt_crypto_sha256_digest`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_crypto_blake3_digest(input: *const GosVec) -> *mut GosVec {
-    let bytes = unsafe { super::encoding::gosvec_u8(input) };
+    // SAFETY: `input` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `vec_bytes` accepts.
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(input) };
     let mut hasher = ::blake3::Hasher::new();
     hasher.update(&bytes);
     let digest: [u8; 32] = *hasher.finalize().as_bytes();
@@ -191,17 +190,22 @@ pub unsafe extern "C" fn gos_rt_crypto_rand_bytes(n: i64) -> i128 {
         return crypto_err("crypto::rand::bytes: count must be non-negative");
     }
     let len = n;
-    let v = unsafe { super::vec::gos_rt_vec_with_capacity(1, len) };
+    let v = super::vec::gos_rt_vec_with_capacity(1, len);
     if len == 0 {
         return super::vec::gos_rt_result_new(0, v as i64);
     }
-    // Fill the freshly-allocated buffer with OS randomness and pin
-    // `len` so `b.len()` reads `n`. Unsafe is justified because GosVec
-    // exposes its backing buffer as a raw pointer at the C ABI
-    // boundary, and there is no safe Rust way to fill it.
+    // The fresh buffer is filled with OS randomness and `len` pinned so
+    // `b.len()` reads `n`.
+    // SAFETY: `gos_rt_vec_with_capacity` answers a live header for a non-negative capacity, owned
+    // here alone.
     let vref = unsafe { &mut *v };
     if !vref.ptr.is_null() {
-        let slice = unsafe { std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), len as usize) };
+        // SAFETY: the fresh buffer has room for `len` bytes that nothing else reaches; they are
+        // zeroed before a slice is formed over them.
+        let slice = unsafe {
+            std::ptr::write_bytes(vref.ptr.as_ptr(), 0, len as usize);
+            std::slice::from_raw_parts_mut(vref.ptr.as_ptr(), len as usize)
+        };
         if getrandom::fill(slice).is_err() {
             return crypto_err("crypto::rand: rng failure");
         }
@@ -228,6 +232,7 @@ pub unsafe extern "C" fn gos_rt_crypto_password_hash(plaintext: *const c_char) -
         let pw = if plaintext.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `plaintext` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(plaintext) }.to_vec()
         };
         let mut salt_bytes = [0u8; 16];
@@ -263,11 +268,13 @@ pub unsafe extern "C" fn gos_rt_crypto_password_verify(
         let pw = if plaintext.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `plaintext` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(plaintext) }.to_vec()
         };
         let phc_s = if phc.is_null() {
             String::new()
         } else {
+            // SAFETY: `phc` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(phc) }
         };
         let parsed = match PasswordHash::new(&phc_s) {
@@ -290,6 +297,7 @@ pub unsafe extern "C" fn gos_rt_crypto_password_needs_rehash(phc: *const c_char)
         let phc_s = if phc.is_null() {
             String::new()
         } else {
+            // SAFETY: `phc` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(phc) }
         };
         let Ok(parsed) = PasswordHash::new(&phc_s) else {

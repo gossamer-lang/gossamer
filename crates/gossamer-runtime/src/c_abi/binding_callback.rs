@@ -101,6 +101,7 @@ pub unsafe extern "C" fn gos_rt_binding_callback_register(
         if env.is_null() || signature.is_null() {
             return 0;
         }
+        // SAFETY: `signature` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { super::string::gos_str_arg_text(signature) };
         let Some((params, ret)) = parse_signature(text) else {
             return 0;
@@ -146,9 +147,11 @@ unsafe fn call_closure<R>(code: *const (), env: *const u8, args: &[Arg]) -> Opti
     use Arg::{Float as F, Word as W};
     macro_rules! call {
         ($($ty:ty => $value:expr),*) => {{
+            type Code<R> = unsafe extern "C" fn(*const u8 $(, $ty)*) -> R;
             // SAFETY: the caller guarantees the code's parameter classes.
-            let f: unsafe extern "C" fn(*const u8 $(, $ty)*) -> R =
-                unsafe { std::mem::transmute(code) };
+            let f: Code<R> = unsafe { std::mem::transmute(code) };
+            // SAFETY: `f` is the closure code `code` names, whose parameters take exactly these
+            // register classes (this `unsafe fn`'s contract), and `env` is its environment.
             Some(unsafe { f(env $(, $value)*) })
         }};
     }
@@ -190,7 +193,13 @@ unsafe fn call_closure<R>(code: *const (), env: *const u8, args: &[Arg]) -> Opti
 
 /// The callback table's entry point for a registered closure: converts the
 /// wire arguments, calls the closure, and writes its result.
-extern "C" fn invoke_closure(
+///
+/// # Safety
+///
+/// Called only through the callback table with the context registered alongside
+/// it: `args` addresses `args_len` bytes of wire arguments and `result_out` the
+/// result slot the caller reads.
+unsafe extern "C" fn invoke_closure(
     context: *const u8,
     args: *const u8,
     args_len: u32,

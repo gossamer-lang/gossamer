@@ -21,8 +21,8 @@ fn binary_search(xs: [i64], needle: i64) -> Result<i64, i64> {
 let sorted: [i64; 10] = #[1, 4, 9, 16, 25, 36, 49, 64, 81, 100]
 for needle in [16, 17, 0, 100, 101] {
     let label = match binary_search(sorted, needle) {
-        Ok(idx) => format("hit at index {}", idx)
-        Err(at) => format("insert at index {}", at)
+        Ok(idx) => f"hit at index {idx}"
+        Err(at) => f"insert at index {at}"
     }
-    println("{} -> {}", needle, label)
+    println(f"{needle} -> {label}")
 }

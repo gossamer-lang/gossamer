@@ -10,18 +10,18 @@
 use std::os::user
 
 let name = user::current_name()
-println("name nonempty: {}", name.len() > 0)
+println(f"name nonempty: {name.len() > 0}")
 
 let uid = user::current_uid()
-println("uid is i64: {}", uid >= -1)
+println(f"uid is i64: {uid >= -1}")
 
 let gid = user::current_gid()
-println("gid is i64: {}", gid >= -1)
+println(f"gid is i64: {gid >= -1}")
 
 let home = user::current_home()
-println("home nonempty: {}", home.len() > 0)
+println(f"home nonempty: {home.len() > 0}")
 
 // Round-trip: look up our own uid from our own name on unix,
 // verify it matches. On Windows lookup_name returns -1.
 let looked = user::lookup_name(name)
-println("round-trip ok: {}", looked == uid || looked == -1)
+println(f"round-trip ok: {looked == uid || looked == -1}")

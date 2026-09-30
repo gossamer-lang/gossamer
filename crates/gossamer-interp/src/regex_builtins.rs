@@ -18,7 +18,8 @@ use crate::value::{RuntimeError, RuntimeResult, SmolStr, Value};
 type Entry = fn(&[Value]) -> RuntimeResult<Value>;
 
 pub(crate) const ENTRIES: &[(&str, Entry)] = &[
-    ("compile", builtin_regex_compile),
+    ("compile", builtin_regex_compile_literal),
+    ("new", builtin_regex_compile),
     ("is_match", builtin_regex_is_match),
     ("find", builtin_regex_find),
     ("find_all", builtin_regex_find_all),
@@ -118,8 +119,8 @@ fn captures_to_array(caps: Vec<Option<String>>) -> Value {
     ))
 }
 
-fn builtin_regex_compile(args: &[Value]) -> RuntimeResult<Value> {
-    let pattern = arg_string(args, 0, "regex::compile")?;
+/// Compiles `pattern` into a registered handle, or the engine's reason.
+fn compile_pattern(pattern: &str) -> Result<Value, String> {
     match regex_std::compile(pattern) {
         Ok(p) => {
             let id = NEXT_REGEX_ID.with(|cell| {
@@ -131,13 +132,26 @@ fn builtin_regex_compile(args: &[Value]) -> RuntimeResult<Value> {
             REGEX_REGISTRY.with(|reg| {
                 reg.borrow_mut().insert(id, p);
             });
-            Ok(Value::variant("Ok", vec![regex_handle(id, pattern)]))
+            Ok(regex_handle(id, pattern))
         }
-        Err(err) => Ok(Value::variant(
-            "Err",
-            vec![Value::String(SmolStr::from(err.to_string()))],
-        )),
+        Err(err) => Err(err.to_string()),
     }
+}
+
+/// `regex::compile("literal")`: the parser validated the pattern with the
+/// engine this compiles it with, so the pattern itself is the answer.
+fn builtin_regex_compile_literal(args: &[Value]) -> RuntimeResult<Value> {
+    let pattern = arg_string(args, 0, "regex::compile")?;
+    compile_pattern(pattern).map_err(RuntimeError::Panic)
+}
+
+/// `regex::new(pattern) -> Result<Pattern, errors::Error>`.
+fn builtin_regex_compile(args: &[Value]) -> RuntimeResult<Value> {
+    let pattern = arg_string(args, 0, "regex::new")?;
+    Ok(match compile_pattern(pattern) {
+        Ok(handle) => Value::variant("Ok", vec![handle]),
+        Err(reason) => Value::variant("Err", vec![Value::String(SmolStr::from(reason))]),
+    })
 }
 
 fn builtin_regex_is_match(args: &[Value]) -> RuntimeResult<Value> {

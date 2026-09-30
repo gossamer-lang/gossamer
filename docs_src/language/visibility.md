@@ -144,6 +144,7 @@ A `pub` item inside a private module is still unreachable from outside,
 and the module is what the diagnostic names - it is the one place a
 `pub` would unblock the path.
 
+<!-- compile_fail GR0008 -->
 ```gossamer
 mod deep {
     mod nest { pub fn nested() -> i64 { 1 } }   // `nest` is private

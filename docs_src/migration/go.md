@@ -18,12 +18,13 @@ more explicit types and errors.
 | `func (p Point) Norm() int` | `impl Point { fn norm(&self) -> i64 { ... } }` | Methods live in `impl` blocks. |
 | `type Reader interface { Read([]byte) int }` | `trait Reader { fn read(&self, buf: &mut [u8]) -> i64 }` | Traits are nominal. |
 | `if err != nil { return err }` | `let v = f()?` | `?` propagates `Err`. |
-| `go work()` | `go work()` | Same idea. |
+| `go work()` | `spawn(|| work())` | Inside a `cohort { }` outside `main`; `go expr` is GP0061 with this rewrite. |
+| `fmt.Sprintf("%s is %d", name, age)` | `f"{name} is {age}"` | See Formatting below. |
 | `defer cleanup()` | `defer cleanup()` | Same idea. |
 | `ch <- v` | `tx.send(v)` | Channels use sender and receiver handles. |
 | `v, ok := <-ch` | `while let Some(v) = rx.recv() { ... }` | `None` means the channel is closed. |
-| `make([]int, 0, 16)` | `Vec::<i64>::with_capacity(16)` | `Vec<T>` owns growable storage; `&[T]` is a borrowed slice view. |
-| `make(map[string]int)` | `Map::<String, i64>::new()` | Import from `std::collections`. |
+| `make([]int, 0, 16)` | `Vec::<i64>::with_capacity(16)` | `Vec<T>` owns growable storage; a `[T]` parameter is a slice view. |
+| `make(map[string]int)` | `Map::<String, i64>::new()` | Core collections need no import. |
 | `map[string]int{"k": 1}` | `{"k": 1}` | Map literal. |
 | set via `map[T]struct{}` | `#{...}` | Set literal, or typed `BTreeSet<T>` for ordered sets. |
 | FIFO queue slice | `Queue::from([1, 2])` | `push` appends, `pop` removes from the front. |
@@ -34,7 +35,7 @@ more explicit types and errors.
 Entry files may use top-level statements. Items are hoisted, and bare
 statements become the body of an implicit `fn main()`.
 
-## Gossamer 0.47 Syntax At A Glance
+## Syntax At A Glance
 
 Go permits implicit statement termination but still uses commas in multiline
 composite literals. Gossamer permits semicolons only between same-line
@@ -87,10 +88,11 @@ enabled := pair.Enabled
 cached, ok := byName["Ada"]
 ```
 
+<!-- fragment -->
 ```gos
 let users = #[user, rename(user, "Grace")]
 let first = users[0]              // slice/Vec index; traps if out of bounds
-let initial = first.name[0]       // String index is a UTF-8 byte as i64
+let initial = first.name[0]       // String index is a char; byte_at(i) is the byte
 let pair = (first.name, first.active)
 let enabled = pair.1
 let mut by_name: Map<String, User> = Map::new()
@@ -101,6 +103,27 @@ let found = Lookup::Found {
     user: cached.unwrap()
 }
 ```
+
+## Formatting And Interpolated Strings
+
+`fmt` verbs become placeholders. An `f"..."` string interpolates the
+expression in each placeholder, and `format`, `println`, and `eprintln` fill
+`{}` placeholders in order:
+
+| Go | Gossamer |
+| --- | --- |
+| `fmt.Sprintf("%s is %d", name, age)` | `f"{name} is {age}"` |
+| `fmt.Printf("%d items\n", len(xs))` | `println(f"{xs.len()} items")` |
+| `%v` | `{}` |
+| `%+v`, `%#v`, `%q` | `{:?}` |
+| `%5.2f`, `%-8s`, `%08d` | `{:5.2}`, `{:<8}`, `{:08}` |
+| `%x`, `%b`, `%o`, `%e` | `{:x}`, `{:b}`, `{:o}`, `{:e}` |
+| `%+d` | `{:+}` |
+
+A placeholder takes a spec after its first top-level `:`:
+`f"{total / n:.2}"`. `{}` renders any value,
+nested collections and structs included, so there is no `Stringer` to write;
+`impl Display for T { fn fmt(&self) -> String }` overrides it.
 
 ## Errors
 
@@ -133,11 +156,13 @@ the right methods. Gossamer traits are nominal, so the conformance is
 explicit:
 
 ```gos
+use std::errors
+
 trait Writer {
     fn write(&mut self, data: [u8]) -> Result<i64, errors::Error>
 }
 
-struct Buffer { data: [u8] }
+struct Buffer { data: Vec<u8> }
 
 impl Writer for Buffer {
     fn write(&mut self, data: [u8]) -> Result<i64, errors::Error> {
@@ -149,8 +174,10 @@ impl Writer for Buffer {
 }
 ```
 
-Generic bounds use `T: Trait`. Runtime trait objects are not the default
-escape hatch; prefer generics or a closed `enum` plus `match`.
+Generic bounds use `T: Trait`. There are no runtime trait objects (`dyn` is
+GP0061); use generics or a closed `enum` plus `match`. A type with
+`impl Iterator for T` works in `for` and gains `map`, `filter`, `take`,
+`collect`, and the other adapters, as a Go iterator function does not.
 
 ## Concurrency
 
@@ -159,6 +186,8 @@ Channels are created with `channel::<T>()`. `channel()` and
 `channel::unbounded()` is explicitly unbounded.
 
 ```gos
+use std::sync::channel
+
 let tx, rx = channel::<i64>()
 
 spawn(|| {
@@ -166,15 +195,34 @@ spawn(|| {
     for n in 0..3 {
         tx.send(n)
     }
-}()
+})
 
 while let Some(n) = rx.recv() {
     println("{n}")
 }
 ```
 
+In any function other than `main`, a `spawn` sits inside a `cohort { }`
+(GT0086). The block is Go's `errgroup.Group` and `sync.WaitGroup` in one: it
+joins every goroutine spawned in it on every exit, and its value is the first
+failure, which cancels the rest.
+
+```gos
+use std::{errors, http}
+
+fn fetch_both(a: String, b: String) -> Result<(), errors::Error> {
+    cohort {
+        let first = spawn(|| http::get(a, #[]))
+        let second = spawn(|| http::get(b, #[]))
+        let _ = first.join()
+        let _ = second.join()
+    }
+}
+```
+
 `select` is Go-shaped:
 
+<!-- fragment -->
 ```gos
 select {
     v = rx.recv() => println("got {v}")
@@ -244,8 +292,20 @@ structs now, so when a fixture does need a literal, it uses braces.
 ## Collections And Pipelines
 
 Gossamer keeps ordinary loops for side effects and early returns.
-Transformation pipelines use free functions in `std::iter` with the
-data argument last:
+Transformations chain on the collection: `map` and `filter` on a `Vec`
+answer a `Vec`, and `iter()` makes the chain lazy.
+
+```gos
+let xs = #[1, 2, 3, 4, 5]
+let total = xs.iter().filter(|n| n % 2 == 0).map(|n| n * n).sum()
+let words = #["3", "x"]
+let parsed: Option<Vec<i64>> = words.iter().map(|w| w.to_i64()).collect()
+```
+
+Collecting into `Option<Vec<T>>` or `Result<Vec<T>, E>` stops at the first
+`None` or `Err`, which replaces Go's loop with an early `return err`. Free
+functions in `std::iter`, `std::option`, and `std::result` take their data
+first and compose with the pipe operator:
 
 ```gos
 use std::iter
@@ -255,17 +315,15 @@ let total = #[1, 2, 3, 4, 5]
     |> |v| iter::sum_by(v, |n: i64| n * n)
 ```
 
-The same pipe-friendly shape exists for `std::option` and
-`std::result`.
-
 ## Integer Overflow And Wrapping Arithmetic
 
 Go integers wrap silently on overflow. Gossamer's plain `+`, `-`, and `*`
-do not: they panic on overflow under `gos run`, the JIT, and `gos build`,
-and wrap only under `gos build --release`. Code that relies on Go's
-wrapping - hashes, checksums, pseudo-random generators, `counter++` on a
-`uint8` - ports to the wrapping operators, which wrap at the declared
-width on every tier and in every profile.
+do not: they panic on overflow on every tier and in every profile, release
+builds included. Code that relies on Go's wrapping - hashes, checksums,
+pseudo-random generators, `counter++` on a `uint8` - ports to the wrapping
+operators, which wrap at the declared width everywhere. There is no switch
+that makes every plain operator wrap: wrapping is written where it is
+intended.
 
 | Go | Gossamer |
 | --- | --- |
@@ -356,9 +414,16 @@ Go package's exported surface is exported to everyone.
 | `os.Args` | `env::args()` |
 | `exec.Command(name, args...).Run()` | `process::run(name, args)` |
 | `strings.TrimSpace(s)` | `strings::trim(s)` |
-| `strconv.Atoi(s)` | `strconv::parse_i64(s)` |
+| `strconv.Atoi(s)` | `s.to_i64()`, an `Option<i64>` |
 | `time.Sleep(d)` | `time::sleep(ms)` |
 | `sync.WaitGroup` | `sync::WaitGroup` |
+| `json.Marshal(v)` / `json.Unmarshal` | `json::to_json::<T>(v)?` / `json::from_json::<T>(text)?` |
+| struct tag `json:"years"` / `json:"-"` | field attribute `#[rename("years")]` / `#[skip]` |
+| `regexp.MustCompile("literal")` | `regex::compile("literal")`, checked while compiling |
+| `regexp.Compile(pattern)` | `regex::new(pattern)?` |
+| `crc32.ChecksumIEEE(b)` | `hash::crc32::checksum(b)`, a `u32` |
+| `time.Time` | `time::Time`, which keeps its UTC offset |
+| `errgroup.Group` | `cohort { }` |
 | `net/http` server | `std::http` |
 | WebSocket handler | `std::http::websocket` |
 | SSE handler | `std::http::sse` |

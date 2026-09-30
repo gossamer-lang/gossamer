@@ -357,6 +357,43 @@ fn comment_only_body(toks: &[Tok<'_>]) -> String {
     body
 }
 
+/// Whether a space separates `tok` from what `body` already holds.
+fn space_before(
+    file: FileId,
+    prev: Option<&Emitted<'_>>,
+    prev_was_comment: bool,
+    tok: &Tok<'_>,
+    class: Class,
+    cur_brace: Option<BraceKind>,
+) -> bool {
+    match prev {
+        Some(prev) if !prev_was_comment => {
+            decide_space(prev, tok, class, cur_brace) || pair_merges(file, prev, tok)
+        }
+        // After a comment, or a leading block comment that filled the line,
+        // the source's own gap decides.
+        _ => !tok.gap.is_empty(),
+    }
+}
+
+/// Appends `tok`'s text, re-indenting a triple-quoted string's body to the
+/// line it now sits on.
+fn push_token_text(body: &mut String, tok: &Tok<'_>, line_level: usize) {
+    match tok.kind {
+        TokenKind::TripleStringLit => {
+            body.push_str(&reindent_triple_string(tok.text, INDENT_WIDTH * line_level));
+        }
+        TokenKind::FTripleStringLit => {
+            body.push('f');
+            body.push_str(&reindent_triple_string(
+                &tok.text[1..],
+                INDENT_WIDTH * line_level,
+            ));
+        }
+        _ => body.push_str(tok.text),
+    }
+}
+
 /// Renders one code line, updating the bracket stack and significant
 /// previous-token state as it walks.
 fn render_code_line<'src>(
@@ -430,28 +467,12 @@ fn render_code_line<'src>(
         } else {
             None
         };
-        if !body.is_empty() {
-            let space = if prev_was_comment {
-                !tok.gap.is_empty()
-            } else if let Some(prev) = &prev {
-                let mut space = decide_space(prev, tok, class, cur_brace);
-                if !space && pair_merges(file, prev, tok) {
-                    space = true;
-                }
-                space
-            } else {
-                // Leading block comment already filled `body`.
-                !tok.gap.is_empty()
-            };
-            if space {
-                body.push(' ');
-            }
+        if !body.is_empty()
+            && space_before(file, prev.as_ref(), prev_was_comment, tok, class, cur_brace)
+        {
+            body.push(' ');
         }
-        if tok.kind == TokenKind::TripleStringLit {
-            body.push_str(&reindent_triple_string(tok.text, INDENT_WIDTH * line_level));
-        } else {
-            body.push_str(tok.text);
-        }
+        push_token_text(&mut body, tok, line_level);
         let declaration_brace =
             line_opens_brace_after(line, tok_index, &[Keyword::Struct, Keyword::Enum]);
         let match_brace = line_opens_brace_after(line, tok_index, &[Keyword::Match]);
@@ -620,6 +641,8 @@ fn ends_expr(kind: TokenKind) -> bool {
             | TokenKind::StringLit
             | TokenKind::RawStringLit { .. }
             | TokenKind::TripleStringLit
+            | TokenKind::FStringLit
+            | TokenKind::FTripleStringLit
             | TokenKind::CharLit
             | TokenKind::ByteLit
             | TokenKind::ByteStringLit
@@ -1102,6 +1125,8 @@ fn significant_tokens(source: &str, file: FileId) -> Vec<(TokenKind, Cow<'_, str
             let text = &source[token.span.start as usize..token.span.end as usize];
             let value = if token.kind == TokenKind::TripleStringLit {
                 Cow::Owned(crate::patterns::string_literal_value(text))
+            } else if token.kind == TokenKind::FTripleStringLit {
+                Cow::Owned(crate::patterns::string_literal_value(&text[1..]))
             } else {
                 Cow::Borrowed(text)
             };

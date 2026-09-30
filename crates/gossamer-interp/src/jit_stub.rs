@@ -34,6 +34,10 @@ pub enum JitKind {
     Bool,
     /// `char` carried as its Unicode scalar value in an integer register.
     Char,
+    /// A shared reference to a scalar (`&self` on a primitive): the body
+    /// reads the value through the address, so the trampoline passes a
+    /// slot holding it.
+    ScalarRef,
     /// Unit (no representation).
     Unit,
     /// Packed runtime `GossamerValue`.

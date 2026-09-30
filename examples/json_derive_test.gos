@@ -4,9 +4,9 @@ struct Config { port: i64, host: String, active: bool }
 
 let c = Config { port: 8080, host: "localhost", active: true }
 let s = to_json::<Config>(c)?
-println("encoded: {}", s)
+println(f"encoded: {s}")
 
 let c2 = from_json::<Config>(s)?
-println("port: {}", c2.port)
-println("host: {}", c2.host)
-println("active: {}", c2.active)
+println(f"port: {c2.port}")
+println(f"host: {c2.host}")
+println(f"active: {c2.active}")

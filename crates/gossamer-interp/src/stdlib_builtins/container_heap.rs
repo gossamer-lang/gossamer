@@ -346,12 +346,7 @@ fn binary_heap_pop_value(xs: &mut Vec<Value>, order: HeapOrder) -> RuntimeResult
 }
 
 fn heap_extract_values(v: &Value) -> Vec<Value> {
-    match v {
-        Value::Array(arr) => arr.as_ref().clone(),
-        Value::IntArray(arr) => arr.iter().map(|&n| Value::Int(n)).collect(),
-        Value::FloatVec(arr) => arr.iter().map(|&n| Value::Float(n)).collect(),
-        _ => Vec::new(),
-    }
+    crate::stdlib_builtins::encoding_pem::collect_array(v)
 }
 
 pub(crate) fn heap_extract_i64s(v: &Value) -> Vec<i64> {

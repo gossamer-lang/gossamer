@@ -1588,6 +1588,17 @@ impl Lowerer<'_> {
                             owner: None,
                         };
                     }
+                    // `{:+}` signs a number and leaves any other value as it
+                    // rendered, which is decided by the value's type here.
+                    if let HirExprKind::Path { segments, .. } = &callee.kind
+                        && segments
+                            .last()
+                            .is_some_and(|segment| segment.name.as_str() == "__gos_fmt_sign")
+                        && args.len() == 1
+                        && !self.pad_value_is_numeric(&args[0])
+                    {
+                        return args.remove(0).kind;
+                    }
                     self.resolve_format_pad_request(&callee, &mut args);
                     self.narrow_radix_operand(&callee, &mut args);
                     self.quote_debug_strings(&callee, &mut args);
@@ -1624,6 +1635,21 @@ impl Lowerer<'_> {
                 }
                 if let Some(desugared) = self.desugar_or_insert_value(expr) {
                     return desugared.kind;
+                }
+                if name.name == "expect"
+                    && args.len() == 1
+                    && let Some(kind) = self.desugar_expect(receiver, Some(&args[0]), expr)
+                {
+                    return kind;
+                }
+                // `Result::unwrap` names the error it found, which only the
+                // error's own type can render.
+                if name.name == "unwrap"
+                    && args.is_empty()
+                    && self.is_result_expr(receiver)
+                    && let Some(kind) = self.desugar_expect(receiver, None, expr)
+                {
+                    return kind;
                 }
                 if let Some(kind) =
                     self.desugar_btree_map_method(expr, receiver, name.name.as_str(), args)
@@ -1782,6 +1808,17 @@ impl Lowerer<'_> {
                 }
             }
             AstExprKind::FieldAccess { receiver, field } => self.lower_field(receiver, field),
+            AstExprKind::Index { base, index }
+                if {
+                    let base_ty = self.ty_of(base.id);
+                    self.is_map_ty(base_ty)
+                } =>
+            {
+                let map = self.lower_expr(base);
+                let key = self.lower_expr(index);
+                let value_ty = self.ty_of(expr.id);
+                self.map_index_read(map, key, value_ty, expr.span).kind
+            }
             AstExprKind::Index { base, index } => HirExprKind::Index {
                 base: Box::new(self.lower_expr(base)),
                 index: Box::new(self.lower_expr(index)),
@@ -1904,10 +1941,17 @@ impl Lowerer<'_> {
         if let Some(method) = wrapping_binary_method(op) {
             return wrapping_call(method, self.lower_expr(lhs), self.lower_expr(rhs));
         }
+        // An operator implemented for this right-hand type calls the method
+        // the checker chose for it.
+        if let Some(method) = self.table.operator_method(lhs.id).map(str::to_string) {
+            return wrapping_call(&method, self.lower_expr(lhs), self.lower_expr(rhs));
+        }
+        let lhs = self.lower_expr(lhs);
+        let rhs = self.lower_expr(rhs);
         HirExprKind::Binary {
             op: lower_binary_op(op),
-            lhs: Box::new(self.lower_expr(lhs)),
-            rhs: Box::new(self.lower_expr(rhs)),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
         }
     }
 
@@ -2007,6 +2051,10 @@ impl Lowerer<'_> {
             Some("__concat" | "__fmt_prec" | "__debug" | "__fmt_radix" | "__fmt_upper") => args
                 .first()
                 .is_some_and(|value| self.ty_renders_as_number(value.ty)),
+            // `{:+}` and `{:e}` wrap the number's own rendering.
+            Some("__gos_fmt_sign" | "__gos_fmt_exp") => args
+                .first()
+                .is_some_and(|inner| self.pad_value_is_numeric(inner)),
             _ => false,
         }
     }
@@ -2174,7 +2222,8 @@ impl Lowerer<'_> {
             let source = if matches!(op, AssignOp::Assign) {
                 source
             } else {
-                let kind = match wrapping_assign_method(op) {
+                let chosen = self.table.operator_method(target.id).map(str::to_string);
+                let kind = match chosen.as_deref().or_else(|| wrapping_assign_method(op)) {
                     Some(method) => wrapping_call(method, lowered_target.clone(), source),
                     None => HirExprKind::Binary {
                         op: compound_assign_to_binary(op),
@@ -2286,8 +2335,29 @@ impl Lowerer<'_> {
         if let AstExprKind::Tuple(elems) = &place.kind {
             return self.lower_destructuring_assign(op, elems, place, value, outer.span);
         }
+        if let Some(kind) = self.lower_map_index_assign(op, place, value, outer.span) {
+            return kind;
+        }
+        let chosen = self.table.operator_method(place.id).map(str::to_string);
         let lowered_place = self.lower_expr(place);
         let lowered_value = self.lower_expr(value);
+        if let Some(method) = chosen
+            && !matches!(op, AssignOp::Assign)
+        {
+            // A compound operator implemented for this right-hand type writes
+            // back what the chosen method answers.
+            let ty = lowered_place.ty;
+            let combined = HirExpr {
+                id: self.fresh(),
+                span: outer.span,
+                ty,
+                kind: wrapping_call(&method, lowered_place.clone(), lowered_value),
+            };
+            return HirExprKind::Assign {
+                place: Box::new(lowered_place),
+                value: Box::new(combined),
+            };
+        }
         self.assign_kind(op, lowered_place, lowered_value, outer.span)
     }
 
@@ -4166,6 +4236,7 @@ impl Lowerer<'_> {
             };
             let lowered = if unit_tail {
                 self.desugar_or_insert_mutation(tail)
+                    .or_else(|| self.desugar_map_index_mutation(tail))
             } else {
                 None
             };
@@ -4239,6 +4310,7 @@ impl Lowerer<'_> {
             AstStmtKind::Expr { expr, has_semi } => {
                 let expr = self
                     .desugar_or_insert_mutation(expr)
+                    .or_else(|| self.desugar_map_index_mutation(expr))
                     .unwrap_or_else(|| self.lower_expr(expr));
                 HirStmtKind::Expr {
                     expr,
@@ -4368,6 +4440,327 @@ impl Lowerer<'_> {
     }
 
     /// One `let` of the entry desugars (`let [mut] name: ty = init`).
+    /// Whether `ty` is a `Map` or `BTreeMap` once references are peeled.
+    fn is_map_ty(&self, ty: gossamer_types::Ty) -> bool {
+        let mut ty = ty;
+        while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(ty) {
+            ty = *inner;
+        }
+        matches!(self.tcx.kind_of(ty), gossamer_types::TyKind::HashMap { .. })
+    }
+
+    /// `name(args)` for a prelude builtin, typed `ty`, with its arguments
+    /// rendered as the written call's would be (`{:?}` quotes a string).
+    fn builtin_call(&mut self, name: &str, mut args: Vec<HirExpr>, ty: Ty, span: Span) -> HirExpr {
+        let callee = HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Path {
+                segments: vec![Ident::new(name)],
+                def: None,
+            },
+        };
+        self.quote_debug_strings(&callee, &mut args);
+        HirExpr {
+            id: self.fresh(),
+            span,
+            ty,
+            kind: HirExprKind::Call {
+                callee: Box::new(callee),
+                args,
+            },
+        }
+    }
+
+    /// `opt.expect(msg)` / `res.expect(msg)` (and `res.unwrap()` with no
+    /// message of its own): a `match` answering the payload, or a panic with
+    /// the message; a `Result` adds `": "` and the error's `{:?}`.
+    fn desugar_expect(
+        &mut self,
+        receiver: &AstExpr,
+        message: Option<&AstExpr>,
+        expr: &AstExpr,
+    ) -> Option<HirExprKind> {
+        let mut carrier_ty = self.ty_of(receiver.id);
+        while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(carrier_ty) {
+            carrier_ty = *inner;
+        }
+        let gossamer_types::TyKind::Adt { def, substs } = self.tcx.kind_of(carrier_ty).clone()
+        else {
+            return None;
+        };
+        let is_option = def.local == u32::MAX - 1;
+        if !is_option && def.local != u32::MAX {
+            return None;
+        }
+        let span = expr.span;
+        let payload_ty = self.ty_of(expr.id);
+        let string_ty = self.tcx.string_ty();
+        let never = self.tcx.never();
+        let scrutinee = self.lower_expr(receiver);
+        let text = match message {
+            Some(message) => self.lower_expr(message),
+            None => HirExpr {
+                id: self.fresh(),
+                span,
+                ty: string_ty,
+                kind: HirExprKind::Literal(HirLiteral::String(
+                    "called `Result::unwrap()` on an `Err` value".to_string(),
+                )),
+            },
+        };
+        let binding = |this: &mut Self, name: &str, ty: Ty| HirPat {
+            id: this.fresh(),
+            span,
+            ty,
+            kind: HirPatKind::Binding {
+                name: Ident::new(name),
+                mutable: false,
+            },
+        };
+        let value_binding = binding(self, "__gos_expect_value", payload_ty);
+        let found_pat = HirPat {
+            id: self.fresh(),
+            span,
+            ty: carrier_ty,
+            kind: HirPatKind::Variant {
+                name: Ident::new(if is_option { "Some" } else { "Ok" }),
+                fields: vec![value_binding],
+            },
+        };
+        let found_body = self.entry_path(span, "__gos_expect_value", payload_ty);
+        let (missing_pat, message) = if is_option {
+            let pat = HirPat {
+                id: self.fresh(),
+                span,
+                ty: carrier_ty,
+                kind: HirPatKind::Variant {
+                    name: Ident::new("None"),
+                    fields: Vec::new(),
+                },
+            };
+            (pat, text)
+        } else {
+            let err_ty = substs.types().get(1).copied()?;
+            let err_binding = binding(self, "__gos_expect_err", err_ty);
+            let pat = HirPat {
+                id: self.fresh(),
+                span,
+                ty: carrier_ty,
+                kind: HirPatKind::Variant {
+                    name: Ident::new("Err"),
+                    fields: vec![err_binding],
+                },
+            };
+            let err = self.entry_path(span, "__gos_expect_err", err_ty);
+            let rendered = self.builtin_call("__debug", vec![err], string_ty, span);
+            let separator = HirExpr {
+                id: self.fresh(),
+                span,
+                ty: string_ty,
+                kind: HirExprKind::Literal(HirLiteral::String(": ".to_string())),
+            };
+            let message =
+                self.builtin_call("__concat", vec![text, separator, rendered], string_ty, span);
+            (pat, message)
+        };
+        let missing_body = self.builtin_call("panic", vec![message], never, span);
+        Some(HirExprKind::Match {
+            scrutinee: Box::new(scrutinee),
+            arms: vec![
+                HirMatchArm {
+                    pattern: found_pat,
+                    guard: None,
+                    body: found_body,
+                },
+                HirMatchArm {
+                    pattern: missing_pat,
+                    guard: None,
+                    body: missing_body,
+                },
+            ],
+        })
+    }
+
+    /// Whether `expr` is a `Result` (through any references).
+    fn is_result_expr(&mut self, expr: &AstExpr) -> bool {
+        let mut ty = self.ty_of(expr.id);
+        while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(ty) {
+            ty = *inner;
+        }
+        matches!(
+            self.tcx.kind_of(ty),
+            gossamer_types::TyKind::Adt { def, .. } if def.local == u32::MAX
+        )
+    }
+
+    /// `m[k]` read: the stored value, or a panic naming the missing key.
+    fn map_index_read(&mut self, map: HirExpr, key: HirExpr, value_ty: Ty, span: Span) -> HirExpr {
+        let key_ty = key.ty;
+        let string_ty = self.tcx.string_ty();
+        let never = self.tcx.never();
+        let option_value = self.tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX - 1),
+            substs: gossamer_types::Substs::from_types([value_ty]),
+        });
+        let bind_key = self.entry_let_stmt(span, "__gos_map_key", key_ty, false, key);
+        let key_arg = self.entry_path(span, "__gos_map_key", key_ty);
+        let found = self.method_call(map, "get", vec![key_arg], option_value, span);
+        let value_pat = HirPat {
+            id: self.fresh(),
+            span,
+            ty: option_value,
+            kind: HirPatKind::Variant {
+                name: Ident::new("Some"),
+                fields: vec![HirPat {
+                    id: self.fresh(),
+                    span,
+                    ty: value_ty,
+                    kind: HirPatKind::Binding {
+                        name: Ident::new("__gos_map_value"),
+                        mutable: false,
+                    },
+                }],
+            },
+        };
+        let value = self.entry_path(span, "__gos_map_value", value_ty);
+        let missing_pat = HirPat {
+            id: self.fresh(),
+            span,
+            ty: option_value,
+            kind: HirPatKind::Variant {
+                name: Ident::new("None"),
+                fields: Vec::new(),
+            },
+        };
+        let key_again = self.entry_path(span, "__gos_map_key", key_ty);
+        let shown = self.builtin_call("__debug", vec![key_again], string_ty, span);
+        let prefix = HirExpr {
+            id: self.fresh(),
+            span,
+            ty: string_ty,
+            kind: HirExprKind::Literal(HirLiteral::String("key ".to_string())),
+        };
+        let suffix = HirExpr {
+            id: self.fresh(),
+            span,
+            ty: string_ty,
+            kind: HirExprKind::Literal(HirLiteral::String(" is not in the map".to_string())),
+        };
+        let message = self.builtin_call("__concat", vec![prefix, shown, suffix], string_ty, span);
+        let missing = self.builtin_call("panic", vec![message], never, span);
+        let lookup = HirExpr {
+            id: self.fresh(),
+            span,
+            ty: value_ty,
+            kind: HirExprKind::Match {
+                scrutinee: Box::new(found),
+                arms: vec![
+                    HirMatchArm {
+                        pattern: value_pat,
+                        guard: None,
+                        body: value,
+                    },
+                    HirMatchArm {
+                        pattern: missing_pat,
+                        guard: None,
+                        body: missing,
+                    },
+                ],
+            },
+        };
+        HirExpr {
+            id: self.fresh(),
+            span,
+            ty: value_ty,
+            kind: HirExprKind::Block(HirBlock {
+                id: self.fresh(),
+                span,
+                stmts: vec![bind_key],
+                tail: Some(Box::new(lookup)),
+                ty: value_ty,
+                is_comptime: false,
+            }),
+        }
+    }
+
+    /// `m[k] = v`, `m[k] op= v`, and `m[k].field op= v`: the key evaluates
+    /// once, the stored value is read (a missing key panics, except for a
+    /// plain `=`, which inserts), updated, and stored back.
+    fn lower_map_index_assign(
+        &mut self,
+        op: AssignOp,
+        place: &AstExpr,
+        value: &AstExpr,
+        span: Span,
+    ) -> Option<HirExprKind> {
+        let mut root = place;
+        let mut projections: Vec<&AstExpr> = Vec::new();
+        while let AstExprKind::FieldAccess { receiver, .. } = &root.kind {
+            projections.push(root);
+            root = receiver;
+        }
+        let AstExprKind::Index { base, index } = &root.kind else {
+            return None;
+        };
+        let base_ty = self.ty_of(base.id);
+        if !self.is_map_ty(base_ty) {
+            return None;
+        }
+        let unit = self.unit();
+        let value_ty = self.ty_of(root.id);
+        let key = self.lower_expr(index);
+        let key_ty = key.ty;
+        let bind_key = self.entry_let_stmt(span, "__gos_map_slot_key", key_ty, false, key);
+        let mut stmts = vec![bind_key];
+        let stored = if projections.is_empty() && matches!(op, AssignOp::Assign) {
+            self.lower_expr(value)
+        } else {
+            let map = self.lower_expr(base);
+            let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
+            let current = self.map_index_read(map, key_arg, value_ty, span);
+            stmts.push(self.entry_let_stmt(span, "__gos_map_slot", value_ty, true, current));
+            let slot = self.entry_path(span, "__gos_map_slot", value_ty);
+            let target = self.project_entry_value(slot, &projections, span);
+            let written = self.lower_expr(value);
+            let kind = self.assign_kind(op, target, written, span);
+            stmts.push(HirStmt {
+                id: self.fresh(),
+                span,
+                kind: HirStmtKind::Expr {
+                    expr: HirExpr {
+                        id: self.fresh(),
+                        span,
+                        ty: unit,
+                        kind,
+                    },
+                    has_semi: true,
+                },
+            });
+            self.entry_path(span, "__gos_map_slot", value_ty)
+        };
+        let map = self.lower_expr(base);
+        let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
+        let insert = self.method_call(map, "insert", vec![key_arg, stored], unit, span);
+        stmts.push(HirStmt {
+            id: self.fresh(),
+            span,
+            kind: HirStmtKind::Expr {
+                expr: insert,
+                has_semi: true,
+            },
+        });
+        Some(HirExprKind::Block(HirBlock {
+            id: self.fresh(),
+            span,
+            stmts,
+            tail: None,
+            ty: unit,
+            is_comptime: false,
+        }))
+    }
+
     fn entry_let_stmt(
         &mut self,
         span: Span,
@@ -4809,6 +5202,77 @@ impl Lowerer<'_> {
                 stmts: vec![k_let, v_let, mutate_stmt],
                 tail: Some(Box::new(insert_call)),
                 ty: unit_ty,
+                is_comptime: false,
+            }),
+        })
+    }
+
+    /// Desugars the statement `m[k].method(args)`, or the same through a
+    /// field path (`m[k].items.push(x)`), into a read of the stored value
+    /// (a missing key panics), the call on it, and a store back, so the
+    /// mutation lands in the map.
+    fn desugar_map_index_mutation(&mut self, expr: &AstExpr) -> Option<HirExpr> {
+        let AstExprKind::MethodCall {
+            receiver,
+            name,
+            args,
+            ..
+        } = &expr.kind
+        else {
+            return None;
+        };
+        let mut root = &**receiver;
+        let mut projections: Vec<&AstExpr> = Vec::new();
+        while let AstExprKind::FieldAccess { receiver, .. } = &root.kind {
+            projections.push(root);
+            root = receiver;
+        }
+        let AstExprKind::Index { base, index } = &root.kind else {
+            return None;
+        };
+        let base_ty = self.ty_of(base.id);
+        if !self.is_map_ty(base_ty) {
+            return None;
+        }
+        let span = expr.span;
+        let unit = self.unit();
+        let value_ty = self.ty_of(root.id);
+        let outer_ty = self.ty_of(expr.id);
+        let key = self.lower_expr(index);
+        let key_ty = key.ty;
+        let bind_key = self.entry_let_stmt(span, "__gos_map_slot_key", key_ty, false, key);
+        let map = self.lower_expr(base);
+        let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
+        let current = self.map_index_read(map, key_arg, value_ty, span);
+        let bind_slot = self.entry_let_stmt(span, "__gos_map_slot", value_ty, true, current);
+        let slot = self.entry_path(span, "__gos_map_slot", value_ty);
+        let target = self.project_entry_value(slot, &projections, span);
+        let lowered_args: Vec<HirExpr> = args.iter().map(|a| self.lower_expr(a)).collect();
+        let call = self.method_call(target, name.name.as_str(), lowered_args, outer_ty, span);
+        let slot = self.entry_path(span, "__gos_map_slot", value_ty);
+        let map = self.lower_expr(base);
+        let key_arg = self.entry_path(span, "__gos_map_slot_key", key_ty);
+        let insert = self.method_call(map, "insert", vec![key_arg, slot], unit, span);
+        let stmt = |this: &mut Self, expr: HirExpr| HirStmt {
+            id: this.fresh(),
+            span,
+            kind: HirStmtKind::Expr {
+                expr,
+                has_semi: true,
+            },
+        };
+        let call = stmt(self, call);
+        let insert = stmt(self, insert);
+        Some(HirExpr {
+            id: self.fresh(),
+            span,
+            ty: unit,
+            kind: HirExprKind::Block(HirBlock {
+                id: self.fresh(),
+                span,
+                stmts: vec![bind_key, bind_slot, call, insert],
+                tail: None,
+                ty: unit,
                 is_comptime: false,
             }),
         })

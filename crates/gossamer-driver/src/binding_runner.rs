@@ -816,8 +816,6 @@ fn gossamer_sources_for_binding(
         RustBindingSpec::Crates { .. } | RustBindingSpec::Git { .. } => {
             vec![GossamerPatchSource::CratesIo]
         }
-        // Prebuilt archives carry no Cargo dep graph - nothing to patch.
-        RustBindingSpec::Prebuilt { .. } => Vec::new(),
     }
 }
 
@@ -983,24 +981,6 @@ fn render_one(
                 format!("{name} = {{ {} }}", toml_path_kv("path", &wrapper_dir)),
                 Vec::new(),
                 Some(wrapper_dir),
-            )
-        }
-        RustBindingSpec::Prebuilt { archive, abi: _ } => {
-            // Prebuilt-archive binding: the staticlib is supplied
-            // directly. There is no Cargo dep - the link step in
-            // `gos build` consumes the archive path. The emitted
-            // line is a TOML-friendly comment; the manifest-side
-            // record keeps the archive path reachable through the
-            // resolved-binding metadata.
-            let abs = if Path::new(archive).is_absolute() {
-                PathBuf::from(archive)
-            } else {
-                manifest_dir.join(archive)
-            };
-            (
-                format!("# prebuilt: {name} archive = '{}'", abs.display()),
-                Vec::new(),
-                None,
             )
         }
     }

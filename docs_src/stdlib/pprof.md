@@ -4,19 +4,19 @@ Status: experimental
 
 Runtime profiles in the text format `go tool pprof` reads, plus a Chrome-trace scheduler capture.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-runtime/src/pprof.rs) lives in the runtime rather than the standard library, so the bytecode VM and the compiled tiers render from one implementation over one set of scheduler counters.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`goroutine_profile`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-runtime/src/pprof.rs) | `fn goroutine_profile() -> String` | Text profile with one sample per live goroutine and its last-known frame. |
-| [`mutex_profile`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-runtime/src/pprof.rs) | `fn mutex_profile() -> String` | Text profile of microseconds parked on synchronization since process start. |
-| [`block_profile`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-runtime/src/pprof.rs) | `fn block_profile() -> String` | Text profile of microseconds parked on channels, I/O, and timers since process start. |
-| [`execution_trace`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-runtime/src/pprof.rs) | `fn execution_trace(millis: i64) -> String` | Chrome trace JSON of scheduler spawn/park/unpark events; blocks for the given window. |
-| [`route`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-runtime/src/pprof.rs) | `fn route(path: String, query: String) -> Option<String>` | Serves a `/debug/pprof/...` path, returning the body to write, or `None` for an unknown path. |
+| `cpu_profile` | `fn cpu_profile(millis: i64) -> String` | Sampled CPU profile over the given milliseconds; a timer reads the running stack. |
+| `heap_profile` | `fn heap_profile(millis: i64) -> String` | Sampled allocation profile over the given milliseconds, weighted by bytes. |
+| `goroutine_profile` | `fn goroutine_profile() -> String` | Text profile with one sample per live goroutine and its last-known frame. |
+| `mutex_profile` | `fn mutex_profile() -> String` | Text profile of microseconds parked on synchronization since process start. |
+| `block_profile` | `fn block_profile() -> String` | Text profile of microseconds parked on channels, I/O, and timers since process start. |
+| `execution_trace` | `fn execution_trace(millis: i64) -> String` | Chrome trace JSON of scheduler spawn/park/unpark events; blocks for the given milliseconds. |
+| `route` | `fn route(path: String, query: String) -> Option<String>` | Serves a `/debug/pprof/...` path, returning the body to write, or `None` for an unknown path. |
+
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
 ## Formats
 

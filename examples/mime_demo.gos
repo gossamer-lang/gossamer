@@ -8,17 +8,17 @@
 use std::mime
 
 let html = "text/html; charset=utf-8"
-println("parsed: {}", mime::parse(html))
-println("top: {}", mime::top(html))
-println("sub: {}", mime::sub(html))
-println("charset: {}", mime::charset(html))
+println(f"parsed: {mime::parse(html)}")
+println(f"top: {mime::top(html)}")
+println(f"sub: {mime::sub(html)}")
+println(f"charset: {mime::charset(html)}")
 
 let multi = "multipart/form-data; boundary=----abc123"
-println("multi boundary: {}", mime::boundary(multi))
+println(f"multi boundary: {mime::boundary(multi)}")
 
-println("ext for text/html: {}", mime::extension_by_type("text/html"))
-println("type for .png: {}", mime::type_by_extension(".png"))
-println("type for json: {}", mime::type_by_extension("json"))
+println(f"ext for text/html: {mime::extension_by_type("text/html")}")
+println(f"type for .png: {mime::type_by_extension(".png")}")
+println(f"type for json: {mime::type_by_extension("json")}")
 
-println("valid: {}", mime::is_valid("application/json"))
-println("invalid: {}", mime::is_valid("nope"))
+println(f"valid: {mime::is_valid("application/json")}")
+println(f"invalid: {mime::is_valid("nope")}")

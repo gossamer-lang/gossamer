@@ -15,4 +15,4 @@ io::stdin()
     .unwrap()
 
 let result = input.trim()
-println("You typed: {}", result)
+println(f"You typed: {result}")

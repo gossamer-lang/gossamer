@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::doc_markdown)]
@@ -54,6 +53,7 @@ pub unsafe extern "C" fn gos_rt_ws_is_upgrade(req: *const GosHttpRequest) -> i64
         if req.is_null() {
             return 0;
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let request = unsafe { &*req };
         let mut has_upgrade_ws = false;
         let mut has_connection_upgrade = false;
@@ -77,6 +77,7 @@ pub unsafe extern "C" fn gos_rt_ws_accept(req: *const GosHttpRequest) -> i128 {
         if req.is_null() {
             return handshake_err("missing Upgrade header");
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let request = unsafe { &*req };
 
         // 1. Upgrade: websocket
@@ -112,12 +113,17 @@ pub unsafe extern "C" fn gos_rt_ws_accept(req: *const GosHttpRequest) -> i128 {
         // length header that sits before the body, and the token it answers is
         // an owned runtime string this frame gives back.
         let key_c = alloc_cstring(key.as_bytes());
+        // SAFETY: `key_c` is the fresh string made above, a live string body.
         let token_ptr = unsafe { gos_rt_ws_accept_key(key_c) };
+        // SAFETY: `key_c` is the fresh string made above, owned here and not read again.
         unsafe { crate::c_abi::string::gos_rt_str_free(key_c) };
         let token = if token_ptr.is_null() {
             String::new()
         } else {
+            // SAFETY: `token_ptr` is the fresh non-null string `gos_rt_ws_accept_key` answered
+            // (checked above).
             let text = unsafe { crate::c_abi::gos_str_arg_string(token_ptr) };
+            // SAFETY: `token_ptr` is owned here, its text copied, and not read again.
             unsafe { crate::c_abi::string::gos_rt_str_free(token_ptr) };
             text
         };

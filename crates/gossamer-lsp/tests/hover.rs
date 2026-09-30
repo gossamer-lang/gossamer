@@ -186,3 +186,19 @@ fn hover_returns_markdown_content_kind() {
         }
     }
 }
+
+#[test]
+fn hover_names_a_stdlib_wrapper_type_as_written() {
+    let server = server_with(
+        "file:///t.gos",
+        "use std::{path, time}\n\nfn main() {\n    let t = time::Time::from_unix(0)\n    let p = path::Path::new(\"/a\")\n    println(\"{} {}\", t.unix(), p.as_str())\n}\n",
+    );
+    for (line, name) in [(3, "time::Time"), (4, "path::Path")] {
+        let text = hover_text(&server.hover(&position_params("file:///t.gos", line, 8)));
+        assert!(text.contains(name), "hover shows {text:?}, not {name}");
+        assert!(
+            !text.contains("__gos_"),
+            "hover leaks an injected name: {text:?}"
+        );
+    }
+}

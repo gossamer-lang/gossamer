@@ -4,12 +4,10 @@ Status: experimental
 
 Deterministic pseudo-random number generation.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/mathrand.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`Rng`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/mathrand.rs) | `type Rng` | SplitMix64-based RNG. |
+| `Rng` | `type Rng` | SplitMix64-based RNG. |
+
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

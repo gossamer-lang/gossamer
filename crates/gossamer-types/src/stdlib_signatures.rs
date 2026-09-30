@@ -176,7 +176,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::crypto::blake3",
         name: "hex",
-        signature: "fn hex(text: String) -> String",
+        signature: "fn hex(data: Vec<u8>) -> String",
     },
     StdFunctionSignature {
         module_path: "std::crypto::ecdsa",
@@ -211,7 +211,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::crypto::hmac",
         name: "sha256_hex",
-        signature: "fn sha256_hex(key: String, message: String) -> String",
+        signature: "fn sha256_hex(key: Vec<u8>, message: Vec<u8>) -> String",
     },
     StdFunctionSignature {
         module_path: "std::crypto::hmac",
@@ -226,7 +226,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::crypto::insecure",
         name: "md5_hex",
-        signature: "fn md5_hex(text: String) -> String",
+        signature: "fn md5_hex(data: Vec<u8>) -> String",
     },
     StdFunctionSignature {
         module_path: "std::crypto::insecure",
@@ -236,7 +236,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::crypto::insecure",
         name: "sha1_hex",
-        signature: "fn sha1_hex(text: String) -> String",
+        signature: "fn sha1_hex(data: Vec<u8>) -> String",
     },
     StdFunctionSignature {
         module_path: "std::crypto::kdf",
@@ -286,7 +286,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::crypto::sha256",
         name: "hex",
-        signature: "fn hex(text: String) -> String",
+        signature: "fn hex(data: Vec<u8>) -> String",
     },
     StdFunctionSignature {
         module_path: "std::crypto::sha512",
@@ -296,7 +296,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::crypto::sha512",
         name: "hex",
-        signature: "fn hex(text: String) -> String",
+        signature: "fn hex(data: Vec<u8>) -> String",
     },
     StdFunctionSignature {
         module_path: "std::crypto::subtle",
@@ -326,7 +326,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::image",
         name: "decode_base64",
-        signature: "fn decode_base64(data: String) -> i64",
+        signature: "fn decode_base64(encoded: String) -> i64",
     },
     StdFunctionSignature {
         module_path: "std::image",
@@ -696,12 +696,12 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::encoding::pem",
         name: "decode",
-        signature: "fn decode(data: String) -> Result<pem::Block, errors::Error>",
+        signature: "fn decode(text: String) -> Result<pem::Block, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::pem",
         name: "decode_all",
-        signature: "fn decode_all(data: String) -> Result<Vec<pem::Block>, errors::Error>",
+        signature: "fn decode_all(text: String) -> Result<Vec<pem::Block>, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::encoding::pem",
@@ -891,7 +891,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::fs",
         name: "sync_dir",
-        signature: "fn sync_dir(path: String) -> Result<(), errors::Error>",
+        signature: "fn sync_dir(path: String) -> Result<(), io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
@@ -906,27 +906,27 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::fs",
         name: "create_dir_mode",
-        signature: "fn create_dir_mode(path: String, mode: i64) -> Result<(), errors::Error>",
+        signature: "fn create_dir_mode(path: String, mode: i64) -> Result<(), io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
         name: "create_dir_all_mode",
-        signature: "fn create_dir_all_mode(path: String, mode: i64) -> Result<(), errors::Error>",
+        signature: "fn create_dir_all_mode(path: String, mode: i64) -> Result<(), io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
         name: "write_mode",
-        signature: "fn write_mode(path: String, contents: String, mode: i64) -> Result<(), errors::Error>",
+        signature: "fn write_mode(path: String, contents: Vec<u8>, mode: i64) -> Result<(), io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
         name: "permissions",
-        signature: "fn permissions(path: String) -> Result<i64, errors::Error>",
+        signature: "fn permissions(path: String) -> Result<i64, io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
         name: "set_permissions",
-        signature: "fn set_permissions(path: String, mode: i64) -> Result<(), errors::Error>",
+        signature: "fn set_permissions(path: String, mode: i64) -> Result<(), io::Error>",
     },
     StdFunctionSignature {
         module_path: "std::fs",
@@ -1021,62 +1021,62 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::hash::adler32",
         name: "checksum",
-        signature: "fn checksum(data: Vec<u8>) -> i64",
+        signature: "fn checksum(data: Vec<u8>) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::adler32",
         name: "checksum_string",
-        signature: "fn checksum_string(text: String) -> i64",
+        signature: "fn checksum_string(text: String) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::adler32",
         name: "update",
-        signature: "fn update(seed: i64, data: Vec<u8>) -> i64",
+        signature: "fn update(seed: u32, data: Vec<u8>) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32",
         name: "checksum",
-        signature: "fn checksum(data: Vec<u8>) -> i64",
+        signature: "fn checksum(data: Vec<u8>) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32",
         name: "checksum_string",
-        signature: "fn checksum_string(text: String) -> i64",
+        signature: "fn checksum_string(text: String) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32",
         name: "update",
-        signature: "fn update(seed: i64, data: Vec<u8>) -> i64",
+        signature: "fn update(seed: u32, data: Vec<u8>) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32",
         name: "update_window",
-        signature: "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
+        signature: "fn update_window(seed: u32, data: Vec<u8>, start: i64, end: i64) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32c",
         name: "checksum",
-        signature: "fn checksum(data: Vec<u8>) -> i64",
+        signature: "fn checksum(data: Vec<u8>) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32c",
         name: "checksum_string",
-        signature: "fn checksum_string(text: String) -> i64",
+        signature: "fn checksum_string(text: String) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32c",
         name: "update",
-        signature: "fn update(seed: i64, data: Vec<u8>) -> i64",
+        signature: "fn update(seed: u32, data: Vec<u8>) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::crc32c",
         name: "update_window",
-        signature: "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
+        signature: "fn update_window(seed: u32, data: Vec<u8>, start: i64, end: i64) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::fnv",
         name: "hash32",
-        signature: "fn hash32(data: Vec<u8>) -> i64",
+        signature: "fn hash32(data: Vec<u8>) -> u32",
     },
     StdFunctionSignature {
         module_path: "std::hash::fnv",
@@ -2731,7 +2731,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::regex",
         name: "compile",
-        signature: "fn compile(pattern: String) -> Result<regex::Pattern, errors::Error>",
+        signature: "fn compile(pattern: String) -> regex::Pattern",
     },
     StdFunctionSignature {
         module_path: "std::regex",
@@ -2752,6 +2752,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::regex",
         name: "is_match",
         signature: "fn is_match(pattern: regex::Pattern, text: String) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::regex",
+        name: "new",
+        signature: "fn new(pattern: String) -> Result<regex::Pattern, errors::Error>",
     },
     StdFunctionSignature {
         module_path: "std::regex",
@@ -3576,12 +3581,12 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::utf16",
         name: "decode_surrogate_pair",
-        signature: "fn decode_surrogate_pair(high: char, low: char) -> Result<char, errors::Error>",
+        signature: "fn decode_surrogate_pair(high: u16, low: u16) -> Option<char>",
     },
     StdFunctionSignature {
         module_path: "std::utf16",
         name: "decode_to_string",
-        signature: "fn decode_to_string(units: Vec<u16>) -> Result<String, errors::Error>",
+        signature: "fn decode_to_string(units: Vec<u16>) -> String",
     },
     StdFunctionSignature {
         module_path: "std::utf16",
@@ -3591,7 +3596,7 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
         module_path: "std::utf16",
         name: "is_surrogate",
-        signature: "fn is_surrogate(rune: char) -> bool",
+        signature: "fn is_surrogate(unit: u16) -> bool",
     },
     StdFunctionSignature {
         module_path: "std::utf16",
@@ -3959,7 +3964,50 @@ pub fn split_top_level(s: &str, needle: char) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::{function_shape_for_path, parse_signature};
+    use super::{STD_FUNCTION_SIGNATURES, function_shape_for_path, parse_signature};
+
+    /// The mechanical rules of `docs_src/design/stdlib_api.md`, checked over
+    /// every signature row.
+    #[test]
+    fn signatures_follow_the_stdlib_api_guideline() {
+        // SSE names its text field `data` in the protocol itself.
+        const EXEMPT: &[(&str, &str)] = &[("std::http::sse", "encode_event")];
+        let mut violations = Vec::new();
+        for row in STD_FUNCTION_SIGNATURES {
+            if EXEMPT.contains(&(row.module_path, row.name)) {
+                continue;
+            }
+            let Some(shape) = parse_signature(row.signature) else {
+                continue;
+            };
+            for param in &shape.params {
+                if matches!(param.name, "data" | "bytes" | "contents") && param.ty == "String" {
+                    violations.push(format!(
+                        "{}::{}: bytes parameter `{}` is a String",
+                        row.module_path, row.name, param.name
+                    ));
+                }
+            }
+            let checksum = row.module_path.starts_with("std::hash::")
+                || matches!(
+                    row.name,
+                    "checksum" | "checksum_string" | "hash32" | "hash64"
+                );
+            if checksum && shape.return_ty.trim() == "i64" {
+                violations.push(format!(
+                    "{}::{}: a fixed-width hash answers i64",
+                    row.module_path, row.name
+                ));
+            }
+            if row.module_path == "std::fs" && row.signature.contains("errors::Error") {
+                violations.push(format!(
+                    "{}::{}: the filesystem answers io::Error",
+                    row.module_path, row.name
+                ));
+            }
+        }
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+    }
 
     #[test]
     fn parses_nested_catalog_signature_shape() {

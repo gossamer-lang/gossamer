@@ -23,6 +23,7 @@ workspace = true
 [dependencies]
 gossamer-pkg = { workspace = true }
 gossamer-runtime = { workspace = true }
+gossamer-core = { workspace = true }
 gossamer-sched = { workspace = true }
 gossamer-coro = { workspace = true }
 gossamer-template = { workspace = true }

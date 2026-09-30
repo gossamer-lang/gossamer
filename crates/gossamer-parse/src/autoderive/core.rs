@@ -47,6 +47,9 @@ enum FieldKind {
     Vec(Box<FieldKind>),
     /// Nested user struct, referenced by source-level name.
     Struct(TyId),
+    /// A user enum, externally tagged: a unit variant is its name, and a
+    /// variant with a payload is a one-key object naming it.
+    Enum(TyId),
     /// `Option<T>` - JSON `null` for `None`, else the inner value. A missing
     /// object key also decodes to `None`.
     Option(Box<FieldKind>),
@@ -74,6 +77,54 @@ impl FieldKind {
         aliases: &HashMap<String, gossamer_ast::Type>,
     ) -> Option<Self> {
         Self::from_type_within(ty, module, structs, aliases, 0)
+    }
+
+    /// The kind a primitive type name serializes as.
+    fn scalar(name: &str) -> Option<Self> {
+        Some(match name {
+            "i64" => Self::I64,
+            "i8" => Self::Int("i8"),
+            "i16" => Self::Int("i16"),
+            "i32" => Self::Int("i32"),
+            "u8" => Self::Int("u8"),
+            "u16" => Self::Int("u16"),
+            "u32" => Self::Int("u32"),
+            "u64" => Self::U64("u64"),
+            "usize" => Self::U64("usize"),
+            "f64" => Self::Float("f64"),
+            "f32" => Self::Float("f32"),
+            "bool" => Self::Bool,
+            "String" => Self::String,
+            _ => return None,
+        })
+    }
+
+    /// The kind a declared struct, enum, or alias named `name` serializes as.
+    fn named(
+        name: &str,
+        module: &str,
+        structs: &StructIdentities,
+        aliases: &HashMap<String, gossamer_ast::Type>,
+        depth: u32,
+    ) -> Option<Self> {
+        let alias = match structs.local(module, name) {
+            Some(DeclaredType::Struct(ty)) => return Some(Self::Struct(ty.clone())),
+            Some(DeclaredType::Enum(ty)) => return Some(Self::Enum(ty.clone())),
+            Some(DeclaredType::Alias(target)) => Some(target),
+            Some(DeclaredType::Other) => return None,
+            None => aliases.get(name),
+        };
+        if let Some(target) = alias {
+            if depth >= MAX_ALIAS_DEPTH {
+                return None;
+            }
+            return Self::from_type_within(target, module, structs, aliases, depth + 1);
+        }
+        structs
+            .first(name)
+            .cloned()
+            .map(Self::Struct)
+            .or_else(|| structs.first_enum(name).cloned().map(Self::Enum))
     }
 
     /// `depth` bounds alias expansion, per [`MAX_ALIAS_DEPTH`].
@@ -108,44 +159,8 @@ impl FieldKind {
                 let seg = &segs[0];
                 let name = seg.name.name.as_str();
                 if seg.generics.is_empty() {
-                    return match name {
-                        "i64" => Some(Self::I64),
-                        "i8" => Some(Self::Int("i8")),
-                        "i16" => Some(Self::Int("i16")),
-                        "i32" => Some(Self::Int("i32")),
-                        "u8" => Some(Self::Int("u8")),
-                        "u16" => Some(Self::Int("u16")),
-                        "u32" => Some(Self::Int("u32")),
-                        "u64" => Some(Self::U64("u64")),
-                        "usize" => Some(Self::U64("usize")),
-                        "f64" => Some(Self::Float("f64")),
-                        "f32" => Some(Self::Float("f32")),
-                        "bool" => Some(Self::Bool),
-                        "String" => Some(Self::String),
-                        other => {
-                            let alias = match structs.local(module, other) {
-                                Some(DeclaredType::Struct(ty)) => {
-                                    return Some(Self::Struct(ty.clone()));
-                                }
-                                Some(DeclaredType::Alias(target)) => Some(target),
-                                Some(DeclaredType::Other) => return None,
-                                None => aliases.get(other),
-                            };
-                            if let Some(target) = alias {
-                                if depth >= MAX_ALIAS_DEPTH {
-                                    return None;
-                                }
-                                return Self::from_type_within(
-                                    target,
-                                    module,
-                                    structs,
-                                    aliases,
-                                    depth + 1,
-                                );
-                            }
-                            structs.first(other).cloned().map(Self::Struct)
-                        }
-                    };
+                    return Self::scalar(name)
+                        .or_else(|| Self::named(name, module, structs, aliases, depth));
                 }
                 match name {
                     "Vec" if seg.generics.len() == 1 => {
@@ -195,7 +210,7 @@ impl FieldKind {
             Self::Bool => "false".to_string(),
             Self::String => "\"\"".to_string(),
             Self::Vec(_) => "Vec::from([])".to_string(),
-            Self::Struct(ty) => format!("{}::default()", ty.path),
+            Self::Struct(ty) | Self::Enum(ty) => format!("{}::default()", ty.path),
             Self::Option(_) => "None".to_string(),
             Self::Tuple(elems) => format!(
                 "({})",
@@ -219,7 +234,7 @@ impl FieldKind {
             Self::Bool => "bool".to_string(),
             Self::String => "String".to_string(),
             Self::Vec(inner) => format!("Vec<{}>", inner.type_spelling()),
-            Self::Struct(ty) => ty.path.clone(),
+            Self::Struct(ty) | Self::Enum(ty) => ty.path.clone(),
             Self::Option(inner) => format!("Option<{}>", inner.type_spelling()),
             Self::Tuple(elems) => format!(
                 "({})",
@@ -251,7 +266,7 @@ impl FieldKind {
             // so a quote, a control character, or `<` in it stays inside it.
             Self::String => format!("json::encode({expr})"),
             Self::Vec(inner) => render_vec_to_json(expr, inner),
-            Self::Struct(ty) => format!("{}({expr})?", to_json_fn(&ty.symbol)),
+            Self::Struct(ty) | Self::Enum(ty) => format!("{}({expr})?", to_json_fn(&ty.symbol)),
             Self::Option(inner) => {
                 let some_render = inner.render_to_json("__inner");
                 format!(
@@ -289,7 +304,7 @@ impl FieldKind {
                 "match json::as_str({value_expr}) {{ Some(__v) => __v, None => return Err(errors::new(\"{path}: expected string\")) }}"
             ),
             Self::Vec(inner) => extract_vec_strict(value_expr, inner, path),
-            Self::Struct(ty) => format!(
+            Self::Struct(ty) | Self::Enum(ty) => format!(
                 "match {}({value_expr}) {{ Ok(__v) => __v, Err(__e) => return Err(errors::wrap(__e, \"{path}\")) }}",
                 from_json_value_fn(&ty.symbol)
             ),
@@ -392,6 +407,8 @@ impl TyId {
 pub(crate) enum DeclaredType {
     /// A named or tuple struct, with the identity its synthesized functions use.
     Struct(TyId),
+    /// A non-generic enum, with the identity its synthesized functions use.
+    Enum(TyId),
     /// A non-generic `type X = T` alias, transparent or opaque.
     Alias(gossamer_ast::Type),
     /// Any other type-namespace item: an enum, a trait, a unit struct, a
@@ -405,6 +422,7 @@ pub(crate) enum DeclaredType {
 pub(crate) struct StructIdentities {
     scoped: HashMap<String, HashMap<String, DeclaredType>>,
     first: HashMap<String, TyId>,
+    first_enum: HashMap<String, TyId>,
 }
 
 impl StructIdentities {
@@ -419,6 +437,11 @@ impl StructIdentities {
     /// for a name the writing module does not declare itself.
     pub(crate) fn first(&self, name: &str) -> Option<&TyId> {
         self.first.get(name)
+    }
+
+    /// The first non-generic enum declared as `name` anywhere in the tree.
+    pub(crate) fn first_enum(&self, name: &str) -> Option<&TyId> {
+        self.first_enum.get(name)
     }
 }
 
@@ -442,6 +465,13 @@ pub(crate) fn struct_identities(items: &[Item]) -> StructIdentities {
                 (&decl.name.name, DeclaredType::Alias(decl.ty.clone()))
             }
             ItemKind::TypeAlias(decl) => (&decl.name.name, DeclaredType::Other),
+            ItemKind::Enum(decl) if decl.generics.params.is_empty() => {
+                let ty = TyId::new(&module, &decl.name.name);
+                out.first_enum
+                    .entry(decl.name.name.clone())
+                    .or_insert_with(|| ty.clone());
+                (&decl.name.name, DeclaredType::Enum(ty))
+            }
             ItemKind::Enum(decl) => (&decl.name.name, DeclaredType::Other),
             ItemKind::Trait(decl) => (&decl.name.name, DeclaredType::Other),
             _ => continue,

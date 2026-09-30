@@ -97,12 +97,12 @@ fn unescape_template(body: &str) -> String {
     text
 }
 
-/// The tour teaches the language through programs a reader runs, so a
-/// lesson that no longer parses or type-checks teaches the wrong
-/// spelling. Checking is the deterministic half of that contract: it
-/// needs no ports, no clock, and no network.
+/// The tour teaches the language through programs a reader runs, so every
+/// lesson must still run to a successful exit: one that no longer parses,
+/// type-checks, or runs teaches the wrong spelling. Each lesson is written
+/// to finish on its own, with no ports, clock, or network it waits on.
 #[test]
-fn every_tour_lesson_still_checks() {
+fn every_tour_lesson_still_runs() {
     let root = workspace_root();
     let source = std::fs::read_to_string(root.join("landing/tour/tour.js")).expect("read tour.js");
     let lessons = tour_lessons(&source);
@@ -122,10 +122,10 @@ fn every_tour_lesson_still_checks() {
         let file = dir.join(format!("{slug}.gos"));
         std::fs::write(&file, code).expect("write the lesson");
         let out = std::process::Command::new(&gos)
-            .arg("check")
+            .arg("run")
             .arg(&file)
             .output()
-            .expect("spawn gos check");
+            .expect("spawn gos run");
         if !out.status.success() {
             broken.push(format!(
                 "{slug}:\n{}",
@@ -135,16 +135,17 @@ fn every_tour_lesson_still_checks() {
     }
     assert!(
         broken.is_empty(),
-        "tour lessons no longer check:\n{}",
+        "tour lessons no longer run:\n{}",
         broken.join("\n\n")
     );
 }
 
 /// The home page's language tour listings are the first Gossamer a
 /// reader sees, and they are static markup no runtime ever exercises,
-/// so nothing but a gate keeps them spelling the current language.
+/// so nothing but a gate keeps them spelling the current language and
+/// running to a successful exit.
 #[test]
-fn every_landing_listing_still_checks() {
+fn every_landing_listing_still_runs() {
     let root = workspace_root();
     let page = std::fs::read_to_string(root.join("landing/index.html")).expect("read index.html");
 
@@ -172,10 +173,10 @@ fn every_landing_listing_still_checks() {
         let file = dir.join(format!("listing-{index}.gos"));
         std::fs::write(&file, code).expect("write the listing");
         let out = std::process::Command::new(&gos)
-            .arg("check")
+            .arg("run")
             .arg(&file)
             .output()
-            .expect("spawn gos check");
+            .expect("spawn gos run");
         if !out.status.success() {
             broken.push(format!(
                 "listing {index}:\n{}",
@@ -185,7 +186,7 @@ fn every_landing_listing_still_checks() {
     }
     assert!(
         broken.is_empty(),
-        "home page listings no longer check:\n{}",
+        "home page listings no longer run:\n{}",
         broken.join("\n\n")
     );
 }

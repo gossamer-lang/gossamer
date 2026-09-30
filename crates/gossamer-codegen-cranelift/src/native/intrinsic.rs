@@ -142,6 +142,9 @@ pub(super) struct IntrinsicContext {
     pub(super) strings: HashMap<String, DataId>,
     /// Cached `FuncId` for each C-ABI runtime function we link.
     pub(super) externs: HashMap<&'static str, FuncId>,
+    /// The runtime's yield-request byte, which loop preemption polls read,
+    /// declared before the parallel phase.
+    pub(super) preempt_requested: Option<DataId>,
     /// Cached `DataId` for each RC type-meta blob, keyed by its codegen
     /// symbol (`gos_rc_meta_<id>`). Deduped so a variant constructed at
     /// many sites shares one data object.
@@ -257,6 +260,7 @@ impl IntrinsicContext {
         Self {
             strings: HashMap::new(),
             externs: HashMap::new(),
+            preempt_requested: None,
             rc_metas: HashMap::new(),
             tuple_tags: HashMap::new(),
             statics: HashMap::new(),

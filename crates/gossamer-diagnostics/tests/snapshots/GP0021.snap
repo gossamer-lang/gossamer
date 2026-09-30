@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GP0021]: A format placeholder must be a binding name, a format specification, or an explicit positional placeholder. Bind complex expressions first. - here
+error[GP0021]: A `format` template's placeholder is `{}`, which takes the next argument, - here
 --- framed ---
-error[GP0021]: A format placeholder must be a binding name, a format specification, or an explicit positional placeholder. Bind complex expressions first.
+error[GP0021]: A `format` template's placeholder is `{}`, which takes the next argument,
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

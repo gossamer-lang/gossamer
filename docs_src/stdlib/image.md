@@ -1,8 +1,22 @@
 # `std::image`
 
-Status: unproven
+Status: experimental
 
 Opaque RGBA8 image handles with PNG and JPEG codecs.
+
+## Items
+
+| Item | Signature | Description |
+|---|---|---|
+| `new` | `fn new(width: i64, height: i64) -> i64` | Allocates a transparent image handle. |
+| `filled` | `fn filled(width: i64, height: i64, rgba: i64) -> i64` | Allocates an image handle filled with a packed 0xRRGGBBAA colour. |
+| `decode_base64` | `fn decode_base64(encoded: String) -> i64` | Decodes a base64 PNG or JPEG; returns zero for malformed input. |
+| `width` | `fn width(image: i64) -> i64` | Returns an image width in pixels. |
+| `height` | `fn height(image: i64) -> i64` | Returns an image height in pixels. |
+| `pixel` | `fn pixel(image: i64, x: i64, y: i64) -> i64` | Returns packed 0xRRGGBBAA, or -1 outside the image. |
+| `set_pixel` | `fn set_pixel(image: i64, x: i64, y: i64, rgba: i64) -> bool` | Sets a packed 0xRRGGBBAA pixel and reports whether it was in bounds. |
+| `encode_png_base64` | `fn encode_png_base64(image: i64) -> String` | Encodes an image as lossless base64 PNG. |
+| `encode_jpeg_base64` | `fn encode_jpeg_base64(image: i64, quality: i64) -> String` | Encodes an image as base64 JPEG at quality 1 through 100. |
 
 <!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 

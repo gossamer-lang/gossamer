@@ -2071,6 +2071,10 @@ impl<'a> Builder<'a> {
                     crate::lower::HandleContainer::Heap => gossamer_abi::rc::RC_CHILD_HEAP,
                 };
                 out.push((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word);
+            } else if let Some(kind) = crate::lower::helpers::lazy_iter_child_kind(self.tcx, fty) {
+                // An iterator field holds a share of the handle, which the
+                // aggregate gives back at its death.
+                out.push((kind << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word);
             } else if self.tcx.is_rc_managed(fty) {
                 out.push(
                     (gossamer_abi::rc::RC_CHILD_RC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT) | word,

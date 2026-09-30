@@ -1039,15 +1039,11 @@ impl MultiScheduler {
     }
 }
 
-/// RAII guard around the per-worker thread handle. On drop (panic
-/// unwind or normal return) it zeroes the `WorkerSlot::thread_handle`
-/// and hands the OS handle back to [`crate::preempt::release_thread_handle`].
-///
-/// Without this guard, a panicking goroutine on Windows leaks the
-/// `DuplicateHandle`-allocated thread handle: `preempt::current_thread_handle`
-/// acquires it, the worker hits a panic, the unwinder destroys the
-/// frame without anyone running release. Long-running services hit
-/// the per-process handle limit and start failing thread creation.
+/// RAII guard around the per-worker thread handle. On drop, which every
+/// way out of the worker reaches (return or unwind), it zeroes
+/// `WorkerSlot::thread_handle` and hands the OS handle back to
+/// [`crate::preempt::release_thread_handle`] before the thread exits. It is
+/// the one place the handle is cleared, so the release is never skipped.
 struct WorkerHandleGuard {
     slot: Arc<WorkerSlot>,
 }
@@ -1128,17 +1124,12 @@ fn worker_loop(index: usize, deque: Deque<SendTask>, slot: Arc<WorkerSlot>, shar
                     }
                 }
             }
-            // Zero the handle before exiting so the watchdog cannot
-            // call pthread_kill on a thread that has already exited.
-            slot.thread_handle.store(0, Ordering::Release);
             shared.live_workers.fetch_sub(1, Ordering::AcqRel);
             return;
         }
         let task = next_task(index, &deque, &slot, &shared, &mut steal_cursor);
         let Some(mut task) = task else {
             if shared.stopping.load(Ordering::Acquire) {
-                // Same: zero the handle before this thread exits.
-                slot.thread_handle.store(0, Ordering::Release);
                 shared.live_workers.fetch_sub(1, Ordering::AcqRel);
                 // The exiting worker may have been the last one
                 // holding wait_until_idle awake. Notify in case

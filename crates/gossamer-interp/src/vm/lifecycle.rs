@@ -44,6 +44,7 @@ impl Vm {
             user_comparators: RefCell::new(rustc_hash::FxHashMap::default()),
             call_stack: RefCell::new(Vec::new()),
             call_depth: Cell::new(0),
+            heap_frame_bytes: Cell::new(0),
             source_map: None,
             collect_comptime: Cell::new(false),
             comptime_folds: RefCell::new(Vec::new()),
@@ -109,6 +110,7 @@ impl Vm {
             user_comparators: RefCell::new(rustc_hash::FxHashMap::default()),
             call_stack: RefCell::new(Vec::new()),
             call_depth: Cell::new(0),
+            heap_frame_bytes: Cell::new(0),
             // Worker VMs run already-compiled chunks; the source map is
             // a compile-time input only, and `Op::CovHit` bumps the
             // global table regardless of which Vm executes the chunk.
@@ -1424,11 +1426,6 @@ impl Vm {
             let Some(Global::Fn(chunk)) = self.lookup_global_ref(name.as_ref()) else {
                 continue;
             };
-            // Keep panic-capable code on bytecode so the VM's diagnostic and
-            // side-effect semantics remain the single execution path.
-            if chunk.globals.iter().any(|g| &**g == "panic") {
-                continue;
-            }
             if trace {
                 eprintln!("jit: promote {name}");
             }

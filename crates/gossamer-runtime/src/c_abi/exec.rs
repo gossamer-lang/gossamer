@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -10,7 +9,6 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
-#![allow(unused_unsafe)]
 
 use std::os::raw::c_char;
 #[cfg(unix)]
@@ -42,17 +40,19 @@ use super::vec::{GosVec, gos_rt_result_new};
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_pipeline_run_raw(commands: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `commands` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `gather_command_lines` accepts.
         let stages = match unsafe { gather_command_lines(commands) } {
             Ok(s) => s,
             Err(msg) => {
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                return unsafe { gos_rt_result_new(1, err as i64) };
+                return gos_rt_result_new(1, err as i64);
             }
         };
         if stages.is_empty() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes(b"exec::pipeline_run: empty pipeline");
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
         match crate::sched_global::run_blocking("exec-pipeline", move || run_pipeline(stages)) {
             Ok(Ok((stdout, stderr, code))) => {
@@ -66,45 +66,30 @@ pub unsafe extern "C" fn gos_rt_exec_pipeline_run_raw(commands: *mut GosVec) -> 
                     let err = crate::c_abi::errors::error_new_from_bytes(
                         b"exec::pipeline_run: out of memory",
                     );
-                    return unsafe { gos_rt_result_new(1, err as i64) };
+                    return gos_rt_result_new(1, err as i64);
                 }
-                unsafe { gos_rt_result_new(0, blob as i64) }
+                gos_rt_result_new(0, blob as i64)
             }
             Ok(Err(msg)) | Err(msg) => {
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
 }
 
+/// # Safety
+/// `commands` is null or a live `Vec<String>`.
 unsafe fn gather_command_lines(commands: *mut GosVec) -> Result<Vec<Vec<String>>, String> {
-    if commands.is_null() {
+    // SAFETY: this `unsafe fn`'s caller passes `commands` null or a live `Vec<String>`.
+    let Some(lines) = (unsafe { crate::c_abi::vec::StrVecView::of(commands) }) else {
         return Err("exec::pipeline_run: commands vec is null".into());
-    }
-    let v = unsafe { &*commands };
-    let elem_bytes = v.elem_bytes as usize;
-    if elem_bytes == 0 || v.ptr.is_null() {
-        return Ok(Vec::new());
-    }
-    let mut stages = Vec::with_capacity(v.len as usize);
-    for i in 0..v.len {
-        let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
-        let cstr_ptr = unsafe {
-            crate::c_abi::vec::slot_read_word(slot)
-                .cast_const()
-                .cast::<c_char>()
-        };
-        if cstr_ptr.is_null() {
-            continue;
-        }
-        let line = unsafe { crate::c_abi::gos_str_arg_string(cstr_ptr) };
-        let parts = tokenize_shell(&line);
-        if !parts.is_empty() {
-            stages.push(parts);
-        }
-    }
-    Ok(stages)
+    };
+    Ok((0..lines.len())
+        .filter(|&i| !lines.is_null(i))
+        .map(|i| tokenize_shell(&lines.text(i)))
+        .filter(|parts| !parts.is_empty())
+        .collect())
 }
 
 fn tokenize_shell(line: &str) -> Vec<String> {
@@ -250,9 +235,10 @@ pub unsafe extern "C" fn gos_rt_exec_wait_timeout(pid: i64, ms: i64) -> i64 {
                 crate::platform::Instant::now() + Duration::from_millis(ms.max(0) as u64);
             loop {
                 let mut status: libc::c_int = 0;
-                // SAFETY: waitpid with WNOHANG returns 0 if still
-                // running, the child pid on reap, -1 on error.
                 let status_ptr: *mut libc::c_int = &raw mut status;
+                // SAFETY: `status_ptr` addresses a live local; waitpid with
+                // WNOHANG returns 0 if still running, the child pid on reap,
+                // -1 on error.
                 let rc = unsafe { libc::waitpid(pid as libc::pid_t, status_ptr, libc::WNOHANG) };
                 if rc > 0 {
                     if libc::WIFEXITED(status) {
@@ -527,37 +513,21 @@ pub fn piped_child_kill(handle: i64) -> bool {
     with_piped_child(handle, |pc| pc.child.kill().is_ok()).unwrap_or(false)
 }
 
-/// Reads the flat `Vec<String>` argv convention shared with
-/// `gos_rt_exec_spawn`.
-fn argv_strings(args: *mut GosVec) -> Vec<String> {
-    let mut out = Vec::new();
-    if args.is_null() {
-        return out;
-    }
-    let v = unsafe { &*args };
-    let elem_bytes = v.elem_bytes as usize;
-    if elem_bytes == 0 || v.ptr.is_null() {
-        return out;
-    }
-    for i in 0..v.len {
-        let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
-        let cstr_ptr = unsafe {
-            crate::c_abi::vec::slot_read_word(slot)
-                .cast_const()
-                .cast::<c_char>()
-        };
-        if cstr_ptr.is_null() {
-            out.push(String::new());
-        } else {
-            out.push(unsafe { crate::c_abi::gos_str_arg_string(cstr_ptr) });
-        }
-    }
-    out
+/// Reads the flat `Vec<String>` argv convention every child-process entry
+/// point takes.
+///
+/// # Safety
+///
+/// `args` is null or a live `Vec` of strings.
+pub(crate) unsafe fn argv_strings(args: *mut GosVec) -> Vec<String> {
+    // SAFETY: this `unsafe fn`'s caller passes `args` null or a live `Vec<String>`.
+    unsafe { crate::c_abi::vec::StrVecView::of(args) }
+        .map_or_else(Vec::new, |argv| argv.texts().collect())
 }
 
 fn err_result(msg: String) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
 /// `process::spawn_piped(prog, args) -> Result<Child, errors::Error>`.
@@ -568,9 +538,11 @@ pub unsafe extern "C" fn gos_rt_exec_spawn_piped(prog: *const c_char, args: *mut
         if prog.is_null() {
             return err_result("process::spawn_piped: program is null".to_string());
         }
+        // SAFETY: `prog` is a String argument from compiled code, null or a live string body for the whole call.
         let prog_str = unsafe { crate::c_abi::gos_str_arg_string(prog) };
-        match piped_child_spawn(&prog_str, &argv_strings(args)) {
-            Ok(handle) => unsafe { gos_rt_result_new(0, handle) },
+        // SAFETY: `args` is this shim's argument, as `argv_strings` requires (C-ABI contract).
+        match piped_child_spawn(&prog_str, &unsafe { argv_strings(args) }) {
+            Ok(handle) => gos_rt_result_new(0, handle),
             Err(msg) => err_result(msg),
         }
     })
@@ -583,6 +555,7 @@ pub unsafe extern "C" fn gos_rt_child_write_stdin(handle: i64, s: *const c_char)
         let bytes = if s.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(s) }.to_vec()
         };
         i64::from(piped_child_write_stdin(handle, &bytes))
@@ -591,7 +564,7 @@ pub unsafe extern "C" fn gos_rt_child_write_stdin(handle: i64, s: *const c_char)
 
 /// `child.close_stdin()`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_child_close_stdin(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_child_close_stdin(handle: i64) -> i64 {
     ffi_entry!(0, {
         piped_child_close_stdin(handle);
         0
@@ -600,12 +573,12 @@ pub unsafe extern "C" fn gos_rt_child_close_stdin(handle: i64) -> i64 {
 
 /// `child.read_line() -> Option<String>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_child_read_line(handle: i64) -> i128 {
+pub extern "C" fn gos_rt_child_read_line(handle: i64) -> i128 {
     ffi_entry!(1i128, {
         match piped_child_read_line(handle) {
             Some(line) => {
                 let ptr = alloc_cstring(line.as_bytes()) as i64;
-                unsafe { gos_rt_result_new(0, ptr) }
+                gos_rt_result_new(0, ptr)
             }
             None => 1i128,
         }
@@ -614,7 +587,7 @@ pub unsafe extern "C" fn gos_rt_child_read_line(handle: i64) -> i128 {
 
 /// `child.read_stdout() -> String`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_child_read_stdout(handle: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_child_read_stdout(handle: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let text = piped_child_read_stdout(handle).unwrap_or_default();
         alloc_cstring(text.as_bytes())
@@ -623,10 +596,10 @@ pub unsafe extern "C" fn gos_rt_child_read_stdout(handle: i64) -> *mut c_char {
 
 /// `child.wait() -> Result<i64, errors::Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_child_wait(handle: i64) -> i128 {
+pub extern "C" fn gos_rt_child_wait(handle: i64) -> i128 {
     ffi_entry!(0i128, {
         match piped_child_wait(handle) {
-            Ok(code) => unsafe { gos_rt_result_new(0, code) },
+            Ok(code) => gos_rt_result_new(0, code),
             Err(msg) => err_result(msg),
         }
     })
@@ -634,7 +607,7 @@ pub unsafe extern "C" fn gos_rt_child_wait(handle: i64) -> i128 {
 
 /// `child.kill() -> bool`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_child_kill(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_child_kill(handle: i64) -> i64 {
     ffi_entry!(0, { i64::from(piped_child_kill(handle)) })
 }
 

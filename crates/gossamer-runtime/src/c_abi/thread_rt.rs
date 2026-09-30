@@ -3,13 +3,12 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_possible_wrap)]
-#![allow(unused_unsafe)]
 
 /// `thread::num_cpus() -> i64` - logical CPU count, at least 1.
 /// Mirrors `gossamer_std::thread::num_cpus` so the compiled tiers
 /// agree bit-for-bit with the interpreter.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_thread_num_cpus() -> i64 {
+pub extern "C" fn gos_rt_thread_num_cpus() -> i64 {
     ffi_entry!(1, {
         std::thread::available_parallelism().map_or(1, |n| n.get() as i64)
     })
@@ -18,7 +17,7 @@ pub unsafe extern "C" fn gos_rt_thread_num_cpus() -> i64 {
 /// `runtime::scheduler_stats_json() -> String` - low-overhead snapshot
 /// of the global goroutine scheduler counters.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_runtime_scheduler_stats_json() -> *mut std::os::raw::c_char {
+pub extern "C" fn gos_rt_runtime_scheduler_stats_json() -> *mut std::os::raw::c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let scheduler = crate::sched_global::scheduler();
         let stats = scheduler.stats();
@@ -43,6 +42,6 @@ pub unsafe extern "C" fn gos_rt_runtime_scheduler_stats_json() -> *mut std::os::
 /// `runtime::cycle_collection_supported() -> bool` - compiled tiers run the
 /// native trial-deletion collector, unlike the Arc-backed bytecode VM.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_runtime_cycle_collection_supported() -> bool {
+pub extern "C" fn gos_rt_runtime_cycle_collection_supported() -> bool {
     true
 }

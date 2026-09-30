@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::io::{BufRead, Read};
@@ -51,17 +49,17 @@ static STREAM_STDOUT: GosStream = GosStream { fd: 1 };
 static STREAM_STDERR: GosStream = GosStream { fd: 2 };
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_stdin() -> *const GosStream {
+pub extern "C" fn gos_rt_io_stdin() -> *const GosStream {
     ffi_entry!(std::ptr::null(), { std::ptr::addr_of!(STREAM_STDIN) })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_stdout() -> *const GosStream {
+pub extern "C" fn gos_rt_io_stdout() -> *const GosStream {
     ffi_entry!(std::ptr::null(), { std::ptr::addr_of!(STREAM_STDOUT) })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_io_stderr() -> *const GosStream {
+pub extern "C" fn gos_rt_io_stderr() -> *const GosStream {
     ffi_entry!(std::ptr::null(), { std::ptr::addr_of!(STREAM_STDERR) })
 }
 
@@ -73,12 +71,16 @@ pub unsafe extern "C" fn gos_rt_io_stderr() -> *const GosStream {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_copy(dst: *const GosStream, src: *const GosStream) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `dst` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let dst_fd = unsafe { stream_fd(dst) };
+        // SAFETY: `src` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let src_fd = unsafe { stream_fd(src) };
         if src_fd != 0 {
             return 0;
         }
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         let read = crate::sched_global::run_blocking("stdin-copy", || {
             let stdin = std::io::stdin();
             let mut buf = String::new();
@@ -88,7 +90,7 @@ pub unsafe extern "C" fn gos_rt_io_copy(dst: *const GosStream, src: *const GosSt
             Ok(Ok((n, buf))) => (n as i64, buf),
             Ok(Err(_)) | Err(_) => return 0,
         };
-        unsafe { write_fd(dst_fd, buf.as_bytes()) };
+        write_fd(dst_fd, buf.as_bytes());
         n
     })
 }
@@ -97,19 +99,21 @@ pub unsafe extern "C" fn gos_rt_io_copy(dst: *const GosStream, src: *const GosSt
 /// Non-stdin readers return an empty string, matching the interpreter builtin.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_io_read_all(reader: *const GosStream) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `reader` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(reader) };
         if fd != 0 {
-            return unsafe { gos_rt_result_new(0, alloc_cstring(b"") as i64) };
+            return gos_rt_result_new(0, alloc_cstring(b"") as i64);
         }
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         let read = crate::sched_global::run_blocking("stdin-read-all", || {
             let stdin = std::io::stdin();
             let mut buf = String::new();
             stdin.lock().read_to_string(&mut buf).map(|_| buf)
         });
         match read {
-            Ok(Ok(buf)) => unsafe { gos_rt_result_new(0, alloc_cstring(buf.as_bytes()) as i64) },
+            Ok(Ok(buf)) => gos_rt_result_new(0, alloc_cstring(buf.as_bytes()) as i64),
             Ok(Err(e)) => read_all_error(e.to_string()),
             Err(e) => read_all_error(e.clone()),
         }
@@ -119,19 +123,21 @@ pub unsafe extern "C" fn gos_rt_io_read_all(reader: *const GosStream) -> i128 {
 fn read_all_error(message: String) -> i128 {
     let err =
         crate::c_abi::errors::error_new_from_bytes(format!("io::ReadAll: {message}").as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
 unsafe fn stream_fd(s: *const GosStream) -> i32 {
     if s.is_null() {
         return 1;
     }
+    // SAFETY: `s` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `GosStream`.
     unsafe { (*s).fd }
 }
 
-unsafe fn write_fd(fd: i32, bytes: &[u8]) {
+fn write_fd(fd: i32, bytes: &[u8]) {
     if fd == 1 {
-        unsafe { write_stdout(bytes) };
+        write_stdout(bytes);
     } else {
         // Unbuffered direct write - fine for stderr and for any
         // user-opened fd once we add `open`. stdout is the only
@@ -167,13 +173,19 @@ fn raw_write_fd(fd: i32, bytes: &[u8]) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_write_byte(stream: *const GosStream, b: i64) {
     ffi_entry!((), {
+        // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
         if fd == 1 {
             let _guard = StdoutGuard::acquire();
             let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
             let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+            // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+            // alone.
             let len = unsafe { *len_ptr };
             if len < STDOUT_BUF_SIZE {
+                // SAFETY: `len` is below the buffer's size (checked above); the held
+                // `StdoutGuard` gives this thread the stdout buffer and its length alone.
                 unsafe {
                     *(*bytes_ptr).as_mut_ptr().add(len) = b as u8;
                     *len_ptr = len + 1;
@@ -181,6 +193,9 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte(stream: *const GosStream, b: i
                 return;
             }
             // Buffer full - flush and stash the new byte.
+            // SAFETY: the buffer is full, so its `len` bytes are written and its first byte is in
+            // bounds; the held `StdoutGuard` gives this thread the stdout buffer and its length
+            // alone.
             unsafe {
                 raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), len));
                 *(*bytes_ptr).as_mut_ptr() = b as u8;
@@ -198,13 +213,16 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte(stream: *const GosStream, b: i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_write_str(stream: *const GosStream, s: *const c_char) {
     ffi_entry!((), {
+        // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
         let bytes = if s.is_null() {
             b"" as &[u8]
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(s) }
         };
-        unsafe { write_fd(fd, bytes) };
+        write_fd(fd, bytes);
     });
 }
 
@@ -228,6 +246,8 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte_array(
             return;
         }
         let len = len as usize;
+        // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
         if fd == 1 {
             // Stdout fast path. We always check capacity ONCE
@@ -240,8 +260,13 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte_array(
             let guard = StdoutGuard::acquire();
             let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
             let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+            // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+            // alone.
             let cur = unsafe { *len_ptr };
             if cur + len <= STDOUT_BUF_SIZE {
+                // SAFETY: `cur + len` fits the buffer (checked above), `arr` is non-null and
+                // addresses `len` words (C-ABI contract); the held `StdoutGuard` gives this
+                // thread the stdout buffer and its length alone.
                 unsafe {
                     let dst = (*bytes_ptr).as_mut_ptr().add(cur);
                     for i in 0..len {
@@ -257,6 +282,10 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte_array(
             // case has to drop the guard first - `STDOUT_LOCK` is
             // a non-recursive `RawMutex`, so re-entering on the
             // same OS thread would deadlock.
+            // SAFETY: the buffer's first `cur` bytes are written, `arr` addresses `len` words
+            // (C-ABI contract), and the guard is dropped before the recursive call reacquires the
+            // lock; the held `StdoutGuard` gives this thread the stdout buffer and its length
+            // alone.
             unsafe {
                 raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 *len_ptr = 0;
@@ -282,6 +311,7 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte_array(
                 raw_write_fd(fd, &buf[..cur]);
                 cur = 0;
             }
+            // SAFETY: `arr` is a handle from compiled code, checked non-null above and live for the whole call.
             buf[cur] = unsafe { (*arr.add(i)) as u8 };
             cur += 1;
         }
@@ -296,9 +326,11 @@ pub unsafe extern "C" fn gos_rt_stream_write_byte_array(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_flush(stream: *const GosStream) {
     ffi_entry!((), {
+        // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
         if fd == 1 {
-            unsafe { gos_rt_flush_stdout() };
+            gos_rt_flush_stdout();
         }
     });
 }
@@ -314,11 +346,13 @@ fn stream_read_line_err(message: &str) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_next_line(stream: *const GosStream) -> i128 {
     ffi_entry!(1i128, {
+        // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
         if fd != 0 {
             return gos_rt_result_new(1, 0);
         }
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         let read = crate::sched_global::run_blocking("stdin-read-line", || {
             let stdin = std::io::stdin();
             let mut line = String::new();
@@ -349,11 +383,13 @@ pub unsafe extern "C" fn gos_rt_stream_read_line(
         if buf_slot.is_null() {
             return stream_read_line_err("read_line: expected &mut String buffer");
         }
+        // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
         if fd != 0 {
             return gos_rt_result_new(0, 0);
         }
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         let read = crate::sched_global::run_blocking("stdin-read-line", || {
             let stdin = std::io::stdin();
             let mut line = String::new();
@@ -361,13 +397,22 @@ pub unsafe extern "C" fn gos_rt_stream_read_line(
         });
         match read {
             Ok(Ok((n, line))) => {
+                // SAFETY: `buf_slot` is non-null (checked above) and addresses the caller's
+                // `String` place, live for the call (C-ABI contract).
                 let current = unsafe { *buf_slot };
-                let mut out = unsafe { crate::c_abi::gos_str_arg_string(current) };
-                out.push_str(&line);
-                let updated = alloc_cstring(out.as_bytes());
-                unsafe {
-                    *buf_slot = updated;
-                }
+                // The place owns a share of its string, which the append consumes; the answer
+                // is the place's new value.
+                // SAFETY: `current` is the place's live string, and `line` is this function's
+                // own text.
+                let updated = unsafe {
+                    crate::c_abi::string::gos_rt_str_append_bytes(
+                        current,
+                        line.as_ptr(),
+                        i64::try_from(line.len()).unwrap_or(i64::MAX),
+                    )
+                };
+                // SAFETY: as above.
+                unsafe { *buf_slot = updated };
                 gos_rt_result_new(0, n as i64)
             }
             Ok(Err(e)) => stream_read_line_err(&format!("read_line: {e}")),
@@ -381,11 +426,13 @@ pub unsafe extern "C" fn gos_rt_stream_read_line(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_stream_read_to_string(stream: *const GosStream) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `stream` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `stream_fd` accepts.
         let fd = unsafe { stream_fd(stream) };
         if fd != 0 {
             return alloc_cstring(b"");
         }
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         let read = crate::sched_global::run_blocking("stdin-read-to-string", || {
             let stdin = std::io::stdin();
             let mut buf = String::new();
@@ -401,6 +448,6 @@ pub unsafe extern "C" fn gos_rt_stream_read_to_string(stream: *const GosStream) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_println() {
     ffi_entry!((), {
-        unsafe { write_stdout(b"\n") };
+        write_stdout(b"\n");
     });
 }

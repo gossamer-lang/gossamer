@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -60,6 +58,7 @@ pub unsafe extern "C" fn gos_rt_regex_compile(pat: *const c_char) -> *mut GosReg
         if pat.is_null() {
             return std::ptr::null_mut();
         }
+        // SAFETY: `pat` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(pat) };
         match ::regex::Regex::new(s) {
             Ok(re) => Box::into_raw(Box::new(GosRegex { inner: re })),
@@ -80,6 +79,7 @@ pub unsafe extern "C" fn gos_rt_regex_compile_result(pat: *const c_char) -> i128
             let msg = alloc_cstring(b"regex: invalid pattern ``: null pattern");
             return gos_rt_result_new(1, msg as i64);
         }
+        // SAFETY: `pat` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(pat) };
         match ::regex::Regex::new(s) {
             Ok(re) => {
@@ -100,7 +100,9 @@ pub unsafe extern "C" fn gos_rt_regex_is_match(re: *const GosRegex, text: *const
         if re.is_null() || text.is_null() {
             return 0;
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         i64::from(unsafe { (*re).inner.is_match(s) })
     })
 }
@@ -112,7 +114,9 @@ pub unsafe extern "C" fn gos_rt_regex_count(re: *const GosRegex, text: *const c_
         if re.is_null() || text.is_null() {
             return 0;
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         i64::try_from(unsafe { (*re).inner.find_iter(s).count() }).unwrap_or(i64::MAX)
     })
 }
@@ -126,8 +130,12 @@ pub unsafe extern "C" fn gos_rt_regex_find(
         if re.is_null() || text.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         match unsafe { (*re).inner.find(s) } {
+            // SAFETY: `text` is this shim's non-null string (checked above), and the match is
+            // text copied from within its content.
             Some(m) => unsafe {
                 crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
             },
@@ -145,7 +153,9 @@ pub unsafe extern "C" fn gos_rt_regex_find_opt(re: *const GosRegex, text: *const
         if re.is_null() || text.is_null() {
             return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         match unsafe { (*re).inner.find(s) } {
             None => gos_rt_result_new(1, 0),
             Some(m) => {
@@ -155,6 +165,8 @@ pub unsafe extern "C" fn gos_rt_regex_find_opt(re: *const GosRegex, text: *const
                     end: i64,
                     text: i64,
                 }
+                // SAFETY: `text` is this shim's non-null string (checked above), and the match is
+                // text copied from within its content.
                 let cstr = unsafe {
                     crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
                 };
@@ -177,26 +189,33 @@ pub unsafe extern "C" fn gos_rt_regex_captures(re: *const GosRegex, text: *const
         if re.is_null() || text.is_null() {
             return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         match unsafe { (*re).inner.captures(s) } {
             None => gos_rt_result_new(1, 0),
             Some(caps) => {
                 // `Option<String>` is the 2-word by-value `i128` (16-byte)
                 // representation, so the inner Vec stores 16-byte elements.
-                let inner = unsafe { gos_rt_vec_new(16) };
+                let inner = gos_rt_vec_new(16);
                 for i in 0..caps.len() {
                     let opt: i128 = match caps.get(i) {
+                        // SAFETY: `text` is this shim's non-null string (checked above), and the
+                        // capture is text copied from within its content.
                         Some(m) => gos_rt_result_new(0, unsafe {
                             crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
                         } as i64),
                         None => gos_rt_result_new(1, 0),
                     };
+                    // SAFETY: `inner` is the fresh vec of 16-byte elements made above, or null,
+                    // which `gos_rt_vec_push` accepts, and `opt` is one element.
                     unsafe { gos_rt_vec_push(inner, std::ptr::addr_of!(opt).cast::<u8>()) };
                 }
                 // Tagged after the pushes: the vec owns the fresh group
                 // strings, so `gos_rt_vec_free` reclaims them even when
                 // the consumer never iterates every slot.
-                crate::c_abi::vec::vec_set_slot_children(inner, &CAPTURE_SLOT_CHILDREN);
+                // SAFETY: `inner` is the live vec built above.
+                unsafe { crate::c_abi::vec::vec_set_slot_children(inner, &CAPTURE_SLOT_CHILDREN) };
                 gos_rt_result_new(0, inner as i64)
             }
         }
@@ -216,13 +235,17 @@ pub unsafe extern "C" fn gos_rt_regex_find_all(
         // matched text, leaving `hit.0` / `hit.1` reading garbage and
         // `hit.2` indexing past the end of the buffer (which the
         // example then printed as an empty string).
-        let vec = unsafe { gos_rt_vec_new(24) };
+        let vec = gos_rt_vec_new(24);
         if re.is_null() || text.is_null() {
             return vec;
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         for m in unsafe { (*re).inner.find_iter(s) } {
             let cstr =
+                // SAFETY: `text` is this shim's non-null string (checked above), and the match is
+                // text copied from within its content.
                 unsafe { crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes()) };
             #[repr(C)]
             struct Tup {
@@ -235,6 +258,8 @@ pub unsafe extern "C" fn gos_rt_regex_find_all(
                 end: m.end() as i64,
                 text: cstr as i64,
             };
+            // SAFETY: `vec` is the fresh vec of 24-byte elements made above, or null, which
+            // `gos_rt_vec_push` accepts, and `entry` is one element.
             unsafe {
                 gos_rt_vec_push(vec, std::ptr::addr_of!(entry).cast::<u8>());
             }
@@ -242,7 +267,8 @@ pub unsafe extern "C" fn gos_rt_regex_find_all(
         // Tagged after the pushes: the vec owns the fresh match-text
         // strings; `gos_rt_vec_free` reclaims unvisited slots (the
         // early-`break` path) instead of leaking them.
-        crate::c_abi::vec::vec_set_slot_children(vec, &FIND_ALL_SLOT_CHILDREN);
+        // SAFETY: `vec` is the live vec built above.
+        unsafe { crate::c_abi::vec::vec_set_slot_children(vec, &FIND_ALL_SLOT_CHILDREN) };
         vec
     })
 }
@@ -257,12 +283,15 @@ pub unsafe extern "C" fn gos_rt_regex_replace_all(
         if re.is_null() || text.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
         let r = if repl.is_null() {
             ""
         } else {
+            // SAFETY: `repl` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(repl) }
         };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { (*re).inner.replace_all(s, r) }.as_bytes())
     })
 }
@@ -280,12 +309,15 @@ pub unsafe extern "C" fn gos_rt_regex_replace(
         if re.is_null() || text.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
         let r = if repl.is_null() {
             ""
         } else {
+            // SAFETY: `repl` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(repl) }
         };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { (*re).inner.replace(s, r) }.as_bytes())
     })
 }
@@ -299,16 +331,22 @@ pub unsafe extern "C" fn gos_rt_regex_split(
         // STRING-typed so `gos_rt_vec_free` deep-frees each owned piece
         // (consumer loops borrow the slot strings; see the unicode
         // `alloc_string_vec` template).
-        let vec = unsafe {
+        let vec = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
         if re.is_null() || text.is_null() {
             return vec;
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         for piece in unsafe { (*re).inner.split(s) } {
+            // SAFETY: `text` is this shim's non-null string (checked above), and the piece is
+            // text copied from within its content.
             let cstr = unsafe { crate::c_abi::string::alloc_slice_cstring(text, piece.as_bytes()) };
             let ptr_val = cstr as i64;
+            // SAFETY: `vec` is the fresh vec made above, or null, which `gos_rt_vec_push`
+            // accepts, and `ptr_val` is one 8-byte element.
             unsafe {
                 gos_rt_vec_push(vec, std::ptr::addr_of!(ptr_val).cast::<u8>());
             }
@@ -330,31 +368,39 @@ pub unsafe extern "C" fn gos_rt_regex_captures_all(
     ffi_entry!(std::ptr::null_mut(), {
         // VEC-typed outer: freeing it recursively frees each inner row,
         // whose own slot meta then reclaims the Some-group strings.
-        let outer = unsafe {
-            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC)
-        };
+        let outer =
+            { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC) };
         if re.is_null() || text.is_null() {
             return outer;
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(text) };
+        // SAFETY: `re` is a handle from compiled code, checked non-null above and live for the whole call.
         for caps in unsafe { (*re).inner.captures_iter(s) } {
             // Each group is an `Option<String>` - the 2-word by-value `i128`
             // (16-byte) representation, so the inner Vec stores 16-byte
             // elements (disc 0 = Some, disc 1 = None).
-            let inner = unsafe { gos_rt_vec_new(16) };
+            let inner = gos_rt_vec_new(16);
             for i in 0..caps.len() {
                 let opt: i128 = match caps.get(i) {
+                    // SAFETY: `text` is this shim's non-null string (checked above), and the
+                    // capture is text copied from within its content.
                     Some(m) => gos_rt_result_new(0, unsafe {
                         crate::c_abi::string::alloc_slice_cstring(text, m.as_str().as_bytes())
                     } as i64),
                     None => gos_rt_result_new(1, 0),
                 };
+                // SAFETY: `inner` is the fresh vec of 16-byte elements made above, or null, which
+                // `gos_rt_vec_push` accepts, and `opt` is one element.
                 unsafe {
                     gos_rt_vec_push(inner, std::ptr::addr_of!(opt).cast::<u8>());
                 }
             }
-            crate::c_abi::vec::vec_set_slot_children(inner, &CAPTURE_SLOT_CHILDREN);
+            // SAFETY: `inner` is the live vec built above.
+            unsafe { crate::c_abi::vec::vec_set_slot_children(inner, &CAPTURE_SLOT_CHILDREN) };
             let inner_val = inner as i64;
+            // SAFETY: `outer` is the fresh vec made above, or null, which `gos_rt_vec_push`
+            // accepts, and `inner_val` is one 8-byte element.
             unsafe {
                 gos_rt_vec_push(outer, std::ptr::addr_of!(inner_val).cast::<u8>());
             }

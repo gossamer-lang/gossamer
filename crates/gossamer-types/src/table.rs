@@ -13,6 +13,7 @@ use crate::ty::Ty;
 pub struct TypeTable {
     entries: HashMap<NodeId, Ty>,
     method_owners: HashMap<NodeId, String>,
+    operator_methods: HashMap<NodeId, String>,
     const_generic_args: HashMap<NodeId, Vec<ConstGenericArg>>,
 }
 
@@ -63,6 +64,19 @@ impl TypeTable {
     /// trait and each call reach its own body.
     pub fn insert_method_owner(&mut self, node: NodeId, owner: String) {
         self.method_owners.insert(node, owner);
+    }
+
+    /// Records the method an operator reaches when its type implements the
+    /// operator for more than one right-hand type, keyed by the left operand
+    /// (or the assigned place of a compound assignment).
+    pub fn insert_operator_method(&mut self, operand: NodeId, method: String) {
+        self.operator_methods.insert(operand, method);
+    }
+
+    /// The method recorded for the operator whose left operand is `operand`.
+    #[must_use]
+    pub fn operator_method(&self, operand: NodeId) -> Option<&str> {
+        self.operator_methods.get(&operand).map(String::as_str)
     }
 
     /// The `impl` owner recorded for a method call, if one was.

@@ -201,7 +201,9 @@ impl<'a> Lowerer<'a> {
         block: &gossamer_mir::BasicBlock,
     ) -> Result<(), BuildError> {
         writeln!(self.out, "bb{}:", block.id.as_u32()).unwrap();
-        // No loop-back-edge safepoint. A runtime call on every
+        if self.preempt_headers.contains(&block.id.as_u32()) {
+            self.emit_preempt_poll();
+        }
         let cleanup = gossamer_mir::plan_cleanup_with_summary(self.body, &self.capture_summary);
         for entry in cleanup.at_block_entry(block.id) {
             self.emit_cleanup_call(entry);
@@ -667,12 +669,6 @@ impl<'a> Lowerer<'a> {
                 Ok(())
             }
             Terminator::Goto { target } => {
-                if self
-                    .current_block
-                    .is_some_and(|src| self.is_cfg_back_edge(src, target.as_u32()))
-                {
-                    self.emit_preempt_check(target.as_u32());
-                }
                 writeln!(self.out, "  br label %bb{}", target.as_u32()).unwrap();
                 Ok(())
             }
@@ -681,16 +677,6 @@ impl<'a> Lowerer<'a> {
                 arms,
                 default,
             } => {
-                let src = self.current_block.unwrap_or(u32::MAX);
-                let back_target = arms
-                    .iter()
-                    .map(|(_, target)| target.as_u32())
-                    .chain(std::iter::once(default.as_u32()))
-                    .filter(|target| self.is_cfg_back_edge(src, *target))
-                    .min();
-                if let Some(target) = back_target {
-                    self.emit_preempt_check(target);
-                }
                 let v = self.lower_operand(discriminant)?;
                 let mut ty = render_ty(self.tcx, self.operand_ty(discriminant));
                 let mut v = v;

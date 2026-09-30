@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
@@ -32,7 +31,11 @@ use std::os::raw::c_char;
 
 use super::*;
 
-fn cstr_to_string(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_string(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -96,7 +99,7 @@ pub struct GosBytesBuilder {
 
 /// Allocate an empty `bytes::Builder`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bytes_builder_new() -> *mut GosBytesBuilder {
+pub extern "C" fn gos_rt_bytes_builder_new() -> *mut GosBytesBuilder {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosBytesBuilder {
             inner: String::new(),
@@ -106,7 +109,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_new() -> *mut GosBytesBuilder {
 
 /// Allocate a `bytes::Builder` with `n` bytes of reserved capacity.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bytes_builder_with_capacity(n: i64) -> *mut GosBytesBuilder {
+pub extern "C" fn gos_rt_bytes_builder_with_capacity(n: i64) -> *mut GosBytesBuilder {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosBytesBuilder {
             inner: String::with_capacity(n.max(0) as usize),
@@ -121,7 +124,9 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_write(b: *mut GosBytesBuilder, tex
         if b.is_null() {
             return;
         }
-        let s = cstr_to_string(text);
+        // SAFETY: `text` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let s = unsafe { cstr_to_string(text) };
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.inner.push_str(&s);
     });
 }
@@ -135,6 +140,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_write_char(b: *mut GosBytesBuilder
             return;
         }
         let c = char::from_u32(ch as u32).unwrap_or('\u{FFFD}');
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *b }.inner.push(c);
     });
 }
@@ -147,6 +153,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_build(b: *mut GosBytesBuilder) -> 
         if b.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { &*b }.inner.as_bytes())
     })
 }
@@ -159,6 +166,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_as_str(b: *mut GosBytesBuilder) ->
         if b.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { &*b }.inner.as_bytes())
     })
 }
@@ -170,6 +178,7 @@ pub unsafe extern "C" fn gos_rt_bytes_builder_len(b: *mut GosBytesBuilder) -> i6
         if b.is_null() {
             return 0;
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*b }.inner.len() as i64
     })
 }
@@ -185,7 +194,7 @@ pub struct GosBytesBuffer {
 
 /// Allocate an empty `bytes::Buffer`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bytes_buffer_new() -> *mut GosBytesBuffer {
+pub extern "C" fn gos_rt_bytes_buffer_new() -> *mut GosBytesBuffer {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosBytesBuffer { inner: Vec::new() }))
     })
@@ -193,7 +202,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_new() -> *mut GosBytesBuffer {
 
 /// Allocate a `bytes::Buffer` with `n` bytes of reserved capacity.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_bytes_buffer_with_capacity(n: i64) -> *mut GosBytesBuffer {
+pub extern "C" fn gos_rt_bytes_buffer_with_capacity(n: i64) -> *mut GosBytesBuffer {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosBytesBuffer {
             inner: Vec::with_capacity(n.max(0) as usize),
@@ -211,7 +220,9 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_write_str(
         if buf.is_null() {
             return;
         }
-        let s = cstr_to_string(text);
+        // SAFETY: `text` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let s = unsafe { cstr_to_string(text) };
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *buf }.inner.extend_from_slice(s.as_bytes());
     });
 }
@@ -223,6 +234,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_push(buf: *mut GosBytesBuffer, byte
         if buf.is_null() {
             return;
         }
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *buf }.inner.push(byte as u8);
     });
 }
@@ -234,6 +246,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_len(buf: *mut GosBytesBuffer) -> i6
         if buf.is_null() {
             return 0;
         }
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*buf }.inner.len() as i64
     })
 }
@@ -245,6 +258,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_is_empty(buf: *mut GosBytesBuffer) 
         if buf.is_null() {
             return 1;
         }
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         i64::from(unsafe { &*buf }.inner.is_empty())
     })
 }
@@ -256,6 +270,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_clear(buf: *mut GosBytesBuffer) {
         if buf.is_null() {
             return;
         }
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *buf }.inner.clear();
     });
 }
@@ -268,6 +283,7 @@ pub unsafe extern "C" fn gos_rt_bytes_buffer_to_string(buf: *mut GosBytesBuffer)
         if buf.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         let owned = String::from_utf8_lossy(&unsafe { &*buf }.inner).into_owned();
         alloc_cstring(owned.as_bytes())
     })
@@ -285,7 +301,11 @@ pub unsafe extern "C" fn gos_rt_bytes_index_of(
     needle: *const crate::c_abi::vec::GosVec,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `haystack` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let h = unsafe { crate::c_abi::vec::vec_bytes(haystack) };
+        // SAFETY: `needle` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let n = unsafe { crate::c_abi::vec::vec_bytes(needle) };
         match bytes_index_of(&h, &n) {
             Some(i) => gos_rt_result_new(0, i as i64),
@@ -301,30 +321,24 @@ pub unsafe extern "C" fn gos_rt_bytes_split(
     sep: *const crate::c_abi::vec::GosVec,
 ) -> *mut crate::c_abi::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let v = unsafe {
-            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC)
-        };
+        let v =
+            { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::VEC) };
+        // SAFETY: `haystack` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let h = unsafe { crate::c_abi::vec::vec_bytes(haystack) };
+        // SAFETY: `sep` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let s = unsafe { crate::c_abi::vec::vec_bytes(sep) };
         for chunk in bytes_split(&h, &s) {
-            let chunk_i64 = unsafe { byte_vec_new(&chunk) } as i64;
+            let chunk_i64 = crate::c_abi::encoding::bytes_to_gosvec(&chunk) as i64;
+            // SAFETY: `v` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts,
+            // and `chunk_i64` is one 8-byte element.
             unsafe {
                 crate::c_abi::vec::gos_rt_vec_push(v, std::ptr::addr_of!(chunk_i64).cast::<u8>());
             }
         }
         v
     })
-}
-
-/// A fresh packed `Vec<u8>` runtime object holding `bytes`.
-unsafe fn byte_vec_new(bytes: &[u8]) -> *mut crate::c_abi::vec::GosVec {
-    let v = unsafe {
-        crate::c_abi::vec::gos_rt_vec_new_typed(1, crate::c_abi::vec::vec_elem_kind::PRIMITIVE)
-    };
-    for &b in bytes {
-        unsafe { crate::c_abi::vec::gos_rt_vec_push(v, std::ptr::addr_of!(b)) };
-    }
-    v
 }
 
 /// `bytes::replace(haystack, from, to)` - every occurrence rewritten;
@@ -336,9 +350,15 @@ pub unsafe extern "C" fn gos_rt_bytes_replace(
     to: *const crate::c_abi::vec::GosVec,
 ) -> *mut crate::c_abi::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `haystack` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let h = unsafe { crate::c_abi::vec::vec_bytes(haystack) };
+        // SAFETY: `from` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let f = unsafe { crate::c_abi::vec::vec_bytes(from) };
+        // SAFETY: `to` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let t = unsafe { crate::c_abi::vec::vec_bytes(to) };
-        unsafe { byte_vec_new(&bytes_replace(&h, &f, &t)) }
+        crate::c_abi::encoding::bytes_to_gosvec(&bytes_replace(&h, &f, &t))
     })
 }

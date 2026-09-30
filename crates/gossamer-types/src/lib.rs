@@ -55,7 +55,7 @@ pub use error::{NotDisplayableClass, TypeDiagnostic, TypeError};
 pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_exhaustiveness};
 pub use infer::{InferCtxt, UnifyError};
 pub use normalize::normalize_caller_side_spellings;
-pub use printer::{render_public_ty, render_ty};
+pub use printer::{public_type_name, render_public_ty, render_ty};
 pub use stdlib_signatures::{
     STD_FUNCTION_SIGNATURES, StdFunctionSignature, function_shape as stdlib_function_shape,
     function_signature as stdlib_function_signature,
@@ -113,7 +113,6 @@ pub fn is_mutating_method_name(name: &str) -> bool {
             | "resize_with"
             | "split_off"
             | "drain"
-            | "retain"
             | "shrink_to_fit"
     )
 }

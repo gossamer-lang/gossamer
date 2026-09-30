@@ -1,0 +1,49 @@
+// Operator impls with a right-hand type of their own (`impl Mul<f64> for V2`)
+// beside the impl for the type itself, chosen by the right operand, with an
+// optional `type Output` restating what the method answers.
+struct V2 { x: f64, y: f64 }
+impl Add for V2 {
+    type Output = V2
+    fn add(self, o: V2) -> V2 { V2 { x: self.x + o.x, y: self.y + o.y } }
+}
+impl Mul<f64> for V2 {
+    type Output = V2
+    fn mul(self, k: f64) -> V2 { V2 { x: self.x * k, y: self.y * k } }
+}
+struct Dot { v: f64 }
+impl Mul for V2 {
+    type Output = Dot
+    fn mul(self, o: V2) -> Dot { Dot { v: self.x * o.x + self.y * o.y } }
+}
+impl Mul<i64> for V2 {
+    type Output = V2
+    fn mul(self, k: i64) -> V2 { V2 { x: self.x * k as f64, y: self.y * k as f64 } }
+}
+impl Neg for V2 {
+    type Output = V2
+    fn neg(self) -> V2 { V2 { x: 0.0 - self.x, y: 0.0 - self.y } }
+}
+struct Money { cents: i64 }
+impl Add<i64> for Money {
+    fn add(self, c: i64) -> Money { Money { cents: self.cents + c } }
+}
+impl Add for Money {
+    fn add(self, o: Money) -> Money { Money { cents: self.cents + o.cents } }
+}
+fn main() {
+    let a = V2 { x: 1.0, y: 2.0 }
+    let b = a + a
+    let c = a * 3.0
+    let d = a * b
+    let e = a * 4
+    let f = -a
+    println("{} {} | {} {} | {} | {} {} | {} {}", b.x, b.y, c.x, c.y, d.v, e.x, e.y, f.x, f.y)
+    let mut m = Money { cents: 100 }
+    m += 5
+    m = m + Money { cents: 10 }
+    m += Money { cents: 1 }
+    println("{}", m.cents)
+    let k = 2.5
+    let g = a * k
+    println("{}", g.y)
+}

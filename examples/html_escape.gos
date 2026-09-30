@@ -15,24 +15,24 @@ use std::encoding
 // HTML escaping - critical for preventing XSS in template output.
 let raw = "<script>alert('XSS & injection')</script>"
 let safe = html::escape(raw)
-println("raw:     {}", raw)
-println("escaped: {}", safe)
+println(f"raw:     {raw}")
+println(f"escaped: {safe}")
 
 let back = html::unescape(safe)
-println("unescaped: {}", back)
+println(f"unescaped: {back}")
 
 // Verify round-trip for common dangerous characters.
 for ch in ["<", ">", "&", "\"", "'"] {
     let esc = html::escape(ch)
     let unesc = html::unescape(esc)
     if unesc == ch {
-        println("round-trip ok: {}", ch)
+        println(f"round-trip ok: {ch}")
     } else {
-        println("round-trip FAIL: {} -> {} -> {}", ch, esc, unesc)
+        println(f"round-trip FAIL: {ch} -> {esc} -> {unesc}")
     }
 }
 
 // XML escape.
 let xml_raw = "price < 10 && quantity > 0"
 let xml_safe = encoding::xml::escape(xml_raw)
-println("xml escape: {}", xml_safe)
+println(f"xml escape: {xml_safe}")

@@ -22,16 +22,12 @@ fn main() {
     // is compiled, so the failing pattern is built at run time: that is
     // the shape whose error a program can still handle.
     let bad = "(unclos" + "ed"
-    match regex::compile(bad) {
+    match regex::new(bad) {
         Ok(_) => println("compile bad: ok?!")
         Err(_) => println("compile bad: err")
     }
 
-    let digits = match regex::compile("\\d+") {
-        Ok(p) => p
-        Err(e) => { println("bad: {}", e)
-            return }
-    }
+    let digits = regex::compile("\\d+")
 
     // --- is_match / find / find_all ---
     println("is_match abc123 = {}", regex::is_match(digits, "abc123"))
@@ -47,31 +43,19 @@ fn main() {
     }
 
     // --- anchors + alternation ---
-    let anchored = match regex::compile("^(cat|dog)$") {
-        Ok(p) => p
-        Err(_) => { println("anchor bad")
-            return }
-    }
+    let anchored = regex::compile("^(cat|dog)$")
     println("anchor cat = {}", regex::is_match(anchored, "cat"))
     println("anchor cats = {}", regex::is_match(anchored, "cats"))
 
     // --- unicode classes (UTF-8 byte offsets vs char offsets) ---
-    let letters = match regex::compile("\\p{L}+") {
-        Ok(p) => p
-        Err(_) => { println("uni bad")
-            return }
-    }
+    let letters = regex::compile("\\p{L}+")
     match regex::find(letters, "  café ") {
         Some((s, e, t)) => println("uni find = {} [{},{})", t, s, e)
         None => println("uni find = none")
     }
 
     // --- captures with optional + multiple groups ---
-    let date = match regex::compile("(\\d{4})-(\\d{2})(-(\\d{2}))?") {
-        Ok(p) => p
-        Err(_) => { println("date bad")
-            return }
-    }
+    let date = regex::compile("(\\d{4})-(\\d{2})(-(\\d{2}))?")
     match regex::captures(date, "2024-03-15") {
         Some(caps) => println("caps full: {}", cap_line(caps))
         None => println("caps full: none")
@@ -84,20 +68,12 @@ fn main() {
     println("captures_all count = {}", kvs.len())
 
     // --- replace / replace_all with $N ---
-    let kv = match regex::compile("(\\w+)=(\\d+)") {
-        Ok(p) => p
-        Err(_) => { println("kv bad")
-            return }
-    }
+    let kv = regex::compile("(\\w+)=(\\d+)")
     println("replace = {}", regex::replace(kv, "a=1 b=2", "$2:$1"))
     println("replace_all = {}", regex::replace_all(kv, "a=1 b=2", "$2:$1"))
 
     // --- split: empty matches, leading/trailing separators ---
-    let ws = match regex::compile("\\s+") {
-        Ok(p) => p
-        Err(_) => { println("ws bad")
-            return }
-    }
+    let ws = regex::compile("\\s+")
     let parts = regex::split(ws, " a  b   c ")
     println("split count = {}", parts.len())
     let mut i = 0
@@ -107,10 +83,6 @@ fn main() {
     }
 
     // --- zero-width pattern split ---
-    let empty_pat = match regex::compile("") {
-        Ok(p) => p
-        Err(_) => { println("empty bad")
-            return }
-    }
+    let empty_pat = regex::compile("")
     println("empty split count = {}", regex::split(empty_pat, "ab").len())
 }

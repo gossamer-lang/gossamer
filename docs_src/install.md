@@ -40,6 +40,31 @@ applies only to a `cargo build` binary you relocate yourself.
 - **A C linker** - required by Cargo, not by Gossamer. `cc` /
   `gcc` / `clang` will do.
 
+## Native builds need LLVM
+
+`gos run`, `gos test`, the REPL, and the JIT need nothing beyond the `gos`
+binary. `gos build` compiles through LLVM's `opt`, `llc`, and `clang`, which
+it finds in this order:
+
+1. `GOS_LLVM_OPT`, `GOS_LLC`, and `GOS_LLVM_CLANG`, each the absolute path of
+   one tool.
+2. An LLVM bundled with `gos`: `llvm/bin/` beside the binary, or
+   `lib/gossamer/llvm/bin/` under its install prefix.
+3. The host's LLVM, newest major first: `opt-22` down to `opt-18` on `PATH`,
+   then the bare `opt`, then the usual apt, Homebrew, and MSYS2 locations.
+
+LLVM 18 through 22 are supported. 22 is the version the toolchain is built
+against; an older major builds the same program and prints a note once. A
+major below 18 is refused. `gos env` prints the tool each role resolves to
+and its version, and a missing tool fails `gos build` with the install command
+for the host:
+
+```sh
+sudo apt-get install -y llvm clang        # Debian, Ubuntu (18 or newer)
+brew install llvm@22                      # macOS
+pacman -S mingw-w64-x86_64-llvm           # Windows, from MSYS2
+```
+
 ## Verifying
 
 ```sh
@@ -70,8 +95,7 @@ armv7, riscv64, and wasm are not supported execution targets.
 across all three tiers (the bytecode VM, the in-process Cranelift JIT,
 and native `gos build`), not just cross-built. `gos` is fully
 self-contained on a Pi; native compilation there uses the device's
-system LLVM (`llc`/`opt`) and C compiler (`sudo apt-get install -y llvm
-clang`).
+system LLVM, as described under [Native builds need LLVM](#native-builds-need-llvm).
 
 ## Target toolchains
 

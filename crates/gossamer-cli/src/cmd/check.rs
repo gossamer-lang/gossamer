@@ -126,9 +126,6 @@ pub(crate) fn run(
     let stage = std::time::Instant::now();
     let outcome = gossamer_driver::check_frontend(&source, file_id);
     let elapsed = stage.elapsed();
-    for diag in outcome.diagnostics.iter().chain(&outcome.warnings) {
-        emit_diag(diag, &map, render_opts, message_format);
-    }
     if fix {
         // A unit is many files, and a rewrite lands in whichever ones
         // carried the diagnostics. Naming only the entry leaves a reader
@@ -152,7 +149,13 @@ pub(crate) fn run(
             if edited.len() > 1 {
                 outln!("fix: {applied} edit(s) across {} file(s)", edited.len());
             }
+            // The verdict belongs to the source as rewritten: what the edits
+            // resolved is gone, and what remains is reported afresh.
+            return run(file, timings, message_format, false);
         }
+    }
+    for diag in outcome.diagnostics.iter().chain(&outcome.warnings) {
+        emit_diag(diag, &map, render_opts, message_format);
     }
     // The editor and `gos lint` both run the default lint registry, so
     // `check` runs it too and stays the superset gate. Lints are advisory
@@ -428,15 +431,37 @@ fn recheck_codes(file: &Path) -> Option<BTreeMap<String, usize>> {
 /// A count alone is the wrong test: a batch that trades three style
 /// diagnostics for one type error reports a lower number and is a
 /// regression. What has to hold is that every code still reported was
-/// already reported, and that there are fewer of them.
+/// already reported, and that there are fewer of them. A source that does
+/// not parse reports nothing past its parse errors, so there only the parse
+/// errors were observed, and the later diagnostics a repair unmasks are
+/// ones the program already had.
 fn is_an_improvement(before: &BTreeMap<String, usize>, after: &BTreeMap<String, usize>) -> bool {
-    let total = |codes: &BTreeMap<String, usize>| codes.values().sum::<usize>();
-    if total(after) >= total(before) {
-        return false;
+    let parse_stage = |codes: &BTreeMap<String, usize>| -> BTreeMap<String, usize> {
+        codes
+            .iter()
+            .filter(|(code, _)| code.starts_with("GP"))
+            .map(|(code, count)| (code.clone(), *count))
+            .collect()
+    };
+    let (before_parse, after_parse) = (parse_stage(before), parse_stage(after));
+    if before_parse.is_empty() {
+        is_a_strict_submultiset(after, before)
+    } else {
+        is_a_strict_submultiset(&after_parse, &before_parse)
     }
-    after
-        .iter()
-        .all(|(code, count)| before.get(code).is_some_and(|had| count <= had))
+}
+
+/// Whether `smaller` holds fewer diagnostics than `larger` and no code more
+/// often than `larger` does.
+fn is_a_strict_submultiset(
+    smaller: &BTreeMap<String, usize>,
+    larger: &BTreeMap<String, usize>,
+) -> bool {
+    let total = |codes: &BTreeMap<String, usize>| codes.values().sum::<usize>();
+    total(smaller) < total(larger)
+        && smaller
+            .iter()
+            .all(|(code, count)| larger.get(code).is_some_and(|had| count <= had))
 }
 
 /// Byte length of the longest common prefix of `a` and `b`, rounded down

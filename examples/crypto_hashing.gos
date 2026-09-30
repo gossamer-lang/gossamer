@@ -13,29 +13,29 @@ use std::encoding
 
 let msg = "The quick brown fox jumps over the lazy dog"
 
-let h256 = crypto::sha256::hex(msg)
-println("SHA-256: {}", h256)
+let h256 = crypto::sha256::hex(msg.as_bytes())
+println(f"SHA-256: {h256}")
 
-let h512 = crypto::sha512::hex(msg)
-println("SHA-512: {}", h512)
+let h512 = crypto::sha512::hex(msg.as_bytes())
+println(f"SHA-512: {h512}")
 
-let hb3 = crypto::blake3::hex(msg)
-println("BLAKE3:  {}", hb3)
+let hb3 = crypto::blake3::hex(msg.as_bytes())
+println(f"BLAKE3:  {hb3}")
 
 let key = "secret-key"
 let mac = crypto::hmac::sha256_mac(key.clone().as_bytes(), msg.clone().as_bytes())
 let mac_hex = encoding::hex::encode(mac)
-println("HMAC:    {}", mac_hex)
+println(f"HMAC:    {mac_hex}")
 
 // Verify a digest is stable across two calls.
-let a = crypto::sha256::hex("gossamer")
-let b = crypto::sha256::hex("gossamer")
+let a = crypto::sha256::hex("gossamer".as_bytes())
+let b = crypto::sha256::hex("gossamer".as_bytes())
 if a == b {
     println("deterministic: ok")
 }
 
 // A one-byte change produces a completely different digest.
-let c = crypto::sha256::hex("gossamer!")
+let c = crypto::sha256::hex("gossamer!".as_bytes())
 if a != c {
     println("avalanche: ok")
 }

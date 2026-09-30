@@ -2,29 +2,24 @@
 
 Lexical filesystem-path operations; platform path grammar, no URL parsing.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`Path`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `type Path` | Immutable UTF-8 lexical path with value-returning operations. |
-| [`components`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn components(path: String) -> Vec<String>` | Rust-like lexical path components. |
-| [`extension`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn extension(path: String) -> Option<String>` | Dotted extension as an Option. |
-| [`file_name`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn file_name(path: String) -> Option<String>` | Final path component, or None. |
-| [`file_stem`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn file_stem(path: String) -> Option<String>` | File name without its extension. |
-| [`is_absolute`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn is_absolute(path: String) -> bool` | Reports whether the path is absolute. |
-| [`join`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn join(base: String, segment: String) -> String` | Joins two path fragments. |
-| [`normalize`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn normalize(path: String) -> String` | Lexically normalizes the path. |
-| [`parent`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn parent(path: String) -> Option<String>` | Parent directory, or None at the root. |
-| [`prefixes`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn prefixes(path: String) -> Vec<String>` | Cumulative Rust-like lexical path prefixes. |
-| [`split`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn split(path: String) -> (String, String)` | Returns (dir, file) for the supplied path. |
-| [`starts_with`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn starts_with(path: String, prefix: String) -> bool` | Reports whether the path begins with a prefix component-wise. |
-| [`unique_prefixes`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/path.rs) | `fn unique_prefixes(text: String) -> Vec<String>` | Sorted unique prefixes for newline-delimited paths. |
+| `join` | `fn join(base: String, segment: String) -> String` | Joins two path fragments. |
+| `walk` | `fn walk(path: String, visit: Fn(fs::DirInfo) -> Result<(), io::Error>) -> Result<(), io::Error>` | Recursively visits every descendant entry under a directory, the path-module spelling of fs::walk_dir. |
+| `components` | `fn components(path: String) -> Vec<String>` | Returns Rust-like lexical path components. |
+| `prefixes` | `fn prefixes(path: String) -> Vec<String>` | Returns cumulative Rust-like lexical path prefixes. |
+| `unique_prefixes` | `fn unique_prefixes(text: String) -> Vec<String>` | Returns sorted unique prefixes for newline-delimited paths. |
+| `split` | `fn split(path: String) -> (String, String)` | Returns (dir, file) for the supplied path. |
+| `parent` | `fn parent(path: String) -> Option<String>` | Parent directory, or None at the root. |
+| `file_name` | `fn file_name(path: String) -> Option<String>` | Final path component, or None. |
+| `file_stem` | `fn file_stem(path: String) -> Option<String>` | File name without its extension. |
+| `extension` | `fn extension(path: String) -> Option<String>` | Dotted extension as an Option. |
+| `is_absolute` | `fn is_absolute(path: String) -> bool` | Reports whether the path is absolute. |
+| `normalize` | `fn normalize(path: String) -> String` | Lexically normalizes the path. |
+| `starts_with` | `fn starts_with(path: String, prefix: String) -> bool` | Reports whether the path begins with a prefix component-wise. |
+| `matches` | `fn matches(pattern: String, name: String) -> bool` | `matches(pattern, name) -> bool` - Go `filepath.Match` shell-glob test over a single path segment: `*` and `?` never cross a `/`, `[abc]` is a character class. Spelled `matches` because `match` is a keyword. Example: `path::matches("*.gos", "main.gos")` is true, `path::matches("a*c", "a/c")` is false. |
+| `glob` | `fn glob(pattern: String) -> Result<Vec<String>, errors::Error>` | `glob(pattern) -> Result<Vec<String>, errors::Error>` - filesystem paths matching a shell glob, sorted so every tier reports the same order. Supports `*`, `?`, `[abc]`, and `**` (this directory and every descendant). Relative patterns resolve against the working directory. Example: `let found = path::glob("src/**/*.gos")?`. |
 
-`Path` performs no I/O. Its `join`, `parent`, `file_name`, `stem`,
-`extension`, `normalize`, `is_absolute`, and `starts_with` methods return new
-values or observations. Keep filesystem access in `std::fs` so errors and
-symlink policy stay explicit.
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

@@ -179,17 +179,24 @@ fn verify_counter(
                 if bi != latch {
                     return false;
                 }
+                // A checked step of any positive size either stays below the
+                // bound or panics. A wrapping step stays in range only when it
+                // is one: the counter is below a bound of at most `i64::MAX`.
                 let positive_step = match rvalue {
                     Rvalue::BinaryOp {
-                        op: BinOp::Add,
+                        op: op @ (BinOp::Add | BinOp::WrappingAdd),
                         lhs: Operand::Copy(p),
                         rhs: Operand::Const(ConstValue::Int(k)),
                     }
                     | Rvalue::BinaryOp {
-                        op: BinOp::Add,
+                        op: op @ (BinOp::Add | BinOp::WrappingAdd),
                         lhs: Operand::Const(ConstValue::Int(k)),
                         rhs: Operand::Copy(p),
-                    } => p.projection.is_empty() && p.local == counter && *k >= 1,
+                    } => {
+                        p.projection.is_empty()
+                            && p.local == counter
+                            && (*k == 1 || (*op == BinOp::Add && *k >= 1))
+                    }
                     _ => false,
                 };
                 if !positive_step || latch_increment {
@@ -569,17 +576,19 @@ fn is_unit_increment_from(body: &Body, rvalue: &Rvalue, local: Local) -> bool {
         }
         other => Some(other),
     };
+    // Checked and wrapping forms agree: a unit step taken below a bound of at
+    // most `i64::MAX` never overflows.
     matches!(
         increment,
         Some(Rvalue::BinaryOp {
-            op: BinOp::Add,
+            op: BinOp::Add | BinOp::WrappingAdd,
             lhs: Operand::Copy(place),
             rhs: Operand::Const(ConstValue::Int(1)),
         }) if place.projection.is_empty() && place.local == local
     ) || matches!(
         increment,
         Some(Rvalue::BinaryOp {
-            op: BinOp::Add,
+            op: BinOp::Add | BinOp::WrappingAdd,
             lhs: Operand::Const(ConstValue::Int(1)),
             rhs: Operand::Copy(place),
         }) if place.projection.is_empty() && place.local == local
@@ -683,7 +692,7 @@ fn local_is_len_minus_one(body: &Body, local: Local, len: Local) -> bool {
     matches!(
         unique_def_rvalue(body, local),
         Some(Rvalue::BinaryOp {
-            op: BinOp::Sub,
+            op: BinOp::Sub | BinOp::WrappingSub,
             lhs: Operand::Copy(lhs),
             rhs: Operand::Const(ConstValue::Int(1)),
         }) if lhs.projection.is_empty() && lhs.local == len

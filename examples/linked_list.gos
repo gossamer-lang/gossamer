@@ -36,7 +36,7 @@ fn print_list(list: List) {
     let mut first = true
     while let List::Cons(v, rest) = cursor {
         if !first { print(", ") }
-        print("{}", v)
+        print(v)
         first = false
         cursor = rest
     }
@@ -44,7 +44,7 @@ fn print_list(list: List) {
 }
 
 let xs = cons(1, cons(2, cons(3, cons(4, cons(5, List::Nil)))))
-println("length = {}", length(xs))
-println("sum    = {}", sum(xs))
+println(f"length = {length(xs)}")
+println(f"sum    = {sum(xs)}")
 print("xs     = ")
 print_list(xs)

@@ -32,11 +32,10 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
-use super::encoding::{bytes_to_gosvec, gosvec_u8};
+use super::encoding::bytes_to_gosvec;
 use super::vec::GosVec;
 
 /// AES-256-GCM / ChaCha20-Poly1305 key length in bytes.
@@ -75,10 +74,18 @@ pub unsafe extern "C" fn gos_rt_crypto_aes256gcm_seal(
     ffi_entry!(0i128, {
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
-        let key = unsafe { gosvec_u8(key) };
-        let nonce = unsafe { gosvec_u8(nonce) };
-        let pt = unsafe { gosvec_u8(plaintext) };
-        let aad = unsafe { gosvec_u8(aad) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
+        // SAFETY: `nonce` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let nonce = unsafe { crate::c_abi::vec::vec_bytes(nonce) };
+        // SAFETY: `plaintext` is this shim's argument, live for the call (C-ABI contract) or
+        // null, which `vec_bytes` accepts.
+        let pt = unsafe { crate::c_abi::vec::vec_bytes(plaintext) };
+        // SAFETY: `aad` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let aad = unsafe { crate::c_abi::vec::vec_bytes(aad) };
         if key.len() != KEY_LEN {
             return aead_err(&format!("aes-256-gcm: key must be {KEY_LEN} bytes"));
         }
@@ -115,10 +122,18 @@ pub unsafe extern "C" fn gos_rt_crypto_aes256gcm_open(
     ffi_entry!(0i128, {
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use aes_gcm::{Aes256Gcm, Nonce as AesNonce};
-        let key = unsafe { gosvec_u8(key) };
-        let nonce = unsafe { gosvec_u8(nonce) };
-        let ct = unsafe { gosvec_u8(ciphertext) };
-        let aad = unsafe { gosvec_u8(aad) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
+        // SAFETY: `nonce` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let nonce = unsafe { crate::c_abi::vec::vec_bytes(nonce) };
+        // SAFETY: `ciphertext` is this shim's argument, live for the call (C-ABI contract) or
+        // null, which `vec_bytes` accepts.
+        let ct = unsafe { crate::c_abi::vec::vec_bytes(ciphertext) };
+        // SAFETY: `aad` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let aad = unsafe { crate::c_abi::vec::vec_bytes(aad) };
         if key.len() != KEY_LEN {
             return aead_err(&format!("aes-256-gcm: key must be {KEY_LEN} bytes"));
         }
@@ -154,10 +169,18 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_seal(
     ffi_entry!(0i128, {
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaNonce};
-        let key = unsafe { gosvec_u8(key) };
-        let nonce = unsafe { gosvec_u8(nonce) };
-        let pt = unsafe { gosvec_u8(plaintext) };
-        let aad = unsafe { gosvec_u8(aad) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
+        // SAFETY: `nonce` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let nonce = unsafe { crate::c_abi::vec::vec_bytes(nonce) };
+        // SAFETY: `plaintext` is this shim's argument, live for the call (C-ABI contract) or
+        // null, which `vec_bytes` accepts.
+        let pt = unsafe { crate::c_abi::vec::vec_bytes(plaintext) };
+        // SAFETY: `aad` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let aad = unsafe { crate::c_abi::vec::vec_bytes(aad) };
         if key.len() != KEY_LEN {
             return aead_err(&format!("chacha20-poly1305: key must be {KEY_LEN} bytes"));
         }
@@ -195,10 +218,18 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_open(
     ffi_entry!(0i128, {
         use aes_gcm::aead::{Aead, KeyInit, Payload};
         use chacha20poly1305::{ChaCha20Poly1305, Nonce as ChaNonce};
-        let key = unsafe { gosvec_u8(key) };
-        let nonce = unsafe { gosvec_u8(nonce) };
-        let ct = unsafe { gosvec_u8(ciphertext) };
-        let aad = unsafe { gosvec_u8(aad) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
+        // SAFETY: `nonce` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let nonce = unsafe { crate::c_abi::vec::vec_bytes(nonce) };
+        // SAFETY: `ciphertext` is this shim's argument, live for the call (C-ABI contract) or
+        // null, which `vec_bytes` accepts.
+        let ct = unsafe { crate::c_abi::vec::vec_bytes(ciphertext) };
+        // SAFETY: `aad` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let aad = unsafe { crate::c_abi::vec::vec_bytes(aad) };
         if key.len() != KEY_LEN {
             return aead_err(&format!("chacha20-poly1305: key must be {KEY_LEN} bytes"));
         }
@@ -227,7 +258,7 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_open(
 /// `crypto::ed25519::keypair() -> Result<([u8], [u8]), errors::Error>`
 /// - fresh Ed25519 keypair `(secret, public)` from the OS CSPRNG.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_crypto_ed25519_keypair() -> i128 {
+pub extern "C" fn gos_rt_crypto_ed25519_keypair() -> i128 {
     ffi_entry!(0i128, {
         use ed25519_dalek::SigningKey;
         let mut seed = [0u8; 32];
@@ -252,8 +283,12 @@ pub unsafe extern "C" fn gos_rt_crypto_ed25519_sign(
 ) -> i128 {
     ffi_entry!(0i128, {
         use ed25519_dalek::{Signer, SigningKey};
-        let secret = unsafe { gosvec_u8(secret) };
-        let msg = unsafe { gosvec_u8(message) };
+        // SAFETY: `secret` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let secret = unsafe { crate::c_abi::vec::vec_bytes(secret) };
+        // SAFETY: `message` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let msg = unsafe { crate::c_abi::vec::vec_bytes(message) };
         let secret: [u8; 32] = match secret.as_slice().try_into() {
             Ok(s) => s,
             Err(_) => return aead_err("ed25519: secret must be 32 bytes"),
@@ -275,9 +310,15 @@ pub unsafe extern "C" fn gos_rt_crypto_ed25519_verify(
 ) -> i128 {
     ffi_entry!(0i128, {
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
-        let public = unsafe { gosvec_u8(public) };
-        let msg = unsafe { gosvec_u8(message) };
-        let sig = unsafe { gosvec_u8(signature) };
+        // SAFETY: `public` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let public = unsafe { crate::c_abi::vec::vec_bytes(public) };
+        // SAFETY: `message` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let msg = unsafe { crate::c_abi::vec::vec_bytes(message) };
+        // SAFETY: `signature` is this shim's argument, live for the call (C-ABI contract) or
+        // null, which `vec_bytes` accepts.
+        let sig = unsafe { crate::c_abi::vec::vec_bytes(signature) };
         let public: [u8; 32] = match public.as_slice().try_into() {
             Ok(p) => p,
             Err(_) => return aead_err("ed25519: public key must be 32 bytes"),

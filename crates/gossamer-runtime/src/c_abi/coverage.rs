@@ -10,6 +10,8 @@
 use std::os::raw::c_char;
 
 unsafe fn cstr_to_string(p: *const c_char) -> String {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_string`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -28,6 +30,8 @@ pub unsafe extern "C" fn gos_rt_cov_record(file: *const c_char, line: u32, branc
     if !crate::coverage::enabled() {
         return;
     }
+    // SAFETY: `file` is this shim's argument, null or a live string body for the call (C-ABI
+    // contract), which `cstr_to_string` accepts.
     let file_str = unsafe { cstr_to_string(file) };
     let _ = crate::coverage::record(&file_str, line, branch);
 }

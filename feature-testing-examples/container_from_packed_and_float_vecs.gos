@@ -1,0 +1,38 @@
+// Every container built `from` a sequence takes that sequence's elements,
+// whatever width the sequence stores them at: a `Vec<u8>` or `Vec<bool>`
+// packs one byte per element, a `Vec<f64>` holds floats, and a vec of
+// float structs packs its fields.
+use std::collections::BTreeSet
+use std::encoding::json
+
+struct P { x: f64, y: f64 }
+
+fn main() {
+    let v: Vec<u8> = #[3, 1, 2, 9]
+    let mut h = MinHeap::from(v)
+    let mut g = MaxHeap::from(v)
+    let a, b = h.pop(), g.pop()
+    let s = Set::from(v)
+    let bs: BTreeSet<u8> = BTreeSet::from(v)
+    let n = s.len()
+    let k = json::encode(v)
+    let mut d = Deque::from(v)
+    let mut q = Queue::from(v)
+    let mut st = Stack::from(v)
+    let e, f, t = d.pop_back(), q.pop(), st.pop()
+    println(f"{a:?} {b:?} {n} {bs:?} {k} {e:?} {f:?} {t:?}")
+
+    let bv: Vec<bool> = #[true, false, true]
+    let sb = Set::from(bv)
+    let m = sb.len()
+    let mut hb = MaxHeap::from(bv)
+    let hb1 = hb.pop()
+    println(f"{m} {hb1:?}")
+
+    let fv: Vec<f64> = #[1.5, 0.5]
+    let mut fd = Deque::from(fv)
+    let ps = #[P { x: 1.0, y: 2.0 }, P { x: 3.0, y: 4.0 }]
+    let mut pq = Queue::from(ps)
+    let c, p = fd.pop_front(), pq.pop()
+    println(f"{c:?} {p:?}")
+}

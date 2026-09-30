@@ -591,6 +591,19 @@ pub enum TypeError {
         /// Whether the first implementation is a `#[derive(...)]`.
         derived: bool,
     },
+    /// Two `impl` blocks define a method of one name on one type. A call
+    /// names a method by its receiver's type and the method's name, so the
+    /// second body has no call that reaches it.
+    #[error("`{ty}` already has a method named `{method}`")]
+    DuplicateMethod {
+        /// Type both definitions attach to.
+        ty: String,
+        /// The method name defined twice.
+        method: String,
+        /// Where the first definition sits: `an inherent impl` or
+        /// `impl Trait for Ty`.
+        first: String,
+    },
     /// `impl<T: Bound> Trait for T`: a blanket impl, which the language
     /// declines (SPEC §17.5).
     #[error(
@@ -647,13 +660,6 @@ pub enum TypeError {
         /// `"type"` or `"const"` - an equality constraint pins a type,
         /// while a constant needs a concrete base or a trait default.
         kind: &'static str,
-    },
-    /// A built-in iterator was passed to a parameter bound by an iteration
-    /// trait. Only a type with an impl block can specialise such a call.
-    #[error("`{ty}` cannot instantiate a parameter bound by an iteration trait")]
-    BuiltinIteratorNotGeneric {
-        /// Rendered iterator type supplied at the call site.
-        ty: String,
     },
     /// An enum declares more variants than the heap representation's
     /// one-byte discriminant can index.
@@ -1141,11 +1147,11 @@ impl TypeError {
             Self::ImplItemNotInTrait { .. } => "impl-item-not-in-trait",
             Self::ConflictingTraitImpl { .. } => "conflicting-trait-impl",
             Self::BlanketImpl { .. } => "blanket-impl",
+            Self::DuplicateMethod { .. } => "duplicate-method",
             Self::UndeclaredReturnValue { .. } => "undeclared-return-value",
             Self::RangeBorrow { .. } => "range-borrow",
             Self::UnknownAssocItem { .. } => "unknown-assoc-item",
             Self::AmbiguousAssocItem { .. } => "ambiguous-assoc-item",
-            Self::BuiltinIteratorNotGeneric { .. } => "builtin-iterator-not-generic",
             Self::TooManyVariants { .. } => "too-many-variants",
             Self::ClosureParamUninferred { .. } => "closure-param-uninferred",
             Self::GenericReturnTypeUninferred { .. } => "generic-return-type-uninferred",
@@ -1223,6 +1229,7 @@ impl TypeError {
             Self::QuestionMarkNoConversion { .. } => "GT0093",
             Self::BindingCallbackUntyped { .. } => "GT0094",
             Self::BlanketImpl { .. } => "GT0095",
+            Self::DuplicateMethod { .. } => "GT0096",
             Self::UnresolvedMethod { .. } => "GT0002",
             Self::UnresolvedOp { .. } | Self::UnresolvedOpImpl { .. } => "GT0003",
             Self::NonExhaustiveMatch { .. } => "GT0004",
@@ -1279,7 +1286,6 @@ impl TypeError {
             Self::RangeBorrow { .. } => "GT0075",
             Self::UnknownAssocItem { .. } => "GT0060",
             Self::AmbiguousAssocItem { .. } => "GT0061",
-            Self::BuiltinIteratorNotGeneric { .. } => "GT0057",
             Self::CallArityMismatch { .. } => "GT0018",
             Self::UnknownVariant { .. } => "GT0019",
             Self::SupertraitMethodThroughBound { .. } => "GT0020",
@@ -1866,6 +1872,14 @@ impl TypeDiagnostic {
                     )
                 });
             }
+            TypeError::DuplicateMethod { ty, method, first } => {
+                out = out
+                    .with_note(format!("the first `{method}` on `{ty}` is in {first}"))
+                    .with_help(format!(
+                        "rename one of them; a call `x.{method}()` reaches one method of \
+                         that name on `{ty}`"
+                    ));
+            }
             TypeError::BlanketImpl { trait_name, param } => {
                 out = out.with_help(format!(
                     "write `impl {trait_name} for Ty` for each type that needs it, or a generic \
@@ -1920,11 +1934,6 @@ impl TypeDiagnostic {
                 };
                 out = out.with_help(help).with_note(format!(
                     "several impls of `{trait_name}` supply `{name}` and it has no default"
-                ));
-            }
-            TypeError::BuiltinIteratorNotGeneric { ty } => {
-                out = out.with_help(format!(
-                    "name the iterator on the parameter instead, as in `fn f(it: {ty})`,                      which every tier lowers"
                 ));
             }
             TypeError::RecursionLimit { .. } => {

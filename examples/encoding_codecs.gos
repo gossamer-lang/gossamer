@@ -14,33 +14,33 @@ let data = "Hello, Gossamer!"
 
 // Base64
 let b64 = encoding::base64::encode(data.clone().as_bytes())
-println("base64 encode: {}", b64)
+println(f"base64 encode: {b64}")
 let b64_dec = encoding::base64::decode(b64)
 match b64_dec {
-    Ok(bytes) => println("base64 decode: {} bytes ok", bytes.len())
-    Err(e) => println("base64 err: {}", e)
+    Ok(bytes) => println(f"base64 decode: {bytes.len()} bytes ok")
+    Err(e) => println(f"base64 err: {e}")
 }
 
 // Hex
 let h = encoding::hex::encode(data.clone().as_bytes())
-println("hex encode:    {}", h)
+println(f"hex encode:    {h}")
 let h_dec = encoding::hex::decode(h)
 match h_dec {
-    Ok(bytes) => println("hex decode:    {} bytes ok", bytes.len())
-    Err(e) => println("hex err: {}", e)
+    Ok(bytes) => println(f"hex decode:    {bytes.len()} bytes ok")
+    Err(e) => println(f"hex err: {e}")
 }
 
 // Base32
 let b32 = encoding::base32::encode(data.clone().as_bytes())
-println("base32 encode: {}", b32)
+println(f"base32 encode: {b32}")
 let b32_dec = encoding::base32::decode_string(b32)
 match b32_dec {
-    Ok(s) => println("base32 decode: {}", s)
-    Err(e) => println("base32 err: {}", e)
+    Ok(s) => println(f"base32 decode: {s}")
+    Err(e) => println(f"base32 err: {e}")
 }
 
 // JSON
 let json_str = encoding::json::encode(42)
-println("json int:  {}", json_str)
+println(f"json int:  {json_str}")
 let arr = encoding::json::encode(#[1, 2, 3])
-println("json arr:  {}", arr)
+println(f"json arr:  {arr}")

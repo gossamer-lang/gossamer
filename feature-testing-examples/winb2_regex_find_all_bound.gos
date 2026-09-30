@@ -1,10 +1,7 @@
 use std::regex
 
 fn main() {
-    let re = match regex::compile("[0-9]+") {
-        Ok(r) => r
-        Err(_) => return
-    }
+    let re = regex::compile("[0-9]+")
     let all = regex::find_all(re, "a1b22c333")
     println("n={}", all.len())
     for hit in all {

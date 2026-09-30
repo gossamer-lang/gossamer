@@ -110,15 +110,21 @@ fn compiled_tier_serves_registry_on_metrics_path() {
 
     // Build a registry with one counter through the same C-ABI
     // constructor shims the compiled tier emits.
-    let reg = unsafe { gos_rt_metrics_registry_new() };
+    let reg = gos_rt_metrics_registry_new();
     assert!(!reg.is_null(), "registry handle");
     let name = CString::new("http_requests_total").unwrap();
     let help = CString::new("total HTTP requests").unwrap();
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     let counter = unsafe { gos_rt_metrics_counter_new(name.as_ptr(), help.as_ptr()) };
     assert!(!counter.is_null(), "counter handle");
     for _ in 0..3 {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_metrics_counter_inc(counter) };
     }
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe { gos_rt_metrics_registry_register(reg, counter) };
 
     // Serve on a background thread; the registry pointer is leaked
@@ -128,6 +134,8 @@ fn compiled_tier_serves_registry_on_metrics_path() {
     let serve_addr = CString::new(addr.clone()).unwrap();
     thread::spawn(move || {
         let reg = reg_addr as *mut _;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_metrics_serve(serve_addr.as_ptr(), reg) };
     });
 

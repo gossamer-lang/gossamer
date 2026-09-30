@@ -29,8 +29,8 @@ let inputs = #["hello", "racecar", "Gossamer", "level"]
 for s in inputs {
     let rev = reverse_bytes(s)
     let label = if is_palindrome(s) { "palindrome" } else { "not palindrome" }
-    println("{} rev-bytes={} ({})", s, rev.len(), label)
+    println(f"{s} rev-bytes={rev.len()} ({label})")
     print("  codes:")
-    rev |> |v| iter::for_each(v, |code: i64| print(" {}", code))
+    rev |> |v| iter::for_each(v, |code: i64| print(f" {code}"))
     println()
 }

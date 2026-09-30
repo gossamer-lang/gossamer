@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0061]: The source used a feature the language declines on purpose. - here
+--- framed ---
+error[GP0061]: The source used a feature the language declines on purpose.
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

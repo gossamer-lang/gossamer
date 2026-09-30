@@ -13,11 +13,11 @@ fn wide_at(buf: Vec<u8>, p: i64) -> i64 {
 }
 
 fn window_crc(buf: Vec<u8>, p: i64) -> i64 {
-    crc32::update_window(0, buf, p, p + 4)
+    (crc32::update_window(0, buf, p, p + 4) as i64)
 }
 
 fn whole_crc(buf: Vec<u8>) -> i64 {
-    crc32::checksum(buf)
+    (crc32::checksum(buf) as i64)
 }
 
 fn digest(buf: Vec<u8>) -> u64 {

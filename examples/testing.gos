@@ -35,7 +35,7 @@ fn parse_sequence(text: String) -> Result<Vec<u64>, errors::Error> {
     for piece in text.split(',') {
         let trimmed = piece.trim()
         let n: u64 = trimmed.to_i64()
-            .ok_or_else(|| errors::new(format("bad number: {trimmed}")))? as u64
+            .ok_or_else(|| errors::new(f"bad number: {trimmed}"))? as u64
         out.push(n)
     }
     Ok(out)
@@ -55,7 +55,7 @@ mod tests {
         for i in 0..10 {
             let got = super::fibonacci(i as u64)
             let want = expected[i]
-            let _ = testing::check_eq(got, want, format("fib({i})"))
+            let _ = testing::check_eq(got, want, f"fib({i})")
         }
     }
 
@@ -93,5 +93,5 @@ mod tests {
 // When run directly (not via `gos test`), demonstrate the
 // function so the example is still useful.
 for i in 0..8 {
-    println("fib({i}) = {}", fibonacci(i as u64))
+    println(f"fib({i}) = {fibonacci(i as u64)}")
 }

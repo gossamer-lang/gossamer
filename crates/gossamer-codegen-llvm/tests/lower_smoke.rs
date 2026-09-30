@@ -446,14 +446,16 @@ fn llvm_lowers_constant_return_to_object_bytes() {
     }
 }
 
+/// A loop with no counter toward a bound may spin forever, so its header
+/// polls for preemption and a goroutine spinning in it still yields.
 #[test]
-fn llvm_numeric_loop_has_no_native_preemption_poll() {
+fn llvm_uncounted_loop_polls_for_preemption_at_its_header() {
     let (body, tcx) = looping_main();
     let ir = gossamer_codegen_llvm::render_ir_to_string(&[body], &tcx, false)
         .expect("loop MIR must render to LLVM IR");
     assert!(
-        !ir.contains("call i32 @gos_rt_preempt_check_and_yield"),
-        "native loop back-edges should not inject an opaque preemption poll: {ir}"
+        ir.contains("load atomic i8, ptr @gos_rt_preempt_requested monotonic"),
+        "an uncounted loop polls at its header: {ir}"
     );
 }
 
@@ -463,7 +465,7 @@ fn llvm_acyclic_backward_numbered_edge_has_no_preemption_poll() {
     let ir = gossamer_codegen_llvm::render_ir_to_string(&[body], &tcx, false)
         .expect("acyclic MIR must render to LLVM IR");
     assert!(
-        !ir.contains("call i32 @gos_rt_preempt_check_and_yield"),
+        !ir.contains("@gos_rt_preempt_requested"),
         "block numbering alone must not create a native safepoint: {ir}"
     );
 }

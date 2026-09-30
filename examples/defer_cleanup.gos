@@ -28,14 +28,14 @@ fn per_iteration() {
     let mut i = 0
     while i < 3 {
         defer println("  <- end of iteration")
-        println("  iteration {}", i)
+        println(f"  iteration {i}")
         i += 1
     }
 }
 
 println("lifo:")
 lifo()
-println("early_return: returned {}", early_return(false))
+println(f"early_return: returned {early_return(false)}")
 println("per_iteration:")
 per_iteration()
 

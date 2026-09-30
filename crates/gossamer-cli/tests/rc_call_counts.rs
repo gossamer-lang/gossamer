@@ -183,8 +183,8 @@ fn aggregate_walk_rc_calls_are_pinned() {
                 "main",
                 RcCounts {
                     retain: 0,
-                    release: 15,
-                    clone: 4,
+                    release: 11,
+                    clone: 2,
                 },
             ),
         ],

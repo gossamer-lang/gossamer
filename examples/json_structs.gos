@@ -39,29 +39,29 @@ let original = User { name: "alice", age: 30, active: true, tags: tags, address:
 
 // Serialize: one call, one line.
 let text = to_json::<User>(original)?
-println("serialized: {}", text)
+println(f"serialized: {text}")
 
 // Deserialize: one call, one line.
 let back: User = from_json::<User>(text)?
-println("name    = {}", back.name)
-println("age     = {}", back.age)
-println("active  = {}", back.active)
-println("city    = {}", back.address.city)
-println("zip     = {}", back.address.zip)
-println("tags[0] = {}", back.tags[0])
-println("tags[1] = {}", back.tags[1])
+println(f"name    = {back.name}")
+println(f"age     = {back.age}")
+println(f"active  = {back.active}")
+println(f"city    = {back.address.city}")
+println(f"zip     = {back.address.zip}")
+println(f"tags[0] = {back.tags[0]}")
+println(f"tags[1] = {back.tags[1]}")
 
 // Strict validation rejects type mismatches with a path-qualified
 // error: `from_json: field 'age': expected integer, got string`.
 let bad = "{\"name\":\"bob\",\"age\":\"oops\",\"active\":false,\"tags\":[],\"address\":{\"city\":\"x\",\"zip\":\"0\"}}"
 match from_json::<User>(bad) {
     Ok(_) => println("unexpected: bad payload parsed clean")
-    Err(e) => println("rejected:   {}", e)
+    Err(e) => println(f"rejected:   {e}")
 }
 
 // Strict validation also rejects missing required fields.
 let missing = "{\"name\":\"carol\",\"age\":40,\"active\":true,\"tags\":[]}"
 match from_json::<User>(missing) {
     Ok(_) => println("unexpected: missing payload parsed clean")
-    Err(e) => println("rejected:   {}", e)
+    Err(e) => println(f"rejected:   {e}")
 }

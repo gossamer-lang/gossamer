@@ -67,27 +67,26 @@ fn callee_body_name(callee: &Operand, def_to_name: &HashMap<u32, String>) -> Opt
 /// into the two-constant form folding recognises. A second copy-prop
 /// pass after folding propagates the newly-created constants.
 pub fn optimise(body: &mut Body, tcx: &TyCtxt) {
-    optimise_with_bounds_limit(body, tcx, Some(versioning_candidate_limit()), false);
+    optimise_with_bounds_limit(body, tcx, Some(versioning_candidate_limit()));
 }
 
 /// JIT preparation optimises for Cranelift promotion admission and hot-loop
 /// dispatch, where the unchecked clone is often required to make a body
 /// lowerable. Keep the general versioning pass aggressive for this path.
 pub fn optimise_for_jit(body: &mut Body, tcx: &TyCtxt) {
-    optimise_with_bounds_limit(body, tcx, None, true);
+    optimise_with_bounds_limit(body, tcx, None);
 }
 
 fn optimise_with_bounds_limit(
     body: &mut Body,
     tcx: &TyCtxt,
     versioning_candidate_limit: Option<usize>,
-    checked_overflow: bool,
 ) {
     crate::verify::debug_verify_body(body);
     copy_propagate(body, tcx);
     elide_vec_clone_in_three_way_swaps(body);
     crate::verify::debug_verify_body(body);
-    const_fold_typed(body, tcx, checked_overflow);
+    const_fold_typed(body, tcx);
     crate::verify::debug_verify_body(body);
     copy_propagate(body, tcx);
     crate::verify::debug_verify_body(body);
@@ -115,6 +114,10 @@ fn optimise_with_bounds_limit(
     if bounds_versioning_enabled() {
         bounds_check_versioning_with_limit(body, tcx, versioning_candidate_limit);
     }
+    elide_overflow_checks_by_ranges(body, tcx);
+    elide_overflow_checks_by_facts(body);
+    overflow_check_versioning(body, tcx);
+    crate::verify::debug_verify_body(body);
     if std::env::var_os("GOS_BOUNDS_REMARKS").is_some() {
         let after_versioning = bounds_access_counts(body);
         eprintln!(
@@ -160,7 +163,7 @@ pub fn optimise_debug(body: &mut Body, tcx: &TyCtxt) {
     crate::verify::debug_verify_body(body);
     copy_propagate(body, tcx);
     crate::verify::debug_verify_body(body);
-    const_fold_typed(body, tcx, true);
+    const_fold_typed(body, tcx);
     crate::verify::debug_verify_body(body);
     copy_propagate(body, tcx);
     crate::verify::debug_verify_body(body);

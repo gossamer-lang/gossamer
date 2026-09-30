@@ -1,0 +1,78 @@
+// A type parameter decided only by an associated-type equality constraint
+// (`S: Source<Out = T>`) takes each call's own instantiation, on free
+// functions, generic impls, and methods.
+trait Source {
+    type Out
+    fn pull(&mut self) -> Option<Self::Out>
+}
+
+struct Counter { n: i64 }
+
+impl Source for Counter {
+    type Out = i64
+    fn pull(&mut self) -> Option<i64> {
+        self.n += 1
+        if self.n > 3 { None } else { Some(self.n) }
+    }
+}
+
+struct Words { i: i64 }
+
+impl Source for Words {
+    type Out = String
+    fn pull(&mut self) -> Option<String> {
+        self.i += 1
+        if self.i > 2 { None } else { Some(format("w{}", self.i)) }
+    }
+}
+
+struct Repeat<T> { value: T, left: i64 }
+
+impl<T> Source for Repeat<T> {
+    type Out = T
+    fn pull(&mut self) -> Option<T> {
+        if self.left == 0 { return None }
+        self.left -= 1
+        Some(self.value)
+    }
+}
+
+fn first<S: Source<Out = T>, T>(mut s: S) -> Option<T> {
+    s.pull()
+}
+
+fn drain<S: Source<Out = T>, T>(mut s: S) -> Vec<T> {
+    let mut out = #[]
+    while let Some(v) = s.pull() {
+        out.push(v)
+    }
+    out
+}
+
+struct Wrap<S, T> { inner: S, seen: Vec<T> }
+
+impl<S: Source<Out = T>, T> Wrap<S, T> {
+    fn get(&mut self) -> Option<T> {
+        self.inner.pull()
+    }
+}
+
+struct Pairing { tag: i64 }
+
+impl Pairing {
+    fn with<S: Source<Out = T>, T>(self, mut s: S) -> Option<(i64, T)> {
+        match s.pull() {
+            Some(v) => Some((self.tag, v))
+            None => None
+        }
+    }
+}
+
+fn main() {
+    println("{:?} {:?}", first(Counter { n: 0 }), first(Words { i: 0 }))
+    println("{:?} {:?}", drain(Counter { n: 0 }), drain(Words { i: 0 }))
+    println("{:?}", drain(Repeat { value: 2.5, left: 2 }))
+    let mut w = Wrap { inner: Counter { n: 1 }, seen: #[] }
+    println("{:?} {:?}", w.get(), w.seen.len())
+    println("{:?} {:?}", Pairing { tag: 9 }.with(Words { i: 1 }), Pairing { tag: 1 }.with(Counter { n: 5 }))
+}

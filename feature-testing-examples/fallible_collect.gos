@@ -1,0 +1,41 @@
+// `collect` into `Result<Vec<T>, E>` and `Option<Vec<T>>`, named by a
+// turbofish, a `let` type, or the enclosing return type. Pulling stops at the
+// first `Err` or `None`, so later stages never run.
+struct Digits { s: Vec<String>, i: i64 }
+impl Iterator for Digits {
+    type Item = Option<i64>
+    fn next(&mut self) -> Option<Option<i64>> {
+        if self.i >= self.s.len() { return None }
+        self.i += 1
+        Some(self.s[self.i - 1].to_i64())
+    }
+}
+fn parse(s: String) -> Result<i64, String> {
+    match s.to_i64() {
+        Some(v) => Ok(v)
+        None => Err(format("bad {}", s))
+    }
+}
+fn all(xs: Vec<String>) -> Result<Vec<i64>, String> {
+    xs.iter().map(|s| parse(s)).collect()
+}
+fn early(xs: Vec<String>) -> Option<Vec<i64>> {
+    if xs.is_empty() {
+        return None
+    }
+    return xs.iter().map(|s| s.to_i64()).collect()
+}
+fn main() {
+    let good: Result<Vec<i64>, String> = #["1", "2"].iter().map(|s| parse(s)).collect()
+    println("{:?}", good)
+    println("{:?} {:?}", all(#["3", "x", "y"]), all(#["4"]))
+    let opts: Option<Vec<i64>> = #["4", "5"].iter().map(|s| s.to_i64()).collect()
+    println("{:?}", opts)
+    println("{:?} {:?}", early(#[]), early(#["6", "z"]))
+    let mut seen = #[]
+    let tf = #["7", "q", "8"].iter().map(|s| { seen.push(s); parse(s) }).collect::<Result<Vec<i64>, String>>()
+    println("{:?} pulled {:?}", tf, seen)
+    println("{:?}", (Digits { s: #["1", "2"], i: 0 }).collect::<Option<Vec<i64>>>())
+    let total = #["1", "2", "3"].iter().map(|s| parse(s)).collect::<Result<Vec<i64>, String>>().unwrap_or(#[]).len()
+    println("{}", total)
+}

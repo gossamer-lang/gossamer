@@ -17,6 +17,17 @@ impl Parser<'_> {
         self.bump();
         let mut params = Vec::new();
         while !self.at_close_angle() && !self.at_eof() {
+            // A lifetime parameter reports the declined feature and is
+            // dropped, so the parameters around it still parse.
+            if matches!(self.peek().kind, TokenKind::Label) {
+                let span = self.peek_span();
+                self.report_declined(crate::declined::LIFETIMES, span);
+                self.bump();
+                if !self.eat_list_separator() {
+                    break;
+                }
+                continue;
+            }
             params.push(self.parse_generic_param());
             if !self.eat_list_separator() {
                 break;

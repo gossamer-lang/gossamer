@@ -211,8 +211,13 @@ fn install_handler() -> std::io::Result<()> {
 
 /// SIGPROF handler. Async-signal-safe: no allocation, no locks, no
 /// library calls beyond reading memory it has bounds-checked.
+///
+/// # Safety
+///
+/// Called only by the kernel as the SIGPROF handler: `context` is null or the
+/// `ucontext_t` it delivers.
 #[cfg(all(unix, not(miri), not(target_arch = "wasm32")))]
-extern "C" fn on_sigprof(
+unsafe extern "C" fn on_sigprof(
     _sig: libc::c_int,
     _info: *mut libc::siginfo_t,
     context: *mut libc::c_void,
@@ -221,7 +226,9 @@ extern "C" fn on_sigprof(
         return;
     }
     let mut sample = RawSample::EMPTY;
-    let (pc, frame_pointer) = interrupted_registers(context);
+    // SAFETY: this handler's contract makes `context` the kernel's `ucontext_t` or null, as
+    // `interrupted_registers` requires.
+    let (pc, frame_pointer) = unsafe { interrupted_registers(context) };
     if pc != 0 {
         sample.frames[0] = pc;
         sample.len = 1;
@@ -248,7 +255,11 @@ extern "C" fn on_sigprof(
     target_arch = "x86_64",
     target_os = "linux"
 ))]
-fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+/// # Safety
+///
+/// `context` is null or the `ucontext_t` the kernel passed to the signal
+/// handler running this.
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     if context.is_null() {
         return (0, 0);
     }
@@ -270,7 +281,11 @@ fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     target_arch = "aarch64",
     target_os = "linux"
 ))]
-fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+/// # Safety
+///
+/// `context` is null or the `ucontext_t` the kernel passed to the signal
+/// handler running this.
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     if context.is_null() {
         return (0, 0);
     }
@@ -287,7 +302,11 @@ fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     target_os = "macos",
     any(target_arch = "aarch64", target_arch = "x86_64")
 ))]
-fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
+/// # Safety
+///
+/// `context` is null or the `ucontext_t` the kernel passed to the signal
+/// handler running this.
+unsafe fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
     if context.is_null() {
         return (0, 0);
     }
@@ -321,7 +340,11 @@ fn interrupted_registers(context: *mut libc::c_void) -> (usize, usize) {
         any(target_os = "linux", target_os = "macos")
     ))
 ))]
-fn interrupted_registers(_context: *mut libc::c_void) -> (usize, usize) {
+/// # Safety
+///
+/// `context` is null or the `ucontext_t` the kernel passed to the signal
+/// handler running this.
+unsafe fn interrupted_registers(_context: *mut libc::c_void) -> (usize, usize) {
     (0, 0)
 }
 

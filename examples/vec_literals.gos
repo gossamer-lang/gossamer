@@ -29,27 +29,27 @@ fn count(items: [String]) -> i64 {
 let names = #["ada", "grace", "edsger"]
 let zeros = [0; 5]
 
-println("first name: {}", names[0])
-println("zeros: {} entries, last = {}", zeros.len(), zeros[4])
+println(f"first name: {names[0]}")
+println(f"zeros: {zeros.len()} entries, last = {zeros[4]}")
 
 // Only a Vec grows.
 let mut queue = #[]
 queue.push("first")
 queue.push("second")
-println("queue holds {}", queue.len())
+println(f"queue holds {queue.len()}")
 
 // Return position.
 let hellos = greetings()
-println("greetings: {}", hellos.len())
-println("scores(true) has {} entries", scores(true).len())
+println(f"greetings: {hellos.len()}")
+println(f"scores(true) has {scores(true).len()} entries")
 
 // Struct field: the declared `Vec<String>` shapes the literal.
 let basket = Basket { fruits: #["apple", "pear"] }
-println("basket holds {} and {}", basket.fruits[0], basket.fruits[1])
+println(f"basket holds {basket.fruits[0]} and {basket.fruits[1]}")
 
 // Arguments.
-println("total = {}", total(#[3, 4, 5]))
-println("count = {}", count(#["x", "y", "z"]))
+println(f"total = {total(#[3, 4, 5])}")
+println(f"count = {count(#["x", "y", "z"])}")
 
 // Nested literals build a Vec of Vecs.
 let grid = #[
@@ -57,9 +57,9 @@ let grid = #[
     #[4, 5]
     #[6]
 ]
-println("grid rows = {}, grid[0][2] = {}", grid.len(), grid[0][2])
+println(f"grid rows = {grid.len()}, grid[0][2] = {grid[0][2]}")
 
 // Fixed arrays: length is part of the type.
 let fixed = [1, 2, 3]
 let shaped: [i64; 2] = [4, 5]
-println("fixed = {}, shaped: {}", fixed.len(), shaped.len())
+println(f"fixed = {fixed.len()}, shaped: {shaped.len()}")

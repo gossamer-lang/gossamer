@@ -8,13 +8,13 @@
 use std::net::url
 
 let q = url::query_escape("hello world & friends")
-println("q escape: {}", q)
+println(f"q escape: {q}")
 
 let q2 = url::query_unescape(q)
-println("q unescape: {}", q2)
+println(f"q unescape: {q2}")
 
 let p = url::path_escape("/users/alice@example.com/files")
-println("p escape: {}", p)
+println(f"p escape: {p}")
 
 let p2 = url::path_unescape(p)
-println("p unescape: {}", p2)
+println(f"p unescape: {p2}")

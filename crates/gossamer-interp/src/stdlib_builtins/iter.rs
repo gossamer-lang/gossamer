@@ -867,8 +867,7 @@ fn lazy_next(
                     Ok(Some(Value::Int(out)))
                 }
             } else if *end_open {
-                // The bytecode VM is a checked tier whatever profile the
-                // interpreter itself was built with.
+                // Stepping past `i64::MAX` raises the overflow panic `+` does.
                 if *current == i64::MAX {
                     Err(crate::value::RuntimeError::Panic(
                         "attempt to add with overflow in open integer range".to_string(),
@@ -1881,6 +1880,17 @@ pub(crate) fn builtin_iter_dedup(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Array(Arc::new(out)))
 }
 
+/// Combines two integers the way `+` or `*` does: the overflow panic when the
+/// result leaves the type.
+fn checked_or_panic<T: Copy>(
+    a: T,
+    b: T,
+    checked: fn(T, T) -> Option<T>,
+    overflow: fn() -> RuntimeError,
+) -> RuntimeResult<T> {
+    checked(a, b).ok_or_else(overflow)
+}
+
 /// The panic an integer `sum` raises where its total leaves the element type,
 /// the same one `+` raises.
 fn add_overflow() -> RuntimeError {
@@ -1895,13 +1905,13 @@ fn mul_overflow() -> RuntimeError {
 
 fn checked_int_sum(mut values: impl Iterator<Item = i64>) -> RuntimeResult<i64> {
     values.try_fold(0i64, |total, value| {
-        total.checked_add(value).ok_or_else(add_overflow)
+        checked_or_panic(total, value, i64::checked_add, add_overflow)
     })
 }
 
 fn checked_int_product(mut values: impl Iterator<Item = i64>) -> RuntimeResult<i64> {
     values.try_fold(1i64, |total, value| {
-        total.checked_mul(value).ok_or_else(mul_overflow)
+        checked_or_panic(total, value, i64::checked_mul, mul_overflow)
     })
 }
 
@@ -1930,13 +1940,13 @@ pub(crate) fn builtin_iter_sum(args: &[Value]) -> RuntimeResult<Value> {
             for v in arr.iter() {
                 match v {
                     Value::Int(n) => {
-                        int_sum = int_sum.checked_add(*n).ok_or_else(add_overflow)?;
+                        int_sum = checked_or_panic(int_sum, *n, i64::checked_add, add_overflow)?;
                         uint_sum = uint_sum.wrapping_add(*n as u64);
                         float_sum += *n as f64;
                     }
                     Value::Uint(n) => {
                         is_uint = true;
-                        uint_sum = uint_sum.checked_add(*n).ok_or_else(add_overflow)?;
+                        uint_sum = checked_or_panic(uint_sum, *n, u64::checked_add, add_overflow)?;
                         float_sum += *n as f64;
                     }
                     Value::Float(f) => {
@@ -2626,13 +2636,14 @@ pub(crate) fn builtin_iter_product(args: &[Value]) -> RuntimeResult<Value> {
             for v in arr.iter() {
                 match v {
                     Value::Int(n) => {
-                        int_prod = int_prod.checked_mul(*n).ok_or_else(mul_overflow)?;
+                        int_prod = checked_or_panic(int_prod, *n, i64::checked_mul, mul_overflow)?;
                         uint_prod = uint_prod.wrapping_mul(*n as u64);
                         float_prod *= *n as f64;
                     }
                     Value::Uint(n) => {
                         is_uint = true;
-                        uint_prod = uint_prod.checked_mul(*n).ok_or_else(mul_overflow)?;
+                        uint_prod =
+                            checked_or_panic(uint_prod, *n, u64::checked_mul, mul_overflow)?;
                         float_prod *= *n as f64;
                     }
                     Value::Float(f) => {

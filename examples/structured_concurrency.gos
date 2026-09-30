@@ -1,11 +1,10 @@
 /*
- * Cohorts - structured concurrency, and how it differs from `go`.
+ * Cohorts - structured concurrency.
  *
  * `cohort { }` owns every goroutine `spawn`ed inside it: the block
  * cannot be left until each child has finished, and a child's failure
- * cancels its siblings and becomes the block's `Result`. `go expr`
- * stays what it has always been - fire-and-forget, for work that
- * genuinely should outlive the block that started it.
+ * cancels its siblings and becomes the block's `Result`. No goroutine
+ * outlives the block that started it.
  */
 
 use std::{errors, time}
@@ -37,12 +36,12 @@ fn fan_out() -> Result<(), errors::Error> {
     cohort {
         let a = spawn(|| fetch("alpha", 20))
         let b = spawn(|| fetch("beta", 10))
-        println("fetched {} and {}", a.join()??, b.join()??)
+        println(f"fetched {a.join()??} and {b.join()??}")
     }
 }
 
 fn main() {
-    println("fan-out: {:?}", fan_out())
+    println(f"fan-out: {fan_out():?}")
 
     // One child fails: its sibling is cancelled and the block reports
     // the failure. The sibling still runs its own `defer` on the way
@@ -52,20 +51,20 @@ fn main() {
         let _worker = spawn(|| drain(rx))
         let _bad = spawn(|| refuse("gamma"))
     }
-    println("fail-fast: {:?}", failed)
+    println(f"fail-fast: {failed:?}")
 
     // Collect every failure instead of stopping at the first.
     let collected = cohort(policy: Policy::CollectAll) {
         let _x = spawn(|| refuse("delta"))
         let _y = spawn(|| refuse("epsilon"))
     }
-    println("collect-all: {:?}", collected)
+    println(f"collect-all: {collected:?}")
 
     // Bound the whole block by a deadline.
     let bounded = cohort(timeout: 50) {
         let _slow = spawn(|| fetch("zeta", 30_000))
     }
-    println("timeout: {}", bounded.is_err())
+    println(f"timeout: {bounded.is_err()}")
 
     // A spawn written outside any `cohort { }` block attaches to the
     // implicit root cohort `main` runs inside, so nothing here is

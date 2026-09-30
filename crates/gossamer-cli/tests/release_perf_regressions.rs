@@ -309,7 +309,7 @@ let n: i64 = env::args()[0].to_i64().unwrap_or(500000)
 let mut src: Vec<i64> = Vec::with_capacity(n)
 let mut dst: Vec<i64> = Vec::with_capacity(n)
 for i in 0..n {
-    src.push(i * 6364136223846793005 + 1442695040888963407)
+    src.push(i *% 6364136223846793005 +% 1442695040888963407)
     dst.push(0)
 }
 let mut pass = 0
@@ -775,7 +775,7 @@ fn main() {
     while i < mb * 1048576 { buf.push((i & 255) as u8); i += 1 }
 
     let start = time::monotonic_ms()
-    let mut crc = 0
+    let mut crc: u32 = 0
     let mut out = ""
     let mut k = 0
     while k < 2000 {

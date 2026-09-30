@@ -4,16 +4,14 @@ Status: experimental
 
 Server-Sent Events (text/event-stream) emitter with heartbeat ticks and retry hint.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_sse.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`Event`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_sse.rs) | `type Event` | One SSE event (id, event, data, retry). |
-| [`Stream`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_sse.rs) | `type Stream` | Active SSE stream - handler writes events through it (Rust-side). |
-| [`encode_comment`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_sse.rs) | `fn encode_comment(comment: String) -> String` | Render a `:`-prefixed keepalive line. Available in interp + compiled. |
-| [`encode_event`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_sse.rs) | `fn encode_event(event: String, data: String, id: String) -> String` | Render one event block as a string: `(event, data, id) -> String`. Available in interp + compiled. |
-| [`encode_retry`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_sse.rs) | `fn encode_retry(ms: i64) -> String` | Render a `retry:` reconnect-hint directive in milliseconds. Available in interp + compiled. |
+| `Stream` | `type Stream` | Active SSE stream - handler writes events through it (Rust-side). |
+| `Event` | `type Event` | One SSE event (id, event, data, retry). |
+| `encode_event` | `fn encode_event(event: String, data: String, id: String) -> String` | Render one event block as a string: `(event, data, id) -> String`. Available in interp + compiled. |
+| `encode_comment` | `fn encode_comment(comment: String) -> String` | Render a `:`-prefixed keepalive line. Available in interp + compiled. |
+| `encode_retry` | `fn encode_retry(ms: i64) -> String` | Render a `retry:` reconnect-hint directive in milliseconds. Available in interp + compiled. |
+
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

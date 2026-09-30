@@ -113,53 +113,8 @@ impl CredentialStore {
     /// failure to restrict aborts the write rather than leaving an
     /// world-readable file in place.
     pub fn save(&self, path: &Path) -> Result<(), CredentialStoreError> {
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).map_err(|e| CredentialStoreError::Io(e.to_string()))?;
-        }
-        let tmp = path.with_file_name(format!(
-            ".{}.tmp-{}-{}",
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("credentials"),
-            std::process::id(),
-            CREDENTIAL_WRITE_ID.fetch_add(1, Ordering::Relaxed),
-        ));
-        let text = self.render();
-        let result = (|| {
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp)
-                .map_err(|e| CredentialStoreError::Io(e.to_string()))?;
-            file.write_all(text.as_bytes())
-                .map_err(|e| CredentialStoreError::Io(e.to_string()))?;
-            file.sync_all()
-                .map_err(|e| CredentialStoreError::Io(e.to_string()))?;
-            Ok::<(), CredentialStoreError>(())
-        })();
-        if let Err(err) = result {
-            let _ = fs::remove_file(&tmp);
-            return Err(err);
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&tmp)
-                .map_err(|e| CredentialStoreError::Io(e.to_string()))?
-                .permissions();
-            perms.set_mode(0o600);
-            fs::set_permissions(&tmp, perms)
-                .map_err(|e| CredentialStoreError::Io(e.to_string()))?;
-        }
-        #[cfg(windows)]
-        {
-            restrict_to_owner(&tmp).map_err(|e| CredentialStoreError::Io(e.to_string()))?;
-        }
-        if let Err(err) = fs::rename(&tmp, path) {
-            let _ = fs::remove_file(&tmp);
-            return Err(CredentialStoreError::Io(err.to_string()));
-        }
-        Ok(())
+        write_private_file(path, self.render().as_bytes())
+            .map_err(|e| CredentialStoreError::Io(e.to_string()))
     }
 
     /// Writes the store to the canonical path.
@@ -247,6 +202,48 @@ fn unquote(s: &str) -> String {
     out
 }
 
+/// Writes `bytes` to `path` atomically, readable by the current user only.
+///
+/// The temporary file is owner-only from the moment it exists - mode 600 on
+/// POSIX, an owner-only DACL on Windows - so the secret is never visible to
+/// another user, and a rename puts it in place whole.
+pub(crate) fn write_private_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_file_name(format!(
+        ".{}.tmp-{}-{}",
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("private"),
+        std::process::id(),
+        CREDENTIAL_WRITE_ID.fetch_add(1, Ordering::Relaxed),
+    ));
+    let result = (|| {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp)?;
+        #[cfg(windows)]
+        restrict_to_owner(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()
+    })();
+    if let Err(err) = result {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// Replaces a file's DACL with a single ACE granting the current user
 /// read+write and nothing else, marking the DACL protected so inherited ACEs
 /// are dropped. The Windows analogue of `chmod 0600`.
@@ -270,6 +267,9 @@ fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{FILE_GENERIC_READ, FILE_GENERIC_WRITE};
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
+    // SAFETY: every pointer the Win32 calls below receive is a local, a buffer this function owns
+    // and sizes as the call reports, or the SID inside that buffer; each handle and ACL they
+    // answer is released on every path.
     unsafe {
         let mut token: HANDLE = std::ptr::null_mut();
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &raw mut token) == 0 {
@@ -278,14 +278,12 @@ fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
         // Two-call pattern: size the buffer, then read TOKEN_USER.
         let mut len: u32 = 0;
         GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &raw mut len);
-        let mut buf = vec![0u8; len as usize];
+        // Word-sized storage gives `TOKEN_USER` the 8-byte alignment it needs.
+        let mut buf = vec![0u64; (len as usize).div_ceil(8)];
         if GetTokenInformation(token, TokenUser, buf.as_mut_ptr().cast(), len, &raw mut len) == 0 {
             CloseHandle(token);
             return Err(io::Error::last_os_error());
         }
-        // The global allocator returns memory aligned to at least 16 bytes, so
-        // the `Vec<u8>` backing store satisfies `TOKEN_USER`'s 8-byte alignment.
-        #[allow(clippy::cast_ptr_alignment)]
         let token_user = &*buf.as_ptr().cast::<TOKEN_USER>();
         let sid = token_user.User.Sid;
 

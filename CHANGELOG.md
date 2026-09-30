@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.65.0 - Language surface, soundness, and tooling
+
+- `f"..."` and `f"""..."""` interpolated strings hold any expression in a placeholder (`{xs.len()}`, `{m["k"]}`, `{a + b:>8}`), with `format`'s specs after the first top-level `:`; an empty placeholder is GP0063 and an unmatched brace is GP0065, each pointed at inside the string.
+- `char`, `u8`, integer, and float methods are one surface on every tier (`char::from_u32`, `checked_*`, `saturating_*`, `overflowing_*`, `rem_euclid`, `div_euclid`, `signum`, `powi`, `powf`); integer `pow` answers an integer, and `gos fix` rewrites a float use of it.
+- Methods a program declares on a primitive answer natively as on the VM, reach an unsuffixed literal receiver, and are not shadowed by a same-name `math` function; `char::from_digit(..)`-style associated functions on a primitive resolve.
+- `{:+}`, `{:e}`, and `{:E}` format numbers with width and precision; `{:e}` on a non-number is rejected.
+- `Vec::retain`, `(lo..hi).contains(x)`, `m[k]` reads, writes, and compound updates, and `collect()` into `Result<Vec<T>, E>` or `Option<Vec<T>>` (stopping at the first `Err` or `None`).
+- Every `impl Iterator` a program declares gets the lazy adapters and terminals the built-in iterators have (`map`, `filter`, `take`, `zip`, `fold`, `find`, `collect`, ...); a method the type defines wins.
+- A generic bound `S: Trait<Out = T>` decides `T` per call on free functions, generic impls, and methods; built-in iterators satisfy `I: Iterator<Item = X>`.
+- An operator trait takes one impl per right-hand type (`impl Mul<f64> for V2` beside `impl Mul for V2`) with an optional `type Output`, and the right operand is checked against the method's parameter.
+- `+`, `-`, and `*` raise the overflow panic in release builds too, so every tier and profile agrees; `+%`, `-%`, and `*%` are the way to wrap. A constant expression that overflows is no longer folded to a wrapped value.
+- Typed serde (`to_json` / `from_json`, TOML, YAML) covers enums, externally tagged, and the field attributes `#[rename("key")]`, `#[skip]`, and `#[default]`.
+- `time::Time` is an instant with its UTC offset: `parse_rfc3339` keeps the offset, and a `Time` formats, adds and subtracts a `Duration`, subtracts another `Time`, converts with `civil()`, `in_location`, and `utc`, and compares.
+- Every declined feature (`async`, generators, `try`/`catch`, lifetimes, `move`, `dyn`, `impl Trait` types, `union`, `class`, `macro_rules!`, `#[proc_macro]`, comprehensions, a retired `go expr`) is GP0061 at its spelling with the replacement, which `gos check --fix` applies where one exists.
+- `vec![..]` is GP0064 with the `#[..]` rewrite and the rest of the file is still checked; `unsafe` blocks and `unsafe impl` report GP0046 once.
+- A call `module::Type::member(..)` naming a member a stdlib type does not answer (`regex::Pattern::compile`, `big::Int::from_i64`) is GT0060, listing the members it does answer; `Type::missing()` on a struct is GT0060 too. A method written qualified (`sync::WaitGroup::add(wg, 1)`) and a trait-qualified call `Trait::method(receiver, ..)` run on every tier.
+- A method name defined twice on one type is GT0096; `#[derive(Default)]` over a field with no `Default` is GP0062; field access on a range, iterator, map, or tuple is rejected at check time.
+- The standard library is consistent: hash `hex` functions and `fs::write_mode` take `Vec<u8>`, checksums answer `u32`, every `fs` function answers `io::Error`, `regex::compile("literal")` answers the `Pattern` and `regex::new(pattern)` is the fallible run-time spelling; `gos fix` repairs each change.
+- Diagnostics, hover, and inlay hints name stdlib types as written (`time::Time`, `path::Path`).
+- `gos check --fix` repairs files with parse errors and reports the source as rewritten; `gos explain GX0008` and `GP0021` describe the current rules.
+- Editors (LSP and MCP): references, rename, hover, go-to-definition, and member completion reach an expression inside an `f"..."` placeholder or a `format` capture; hover and rename on a field or method name land on the name, and hover on a field shows its type. Rename accepts a contextual word (`defer`, `select`) as a new name. The MCP `check` tool takes `fix`, and `check`, `fix`, `lint`, and `fmt` given inline `source` return the rewritten text.
+- `Weak` behaves the same on every tier.
+- Compiled loops preempt: a long-running loop that calls nothing yields to other goroutines.
+- `gos build -g` emits variable locations for parameters and named locals.
+- VM recursion is bounded by frame memory instead of 4096 frames.
+- `GOS_VERIFY_RC=1` checks the reference-count operations of every compiled function (use after release, double release); debug builds always run it.
+- `gos registry serve` serves a package registry from a directory, `gos keygen` creates a publish key, and `gos publish` refuses to upload unsigned. Fetched packages reach the build, and signed packages verify. Credentials and keys are written owner-only from creation.
+- Packages stay source at 1.0; diagnostics and traces name each module's own file and line, `gos test` included.
+- `gos new` and `gos init` write a `.gitignore`; `gos env` prints the LLVM tools a native build resolves and prefers an LLVM bundled beside `gos`.
+- A JSON document rejected in a native build reports the same message and position as on the VM.
+- Built-in iterators over tuples, structs, `Option`, or `Result` advance correctly in native builds; a lazy `map` stops at an early exit; an iterator held in a field or passed by value is released once.
+- `iter::find` and `enumerate()` over strings and payload enums answer elements that own their share (heap corruption in native builds).
+- A lazy `map` whose callback answers an `Option` or a `Result` gives each element its real layout in native builds, where a debug build aborted releasing it.
+- A function answering `Ok(v)` on one path and returning early on another no longer leaks `v`.
+- `unwrap()` and `unwrap_or(d)` on an element a sequence still holds (`xs.first()`, `xs.last()`, `xs.max_by_key(f)`) take a share of their own on the compiled tiers; a payload enum element was released under the sequence, which could fault at exit.
+- A `for` over an element of a by-value parameter no longer copies the parameter at every call.
+- `Vec::insert(&mut xs, i, v)` with a struct, tuple, or array element stores the element on the compiled tiers, as the method form does.
+- `Set::from`, `BTreeSet::from`, `MinHeap::from`, `MaxHeap::from`, and `json::encode` over a `Vec<u8>` or `Vec<bool>` take its elements on the compiled tiers; on the VM, a heap built from a byte vec is no longer empty and `Deque::from`, `Queue::from`, and `Stack::from` take a byte or float vec's elements.
+- `json::Value::Null`, `Int`, `Float`, `String`, `Bool`, `Array`, and `json::Value::object` build JSON values on the VM that render and encode as a parsed document does; in native builds the object and array constructors keep a fixed array's parts, `json::Value::Float` links, and `to_string()` on a `json::Value` renders it.
+- `stdin.read_line(&mut buf)` no longer leaks the string `buf` held, and a `bufio::Scanner` no longer leaks the text it read, in native builds.
+- A native SQL driver with fields keeps working after the function that registered it returns.
+- The scheduler signals only a live worker thread, and a worker's Windows thread handle is closed when it exits.
+- `iter::unzip` over a vec narrower than a pair answers two empty vecs, and `chunk_by` and `count_by` group many distinct keys without rescanning them.
+- `U8Vec::window_key` names itself in its argument errors.
+- The native runtime's C ABI contract is documented; every `unsafe` block in the runtime states why it holds, and the lint that requires it is enforced. Vector and string arguments are read through typed views, callbacks keep their provenance, and Miri now also runs the vector, string, and map integration suites.
+- The skill card is a quarter of its former length.
+- The migration guides from Rust, Go, Kotlin, F#, and Python cover interpolated strings, overflow in release builds, typed serde, cohorts, and iterator chains, and no longer describe a `String` index as a byte or a `Vec` as `[...]`.
+
 ## 0.64.2 - Correctness, diagnostics, and doc tests
 
 - A two-argument `math` method with an integer operand (`n.pow(2)`, `n.hypot(4)`, `y.atan2(1)`) answers the right value in native builds.
@@ -8305,7 +8353,7 @@ Many modules and methods had an interpreter implementation but no compiled-tier 
 
 The remaining Rust-façade-only pieces now work from Gossamer source, verified bit-identically under `gos`, `gos build`, and `gos build --release` against live PostgreSQL via the external pgooseql driver (TLS, streaming rows, COPY, LISTEN/NOTIFY, rich type decoding on the driver side).
 
-- **Capability-gated trait extensions** (`gossamer-runtime::sql`): `ConnectionImpl::{copy_in, copy_out, listen, unlisten, poll_notification}` and `TransactionImpl::{execute_params, query_params}`, each defaulting to an honest `driver("sql", "… not supported by this driver")` error; a `Notification { channel, payload, process_id }` type; façade `Conn` / `Tx` wrappers to match.
+- **Capability-gated trait extensions** (`gossamer-runtime::sql`): `ConnectionImpl::{copy_in, copy_out, listen, unlisten, poll_notification}` and `TransactionImpl::{execute_params, query_params}`, each defaulting to a `driver("sql", "… not supported by this driver")` error; a `Notification { channel, payload, process_id }` type; façade `Conn` / `Tx` wrappers to match.
 - **Prepared statements**: `conn.prepare(sql) -> Stmt` with `execute` / `query` / `close`; Stmt handles register under their connection and sweep with `conn.close()`.
 - **Parameterized transactions**: `tx.execute_params(sql, &[Value…])` and `tx.query(sql, &[Value…])` (cursors register under the transaction's connection).
 - **COPY**: `conn.copy_in(sql, data: &[u8]) -> i64` and `conn.copy_out(sql) -> [u8]` (two-step run/take shims so the wrapper branches on a scalar status before materializing bytes).

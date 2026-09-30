@@ -193,15 +193,23 @@ mod tests {
 
     #[test]
     fn skill_card_teaches_explicit_imports_and_direct_metadata_access() {
-        assert!(SKILL_CARD.contains("Import everything you name."));
-        assert!(SKILL_CARD.contains("entry.is_symlink"));
-        assert!(SKILL_CARD.contains("fs::is_symlink(entry.path)"));
-        assert!(SKILL_CARD.contains("Calls never create `&mut` implicitly"));
+        assert!(SKILL_CARD.contains("Import everything you name"));
+        assert!(SKILL_CARD.contains("`fs::read_dir` entries carry `is_file`"));
+        assert!(SKILL_CARD.contains("do not re-query"));
+        assert!(SKILL_CARD.contains("the call site spells it"));
     }
 
     #[test]
     fn skill_card_teaches_collection_literal_spellings() {
-        for literal in ["`#[]`", "`[]`", "`{}`", "`#{}`", "`T::from([1,2,3])`"] {
+        for literal in [
+            "`#[1, 2]` Vec",
+            "`[1, 2]` fixed array",
+            "`{\"k\": 1}` Map",
+            "`#{1, 2}`",
+            "`#[0; n]`",
+            "`[0; 4]`",
+            "`T::from([..])`",
+        ] {
             assert!(
                 SKILL_CARD.contains(literal),
                 "skill card should document {literal}"
@@ -214,22 +222,15 @@ mod tests {
                 "skill card still presents the removed literal {retired}"
             );
         }
-        assert!(SKILL_CARD.contains("Stack"));
-        assert!(SKILL_CARD.contains("LIFO-only argument contract"));
-        assert!(SKILL_CARD.contains("Queue"));
-        assert!(SKILL_CARD.contains("FIFO-only behavior"));
-        assert!(SKILL_CARD.contains("MinHeap` / `MaxHeap` for explicit priority order"));
-        assert!(
-            SKILL_CARD.contains("`[5; 5]` is a fixed array"),
-            "skill card should teach that a bare repeat literal is a fixed array"
-        );
-        assert!(
-            SKILL_CARD.contains("`#[6; 7]` is a `Vec`"),
-            "skill card should teach that a hash-prefixed repeat literal is a Vec"
-        );
-        assert!(
-            SKILL_CARD.contains("`%i Tuple` documents"),
-            "skill card should document the Tuple type"
-        );
+        for contract in [
+            "`Stack` for LIFO",
+            "`MinHeap` instead of negated keys",
+            "`Queue`",
+        ] {
+            assert!(
+                SKILL_CARD.contains(contract),
+                "skill card should steer to {contract}"
+            );
+        }
     }
 }

@@ -1,0 +1,6 @@
+// ERROR: GP0065
+
+fn main() {
+    let total = 3
+    println(f"total: {total")
+}

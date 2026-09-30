@@ -74,8 +74,8 @@ use gossamer_mir::{
 };
 use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 
-/// The label of the block a release body's failed bounds checks share.
-const BOUNDS_FAIL_LABEL: &str = "bounds_fail";
+/// The label of the block a release body's failed checks share.
+const CHECK_FAIL_LABEL: &str = "check_fail";
 
 impl<'a> Lowerer<'a> {
     /// Emits the runtime call + `unreachable` for a MIR
@@ -89,34 +89,71 @@ impl<'a> Lowerer<'a> {
         writeln!(self.out, "  unreachable").unwrap();
     }
 
-    /// The shared block every failed bounds check in a release body branches
-    /// to, when any does: it raises the report for the vector and index the
-    /// failing check carried in.
-    pub(crate) fn emit_shared_bounds_fail(&mut self) {
-        if self.bounds_fail_edges.is_empty() {
+    /// The shared block every failed check in a release body branches to,
+    /// when any does: it raises the report for the kind of check, and the
+    /// vector and index a failing bounds check carried in. One report call
+    /// per body lets the frame setup sink into this block.
+    pub(crate) fn emit_shared_check_fail(&mut self) {
+        if self.check_fail_edges.is_empty() {
             return;
         }
-        let edges = std::mem::take(&mut self.bounds_fail_edges);
-        declare_rt(&mut self.runtime_refs, "gos_rt_panic_vec_index");
-        let incoming = |ty: &str, pick: fn(&(String, String, String)) -> &String| {
+        let edges = std::mem::take(&mut self.check_fail_edges);
+        declare_rt(&mut self.runtime_refs, "gos_rt_panic_check");
+        let incoming = |ty: &str, pick: &dyn Fn(&CheckFailEdge) -> String| {
             let arms = edges
                 .iter()
-                .map(|edge| format!("[ {}, %{} ]", pick(edge), edge.0))
+                .map(|edge| format!("[ {}, %{} ]", pick(edge), edge.label))
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("phi {ty} {arms}")
         };
+        let kind = self.fresh();
         let seq = self.fresh();
         let idx = self.fresh();
-        writeln!(self.out, "{BOUNDS_FAIL_LABEL}:").unwrap();
-        writeln!(self.out, "  {seq} = {}", incoming("ptr", |e| &e.1)).unwrap();
-        writeln!(self.out, "  {idx} = {}", incoming("i64", |e| &e.2)).unwrap();
+        writeln!(self.out, "{CHECK_FAIL_LABEL}:").unwrap();
         writeln!(
             self.out,
-            "  call void @gos_rt_panic_vec_index(ptr {seq}, i64 {idx})"
+            "  {kind} = {}",
+            incoming("i64", &|e| e.kind.to_string())
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {seq} = {}",
+            incoming("ptr", &|e| e.seq.clone())
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  {idx} = {}",
+            incoming("i64", &|e| e.index.clone())
+        )
+        .unwrap();
+        writeln!(
+            self.out,
+            "  call void @gos_rt_panic_check(i64 {kind}, ptr {seq}, i64 {idx})"
         )
         .unwrap();
         writeln!(self.out, "  unreachable").unwrap();
+    }
+
+    /// Branches a failed check to the body's shared report block, which
+    /// raises the report `kind` names with `seq` and `index`.
+    pub(crate) fn branch_to_check_fail(
+        &mut self,
+        label: String,
+        kind: i64,
+        seq: String,
+        index: String,
+    ) {
+        writeln!(self.out, "{label}:").unwrap();
+        writeln!(self.out, "  br label %{CHECK_FAIL_LABEL}").unwrap();
+        self.check_fail_edges.push(CheckFailEdge {
+            label,
+            kind,
+            seq,
+            index,
+        });
     }
 
     /// Lowers `Terminator::Assert`: branches to the success
@@ -146,9 +183,9 @@ impl<'a> Lowerer<'a> {
         self.next_ssa += 1;
         let br_true = if expected { &ok_label } else { &fail_label };
         let br_false = if expected { &fail_label } else { &ok_label };
-        // Without frame lines to name, every failed bounds check in a body
-        // raises the same report from one shared block, so the body carries
-        // one report call however many indexed accesses it makes. A report
+        // Without frame lines to name, every failed check in a body raises its
+        // report from one shared block, so the body carries one report call
+        // however many indexed accesses it makes. A report
         // call per access weighs on the inliner's estimate of the body even
         // though no access takes that path.
         if let gossamer_mir::AssertMessage::BoundsCheck { index, seq } = msg
@@ -162,9 +199,7 @@ impl<'a> Lowerer<'a> {
                 "  br i1 {cond_bit}, label %{br_true}, label %{br_false}"
             )
             .unwrap();
-            writeln!(self.out, "{fail_label}:").unwrap();
-            writeln!(self.out, "  br label %{BOUNDS_FAIL_LABEL}").unwrap();
-            self.bounds_fail_edges.push((fail_label, handle, idx));
+            self.branch_to_check_fail(fail_label, abi::check_fail::INDEX, handle, idx);
             return Ok(());
         }
         writeln!(

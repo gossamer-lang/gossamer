@@ -1,0 +1,6 @@
+// ERROR: GP0063
+
+fn main() {
+    let x = 1
+    println(f"value: {}", x)
+}

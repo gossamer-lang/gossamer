@@ -218,7 +218,7 @@ fn result_for(
         peak_rss_kib: peak_rss
         compile_ns: compile_ns
         binary_bytes: fs::file_size(binary)
-        output_sha256: sha256::hex(expected)
+        output_sha256: sha256::hex(expected.as_bytes())
     }
 }
 

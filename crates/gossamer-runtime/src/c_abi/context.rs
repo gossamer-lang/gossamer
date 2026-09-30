@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_sign_loss)]
 
 //! Runtime support for `std::context` - request-scoped cancellation
@@ -88,9 +87,7 @@ pub(crate) fn addr_is_cancelled(addr: usize) -> bool {
 /// already ran. It is born closed, so a recv arm on it is ready at once -
 /// the only thing a cancelled context's done channel ever reports.
 static RETIRED_CHAN: LazyLock<usize> = LazyLock::new(|| {
-    // SAFETY: `gos_rt_chan_new` returns a freshly boxed `GosChan` or null
-    // on allocation failure; both are valid `usize` addresses.
-    let chan = unsafe { super::chan::gos_rt_chan_new(8, 0) };
+    let chan = super::chan::gos_rt_chan_new(8, 0);
     if !chan.is_null() {
         // SAFETY: `chan` was just allocated and is non-null here.
         super::chan::chan_close_idempotent(unsafe { &*chan });
@@ -162,9 +159,7 @@ fn close_done_chan(node: &GosCtx) {
 fn done_chan_of(node: &GosCtx) -> *mut GosChan {
     let mut slot = node.chan.lock();
     if *slot == 0 {
-        // SAFETY: `gos_rt_chan_new` returns a freshly boxed `GosChan` or
-        // null on allocation failure; both are valid `usize` addresses.
-        let fresh = unsafe { super::chan::gos_rt_chan_new(8, 0) };
+        let fresh = super::chan::gos_rt_chan_new(8, 0);
         *slot = fresh as usize;
         if !fresh.is_null() && node.cancelled.load(Ordering::Acquire) {
             // SAFETY: `fresh` was just allocated and is non-null here.
@@ -219,7 +214,7 @@ pub fn cancel_live_requests() {
 /// `context::Context::background()` - a root context, never cancelled,
 /// no deadline.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_ctx_background() -> *mut GosCtx {
+pub extern "C" fn gos_rt_ctx_background() -> *mut GosCtx {
     ffi_entry!(std::ptr::null_mut(), { alloc_ctx(None, 0) })
 }
 

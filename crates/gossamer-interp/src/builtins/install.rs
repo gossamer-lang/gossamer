@@ -913,10 +913,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "json::Value::Array",
         builtin("json::Value::Array", builtin_json_value_passthrough),
     ));
-    globals.push((
-        "json::Value::Null",
-        builtin("json::Value::Null", builtin_json_value_null),
-    ));
+    globals.push(("json::Value::Null", json_null_value()));
     globals.push((
         "json::Value::object",
         builtin("json::Value::object", builtin_json_value_object),
@@ -2161,33 +2158,18 @@ fn install_concurrency_builtins(globals: &mut Vec<(&'static str, Value)>) {
 }
 
 fn install_regex_builtins(globals: &mut Vec<(&'static str, Value)>) {
-    // Register regex helpers only under their qualified key plus
-    // a `regex::Pattern::*` shape (used by qualified-method
-    // dispatch on `Value::Struct` regex handles). The bare names
-    // (`split`, `find`, `replace`, …) collide with the string
-    // method-call dispatch - bare-registering would route a
-    // `s.split(" ")` call to the regex helper, which would then
-    // bail with "expected Pattern handle".
-    let qualified_only = [
-        "compile",
-        "is_match",
-        "find",
-        "find_all",
-        "count",
-        "captures",
-        "captures_all",
-        "replace",
-        "replace_all",
-        "split",
-    ];
+    // Regex helpers register under their qualified key only: the bare
+    // names (`split`, `find`, `replace`, ...) are string methods too.
+    // Every helper but `compile` also answers as a `regex::Pattern::*`
+    // method for qualified dispatch on a pattern handle; `compile`
+    // builds a pattern from a literal and is no method of one.
     for (short, call) in crate::regex_builtins::ENTRIES {
         let joined: &'static str = Box::leak(format!("regex::{short}").into_boxed_str());
         globals.push((joined, builtin(joined, *call)));
-        let pattern_key: &'static str =
-            Box::leak(format!("regex::Pattern::{short}").into_boxed_str());
-        globals.push((pattern_key, builtin(pattern_key, *call)));
-        if !qualified_only.contains(short) {
-            globals.push((*short, builtin(short, *call)));
+        if *short != "compile" {
+            let pattern_key: &'static str =
+                Box::leak(format!("regex::Pattern::{short}").into_boxed_str());
+            globals.push((pattern_key, builtin(pattern_key, *call)));
         }
     }
 }

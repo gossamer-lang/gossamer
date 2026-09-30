@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -19,22 +18,6 @@ use std::os::raw::c_char;
 use super::string::alloc_cstring;
 use super::vec::{GosVec, gos_rt_result_new, gos_rt_vec_push, gos_rt_vec_with_capacity};
 
-unsafe fn vec_u8(v: *const GosVec) -> Vec<u8> {
-    if v.is_null() {
-        return Vec::new();
-    }
-    let vref = unsafe { &*v };
-    if vref.ptr.is_null() || vref.len <= 0 {
-        return Vec::new();
-    }
-    let len = vref.len as usize;
-    if vref.elem_bytes == 1 {
-        return unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr(), len) }.to_vec();
-    }
-    let words = unsafe { std::slice::from_raw_parts(vref.ptr.as_ptr().cast::<i64>(), len) };
-    words.iter().map(|&w| w as u8).collect()
-}
-
 fn byte_vec(bytes: &[u8]) -> *mut GosVec {
     super::encoding::bytes_to_gosvec(bytes)
 }
@@ -46,22 +29,31 @@ unsafe fn read_name_data_pairs(v: *const GosVec) -> Vec<(String, Vec<u8>)> {
     if v.is_null() {
         return out;
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let vref = unsafe { &*v };
-    if vref.ptr.is_null() || vref.len <= 0 {
+    // Each element is a name word and a data word, so a narrower slot holds no pair.
+    if vref.ptr.is_null() || vref.len <= 0 || vref.elem_bytes < 16 {
         return out;
     }
-    let elem = vref.elem_bytes.max(16) as usize;
+    let elem = vref.elem_bytes as usize;
     let base = vref.ptr.as_ptr();
     for i in 0..vref.len as usize {
+        // SAFETY: `i` counts below the vec's length, so the element's two words lie inside its
+        // slot of at least 16 bytes.
         let slot = unsafe { base.add(i * elem).cast::<i64>() };
-        let name_ptr = unsafe { *slot } as *const c_char;
-        let data_ptr = unsafe { *slot.add(1) } as *const GosVec;
+        // SAFETY: as above; a slot may sit at any byte offset.
+        let name_ptr = unsafe { slot.read_unaligned() } as *const c_char;
+        // SAFETY: as above.
+        let data_ptr = unsafe { slot.add(1).read_unaligned() } as *const GosVec;
         let name = if name_ptr.is_null() {
             String::new()
         } else {
+            // SAFETY: a non-null name word is a live string body (C-ABI contract).
             unsafe { crate::c_abi::gos_str_arg_string(name_ptr) }
         };
-        out.push((name, unsafe { vec_u8(data_ptr) }));
+        // SAFETY: a data word is null or a live `Vec<u8>` (C-ABI contract), which `vec_bytes`
+        // accepts.
+        out.push((name, unsafe { crate::c_abi::vec::vec_bytes(data_ptr) }));
     }
     out
 }
@@ -88,30 +80,33 @@ static ENTRY_SLOT_CHILDREN: [crate::c_abi::vec::VecSlotChild; 2] = [
 /// the name strings and data vecs (slot-children layout registered
 /// after the pushes), so `gos_rt_vec_free` deep-frees them.
 fn build_entry_vec(entries: &[(String, Vec<u8>, bool)]) -> *mut GosVec {
-    let v = unsafe { gos_rt_vec_with_capacity(24, entries.len() as i64) };
+    let v = gos_rt_vec_with_capacity(24, entries.len() as i64);
     for (name, data, is_dir) in entries {
         let tup: [i64; 3] = [
             alloc_cstring(name.as_bytes()) as i64,
             byte_vec(data) as i64,
             i64::from(*is_dir),
         ];
+        // SAFETY: `v` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts, and
+        // `tup` is one 24-byte element.
         unsafe { gos_rt_vec_push(v, tup.as_ptr().cast::<u8>()) };
     }
-    crate::c_abi::vec::vec_set_slot_children(v, &ENTRY_SLOT_CHILDREN);
+    // SAFETY: `v` is the live vec built above.
+    unsafe { crate::c_abi::vec::vec_set_slot_children(v, &ENTRY_SLOT_CHILDREN) };
     v
 }
 
 fn ok_vec(v: *mut GosVec) -> i128 {
-    unsafe { gos_rt_result_new(0, v as i64) }
+    gos_rt_result_new(0, v as i64)
 }
 
 fn ok_bytes(bytes: &[u8]) -> i128 {
-    unsafe { gos_rt_result_new(0, byte_vec(bytes) as i64) }
+    gos_rt_result_new(0, byte_vec(bytes) as i64)
 }
 
 fn err(msg: &str) -> i128 {
     let e = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, e as i64) }
+    gos_rt_result_new(1, e as i64)
 }
 
 // ----------------------------------------------------------------- tar
@@ -120,7 +115,9 @@ fn err(msg: &str) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tar_read_raw(data: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let bytes = unsafe { vec_u8(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let mut archive = tar::Archive::new(Cursor::new(bytes));
         let iter = match archive.entries() {
             Ok(it) => it,
@@ -152,6 +149,8 @@ pub unsafe extern "C" fn gos_rt_tar_read_raw(data: *const GosVec) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_tar_write(files: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `files` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `read_name_data_pairs` accepts.
         let pairs = unsafe { read_name_data_pairs(files) };
         let mut builder = tar::Builder::new(Vec::new());
         for (name, data) in &pairs {
@@ -179,7 +178,9 @@ pub unsafe extern "C" fn gos_rt_tar_write(files: *const GosVec) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_zip_read_raw(data: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let bytes = unsafe { vec_u8(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let mut archive = match zip::ZipArchive::new(Cursor::new(bytes)) {
             Ok(a) => a,
             Err(e) => return err(&format!("zip read: {e}")),
@@ -206,6 +207,8 @@ pub unsafe extern "C" fn gos_rt_zip_read_raw(data: *const GosVec) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_zip_write(files: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `files` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `read_name_data_pairs` accepts.
         let pairs = unsafe { read_name_data_pairs(files) };
         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
         let opts = zip::write::SimpleFileOptions::default()

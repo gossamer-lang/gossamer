@@ -5,6 +5,12 @@
 //! combinator here has one implementation and three entry points - word,
 //! float, and by-address - so the spellings cannot drift apart, and the ABI
 //! registry records which class each entry reads its buffer as.
+//!
+//! The helper contract: every `unsafe fn` here takes `env` null or a live
+//! closure environment whose callable was compiled for the element class
+//! `pass` names, `addr` the callable `env_fn_addr` read from that `env`, and
+//! `v` null or a live `Vec` the callback does not resize. The shims receive
+//! exactly that under the C-ABI contract and forward it unchanged.
 
 use super::{
     GosMap, GosVec, gos_rt_map_insert_i64_i64, gos_rt_map_new, gos_rt_result_new,
@@ -48,7 +54,12 @@ type FloatCmp = unsafe extern "C" fn(env: *const u8, a: f64, b: f64) -> i64;
 type PtrCmp = unsafe extern "C" fn(env: *const u8, a: *mut u8, b: *mut u8) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null or zero env.
-pub(crate) fn env_fn_addr(env: *const u8) -> Option<*const ()> {
+///
+/// # Safety
+///
+/// `env` is null or a live closure environment, whose first word is the
+/// closure's entry address.
+pub(crate) unsafe fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     if env.is_null() {
         return None;
     }
@@ -62,7 +73,10 @@ pub(crate) fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     }
 }
 
-fn vec_len_of(v: *const GosVec) -> i64 {
+/// # Safety
+///
+/// `v` is null or a live `Vec`.
+unsafe fn vec_len_of(v: *const GosVec) -> i64 {
     if v.is_null() {
         0
     } else {
@@ -75,12 +89,11 @@ fn vec_len_of(v: *const GosVec) -> i64 {
 /// copied into it keeps the shape it had.
 unsafe fn out_like(src: *const GosVec) -> *mut GosVec {
     if src.is_null() {
-        // SAFETY: fresh allocation.
-        return unsafe { gos_rt_vec_new(8) };
+        return gos_rt_vec_new(8);
     }
     // SAFETY: the caller supplies a live GosVec header.
     let s = unsafe { &*src };
-    unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity_typed(s.elem_bytes, 0, s.elem_kind) }
+    crate::c_abi::vec::gos_rt_vec_with_capacity_typed(s.elem_bytes, 0, s.elem_kind)
 }
 
 /// Calls a bool-answering callback on `v[i]` through `pass`'s register class.
@@ -228,6 +241,7 @@ macro_rules! cross_shims {
         #[doc = "Word-slot elements."]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $word($($arg: $aty),*) -> $ret {
+            // SAFETY: the shim's arguments meet the helper contract under the C-ABI contract.
             ffi_entry!($fallback, { unsafe { $body($($arg),*, ElemPass::Word) } })
         }
         #[doc = $doc]
@@ -235,6 +249,7 @@ macro_rules! cross_shims {
         #[doc = "`f64` elements, whose slot bits reach the callback in an SSE register."]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $float($($arg: $aty),*) -> $ret {
+            // SAFETY: the shim's arguments meet the helper contract under the C-ABI contract.
             ffi_entry!($fallback, { unsafe { $body($($arg),*, ElemPass::Float) } })
         }
         #[doc = $doc]
@@ -242,6 +257,7 @@ macro_rules! cross_shims {
         #[doc = "Elements the callback receives by the address of their storage."]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $ptr($($arg: $aty),*) -> $ret {
+            // SAFETY: the shim's arguments meet the helper contract under the C-ABI contract.
             ffi_entry!($fallback, { unsafe { $body($($arg),*, ElemPass::Ptr) } })
         }
     };
@@ -251,14 +267,19 @@ macro_rules! cross_shims {
 // take_while / skip_while
 
 unsafe fn take_while_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosVec {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `out_like` accepts.
     let out = unsafe { out_like(v) };
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         if !unsafe { pred_at(addr, env, v, i, pass) } {
             break;
         }
+        // SAFETY: `out` is the fresh vec made above and `v` is live, with `i` below its length.
         unsafe { vec_push_elem_from(out, v, i) };
     }
     out
@@ -275,16 +296,21 @@ cross_shims!(
 );
 
 unsafe fn skip_while_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosVec {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `out_like` accepts.
     let out = unsafe { out_like(v) };
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
     let mut dropping = true;
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         if dropping && unsafe { pred_at(addr, env, v, i, pass) } {
             continue;
         }
         dropping = false;
+        // SAFETY: `out` is the fresh vec made above and `v` is live, with `i` below its length.
         unsafe { vec_push_elem_from(out, v, i) };
     }
     out
@@ -304,10 +330,13 @@ cross_shims!(
 // position
 
 unsafe fn position_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i128 {
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return NONE;
     };
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         if unsafe { pred_at(addr, env, v, i, pass) } {
             return some_of(i);
         }
@@ -329,14 +358,19 @@ cross_shims!(
 // find, whose answer is built from a value and a companion flag
 
 unsafe fn find_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i64 {
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return 0;
     };
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         if unsafe { pred_at(addr, env, v, i, pass) } {
             return match pass {
                 // SAFETY: `v` is live and `i` is in range.
                 ElemPass::Ptr => (unsafe { gos_rt_vec_get_ptr(v, i) }) as usize as i64,
+                // SAFETY: `v` is live (this module's helper contract) and `i` is below its
+                // length.
                 _ => unsafe { gos_rt_vec_get_i64(v, i) },
             };
         }
@@ -355,10 +389,13 @@ cross_shims!(
 );
 
 unsafe fn find_flag_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i64 {
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return 0;
     };
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         if unsafe { pred_at(addr, env, v, i, pass) } {
             return 1;
         }
@@ -390,12 +427,14 @@ unsafe fn filter_map_impl(
     // payload's own declared width rather than the input element's. A payload
     // the callback answers by address is copied whole out of that address.
     let width = u32::try_from(out_bytes.max(1)).unwrap_or(8);
-    // SAFETY: fresh allocation.
-    let out = unsafe { gos_rt_vec_new(width) };
-    let Some(addr) = env_fn_addr(env) else {
+    let out = gos_rt_vec_new(width);
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let r = unsafe { opt_at(addr, env, v, i, pass) };
         if crate::c_abi::gos_rt_result_disc(r) != 0 {
             continue;
@@ -428,16 +467,20 @@ cross_shims!(
 );
 
 unsafe fn map_carrier_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosVec {
-    let len = vec_len_of(v);
-    // SAFETY: fresh allocation sized for one carrier per element.
-    let out = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity_typed(16, len, 0) };
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    let len = unsafe { vec_len_of(v) };
+    let out = crate::c_abi::vec::gos_rt_vec_with_capacity_typed(16, len, 0);
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
     for i in 0..len {
         // The callback answers a carrier of its own, whose payload share the
         // element now holds.
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let carrier = unsafe { opt_at(addr, env, v, i, pass) };
+        // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push_i128`
+        // accepts.
         unsafe { crate::c_abi::vec::gos_rt_vec_push_i128(out, carrier) };
     }
     out
@@ -454,10 +497,13 @@ cross_shims!(
 );
 
 unsafe fn find_map_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i128 {
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return NONE;
     };
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let r = unsafe { opt_at(addr, env, v, i, pass) };
         if crate::c_abi::gos_rt_result_disc(r) == 0 {
             return r;
@@ -487,13 +533,16 @@ unsafe fn select_by(
     pass: ElemPass,
     keep_greater: bool,
 ) -> Option<i64> {
-    let addr = env_fn_addr(env)?;
-    let len = vec_len_of(v);
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let addr = unsafe { env_fn_addr(env) }?;
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    let len = unsafe { vec_len_of(v) };
     if len == 0 {
         return None;
     }
     let mut best = 0;
     for i in 1..len {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let ord = unsafe { cmp_at(addr, env, v, i, best, pass) };
         if (keep_greater && ord > 0) || (!keep_greater && ord < 0) {
             best = i;
@@ -518,19 +567,24 @@ unsafe fn some_elem_at(v: *const GosVec, idx: i64, pass: ElemPass) -> i128 {
 unsafe fn reduce_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i128 {
     // `reduce` folds with the first element as the seed, so the accumulator
     // is an element and the callback answers one.
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return NONE;
     };
-    let len = vec_len_of(v);
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    let len = unsafe { vec_len_of(v) };
     if len == 0 {
         return NONE;
     }
     let mut acc = match pass {
         // SAFETY: `v` is live and index 0 is in range.
         ElemPass::Ptr => (unsafe { gos_rt_vec_get_ptr(v, 0) }) as usize as i64,
+        // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `gos_rt_vec_get_i64`
+        // accepts.
         _ => unsafe { gos_rt_vec_get_i64(v, 0) },
     };
     for i in 1..len {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         acc = unsafe { fold_step(addr, env, acc, v, i, pass) };
     }
     some_of(acc)
@@ -546,6 +600,7 @@ unsafe fn fold_step(
     i: i64,
     pass: ElemPass,
 ) -> i64 {
+    // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
     unsafe { fold_step_typed(addr, env, acc, v, i, pass, pass) }
 }
 
@@ -612,7 +667,9 @@ cross_shims!(
 );
 
 unsafe fn min_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i128 {
+    // SAFETY: `env` and `v` meet this module's helper contract.
     match unsafe { select_by(env, v, pass, false) } {
+        // SAFETY: `v` is live and `idx` is an index `select_by` answered below its length.
         Some(idx) => unsafe { some_elem_at(v, idx, pass) },
         None => NONE,
     }
@@ -629,7 +686,9 @@ cross_shims!(
 );
 
 unsafe fn max_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i128 {
+    // SAFETY: `env` and `v` meet this module's helper contract.
     match unsafe { select_by(env, v, pass, true) } {
+        // SAFETY: `v` is live and `idx` is an index `select_by` answered below its length.
         Some(idx) => unsafe { some_elem_at(v, idx, pass) },
         None => NONE,
     }
@@ -649,11 +708,14 @@ cross_shims!(
 // sort_by
 
 unsafe fn sort_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosVec {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `out_like` accepts.
     let out = unsafe { out_like(v) };
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
-    let len = vec_len_of(v);
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    let len = unsafe { vec_len_of(v) };
     let mut order: Vec<i64> = (0..len).collect();
     // An insertion sort keeps the comparator's calls in a fixed order, which
     // is what makes the answer identical on every tier for a comparator that
@@ -661,6 +723,7 @@ unsafe fn sort_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut
     for i in 1..order.len() {
         let mut j = i;
         while j > 0 {
+            // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
             let ord = unsafe { cmp_at(addr, env, v, order[j], order[j - 1], pass) };
             if ord >= 0 {
                 break;
@@ -670,6 +733,7 @@ unsafe fn sort_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut
         }
     }
     for idx in order {
+        // SAFETY: `out` is the fresh vec made above and `v` is live, with `idx` below its length.
         unsafe { vec_push_elem_from(out, v, idx) };
     }
     out
@@ -699,13 +763,18 @@ unsafe fn scan_impl(
 ) -> *mut GosVec {
     // Each output is an accumulator the callback produced, so the result is a
     // word-slot sequence whatever the input element was.
-    let out = unsafe { gos_rt_vec_new(8) };
-    let Some(addr) = env_fn_addr(env) else {
+    let out = gos_rt_vec_new(8);
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
     let mut acc = init;
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         acc = unsafe { fold_step_typed(addr, env, acc, v, i, elem, acc_pass) };
+        // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push_i64`
+        // accepts.
         unsafe { crate::c_abi::gos_rt_vec_push_i64(out, acc) };
     }
     out
@@ -724,6 +793,8 @@ macro_rules! scan_shims {
                 v: *const GosVec,
             ) -> *mut GosVec {
                 ffi_entry!(std::ptr::null_mut(), {
+                    // SAFETY: the shim's arguments meet the helper contract under the C-ABI
+                    // contract.
                     unsafe { scan_impl(init, env, v, $elem, $acc) }
                 })
             }
@@ -741,11 +812,14 @@ scan_shims!(
 );
 
 unsafe fn product_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> i64 {
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return 1;
     };
     let mut prod: i64 = 1;
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         prod = prod.wrapping_mul(unsafe { key_at(addr, env, v, i, pass) });
     }
     prod
@@ -765,15 +839,22 @@ cross_shims!(
 // partition
 
 unsafe fn partition_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut u8 {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `out_like` accepts.
     let yes = unsafe { out_like(v) };
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `out_like` accepts.
     let no = unsafe { out_like(v) };
-    if let Some(addr) = env_fn_addr(env) {
-        for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    if let Some(addr) = unsafe { env_fn_addr(env) } {
+        // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+        for i in 0..unsafe { vec_len_of(v) } {
+            // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
             let dst = if unsafe { pred_at(addr, env, v, i, pass) } {
                 yes
             } else {
                 no
             };
+            // SAFETY: `dst` is one of the fresh vecs made above and `v` is live, with `i` below
+            // its length.
             unsafe { vec_push_elem_from(dst, v, i) };
         }
     }
@@ -809,28 +890,40 @@ cross_shims!(
 // chunk_by / count_by
 
 unsafe fn chunk_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosMap {
-    let out = unsafe { gos_rt_map_new(8, 8) };
-    let Some(addr) = env_fn_addr(env) else {
+    let out = gos_rt_map_new(8, 8);
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
     let mut keys: Vec<i64> = Vec::new();
     let mut groups: Vec<*mut GosVec> = Vec::new();
-    for i in 0..vec_len_of(v) {
+    let mut group_of: rustc_hash::FxHashMap<i64, usize> = rustc_hash::FxHashMap::default();
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let k = unsafe { key_at(addr, env, v, i, pass) };
-        let slot = if let Some(at) = keys.iter().position(|&seen| seen == k) {
+        let slot = if let Some(&at) = group_of.get(&k) {
             groups[at]
         } else {
+            group_of.insert(k, groups.len());
+            // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `out_like`
+            // accepts.
             let g = unsafe { out_like(v) };
             keys.push(k);
             groups.push(g);
             g
         };
+        // SAFETY: `slot` is a group vec made above and `v` is live, with `i` below its length.
         unsafe { vec_push_elem_from(slot, v, i) };
     }
     for (k, g) in keys.into_iter().zip(groups) {
+        // SAFETY: `out` is the fresh map made above, or null, which `gos_rt_map_insert_i64_i64`
+        // accepts.
         unsafe { gos_rt_map_insert_i64_i64(out, k, g as i64) };
     }
     // Each group was built here and handed to the map, so the map owns it.
+    // SAFETY: `out` is the fresh map made above, whose every value is a group vec this function
+    // built.
     unsafe { crate::c_abi::map::gos_rt_map_set_vec_values(out) };
     out
 }
@@ -846,22 +939,29 @@ cross_shims!(
 );
 
 unsafe fn count_by_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosMap {
-    let out = unsafe { gos_rt_map_new(8, 8) };
-    let Some(addr) = env_fn_addr(env) else {
+    let out = gos_rt_map_new(8, 8);
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
     let mut keys: Vec<i64> = Vec::new();
     let mut counts: Vec<i64> = Vec::new();
-    for i in 0..vec_len_of(v) {
+    let mut count_of: rustc_hash::FxHashMap<i64, usize> = rustc_hash::FxHashMap::default();
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let k = unsafe { key_at(addr, env, v, i, pass) };
-        if let Some(at) = keys.iter().position(|&seen| seen == k) {
+        if let Some(&at) = count_of.get(&k) {
             counts[at] += 1;
         } else {
+            count_of.insert(k, counts.len());
             keys.push(k);
             counts.push(1);
         }
     }
     for (k, c) in keys.into_iter().zip(counts) {
+        // SAFETY: `out` is the fresh map made above, or null, which `gos_rt_map_insert_i64_i64`
+        // accepts.
         unsafe { gos_rt_map_insert_i64_i64(out, k, c) };
     }
     out
@@ -881,31 +981,37 @@ cross_shims!(
 // flat_map
 
 unsafe fn flat_map_impl(env: *const u8, v: *const GosVec, pass: ElemPass) -> *mut GosVec {
-    let Some(addr) = env_fn_addr(env) else {
-        // SAFETY: fresh allocation.
-        return unsafe { gos_rt_vec_new(8) };
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
+        return gos_rt_vec_new(8);
     };
     // The concatenation carries the callback's element, so the result takes
     // its width and kind from the first sequence the callback answers.
     let mut out: *mut GosVec = std::ptr::null_mut();
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let inner = unsafe { seq_at(addr, env, v, i, pass) };
         if inner.is_null() {
             continue;
         }
         if out.is_null() {
+            // SAFETY: `inner` is the non-null sequence the callback answered (checked above).
             out = unsafe { out_like(inner) };
         }
-        for j in 0..vec_len_of(inner) {
+        // SAFETY: `inner` is the live sequence the callback answered (non-null, checked above).
+        for j in 0..unsafe { vec_len_of(inner) } {
+            // SAFETY: `out` is the vec made from `inner`'s shape and `inner` is live, with `j`
+            // below its length.
             unsafe { vec_push_elem_from(out, inner, j) };
         }
         // The callback answered a share of its sequence; each copied element
         // took a share of its own, so the sequence's share is given back.
+        // SAFETY: `inner` holds the share the callback answered, which this call gives back.
         unsafe { crate::c_abi::map::gos_rt_vec_free(inner) };
     }
     if out.is_null() {
-        // SAFETY: fresh allocation.
-        out = unsafe { gos_rt_vec_new(8) };
+        out = gos_rt_vec_new(8);
     }
     out
 }
@@ -931,12 +1037,15 @@ unsafe fn flat_map_arr_impl(
 ) -> *mut GosVec {
     // A fixed array is a raw buffer of contiguous slots with no header, so
     // the result is a word-slot sequence whatever the element read was.
-    let out = unsafe { gos_rt_vec_new(8) };
-    let Some(addr) = env_fn_addr(env) else {
+    let out = gos_rt_vec_new(8);
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
-    for i in 0..vec_len_of(v) {
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    for i in 0..unsafe { vec_len_of(v) } {
         let buf: *const i64 =
+            // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
             std::ptr::with_exposed_provenance(unsafe { key_at(addr, env, v, i, pass) } as usize);
         if buf.is_null() {
             continue;
@@ -945,6 +1054,8 @@ unsafe fn flat_map_arr_impl(
             // SAFETY: the callback answered a live buffer of `arr_len`
             // contiguous slots, which is the fixed-array ABI.
             let word = unsafe { buf.add(j as usize).read() };
+            // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push_i64`
+            // accepts.
             unsafe { crate::c_abi::gos_rt_vec_push_i64(out, word) };
         }
     }
@@ -970,19 +1081,24 @@ unsafe fn sort_by_key_impl(
     key_is_f64: i64,
     pass: ElemPass,
 ) -> *mut GosVec {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `out_like` accepts.
     let out = unsafe { out_like(v) };
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return out;
     };
-    let len = vec_len_of(v);
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    let len = unsafe { vec_len_of(v) };
     let mut keyed: Vec<(i64, SortKey)> = Vec::with_capacity(len.max(0) as usize);
     for i in 0..len {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         keyed.push((i, unsafe {
             sort_key_at(addr, env, v, i, key_is_f64 != 0, pass)
         }));
     }
     keyed.sort_by(|(_, a), (_, b)| a.order(*b));
     for (idx, _) in keyed {
+        // SAFETY: `out` is the fresh vec made above and `v` is live, with `idx` below its length.
         unsafe { vec_push_elem_from(out, v, idx) };
     }
     out
@@ -1046,10 +1162,14 @@ unsafe fn key_of_word(env: *const u8, addr: *const (), x: i64, key_is_f64: bool)
         // SAFETY: addr is the callable stored by the closure lowering, whose
         // shape the flag names.
         let f: WordToF64 = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the key callback `addr` names, whose environment `env` is live (this
+        // module's helper contract).
         SortKey::Float(unsafe { f(env, x) })
     } else {
         // SAFETY: as above.
         let f: WordToWord = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the key callback `addr` names, whose environment `env` is live (this
+        // module's helper contract).
         SortKey::Int(unsafe { f(env, x) })
     }
 }
@@ -1061,10 +1181,14 @@ unsafe fn key_of_float(env: *const u8, addr: *const (), bits: i64, key_is_f64: b
         // SAFETY: addr is the callable stored by the closure lowering, whose
         // shape the flag names.
         let f: FloatToF64 = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the key callback `addr` names, whose environment `env` is live (this
+        // module's helper contract).
         SortKey::Float(unsafe { f(env, x) })
     } else {
         // SAFETY: as above.
         let f: FloatToWord = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the key callback `addr` names, whose environment `env` is live (this
+        // module's helper contract).
         SortKey::Int(unsafe { f(env, x) })
     }
 }
@@ -1080,10 +1204,14 @@ pub(crate) unsafe fn key_of_ptr(
         // SAFETY: addr is the callable stored by the closure lowering, whose
         // shape the flag names.
         let f: PtrToF64 = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the key callback `addr` names, whose environment `env` is live (this
+        // module's helper contract).
         SortKey::Float(unsafe { f(env, x) })
     } else {
         // SAFETY: as above.
         let f: PtrToWord = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the key callback `addr` names, whose environment `env` is live (this
+        // module's helper contract).
         SortKey::Int(unsafe { f(env, x) })
     }
 }
@@ -1108,22 +1236,28 @@ unsafe fn select_by_key(
     pass: ElemPass,
     keep_greater: bool,
 ) -> i128 {
-    let Some(addr) = env_fn_addr(env) else {
+    // SAFETY: this module's helper contract covers `env`, as `env_fn_addr` requires.
+    let Some(addr) = (unsafe { env_fn_addr(env) }) else {
         return NONE;
     };
-    let len = vec_len_of(v);
+    // SAFETY: this module's helper contract covers `v`, as `vec_len_of` requires.
+    let len = unsafe { vec_len_of(v) };
     if len == 0 {
         return NONE;
     }
     let mut best = 0;
+    // SAFETY: `addr`, `env`, and `v` meet this module's helper contract, and `len` is non-zero
+    // (checked above).
     let mut best_key = unsafe { sort_key_at(addr, env, v, 0, key_is_f64 != 0, pass) };
     for i in 1..len {
+        // SAFETY: `addr`, `env`, and `v` meet this module's helper contract.
         let k = unsafe { sort_key_at(addr, env, v, i, key_is_f64 != 0, pass) };
         if k.beats(best_key, keep_greater) {
             best = i;
             best_key = k;
         }
     }
+    // SAFETY: `v` is live and `best` is an index below its length.
     unsafe { some_elem_at(v, best, pass) }
 }
 
@@ -1133,6 +1267,7 @@ unsafe fn min_by_key_impl(
     key_is_f64: i64,
     pass: ElemPass,
 ) -> i128 {
+    // SAFETY: `env` and `v` meet this module's helper contract.
     unsafe { select_by_key(env, v, key_is_f64, pass, false) }
 }
 
@@ -1152,6 +1287,7 @@ unsafe fn max_by_key_impl(
     key_is_f64: i64,
     pass: ElemPass,
 ) -> i128 {
+    // SAFETY: `env` and `v` meet this module's helper contract.
     unsafe { select_by_key(env, v, key_is_f64, pass, true) }
 }
 

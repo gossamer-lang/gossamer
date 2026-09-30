@@ -134,7 +134,127 @@ impl Parser<'_> {
         Item::new(id, span, attrs, visibility, kind)
     }
 
+    /// A declined type-like item (`macro_rules!`, `union`, `class`), reported
+    /// at its keyword and parsed as a unit struct so the rest of the file
+    /// still checks; `None` when the cursor is at none of them.
+    fn parse_declined_type_item(&mut self) -> Option<ItemKind> {
+        if self.at_contextual_word("macro_rules") && self.peek_nth_is_punct(1, Punct::Bang) {
+            let span = self.peek_span();
+            self.report_declined(crate::declined::USER_MACROS, span);
+            self.bump();
+            self.bump();
+            let name = self.parse_ident_required("macro name");
+            let (open, close) = if self.at_punct(Punct::LParen) {
+                (Punct::LParen, Punct::RParen)
+            } else if self.at_punct(Punct::LBracket) {
+                (Punct::LBracket, Punct::RBracket)
+            } else {
+                (Punct::LBrace, Punct::RBrace)
+            };
+            if self.eat_punct(open) {
+                self.recover_to_close(open, close);
+            }
+            return Some(ItemKind::Struct(StructDecl {
+                name,
+                generics: Generics::default(),
+                where_clause: WhereClause::default(),
+                body: StructBody::Unit,
+            }));
+        }
+        let declined_type = if self.at_contextual_word("union") {
+            Some(crate::declined::UNIONS)
+        } else if self.at_contextual_word("class") {
+            Some(crate::declined::CLASSES)
+        } else {
+            None
+        };
+        if let Some(declined) = declined_type
+            && matches!(self.peek_nth(1).kind, TokenKind::Ident)
+        {
+            let span = self.peek_span();
+            self.report_declined(declined, span);
+            self.bump();
+            let name = self.parse_ident_required("type name");
+            while !self.at_eof() && !self.at_punct(Punct::LBrace) {
+                self.bump();
+            }
+            if self.eat_punct(Punct::LBrace) {
+                self.recover_to_close(Punct::LBrace, Punct::RBrace);
+            }
+            return Some(ItemKind::Struct(StructDecl {
+                name,
+                generics: Generics::default(),
+                where_clause: WhereClause::default(),
+                body: StructBody::Unit,
+            }));
+        }
+        None
+    }
+
+    /// `extern "C" { ... }` and `unsafe extern "C" { ... }` - GP0016. The
+    /// keyword is an item start to the recovery helper, so the whole form is
+    /// consumed here, or recovery would return without advancing past it.
+    fn parse_reserved_extern(&mut self) -> ItemKind {
+        let span = self.peek_span();
+        self.record(ParseError::ExternReserved, span);
+        if self.eat_keyword(Keyword::Unsafe) {
+            // consumed `unsafe` of `unsafe extern "C" ...`
+        }
+        self.bump(); // consume `extern`
+        // optional ABI string: `"C"`, `"system"`, etc.
+        if matches!(self.peek().kind, TokenKind::StringLit) {
+            self.bump();
+        }
+        // skip braced body `{ ... }` when present
+        if self.at_punct(Punct::LBrace) {
+            self.bump(); // consume opening `{`
+            let mut depth = 1u32;
+            while !self.at_eof() && depth > 0 {
+                if self.at_punct(Punct::LBrace) {
+                    depth += 1;
+                } else if self.at_punct(Punct::RBrace) {
+                    depth -= 1;
+                }
+                self.bump();
+            }
+        }
+        ItemKind::Mod(ModDecl {
+            name: Ident::new("<extern-error>"),
+            body: ModBody::External,
+        })
+    }
+
     fn parse_item_kind(&mut self, visibility: Visibility) -> ItemKind {
+        // `async fn` and `gen fn` report the declined feature and parse the
+        // function under it, so the rest of the file still checks.
+        let declined_fn = if self.at_keyword(Keyword::Async) {
+            Some(crate::declined::ASYNC)
+        } else if self.at_contextual_word("gen") {
+            Some(crate::declined::GENERATORS)
+        } else {
+            None
+        };
+        if let Some(declined) = declined_fn
+            && matches!(self.peek_nth(1).kind, TokenKind::Keyword(Keyword::Fn))
+        {
+            let span = self.peek_span();
+            self.report_declined(declined, span);
+            self.bump();
+        }
+        if let Some(kind) = self.parse_declined_type_item() {
+            return kind;
+        }
+        if self.at_keyword(Keyword::Unsafe)
+            && matches!(
+                self.peek_nth(1).kind,
+                TokenKind::Keyword(Keyword::Impl | Keyword::Trait)
+            )
+        {
+            let span = self.peek_span();
+            self.bump();
+            let span = self.through_trailing_space(span);
+            self.record(ParseError::UnsafeGrantsNothing, span);
+        }
         if self.at_keyword(Keyword::Fn) || self.at_keyword(Keyword::Unsafe) || self.at_comptime_fn()
         {
             return ItemKind::Fn(self.parse_fn_decl(visibility));
@@ -183,33 +303,7 @@ impl Parser<'_> {
             || (self.at_keyword(Keyword::Unsafe)
                 && matches!(self.peek_nth(1).kind, TokenKind::Keyword(Keyword::Extern)))
         {
-            let span = self.peek_span();
-            self.record(ParseError::ExternReserved, span);
-            if self.eat_keyword(Keyword::Unsafe) {
-                // consumed `unsafe` of `unsafe extern "C" ...`
-            }
-            self.bump(); // consume `extern`
-            // optional ABI string: `"C"`, `"system"`, etc.
-            if matches!(self.peek().kind, TokenKind::StringLit) {
-                self.bump();
-            }
-            // skip braced body `{ ... }` when present
-            if self.at_punct(Punct::LBrace) {
-                self.bump(); // consume opening `{`
-                let mut depth = 1u32;
-                while !self.at_eof() && depth > 0 {
-                    if self.at_punct(Punct::LBrace) {
-                        depth += 1;
-                    } else if self.at_punct(Punct::RBrace) {
-                        depth -= 1;
-                    }
-                    self.bump();
-                }
-            }
-            return ItemKind::Mod(ModDecl {
-                name: Ident::new("<extern-error>"),
-                body: ModBody::External,
-            });
+            return self.parse_reserved_extern();
         }
         // A file's imports precede its items, so a `use` here is a
         // placement error rather than an unrecognised construct: naming
@@ -254,7 +348,16 @@ impl Parser<'_> {
     pub(crate) fn parse_attrs(&mut self) -> Attrs {
         let mut outer = Vec::new();
         while self.at_attribute_start() {
+            let span = self.peek_span();
             if let Some(attribute) = self.parse_attribute() {
+                if attribute.path.segments.last().is_some_and(|segment| {
+                    matches!(
+                        segment.name.name.as_str(),
+                        "proc_macro" | "proc_macro_derive" | "proc_macro_attribute"
+                    )
+                }) {
+                    self.report_declined(crate::declined::PROC_MACROS, span);
+                }
                 outer.push(attribute);
             } else {
                 break;
@@ -384,7 +487,8 @@ impl Parser<'_> {
         let unsafe_span = self.peek_span();
         let is_unsafe = self.eat_keyword(Keyword::Unsafe);
         if is_unsafe {
-            self.record(ParseError::UnsafeGrantsNothing, unsafe_span);
+            let span = self.through_trailing_space(unsafe_span);
+            self.record(ParseError::UnsafeGrantsNothing, span);
         }
         self.expect_keyword(Keyword::Fn, "to start function declaration");
         let name_span = self.peek_span();
@@ -468,6 +572,14 @@ impl Parser<'_> {
             let amp = self.peek_span();
             let ty = self.parse_type();
             let ty = self.strip_shared_parameter_reference(ty, amp);
+            // `A | B` names a union type, which the language declines; each
+            // alternative after the first is reported and dropped.
+            while self.at_punct(Punct::Pipe) {
+                let span = self.peek_span();
+                self.report_declined(crate::declined::UNIONS, span);
+                self.bump();
+                let _ = self.parse_type();
+            }
             let default = if self.eat_punct(Punct::Eq) {
                 Some(Box::new(self.parse_expr_no_assign()))
             } else {
@@ -778,6 +890,12 @@ impl Parser<'_> {
             let attrs = self.parse_attrs();
             if self.eat_keyword(Keyword::Type) {
                 let name = self.parse_ident_required("associated type name");
+                if self.at_punct(Punct::Lt) {
+                    let span = self.peek_span();
+                    self.report_declined(crate::declined::GENERIC_ASSOCIATED_TYPES, span);
+                    self.bump();
+                    self.recover_to_close_angle();
+                }
                 let bounds = if self.eat_punct(Punct::Colon) {
                     self.parse_trait_bound_list()
                 } else {
@@ -880,6 +998,13 @@ impl Parser<'_> {
     fn parse_impl_item(&mut self) -> ImplItem {
         let attrs = self.parse_attrs();
         let visibility = self.parse_visibility();
+        if self.at_contextual_word("default")
+            && matches!(self.peek_nth(1).kind, TokenKind::Keyword(Keyword::Fn))
+        {
+            let span = self.peek_span();
+            self.report_declined(crate::declined::SPECIALIZATION, span);
+            self.bump();
+        }
         if self.eat_keyword(Keyword::Type) {
             let name = self.parse_ident_required("associated type name");
             self.expect_punct(Punct::Eq, "after the associated type name");

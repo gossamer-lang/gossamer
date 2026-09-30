@@ -1,0 +1,9 @@
+// ERROR: GP0061
+
+async fn fetch() -> i64 {
+    1
+}
+
+fn main() {
+    println("{}", fetch())
+}

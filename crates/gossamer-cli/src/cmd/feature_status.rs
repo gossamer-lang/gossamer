@@ -555,7 +555,9 @@ fn check_mode(
         // it on every tier. `Unproven` is exempt - it is the label for
         // exactly this absence.
         let derived = feature_status::derived_status(entry.path, entry.status);
-        if matches!(derived, Status::Stable | Status::Shipped) {
+        if matches!(derived, Status::Stable | Status::Shipped)
+            && !feature_status::is_tooling(entry.path)
+        {
             match tier_record(tiers, entry.path) {
                 Some(t) if t.all_pass() => {}
                 Some(_) => failures.push(format!(
@@ -951,10 +953,12 @@ mod tests {
         assert_eq!(pinned_out, "\"shipped\"[\"vm\",\"cranelift\",\"llvm\"]");
         assert!(!pinned.positive_tests.is_empty());
 
-        // A surface no fixture exercises still claims nothing.
+        // A surface no fixture exercises - a module shipped without one -
+        // reads `unproven`, which is not a judgment the way `experimental`
+        // is, and claims no tier.
         let unproven = feature_status::item_evidence(
-            "std::utf16",
-            feature_status::derived_status("std::utf16", Status::Shipped),
+            "std::unexercised",
+            feature_status::derived_status("std::unexercised", Status::Shipped),
         );
         let mut bare = String::new();
         bare.push_str(&json_string(unproven.status.tag()));

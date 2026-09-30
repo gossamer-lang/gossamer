@@ -9,6 +9,7 @@ Product type declaration.
 A struct literal may spread a base value with `..base` and override
 individual fields:
 
+<!-- fragment -->
 ```gossamer
 let p2 = Point { x: 10, y: p1.y }
 ```
@@ -42,8 +43,8 @@ let empty = Empty {}
 let empty_tuple = EmptyTuple()
 let p = Pt { x: 3, y: 4 }     // keyed fields, any order
 let pair = Pair("row", 4)
-println("{} {}", p.x, p.y)
-println("{} {}", pair.0, pair.1)
+println(f"{p.x} {p.y}")
+println(f"{pair.0} {pair.1}")
 let Pt { x, y } = p
 ```
 

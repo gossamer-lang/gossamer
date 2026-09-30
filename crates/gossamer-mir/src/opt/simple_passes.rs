@@ -218,11 +218,11 @@ pub fn const_fold(body: &mut Body) {
     }
 }
 
-/// Type-aware constant folding for integer arithmetic. Debug profiles leave
-/// an overflowing operation in MIR so code generation can emit the runtime
-/// overflow panic. Release profiles fold with the declared integer width's
-/// wrapping semantics.
-fn const_fold_typed(body: &mut Body, tcx: &TyCtxt, checked_overflow: bool) {
+/// Type-aware constant folding for integer arithmetic. An overflowing
+/// operation stays in MIR so code generation emits the runtime overflow panic,
+/// unless the program asks integer arithmetic to wrap, when it folds with the
+/// declared integer width's wrapping semantics.
+fn const_fold_typed(body: &mut Body, tcx: &TyCtxt) {
     let local_tys: Vec<_> = body.locals.iter().map(|local| local.ty).collect();
     for block in &mut body.blocks {
         for stmt in &mut block.stmts {
@@ -232,7 +232,7 @@ fn const_fold_typed(body: &mut Body, tcx: &TyCtxt, checked_overflow: bool) {
             } = &mut stmt.kind
             {
                 let folded = match tcx.kind_of(local_tys[place.local.0 as usize]) {
-                    TyKind::Int(int_ty) => try_fold_typed_int(rv, *int_ty, checked_overflow),
+                    TyKind::Int(int_ty) => try_fold_typed_int(rv, *int_ty),
                     _ => try_fold(rv),
                 };
                 if let Some(folded) = folded {
@@ -245,11 +245,7 @@ fn const_fold_typed(body: &mut Body, tcx: &TyCtxt, checked_overflow: bool) {
     }
 }
 
-fn try_fold_typed_int(
-    rvalue: &Rvalue,
-    int_ty: gossamer_types::IntTy,
-    checked_overflow: bool,
-) -> Option<ConstValue> {
+fn try_fold_typed_int(rvalue: &Rvalue, int_ty: gossamer_types::IntTy) -> Option<ConstValue> {
     let Rvalue::BinaryOp {
         op,
         lhs: Operand::Const(ConstValue::Int(lhs)),
@@ -278,7 +274,7 @@ fn try_fold_typed_int(
         BinOp::WrappingMul => BinOp::Mul,
         _ => *op,
     };
-    let checked = checked_overflow && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul);
+    let checked = matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul);
     fold_typed_integer_arithmetic(fold_op, *lhs, *rhs, int_ty, checked)
         .map(ConstValue::Int)
 }
@@ -330,7 +326,7 @@ fn fold_typed_integer_arithmetic(
     lhs: i128,
     rhs: i128,
     int_ty: gossamer_types::IntTy,
-    checked_overflow: bool,
+    checked: bool,
 ) -> Option<i128> {
     use gossamer_types::IntTy;
 
@@ -355,7 +351,7 @@ fn fold_typed_integer_arithmetic(
         } else {
             (1u128 << bits) - 1
         };
-        if checked_overflow {
+        if checked {
             return value
                 .filter(|value| *value <= max)
                 .map(|value| i128::from(value as u64 as i64));
@@ -386,7 +382,7 @@ fn fold_typed_integer_arithmetic(
     };
     let min = -(1i128 << (bits - 1));
     let max = (1i128 << (bits - 1)) - 1;
-    if checked_overflow {
+    if checked {
         return (min..=max).contains(&value).then_some(value);
     }
     let modulus = 1i128 << bits;
@@ -417,9 +413,21 @@ fn try_fold(rvalue: &Rvalue) -> Option<ConstValue> {
 fn fold_binary(op: BinOp, lhs: &ConstValue, rhs: &ConstValue) -> Option<ConstValue> {
     match (lhs, rhs) {
         (ConstValue::Int(x), ConstValue::Int(y)) => match op {
-            BinOp::Add | BinOp::WrappingAdd => Some(ConstValue::Int(x.wrapping_add(*y))),
-            BinOp::Sub => Some(ConstValue::Int(x.wrapping_sub(*y))),
-            BinOp::Mul | BinOp::WrappingMul => Some(ConstValue::Int(x.wrapping_mul(*y))),
+            BinOp::WrappingAdd => Some(ConstValue::Int(x.wrapping_add(*y))),
+            BinOp::WrappingMul => Some(ConstValue::Int(x.wrapping_mul(*y))),
+            // With no declared width at hand, a plain operation folds only when
+            // its value is one every integer type holds as written: anything
+            // else is the overflow the tiers raise at run time.
+            BinOp::Add | BinOp::Sub | BinOp::Mul => {
+                let value = match op {
+                    BinOp::Add => x.checked_add(*y)?,
+                    BinOp::Sub => x.checked_sub(*y)?,
+                    _ => x.checked_mul(*y)?,
+                };
+                (i128::from(i64::MIN)..=i128::from(i64::MAX))
+                    .contains(&value)
+                    .then_some(ConstValue::Int(value))
+            }
             // Div/rem signedness is carried by the typed lowering context, not
             // by `ConstValue`; folding here would make `u64`/`usize` operands
             // at or above 2^63 indistinguishable from signed i64 values.

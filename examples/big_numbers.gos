@@ -13,37 +13,37 @@ use std::math
 
 // Factorial grows far beyond i64 range.
 let f30 = math::big::factorial(30)
-println("30! = {}", f30)
+println(f"30! = {f30}")
 
 let f50 = math::big::factorial(50)
-println("50! = {}", f50)
+println(f"50! = {f50}")
 
 // Arithmetic on large numbers.
 let a = math::big::int_from_i64(1_000_000_000)
 let b = math::big::int_from_i64(1_000_000_000)
 let product = math::big::int_mul(a, b)
-println("1e9 * 1e9 = {}", product)
+println(f"1e9 * 1e9 = {product}")
 
 let sum = math::big::int_add(product, math::big::int_from_i64(1))
-println("+ 1       = {}", sum)
+println(f"+ 1       = {sum}")
 
 // GCD and LCM.
 let x = math::big::int_from_i64(1071)
 let y = math::big::int_from_i64(462)
 let g = math::big::int_gcd(x, y)
 let l = math::big::int_lcm(x, y)
-println("gcd(1071, 462) = {}", g)
-println("lcm(1071, 462) = {}", l)
+println(f"gcd(1071, 462) = {g}")
+println(f"lcm(1071, 462) = {l}")
 
 // Modular exponentiation for RSA-like operations.
 let base = math::big::uint_from_u64(2)
 let exp = math::big::uint_from_u64(100)
 let modulus = math::big::uint_from_u64(1_000_000_007)
 let result = math::big::uint_pow_mod(base, exp, modulus)
-println("2^100 mod 10^9+7 = {}", result)
+println(f"2^100 mod 10^9+7 = {result}")
 
 // Comparison.
 let p = math::big::int_from_i64(100)
 let q = math::big::int_from_i64(200)
 let cmp = math::big::int_cmp(p, q)
-println("cmp(100, 200) = {}", cmp)
+println(f"cmp(100, 200) = {cmp}")

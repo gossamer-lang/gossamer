@@ -153,12 +153,17 @@ pub const REGEX: StdModule = StdModule {
         StdItem {
             name: "Pattern",
             kind: StdItemKind::Type,
-            doc: "Compiled pattern handle returned by `compile`.",
+            doc: "Compiled pattern handle returned by `compile` and `new`.",
         },
         StdItem {
             name: "compile",
             kind: StdItemKind::Function,
-            doc: "Parses a pattern into a reusable `Pattern` or returns an `Err`.",
+            doc: "Compiles a literal pattern, checked while the program is built, into a `Pattern`.",
+        },
+        StdItem {
+            name: "new",
+            kind: StdItemKind::Function,
+            doc: "Compiles a pattern built at run time into a `Pattern`, or an `Err` with the reason.",
         },
         StdItem {
             name: "is_match",
@@ -732,17 +737,17 @@ pub const UTF16: StdModule = StdModule {
         StdItem {
             name: "is_surrogate",
             kind: StdItemKind::Function,
-            doc: "True iff r falls in the surrogate range U+D800..U+DFFF.",
+            doc: "Whether a code unit lies in the surrogate range `0xD800..=0xDFFF`.",
         },
         StdItem {
             name: "rune_len",
             kind: StdItemKind::Function,
-            doc: "Number of UTF-16 code units needed to encode r (1 or 2).",
+            doc: "Number of UTF-16 code units a `char` encodes to (1 or 2).",
         },
         StdItem {
             name: "decode_surrogate_pair",
             kind: StdItemKind::Function,
-            doc: "Decodes a high+low surrogate pair to a char.",
+            doc: "The `char` a high and low surrogate pair encode, or `None` when they are not a pair.",
         },
         StdItem {
             name: "encode_string",
@@ -752,7 +757,7 @@ pub const UTF16: StdModule = StdModule {
         StdItem {
             name: "decode_to_string",
             kind: StdItemKind::Function,
-            doc: "Decodes UTF-16 code units (`[u16]`) to a String.",
+            doc: "Decodes UTF-16 code units to a String; an unpaired surrogate becomes U+FFFD.",
         },
     ],
 };

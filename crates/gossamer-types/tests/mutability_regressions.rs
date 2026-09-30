@@ -722,8 +722,8 @@ fn mutable_places_and_reference_capabilities_remain_usable() {
             "use std::metrics\nfn main() { let counter = metrics::Counter::new(\"hits\", \"hits\")\n counter.inc()\n let gauge = metrics::Gauge::new(\"depth\", \"depth\")\n gauge.inc() }",
         ),
         (
-            "inherent shared method takes precedence over mutable trait method",
-            "trait Advance { fn access(&mut self) -> i64 }\nstruct Reader { value: i64 }\nimpl Reader { fn access(&self) -> i64 { self.value } }\nimpl Advance for Reader { fn access(&mut self) -> i64 { self.value } }\nfn main() { let reader = Reader { value: 7 }\n let value = reader.access() }",
+            "shared inherent method on an immutable binding beside a mutable trait method",
+            "trait Advance { fn advance(&mut self) -> i64 }\nstruct Reader { value: i64 }\nimpl Reader { fn access(&self) -> i64 { self.value } }\nimpl Advance for Reader { fn advance(&mut self) -> i64 { self.value } }\nfn main() { let reader = Reader { value: 7 }\n let value = reader.access() }",
         ),
         (
             "mutable trait method through mutable reference",

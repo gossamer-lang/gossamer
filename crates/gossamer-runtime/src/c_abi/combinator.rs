@@ -14,8 +14,8 @@
 //! (0 = Ok/Some, 1 = Err/None), high word payload (see `pack_result`).
 
 use super::{
-    GosVec, gos_rt_result_disc, gos_rt_result_new, gos_rt_result_payload, gos_rt_vec_get_ptr,
-    gos_rt_vec_len, gos_rt_vec_new, gos_rt_vec_push_i64,
+    GosVec, gos_rt_result_disc, gos_rt_result_new, gos_rt_result_payload, gos_rt_vec_new,
+    gos_rt_vec_push_i64,
 };
 
 type PredFn = unsafe extern "C" fn(env: *const u8, x: i64) -> bool;
@@ -26,7 +26,12 @@ type ThunkValFn = unsafe extern "C" fn(env: *const u8) -> i64;
 const NONE: i128 = 1;
 
 /// Callable address stored at `env[0]`, or `None` for null/zero envs.
-fn env_fn_addr(env: *const u8) -> Option<*const ()> {
+///
+/// # Safety
+///
+/// `env` is null or a live closure environment, whose first word is the
+/// closure's entry address.
+unsafe fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     if env.is_null() {
         return None;
     }
@@ -50,7 +55,11 @@ fn some_of(payload: i64) -> i128 {
 /// Loads the 16-byte enum value whose heap address is `addr` (the
 /// payload representation of a nested Result/Option), or None when
 /// the address is null.
-fn load_enum_at(addr: i64) -> i128 {
+///
+/// # Safety
+///
+/// A non-zero `addr` addresses a live 16-byte enum copy.
+unsafe fn load_enum_at(addr: i64) -> i128 {
     if addr == 0 {
         return NONE;
     }
@@ -81,9 +90,10 @@ fn alloc_pair(a: i64, b: i64) -> *mut u8 {
 }
 
 fn vec_from(xs: &[i64]) -> *mut GosVec {
-    // SAFETY: fresh vec; push copies values in.
-    let out = unsafe { gos_rt_vec_new(8) };
+    let out = gos_rt_vec_new(8);
     for &x in xs {
+        // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push_i64`
+        // accepts.
         unsafe { gos_rt_vec_push_i64(out, x) };
     }
     out
@@ -100,11 +110,14 @@ pub unsafe extern "C" fn gos_rt_result_and_then(res: i128, env: *const u8) -> i1
         if gos_rt_result_disc(res) != 0 {
             return res;
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return res;
         };
         // SAFETY: addr is the callable stored by the closure lowering.
         let f: EnumFn = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the callback `addr` names, compiled for this shape, whose environment
+        // `env` is live for the call (C-ABI contract).
         unsafe { f(env, gos_rt_result_payload(res)) }
     })
 }
@@ -117,11 +130,14 @@ pub unsafe extern "C" fn gos_rt_result_or_else(res: i128, env: *const u8) -> i12
         if gos_rt_result_disc(res) == 0 {
             return res;
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return res;
         };
         // SAFETY: addr is the callable stored by the closure lowering.
         let f: EnumFn = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the callback `addr` names, compiled for this shape, whose environment
+        // `env` is live for the call (C-ABI contract).
         unsafe { f(env, gos_rt_result_payload(res)) }
     })
 }
@@ -157,11 +173,14 @@ pub unsafe extern "C" fn gos_rt_option_and_then(opt: i128, env: *const u8) -> i1
         if gos_rt_result_disc(opt) != 0 {
             return NONE;
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return NONE;
         };
         // SAFETY: addr is the callable stored by the closure lowering.
         let f: EnumFn = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the callback `addr` names, compiled for this shape, whose environment
+        // `env` is live for the call (C-ABI contract).
         unsafe { f(env, gos_rt_result_payload(opt)) }
     })
 }
@@ -173,12 +192,15 @@ pub unsafe extern "C" fn gos_rt_option_filter(opt: i128, env: *const u8) -> i128
         if gos_rt_result_disc(opt) != 0 {
             return NONE;
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return NONE;
         };
         let payload = gos_rt_result_payload(opt);
         // SAFETY: addr is the callable stored by the closure lowering.
         let p: PredFn = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `p` is the predicate `addr` names, compiled for this shape, whose environment
+        // `env` is live for the call (C-ABI contract).
         if unsafe { p(env, payload) } {
             some_of(payload)
         } else {
@@ -206,11 +228,14 @@ pub unsafe extern "C" fn gos_rt_option_or_else(opt: i128, env: *const u8) -> i12
         if gos_rt_result_disc(opt) == 0 {
             return opt;
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return NONE;
         };
         // SAFETY: addr is the callable stored by the closure lowering.
         let f: ThunkEnumFn = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the callback `addr` names, compiled for this shape, whose environment
+        // `env` is live for the call (C-ABI contract).
         unsafe { f(env) }
     })
 }
@@ -222,11 +247,14 @@ pub unsafe extern "C" fn gos_rt_option_default_with(opt: i128, env: *const u8) -
         if gos_rt_result_disc(opt) == 0 {
             return gos_rt_result_payload(opt);
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return 0;
         };
         // SAFETY: addr is the callable stored by the closure lowering.
         let f: ThunkValFn = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the callback `addr` names, compiled for this shape, whose environment
+        // `env` is live for the call (C-ABI contract).
         unsafe { f(env) }
     })
 }
@@ -239,11 +267,14 @@ pub unsafe extern "C" fn gos_rt_result_ok_or_else(opt: i128, env: *const u8) -> 
         if gos_rt_result_disc(opt) == 0 {
             return opt;
         }
-        let Some(addr) = env_fn_addr(env) else {
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let Some(addr) = (unsafe { env_fn_addr(env) }) else {
             return opt;
         };
         // SAFETY: addr is the callable stored by the closure lowering.
         let f: ThunkValFn = unsafe { std::mem::transmute(addr) };
+        // SAFETY: `f` is the callback `addr` names, compiled for this shape, whose environment
+        // `env` is live for the call (C-ABI contract).
         gos_rt_result_new(1, unsafe { f(env) })
     })
 }
@@ -267,17 +298,22 @@ pub extern "C" fn gos_rt_option_zip(first: i128, second: i128) -> i128 {
 
 /// `option::flatten(opt)` - `Some(inner)` loads the nested 16-byte
 /// Option from the payload word; None stays None.
+///
+/// # Safety
+///
+/// A `Some` payload of `opt` addresses a live 16-byte enum copy.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_option_flatten(opt: i128) -> i128 {
+pub unsafe extern "C" fn gos_rt_option_flatten(opt: i128) -> i128 {
     if gos_rt_result_disc(opt) != 0 {
         return NONE;
     }
-    load_enum_at(gos_rt_result_payload(opt))
+    // SAFETY: a `Some` payload is the enum copy this function's contract names.
+    unsafe { load_enum_at(gos_rt_result_payload(opt)) }
 }
 
 /// `option::iter(opt) -> [T]` - zero- or one-element Vec.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_iter(opt: i128) -> *mut GosVec {
+pub extern "C" fn gos_rt_option_iter(opt: i128) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if gos_rt_result_disc(opt) == 0 {
             vec_from(&[gos_rt_result_payload(opt)])
@@ -299,15 +335,18 @@ pub unsafe extern "C" fn gos_rt_iter_unzip_i64(v: *const GosVec) -> *mut u8 {
     ffi_entry!(std::ptr::null_mut(), {
         let mut a = Vec::new();
         let mut b = Vec::new();
-        if !v.is_null() {
-            let len = unsafe { gos_rt_vec_len(v) };
-            for i in 0..len {
-                let slot = unsafe { gos_rt_vec_get_ptr(v, i) }.cast::<i64>();
-                if slot.is_null() {
-                    continue;
-                }
-                a.push(unsafe { *slot });
-                b.push(unsafe { *slot.add(1) });
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        let pairs = unsafe { crate::c_abi::vec::VecView::of(v) }.filter(|vec| vec.width() >= 16);
+        if let Some(pairs) = pairs {
+            for i in 0..pairs.len() {
+                let elem = pairs.elem(i);
+                let word = |at: usize| {
+                    let mut bytes = [0u8; 8];
+                    bytes.copy_from_slice(&elem[at..at + 8]);
+                    i64::from_ne_bytes(bytes)
+                };
+                a.push(word(0));
+                b.push(word(8));
             }
         }
         alloc_pair(vec_from(&a) as i64, vec_from(&b) as i64)
@@ -317,6 +356,7 @@ pub unsafe extern "C" fn gos_rt_iter_unzip_i64(v: *const GosVec) -> *mut u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::c_abi::vec::gos_rt_vec_len;
 
     /// Heap-copies a 16-byte enum value and returns its address -
     /// the payload representation of a nested Result/Option.
@@ -362,6 +402,8 @@ mod tests {
         // per-index read is bounds-checked by the accessor.
         let len = unsafe { gos_rt_vec_len(v) };
         (0..len)
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             .map(|i| unsafe { crate::c_abi::gos_rt_vec_get_i64(v, i) })
             .collect()
     }
@@ -371,7 +413,11 @@ mod tests {
         let env = env_for(even_cb as *const () as usize);
         let some4 = gos_rt_result_new(0, 4);
         let some3 = gos_rt_result_new(0, 3);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let kept = unsafe { gos_rt_option_filter(some4, env.as_ptr().cast()) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let dropped = unsafe { gos_rt_option_filter(some3, env.as_ptr().cast()) };
         assert_eq!(gos_rt_result_disc(kept), 0);
         assert_eq!(gos_rt_result_payload(kept), 4);
@@ -396,20 +442,31 @@ mod tests {
     fn option_flatten_loads_nested_enum() {
         let inner = gos_rt_result_new(0, 42);
         let outer = gos_rt_result_new(0, store_enum(inner));
-        let flat = gos_rt_option_flatten(outer);
+        // SAFETY: `outer`'s payload is the enum copy `store_enum` made.
+        let flat = unsafe { gos_rt_option_flatten(outer) };
         assert_eq!(gos_rt_result_disc(flat), 0);
         assert_eq!(gos_rt_result_payload(flat), 42);
-        assert_eq!(gos_rt_result_disc(gos_rt_option_flatten(NONE)), 1);
+        // SAFETY: `None` carries no payload to read.
+        assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            gos_rt_result_disc(unsafe { gos_rt_option_flatten(NONE) }),
+            1
+        );
     }
 
     #[test]
     fn result_and_then_chains_ok_payload() {
         let env = env_for(opt_pos_cb as *const () as usize);
         let ok = gos_rt_result_new(0, 5);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let out = unsafe { gos_rt_result_and_then(ok, env.as_ptr().cast()) };
         assert_eq!(gos_rt_result_disc(out), 0);
         assert_eq!(gos_rt_result_payload(out), 50);
         let err = gos_rt_result_new(1, 9);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let passthrough = unsafe { gos_rt_result_and_then(err, env.as_ptr().cast()) };
         assert_eq!(gos_rt_result_disc(passthrough), 1);
         assert_eq!(gos_rt_result_payload(passthrough), 9);
@@ -419,6 +476,8 @@ mod tests {
     fn iter_partition_splits_matching_first() {
         let env = env_for(even_cb as *const () as usize);
         let v = vec_from(&[1, 2, 3, 4]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let pair = unsafe { crate::c_abi::gos_rt_iter_partition_i64(env.as_ptr().cast(), v) };
         // SAFETY: partition returns a live 2-slot pair of vec pointers.
         let (yes, no) = unsafe {
@@ -435,19 +494,27 @@ mod tests {
     #[test]
     fn iter_scan_reduce_sorted_follow_interp_semantics() {
         let cmp_env = env_for(sub_cb as *const () as usize);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let scanned = unsafe {
             crate::c_abi::gos_rt_iter_scan_i64(0, cmp_env.as_ptr().cast(), vec_from(&[1, 2, 3]))
         };
         assert_eq!(elems(scanned), vec![-1, -3, -6]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let reduced = unsafe {
             crate::c_abi::gos_rt_iter_reduce_i64(cmp_env.as_ptr().cast(), vec_from(&[10, 1, 2]))
         };
         assert_eq!(gos_rt_result_payload(reduced), 7);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let sorted = unsafe {
             crate::c_abi::gos_rt_iter_sorted_by_i64(cmp_env.as_ptr().cast(), vec_from(&[3, 1, 2]))
         };
         assert_eq!(elems(sorted), vec![1, 2, 3]);
         let map_env = env_for(double_cb as *const () as usize);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let keyed = unsafe {
             crate::c_abi::gos_rt_iter_sorted_by_key_i64(
                 map_env.as_ptr().cast(),

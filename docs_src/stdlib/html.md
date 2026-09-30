@@ -4,14 +4,11 @@ Status: experimental
 
 HTML text escaping and unescaping.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/html.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`escape`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/html.rs) | `fn escape(text: String) -> String` | Escapes HTML metacharacters (, <, >, ", '). |
-| [`render_json`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/html.rs) | `fn render_json(template: String, data: json::Value) -> Result<String, errors::Error>` | render_json(source, json_data) -> Result<String, Error>: renders a context-aware HTML template against a JSON data context. Stateless and wired bit-identically across every tier. |
-| [`unescape`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/html.rs) | `fn unescape(text: String) -> String` | Resolves HTML entities back to their characters. |
+| `escape` | `fn escape(text: String) -> String` | Escapes HTML metacharacters (, <, >, ", '). |
+| `unescape` | `fn unescape(text: String) -> String` | Resolves HTML entities back to their characters. |
+
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->

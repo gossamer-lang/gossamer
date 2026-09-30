@@ -418,7 +418,14 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GP0021",
-        "A format placeholder must be a binding name, a format specification, or an explicit positional placeholder. Bind complex expressions first.",
+        "A `format` template's placeholder is `{}`, which takes the next argument,\n\
+                     or a binding or field path (`{name}`, `{p.x}`, `{t.0}`), either with an\n\
+                     optional specification (`{:>8}`, `{name:.2}`). A number (`{0}`) or any\n\
+                     other expression is not a template placeholder: pass the value as an\n\
+                     argument, or write the string as `f\"...\"`, whose placeholders hold any\n\
+                     expression (`f\"{x + 1}\"`). A spec is fill, alignment, sign, zero-pad,\n\
+                     width, precision, and radix or exponent (`:>8`, `:+08.3`, `:#x`, `:.2e`),\n\
+                     or `?`.",
     ),
     (
         "GP0022",
@@ -500,9 +507,9 @@ pub const REGISTRY: &[(&str, &str)] = &[
     (
         "GP0039",
         "A serde turbofish named a type typed serde does not cover.\n\
-            A codec is synthesized per concrete struct whose fields the\n\
-            synthesizer can classify, so a generic struct, an enum, or a name\n\
-            that is not a struct has none. Exchange a concrete struct, read\n\
+            A codec is synthesized per concrete struct or enum whose fields the\n\
+            synthesizer can classify, so a generic type, or a name that is not\n\
+            a declared struct or enum, has none. Exchange a concrete type, read\n\
             the document dynamically with `json::parse`, or hand-write the\n\
             function.",
     ),
@@ -602,10 +609,11 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GP0052",
-        "`sql::statement` was handed something other than a literal. The\n\
-            statement is checked while the program is compiled, so it has to\n\
-            be there to check; a statement built at run time is an ordinary\n\
-            `String` and needs no wrapper.",
+        "A build-time validated call was handed something other than a\n\
+            literal. `sql::statement` and `regex::compile` check their literal\n\
+            while the program is compiled, so it has to be there to check. A\n\
+            statement built at run time is an ordinary `String`, and a pattern\n\
+            built at run time goes to `regex::new`, which answers a `Result`.",
     ),
     (
         "GP0053",
@@ -668,6 +676,41 @@ pub const REGISTRY: &[(&str, &str)] = &[
         "A struct literal was written without parentheses in an `if`, `while`,\n\
             `match`, or `for` head. There a `{` opens the body, so the literal\n\
             is ambiguous with it: write `for v in (Fib { a: 0, b: 1 }) { .. }`.",
+    ),
+    (
+        "GP0061",
+        "The source used a feature the language declines on purpose.\n\
+            The declined features are `async` and `.await`, generators,\n\
+            exceptions, lifetimes, `move` closures, `dyn` trait objects,\n\
+            `impl Trait` types, generic associated types, specialization,\n\
+            union types, classes, user or procedural macros, and\n\
+            comprehensions. Each has one replacement, which the help names.",
+    ),
+    (
+        "GP0062",
+        "A `#[derive(Default)]` struct has a field with no zero value.\n\
+            A field of a declared struct or enum takes that type's own\n\
+            `default()`, so the type needs `#[derive(Default)]` or an\n\
+            `impl Default`, or the struct needs a hand-written `default`.",
+    ),
+    (
+        "GP0063",
+        "An `f\"...\"` string holds an empty `{}` placeholder. An interpolated\n\
+            string has no arguments to fill placeholders in order, so each one holds\n\
+            the expression it renders: `f\"{total}\"`, `f\"{a + b:.2}\"`. To fill `{}`\n\
+            placeholders in order from arguments, call `format(\"...\", a, b)`.",
+    ),
+    (
+        "GP0064",
+        "`vec![...]` was written. Gossamer has no macros to build a Vec: the\n\
+            literal `#[1, 2, 3]` is a `Vec`, `[1, 2, 3]` is a fixed array, and\n\
+            `#[0; n]` is a `Vec` of `n` zeros. `gos check --fix` rewrites `vec!` to `#`.",
+    ),
+    (
+        "GP0065",
+        "An `f\"...\"` string holds a `{` that no `}` closes, or a `}` that no\n\
+            `{` opened. A placeholder is `{expr}` or `{expr:spec}`; a literal brace\n\
+            is written twice, `{{` or `}}`.",
     ),
     (
         "GR0001",
@@ -1183,12 +1226,6 @@ pub const REGISTRY: &[(&str, &str)] = &[
                      Bound the parameter by a trait that declares the method.",
     ),
     (
-        "GT0057",
-        "A built-in iterator was passed to a parameter bound by an iteration\n\
-                     trait. Only a type with an impl block can specialise such a\n\
-                     call, so name the iterator type on the parameter directly.",
-    ),
-    (
         "GT0058",
         "A trait impl leaves out a method the trait declares without a\n\
                      default body. A call through the trait lowers to a direct\n\
@@ -1523,6 +1560,16 @@ pub const REGISTRY: &[(&str, &str)] = &[
             (`fn describe<T: Named>(x: T) -> String`).",
     ),
     (
+        "GT0096",
+        "Two `impl` blocks define a method of the same name on one type: two\n\
+            inherent blocks, an inherent block and a trait impl, two trait impls,\n\
+            or impls for two instantiations of one generic type. A call names a\n\
+            method by its receiver's type and the method's name, so only one body\n\
+            could ever answer it. Rename one of the methods. `Display` and `Debug`\n\
+            each define `fmt` without colliding, because `{}` and `{:?}` choose\n\
+            between them.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\
@@ -1566,14 +1613,13 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GX0008",
-        "The goroutine exceeded the VM's maximum call depth (40 frames).\n\
-                     Each interpreted Gossamer frame adds a large pair of Rust stack\n\
-                     frames (apply + run); the 8 MB OS thread stack can safely hold\n\
-                     around 40 such pairs in a debug build before overflowing.\n\
-                     Direct or mutual recursion without a reachable base case is the\n\
-                     most common cause. Add a terminating condition, convert to an\n\
-                     iterative loop, or use `gos build` where the native codegen\n\
-                     produces standard call instructions the OS can grow to handle.",
+        "A goroutine's recursion outgrew the memory its call frames may use.\n\
+                     The bytecode VM keeps suspended frames on the heap, up to 1 GiB\n\
+                     per goroutine; compiled code runs on the goroutine's stack, whose\n\
+                     guard turns exhaustion into this error. Every tier reports it the\n\
+                     same way. Direct or mutual recursion without a reachable base case\n\
+                     is the most common cause: add the terminating condition, or turn\n\
+                     the recursion into a loop over an explicit `Stack`.",
     ),
     (
         "GX0009",

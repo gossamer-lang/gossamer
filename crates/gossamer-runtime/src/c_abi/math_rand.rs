@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
@@ -33,7 +32,7 @@ impl GosRng {
 
 /// Allocate a new RNG seeded with `seed` (reinterpreted as `u64`).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_math_rng_new(seed: i64) -> *mut GosRng {
+pub extern "C" fn gos_rt_math_rng_new(seed: i64) -> *mut GosRng {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosRng { state: seed as u64 }))
     })
@@ -46,6 +45,7 @@ pub unsafe extern "C" fn gos_rt_math_rng_next_u64(r: *mut GosRng) -> i64 {
         if r.is_null() {
             return 0;
         }
+        // SAFETY: `r` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &mut *r }.next_u64() as i64
     })
 }
@@ -57,6 +57,7 @@ pub unsafe extern "C" fn gos_rt_math_rng_next_u32(r: *mut GosRng) -> i64 {
         if r.is_null() {
             return 0;
         }
+        // SAFETY: `r` is a handle from compiled code, checked non-null above and live for the whole call.
         i64::from((unsafe { &mut *r }.next_u64() >> 32) as u32)
     })
 }
@@ -75,6 +76,7 @@ pub unsafe extern "C" fn gos_rt_math_rng_range_u64(r: *mut GosRng, low: i64, hig
         if hi <= lo {
             return low;
         }
+        // SAFETY: `r` is a handle from compiled code, checked non-null above and live for the whole call.
         (lo + unsafe { &mut *r }.next_u64() % (hi - lo)) as i64
     })
 }
@@ -86,6 +88,7 @@ pub unsafe extern "C" fn gos_rt_math_rng_next_f64(r: *mut GosRng) -> f64 {
         if r.is_null() {
             return 0.0;
         }
+        // SAFETY: `r` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &mut *r }.next_u64();
         (v >> 11) as f64 / ((1u64 << 53) as f64)
     })

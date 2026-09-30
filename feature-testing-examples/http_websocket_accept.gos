@@ -40,7 +40,7 @@ impl http::Handler for App {
 }
 
 fn serve_ws() {
-    if let Err(e) = http::serve("127.0.0.1:23891", App { }) {
+    if let Err(e) = http::serve("127.0.0.1:23886", App { }) {
         eprintln("serve failed: {e}")
     }
 }
@@ -62,7 +62,7 @@ fn main() {
     println("accept_key={}", websocket::accept_key(SAMPLE_KEY))
 
     spawn(|| serve_ws())
-    await_ready("http://127.0.0.1:23891/x")
+    await_ready("http://127.0.0.1:23886/x")
 
     let up: Vec<(String, String)> = Vec::from([
         ("Upgrade", "websocket")
@@ -70,11 +70,11 @@ fn main() {
         ("Sec-WebSocket-Version", "13")
         ("Sec-WebSocket-Key", SAMPLE_KEY)
     ])
-    match http::request("GET", "http://127.0.0.1:23891/ws", "", up) {
+    match http::request("GET", "http://127.0.0.1:23886/ws", "", up) {
         Ok(r) => println("valid={}", r.body)
         Err(e) => println("valid error: {}", e)
     }
-    match http::get("http://127.0.0.1:23891/ws", Vec::from([])) {
+    match http::get("http://127.0.0.1:23886/ws", Vec::from([])) {
         Ok(r) => println("reject={}", r.body)
         Err(e) => println("reject error: {}", e)
     }

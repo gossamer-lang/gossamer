@@ -152,9 +152,7 @@ pub fn flush_runtime_stdout() {
     // FFI uniformity but has no preconditions - it just drains
     // the per-thread `STDOUT_BUF` and writes to FD 1.
     #[allow(unsafe_code)]
-    unsafe {
-        gossamer_runtime::c_abi::gos_rt_flush_stdout();
-    }
+    gossamer_runtime::c_abi::gos_rt_flush_stdout();
 }
 pub use bytecode::{FnChunk, InstructionLocation, Op, SourceLocation};
 pub use comptime::{fold_into_source, fold_into_source_anchored};

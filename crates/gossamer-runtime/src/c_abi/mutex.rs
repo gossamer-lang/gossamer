@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -41,7 +39,7 @@ pub struct GosMutex {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_mutex_new() -> *mut GosMutex {
+pub extern "C" fn gos_rt_mutex_new() -> *mut GosMutex {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosMutex {
             inner: parking_lot::Mutex::new(()),
@@ -57,6 +55,7 @@ pub unsafe extern "C" fn gos_rt_mutex_lock(m: *mut GosMutex) {
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let m = unsafe { &*m };
         // Forget the guard - the user calls unlock explicitly.
         let guard = m.inner.lock();
@@ -76,6 +75,7 @@ pub unsafe extern "C" fn gos_rt_mutex_unlock(m: *mut GosMutex) {
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let m = unsafe { &*m };
         let me = i64::from(crate::race::current_gid());
         let owner = m.owner.load(Ordering::Acquire);
@@ -86,12 +86,11 @@ pub unsafe extern "C" fn gos_rt_mutex_unlock(m: *mut GosMutex) {
             );
             std::process::abort();
         }
-        // SAFETY: matched with the `forget` in lock - the lock is
-        // held by this goroutine (owner check above) and we now
-        // release it. Releasing an unlocked mutex is undefined;
-        // the owner check ensures the lock is currently held.
         m.owner.store(-1, Ordering::Release);
         m.last_unlocker.store(me, Ordering::Release);
+        // SAFETY: matched with the `forget` in lock - the lock is held by
+        // this goroutine (owner check above), so releasing it here is the
+        // unlock of a held lock.
         unsafe { m.inner.force_unlock() };
     });
 }

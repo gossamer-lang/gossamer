@@ -312,11 +312,17 @@ impl<'a> Builder<'a> {
         if let Some(block) = dispatch_block {
             self.set_current(block);
         }
-        self.terminate(Terminator::SwitchInt {
-            discriminant: Operand::Copy(Place::local(scrutinee_local)),
-            arms: switch_arms,
-            default,
-        });
+        // With nothing to compare, the default arm is the only one: its
+        // scrutinee may be any type, so no discriminant is read.
+        if switch_arms.is_empty() {
+            self.terminate(Terminator::Goto { target: default });
+        } else {
+            self.terminate(Terminator::SwitchInt {
+                discriminant: Operand::Copy(Place::local(scrutinee_local)),
+                arms: switch_arms,
+                default,
+            });
+        }
         for ((arm_block, body), binding) in arm_bodies.into_iter().zip(arm_bindings) {
             self.set_current(arm_block);
             // When the arm pattern was `Ok(v)` / `Some(v)` /

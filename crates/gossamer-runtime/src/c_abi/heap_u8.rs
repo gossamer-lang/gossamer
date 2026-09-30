@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -39,7 +37,7 @@ pub struct GosU8Vec {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_heap_u8_new(len: i64) -> *mut GosU8Vec {
+pub extern "C" fn gos_rt_heap_u8_new(len: i64) -> *mut GosU8Vec {
     ffi_entry!(std::ptr::null_mut(), {
         if len < 0 {
             return std::ptr::null_mut();
@@ -58,9 +56,13 @@ pub unsafe extern "C" fn gos_rt_heap_u8_free(v: *mut GosU8Vec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is non-null (checked above), the vector `gos_rt_heap_u8_new` boxed, which
+        // this call consumes (C-ABI contract).
         let v = unsafe { Box::from_raw(v) };
         if !v.data.is_null() {
             let n = v.len as usize;
+            // SAFETY: `data` is the `Vec<u8>` allocation of `len` bytes and capacity
+            // `gos_rt_heap_u8_new` made.
             unsafe {
                 let _ = Vec::from_raw_parts(v.data, n, n);
             }
@@ -74,10 +76,12 @@ pub unsafe extern "C" fn gos_rt_heap_u8_get(v: *const GosU8Vec, idx: i64) -> i64
         if v.is_null() || idx < 0 {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         if idx >= v.len || v.data.is_null() {
             return 0;
         }
+        // SAFETY: `idx` is in `[0, len)` and `data` is non-null (checked above).
         unsafe { i64::from(*v.data.add(idx as usize)) }
     })
 }
@@ -88,12 +92,14 @@ pub unsafe extern "C" fn gos_rt_heap_u8_set(v: *mut GosU8Vec, idx: i64, val: i64
         if v.is_null() || idx < 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if idx >= v_ref.len || v_ref.data.is_null() {
             return;
         }
         // Truncate to a byte; callers pass `i64`-typed source values
         // that always live in `0..=255` for this use case.
+        // SAFETY: `idx` is in `[0, len)` and `data` is non-null (checked above).
         unsafe { *v_ref.data.add(idx as usize) = val as u8 };
     });
 }
@@ -104,6 +110,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_len(v: *const GosU8Vec) -> i64 {
         if v.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*v).len }
     })
 }
@@ -126,12 +133,14 @@ pub unsafe extern "C" fn gos_rt_heap_u8_to_string(v: *const GosU8Vec, len: i64) 
         if v.is_null() || len <= 0 {
             return alloc_cstring(b"");
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if v_ref.data.is_null() {
             return alloc_cstring(b"");
         }
         let cap = v_ref.len.max(0) as usize;
         let take = (len as usize).min(cap);
+        // SAFETY: `data` holds `len` bytes and `take` is at most `len`.
         let bytes: &[u8] = unsafe { std::slice::from_raw_parts(v_ref.data, take) };
         alloc_cstring(bytes)
     })
@@ -151,6 +160,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_lines_to_stdout(
         if v.is_null() || start < 0 || count <= 0 || line_width <= 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if v_ref.data.is_null() {
             return;
@@ -162,12 +172,16 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_lines_to_stdout(
         let _guard = StdoutGuard::acquire();
         let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
         let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         let mut cur = unsafe { *len_ptr };
         let mut col: i64 = 0;
         let mut idx = start as usize;
         let end = (start + count) as usize;
         while idx < end {
             if cur >= STDOUT_BUF_SIZE {
+                // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                // length alone, and its first `cur` bytes are written.
                 unsafe {
                     raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 }
@@ -178,6 +192,9 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_lines_to_stdout(
             let chars_left = end - idx;
             let take = std::cmp::min(chars_to_eol, std::cmp::min(chars_left, avail));
             // u8 → u8 plain memcpy.
+            // SAFETY: `idx + take` is at most `end`, within the vector's `len` (checked above),
+            // and `cur + take` is at most the buffer's size; the held `StdoutGuard` gives this
+            // thread the stdout buffer and its length alone.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     v_ref.data.add(idx),
@@ -190,11 +207,15 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_lines_to_stdout(
             col += take as i64;
             if col >= line_width {
                 if cur >= STDOUT_BUF_SIZE {
+                    // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                    // length alone, and its first `cur` bytes are written.
                     unsafe {
                         raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                     }
                     cur = 0;
                 }
+                // SAFETY: `cur` is below the buffer's size (flushed above when full); the held
+                // `StdoutGuard` gives this thread the stdout buffer and its length alone.
                 unsafe {
                     *(*bytes_ptr).as_mut_ptr().add(cur) = b'\n';
                 }
@@ -204,16 +225,22 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_lines_to_stdout(
         }
         if col > 0 {
             if cur >= STDOUT_BUF_SIZE {
+                // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                // length alone, and its first `cur` bytes are written.
                 unsafe {
                     raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 }
                 cur = 0;
             }
+            // SAFETY: `cur` is below the buffer's size (flushed above when full); the held
+            // `StdoutGuard` gives this thread the stdout buffer and its length alone.
             unsafe {
                 *(*bytes_ptr).as_mut_ptr().add(cur) = b'\n';
             }
             cur += 1;
         }
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         unsafe { *len_ptr = cur };
     });
 }
@@ -232,6 +259,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_bytes_to_stdout(
         if v.is_null() || start < 0 || count <= 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if v_ref.data.is_null() {
             return;
@@ -243,12 +271,16 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_bytes_to_stdout(
         let _guard = StdoutGuard::acquire();
         let bytes_ptr = GOS_RT_STDOUT_BYTES.0.get();
         let len_ptr = GOS_RT_STDOUT_LEN.0.get();
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         let mut cur = unsafe { *len_ptr };
         let n = count as usize;
         let mut idx = start as usize;
         let mut written = 0usize;
         while written < n {
             if cur >= STDOUT_BUF_SIZE {
+                // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                // length alone, and its first `cur` bytes are written.
                 unsafe {
                     raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 }
@@ -256,6 +288,9 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_bytes_to_stdout(
             }
             let avail = STDOUT_BUF_SIZE - cur;
             let take = std::cmp::min(avail, n - written);
+            // SAFETY: `idx + take` is at most the checked `end`, within the vector's `len`, and
+            // `cur + take` is at most the buffer's size; the held `StdoutGuard` gives this thread
+            // the stdout buffer and its length alone.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     v_ref.data.add(idx),
@@ -267,12 +302,16 @@ pub unsafe extern "C" fn gos_rt_heap_u8_write_bytes_to_stdout(
             idx += take;
             written += take;
             if cur == STDOUT_BUF_SIZE {
+                // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its
+                // length alone, and its first `cur` bytes are written.
                 unsafe {
                     raw_write_stdout(std::slice::from_raw_parts((*bytes_ptr).as_ptr(), cur));
                 }
                 cur = 0;
             }
         }
+        // SAFETY: the held `StdoutGuard` gives this thread the stdout buffer and its length
+        // alone.
         unsafe { *len_ptr = cur };
     });
 }
@@ -293,11 +332,15 @@ unsafe fn u8_slice<'a>(v: *const GosU8Vec, limit: i64) -> &'a [u8] {
     if v.is_null() || limit <= 0 {
         return &[];
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `GosU8Vec`.
     let v = unsafe { &*v };
     if v.data.is_null() || v.len <= 0 {
         return &[];
     }
     let len = usize::try_from(v.len.min(limit)).unwrap_or(0);
+    // SAFETY: `data` is non-null (checked above) and holds `len` bytes, and the slice takes at
+    // most that many.
     unsafe { std::slice::from_raw_parts(v.data, len) }
 }
 
@@ -310,6 +353,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_window_key(v: *const GosU8Vec, index: i6
         if v.is_null() || index < 0 || k <= 0 {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v_ref = unsafe { &*v };
         if v_ref.data.is_null() {
             return 0;
@@ -320,6 +364,7 @@ pub unsafe extern "C" fn gos_rt_heap_u8_window_key(v: *const GosU8Vec, index: i6
         let stop = start.saturating_add(want).min(len);
         let mut key: i64 = 0;
         for offset in start..stop {
+            // SAFETY: `offset` is below `len`, the vector's length.
             let byte = unsafe { *v_ref.data.add(offset) };
             key = (key << 2) | i64::from(byte);
         }
@@ -338,8 +383,10 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_singles(
     length: i64,
 ) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { gos_rt_vec_new(8) };
+        let out = gos_rt_vec_new(8);
         let mut counts = [0i64; 4];
+        // SAFETY: `v` is this shim's argument, null or a live vector (C-ABI contract), which
+        // `u8_slice` accepts.
         for &byte in unsafe { u8_slice(v, length) } {
             if (byte as usize) < counts.len() {
                 counts[byte as usize] += 1;
@@ -347,6 +394,8 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_singles(
         }
         for count in counts {
             let bytes = count.to_ne_bytes();
+            // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push`
+            // accepts, and `bytes` is one 8-byte element.
             unsafe { gos_rt_vec_push(out, bytes.as_ptr()) };
         }
         out
@@ -361,8 +410,10 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_pairs(
     length: i64,
 ) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { gos_rt_vec_new(8) };
+        let out = gos_rt_vec_new(8);
         let mut counts = [0i64; 16];
+        // SAFETY: `v` is this shim's argument, null or a live vector (C-ABI contract), which
+        // `u8_slice` accepts.
         let bytes = unsafe { u8_slice(v, length) };
         for window in bytes.windows(2) {
             let key = ((window[0] as usize) << 2) | (window[1] as usize);
@@ -372,6 +423,8 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_pairs(
         }
         for count in counts {
             let raw = count.to_ne_bytes();
+            // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push`
+            // accepts, and `raw` is one 8-byte element.
             unsafe { gos_rt_vec_push(out, raw.as_ptr()) };
         }
         out
@@ -387,7 +440,9 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_kmers(
     k: i64,
 ) -> *mut GosMap {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { gos_rt_map_new(8, 8) };
+        let out = gos_rt_map_new(8, 8);
+        // SAFETY: `v` is this shim's argument, null or a live vector (C-ABI contract), which
+        // `u8_slice` accepts.
         let bytes = unsafe { u8_slice(v, length) };
         let Ok(width) = usize::try_from(k) else {
             return out;
@@ -400,6 +455,8 @@ pub unsafe extern "C" fn gos_rt_heap_u8_count_kmers(
             for &byte in window {
                 key = (key << 2) | i64::from(byte);
             }
+            // SAFETY: `out` is the fresh map made above, or null, which `gos_rt_map_inc_i64`
+            // accepts.
             unsafe { gos_rt_map_inc_i64(out, key, 1) };
         }
         out

@@ -32,6 +32,9 @@ pub(crate) fn init(id: &str) -> Result<()> {
     } else {
         false
     };
+    if !PathBuf::from(".gitignore").exists() {
+        write_gitignore(&PathBuf::from("."))?;
+    }
     if scaffolded {
         outln!("init: created project.toml + src/main.gos for {project}");
         outln!("hint: try `gos` or `gos test`");
@@ -39,6 +42,16 @@ pub(crate) fn init(id: &str) -> Result<()> {
         outln!("init: created project.toml for {project}");
     }
     Ok(())
+}
+
+/// What a new project keeps out of version control: the build output and
+/// the incremental caches `gos build` writes beside the sources.
+const GITIGNORE: &str =
+    "# Build output and the caches `gos build` keeps beside the sources.\ntarget/\n.gos-cache/\n";
+
+fn write_gitignore(dir: &std::path::Path) -> Result<()> {
+    let path = dir.join(".gitignore");
+    fs::write(&path, GITIGNORE).with_context(|| format!("writing {}", path.display()))
 }
 
 /// `gos new ID --path P --template T` - scaffolds a fresh project
@@ -110,6 +123,7 @@ pub(crate) fn new(id: &str, path: Option<PathBuf>, template: &str) -> Result<()>
             ));
         }
     }
+    write_gitignore(&dir)?;
     outln!(
         "new: scaffolded {} ({} template) at {}",
         project,

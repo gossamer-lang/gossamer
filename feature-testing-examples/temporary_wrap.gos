@@ -14,8 +14,8 @@ fn main() {
     // sha256 / hmac hex digests are 64 ASCII hex chars. `.len()` on
     // the inline temporary must dispatch to `gos_rt_str_len` (strlen),
     // not the GosVec-header `gos_rt_len`.
-    println("sha256 len = {}", crypto::sha256::hex("abc").len())
-    println("hmac len = {}", crypto::hmac::sha256_hex("key", "msg").len())
+    println("sha256 len = {}", crypto::sha256::hex("abc".as_bytes()).len())
+    println("hmac len = {}", crypto::hmac::sha256_hex("key".as_bytes(), "msg".as_bytes()).len())
 
     // iter::min / iter::max are typed `Option<i64>`. Piped straight
     // into option::unwrap_or / matched inline, the boxed-Option ABI must

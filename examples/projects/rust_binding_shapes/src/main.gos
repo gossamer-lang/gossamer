@@ -16,23 +16,23 @@ enum Reply { Integer(i64), Text(String), Nothing }
 
 fn show(reply: Reply) -> String {
     match reply {
-        Reply::Integer(n) => format("int {}", n)
-        Reply::Text(s) => format("text {}", s)
+        Reply::Integer(n) => f"int {n}"
+        Reply::Text(s) => f"text {s}"
         Reply::Nothing => "nothing"
     }
 }
 
 fn main() {
-    println("{:?}", shapes::reverse_bytes("abc".as_bytes()))
-    println("{:?}", shapes::counts(#["a", "b", "a"]))
-    println("{}", shapes::map_total({ "a": 1, "b": 2 }))
-    println("{:?}", shapes::retuple((7, "ok", true)))
-    println("{:?}", shapes::retag(Tagged { label: "hi", weight: 1.5, live: true }))
+    println(f"{shapes::reverse_bytes("abc".as_bytes()):?}")
+    println(f"{shapes::counts(#["a", "b", "a"]):?}")
+    println(f"{shapes::map_total({ "a": 1, "b": 2 })}")
+    println(f"{shapes::retuple((7, "ok", true)):?}")
+    println(f"{shapes::retag(Tagged { label: "hi", weight: 1.5, live: true }):?}")
     for pick in 0..10 {
-        println("{:?}", shapes::dynamic(pick))
+        println(f"{shapes::dynamic(pick):?}")
     }
     for pick in 0..3 {
-        println("{}", show(shapes::reply(pick)))
+        println(show(shapes::reply(pick)))
     }
 }
 
@@ -64,11 +64,11 @@ mod shapes_tests {
     fn a_dynamic_value_crosses_as_the_value_it_is() {
         // The open shape has no declared type to lower through, so a native
         // build once handed back the pointer that reached it.
-        let _ = testing::check_eq(format("{:?}", shapes::dynamic(2)), "-7", "int")
-        let _ = testing::check_eq(format("{:?}", shapes::dynamic(5)), "\"hi\"", "string")
-        let _ = testing::check_eq(format("{:?}", shapes::dynamic(6)), "[1, 2, 3]", "bytes")
+        let _ = testing::check_eq(f"{shapes::dynamic(2):?}", "-7", "int")
+        let _ = testing::check_eq(f"{shapes::dynamic(5):?}", "\"hi\"", "string")
+        let _ = testing::check_eq(f"{shapes::dynamic(6):?}", "[1, 2, 3]", "bytes")
         let _ = testing::check_eq(
-            format("{:?}", shapes::dynamic(8))
+            f"{shapes::dynamic(8):?}"
             "Row8(9, Inner(false))"
             "runtime arm name and nested arm"
         )

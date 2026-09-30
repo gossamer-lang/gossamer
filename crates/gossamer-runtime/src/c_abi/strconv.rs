@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::wildcard_imports)]
 #![allow(clippy::single_match_else)]
@@ -15,19 +14,33 @@ unsafe fn str_of<'a>(s: *const c_char) -> &'a str {
     if s.is_null() {
         ""
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_text`
+        // accepts.
         unsafe { crate::c_abi::gos_str_arg_text(s) }
     }
 }
 
+/// The UTF-8 text of the `len` bytes at `ptr`, or `None` for a null, negative,
+/// or non-UTF-8 window.
+///
+/// # Safety
+/// `ptr` is null or addresses `len` bytes live for `'a`.
 unsafe fn bytes_of<'a>(ptr: *const u8, len: i64) -> Option<&'a str> {
     if ptr.is_null() || len < 0 {
         return None;
     }
+    // SAFETY: `ptr` is non-null (checked above), and this `unsafe fn`'s caller passes it
+    // addressing `len` bytes.
     let bytes = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
     std::str::from_utf8(bytes).ok()
 }
 
+/// The byte range `start..end` of `s` as text, or the error its bounds earn.
+///
+/// # Safety
+/// `s` is null or a string body live for `'a`.
 unsafe fn str_range_of<'a>(s: *const c_char, start: i64, end: i64) -> Result<&'a str, String> {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_len` accepts.
     let len = unsafe { crate::c_abi::gos_str_arg_len(s) } as i64;
     if start < 0 || end < 0 || start > end || end > len {
         return Err(format!(
@@ -39,6 +52,8 @@ unsafe fn str_range_of<'a>(s: *const c_char, start: i64, end: i64) -> Result<&'a
     let bytes = if s.is_null() {
         &[]
     } else {
+        // SAFETY: `s` is non-null here and, per this `unsafe fn`'s caller, a live string body of
+        // `len` bytes.
         unsafe { std::slice::from_raw_parts(s.cast::<u8>(), len as usize) }
     };
     std::str::from_utf8(&bytes[lo..hi])
@@ -70,13 +85,15 @@ fn int_err_text(value: &str, err: &std::num::ParseIntError) -> String {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_parse_i64(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `str_of` accepts.
         let trimmed = unsafe { str_of(s) }.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         match trimmed.parse::<i64>() {
-            Ok(n) => unsafe { gos_rt_result_new(0, n) },
-            Err(e) => unsafe { strconv_err(&int_err_text(trimmed, &e)) },
+            Ok(n) => gos_rt_result_new(0, n),
+            Err(e) => strconv_err(&int_err_text(trimmed, &e)),
         }
     })
 }
@@ -89,16 +106,18 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_i64(s: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_parse_i64_bytes(ptr: *const u8, len: i64) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `ptr` and `len` are this shim's arguments, null or a live window of `len` bytes
+        // (C-ABI contract), which `bytes_of` accepts.
         let Some(text) = (unsafe { bytes_of(ptr, len) }) else {
-            return unsafe { strconv_err("invalid input: \"<non-utf8>\"") };
+            return strconv_err("invalid input: \"<non-utf8>\"");
         };
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         match trimmed.parse::<i64>() {
-            Ok(n) => unsafe { gos_rt_result_new(0, n) },
-            Err(e) => unsafe { strconv_err(&int_err_text(trimmed, &e)) },
+            Ok(n) => gos_rt_result_new(0, n),
+            Err(e) => strconv_err(&int_err_text(trimmed, &e)),
         }
     })
 }
@@ -114,17 +133,19 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_i64_range(
     end: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` is this shim's argument, null or a live string for the call (C-ABI
+        // contract), which `str_range_of` accepts.
         let text = match unsafe { str_range_of(s, start, end) } {
             Ok(text) => text,
-            Err(msg) => return unsafe { strconv_err(&msg) },
+            Err(msg) => return strconv_err(&msg),
         };
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         match trimmed.parse::<i64>() {
-            Ok(n) => unsafe { gos_rt_result_new(0, n) },
-            Err(e) => unsafe { strconv_err(&int_err_text(trimmed, &e)) },
+            Ok(n) => gos_rt_result_new(0, n),
+            Err(e) => strconv_err(&int_err_text(trimmed, &e)),
         }
     })
 }
@@ -132,6 +153,8 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_i64_range(
 /// Legacy ABI helper for `strconv::parse_i64(s) -> Result<i64, errors::Error>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_atoi(s: *const c_char) -> i128 {
+    // SAFETY: `s` is this shim's argument, null or a live string for the call (C-ABI contract),
+    // which `gos_rt_strconv_parse_i64` accepts.
     unsafe { gos_rt_strconv_parse_i64(s) }
 }
 
@@ -142,15 +165,17 @@ pub unsafe extern "C" fn gos_rt_strconv_atoi(s: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_parse_u64(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `str_of` accepts.
         let trimmed = unsafe { str_of(s) }.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         match trimmed.parse::<u64>() {
             // The payload word carries the `u64`'s bits; the static type
             // reads them back unsigned.
-            Ok(n) => unsafe { gos_rt_result_new(0, n.cast_signed()) },
-            Err(e) => unsafe { strconv_err(&int_err_text(trimmed, &e)) },
+            Ok(n) => gos_rt_result_new(0, n.cast_signed()),
+            Err(e) => strconv_err(&int_err_text(trimmed, &e)),
         }
     })
 }
@@ -165,13 +190,15 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_f64(s: *const c_char) -> i128 {
         // Mirrors `gossamer_std::strconv::parse_f64`: trim, reject the
         // empty input as `ParseError::Empty`, and surface every other
         // failure as `ParseError::Invalid`.
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `str_of` accepts.
         let trimmed = unsafe { str_of(s) }.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         match trimmed.parse::<f64>() {
-            Ok(x) => unsafe { gos_rt_result_new(0, x.to_bits() as i64) },
-            Err(_) => unsafe { strconv_err(&format!("invalid input: {trimmed:?}")) },
+            Ok(x) => gos_rt_result_new(0, x.to_bits() as i64),
+            Err(_) => strconv_err(&format!("invalid input: {trimmed:?}")),
         }
     })
 }
@@ -180,16 +207,18 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_f64(s: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_parse_f64_bytes(ptr: *const u8, len: i64) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `ptr` and `len` are this shim's arguments, null or a live window of `len` bytes
+        // (C-ABI contract), which `bytes_of` accepts.
         let Some(text) = (unsafe { bytes_of(ptr, len) }) else {
-            return unsafe { strconv_err("invalid input: \"<non-utf8>\"") };
+            return strconv_err("invalid input: \"<non-utf8>\"");
         };
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         match trimmed.parse::<f64>() {
-            Ok(x) => unsafe { gos_rt_result_new(0, x.to_bits() as i64) },
-            Err(_) => unsafe { strconv_err(&format!("invalid input: {trimmed:?}")) },
+            Ok(x) => gos_rt_result_new(0, x.to_bits() as i64),
+            Err(_) => strconv_err(&format!("invalid input: {trimmed:?}")),
         }
     })
 }
@@ -205,17 +234,19 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_f64_range(
     end: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` is this shim's argument, null or a live string for the call (C-ABI
+        // contract), which `str_range_of` accepts.
         let text = match unsafe { str_range_of(s, start, end) } {
             Ok(text) => text,
-            Err(msg) => return unsafe { strconv_err(&msg) },
+            Err(msg) => return strconv_err(&msg),
         };
         let trimmed = text.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         match trimmed.parse::<f64>() {
-            Ok(x) => unsafe { gos_rt_result_new(0, x.to_bits() as i64) },
-            Err(_) => unsafe { strconv_err(&format!("invalid input: {trimmed:?}")) },
+            Ok(x) => gos_rt_result_new(0, x.to_bits() as i64),
+            Err(_) => strconv_err(&format!("invalid input: {trimmed:?}")),
         }
     })
 }
@@ -227,11 +258,13 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_f64_range(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_parse_bool(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `str_of` accepts.
         let text = unsafe { str_of(s) };
         match text {
-            "true" => unsafe { gos_rt_result_new(0, 1) },
-            "false" => unsafe { gos_rt_result_new(0, 0) },
-            other => unsafe { strconv_err(&format!("invalid input: {other:?}")) },
+            "true" => gos_rt_result_new(0, 1),
+            "false" => gos_rt_result_new(0, 0),
+            other => strconv_err(&format!("invalid input: {other:?}")),
         }
     })
 }
@@ -239,31 +272,31 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_bool(s: *const c_char) -> i128 {
 /// `strconv::format_i64(n) -> String` - alias for `i64_to_str`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_format_i64(n: i64) -> *mut c_char {
-    unsafe { gos_rt_i64_to_str(n) }
+    gos_rt_i64_to_str(n)
 }
 
 /// Legacy ABI helper for `strconv::format_i64(n) -> String`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_itoa(n: i64) -> *mut c_char {
-    unsafe { gos_rt_i64_to_str(n) }
+    gos_rt_i64_to_str(n)
 }
 
 /// `strconv::format_f64(x) -> String` - alias for `f64_to_str`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_strconv_format_f64(x: f64) -> *mut c_char {
-    unsafe { gos_rt_f64_to_str(x) }
+    gos_rt_f64_to_str(x)
 }
 
 /// `strconv::format_bool(b) -> String` - alias for `bool_to_str`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_strconv_format_bool(b: i32) -> *mut c_char {
-    unsafe { gos_rt_bool_to_str(b) }
+pub extern "C" fn gos_rt_strconv_format_bool(b: i32) -> *mut c_char {
+    gos_rt_bool_to_str(b)
 }
 
 /// Packs an `Err(errors::Error)` result carrying `msg`.
-unsafe fn strconv_err(msg: &str) -> i128 {
+fn strconv_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
 /// `strconv::parse_i64_radix(s, base) -> Result<i64, errors::Error>`.
@@ -276,18 +309,20 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_i64_radix(s: *const c_char, base: 
         // with `u32::try_from(base).unwrap_or(0)`, so an out-of-range
         // base reports the converted radix (0 for negatives) and the
         // message is itself wrapped as `ParseError::Invalid`.
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `str_of` accepts.
         let trimmed = unsafe { str_of(s) }.trim();
         if trimmed.is_empty() {
-            return unsafe { strconv_err("empty input") };
+            return strconv_err("empty input");
         }
         let radix = u32::try_from(base).unwrap_or(0);
         if !(2..=36).contains(&radix) {
             let inner = format!("invalid base {radix}");
-            return unsafe { strconv_err(&format!("invalid input: {inner:?}")) };
+            return strconv_err(&format!("invalid input: {inner:?}"));
         }
         match i64::from_str_radix(trimmed, radix) {
-            Ok(n) => unsafe { gos_rt_result_new(0, n) },
-            Err(e) => unsafe { strconv_err(&int_err_text(trimmed, &e)) },
+            Ok(n) => gos_rt_result_new(0, n),
+            Err(e) => strconv_err(&int_err_text(trimmed, &e)),
         }
     })
 }
@@ -295,7 +330,7 @@ pub unsafe extern "C" fn gos_rt_strconv_parse_i64_radix(s: *const c_char, base: 
 /// `strconv::format_i64_radix(n, base) -> String`. Out-of-range bases fall
 /// back to decimal; digits a-z are lowercase.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_strconv_format_i64_radix(n: i64, base: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_strconv_format_i64_radix(n: i64, base: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let radix = u32::try_from(base).unwrap_or(10);
         let out = if !(2..=36).contains(&radix) || n == 0 {
@@ -327,7 +362,7 @@ pub unsafe extern "C" fn gos_rt_strconv_format_i64_radix(n: i64, base: i64) -> *
 /// rendering. Negative values are rendered as their 64-bit two's-complement
 /// bit pattern, matching Rust's radix formatters.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fmt_radix_i64(n: i64, base: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_fmt_radix_i64(n: i64, base: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let radix = u32::try_from(base).unwrap_or(10);
         if !(2..=36).contains(&radix) {
@@ -357,6 +392,7 @@ pub unsafe extern "C" fn gos_rt_strconv_quote(s: *const c_char) -> *mut c_char {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         let mut out = String::with_capacity(text.len() + 2);
@@ -385,6 +421,7 @@ pub unsafe extern "C" fn gos_rt_debug_quote_str(s: *const c_char) -> *mut c_char
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         alloc_cstring(format!("{text:?}").as_bytes())
@@ -394,7 +431,7 @@ pub unsafe extern "C" fn gos_rt_debug_quote_str(s: *const c_char) -> *mut c_char
 /// `{:?}` of a `char`: the character between single quotes, escaped as
 /// Rust's `Debug` escapes it.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_debug_quote_char(c: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_debug_quote_char(c: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let ch = u32::try_from(c)
             .ok()
@@ -412,9 +449,11 @@ pub unsafe extern "C" fn gos_rt_strconv_unquote(s: *const c_char) -> i128 {
         // Mirrors `gossamer_std::strconv::unquote`: every failure mode
         // surfaces as `ParseError::Invalid(original_input)`, so the
         // error text matches `gos` byte-for-byte.
+        // SAFETY: `s` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `str_of` accepts.
         let text = unsafe { str_of(s) };
         if text.len() < 2 || !text.starts_with('"') || !text.ends_with('"') {
-            return unsafe { strconv_err(&format!("invalid input: {text:?}")) };
+            return strconv_err(&format!("invalid input: {text:?}"));
         }
         let inner = &text[1..text.len() - 1];
         let mut out = String::with_capacity(inner.len());
@@ -458,9 +497,9 @@ pub unsafe extern "C" fn gos_rt_strconv_unquote(s: *const c_char) -> i128 {
             }
         }
         if bad {
-            return unsafe { strconv_err(&format!("invalid input: {text:?}")) };
+            return strconv_err(&format!("invalid input: {text:?}"));
         }
         let ptr = alloc_cstring(out.as_bytes());
-        unsafe { gos_rt_result_new(0, ptr as i64) }
+        gos_rt_result_new(0, ptr as i64)
     })
 }

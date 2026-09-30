@@ -206,6 +206,68 @@ pub(crate) fn lex_triple_string(
     }
 }
 
+/// Lexes an interpolated string literal beginning at its opening `"` or
+/// `"""` (the `f` prefix already consumed). A placeholder is skipped whole,
+/// so the quotes, braces, and escapes its expression holds are the
+/// expression's own; escapes in the literal text are checked as in any
+/// string.
+pub(crate) fn lex_interpolated_string(
+    cursor: &mut Cursor<'_>,
+    file: FileId,
+    literal_start: u32,
+) -> QuotedOutcome {
+    let triple = cursor.rest().starts_with(TRIPLE_QUOTE);
+    let (kind, delimiter) = if triple {
+        (TokenKind::TripleStringLit, TRIPLE_QUOTE)
+    } else {
+        (TokenKind::StringLit, "\"")
+    };
+    for _ in 0..delimiter.len() {
+        cursor.bump();
+    }
+    let mut diagnostics = Vec::new();
+    loop {
+        if cursor.is_eof() {
+            diagnostics.push(if triple {
+                LexError::UnterminatedTripleString {
+                    span: span_to_here(file, literal_start, cursor),
+                }
+            } else {
+                LexError::UnterminatedString {
+                    span: span_to_here(file, literal_start, cursor),
+                }
+            });
+            return QuotedOutcome { kind, diagnostics };
+        }
+        let rest = cursor.rest();
+        if rest.starts_with(delimiter) {
+            for _ in 0..delimiter.len() {
+                cursor.bump();
+            }
+            return QuotedOutcome { kind, diagnostics };
+        }
+        if rest.starts_with("{{") || rest.starts_with("}}") {
+            cursor.bump();
+            cursor.bump();
+        } else if rest.starts_with('{') {
+            match crate::interpolation::scan_placeholder(rest, triple) {
+                Some(placeholder) => {
+                    for _ in rest[..placeholder.len].chars() {
+                        cursor.bump();
+                    }
+                }
+                None => {
+                    cursor.bump();
+                }
+            }
+        } else if cursor.peek() == '\\' {
+            consume_escape(cursor, file, &mut diagnostics);
+        } else {
+            cursor.bump();
+        }
+    }
+}
+
 /// Lexes a raw string literal beginning at `r` or `br` (after any `b`
 /// prefix has already been consumed by `lex_ident_or_prefix`).
 ///

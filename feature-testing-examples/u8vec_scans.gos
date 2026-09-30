@@ -1,0 +1,18 @@
+// The `U8Vec` small-alphabet scans answer the same keys and counts on every
+// tier, including a window that runs past the end, which zero-extends.
+fn main() {
+    let buf = U8Vec::new(6)
+    for i in 0..6 {
+        buf.set_byte(i, i % 4)
+    }
+    let whole = buf.window_key(0, 3)
+    let tail = buf.window_key(4, 4)
+    let past = buf.window_key(9, 2)
+    println(f"{whole} {tail} {past}")
+    let singles = buf.count_singles(6)
+    let pairs = buf.count_pairs(6)
+    let kmers = buf.count_kmers(6, 2)
+    let head = buf.get_byte(1)
+    let n = kmers.len()
+    println(f"{singles:?} {pairs:?} {n} {head}")
+}

@@ -46,19 +46,15 @@ fn parses_src_single_file_form() {
 }
 
 #[test]
-fn parses_prebuilt_form() {
+fn rejects_a_prebuilt_archive() {
     let src = format!(
         "{HEADER}\n[rust-bindings]\necho = {{ prebuilt = \"lib/libecho.a\", abi = \"1.0\" }}\n"
     );
-    let m = Manifest::parse(&src).unwrap();
-    let spec = &m.rust_bindings["echo"];
-    match spec {
-        RustBindingSpec::Prebuilt { archive, abi } => {
-            assert_eq!(archive, "lib/libecho.a");
-            assert_eq!(abi, "1.0");
-        }
-        other => panic!("expected Prebuilt, got {other:?}"),
-    }
+    let err = Manifest::parse(&src).unwrap_err();
+    assert!(
+        matches!(&err, ManifestError::PrebuiltRustBinding(k) if k == "echo"),
+        "got {err:?}"
+    );
 }
 
 #[test]

@@ -1,16 +1,14 @@
 /*
  * Goroutine spawn without channels.
  *
- * `go expr` hands a call to the scheduler. This example keeps
- * the example compile-friendly: every construct here lowers
- * through native codegen today, so `gos build` produces a real
- * binary. The full goroutine + channel shape lives in
+ * `spawn(f)` hands a closure to the scheduler; in `main` it needs no
+ * enclosing `cohort { }`. The goroutine + channel shape lives in
  * `concurrency.gos`.
  */
 
 fn worker(id: i64, reps: i64) {
     for i in 0..reps {
-        println("worker {} tick {}", id, i)
+        println(f"worker {id} tick {i}")
     }
 }
 

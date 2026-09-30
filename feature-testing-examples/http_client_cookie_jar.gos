@@ -51,7 +51,7 @@ impl http::Handler for App {
 
 /// Where this run listens; the caller names it, so nothing on the box is
 /// competed for. The default is what running the fixture by hand gets.
-fn addr() -> String { env::args().first().unwrap_or("127.0.0.1:23892") }
+fn addr() -> String { env::args().first().unwrap_or("127.0.0.1:23887") }
 
 fn base() -> String { "http://" + addr() }
 

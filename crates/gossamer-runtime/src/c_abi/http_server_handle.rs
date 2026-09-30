@@ -71,7 +71,7 @@ fn err_result(message: &str) -> i128 {
 
 /// `http::Server::new() -> Server` - a server carrying every default.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_new() -> i64 {
+pub extern "C" fn gos_rt_http_server_new() -> i64 {
     ffi_entry!(-1, {
         let mut servers = registry().lock();
         servers.push(Arc::new(GosHttpServer::new()));
@@ -102,7 +102,7 @@ fn budget(value: i64) -> usize {
 /// bound: a socket idle timeout does not stop a client that trickles one
 /// header every 25 seconds.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_read_header_timeout_ms(handle: i64, ms: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_read_header_timeout_ms(handle: i64, ms: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.read_header_timeout_ms = millis(ms))
     })
@@ -112,7 +112,7 @@ pub unsafe extern "C" fn gos_rt_http_server_read_header_timeout_ms(handle: i64, 
 /// after the headers. Kept separate so a long upload does not have to buy
 /// a long header window.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_read_body_timeout_ms(handle: i64, ms: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_read_body_timeout_ms(handle: i64, ms: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.read_body_timeout_ms = millis(ms))
     })
@@ -121,7 +121,7 @@ pub unsafe extern "C" fn gos_rt_http_server_read_body_timeout_ms(handle: i64, ms
 /// `server.write_timeout_ms(ms)` - how long a response has to reach a peer
 /// that stopped reading.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_write_timeout_ms(handle: i64, ms: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_write_timeout_ms(handle: i64, ms: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.write_timeout_ms = millis(ms))
     })
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn gos_rt_http_server_write_timeout_ms(handle: i64, ms: i6
 /// `server.idle_timeout_ms(ms)` - how long a keep-alive connection may sit
 /// between requests.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_idle_timeout_ms(handle: i64, ms: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_idle_timeout_ms(handle: i64, ms: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.idle_timeout_ms = millis(ms))
     })
@@ -139,7 +139,7 @@ pub unsafe extern "C" fn gos_rt_http_server_idle_timeout_ms(handle: i64, ms: i64
 /// `server.max_header_bytes(n)` - largest accepted header block; past it
 /// the answer is 431.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_max_header_bytes(handle: i64, n: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_max_header_bytes(handle: i64, n: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.max_header_bytes = budget(n))
     })
@@ -149,7 +149,7 @@ pub unsafe extern "C" fn gos_rt_http_server_max_header_bytes(handle: i64, n: i64
 /// is 413. The default is 1 MiB, which an application accepting a photo, a
 /// PDF, or a CSV import raises here.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_max_body_bytes(handle: i64, n: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_max_body_bytes(handle: i64, n: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.max_body_bytes = budget(n))
     })
@@ -158,7 +158,7 @@ pub unsafe extern "C" fn gos_rt_http_server_max_body_bytes(handle: i64, n: i64) 
 /// `server.max_connections(n)` - largest number of live connections; past
 /// it the answer is 503.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_max_connections(handle: i64, n: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_max_connections(handle: i64, n: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.max_connections = budget(n).max(1))
     })
@@ -174,7 +174,7 @@ pub unsafe extern "C" fn gos_rt_http_server_max_connections(handle: i64, n: i64)
 /// should stop with the request - a query, an outbound call, a spawned
 /// worker - and those stop on time.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_request_timeout_ms(handle: i64, ms: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_request_timeout_ms(handle: i64, ms: i64) -> i64 {
     ffi_entry!(handle, {
         set_limit(handle, |l| l.request_timeout_ms = millis(ms))
     })
@@ -188,6 +188,7 @@ pub unsafe extern "C" fn gos_rt_http_server_server_name(handle: i64, name: *cons
         let text = if name.is_null() {
             String::new()
         } else {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(name) }
         };
         set_limit(handle, move |l| l.server_name = text)
@@ -205,6 +206,7 @@ pub unsafe extern "C" fn gos_rt_http_server_listen(handle: i64, addr: *const c_c
         let addr_s = if addr.is_null() {
             "0.0.0.0:8080".to_string()
         } else {
+            // SAFETY: `addr` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(addr) }
         };
         let listener = match crate::listen::bind_tcp(&addr_s) {
@@ -224,7 +226,7 @@ pub unsafe extern "C" fn gos_rt_http_server_listen(handle: i64, addr: *const c_c
 /// before `listen`. Binding port 0 and reading it back is how a test
 /// finds a free port without racing another test for one.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_addr(handle: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_http_server_addr(handle: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let text = server_at(handle).map_or_else(String::new, |s| s.bound_addr.lock().clone());
         crate::c_abi::string::alloc_cstring(text.as_bytes())
@@ -258,9 +260,13 @@ pub unsafe extern "C" fn gos_rt_http_server_serve(
             &limits,
             &server.shutdown,
             move |stream, peer, limits| {
-                super::http_server::serve_one_connection(
-                    stream, peer, limits, &gate, env_addr, fn_addr,
-                );
+                // SAFETY: the caller keeps the handler environment live while
+                // the server runs, and `handler_fn` is its compiled method.
+                unsafe {
+                    super::http_server::serve_one_connection(
+                        stream, peer, limits, &gate, env_addr, fn_addr,
+                    );
+                }
             },
         );
         if !served {
@@ -278,7 +284,7 @@ pub unsafe extern "C" fn gos_rt_http_server_serve(
 /// elapsed with requests still running, which is the caller's cue to
 /// report it rather than exit believing the drain was clean.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_server_shutdown(handle: i64, deadline_ms: i64) -> i64 {
+pub extern "C" fn gos_rt_http_server_shutdown(handle: i64, deadline_ms: i64) -> i64 {
     ffi_entry!(0, {
         let Some(server) = server_at(handle) else {
             return 0;

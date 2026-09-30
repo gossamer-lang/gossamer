@@ -19,13 +19,22 @@
 //! The signal handler itself does only async-signal-safe work
 //! (atomic store) - no allocations, no locks.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 /// Global counter incremented every time the scheduler asks all
 /// goroutines to reach a safepoint (start of a GC cycle, set-max-procs
 /// reduction, etc.). Application code compares its own
 /// thread-local copy and yields if the global moved.
 static GLOBAL_PHASE: AtomicU64 = AtomicU64::new(0);
+
+/// Nonzero while a yield request has not yet reached a compiled loop's poll.
+/// A compiled loop tests this byte on every pass, and only a set byte sends
+/// it to [`gos_rt_preempt_check_and_yield`], which clears it and decides from
+/// [`GLOBAL_PHASE`] whether this worker yields. A worker that misses a
+/// request because another cleared the byte first sees the next one: the
+/// watchdog keeps asking while a worker overruns its slice.
+#[unsafe(export_name = "gos_rt_preempt_requested")]
+pub static PREEMPT_REQUESTED: AtomicU8 = AtomicU8::new(0);
 
 // Per-thread "yield requested" flag set by the SIGURG handler.
 // Stored thread-locally so the safepoint poll is a single relaxed
@@ -121,6 +130,7 @@ fn install_signal_handler() {
 /// without per-thread state can also notice.
 pub fn request_yield_all() {
     GLOBAL_PHASE.fetch_add(1, Ordering::AcqRel);
+    PREEMPT_REQUESTED.store(1, Ordering::Release);
 }
 
 /// Asks the calling thread to reach a safepoint at its next
@@ -129,6 +139,7 @@ pub fn request_yield_all() {
 pub fn request_yield_self() {
     LOCAL_YIELD.with(|f| f.store(true, Ordering::Release));
     GLOBAL_PHASE.fetch_add(1, Ordering::AcqRel);
+    PREEMPT_REQUESTED.store(1, Ordering::Release);
 }
 
 /// Returns `true` when the calling thread should yield at the next
@@ -208,6 +219,7 @@ pub extern "C" fn gos_rt_preempt_check() -> i32 {
 /// next safepoint will observe the same flag and try again.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_preempt_check_and_yield() -> i32 {
+    PREEMPT_REQUESTED.store(0, Ordering::Relaxed);
     if PREEMPT_STATS_ENABLED.load(Ordering::Relaxed) {
         SLOW_POLL_COUNT.fetch_add(1, Ordering::Relaxed);
     }
@@ -241,13 +253,28 @@ pub fn bump_pressure() {
     PENDING_PRESSURE.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Handles [`current_thread_handle`] gave out and [`release_thread_handle`]
+/// has not taken back. A thread releases its handle before it exits, and
+/// [`signal_thread_sigurg`] signals only a handle listed here while holding
+/// this lock, so no signal reaches a thread that has exited.
+static LIVE_THREAD_HANDLES: parking_lot::Mutex<Vec<u64>> = parking_lot::Mutex::new(Vec::new());
+
 /// Returns an opaque handle for the calling OS thread suitable for
-/// later use with [`signal_thread_sigurg`]. On Unix this is the
+/// later use with [`signal_thread_sigurg`], which the thread gives back
+/// with [`release_thread_handle`] before it exits. On Unix this is the
 /// `pthread_t` of the calling thread cast through `u64`. On other
 /// platforms it returns `0`; the targeted preemption path becomes a
 /// no-op and the cooperative phase counter does the work alone.
 #[must_use]
 pub fn current_thread_handle() -> u64 {
+    let handle = os_thread_handle();
+    if handle != 0 {
+        LIVE_THREAD_HANDLES.lock().push(handle);
+    }
+    handle
+}
+
+fn os_thread_handle() -> u64 {
     #[cfg(unix)]
     {
         // SAFETY: `pthread_self` is async-signal-safe and has no
@@ -266,17 +293,16 @@ pub fn current_thread_handle() -> u64 {
         // it to a real handle with stable identity).
         use windows_sys::Win32::Foundation::{DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE};
         use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread};
-        // SAFETY: GetCurrentThread / GetCurrentProcess return
-        // pseudo-handles that DuplicateHandle resolves into real
-        // handles. The duplicated handle is owned by us; the caller
-        // is responsible for eventually invoking
-        // `release_thread_handle(h)` so the kernel object doesn't
-        // leak across goroutine spawn churn. The scheduler nulls
-        // the slot at thread-exit time, mirroring the Unix path's
-        // `pthread_t`-after-join cleanup.
+        // The duplicated handle is owned here; the caller eventually invokes
+        // `release_thread_handle(h)` so the kernel object does not outlive
+        // the thread, as the Unix path's `pthread_t` does after a join.
         let mut dup: HANDLE = std::ptr::null_mut();
+        // SAFETY: `GetCurrentProcess` takes nothing and answers a pseudo-handle.
         let proc_handle = unsafe { GetCurrentProcess() };
+        // SAFETY: `GetCurrentThread` takes nothing and answers a pseudo-handle.
         let thread_handle = unsafe { GetCurrentThread() };
+        // SAFETY: both pseudo-handles name this process and thread, and `dup` is a local the
+        // call writes the real handle into.
         let ok = unsafe {
             DuplicateHandle(
                 proc_handle,
@@ -299,24 +325,22 @@ pub fn current_thread_handle() -> u64 {
     }
 }
 
-/// Releases a duplicated Win32 thread handle returned by
-/// [`current_thread_handle`]. No-op on Unix and unsupported
-/// platforms (the Unix `pthread_t` is not refcounted; the kernel
-/// reclaims it on thread exit).
+/// Takes back a handle [`current_thread_handle`] gave out, which its thread
+/// does before it exits: afterwards [`signal_thread_sigurg`] ignores it. On
+/// Windows this also closes the duplicated thread handle; the Unix
+/// `pthread_t` is not refcounted. A handle that is not live is ignored.
 pub fn release_thread_handle(handle: u64) {
+    let mut live = LIVE_THREAD_HANDLES.lock();
+    let Some(at) = live.iter().position(|&h| h == handle) else {
+        return;
+    };
+    live.swap_remove(at);
     #[cfg(windows)]
     {
         use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
-        if handle == 0 {
-            return;
-        }
-        // SAFETY: every non-zero handle returned by
-        // current_thread_handle is a fresh DuplicateHandle output.
+        // SAFETY: `handle` was a live `DuplicateHandle` output, and taking
+        // it out of the list under its lock makes this its one close.
         let _ = unsafe { CloseHandle(handle as HANDLE) };
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = handle;
     }
 }
 
@@ -329,9 +353,18 @@ pub fn release_thread_handle(handle: u64) {
 ///
 /// Returns `true` if the signal was issued, `false` if the platform
 /// has no targeted-preempt path or the handle is the null marker.
+///
+/// A handle that is not live (never given out, or already released) is not
+/// signalled.
 #[must_use]
 pub fn signal_thread_sigurg(handle: u64) -> bool {
     if handle == 0 {
+        return false;
+    }
+    // Held across the signal, so the thread cannot release its handle and
+    // exit in between.
+    let live = LIVE_THREAD_HANDLES.lock();
+    if !live.contains(&handle) {
         return false;
     }
     #[cfg(miri)]
@@ -344,11 +377,10 @@ pub fn signal_thread_sigurg(handle: u64) -> bool {
     }
     #[cfg(all(unix, not(miri)))]
     {
-        // SAFETY: SIGURG is async-signal-safe; the SIGURG iterator
-        // installed in `install_signal_handler` only does atomic
-        // stores. `handle` is a `pthread_t` produced by an earlier
-        // call on a still-live worker - the scheduler nulls the
-        // slot before joining the thread.
+        // SAFETY: `handle` is a live thread's `pthread_t`: it is listed in
+        // `LIVE_THREAD_HANDLES`, whose lock is held, and a thread releases
+        // its handle before exiting. The SIGURG handler only does atomic
+        // stores.
         let rc = unsafe { libc::pthread_kill(handle as libc::pthread_t, libc::SIGURG) };
         rc == 0
     }
@@ -365,10 +397,10 @@ pub fn signal_thread_sigurg(handle: u64) -> bool {
         // observe a cooperative request.
         use windows_sys::Win32::Foundation::HANDLE;
         use windows_sys::Win32::System::Threading::QueueUserAPC;
-        // SAFETY: `apc_callback` is `extern "system" fn(usize)`
-        // (the APC ABI); `handle` is a duplicated thread handle
-        // with QUEUE_USER_APC access. QueueUserAPC is documented
-        // safe to invoke from any thread.
+        // SAFETY: `apc_callback` is `extern "system" fn(usize)` (the APC
+        // ABI), and `handle` is a live duplicated thread handle with
+        // QUEUE_USER_APC access: it is listed in `LIVE_THREAD_HANDLES`, whose
+        // lock is held.
         let rc = unsafe { QueueUserAPC(Some(apc_callback), handle as HANDLE, 0) };
         rc != 0
     }
@@ -463,6 +495,11 @@ mod tests {
         crate::platform::sleep(std::time::Duration::from_millis(50));
         // The phase should have moved at least once.
         assert!(current_phase() >= baseline);
+        release_thread_handle(handle);
+        assert!(
+            !signal_thread_sigurg(handle),
+            "a released handle is not signalled"
+        );
     }
 
     #[test]

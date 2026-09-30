@@ -713,9 +713,10 @@ impl<'a> Builder<'a> {
     /// `gos_fn_addr("<Type>::dispatch")` and emits
     /// `gos_rt_sql_register_native(name_ptr, env, fn_addr)`, which
     /// builds a `GossamerDriver` and registers it in `crate::sql`. The
-    /// driver struct is stateless (a ZST whose `dispatch` never reads
-    /// `self`), so the env pointer dangling after the call returns is
-    /// harmless. Return type is unit.
+    /// registry keeps the driver for the process and `dispatch` reads it
+    /// through `self`, so a driver with fields is registered as a counted
+    /// copy that co-owns its children and is never released. Return type
+    /// is unit.
     pub(crate) fn lower_sql_register_native(
         &mut self,
         name_expr: &HirExpr,
@@ -738,6 +739,24 @@ impl<'a> Builder<'a> {
             },
             span,
         );
+        // Connections on different threads dispatch concurrently, so the
+        // copy the registry keeps counts its children atomically.
+        let env_local = if self.type_slot_bytes(driver_ty) > 0 {
+            let boxed = self.box_aggregate_payload(driver_local, driver_ty, span);
+            let unit_ty = self.tcx.unit();
+            let marked = self.fresh(unit_ty);
+            let next = self.new_block(span);
+            self.terminate(Terminator::Call {
+                callee: Operand::Const(ConstValue::Str("gos_rt_rc_mark_shared".to_string())),
+                args: vec![Operand::Copy(Place::local(boxed))],
+                destination: Place::local(marked),
+                target: Some(next),
+            });
+            self.set_current(next);
+            boxed
+        } else {
+            driver_local
+        };
         let unit_ty = self.tcx.unit();
         let dest = self.fresh(unit_ty);
         let next = self.new_block(span);
@@ -745,7 +764,7 @@ impl<'a> Builder<'a> {
             callee: Operand::Const(ConstValue::Str("gos_rt_sql_register_native".to_string())),
             args: vec![
                 Operand::Copy(Place::local(name_local)),
-                Operand::Copy(Place::local(driver_local)),
+                Operand::Copy(Place::local(env_local)),
                 Operand::Copy(Place::local(fn_addr_local)),
             ],
             destination: Place::local(dest),

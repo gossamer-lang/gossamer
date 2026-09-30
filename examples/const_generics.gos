@@ -23,7 +23,7 @@ fn zeros<const N: usize>() -> [i64; N] {
 }
 
 fn describe<const N: usize>(xs: [i64; N]) -> String {
-    format("{} values summing to {}", N as i64, sum(xs))
+    f"{N as i64} values summing to {sum(xs)}"
 }
 
 struct Ring<const N: usize> {
@@ -55,15 +55,15 @@ fn cells<const N: usize>(grid: Grid<N>) -> i64 {
 }
 
 fn main() {
-    println("{}", describe([1, 2, 3]))
-    println("{}", describe([10, 20, 30, 40, 50]))
+    println(describe([1, 2, 3]))
+    println(describe([10, 20, 30, 40, 50]))
     let empty_row = zeros::<4>()
-    println("zeros {:?}", empty_row)
+    println(f"zeros {empty_row:?}")
     let mut ring = Ring { items: [0; 3], head: 0 }
     for value in 1..6 {
         ring.push(value)
     }
-    println("ring {:?} capacity {}", ring.items, ring.capacity())
+    println(f"ring {ring.items:?} capacity {ring.capacity()}")
     let blank: Grid<2> = Grid::Empty
-    println("grid cells {} {}", cells(Grid::Filled([7, 8])), cells(blank))
+    println(f"grid cells {cells(Grid::Filled([7, 8]))} {cells(blank)}")
 }

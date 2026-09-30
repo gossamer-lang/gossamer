@@ -62,6 +62,11 @@ struct TraitAssoc {
 #[derive(Debug, Default, Clone)]
 struct SelfAssoc {
     types: HashMap<String, Type>,
+    /// For each supplied associated type, the parameter each of the impl's
+    /// self-type arguments names (`impl<T> Iterator for Stack<T>` gives
+    /// `[Some("T")]`), so a supplied type written against those parameters
+    /// reads against a concrete instantiation's arguments.
+    type_self_params: HashMap<String, Vec<Option<String>>>,
     consts: HashMap<String, Type>,
     traits: Vec<String>,
 }
@@ -134,6 +139,9 @@ impl AssocIndex {
                         match impl_item {
                             ImplItem::Type { name, ty, .. } => {
                                 entry.types.insert(name.name.clone(), ty.clone());
+                                entry
+                                    .type_self_params
+                                    .insert(name.name.clone(), self_type_params(&decl.self_ty));
                             }
                             ImplItem::Const { name, ty, .. } => {
                                 entry.consts.insert(name.name.clone(), ty.clone());
@@ -246,6 +254,18 @@ impl AssocIndex {
             .traits
             .iter()
             .find_map(|t| self.traits.get(t)?.types.get(name)?.as_ref())
+    }
+
+    /// The parameter names the self-type arguments of the impl supplying
+    /// `name` for `self_ty` are written as, in argument order. `None` when
+    /// the impl supplies no such type, or names no arguments.
+    #[must_use]
+    pub fn assoc_type_self_params(&self, self_ty: &str, name: &str) -> Option<&[Option<String>]> {
+        self.selves
+            .get(self_ty)?
+            .type_self_params
+            .get(name)
+            .map(Vec::as_slice)
     }
 
     /// Concrete type reached through `trait_name` alone: the trait's default
@@ -381,4 +401,29 @@ pub fn type_head_name(ty: &Type) -> Option<&str> {
         return None;
     };
     path.segments.last().map(|s| s.name.name.as_str())
+}
+
+/// The parameter each generic argument of a self type names: `Stack<T>`
+/// gives `[Some("T")]`, and an argument that is not a bare name gives `None`.
+fn self_type_params(ty: &Type) -> Vec<Option<String>> {
+    let TypeKind::Path(path) = &ty.kind else {
+        return Vec::new();
+    };
+    let Some(last) = path.segments.last() else {
+        return Vec::new();
+    };
+    last.generics
+        .iter()
+        .map(|arg| match arg {
+            crate::GenericArg::Type(arg_ty) => match &arg_ty.kind {
+                TypeKind::Path(arg_path)
+                    if arg_path.segments.len() == 1 && arg_path.segments[0].generics.is_empty() =>
+                {
+                    Some(arg_path.segments[0].name.name.clone())
+                }
+                _ => None,
+            },
+            crate::GenericArg::Const(_) => None,
+        })
+        .collect()
 }

@@ -27,17 +27,17 @@ fn rgb(r: i64, g: i64, b: i64) -> Color { Color { r: r, g: g, b: b } }
 fn default_color() -> Color { Color::default() }
 
 let black = Color::default()
-println("black = {:?}", black)
+println(f"black = {black:?}")
 
 let red = Color { r: 255, g: 0, b: 0 }
 let also_red = red.clone()
-println("red == also_red: {}", red == also_red)
-println("red != black:    {}", red != black)
+println(f"red == also_red: {red == also_red}")
+println(f"red != black:    {red != black}")
 
 // Nested struct: Debug and equality recurse into `color`.
 let p = Pixel { at: 3, color: red }
-println("pixel = {:?}", p)
-println("same pixel: {}", p == Pixel { at: 3, color: rgb(255, 0, 0) })
+println(f"pixel = {p:?}")
+println(f"same pixel: {p == Pixel { at: 3, color: rgb(255, 0, 0) }}")
 
 #[cfg(test)]
 mod tests {

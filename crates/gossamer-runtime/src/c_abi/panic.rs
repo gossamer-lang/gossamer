@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -135,6 +133,7 @@ fn host_trace() -> String {
     }
     // SAFETY: the hook hands back an owned runtime string; copy and free it.
     let out = unsafe { crate::c_abi::gos_str_arg_string(text) };
+    // SAFETY: `text` is the owned string the hook answered, its text copied, and not read again.
     unsafe { crate::c_abi::string::gos_rt_str_free(text) };
     out
 }
@@ -144,6 +143,8 @@ pub unsafe extern "C-unwind" fn gos_rt_panic(msg: *const c_char) {
     let text = if msg.is_null() {
         "panic".to_string()
     } else {
+        // SAFETY: `msg` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `gos_str_arg_string` accepts.
         unsafe { crate::c_abi::gos_str_arg_string(msg) }
     };
     raise("GX0005", "panic: ", text);
@@ -330,9 +331,8 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
             && !gossamer_coro::in_joinable_spawn()
             && !ISOLATED_FAULTS.with(std::cell::Cell::get)
         {
-            unsafe {
-                gos_rt_flush_stdout();
-            }
+            gos_rt_flush_stdout();
+
             eprintln!("error[{code}]: {prefix}{text}");
         }
         std::panic::panic_any(GosPanic(text));
@@ -344,9 +344,8 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
         // Everything the program printed before the fault belongs ahead of
         // the report; buffered stdout would otherwise land after it and read
         // as though the fault came first.
-        unsafe {
-            gos_rt_flush_stdout();
-        }
+        gos_rt_flush_stdout();
+
         // Match the unified diagnostic-code prefix the VM uses so both
         // execution modes tag a fault with the same code.
         eprintln!("error[{code}]: {prefix}{text}");
@@ -355,9 +354,8 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
             eprint!("{trace}");
         }
     }
-    unsafe {
-        gos_rt_flush_stdout();
-    }
+    gos_rt_flush_stdout();
+
     std::process::exit(101);
 }
 
@@ -373,9 +371,8 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
 pub(crate) fn fatal_program_fault(code: &str, prefix: &str, text: &str, with_trace: bool) -> ! {
     install_silent_gos_hook();
     if !call_user_panic_hook(text) {
-        unsafe {
-            gos_rt_flush_stdout();
-        }
+        gos_rt_flush_stdout();
+
         eprintln!("error[{code}]: {prefix}{text}");
         if with_trace {
             let trace = fault_trace();
@@ -384,9 +381,8 @@ pub(crate) fn fatal_program_fault(code: &str, prefix: &str, text: &str, with_tra
             }
         }
     }
-    unsafe {
-        gos_rt_flush_stdout();
-    }
+    gos_rt_flush_stdout();
+
     std::process::exit(101);
 }
 
@@ -455,6 +451,7 @@ pub unsafe extern "C" fn gos_rt_panic_oob(what: *const c_char, idx: i64, len: i6
     let label = if what.is_null() {
         "array index".to_string()
     } else {
+        // SAFETY: `what` is a String argument from compiled code, null or a live string body for the whole call.
         unsafe { crate::c_abi::gos_str_arg_string(what) }
     };
     panic_oob_text(&label, idx, len);
@@ -471,8 +468,40 @@ pub unsafe extern "C" fn gos_rt_panic_vec_index(
     v: *const crate::c_abi::vec::GosVec,
     idx: i64,
 ) -> ! {
-    let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+    // SAFETY: `v` is null or a live `GosVec` (this shim's contract).
+    let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
     panic_oob_text("vec index", idx, len);
+}
+
+/// Panic helper for the one failure block a release body's checks share:
+/// `kind` is a [`gossamer_abi::check_fail`] value naming the check, and `v` and
+/// `idx` are the vector and index of a failed bounds check. Each kind raises
+/// the report its own check raises where it is not shared.
+///
+/// # Safety
+/// `v` must be null or point to a live `GosVec`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_panic_check(
+    kind: i64,
+    v: *const crate::c_abi::vec::GosVec,
+    idx: i64,
+) -> ! {
+    use gossamer_abi::check_fail;
+    let operation = match kind {
+        check_fail::ADD => "add",
+        check_fail::SUBTRACT => "subtract",
+        check_fail::MULTIPLY => "multiply",
+        _ => {
+            // SAFETY: `v` is null or a live `GosVec` (this shim's contract).
+            let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
+            panic_oob_text("vec index", idx, len);
+        }
+    };
+    raise(
+        "GX0005",
+        "panic: ",
+        format!("attempt to {operation} with overflow\n"),
+    );
 }
 
 // ---------------------------------------------------------------
@@ -480,7 +509,7 @@ pub unsafe extern "C" fn gos_rt_panic_vec_index(
 // ---------------------------------------------------------------
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_exit(code: i32) -> ! {
+pub extern "C" fn gos_rt_exit(code: i32) -> ! {
     // signal the netpoller thread to drain its
     // current `poll()` cycle before `std::process::exit` kills it.
     // Without this, in-flight TCP send buffers were terminated by
@@ -492,9 +521,8 @@ pub unsafe extern "C" fn gos_rt_exit(code: i32) -> ! {
     // by `os::exit(N)` produces no output - `std::process::exit`
     // skips the C++/atexit handlers that would normally drain
     // stdio.
-    unsafe {
-        gos_rt_flush_stdout();
-    }
+    gos_rt_flush_stdout();
+
     std::process::exit(code);
 }
 

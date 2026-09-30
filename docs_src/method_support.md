@@ -82,6 +82,7 @@ The literal spelling of each container is in
 | `v.pop()` | `Option<T>` | |
 | `v.clear()` | `()` | Removes all elements. |
 | `v.truncate(n)` | `()` | Keeps the first `n` elements, clamping negative lengths to `0`. |
+| `v.retain(keep)` | `()` | Keeps the elements `keep` accepts, in order. |
 | `v.extend(xs)` / `v.extend_from_slice(xs)` | `()` | Appends elements from another vector or inline array with matching element layout. |
 | `v.reserve(n)` / `v.reserve_exact(n)` | `()` | Ensures room for at least `n` total elements. |
 | `v.capacity()` | `i64` | Returns allocated element capacity. |
@@ -112,6 +113,11 @@ The literal spelling of each container is in
 | `v.fill(value)` | `()` | Clones `value` into every existing element without changing length or capacity; also available on mutable arrays and slices. |
 
 ## Map
+
+`m[k]` reads the value stored under `k` and panics, naming the key, when the
+map does not hold it. `m[k] = v` stores a value; `m[k] += 1`,
+`m[k].field -= 3`, and `m[k].items.push(x)` read the stored value, update it,
+and store it back.
 
 | Method | Returns | Notes |
 |---|---|---|
@@ -241,6 +247,69 @@ lexicographically, `Option` and `Result` by arm then payload, and an enum by
 variant rank then payload. A `Map` or a `Set` has no element order and is
 reported as GT0068, as is a `u64` or `usize`, whose range outruns the signed
 comparison the heap orders by.
+
+## char
+
+Written in Gossamer and compiled like any other method, so every tier runs
+the same body. A program's own `impl char { .. }` defining one of these names
+keeps its definition.
+
+| Method | Returns | Notes |
+|---|---|---|
+| `is_alphabetic` / `is_numeric` / `is_alphanumeric` | `bool` | Unicode general categories (`L`, `N`). |
+| `is_whitespace` / `is_uppercase` / `is_lowercase` / `is_control` | `bool` | Unicode classes. |
+| `is_ascii` and `is_ascii_{digit, alphabetic, alphanumeric, uppercase, lowercase, hexdigit, whitespace, punctuation, graphic, control}` | `bool` | ASCII tests; `u8` answers the same set. |
+| `to_digit(radix)` / `is_digit(radix)` | `Option<i64>` / `bool` | Radix 2 to 36. |
+| `to_uppercase()` / `to_lowercase()` | `String` | Full mapping: `'ß'.to_uppercase()` is `"SS"`. |
+| `to_ascii_uppercase()` / `to_ascii_lowercase()` | `char` | ASCII letters only; `u8` answers a `u8`. |
+| `eq_ignore_ascii_case(other)` | `bool` | |
+| `len_utf8()` / `len_utf16()` | `i64` | Encoded length in bytes / code units. |
+| `char::from_digit(d, radix)` | `Option<char>` | Lowercase letters above 9. |
+| `char::from_u32(code)` | `Option<char>` | `None` outside the Unicode scalar range. |
+
+## Integers
+
+Every integer type (`i8` .. `i64`, `isize`, `u8` .. `u64`, `usize`) answers
+these, written in Gossamer. Plain `+ - *` report an overflow; these are the
+spellings that decide what happens instead.
+
+| Method | Returns | Notes |
+|---|---|---|
+| `checked_{add, sub, mul, div, rem, pow}` | `Option<T>` | `None` on overflow or a zero divisor. Signed also `checked_neg`, `checked_abs`. |
+| `saturating_{add, sub, mul, pow}` | `T` | Clamps to `T::MIN` / `T::MAX`. |
+| `overflowing_{add, sub, mul}` | `(T, bool)` | The wrapped result and whether it wrapped. |
+| `pow(exp)` | `T` | Integer power; overflow is reported as for `*`. A negative exponent panics. |
+| `rem_euclid(rhs)` / `div_euclid(rhs)` | `T` | Euclidean remainder is never negative. |
+| `signum()` / `is_positive()` / `is_negative()` | `T` / `bool` | Signed types. |
+| `abs_diff(other)` | unsigned `T` | Never overflows. |
+| `is_power_of_two()` / `next_power_of_two()` | `bool` / `T` | Unsigned types. |
+| `isqrt()` | `T` | Floor of the square root. |
+| `count_ones()` / `count_zeros()` / `leading_zeros()` / `trailing_zeros()` | `i64` | Over the type's width. |
+
+An integer's `pow` answers an integer since 0.65.0; `gos fix` rewrites a call
+that relied on the earlier `f64` answer to `(n as f64).pow(e)`.
+
+## Ranges
+
+A range held in a binding is iteration state. A range written in place answers
+`contains`: `(lo..hi).contains(x)`, `(lo..=hi).contains(x)`, and `(lo..).contains(x)`
+compare `x` against the bounds, each evaluated once.
+
+## Iterators
+
+A built-in `Iterator<T>` and every type with `impl Iterator for T` share one
+surface. Adapters stay lazy: `map`, `filter`, `filter_map`, `flat_map`,
+`take`, `skip`, `step_by`, `enumerate`, `take_while`, `skip_while`, `chain`,
+`zip`. Terminals end the chain: `collect`, `count`, `sum`, `product`, `min`,
+`max`, `min_by_key`, `max_by_key`, `fold`, `reduce`, `any`, `all`, `find`,
+`find_map`, `position`, `for_each`, `last`, `nth`, `join`. `next()` advances an
+iterator in place. On a program's own iterator the adapters are Gossamer
+methods written for its type, so a method of the same name the type declares
+takes precedence.
+
+`collect()` answers `Vec<T>`, or `Result<Vec<T>, E>` / `Option<Vec<T>>` when a
+turbofish, the `let` type, or the function's return type names one; pulling
+stops at the first `Err` or `None`.
 
 ## `to_string` and the Display rendering
 

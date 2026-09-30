@@ -1,7 +1,7 @@
 use std::regex
 
 fn main() {
-    let pat = regex::compile("foo").unwrap()
+    let pat = regex::compile("foo")
     let s = "foo bar foo baz"
     println("{}", pat.replace(s, "BAR"))
     println("{}", pat.replace_all(s, "BAR"))

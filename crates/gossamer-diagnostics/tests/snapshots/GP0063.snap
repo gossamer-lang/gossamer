@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0063]: An `f"..."` string holds an empty `{}` placeholder. An interpolated - here
+--- framed ---
+error[GP0063]: An `f"..."` string holds an empty `{}` placeholder. An interpolated
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

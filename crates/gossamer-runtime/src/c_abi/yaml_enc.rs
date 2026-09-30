@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::doc_markdown)]
@@ -21,12 +20,12 @@ use super::*;
 // ---------------------------------------------------------------
 
 fn yaml_result_ok(s: &str) -> i128 {
-    unsafe { gos_rt_result_new(0, alloc_cstring(s.as_bytes()) as i64) }
+    gos_rt_result_new(0, alloc_cstring(s.as_bytes()) as i64)
 }
 
 fn yaml_result_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
 fn json_to_serde_norway(v: &serde_json::Value) -> serde_norway::Value {
@@ -71,6 +70,7 @@ pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         match crate::yaml_node::decode_json(
@@ -80,11 +80,11 @@ pub unsafe extern "C" fn gos_rt_yaml_parse(s: *const c_char) -> i128 {
         ) {
             Ok(json_val) => {
                 let ptr = crate::c_abi::json::GosJson::into_raw(json_val);
-                unsafe { gos_rt_result_new(0, ptr as i64) }
+                gos_rt_result_new(0, ptr as i64)
             }
             Err(e) => {
                 let cs = alloc_cstring(format!("yaml::parse: {e}").as_bytes());
-                unsafe { gos_rt_result_new(1, cs as i64) }
+                gos_rt_result_new(1, cs as i64)
             }
         }
     })
@@ -96,6 +96,7 @@ pub unsafe extern "C" fn gos_rt_yaml_to_json(s: *const c_char) -> i128 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         let json_val = match crate::yaml_node::decode_json(
@@ -119,6 +120,7 @@ pub unsafe extern "C" fn gos_rt_yaml_from_json(s: *const c_char) -> i128 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         let json_val: serde_json::Value = match serde_json::from_str(text) {
@@ -140,6 +142,8 @@ pub unsafe extern "C" fn gos_rt_yaml_from_json(s: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_yaml_encode(j: *const crate::c_abi::json::GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_value_ref` accepts.
         let yaml_val = match unsafe { crate::c_abi::json::json_value_ref(j) } {
             Some(jv) => json_to_serde_norway(jv),
             None => serde_norway::Value::Null,
@@ -161,6 +165,7 @@ pub unsafe extern "C" fn gos_rt_yaml_parse_all(s: *const c_char) -> i128 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         let docs = match crate::yaml_node::parse_all(text) {
@@ -169,14 +174,15 @@ pub unsafe extern "C" fn gos_rt_yaml_parse_all(s: *const c_char) -> i128 {
         };
         // JSON-typed: each element is a handle holding a share of its
         // document, which `gos_rt_vec_free` gives back with the vec.
-        let vec = unsafe {
-            crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::JSON)
-        };
+        let vec =
+            { crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::JSON) };
         for doc in docs {
             let ptr = crate::c_abi::json::GosJson::into_raw(doc.into_json());
+            // SAFETY: `vec` is the fresh vec made above, or null, which `gos_rt_vec_push_i64`
+            // accepts.
             unsafe { crate::c_abi::vec::gos_rt_vec_push_i64(vec, ptr as i64) };
         }
-        unsafe { gos_rt_result_new(0, vec as i64) }
+        gos_rt_result_new(0, vec as i64)
     })
 }
 
@@ -186,6 +192,7 @@ pub unsafe extern "C" fn gos_rt_yaml_is_valid(s: *const c_char) -> i64 {
         let text = if s.is_null() {
             ""
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(s) }
         };
         i64::from(crate::yaml_node::parse(text).is_ok())

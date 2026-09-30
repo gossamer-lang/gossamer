@@ -118,7 +118,7 @@ impl<'src> Lexer<'src> {
     }
 
     /// Classifies a run of identifier characters as a keyword, a
-    /// string-prefix literal (`r"..."`, `b"..."`, `br"..."`), or a
+    /// string-prefix literal (`r"..."`, `b"..."`, `br"..."`, `f"..."`), or a
     /// plain identifier.
     fn lex_ident_or_prefix(&mut self, start: u32) -> TokenKind {
         if let Some(kind) = self.try_prefixed_string(start) {
@@ -129,10 +129,20 @@ impl<'src> Lexer<'src> {
         Keyword::from_ident(text).map_or(TokenKind::Ident, TokenKind::Keyword)
     }
 
-    /// If the cursor sits at `r"`, `r#`, `b"`, `b'`, or `br"`/`br#`,
+    /// If the cursor sits at `r"`, `r#`, `b"`, `b'`, `br"`/`br#`, or `f"`,
     /// lexes the corresponding literal and returns its token kind.
     fn try_prefixed_string(&mut self, start: u32) -> Option<TokenKind> {
         match (self.cursor.peek(), self.cursor.peek_nth(1)) {
+            ('f', '"') => {
+                self.cursor.bump();
+                let outcome =
+                    crate::string::lex_interpolated_string(&mut self.cursor, self.file, start);
+                Some(match self.absorb_quoted(outcome) {
+                    TokenKind::StringLit => TokenKind::FStringLit,
+                    TokenKind::TripleStringLit => TokenKind::FTripleStringLit,
+                    other => other,
+                })
+            }
             ('r', '"' | '#') => Some(self.drive_raw_string(start, false)),
             ('b', '"') => Some(self.drive_byte_string(start)),
             ('b', '\'') => Some(self.drive_byte_literal(start)),

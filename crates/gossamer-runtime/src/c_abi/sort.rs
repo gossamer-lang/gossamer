@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::wildcard_imports)]
 #![allow(clippy::cast_ptr_alignment)]
@@ -32,11 +31,14 @@ unsafe fn i64_slots<'a>(v: *const GosVec) -> &'a [i64] {
     if v.is_null() {
         return &[];
     }
+    // SAFETY: `v` is non-null (checked above) and, by this function's caller, a live `Vec`.
     let header = unsafe { &*v };
     let len = header.len.max(0) as usize;
     if len == 0 || header.elem_bytes != 8 {
         return &[];
     }
+    // SAFETY: a `Vec` of 8-byte elements holds `len` initialised words at `ptr`, and the slice
+    // lives no longer than the caller's borrow of `v`.
     unsafe { std::slice::from_raw_parts(header.ptr.cast::<i64>(), len) }
 }
 
@@ -47,6 +49,7 @@ unsafe fn str_slot<'a>(slots: &[i64], i: usize) -> &'a str {
     if raw == 0 {
         return "";
     }
+    // SAFETY: a non-zero slot of a `String` vec is a live string body the vec keeps.
     unsafe { crate::c_abi::gos_str_arg_text(raw as *const c_char) }
 }
 
@@ -54,6 +57,7 @@ unsafe fn borrowed_str<'a>(p: *const c_char) -> &'a str {
     if p.is_null() {
         return "";
     }
+    // SAFETY: `p` is non-null (checked above) and, by this function's caller, a live string body.
     unsafe { crate::c_abi::gos_str_arg_text(p) }
 }
 
@@ -75,16 +79,23 @@ fn lower_bound<F: Fn(usize) -> std::cmp::Ordering>(len: usize, cmp: F) -> usize 
 /// Copy `src` into a fresh Vec sharing ownership of every element,
 /// mirroring the sharing contract of `gos_rt_vec_reversed`.
 unsafe fn clone_vec(src: *const GosVec, order: &[usize]) -> *mut GosVec {
+    // SAFETY: `src` is, by this function's caller, a live `Vec`.
     let header = unsafe { &*src };
     let elem_bytes = header.elem_bytes;
-    let out = unsafe { gos_rt_vec_with_capacity(elem_bytes, order.len() as i64) };
+    let out = gos_rt_vec_with_capacity(elem_bytes, order.len() as i64);
     if out.is_null() {
         return out;
     }
     for &from in order {
+        // SAFETY: every index in `order` is below the vec's length, so the element lies inside
+        // its buffer.
         let elem = unsafe { header.ptr.add(from * (elem_bytes as usize)) };
+        // SAFETY: `out` is the live vec made above and `elem` addresses one element of `src`'s
+        // element size.
         unsafe { gos_rt_vec_push(out, elem) };
     }
+    // SAFETY: `src` and `out` are live vecs of the same element kind, `out` holding copies of
+    // `src`'s elements.
     unsafe { crate::c_abi::vec::vec_share_owned_elements(src, out) };
     out
 }
@@ -95,11 +106,14 @@ unsafe fn clone_vec(src: *const GosVec, order: &[usize]) -> *mut GosVec {
 pub unsafe extern "C" fn gos_rt_sort_stable_i64(v: *const GosVec) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `v` is this shim's `Vec` argument, non-null (checked above) and live for the
+        // call (C-ABI contract).
         let slots = unsafe { i64_slots(v) };
         let mut order: Vec<usize> = (0..slots.len()).collect();
         order.sort_by_key(|&i| slots[i]);
+        // SAFETY: `v` is live, and `order` is a permutation of its indices.
         unsafe { clone_vec(v, &order) }
     })
 }
@@ -110,11 +124,15 @@ pub unsafe extern "C" fn gos_rt_sort_stable_i64(v: *const GosVec) -> *mut GosVec
 pub unsafe extern "C" fn gos_rt_sort_stable_str(v: *const GosVec) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `v` is this shim's `Vec` argument, non-null (checked above) and live for the
+        // call (C-ABI contract).
         let slots = unsafe { i64_slots(v) };
         let mut order: Vec<usize> = (0..slots.len()).collect();
+        // SAFETY: `a` and `b` are indices of `slots`, a `String` vec's slots.
         order.sort_by(|&a, &b| unsafe { str_slot(slots, a).cmp(str_slot(slots, b)) });
+        // SAFETY: `v` is live, and `order` is a permutation of its indices.
         unsafe { clone_vec(v, &order) }
     })
 }
@@ -123,13 +141,15 @@ pub unsafe extern "C" fn gos_rt_sort_stable_str(v: *const GosVec) -> *mut GosVec
 /// `Vec<i64>`; `Some(index)` of a matching element, else `None`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_binary_search_i64(v: *const GosVec, target: i64) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
         let at = lower_bound(slots.len(), |mid| slots[mid].cmp(&target));
         if at < slots.len() && slots[at] == target {
-            unsafe { gos_rt_result_new(0, at as i64) }
+            gos_rt_result_new(0, at as i64)
         } else {
-            unsafe { gos_rt_result_new(1, 0) }
+            gos_rt_result_new(1, 0)
         }
     })
 }
@@ -141,16 +161,23 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_str(
     v: *const GosVec,
     target: *const c_char,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
+        // SAFETY: `target` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `borrowed_str` accepts.
         let needle = unsafe { borrowed_str(target) };
+        // SAFETY: `mid` is below `slots.len()`, an index of a `String` vec's slots.
         let at = lower_bound(slots.len(), |mid| unsafe {
             str_slot(slots, mid).cmp(needle)
         });
+        // SAFETY: `at` is below `slots.len()` (checked just before), an index of a `String` vec's
+        // slots.
         if at < slots.len() && unsafe { str_slot(slots, at) } == needle {
-            unsafe { gos_rt_result_new(0, at as i64) }
+            gos_rt_result_new(0, at as i64)
         } else {
-            unsafe { gos_rt_result_new(1, 0) }
+            gos_rt_result_new(1, 0)
         }
     })
 }
@@ -161,6 +188,8 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_str(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_partition_point_i64(v: *const GosVec, pivot: i64) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
         lower_bound(slots.len(), |mid| slots[mid].cmp(&pivot)) as i64
     })
@@ -174,8 +203,13 @@ pub unsafe extern "C" fn gos_rt_sort_partition_point_str(
     pivot: *const c_char,
 ) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
+        // SAFETY: `pivot` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `borrowed_str` accepts.
         let needle = unsafe { borrowed_str(pivot) };
+        // SAFETY: `mid` is below `slots.len()`, an index of a `String` vec's slots.
         lower_bound(slots.len(), |mid| unsafe {
             str_slot(slots, mid).cmp(needle)
         }) as i64
@@ -187,11 +221,14 @@ unsafe fn f64_slots<'a>(v: *const GosVec) -> &'a [f64] {
     if v.is_null() {
         return &[];
     }
+    // SAFETY: `v` is non-null (checked above) and, by this function's caller, a live `Vec`.
     let header = unsafe { &*v };
     let len = header.len.max(0) as usize;
     if len == 0 || header.elem_bytes != 8 {
         return &[];
     }
+    // SAFETY: a `Vec` of 8-byte elements holds `len` initialised words at `ptr`, and the slice
+    // lives no longer than the caller's borrow of `v`.
     unsafe { std::slice::from_raw_parts(header.ptr.cast::<f64>(), len) }
 }
 
@@ -201,11 +238,14 @@ unsafe fn f64_slots<'a>(v: *const GosVec) -> &'a [f64] {
 pub unsafe extern "C" fn gos_rt_sort_stable_f64(v: *const GosVec) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `v` is this shim's `Vec` argument, non-null (checked above) and live for the
+        // call (C-ABI contract).
         let slots = unsafe { f64_slots(v) };
         let mut order: Vec<usize> = (0..slots.len()).collect();
         order.sort_by(|&a, &b| float_order(slots[a], slots[b]));
+        // SAFETY: `v` is live, and `order` is a permutation of its indices.
         unsafe { clone_vec(v, &order) }
     })
 }
@@ -214,13 +254,15 @@ pub unsafe extern "C" fn gos_rt_sort_stable_f64(v: *const GosVec) -> *mut GosVec
 /// `Vec<f64>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_binary_search_f64(v: *const GosVec, target: f64) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `f64_slots` accepts.
         let slots = unsafe { f64_slots(v) };
         let at = lower_bound(slots.len(), |mid| float_order(slots[mid], target));
         if at < slots.len() && float_order(slots[at], target) == std::cmp::Ordering::Equal {
-            unsafe { gos_rt_result_new(0, at as i64) }
+            gos_rt_result_new(0, at as i64)
         } else {
-            unsafe { gos_rt_result_new(1, 0) }
+            gos_rt_result_new(1, 0)
         }
     })
 }
@@ -229,6 +271,8 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_f64(v: *const GosVec, target:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sort_partition_point_f64(v: *const GosVec, pivot: f64) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `f64_slots` accepts.
         let slots = unsafe { f64_slots(v) };
         lower_bound(slots.len(), |mid| float_order(slots[mid], pivot)) as i64
     })
@@ -239,11 +283,13 @@ pub unsafe extern "C" fn gos_rt_sort_partition_point_f64(v: *const GosVec, pivot
 /// position an insert would keep sorted.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_binary_search_i64(v: *const GosVec, target: i64) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
         let at = lower_bound(slots.len(), |mid| slots[mid].cmp(&target));
         let found = at < slots.len() && slots[at] == target;
-        unsafe { gos_rt_result_new(i64::from(!found), at as i64) }
+        gos_rt_result_new(i64::from(!found), at as i64)
     })
 }
 
@@ -251,11 +297,13 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_i64(v: *const GosVec, target: 
 /// `Vec<f64>`, ordered by [`float_order`] like every other float sort.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_binary_search_f64(v: *const GosVec, target: f64) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `f64_slots` accepts.
         let slots = unsafe { f64_slots(v) };
         let at = lower_bound(slots.len(), |mid| float_order(slots[mid], target));
         let found = at < slots.len() && float_order(slots[at], target) == std::cmp::Ordering::Equal;
-        unsafe { gos_rt_result_new(i64::from(!found), at as i64) }
+        gos_rt_result_new(i64::from(!found), at as i64)
     })
 }
 
@@ -266,14 +314,21 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_str(
     v: *const GosVec,
     target: *const c_char,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `i64_slots` accepts.
         let slots = unsafe { i64_slots(v) };
+        // SAFETY: `target` is this shim's `String` argument, null or live (C-ABI contract), which
+        // `borrowed_str` accepts.
         let needle = unsafe { borrowed_str(target) };
+        // SAFETY: `mid` is below `slots.len()`, an index of a `String` vec's slots.
         let at = lower_bound(slots.len(), |mid| unsafe {
             str_slot(slots, mid).cmp(needle)
         });
+        // SAFETY: `at` is below `slots.len()` (checked just before), an index of a `String` vec's
+        // slots.
         let found = at < slots.len() && unsafe { str_slot(slots, at) } == needle;
-        unsafe { gos_rt_result_new(i64::from(!found), at as i64) }
+        gos_rt_result_new(i64::from(!found), at as i64)
     })
 }
 
@@ -283,6 +338,7 @@ unsafe fn aggregate_elems(v: *const GosVec) -> Option<(*const u8, usize, usize)>
     if v.is_null() {
         return None;
     }
+    // SAFETY: `v` is non-null (checked above) and, by this function's caller, a live `Vec`.
     let header = unsafe { &*v };
     let len = header.len.max(0) as usize;
     let stride = i64::from(header.elem_bytes).max(0) as usize;
@@ -302,7 +358,9 @@ unsafe fn aggregate_cmp(
     n: i64,
     tags: *const u8,
 ) -> std::cmp::Ordering {
+    // SAFETY: `i` is below the vec's length, so the element lies inside the buffer at `base`.
     let elem = unsafe { base.add(i * stride).cast::<i64>() };
+    // SAFETY: `elem` and `target` each address `n` slots laid out as `tags` describes.
     unsafe { crate::c_abi::gos_rt_tuple_cmp(elem, target.cast::<i64>(), n, tags) }.cmp(&0)
 }
 
@@ -318,20 +376,26 @@ pub unsafe extern "C" fn gos_rt_sort_stable_aggr(
     tags: *const u8,
 ) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
             let elem_bytes = if v.is_null() {
                 8
             } else {
+                // SAFETY: `v` is non-null here and live for the call (C-ABI contract).
                 unsafe { &*v }.elem_bytes.max(8)
             };
-            return unsafe { gos_rt_vec_new(elem_bytes) };
+            return gos_rt_vec_new(elem_bytes);
         };
         let mut order: Vec<usize> = (0..len).collect();
+        // SAFETY: `a` and `b` are indices below `len`, so each element lies inside the buffer,
+        // laid out as `tags` describes.
         order.sort_by(|&a, &b| unsafe {
             let pa = base.add(a * stride).cast::<i64>();
             let pb = base.add(b * stride).cast::<i64>();
             crate::c_abi::gos_rt_tuple_cmp(pa, pb, n, tags).cmp(&0)
         });
+        // SAFETY: `v` is live, and `order` is a permutation of its indices.
         unsafe { clone_vec(v, &order) }
     })
 }
@@ -345,23 +409,29 @@ pub unsafe extern "C" fn gos_rt_sort_binary_search_aggr(
     n: i64,
     tags: *const u8,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         };
         if target.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `mid` is below `len`, and `target` is non-null (checked above), laid out as
+        // `tags` describes (C-ABI contract).
         let at = lower_bound(len, |mid| unsafe {
             aggregate_cmp(base, stride, mid, target, n, tags)
         });
         let found = at < len
+            // SAFETY: `at` is below `len` (checked just before), and `target` is non-null, laid
+            // out as `tags` describes.
             && unsafe { aggregate_cmp(base, stride, at, target, n, tags) }
                 == std::cmp::Ordering::Equal;
         if found {
-            unsafe { gos_rt_result_new(0, at as i64) }
+            gos_rt_result_new(0, at as i64)
         } else {
-            unsafe { gos_rt_result_new(1, 0) }
+            gos_rt_result_new(1, 0)
         }
     })
 }
@@ -377,20 +447,26 @@ pub unsafe extern "C" fn gos_rt_vec_binary_search_aggr(
     n: i64,
     tags: *const u8,
 ) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         };
         if target.is_null() || tags.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `mid` is below `len`, and `target` and `tags` are non-null (checked above),
+        // with `target` laid out as `tags` describes.
         let at = lower_bound(len, |mid| unsafe {
             aggregate_cmp(base, stride, mid, target, n, tags)
         });
         let found = at < len
+            // SAFETY: `at` is below `len` (checked just before), and `target` and `tags` are
+            // non-null.
             && unsafe { aggregate_cmp(base, stride, at, target, n, tags) }
                 == std::cmp::Ordering::Equal;
-        unsafe { gos_rt_result_new(i64::from(!found), at as i64) }
+        gos_rt_result_new(i64::from(!found), at as i64)
     })
 }
 
@@ -403,12 +479,16 @@ pub unsafe extern "C" fn gos_rt_sort_partition_point_aggr(
     tags: *const u8,
 ) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's `Vec` argument, null or live for the call (C-ABI contract),
+        // which `aggregate_elems` accepts.
         let Some((base, len, stride)) = (unsafe { aggregate_elems(v) }) else {
             return 0;
         };
         if pivot.is_null() {
             return 0;
         }
+        // SAFETY: `mid` is below `len`, and `pivot` is non-null (checked above), laid out as
+        // `tags` describes (C-ABI contract).
         lower_bound(len, |mid| unsafe {
             aggregate_cmp(base, stride, mid, pivot, n, tags)
         }) as i64

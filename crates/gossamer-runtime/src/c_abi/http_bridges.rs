@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -108,7 +106,7 @@ fn route_segments_match(segments: &[RouteSegment], path: &str) -> Option<Vec<(St
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_router_new() -> *mut GosRouter {
+pub extern "C" fn gos_rt_router_new() -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosRouter { routes: Vec::new() }))
     })
@@ -119,6 +117,11 @@ pub unsafe extern "C" fn gos_rt_router_new() -> *mut GosRouter {
 /// The per-verb entry points below name their method in Rust, so they reach
 /// the route table here rather than shaping a C string the string ABI would
 /// have to measure as a foreign one.
+///
+/// # Safety
+/// `router`, `pattern`, and `env` are each null or live, `router` accessed by
+/// nothing else during the call, and `fn_addr` is a compiled handler taking
+/// `env` and a request.
 unsafe fn router_add_verb(
     router: *mut GosRouter,
     method: &str,
@@ -129,10 +132,14 @@ unsafe fn router_add_verb(
     if router.is_null() {
         return;
     }
+    // SAFETY: `router` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `GosRouter` not otherwise accessed during the call.
     let r = unsafe { &mut *router };
     let pat = if pattern.is_null() {
         String::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `pattern` live or null, which
+        // `gos_str_arg_string` accepts.
         unsafe { crate::c_abi::gos_str_arg_string(pattern) }
     };
     let segments = parse_route_pattern(&pat);
@@ -143,12 +150,16 @@ unsafe fn router_add_verb(
     // The route therefore takes a share of the environment, and holds it for
     // the life of the router - the same ownership `spawn` gives a goroutine
     // it hands a closure to.
+    // SAFETY: this `unsafe fn`'s caller passes `env` live or null, which `gos_rt_rc_retain`
+    // accepts.
     unsafe { crate::c_abi::rc::gos_rt_rc_retain(env) };
     // The server dispatches this handler on a goroutine per connection, so
     // everything the environment holds is reached from several threads at
     // once and has to count its shares atomically. Registration is where
     // that can be said: it runs on the thread that built the closure, before
     // the listener exists, which is the ordering `mark_shared` requires.
+    // SAFETY: this `unsafe fn`'s caller passes `env` live or null, which `gos_rt_rc_mark_shared`
+    // accepts.
     unsafe { crate::c_abi::rc::gos_rt_rc_mark_shared(env) };
     r.routes.push(GosRoute {
         method: method.to_ascii_uppercase(),
@@ -171,8 +182,12 @@ pub unsafe extern "C" fn gos_rt_router_add(
         let m = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, &m, pattern, env, fn_addr) };
     });
 }
@@ -191,15 +206,18 @@ pub unsafe extern "C" fn gos_rt_router_add_pattern(
         if router.is_null() {
             return;
         }
+        // SAFETY: `router` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &mut *router };
         let m = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }.to_ascii_uppercase()
         };
         let pat = if pattern.is_null() {
             String::new()
         } else {
+            // SAFETY: `pattern` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(pattern) }
         };
         let segments = parse_route_pattern(&pat);
@@ -223,35 +241,42 @@ pub unsafe extern "C" fn gos_rt_router_lookup(
     method: *const c_char,
     path: *const c_char,
 ) -> i128 {
-    ffi_entry!(unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) }, {
+    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
         if router.is_null() {
-            return unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) };
+            return crate::c_abi::vec::gos_rt_result_new(1, 0);
         }
+        // SAFETY: `router` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &*router };
         let m = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }.to_ascii_uppercase()
         };
         let p = if path.is_null() {
             String::new()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         for (i, route) in r.routes.iter().enumerate() {
             if (route.method.is_empty() || route.method == m)
                 && route_segments_match(&route.segments, &p).is_some()
             {
-                return unsafe { crate::c_abi::vec::gos_rt_result_new(0, i as i64) };
+                return crate::c_abi::vec::gos_rt_result_new(0, i as i64);
             }
         }
-        unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) }
+        crate::c_abi::vec::gos_rt_result_new(1, 0)
     })
 }
 
 /// Internal helper: bare-fn variant of `gos_rt_router_add`. Used by
 /// `gos_rt_router_get_fn` / `_post_fn` / etc. when the registered
 /// handler has no env (a top-level `fn`).
+///
+/// # Safety
+/// `router` and `pattern` are each null or live, `router` accessed by nothing
+/// else during the call, and `fn_addr` is a compiled handler taking a request.
 unsafe fn router_add_bare(
     router: *mut GosRouter,
     method: &str,
@@ -261,11 +286,15 @@ unsafe fn router_add_bare(
     if router.is_null() {
         return;
     }
+    // SAFETY: `router` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `GosRouter` not otherwise accessed during the call.
     let r = unsafe { &mut *router };
     let m = method.to_ascii_uppercase();
     let pat = if pattern.is_null() {
         String::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `pattern` live or null, which
+        // `gos_str_arg_string` accepts.
         unsafe { crate::c_abi::gos_str_arg_string(pattern) }
     };
     let segments = parse_route_pattern(&pat);
@@ -295,6 +324,9 @@ pub unsafe extern "C" fn gos_rt_router_get(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, "GET", pattern, env, fn_addr) };
         router
     })
@@ -308,6 +340,9 @@ pub unsafe extern "C" fn gos_rt_router_post(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, "POST", pattern, env, fn_addr) };
         router
     })
@@ -321,6 +356,9 @@ pub unsafe extern "C" fn gos_rt_router_put(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, "PUT", pattern, env, fn_addr) };
         router
     })
@@ -334,6 +372,9 @@ pub unsafe extern "C" fn gos_rt_router_delete(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, "DELETE", pattern, env, fn_addr) };
         router
     })
@@ -347,6 +388,9 @@ pub unsafe extern "C" fn gos_rt_router_patch(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, "PATCH", pattern, env, fn_addr) };
         router
     })
@@ -360,6 +404,9 @@ pub unsafe extern "C" fn gos_rt_router_head(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, "HEAD", pattern, env, fn_addr) };
         router
     })
@@ -373,6 +420,9 @@ pub unsafe extern "C" fn gos_rt_router_options(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router`, `pattern`, and `env` are this shim's arguments, each null or live for
+        // the call (C-ABI contract), and `fn_addr` a handler of the environment-taking shape,
+        // which `router_add_verb` accepts.
         unsafe { router_add_verb(router, "OPTIONS", pattern, env, fn_addr) };
         router
     })
@@ -389,6 +439,8 @@ pub unsafe extern "C" fn gos_rt_router_get_fn(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "GET", pattern, fn_addr) };
         router
     })
@@ -401,6 +453,8 @@ pub unsafe extern "C" fn gos_rt_router_post_fn(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "POST", pattern, fn_addr) };
         router
     })
@@ -413,6 +467,8 @@ pub unsafe extern "C" fn gos_rt_router_put_fn(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "PUT", pattern, fn_addr) };
         router
     })
@@ -425,6 +481,8 @@ pub unsafe extern "C" fn gos_rt_router_delete_fn(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "DELETE", pattern, fn_addr) };
         router
     })
@@ -437,6 +495,8 @@ pub unsafe extern "C" fn gos_rt_router_patch_fn(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "PATCH", pattern, fn_addr) };
         router
     })
@@ -449,6 +509,8 @@ pub unsafe extern "C" fn gos_rt_router_head_fn(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "HEAD", pattern, fn_addr) };
         router
     })
@@ -461,6 +523,8 @@ pub unsafe extern "C" fn gos_rt_router_options_fn(
     fn_addr: i64,
 ) -> *mut GosRouter {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, "OPTIONS", pattern, fn_addr) };
         router
     })
@@ -477,8 +541,11 @@ pub unsafe extern "C" fn gos_rt_router_add_fn(
         let m = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
+        // SAFETY: `router` and `pattern` are this shim's arguments, each null or live for the
+        // call (C-ABI contract), and `fn_addr` a bare handler, which `router_add_bare` accepts.
         unsafe { router_add_bare(router, &m, pattern, fn_addr) }
     });
 }
@@ -496,16 +563,24 @@ pub unsafe extern "C-unwind" fn gos_rt_router_serve(
         if router.is_null() || req.is_null() {
             return router_404_result();
         }
+        // SAFETY: `router` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &*router };
         // Clone the request's path + method so the borrow ends before
         // we write captured params back through the `*mut req`.
+        // SAFETY: `req` is this shim's `GosHttpRequest` argument, non-null (checked above), live
+        // for the call (C-ABI contract).
         let path = unsafe { (*req).url_path_only().to_string() };
+        // SAFETY: `req` is this shim's `GosHttpRequest` argument, non-null (checked above), live
+        // for the call (C-ABI contract).
         let method = unsafe { (*req).method.clone() };
         for route in &r.routes {
             if !route.method.is_empty() && !route.method.eq_ignore_ascii_case(&method) {
                 continue;
             }
             if let Some(params) = route_segments_match(&route.segments, &path) {
+                // SAFETY: `req` is this shim's `GosHttpRequest` argument, non-null (checked
+                // above), live for the call and not otherwise accessed during it (C-ABI
+                // contract).
                 unsafe { (*req).params = params };
                 if route.bare {
                     super::fn_registry::verify(
@@ -513,7 +588,12 @@ pub unsafe extern "C-unwind" fn gos_rt_router_serve(
                         super::fn_registry::FnKind::HttpHandlerBare,
                     );
                     type BareFn = unsafe extern "C-unwind" fn(req: *mut GosHttpRequest) -> i128;
-                    let handler: BareFn = unsafe { std::mem::transmute(route.fn_addr) };
+                    // SAFETY: the route's address is a compiled bare handler (C-ABI contract),
+                    // which `fn_registry::verify` has checked.
+                    let handler: BareFn =
+                        unsafe { std::mem::transmute(crate::c_abi::code_address(route.fn_addr)) };
+                    // SAFETY: `handler` takes the request, which is non-null (checked above) and
+                    // live for the call (C-ABI contract).
                     return unsafe { handler(req) };
                 }
                 super::fn_registry::verify(
@@ -522,7 +602,12 @@ pub unsafe extern "C-unwind" fn gos_rt_router_serve(
                 );
                 type HandlerFn =
                     unsafe extern "C-unwind" fn(env: *mut u8, req: *mut GosHttpRequest) -> i128;
-                let handler: HandlerFn = unsafe { std::mem::transmute(route.fn_addr) };
+                // SAFETY: the route's address is a compiled handler of this shape (C-ABI
+                // contract), which `fn_registry::verify` has checked.
+                let handler: HandlerFn =
+                    unsafe { std::mem::transmute(crate::c_abi::code_address(route.fn_addr)) };
+                // SAFETY: `handler` takes the route's environment, which the route holds a share
+                // of, and the live request.
                 return unsafe { handler(route.env as *mut u8, req) };
             }
         }
@@ -780,11 +865,13 @@ pub unsafe extern "C" fn gos_rt_file_server_new(
         let root_s = if root.is_null() {
             String::new()
         } else {
+            // SAFETY: `root` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(root) }
         };
         let prefix_s = if prefix.is_null() {
             String::new()
         } else {
+            // SAFETY: `prefix` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(prefix) }
         };
         Box::into_raw(Box::new(GosFileServer {
@@ -806,7 +893,9 @@ pub unsafe extern "C" fn gos_rt_file_server_serve(
         if fs.is_null() || req.is_null() {
             return router_404_result();
         }
+        // SAFETY: `fs` is a handle from compiled code, checked non-null above and live for the whole call.
         let server = unsafe { &*fs };
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let request = unsafe { &*req };
         let path = request.url_path_only();
         let rel = path.strip_prefix(&server.prefix).unwrap_or(path);
@@ -923,6 +1012,7 @@ pub unsafe extern "C" fn gos_rt_static_serve_file(path: *const c_char) -> i128 {
         let path_s = if path.is_null() {
             String::new()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         match std::fs::read(&path_s) {
@@ -982,7 +1072,7 @@ fn mime_for_path_str(path: &str) -> &'static str {
 pub struct GosNativeClient;
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_native_client_new() -> *mut GosNativeClient {
+pub extern "C" fn gos_rt_native_client_new() -> *mut GosNativeClient {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosNativeClient))
     })
@@ -995,7 +1085,10 @@ pub unsafe extern "C" fn gos_rt_native_client_get(
     _client: *const GosNativeClient,
     url: *const c_char,
 ) -> i128 {
+    // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract).
     ffi_entry!(0i128, {
+        // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `gos_rt_http_get` accepts with no options.
         unsafe { gos_rt_http_get(url, std::ptr::null_mut()) }
     })
 }
@@ -1013,6 +1106,7 @@ pub unsafe extern "C" fn gos_rt_proxy_new(upstream: *const c_char) -> *mut GosPr
         let u = if upstream.is_null() {
             String::new()
         } else {
+            // SAFETY: `upstream` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(upstream) }
         };
         Box::into_raw(Box::new(GosProxy { upstream: u }))
@@ -1028,17 +1122,21 @@ pub unsafe extern "C" fn gos_rt_proxy_forward(
         if proxy.is_null() {
             return router_404_result();
         }
+        // SAFETY: `proxy` is a handle from compiled code, checked non-null above and live for the whole call.
         let p = unsafe { &*proxy };
         let request_path = if req.is_null() {
             "/".to_string()
         } else {
+            // SAFETY: `req` is non-null (checked above) and live for the call (C-ABI contract).
             unsafe { (&*req).url.clone() }
         };
         let full = format!("{}{request_path}", p.upstream.trim_end_matches('/'));
         // The `url` parameter is a Gossamer `String`, read through the length
         // header that sits before the body, so the argument is built as one.
         let url = alloc_cstring(full.as_bytes());
+        // SAFETY: `url` is the fresh string built above.
         let forwarded = unsafe { gos_rt_http_get(url, std::ptr::null_mut()) };
+        // SAFETY: `url` is the fresh string built above, no longer read.
         unsafe { crate::c_abi::string::gos_rt_str_free(url) };
         forwarded
     })
@@ -1057,6 +1155,7 @@ pub unsafe extern "C" fn gos_rt_ws_frame_text(payload: *const c_char) -> *mut c_
         if payload.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `payload` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(payload) };
         let mut out: Vec<u8> = Vec::with_capacity(bytes.len() + 14);
         out.push(0x81); // FIN + text opcode
@@ -1092,6 +1191,7 @@ pub unsafe extern "C" fn gos_rt_chunked_encode(data: *const c_char) -> *mut c_ch
         if data.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `data` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(data) };
         let out = format!("{:x}\r\n", bytes.len());
         let mut buf: Vec<u8> = Vec::with_capacity(bytes.len() + out.len() + 7);
@@ -1110,6 +1210,7 @@ pub unsafe extern "C" fn gos_rt_chunked_decode(data: *const c_char) -> *mut c_ch
         if data.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `data` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(data) };
         let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
         let mut i = 0usize;
@@ -1163,16 +1264,19 @@ pub unsafe extern "C" fn gos_rt_sse_encode_event(
         let n = if name.is_null() {
             String::new()
         } else {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(name) }
         };
         let d = if data.is_null() {
             String::new()
         } else {
+            // SAFETY: `data` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(data) }
         };
         let id_s = if id.is_null() {
             String::new()
         } else {
+            // SAFETY: `id` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(id) }
         };
         let mut out = String::new();
@@ -1203,6 +1307,7 @@ pub unsafe extern "C" fn gos_rt_sse_encode_comment(text: *const c_char) -> *mut 
         let t = if text.is_null() {
             String::new()
         } else {
+            // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(text) }
         };
         alloc_cstring(format!(": {t}\n\n").as_bytes())
@@ -1211,7 +1316,7 @@ pub unsafe extern "C" fn gos_rt_sse_encode_comment(text: *const c_char) -> *mut 
 
 /// sse::encode_retry - render a `retry:` directive.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sse_encode_retry(ms: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sse_encode_retry(ms: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         alloc_cstring(format!("retry: {ms}\n\n").as_bytes())
     })
@@ -1220,7 +1325,7 @@ pub unsafe extern "C" fn gos_rt_sse_encode_retry(ms: i64) -> *mut c_char {
 /// middleware::new_request_id - process-monotonic id with nanos
 /// prefix.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_mw_new_request_id() -> *mut c_char {
+pub extern "C" fn gos_rt_mw_new_request_id() -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1240,6 +1345,7 @@ pub unsafe extern "C" fn gos_rt_mw_accepts_gzip(header: *const c_char) -> i32 {
         if header.is_null() {
             return 0;
         }
+        // SAFETY: `header` is a String argument from compiled code, null or a live string body for the whole call.
         let h = unsafe { crate::c_abi::gos_str_arg_lossy(header) };
         let accepts = h
             .split(',')
@@ -1257,6 +1363,7 @@ pub unsafe extern "C" fn gos_rt_ws_accept_key(client_key: *const c_char) -> *mut
         if client_key.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `client_key` is a String argument from compiled code, null or a live string body for the whole call.
         let k = unsafe { crate::c_abi::gos_str_arg_bytes(client_key) };
         let mut input: Vec<u8> = Vec::with_capacity(k.len() + WS_GUID.len());
         input.extend_from_slice(k);
@@ -1274,6 +1381,7 @@ pub unsafe extern "C" fn gos_rt_static_mime_for_path(path: *const c_char) -> *mu
         if path.is_null() {
             return alloc_cstring(b"application/octet-stream");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let ext = std::path::Path::new(&p)
             .extension()
@@ -1517,14 +1625,22 @@ mod static_path_tests {
     #[test]
     fn a_registered_route_holds_a_share_of_its_handler_environment() {
         let meta: [i64; 2] = [8, 0];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let env = unsafe { crate::c_abi::rc::gos_rt_rc_alloc(8, meta.as_ptr()) };
         assert!(!env.is_null(), "the test environment allocated");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let before = unsafe { crate::c_abi::rc::rc_strong_count(env) };
 
-        let router = unsafe { gos_rt_router_new() };
+        let router = gos_rt_router_new();
         let pattern = crate::c_abi::string::test_gos_str("/user/{id}");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { router_add_verb(router, "GET", pattern, env, 0) };
 
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let after = unsafe { crate::c_abi::rc::rc_strong_count(env) };
         assert_eq!(
             after,
@@ -1538,18 +1654,26 @@ mod static_path_tests {
     #[test]
     fn a_registered_route_marks_its_handler_environment_shared() {
         let meta: [i64; 2] = [8, 0];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let env = unsafe { crate::c_abi::rc::gos_rt_rc_alloc(8, meta.as_ptr()) };
         assert!(!env.is_null(), "the test environment allocated");
         assert!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             !unsafe { crate::c_abi::rc::rc_payload_is_shared(env) },
             "a fresh environment starts thread-local"
         );
 
-        let router = unsafe { gos_rt_router_new() };
+        let router = gos_rt_router_new();
         let pattern = crate::c_abi::string::test_gos_str("/user/{id}");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { router_add_verb(router, "GET", pattern, env, 0) };
 
         assert!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { crate::c_abi::rc::rc_payload_is_shared(env) },
             "registering a handler publishes its environment to the server's goroutines"
         );

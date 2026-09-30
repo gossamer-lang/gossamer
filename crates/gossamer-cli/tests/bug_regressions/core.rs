@@ -711,7 +711,7 @@ fn regex_captures_indexing_works() {
     let src = r#"
 use std::regex
 fn main() {
-    let re = regex::compile("(\\w+)=(\\d+)").unwrap()
+    let re = regex::compile("(\\w+)=(\\d+)")
     let caps = regex::captures_all(re, "a=1 b=22")
     if caps.len() == 0 {
         println("no match")

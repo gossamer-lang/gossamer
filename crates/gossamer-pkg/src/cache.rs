@@ -277,6 +277,17 @@ fn digest_dir(root: &Path, digest: &str) -> PathBuf {
     root.join("pkg").join(digest)
 }
 
+/// The directory holding the unpacked source a fetch cached under `digest`
+/// below `root`, when one is there.
+#[must_use]
+pub fn cached_source_dir(root: &Path, digest: &str) -> Option<PathBuf> {
+    if !is_canonical_digest(digest) {
+        return None;
+    }
+    let dir = digest_dir(root, digest).join("source");
+    dir.is_dir().then_some(dir)
+}
+
 fn is_canonical_digest(digest: &str) -> bool {
     digest.len() == 64
         && digest
@@ -558,6 +569,12 @@ pub enum CacheError {
     /// is rejected before it is unpacked.
     #[error("{0}: registry source is missing a publisher signature")]
     Unsigned(String),
+    /// A registry dependency with no registry configured to fetch it from.
+    #[error(
+        "{0} comes from a package registry, and none is configured: set `[registries] default` \
+         in project.toml or GOS_REGISTRY_URL"
+    )]
+    NoRegistry(String),
     /// The publisher signature did not verify against the tarball
     /// bytes. The tarball is rejected before it is unpacked.
     #[error("{0}: publisher signature does not verify")]

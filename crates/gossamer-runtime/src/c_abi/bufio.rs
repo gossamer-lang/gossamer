@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -44,11 +42,17 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_new(
         } else {
             // Re-use the stream-read-to-string helper: every stream
             // the runtime exposes is one of the io handles.
+            // SAFETY: `stream` is this shim's non-null stream handle (checked above), live for the
+            // call (C-ABI contract).
             let cstr = unsafe { gos_rt_stream_read_to_string(stream.cast::<GosStream>()) };
             if cstr.is_null() {
                 String::new()
             } else {
-                unsafe { crate::c_abi::gos_str_arg_string(cstr) }
+                // SAFETY: `cstr` is the fresh non-null string the read answered, owned here.
+                let text = unsafe { crate::c_abi::gos_str_arg_string(cstr) };
+                // SAFETY: as above; its text is copied and nothing reads it again.
+                unsafe { crate::c_abi::string::gos_rt_str_free(cstr) };
+                text
             }
         };
         let lines: Vec<String> = text.lines().map(str::to_string).collect();
@@ -65,6 +69,7 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_scan(s: *mut GosScanner) -> bool {
         if s.is_null() {
             return false;
         }
+        // SAFETY: `s` is a handle from compiled code, checked non-null above and live for the whole call.
         let scanner = unsafe { &mut *s };
         if let Some(line) = scanner.lines.next() {
             scanner.current = Some(line);
@@ -85,6 +90,7 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_next(s: *mut GosScanner) -> i128 {
         if s.is_null() {
             return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `s` is a handle from compiled code, checked non-null above and live for the whole call.
         let scanner = unsafe { &mut *s };
         if let Some(line) = scanner.lines.next() {
             let text = alloc_cstring(line.as_bytes()) as i64;
@@ -103,6 +109,7 @@ pub unsafe extern "C" fn gos_rt_bufio_scanner_text(s: *const GosScanner) -> *mut
         if s.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `s` is a handle from compiled code, checked non-null above and live for the whole call.
         let scanner = unsafe { &*s };
         match &scanner.current {
             Some(text) => alloc_cstring(text.as_bytes()),

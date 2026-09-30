@@ -40,41 +40,41 @@ fn split_words(s: String) -> Vec<String> {
 
 // Arithmetic chain: 3 -> double -> add 10 -> clamp to [0, 100].
 let n = 3 |> double |> |v| add(10, v) |> |v| clamp(0, 100, v)
-println("arithmetic: {n}")
+println(f"arithmetic: {n}")
 
 // Equivalent nested form - what the pipe saves the reader.
 let same = clamp(0, 100, add(10, double(3)))
-println("nested: {same}")
+println(f"nested: {same}")
 
 // Methods chain on their own; the pipe is not involved.
 let shout = "  hello  ".trim().to_uppercase()
-println("shout: {shout}")
+println(f"shout: {shout}")
 
 // A method chain is an ordinary operand, so it can feed a pipe step.
 let loud = "  hello  ".trim().to_uppercase() |> split_words
-println("from a chain: {}", loud |> iter::count)
+println(f"from a chain: {loud |> iter::count}")
 
 // Word count, top-down: split on whitespace, drop empties, count.
 let words = "  Hello  World  "
     |> split_words
     |> |v| iter::filter(v, |w: String| w.len() > 0)
     |> iter::count
-println("words: {words}")
+println(f"words: {words}")
 
 // Sum of squares of evens in 1..=10 - one expression, no `let mut`.
 let total = iter::range_inclusive(1, 10)
     |> |v| iter::filter(v, |n: i64| n % 2 == 0)
     |> |v| iter::sum_by(v, |n: i64| n * n)
-println("sum of even squares: {total}")
+println(f"sum of even squares: {total}")
 
 // Pipeline through Option: first match, fall back to a default.
 let xs = #[1, 3, 5, 9, 14, 21]
 let first_big = xs
     |> |v| iter::find(v, |n: i64| n > 10)
     |> |v| option::unwrap_or(v, -1)
-println("first > 10 (or -1): {first_big}")
+println(f"first > 10 (or -1): {first_big}")
 
 // Filter twice - `iter::count` reports each subset's size.
 let evens = xs |> |v| iter::filter(v, |n: i64| n % 2 == 0)
 let odds = xs |> |v| iter::filter(v, |n: i64| n % 2 != 0)
-println("evens: {}, odds: {}", evens |> iter::count, odds |> iter::count)
+println(f"evens: {evens |> iter::count}, odds: {odds |> iter::count}")

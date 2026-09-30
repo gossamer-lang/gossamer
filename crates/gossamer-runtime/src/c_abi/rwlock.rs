@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 //! Runtime support for `std::sync::RwLock` - a reader-writer lock
 //! guarding a single `i64` value. The handle is an opaque heap
@@ -27,7 +26,12 @@ use parking_lot::RwLock as PRwLock;
 type GuardFn = unsafe extern "C" fn(env: *const u8, value: i64) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null/zero env.
-fn env_fn_addr(env: *const u8) -> Option<*const ()> {
+///
+/// # Safety
+///
+/// `env` is null or a live closure environment, whose first word is the
+/// closure's entry address.
+unsafe fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     if env.is_null() {
         return None;
     }
@@ -52,7 +56,7 @@ pub struct GosRwLock {
 
 /// Allocate a `sync::RwLock` guarding `value`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_rwlock_new(value: i64) -> *mut GosRwLock {
+pub extern "C" fn gos_rt_rwlock_new(value: i64) -> *mut GosRwLock {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosRwLock {
             inner: PRwLock::new(value),
@@ -67,6 +71,7 @@ pub unsafe extern "C" fn gos_rt_rwlock_get(lock: *mut GosRwLock) -> i64 {
         if lock.is_null() {
             return 0;
         }
+        // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
         *unsafe { &*lock }.inner.read()
     })
 }
@@ -79,6 +84,7 @@ pub unsafe extern "C" fn gos_rt_rwlock_set(lock: *mut GosRwLock, value: i64) {
         if lock.is_null() {
             return;
         }
+        // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
         *unsafe { &*lock }.inner.write() = value;
     });
 }
@@ -91,13 +97,16 @@ pub unsafe extern "C" fn gos_rt_rwlock_with_read(lock: *mut GosRwLock, env: *con
         if lock.is_null() {
             return 0;
         }
+        // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
         let value = *unsafe { &*lock }.inner.read();
-        match env_fn_addr(env) {
-            // SAFETY: addr is the callable stored by the closure
-            // lowering; a one-argument closure lowers to the
-            // `fn(env, i64) -> i64` value-thunk shape.
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        match unsafe { env_fn_addr(env) } {
             Some(addr) => {
+                // SAFETY: `addr` is the callable the closure lowering stored, and a one-argument
+                // closure lowers to the `fn(env, i64) -> i64` value-thunk shape.
                 let f: GuardFn = unsafe { std::mem::transmute(addr) };
+                // SAFETY: `f` is that callable, whose environment `env` is live for the call (C-ABI
+                // contract).
                 unsafe { f(env, value) }
             }
             None => value,
@@ -113,12 +122,17 @@ pub unsafe extern "C" fn gos_rt_rwlock_with_write(lock: *mut GosRwLock, env: *co
         if lock.is_null() {
             return 0;
         }
+        // SAFETY: `lock` is a handle from compiled code, checked non-null above and live for the whole call.
         let mut guard = unsafe { &*lock }.inner.write();
         let current = *guard;
-        let next = match env_fn_addr(env) {
-            // SAFETY: see `with_read`.
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let next = match unsafe { env_fn_addr(env) } {
             Some(addr) => {
+                // SAFETY: `addr` is the callable the closure lowering stored, and a one-argument
+                // closure lowers to the `fn(env, i64) -> i64` value-thunk shape.
                 let f: GuardFn = unsafe { std::mem::transmute(addr) };
+                // SAFETY: `f` is that callable, whose environment `env` is live for the call (C-ABI
+                // contract).
                 unsafe { f(env, current) }
             }
             None => current,

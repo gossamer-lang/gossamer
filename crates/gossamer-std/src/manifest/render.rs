@@ -263,7 +263,8 @@ pub fn render_all_docs() -> Vec<(String, String)> {
 /// Escapes Markdown table delimiters in prose while preserving inline-code
 /// content. A pipe inside backticks is literal text, and escaping it there
 /// leaks a visible backslash into rendered signatures such as `String | char`.
-fn escape_table_cell(text: &str) -> String {
+#[must_use]
+pub fn escape_table_cell(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut in_code = false;
     for ch in text.chars() {

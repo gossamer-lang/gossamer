@@ -44,9 +44,10 @@ let a = Account { owner: "jane", balance: 1200 }
 println("{a.owner}: {a.balance:>8}")
 ```
 
-Any other expression in a placeholder (`{age + 1}`, `{v[i]}`) is a parse
-error (`GP0021`) - bind it first or pass it positionally. So is a spec the
-grammar does not take (`{:+}`, `{:e}`), which would otherwise print as text.
+Any other expression in a `format` placeholder (`{age + 1}`, `{v[i]}`) is a
+parse error (`GP0021`) - pass it positionally, or write the string as
+`f"..."`, whose placeholders hold any expression. So is a spec the grammar
+does not take (`{:q}`), which would otherwise print as text.
 
 ## Desugaring calls
 
@@ -58,6 +59,7 @@ uniformly on every tier:
   (or supplied) message.
 - `dbg(expr)` - prints `expr` with `{:?}` to stderr and yields its value.
 
+<!-- fragment -->
 ```gossamer
 if matches(n, 1..=9) { /* single digit */ }
 let x = dbg(compute())   // logs the value, returns it
@@ -66,6 +68,8 @@ let x = dbg(compute())   // logs the value, returns it
 ## Build-time validation
 
 `regex::compile("…")` and `sql::statement("…")` validate a literal
-argument at compile time and fold to the validated string;
+argument at compile time and answer the checked value (a `regex::Pattern`,
+or the statement `String`); a pattern built at run time goes to
+`regex::new`, which answers a `Result`;
 `codegen(...)` splices a `comptime fn`'s `String` result back as source.
 See [comptime](comptime.md).

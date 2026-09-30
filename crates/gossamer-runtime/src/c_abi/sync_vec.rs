@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 // ---------------------------------------------------------------
@@ -30,7 +28,7 @@ pub struct GosSyncI64Vec {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sync_i64_new(len: i64) -> *mut GosSyncI64Vec {
+pub extern "C" fn gos_rt_sync_i64_new(len: i64) -> *mut GosSyncI64Vec {
     ffi_entry!(std::ptr::null_mut(), {
         let n = if len < 0 { 0 } else { len as usize };
         Box::into_raw(Box::new(GosSyncI64Vec {
@@ -45,6 +43,8 @@ pub unsafe extern "C" fn gos_rt_sync_i64_drop(v: *mut GosSyncI64Vec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is non-null (checked above), the vector its constructor boxed, which this
+        // call consumes (C-ABI contract).
         drop(unsafe { Box::from_raw(v) });
     });
 }
@@ -55,6 +55,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_len(v: *const GosSyncI64Vec) -> i64 {
         if v.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         i64::try_from(v.inner.lock().len()).unwrap_or(i64::MAX)
     })
@@ -66,6 +67,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_get(v: *const GosSyncI64Vec, idx: i64) 
         if v.is_null() || idx < 0 {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         let g = v.inner.lock();
         g.get(idx as usize).copied().unwrap_or(0)
@@ -78,6 +80,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_set(v: *mut GosSyncI64Vec, idx: i64, va
         if v.is_null() || idx < 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         let mut g = v.inner.lock();
         if let Some(slot) = g.get_mut(idx as usize) {
@@ -92,6 +95,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_push(v: *mut GosSyncI64Vec, val: i64) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         v.inner.lock().push(val);
     });
@@ -106,6 +110,7 @@ pub unsafe extern "C" fn gos_rt_sync_i64_add(v: *mut GosSyncI64Vec, idx: i64, de
         if v.is_null() || idx < 0 {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         let mut g = v.inner.lock();
         if let Some(slot) = g.get_mut(idx as usize) {
@@ -122,7 +127,7 @@ pub struct GosSyncU8Vec {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sync_u8_new(len: i64) -> *mut GosSyncU8Vec {
+pub extern "C" fn gos_rt_sync_u8_new(len: i64) -> *mut GosSyncU8Vec {
     ffi_entry!(std::ptr::null_mut(), {
         let n = if len < 0 { 0 } else { len as usize };
         Box::into_raw(Box::new(GosSyncU8Vec {
@@ -137,6 +142,8 @@ pub unsafe extern "C" fn gos_rt_sync_u8_drop(v: *mut GosSyncU8Vec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is non-null (checked above), the vector its constructor boxed, which this
+        // call consumes (C-ABI contract).
         drop(unsafe { Box::from_raw(v) });
     });
 }
@@ -147,6 +154,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_len(v: *const GosSyncU8Vec) -> i64 {
         if v.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         i64::try_from(v.inner.lock().len()).unwrap_or(i64::MAX)
     })
@@ -158,6 +166,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_get(v: *const GosSyncU8Vec, idx: i64) ->
         if v.is_null() || idx < 0 {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         let g = v.inner.lock();
         g.get(idx as usize).copied().map_or(0, i64::from)
@@ -170,6 +179,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_set(v: *mut GosSyncU8Vec, idx: i64, val:
         if v.is_null() || idx < 0 {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         let mut g = v.inner.lock();
         if let Some(slot) = g.get_mut(idx as usize) {
@@ -184,6 +194,7 @@ pub unsafe extern "C" fn gos_rt_sync_u8_push(v: *mut GosSyncU8Vec, val: i64) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let v = unsafe { &*v };
         v.inner.lock().push(val as u8);
     });

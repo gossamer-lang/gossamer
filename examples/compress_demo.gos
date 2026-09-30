@@ -17,9 +17,9 @@ fn show_roundtrip(name: str, compressed: Result<Vec<u8>, compress::Error>, origi
     match compressed {
         Ok(bytes) => {
             let ratio = bytes.len() * 100 / original_len
-            println("{}: {} -> {} bytes ({}%)", name, original_len, bytes.len(), ratio)
+            println(f"{name}: {original_len} -> {bytes.len()} bytes ({ratio}%)")
         }
-        Err(e) => println("{}: error: {}", name, e)
+        Err(e) => println(f"{name}: error: {e}")
     }
 }
 
@@ -49,14 +49,14 @@ fn main() {
             match restored {
                 Ok(bytes) => {
                     if bytes.len() == n {
-                        println("gzip roundtrip: ok ({} bytes)", n)
+                        println(f"gzip roundtrip: ok ({n} bytes)")
                     } else {
                         println("gzip roundtrip: size mismatch")
                     }
                 }
-                Err(e) => println("gzip decode err: {}", e)
+                Err(e) => println(f"gzip decode err: {e}")
             }
         }
-        Err(e) => println("gzip encode err: {}", e)
+        Err(e) => println(f"gzip encode err: {e}")
     }
 }

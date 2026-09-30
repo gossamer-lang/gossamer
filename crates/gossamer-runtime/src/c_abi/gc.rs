@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::alloc::Layout;
@@ -80,6 +78,7 @@ fn aggregate_layout(size: usize) -> Result<Layout, GcError> {
 fn aggregate_alloc_zeroed(size: usize) -> *mut u8 {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
+        // SAFETY: `mi_zalloc` takes any size and answers null or a fresh zeroed block of it.
         unsafe { libmimalloc_sys::mi_zalloc(size).cast() }
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
@@ -87,6 +86,7 @@ fn aggregate_alloc_zeroed(size: usize) -> *mut u8 {
         let Ok(layout) = aggregate_layout(size) else {
             return std::ptr::null_mut();
         };
+        // SAFETY: `aggregate_layout` answers a layout of non-zero size.
         unsafe { alloc_zeroed(layout) }
     }
 }
@@ -97,10 +97,14 @@ unsafe fn aggregate_free(ptr: *mut u8, layout: Layout) {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
         let _ = layout;
+        // SAFETY: this `unsafe fn`'s caller passes `ptr` as a block `aggregate_alloc_zeroed`
+        // answered, not freed before.
         unsafe { libmimalloc_sys::mi_free(ptr.cast()) };
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
     {
+        // SAFETY: this `unsafe fn`'s caller passes `ptr` as a block `aggregate_alloc_zeroed`
+        // answered with `layout`, not freed before.
         unsafe { dealloc(ptr, layout) };
     }
 }
@@ -126,7 +130,7 @@ pub extern "C" fn gos_rt_gc_alloc(size: u64) -> *mut u8 {
         let Ok(layout) = aggregate_layout(size as usize) else {
             return std::ptr::null_mut();
         };
-        // SAFETY: layout validated by `aggregate_layout` (size > 0,
+        // The layout is validated by `aggregate_layout` (size > 0,
         // <= MAX_AGGR_BYTES, 8-byte align); the allocator is thread-safe;
         // null is handled below.
         let ptr = aggregate_alloc_zeroed(layout.size());
@@ -142,7 +146,7 @@ pub extern "C" fn gos_rt_gc_alloc(size: u64) -> *mut u8 {
         // not tracked in the per-block aggregate ledger. This is the single
         // accounting site for aggregate allocation; wrappers must not add
         // their own increment.
-        if !unsafe { crate::c_abi::rc::in_region_arena(ptr) } {
+        if !crate::c_abi::rc::in_region_arena(ptr) {
             crate::c_abi::ledger::aggr_inc();
         }
         ptr
@@ -190,7 +194,7 @@ pub extern "C" fn gos_rt_aggr_alloc_leak(size: u64) -> *mut u8 {
         let Ok(layout) = aggregate_layout(size as usize) else {
             return std::ptr::null_mut();
         };
-        // SAFETY: as in `gos_rt_gc_alloc`.
+        // The layout is validated as in `gos_rt_gc_alloc`.
         let ptr = aggregate_alloc_zeroed(layout.size());
         if ptr.is_null() {
             eprintln!(
@@ -211,15 +215,20 @@ static GOS_RT_AGGR_ALLOC_LEAK_KEEP: extern "C" fn(u64) -> *mut u8 = gos_rt_aggr_
 /// `gos_rt_gc_alloc`. Idempotent on null. `size` must match the
 /// original allocation (the MIR drop pass derives it from
 /// `type_slot_count(ty) * 8`).
+///
+/// # Safety
+///
+/// `ptr` is null or an aggregate block of `size` bytes that `gos_rt_gc_alloc`
+/// or `gos_rt_aggr_alloc` made, freed nowhere else.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_aggr_free(ptr: *mut u8, size: u64) {
+pub unsafe extern "C" fn gos_rt_aggr_free(ptr: *mut u8, size: u64) {
     ffi_entry!((), {
         if ptr.is_null() || size == 0 {
             return;
         }
         // Region-allocated aggregates are reclaimed wholesale at `arena_pop`;
         // an individual free would corrupt the bump arena. No-op for them.
-        if unsafe { crate::c_abi::rc::in_region_arena(ptr) } {
+        if crate::c_abi::rc::in_region_arena(ptr) {
             return;
         }
         let Ok(layout) = aggregate_layout(size as usize) else {
@@ -289,9 +298,12 @@ mod tests {
         assert_eq!(p as usize % WORD_BYTES, 0);
         // Zeroed.
         for i in 0..24 {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             assert_eq!(unsafe { *p.add(i) }, 0);
         }
-        gos_rt_aggr_free(p, 24);
+        // SAFETY: `p` is the 24-byte block allocated above and freed only here.
+        unsafe { gos_rt_aggr_free(p, 24) };
     }
 
     #[test]
@@ -302,7 +314,8 @@ mod tests {
 
     #[test]
     fn aggr_free_is_null_safe() {
-        gos_rt_aggr_free(std::ptr::null_mut(), 8);
+        // SAFETY: a null block is accepted.
+        unsafe { gos_rt_aggr_free(std::ptr::null_mut(), 8) };
         gos_rt_gc_deregister(std::ptr::null_mut());
         gos_rt_gc_reset();
     }

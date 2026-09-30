@@ -346,7 +346,7 @@ fn main() {
 }
 
 #[test]
-fn spec_3_1_native_profiles_check_then_wrap_overflow() {
+fn spec_3_1_native_profiles_both_check_overflow() {
     let src = r#"
 fn main() {
     let a: u8 = 200u8
@@ -362,30 +362,30 @@ fn main() {
         "expected native debug overflow panic, got: {debug_stderr}",
     );
 
-    let (release_ok, release_stdout, release_stderr) =
+    let (release_ok, _release_stdout, release_stderr) =
         build_and_run_program("spec_3_1_native_release", src, true);
+    assert!(!release_ok, "native release overflow must panic");
     assert!(
-        release_ok,
-        "native release wrapping program failed: {release_stderr}",
+        release_stderr.contains("attempt to add with overflow"),
+        "expected native release overflow panic, got: {release_stderr}",
     );
-    assert_eq!(release_stdout.trim(), "144");
 }
 
-/// Release wrapping holds for values only known at run time - parameters,
+/// Wrapping arithmetic holds for values only known at run time - parameters,
 /// loop accumulators, compound assignment, and container elements - not just
 /// for operands the optimiser folds, and a narrow value never leaves its range.
 #[test]
-fn spec_3_1_native_release_wraps_runtime_narrow_values() {
+fn spec_3_1_native_wrapping_operators_wrap_runtime_narrow_values() {
     let src = r#"
-fn add32(a: u32, b: u32) -> u32 { a + b }
-fn sub32(a: u32, b: u32) -> u32 { a - b }
-fn mul_i32(a: i32, b: i32) -> i32 { a * b }
-fn add_i8(a: i8, b: i8) -> i8 { a + b }
-fn mul16(a: u16, b: u16) -> u16 { a * b }
+fn add32(a: u32, b: u32) -> u32 { a +% b }
+fn sub32(a: u32, b: u32) -> u32 { a -% b }
+fn mul_i32(a: i32, b: i32) -> i32 { a *% b }
+fn add_i8(a: i8, b: i8) -> i8 { a +% b }
+fn mul16(a: u16, b: u16) -> u16 { a *% b }
 
 fn djb2(text: String) -> u32 {
     let mut hash: u32 = 5381
-    for b in text.bytes() { hash = (hash << 5) + hash + b as u32 }
+    for b in text.bytes() { hash = (hash << 5) +% hash +% b as u32 }
     hash
 }
 
@@ -394,18 +394,21 @@ fn main() {
     println("{} {}", mul_i32(2_000_000_000, 3), add_i8(127, 1))
     println("{}", mul16(60_000, 60_000))
     let mut s: u32 = 4_000_000_000
-    s += 500_000_000
+    s +%= 500_000_000
     let v: Vec<u32> = #[4_000_000_000]
-    println("{} {}", s, v[0] + v[0])
+    println("{} {}", s, v[0] +% v[0])
     println("{}", djb2("the quick brown fox jumps over the lazy dog"))
 }
 "#;
-    let (debug_ok, _debug_stdout, debug_stderr) =
+    let (debug_ok, debug_stdout, debug_stderr) =
         build_and_run_program("spec_3_1_runtime_narrow_debug", src, false);
-    assert!(!debug_ok, "native debug narrow overflow must panic");
     assert!(
-        debug_stderr.contains("with overflow"),
-        "expected native debug overflow panic, got: {debug_stderr}",
+        debug_ok,
+        "native debug wrapping program failed: {debug_stderr}"
+    );
+    assert_eq!(
+        debug_stdout.trim(),
+        "705032704 4294967295\n1705032704 -128\n41984\n205032704 3705032704\n2012963070"
     );
 
     let (release_ok, release_stdout, release_stderr) =

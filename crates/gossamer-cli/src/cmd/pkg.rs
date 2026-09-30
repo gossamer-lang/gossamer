@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 use std::fs;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -39,18 +40,39 @@ fn insecure_registry_opt_in() -> bool {
     )
 }
 
-/// Returns the registry URL the CLI should consult. Honours the
-/// `GOS_REGISTRY_URL` env var first, falls back to the manifest's
-/// `[registries]` table (when keyed under `default`), and finally
-/// the public default.
-fn registry_url(manifest: &gossamer_pkg::Manifest) -> String {
+/// The registry URL the CLI should consult: `GOS_REGISTRY_URL` first, then
+/// the manifest's `[registries] default`. `None` when neither names one.
+fn registry_url(manifest: &gossamer_pkg::Manifest) -> Option<String> {
     if let Ok(env) = std::env::var("GOS_REGISTRY_URL") {
-        return env;
+        return Some(env);
     }
-    if let Some(url) = manifest.registries.get("default") {
-        return url.clone();
+    manifest.registries.get("default").cloned()
+}
+
+/// The registry a command acting on a published package talks to:
+/// `GOS_REGISTRY_URL`, else the nearest project's `[registries] default`.
+fn configured_registry() -> Result<String> {
+    if let Ok(env) = std::env::var("GOS_REGISTRY_URL") {
+        return Ok(env);
     }
-    gossamer_pkg::DEFAULT_REGISTRY_URL.to_string()
+    let Some(manifest_path) = gossamer_pkg::find_manifest(&std::env::current_dir()?) else {
+        return Err(no_registry_error());
+    };
+    let text =
+        fs::read_to_string(&manifest_path).map_err(|e| friendly_io_error(e, &manifest_path))?;
+    let manifest = gossamer_pkg::Manifest::parse(&text)?;
+    manifest
+        .registries
+        .get("default")
+        .cloned()
+        .ok_or_else(no_registry_error)
+}
+
+fn no_registry_error() -> anyhow::Error {
+    anyhow!(
+        "no package registry is configured: set `[registries] default` in project.toml \
+         or GOS_REGISTRY_URL"
+    )
 }
 
 /// Loads the optional bearer token for `registry_url` from the
@@ -75,9 +97,10 @@ fn build_fetcher(
         if matches!(spec, gossamer_pkg::DependencySpec::Registry(_)) {
             let id = gossamer_pkg::dependency_identity(raw_id, spec, None)
                 .with_context(|| format!("invalid id `{raw_id}`"))?;
-            if let Err(err) =
-                catalogue.load_from_registry(transport.as_ref(), &options.registry_url, &id)
-            {
+            let Some(registry) = options.registry_url.as_deref() else {
+                return Err(anyhow!("{raw_id}: {}", no_registry_error()));
+            };
+            if let Err(err) = catalogue.load_from_registry(transport.as_ref(), registry, &id) {
                 eprintln!(
                     "warning: registry index for {raw_id} unavailable: {err}; \
                      resolution will fail unless a cached / vendored copy exists"
@@ -114,7 +137,7 @@ pub(crate) fn enforce_lockfile_if_requested(locked: bool) -> Result<()> {
         registry_url: registry_url(&manifest),
         ..gossamer_pkg::FetchOptions::default()
     };
-    options.auth_token = credential_for(&options.registry_url);
+    options.auth_token = options.registry_url.as_deref().and_then(credential_for);
     let fetcher = build_fetcher(&manifest, options)?;
     let plan = gossamer_pkg::Resolver::new(fetcher.catalogue().clone())
         .with_root(&project_root)
@@ -482,7 +505,7 @@ pub(crate) fn fetch(manifest: Option<PathBuf>, offline: bool, update: bool) -> R
         registry_url: registry_url(&m),
         ..gossamer_pkg::FetchOptions::default()
     };
-    options.auth_token = credential_for(&options.registry_url);
+    options.auth_token = options.registry_url.as_deref().and_then(credential_for);
     let existing_lock = gossamer_pkg::Lockfile::load(&project_root)
         .map_err(|e| anyhow!("loading lockfile: {e}"))?;
     let pinned_keys = existing_lock
@@ -527,7 +550,7 @@ pub(crate) fn vendor(manifest: Option<PathBuf>, out: Option<PathBuf>) -> Result<
         registry_url: registry_url(&m),
         ..gossamer_pkg::FetchOptions::default()
     };
-    options.auth_token = credential_for(&options.registry_url);
+    options.auth_token = options.registry_url.as_deref().and_then(credential_for);
     let pinned_keys = gossamer_pkg::Lockfile::load(&project_root)
         .map_err(|e| anyhow!("loading lockfile: {e}"))?
         .map(|l| l.pinned_keys())
@@ -595,7 +618,9 @@ pub(crate) fn publish(
     // would put the registry's advisory feed in the path of every
     // release, where an entry added in error becomes an outage.
     warn_on_reachable_advisories(&project_root);
-    let registry_url = registry.unwrap_or_else(|| self::registry_url(&m));
+    let registry_url = registry
+        .or_else(|| self::registry_url(&m))
+        .ok_or_else(no_registry_error)?;
     let artifact = gossamer_pkg::pack_crate_streaming(&project_root)
         .map_err(|e| anyhow!("pack failed: {e}"))?;
     outln!(
@@ -603,25 +628,17 @@ pub(crate) fn publish(
         bytes = artifact.bytes,
         sha = artifact.sha256
     );
-    let signature = match gossamer_pkg::signing::load_publish_key(m.project.id.as_str()) {
-        Ok(key) => {
-            // Publish protocol v2 signs the archive's immutable digest. The
-            // archive itself stays in its private spool and is copied to the
-            // registry directly by the reader-based transport.
-            let sig = key.sign(artifact.sha256.as_bytes());
-            let pk = key.verifying_key().to_bytes();
-            outln!(
-                "publish: signed with ed25519 pubkey {pk}",
-                pk = key.verifying_key().to_hex()
-            );
-            Some((sig, pk))
-        }
-        Err(gossamer_pkg::signing::SigningError::Missing(_)) => {
-            eprintln!("publish: no signing key configured; uploading unsigned");
-            None
-        }
-        Err(e) => return Err(anyhow!("signing: {e}")),
-    };
+    let key = gossamer_pkg::signing::load_publish_key(m.project.id.as_str())
+        .map_err(|e| anyhow!("publish: {e}"))?;
+    // Publish protocol v2 signs the archive's immutable digest. The archive
+    // itself stays in its private spool and is copied to the registry
+    // directly by the reader-based transport.
+    let signature = key.sign(artifact.sha256.as_bytes());
+    let public_key = key.verifying_key();
+    outln!(
+        "publish: signed with ed25519 pubkey {}",
+        public_key.to_hex()
+    );
     if dry_run {
         outln!("publish: --dry-run set; skipping upload to {registry_url}");
         return Ok(());
@@ -635,8 +652,8 @@ pub(crate) fn publish(
         project_id: m.project.id.as_str(),
         version: &m.project.version.to_string(),
         artifact: &artifact,
-        signature: signature.map(|(s, _)| s),
-        public_key: signature.map(|(_, k)| k),
+        signature: Some(signature),
+        public_key: Some(public_key.to_bytes()),
         auth_token: token.as_deref(),
     };
     gossamer_pkg::publish::upload_streaming_with(&uploader, &registry_url, &request)
@@ -656,8 +673,7 @@ pub(crate) fn yank(spec: &str, reason: Option<String>) -> Result<()> {
         .with_context(|| format!("invalid id `{id_text}`"))?;
     let _ = gossamer_pkg::Version::parse(version_text)
         .with_context(|| format!("invalid version `{version_text}`"))?;
-    let registry_url = std::env::var("GOS_REGISTRY_URL")
-        .unwrap_or_else(|_| gossamer_pkg::DEFAULT_REGISTRY_URL.to_string());
+    let registry_url = configured_registry()?;
     let token = credential_for(&registry_url);
     let transport = registry_transport();
     let uploader = gossamer_pkg::publish::HttpUploader {
@@ -674,6 +690,38 @@ pub(crate) fn yank(spec: &str, reason: Option<String>) -> Result<()> {
     .map_err(|e| anyhow!("yank: {e}"))?;
     outln!("yank: marked {id}@{version_text} as yanked");
     Ok(())
+}
+
+/// `gos keygen ID` - create `ID`'s publish key and print its public half.
+pub(crate) fn keygen(id_text: &str) -> Result<()> {
+    let id = gossamer_pkg::ProjectId::parse(id_text)
+        .with_context(|| format!("invalid id `{id_text}`"))?;
+    let key = gossamer_pkg::signing::SigningKey::generate();
+    let path = gossamer_pkg::signing::save_publish_key(id.as_str(), &key)
+        .map_err(|e| anyhow!("keygen: {e}"))?;
+    outln!(
+        "keygen: wrote the signing key for {id} to {}",
+        path.display()
+    );
+    outln!("keygen: consumers pin it with");
+    outln!("");
+    outln!("[trusted-publishers]");
+    outln!("\"{id}\" = \"{}\"", key.verifying_key().to_hex());
+    Ok(())
+}
+
+/// `gos registry serve` - serve a registry from `root` on `addr` until the
+/// process is stopped. The first line on stdout names the bound URL.
+pub(crate) fn registry_serve(root: &std::path::Path, addr: &str) -> Result<()> {
+    let server = gossamer_pkg::registry_server::RegistryServer::open(root)
+        .with_context(|| format!("opening registry at {}", root.display()))?;
+    let listener = std::net::TcpListener::bind(addr).with_context(|| format!("binding {addr}"))?;
+    let bound = listener.local_addr().context("reading the bound address")?;
+    outln!("registry: serving {} at http://{bound}", root.display());
+    std::io::stdout().flush().context("flushing stdout")?;
+    Arc::new(server)
+        .serve(&listener)
+        .with_context(|| format!("serving {bound}"))
 }
 
 /// `gos login --registry URL` - prompt for a bearer token (or read
@@ -718,8 +766,7 @@ pub(crate) fn logout(registry: String) -> Result<()> {
 pub(crate) fn owner(op: &str, id_text: &str, user: Option<String>) -> Result<()> {
     let id = gossamer_pkg::ProjectId::parse(id_text)
         .with_context(|| format!("invalid id `{id_text}`"))?;
-    let registry_url = std::env::var("GOS_REGISTRY_URL")
-        .unwrap_or_else(|_| gossamer_pkg::DEFAULT_REGISTRY_URL.to_string());
+    let registry_url = configured_registry()?;
     let token = credential_for(&registry_url);
     let transport = registry_transport();
     let uploader = gossamer_pkg::publish::HttpUploader {

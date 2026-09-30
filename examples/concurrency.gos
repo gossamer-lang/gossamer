@@ -1,7 +1,7 @@
 /*
  * Goroutines + channels - the canonical producer / consumer shape.
  *
- * `go expr` spawns a goroutine. `channel()` returns a
+ * `spawn(f)` starts a goroutine. `channel()` returns a
  * (Sender, Receiver) pair, destructurable inline. The producer
  * sends each value with `tx.send(v)` and `close()`s the channel
  * when the stream ends; the consumer drains it with the canonical
@@ -24,4 +24,4 @@ let mut total = 0
 while let Some(v) = rx.recv() {
     total += v
 }
-println("drained three values, total = {}", total)
+println(f"drained three values, total = {total}")

@@ -81,6 +81,31 @@ impl TokenStream {
         }
     }
 
+    /// Lexes `source[start..end]` - an expression embedded in a larger
+    /// token, such as an interpolated string's placeholder - with every span
+    /// in the coordinates of the whole of `source`.
+    #[must_use]
+    pub fn range(source: &str, file: FileId, start: u32, end: u32) -> Self {
+        let text = source.get(start as usize..end as usize).unwrap_or_default();
+        let mut stream = Self::new(text, file);
+        let shift = |span: Span| Span::new(span.file, span.start + start, span.end + start);
+        for token in &mut stream.tokens {
+            token.span = shift(token.span);
+        }
+        for comment in &mut stream.comments {
+            comment.span = shift(comment.span);
+        }
+        stream.eof_span = Span::new(file, end, end);
+        let last = stream.tokens.len() - 1;
+        stream.tokens[last].span = stream.eof_span;
+        stream.lex_errors = stream
+            .lex_errors
+            .into_iter()
+            .map(|err| err.shifted(start))
+            .collect();
+        stream
+    }
+
     /// Drains the tokenization errors collected while buffering.
     pub fn take_lex_errors(&mut self) -> Vec<LexError> {
         std::mem::take(&mut self.lex_errors)

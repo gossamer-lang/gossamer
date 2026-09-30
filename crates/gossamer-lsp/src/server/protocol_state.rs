@@ -22,7 +22,7 @@ use gossamer_diagnostics::{Diagnostic as GossamerDiagnostic, Severity};
 use gossamer_lex::Span;
 use gossamer_resolve::{DefKind, Resolution};
 use gossamer_std::json::Value;
-use gossamer_types::render_ty;
+use gossamer_types::{render_public_ty, render_ty};
 
 use crate::inlay::{InlayHint, collect_inlays};
 use crate::navigation::{BindingInfo, DefinitionInfo, Locate, attach_resolution, locate};
@@ -883,8 +883,13 @@ impl ServerState {
             }
         }
         // Walk every impl block in this file looking for methods whose
-        // receiver type spelling matches.
+        // receiver type spelling matches, and the struct's own fields.
         if let Some(receiver_type) = receiver_kind.type_name() {
+            for field in user_fields_for(doc, receiver_type) {
+                if field.name.starts_with(prefix) && seen.insert(field.name.clone()) {
+                    items.push(user_field_completion_item(&field));
+                }
+            }
             for method in user_methods_for(doc, receiver_type) {
                 if method.name.starts_with(prefix) && seen.insert(method.name.clone()) {
                     items.push(user_method_completion_item(&method));
@@ -963,7 +968,7 @@ impl ServerState {
     }
 
     fn cursor(&self, doc: &DocumentAnalysis, offset: u32) -> Option<Locate> {
-        let mut loc = locate(&doc.sf, offset)?;
+        let mut loc = locate(&doc.sf, doc.source(), offset)?;
         attach_resolution(&mut loc, &doc.resolutions);
         Some(loc)
     }

@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -33,26 +31,87 @@ fn seq_empty(bare: i32) -> &'static str {
     if bare == 0 { "#[]" } else { "[]" }
 }
 
+/// Writes every element of `vec` with `render`, between the brackets `bare`
+/// selects; a null vec writes as empty.
+fn write_elems(
+    vec: Option<crate::c_abi::vec::VecView<'_>>,
+    bare: i32,
+    out: &mut String,
+    render: impl Fn(crate::c_abi::vec::VecView<'_>, usize, &mut String),
+) {
+    let Some(vec) = vec else {
+        out.push_str(seq_empty(bare));
+        return;
+    };
+    out.push_str(seq_open(bare));
+    for i in 0..vec.len() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        render(vec, i, out);
+    }
+    out.push(']');
+}
+
+/// Renders every element of the `Vec` `v` names with `render`, between the
+/// brackets `bare` selects.
+///
+/// # Safety
+/// `v` is null or a live `Vec`.
+unsafe fn format_elems(
+    v: *const GosVec,
+    bare: i32,
+    render: impl Fn(crate::c_abi::vec::VecView<'_>, usize, &mut String),
+) -> *mut c_char {
+    let mut out = String::new();
+    // SAFETY: this `unsafe fn`'s caller passes `v` null or a live `Vec`.
+    write_elems(
+        unsafe { crate::c_abi::vec::VecView::of(v) },
+        bare,
+        &mut out,
+        render,
+    );
+    alloc_cstring(out.as_bytes())
+}
+
+/// Writes one integer element, read at the width its vec declares.
+fn int_elem(vec: crate::c_abi::vec::VecView<'_>, i: usize, out: &mut String) {
+    out.push_str(&crate::builtins::format_int(vec.word(i)));
+}
+
+/// Writes one `f64` element from the bits its slot holds.
+fn float_elem(vec: crate::c_abi::vec::VecView<'_>, i: usize, out: &mut String) {
+    out.push_str(&crate::builtins::format_float_debug(f64::from_bits(
+        vec.word(i) as u64,
+    )));
+}
+
+/// Writes every element of a `Vec<String>` quoted, between the brackets `bare`
+/// selects; a null vec writes as empty and an empty slot writes nothing.
+fn write_strings(vec: Option<crate::c_abi::vec::StrVecView<'_>>, bare: i32, out: &mut String) {
+    let Some(vec) = vec else {
+        out.push_str(seq_empty(bare));
+        return;
+    };
+    out.push_str(seq_open(bare));
+    for i in 0..vec.len() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        if !vec.is_null(i) {
+            crate::c_abi::map::push_quoted_str(out, &vec.text(i));
+        }
+    }
+    out.push(']');
+}
+
+/// Renders an integer `Vec` as `[v0, v1, …]`, each element read at the width
+/// the header declares. Returns a fresh String pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_i64(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
-        }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 4);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            // Byte-strided elements (`u8`, `bool`) store one byte per slot,
-            // so the value is read at the width the header declares.
-            let n = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) };
-            out.push_str(&format!("{n}"));
-        }
-        out.push(']');
-        alloc_cstring(out.as_bytes())
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        unsafe { format_elems(v, bare, int_elem) }
     })
 }
 
@@ -63,21 +122,12 @@ pub unsafe extern "C" fn gos_rt_vec_format_i64(v: *const GosVec, bare: i32) -> *
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_u64(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        unsafe {
+            format_elems(v, bare, |vec, i, out| {
+                out.push_str(&crate::builtins::format_uint(vec.word(i) as u64));
+            })
         }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 4);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let n = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) } as u64;
-            out.push_str(&format!("{n}"));
-        }
-        out.push(']');
-        alloc_cstring(out.as_bytes())
     })
 }
 
@@ -86,22 +136,8 @@ pub unsafe extern "C" fn gos_rt_vec_format_u64(v: *const GosVec, bare: i32) -> *
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_f64(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
-        }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 6);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let n = unsafe { (p as *const f64).read_unaligned() };
-            out.push_str(&crate::builtins::format_float_debug(n));
-        }
-        out.push(']');
-        alloc_cstring(out.as_bytes())
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        unsafe { format_elems(v, bare, float_elem) }
     })
 }
 
@@ -110,22 +146,12 @@ pub unsafe extern "C" fn gos_rt_vec_format_f64(v: *const GosVec, bare: i32) -> *
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_bool(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        unsafe {
+            format_elems(v, bare, |vec, i, out| {
+                out.push_str(if vec.elem(i)[0] != 0 { "true" } else { "false" });
+            })
         }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 6);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let b = unsafe { *p } != 0;
-            out.push_str(if b { "true" } else { "false" });
-        }
-        out.push(']');
-        alloc_cstring(out.as_bytes())
     })
 }
 
@@ -135,21 +161,12 @@ pub unsafe extern "C" fn gos_rt_vec_format_bool(v: *const GosVec, bare: i32) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_char(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        unsafe {
+            format_elems(v, bare, |vec, i, out| {
+                crate::c_abi::map::push_quoted_char(out, vec.word(i));
+            })
         }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 3);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let word = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) };
-            crate::c_abi::map::push_quoted_char(&mut out, word);
-        }
-        out.push(']');
-        alloc_cstring(out.as_bytes())
     })
 }
 
@@ -166,25 +183,22 @@ pub unsafe extern "C" fn gos_rt_vec_format_adt(
     bare: i32,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() || fmt.is_null() {
+        if fmt.is_null() {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 16);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let slot = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let arg = if by_ref != 0 {
-                slot
+        let mut out = String::new();
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        let elems = unsafe { crate::c_abi::vec::VecView::of(v) };
+        write_elems(elems, bare, &mut out, |elems, i, out| {
+            let arg = if by_ref == 0 {
+                elems.pointer_at::<u8>(i)
             } else {
-                unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast_const()
+                elems.elem(i).as_ptr()
             };
+            // SAFETY: `fmt` is non-null (checked above) and the compiled formatter of the element
+            // type, and `arg` is the element in the form `by_ref` names (C-ABI contract).
             out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
-        }
-        out.push(']');
+        });
         alloc_cstring(out.as_bytes())
     })
 }
@@ -202,32 +216,36 @@ pub unsafe extern "C" fn gos_rt_vec_format_desc(
     bare: i32,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() || tags.is_null() {
+        if tags.is_null() {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
+        // SAFETY: `tags` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         let tags = unsafe { crate::c_abi::map::DescStream::new(tags) };
-        let vec = unsafe { &*v };
-        // An aggregate element is stored inline whatever its width; a
-        // one-word element that is not one is the value itself or the
-        // handle addressing it.
-        let storage = if crate::c_abi::vec::vec_elem_is_inline_aggregate(vec) {
-            crate::c_abi::map::Storage::Inline
-        } else {
-            crate::c_abi::map::Storage::ByWord
-        };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 16);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let slot = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        let elems = unsafe { crate::c_abi::vec::VecView::of(v) };
+        let mut out = String::new();
+        write_elems(elems, bare, &mut out, |elems, i, out| {
+            // An aggregate element is stored inline whatever its width; a one-word element that
+            // is not one is the value itself or the handle addressing it.
+            let storage = if crate::c_abi::vec::vec_elem_is_inline_aggregate(elems.header()) {
+                crate::c_abi::map::Storage::Inline
+            } else {
+                crate::c_abi::map::Storage::ByWord
+            };
             let mut cursor = desc as usize;
+            // SAFETY: the element is stored as `storage` names and laid out as the descriptor at
+            // `desc` describes (C-ABI contract).
             unsafe {
-                crate::c_abi::map::render_desc_storage(&mut out, slot, tags, &mut cursor, storage);
+                crate::c_abi::map::render_desc_storage(
+                    out,
+                    elems.elem(i).as_ptr(),
+                    tags,
+                    &mut cursor,
+                    storage,
+                );
             }
-        }
-        out.push(']');
+        });
         alloc_cstring(out.as_bytes())
     })
 }
@@ -240,26 +258,21 @@ pub unsafe extern "C" fn gos_rt_vec_format_desc(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_map(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
-        }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 16);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let slot = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
-            let rendered = unsafe { crate::c_abi::gos_rt_map_format(child.cast_const().cast()) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec<Map>` (C-ABI contract).
+        let elems = unsafe { crate::c_abi::vec::VecView::of(v) };
+        let mut out = String::new();
+        write_elems(elems, bare, &mut out, |elems, i, out| {
+            let child = elems.pointer_at::<crate::c_abi::GosMap>(i);
+            // SAFETY: a `Vec<Map>` element is null or a live map (C-ABI contract), which
+            // `gos_rt_map_format` accepts.
+            let rendered = unsafe { crate::c_abi::gos_rt_map_format(child) };
             if !rendered.is_null() {
+                // SAFETY: the formatter answered a fresh non-null rendering (checked above).
                 out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
-                // The formatter answered a fresh rendering whose bytes are now copied.
+                // SAFETY: the rendering is owned here, its text copied, and not read again.
                 unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
             }
-        }
-        out.push(']');
+        });
         alloc_cstring(out.as_bytes())
     })
 }
@@ -279,31 +292,28 @@ pub unsafe extern "C" fn gos_rt_vec_format_tuple(
     bare: i32,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() || tags.is_null() || n <= 0 {
+        if tags.is_null() || n <= 0 {
             return alloc_cstring(seq_empty(bare).as_bytes());
         }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 16);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let slot = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
+        let elems = unsafe { crate::c_abi::vec::VecView::of(v) };
+        let mut out = String::new();
+        write_elems(elems, bare, &mut out, |elems, i, out| {
             let mut slot_cursor = 0usize;
             let mut tag_cursor = 0usize;
+            // SAFETY: the element is a tuple of `n` fields laid out as `tags` describes (C-ABI
+            // contract).
             unsafe {
                 crate::c_abi::map::render_tuple_elements(
-                    &mut out,
-                    slot.cast::<i64>(),
+                    out,
+                    elems.elem(i).as_ptr().cast::<i64>(),
                     crate::c_abi::map::DescStream::bare(tags),
                     n as usize,
                     &mut slot_cursor,
                     &mut tag_cursor,
                 );
             }
-        }
-        out.push(']');
+        });
         alloc_cstring(out.as_bytes())
     })
 }
@@ -315,29 +325,13 @@ pub unsafe extern "C" fn gos_rt_vec_format_tuple(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_string(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
-        }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 8);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let s_ptr = unsafe {
-                crate::c_abi::vec::slot_read_word(p)
-                    .cast_const()
-                    .cast::<c_char>()
-            };
-            if !s_ptr.is_null() {
-                crate::c_abi::map::push_quoted_str(&mut out, &unsafe {
-                    crate::c_abi::gos_str_arg_lossy(s_ptr)
-                });
-            }
-        }
-        out.push(']');
+        let mut out = String::new();
+        // SAFETY: `v` is this shim's argument, null or a live `Vec<String>` (C-ABI contract).
+        write_strings(
+            unsafe { crate::c_abi::vec::StrVecView::of(v) },
+            bare,
+            &mut out,
+        );
         alloc_cstring(out.as_bytes())
     })
 }
@@ -349,36 +343,20 @@ pub unsafe extern "C" fn gos_rt_vec_format_string(v: *const GosVec, bare: i32) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_vec_i64(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
-        }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 8);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let inner_ptr = unsafe {
-                crate::c_abi::vec::slot_read_word(p)
-                    .cast_const()
-                    .cast::<GosVec>()
-            };
-            if inner_ptr.is_null() {
-                out.push_str("#[]");
-            } else {
-                let rendered = unsafe { gos_rt_vec_format_i64(inner_ptr, 0) };
-                if rendered.is_null() {
-                    out.push_str("#[]");
-                } else {
-                    out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
-                    // The formatter answered a fresh rendering whose bytes are now copied.
-                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
-                }
-            }
-        }
-        out.push(']');
+        let mut out = String::new();
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` whose elements are `Vec`s
+        // (C-ABI contract).
+        let rows = unsafe { crate::c_abi::vec::VecView::of(v) };
+        write_elems(rows, bare, &mut out, |rows, i, out| {
+            let row = rows.pointer_at::<GosVec>(i);
+            // SAFETY: an element of a `Vec<Vec<i64>>` is null or a live `Vec` (C-ABI contract).
+            write_elems(
+                unsafe { crate::c_abi::vec::VecView::of(row) },
+                0,
+                out,
+                int_elem,
+            );
+        });
         alloc_cstring(out.as_bytes())
     })
 }
@@ -389,36 +367,20 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_i64(v: *const GosVec, bare: i32) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_vec_f64(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
-        }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 8);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let inner_ptr = unsafe {
-                crate::c_abi::vec::slot_read_word(p)
-                    .cast_const()
-                    .cast::<GosVec>()
-            };
-            if inner_ptr.is_null() {
-                out.push_str("#[]");
-            } else {
-                let rendered = unsafe { gos_rt_vec_format_f64(inner_ptr, 0) };
-                if rendered.is_null() {
-                    out.push_str("#[]");
-                } else {
-                    out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
-                    // The formatter answered a fresh rendering whose bytes are now copied.
-                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
-                }
-            }
-        }
-        out.push(']');
+        let mut out = String::new();
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` whose elements are `Vec`s
+        // (C-ABI contract).
+        let rows = unsafe { crate::c_abi::vec::VecView::of(v) };
+        write_elems(rows, bare, &mut out, |rows, i, out| {
+            let row = rows.pointer_at::<GosVec>(i);
+            // SAFETY: an element of a `Vec<Vec<f64>>` is null or a live `Vec` (C-ABI contract).
+            write_elems(
+                unsafe { crate::c_abi::vec::VecView::of(row) },
+                0,
+                out,
+                float_elem,
+            );
+        });
         alloc_cstring(out.as_bytes())
     })
 }
@@ -430,36 +392,16 @@ pub unsafe extern "C" fn gos_rt_vec_format_vec_f64(v: *const GosVec, bare: i32) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_format_vec_string(v: *const GosVec, bare: i32) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        if v.is_null() {
-            return alloc_cstring(seq_empty(bare).as_bytes());
-        }
-        let vec = unsafe { &*v };
-        let mut out = String::with_capacity(2 + (vec.len as usize) * 8);
-        out.push_str(seq_open(bare));
-        for i in 0..vec.len {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let inner_ptr = unsafe {
-                crate::c_abi::vec::slot_read_word(p)
-                    .cast_const()
-                    .cast::<GosVec>()
-            };
-            if inner_ptr.is_null() {
-                out.push_str("#[]");
-            } else {
-                let rendered = unsafe { gos_rt_vec_format_string(inner_ptr, 0) };
-                if rendered.is_null() {
-                    out.push_str("#[]");
-                } else {
-                    out.push_str(&unsafe { crate::c_abi::gos_str_arg_lossy(rendered) });
-                    // The formatter answered a fresh rendering whose bytes are now copied.
-                    unsafe { crate::c_abi::string::gos_rt_str_free(rendered) };
-                }
-            }
-        }
-        out.push(']');
+        let mut out = String::new();
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` whose elements are `Vec`s
+        // (C-ABI contract).
+        let rows = unsafe { crate::c_abi::vec::VecView::of(v) };
+        write_elems(rows, bare, &mut out, |rows, i, out| {
+            let row = rows.pointer_at::<GosVec>(i);
+            // SAFETY: an element of a `Vec<Vec<String>>` is null or a live `Vec<String>` (C-ABI
+            // contract).
+            write_strings(unsafe { crate::c_abi::vec::StrVecView::of(row) }, 0, out);
+        });
         alloc_cstring(out.as_bytes())
     })
 }
@@ -480,6 +422,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_u8(p: *const u8, len: i64) -> *mut c_
             if i > 0 {
                 out.push_str(", ");
             }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` bytes (C-ABI contract),
+            // and `i` is below `len`.
             let n = unsafe { p.add(i).read_unaligned() };
             out.push_str(&format!("{n}"));
         }
@@ -507,6 +451,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_i64(p: *const i64, len: i64) -> *mut 
             if i > 0 {
                 out.push_str(", ");
             }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` words (C-ABI contract),
+            // and `i` is below `len`.
             let n = unsafe { p.add(i).read_unaligned() };
             out.push_str(&format!("{n}"));
         }
@@ -530,6 +476,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_f64(p: *const f64, len: i64) -> *mut 
             if i > 0 {
                 out.push_str(", ");
             }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` floats (C-ABI
+            // contract), and `i` is below `len`.
             let n = unsafe { p.add(i).read_unaligned() };
             out.push_str(&crate::builtins::format_float_debug(n));
         }
@@ -553,6 +501,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_bool(p: *const i64, len: i64) -> *mut
             if i > 0 {
                 out.push_str(", ");
             }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` words (C-ABI contract),
+            // and `i` is below `len`.
             let raw = unsafe { p.add(i).read_unaligned() };
             out.push_str(if raw & 1 != 0 { "true" } else { "false" });
         }
@@ -576,6 +526,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_char(p: *const i64, len: i64) -> *mut
             if i > 0 {
                 out.push_str(", ");
             }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` words (C-ABI contract),
+            // and `i` is below `len`.
             let raw = unsafe { p.add(i).read_unaligned() };
             crate::c_abi::map::push_quoted_char(&mut out, raw);
         }
@@ -607,12 +559,17 @@ pub unsafe extern "C" fn gos_rt_arr_format_adt(
             if i > 0 {
                 out.push_str(", ");
             }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` elements of `stride`
+            // bytes (C-ABI contract), and `i` is below `len`.
             let slot = unsafe { p.add(i * (stride as usize)) };
             let arg = if by_ref != 0 {
                 slot
             } else {
+                // SAFETY: `slot` addresses a one-word element of the array.
                 unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast_const()
             };
+            // SAFETY: `fmt` is non-null (checked above) and the compiled formatter of the element
+            // type, and `arg` is the element in the form `by_ref` names (C-ABI contract).
             out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
         }
         out.push(']');
@@ -638,8 +595,12 @@ pub unsafe extern "C" fn gos_rt_arr_format_string(
             if i > 0 {
                 out.push_str(", ");
             }
+            // SAFETY: `p` is non-null (checked above) and addresses `len` words (C-ABI contract),
+            // and `i` is below `len`.
             let s_ptr = unsafe { p.add(i).read_unaligned() };
             if !s_ptr.is_null() {
+                // SAFETY: `s_ptr` is a non-null slot of a `String` array, a live string body
+                // (C-ABI contract).
                 crate::c_abi::map::push_quoted_str(&mut out, &unsafe {
                     crate::c_abi::gos_str_arg_lossy(s_ptr)
                 });
@@ -676,6 +637,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_arr_i64(
                 if j > 0 {
                     out.push_str(", ");
                 }
+                // SAFETY: `p` is non-null (checked above) and addresses `outer * inner` words
+                // (C-ABI contract), and `i * inner + j` is below that.
                 let n = unsafe { p.add(i * inner + j).read_unaligned() };
                 out.push_str(&format!("{n}"));
             }
@@ -710,6 +673,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_arr_f64(
                 if j > 0 {
                     out.push_str(", ");
                 }
+                // SAFETY: `p` is non-null (checked above) and addresses `outer * inner` floats
+                // (C-ABI contract), and `i * inner + j` is below that.
                 let n = unsafe { p.add(i * inner + j).read_unaligned() };
                 out.push_str(&crate::builtins::format_float_debug(n));
             }
@@ -744,6 +709,8 @@ pub unsafe extern "C" fn gos_rt_arr_format_arr_bool(
                 if j > 0 {
                     out.push_str(", ");
                 }
+                // SAFETY: `p` is non-null (checked above) and addresses `outer * inner` words
+                // (C-ABI contract), and `i * inner + j` is below that.
                 let raw = unsafe { p.add(i * inner + j).read_unaligned() };
                 out.push_str(if raw & 1 != 0 { "true" } else { "false" });
             }
@@ -772,16 +739,18 @@ pub unsafe extern "C" fn gos_rt_os_set_env(name: *const c_char, value: *const c_
     ffi_entry!(0i128, {
         if name.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"os::set_env: name is null");
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
         let name_str = unsafe { crate::c_abi::gos_str_arg_string(name) };
         let value_str = if value.is_null() {
             String::new()
         } else {
+            // SAFETY: `value` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(value) }
         };
         crate::safe_env::set_env(&name_str, &value_str);
-        unsafe { gos_rt_result_new(0, 0) }
+        gos_rt_result_new(0, 0)
     })
 }
 
@@ -794,6 +763,7 @@ pub unsafe extern "C" fn gos_rt_os_unset_env(name: *const c_char) {
         if name.is_null() {
             return;
         }
+        // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
         let name_str = unsafe { crate::c_abi::gos_str_arg_string(name) };
         crate::safe_env::unset_env(&name_str);
     });
@@ -818,29 +788,14 @@ pub unsafe extern "C" fn gos_rt_exec_spawn(prog: *const c_char, args: *mut GosVe
     ffi_entry!(0i128, {
         let prog_str = if prog.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"exec::spawn: program is null");
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         } else {
+            // SAFETY: `prog` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(prog) }
         };
-        let mut cmd_args: Vec<String> = Vec::new();
-        if !args.is_null() {
-            let v = unsafe { &*args };
-            let elem_bytes = v.elem_bytes as usize;
-            if elem_bytes != 0 && !v.ptr.is_null() {
-                for i in 0..v.len {
-                    let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
-                    let cstr_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }
-                        .cast_const()
-                        .cast::<c_char>();
-                    if cstr_ptr.is_null() {
-                        cmd_args.push(String::new());
-                        continue;
-                    }
-                    let arg_str = unsafe { crate::c_abi::gos_str_arg_string(cstr_ptr) };
-                    cmd_args.push(arg_str);
-                }
-            }
-        }
+        // SAFETY: `args` is this shim's argument, null or a live `Vec<String>` for the call
+        // (C-ABI contract), which `argv_strings` accepts.
+        let cmd_args = unsafe { crate::c_abi::exec::argv_strings(args) };
         let mut command = std::process::Command::new(&prog_str);
         command.args(&cmd_args);
         command.stdin(std::process::Stdio::null());
@@ -854,12 +809,12 @@ pub unsafe extern "C" fn gos_rt_exec_spawn(prog: *const c_char, args: *mut GosVe
                 // (or leaves the daemon running for the parent's
                 // lifetime).
                 std::mem::forget(child);
-                unsafe { gos_rt_result_new(0, pid) }
+                gos_rt_result_new(0, pid)
             }
             Err(e) => {
                 let msg = format!("exec::spawn({prog_str}): {e}");
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -886,19 +841,20 @@ pub unsafe extern "C" fn gos_rt_exec_kill(pid: i64) -> i64 {
         }
         #[cfg(windows)]
         {
-            // SAFETY: Win32 OpenProcess/TerminateProcess/CloseHandle.
-            // CloseHandle is always called to prevent a handle leak.
             unsafe extern "system" {
                 fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
                 fn TerminateProcess(process: isize, exit_code: u32) -> i32;
                 fn CloseHandle(object: isize) -> i32;
             }
             const PROCESS_TERMINATE: u32 = 0x0001;
+            // SAFETY: `OpenProcess` takes plain values and answers a handle or zero.
             let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid as u32) };
             if handle == 0 {
                 return 0;
             }
+            // SAFETY: `handle` is the non-zero process handle opened above.
             let ok = unsafe { TerminateProcess(handle, 1) };
+            // SAFETY: `handle` is the process handle opened above, closed once here.
             unsafe { CloseHandle(handle) };
             i64::from(ok != 0)
         }

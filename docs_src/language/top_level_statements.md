@@ -33,12 +33,13 @@ If any top-level statement uses `?`, the implicit `main` returns
 use std::fs
 
 let text = fs::read_to_string("config.toml")?
-println("{}", text)
+println(f"{text}")
 ```
 
 Otherwise `main` returns `()`. To set a process exit code, call
 `std::process::exit(n)`:
 
+<!-- fragment -->
 ```gossamer
 use std::process
 

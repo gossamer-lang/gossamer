@@ -52,7 +52,7 @@ buffered and flush stdout first, so the two streams keep their order.
 | `unimplemented` | `unimplemented("msg"?) -> !` | Mark an unsupported path and panic if reached. |
 | `unreachable` | `unreachable("msg"?) -> !` | Mark an impossible path and panic if reached. |
 | `dbg` | `dbg(expr) -> T` | Print `expr` with debug formatting, then return it. |
-| `regex::compile` | `regex::compile("pattern") -> regex::Pattern` | Compile a regular expression; a literal pattern is checked while the program is parsed. The `regex` module is imported like any other: `use std::regex`. |
+| `regex::compile` | `regex::compile("pattern") -> regex::Pattern` | Compile a literal regular expression, checked while the program is parsed; `regex::new(pattern)` answers a `Result` for a pattern built at run time. The `regex` module is imported like any other: `use std::regex`. |
 | `sql::statement` | `sql::statement("query")` | Check a SQL literal at build time when a driver can validate it. |
 | `codegen` | `codegen(...)` | Run the build-time codegen hook. |
 
@@ -79,6 +79,7 @@ Use `todo(...)` for unfinished code.
 | `max` | `max(xs) -> Option<T>` | Return the largest collection item, or `None` when empty. |
 | `clamp` | `clamp(x, lo, hi) -> T` | Limit `x` to the inclusive range `[lo, hi]`. |
 
+<!-- fragment -->
 ```gossamer
 let speed = clamp(input, 0, 120)
 let better = max(score_a, score_b)
@@ -91,6 +92,7 @@ let better = max(score_a, score_b)
 | `spawn` | `spawn(f) -> JoinHandle<T>` | Run `f` on a goroutine and return a join handle. |
 | `join` | `handle.join() -> Result<T, String>` | Wait for a spawned goroutine. `Err` carries the panic message. |
 
+<!-- fragment -->
 ```gossamer
 let h = spawn(|| heavy_compute())
 match h.join() {
@@ -115,6 +117,7 @@ Every user `struct` gets strict typed codecs. No derive attribute needed.
 | `from_yaml` | `from_yaml::<T>(text) -> Result<T, errors::Error>` | Decode YAML into `T`; report schema errors. |
 | `to_yaml` | `to_yaml::<T>(value) -> Result<String, errors::Error>` | Encode `T` as YAML text. |
 
+<!-- fragment -->
 ```gossamer
 struct Config { host: String, port: i64 }
 
@@ -139,7 +142,7 @@ sequence, so it answers the same combinator surface `Iterator` does.
 
 ```gos
 let counted: Range = 0..5
-println("{:?}", counted.iter().rev().collect())
+println("{:?}", counted.rev().collect())
 ```
 
 ## Runtime statements

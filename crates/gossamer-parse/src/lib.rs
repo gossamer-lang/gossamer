@@ -12,6 +12,7 @@
 pub mod autoderive;
 pub mod builtin_macros;
 mod cohort;
+mod declined;
 mod diagnostic;
 mod entry_main;
 mod expressions;
@@ -130,6 +131,12 @@ impl Parser<'_> {
         }
     }
 }
+
+/// The injected function a `{:+}` placeholder renders through.
+pub(crate) const FORMAT_SIGN_HELPER: &str = "__gos_fmt_sign";
+
+/// The injected function a `{:e}` placeholder renders through.
+pub(crate) const FORMAT_EXPONENT_HELPER: &str = "__gos_fmt_exp";
 
 #[cfg(test)]
 mod top_level_stmt_tests {

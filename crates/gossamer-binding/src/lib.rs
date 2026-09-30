@@ -42,14 +42,13 @@ pub use crate::sig::SigType;
 pub use crate::types::{Type, VariantArm};
 pub use gossamer_binding_macros::{GosStruct, gos_blocking, gos_module, gos_opaque};
 
-/// Major.minor ABI version of the gossamer-binding surface.
+/// Major.minor version of the binding wire layout.
 ///
-/// Bumped whenever any of the cross-FFI layouts, calling
-/// conventions, or symbol prefixes change in a way that would
-/// silently corrupt memory if a binding built against an older
-/// version were linked against a newer runtime. Each released
-/// binding records this constant via the `__GOS_BINDING_ABI_VERSION`
-/// static the runtime sniffs at startup.
+/// Bumped whenever a cross-FFI layout, calling convention, or symbol prefix
+/// changes. A binding is always compiled against the toolchain building the
+/// program (the runner patches `gossamer-binding` to the toolchain's copy),
+/// so the layout is internal: the version names it for diagnostics and for
+/// `ABI_0_4.md`, and no binary built by one toolchain is linked by another.
 ///
 /// ABI v2.0 freezes the legacy wire prefix and requires runtime-created
 /// ownership carriers for allocation-backed values such as `GosVec`.
@@ -61,11 +60,8 @@ pub use gossamer_binding_macros::{GosStruct, gos_blocking, gos_module, gos_opaqu
 /// bumps (v2) break compatibility.
 pub const ABI_VERSION: (u8, u8) = (2, 0);
 
-/// Linkage-anchored marker so the runtime can verify the binding's
-/// ABI version at load time. The runtime probes for the symbol
-/// (`__gos_binding_abi_version`) via the host's dynamic-symbol
-/// lookup; mismatch produces a diagnostic at first call rather
-/// than a silent memory corruption.
+/// The wire-layout version this binding was compiled with, exported so a
+/// linked binary records which layout its bindings speak.
 ///
 /// `unsafe_code` is permitted on this single static because the
 /// `no_mangle` export is the entire mechanism - without it, the

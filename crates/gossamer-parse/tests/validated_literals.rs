@@ -31,11 +31,21 @@ fn a_literal_pattern_that_does_not_compile_is_reported_at_the_literal() {
 fn a_pattern_that_compiles_or_is_built_at_run_time_is_accepted() {
     for body in [
         "let r = regex::compile(\"^\\\\d{4}-\\\\p{L}+$\")",
-        "let p = \"a(b\"\n    let r = regex::compile(p)",
+        "let p = \"a(b\"\n    let r = regex::new(p)",
     ] {
         let (_, diags) = diagnostics(body);
         assert!(diags.is_empty(), "{body}: {diags:?}");
     }
+}
+
+#[test]
+fn a_pattern_built_at_run_time_is_refused_by_compile() {
+    let body = "let p = \"a+\"\n    let r = regex::compile(p)";
+    let (_, diags) = diagnostics(body);
+    let [diag] = diags.as_slice() else {
+        panic!("{body}: {diags:?}");
+    };
+    assert_eq!(diag.to_diagnostic().code.as_str(), "GP0052", "{diag:?}");
 }
 
 #[test]

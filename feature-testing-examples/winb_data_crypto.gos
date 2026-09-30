@@ -11,25 +11,25 @@ fn main() {
     let abc: Vec<u8> = Vec::from([97, 98, 99])
 
     // --- SHA-256 (digest bytes + hex) on empty and known vectors ---
-    println("sha256(empty) = {}", crypto::sha256::hex(""))
-    println("sha256(abc) = {}", crypto::sha256::hex("abc"))
+    println("sha256(empty) = {}", crypto::sha256::hex("".as_bytes()))
+    println("sha256(abc) = {}", crypto::sha256::hex("abc".as_bytes()))
     println("sha256 digest len = {}", crypto::sha256::digest(abc).len())
     println("sha256 digest hex = {}", encoding::hex::encode(crypto::sha256::digest(abc)))
 
     // --- SHA-512 ---
-    println("sha512(empty) = {}", crypto::sha512::hex(""))
-    println("sha512(abc) = {}", crypto::sha512::hex("abc"))
+    println("sha512(empty) = {}", crypto::sha512::hex("".as_bytes()))
+    println("sha512(abc) = {}", crypto::sha512::hex("abc".as_bytes()))
     println("sha512 digest len = {}", crypto::sha512::digest(abc).len())
 
     // --- BLAKE3 ---
-    println("blake3(empty) = {}", crypto::blake3::hex(""))
-    println("blake3(abc) = {}", crypto::blake3::hex("abc"))
+    println("blake3(empty) = {}", crypto::blake3::hex("".as_bytes()))
+    println("blake3(abc) = {}", crypto::blake3::hex("abc".as_bytes()))
     println("blake3 digest len = {}", crypto::blake3::digest(abc).len())
 
     // --- HMAC-SHA256 edge cases (empty key, empty msg) ---
-    println("hmac(key,msg) = {}", crypto::hmac::sha256_hex("key", "msg"))
-    println("hmac(empty,empty) = {}", crypto::hmac::sha256_hex("", ""))
-    println("hmac(key,empty) = {}", crypto::hmac::sha256_hex("key", ""))
+    println("hmac(key,msg) = {}", crypto::hmac::sha256_hex("key".as_bytes(), "msg".as_bytes()))
+    println("hmac(empty,empty) = {}", crypto::hmac::sha256_hex("".as_bytes(), "".as_bytes()))
+    println("hmac(key,empty) = {}", crypto::hmac::sha256_hex("key".as_bytes(), "".as_bytes()))
     println("hmac mac len = {}", crypto::hmac::sha256_mac(Vec::from([107, 101, 121]), Vec::from([109, 115, 103])).len())
 
     // --- subtle constant-time eq, incl empty vs empty ---
@@ -39,10 +39,10 @@ fn main() {
     println("cteq len mismatch = {}", crypto::subtle::constant_time_eq(Vec::from([1, 2]), Vec::from([1, 2, 3])))
 
     // --- insecure (MD5 / SHA-1) on empty + vector ---
-    println("md5(empty) = {}", crypto::insecure::md5_hex(""))
-    println("md5(abc) = {}", crypto::insecure::md5_hex("abc"))
-    println("sha1(empty) = {}", crypto::insecure::sha1_hex(""))
-    println("sha1(abc) = {}", crypto::insecure::sha1_hex("abc"))
+    println("md5(empty) = {}", crypto::insecure::md5_hex("".as_bytes()))
+    println("md5(abc) = {}", crypto::insecure::md5_hex("abc".as_bytes()))
+    println("sha1(empty) = {}", crypto::insecure::sha1_hex("".as_bytes()))
+    println("sha1(abc) = {}", crypto::insecure::sha1_hex("abc".as_bytes()))
 
     // --- non-crypto hashes on empty + bytes + chaining ---
     println("fnv1a32(empty) = {}", hash::fnv::hash32(empty))

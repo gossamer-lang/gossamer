@@ -44,7 +44,7 @@ license = "Apache-2.0"
 "example.org/lib" = "1.2.3"
 
 [registries]
-default = "https://registry.gossamer-lang.org"
+default = "https://registry.example.org"
 
 # Required before the first registry fetch for a package. The registry
 # cannot establish this binding by advertising a key in its index.
@@ -168,6 +168,7 @@ The layout declares the modules, so the entry needs no `mod NAME;` line.
 A module's items are not in scope on their own: name them through a path
 or bring them in with `use`.
 
+<!-- fragment -->
 ```gossamer
 // src/main.gos
 use widget::greet
@@ -183,6 +184,7 @@ names the declaring module and the exact `use` line to add. A type
 belongs to the module that declares it, so two modules may each declare
 a `Config` without the two colliding.
 
+<!-- fragment -->
 ```gossamer
 // src/widget.gos
 pub fn greet(name: String) -> String {
@@ -220,6 +222,7 @@ runs them on the register-based bytecode VM.
 
 ## Documentation
 
+<!-- fragment -->
 ```gossamer
 // Pixel width of `text` at this font's current size,
 // including kerning.
@@ -259,6 +262,7 @@ mod bindings {
 }
 ```
 
+<!-- fragment -->
 ```gossamer
 use native
 fn main() { println("{}", native::shout("hello")) }
@@ -272,12 +276,36 @@ that knows nothing about Gossamer, and the tier and ABI rules.
 
 ## Publishing
 
-`gos publish` packs the project, signs the tarball (Ed25519), and
-uploads it to the registry; `--dry-run` packs and signs without
-uploading. `gos yank`, `gos login` / `gos logout`, and `gos owner`
+A registry is named by `[registries] default` in `project.toml` or by
+`GOS_REGISTRY_URL`; the toolchain names none of its own, and a registry
+dependency with none configured is an error that says so.
+
+`gos publish` packs the project, signs the archive's SHA-256 digest
+(Ed25519, with the key at `~/.gossamer/keys/<id>.ed25519` or in
+`GOS_PUBLISH_KEY`), and uploads it to the registry; `--dry-run` packs and
+signs without uploading. A registry refuses an unsigned upload. `gos yank`, `gos login` / `gos logout`, and `gos owner`
 round out the registry workflow, with dependency tarballs sha256-pinned
 in `project.lock`. A registry package must also have a publisher key pinned
 in `project.lock` or explicitly bound in `[trusted-publishers]` before its
 first fetch; keys advertised only by a registry index are not trusted.
 Path-based and git-based dependencies in
 `project.toml` also work end-to-end.
+
+### Running a registry
+
+`gos registry serve --root DIR --addr HOST:PORT` serves a registry from a
+directory: `index/` holds each package's version list, `packages/` the
+archives, and `owners/` who may publish each id. The first publisher of an
+id owns it; `gos owner add` shares it. A `tokens.toml` in the root maps each
+user to a bearer token:
+
+```toml
+[tokens]
+alice = "a-long-random-token"
+```
+
+Clients store theirs with `gos login --registry URL`. A root with no
+`tokens.toml` accepts every request as the user `local`, which suits a
+registry on one machine and nothing else, so the default address is
+loopback. Plain `http://` is accepted for a loopback registry; anything
+remote is `https://` behind a TLS terminator.

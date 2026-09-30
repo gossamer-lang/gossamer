@@ -31,6 +31,23 @@ impl Parser<'_> {
     }
 
     fn parse_type_kind(&mut self) -> TypeKind {
+        // `dyn Trait` and `impl Trait` report the declined feature and parse
+        // the trait path in their place.
+        let declined = if self.at_contextual_word("dyn")
+            && matches!(self.peek_nth(1).kind, TokenKind::Ident)
+        {
+            Some(crate::declined::TRAIT_OBJECTS)
+        } else if self.at_keyword(Keyword::Impl) {
+            Some(crate::declined::IMPL_TRAIT_TYPES)
+        } else {
+            None
+        };
+        if let Some(declined) = declined {
+            let span = self.peek_span();
+            self.report_declined(declined, span);
+            self.bump();
+            return self.parse_type_kind();
+        }
         if self.eat_punct(Punct::LParen) {
             return self.parse_tuple_or_unit_type();
         }
@@ -118,6 +135,11 @@ impl Parser<'_> {
 
     fn parse_ref_type(&mut self) -> TypeKind {
         self.bump();
+        if matches!(self.peek().kind, TokenKind::Label) {
+            let span = self.peek_span();
+            self.report_declined(crate::declined::LIFETIMES, span);
+            self.bump();
+        }
         let mutability = if self.eat_keyword(Keyword::Mut) {
             Mutability::Mutable
         } else {

@@ -6,5 +6,5 @@ fn main() {
         |> |v| iter::filter(v, |x| x % 2 == 0)
         |> |v| iter::take(v, 5)
         |> iter::collect
-    println("{:?}", result)
+    println(f"{result:?}")
 }

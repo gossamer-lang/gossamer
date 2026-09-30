@@ -111,6 +111,12 @@ pub const RC_CHILD_DEQUE: i64 = 8;
 /// is a counted vector, but a heap write reaches its store in place, so a copy
 /// takes a heap of its own rather than a share.
 pub const RC_CHILD_HEAP: i64 = 9;
+/// Child entry naming a lazy iterator handle the blob holds a share of. A copy
+/// of the blob takes a share, and every holder advances one cursor.
+pub const RC_CHILD_ITER: i64 = 10;
+/// Child entry naming a lazy pair iterator handle (the state `zip` and
+/// `enumerate` build), held on the same terms as [`RC_CHILD_ITER`].
+pub const RC_CHILD_ITER_PAIR: i64 = 11;
 
 /// The copy-blob child kind for a carrier field whose payload is a blob under
 /// discriminant `gate` (0, 1, or negative for both arms).

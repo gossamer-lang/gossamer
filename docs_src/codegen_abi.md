@@ -33,7 +33,7 @@ backend - for:
 
   fn main() {
       let p = id(Point { x: 1, y: 2 })
-      println("{} {}", p.x, p.y)
+      println(f"{p.x} {p.y}")
   }
   ```
 
@@ -48,7 +48,7 @@ backend - for:
   fn main() {
       let w = Wrapper { value: Point { x: 7, y: 9 } }
       let p = w.get()
-      println("{} {}", p.x, p.y)
+      println(f"{p.x} {p.y}")
   }
   ```
 

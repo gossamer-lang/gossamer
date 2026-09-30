@@ -1,0 +1,18 @@
+// `std::image`: a filled image reads back its fill, a written pixel reads
+// back what was written, writes outside the image are refused, and a PNG
+// round trip through base64 keeps every pixel.
+
+use std::image
+
+fn main() {
+    let img = image::filled(4, 3, 0x11223344)
+    println("size: {}x{}", image::width(img), image::height(img))
+    println("fill: {:08x}", image::pixel(img, 3, 2))
+    println("set: {}", image::set_pixel(img, 1, 1, 0xff0000ff))
+    println("read: {:08x}", image::pixel(img, 1, 1))
+    println("outside: {}", image::set_pixel(img, 4, 0, 0))
+    let back = image::decode_base64(image::encode_png_base64(img))
+    println("decoded: {}x{}", image::width(back), image::height(back))
+    println("same pixel: {}", image::pixel(back, 1, 1) == image::pixel(img, 1, 1))
+    println("same fill: {}", image::pixel(back, 0, 0) == image::pixel(img, 0, 0))
+}

@@ -1,0 +1,100 @@
+// A Gossamer-native SQL driver with state (sql::register_native).
+//
+// The driver carries its greeting in a field, and it is registered by a
+// function that returns before any query runs, while other work reuses the
+// stack. The registry keeps the driver for the process, so every tier
+// answers the query from the driver's own field.
+
+use std::database::sql
+use std::errors
+
+// Op codes shared with the runtime (gossamer-runtime c_abi::sql).
+const OP_OPEN: i64 = 0
+const OP_CLOSE: i64 = 1
+const OP_PREPARE: i64 = 2
+const OP_STMT_QUERY: i64 = 4
+const OP_STMT_CLOSE: i64 = 5
+const OP_ROWS_NEXT: i64 = 6
+const OP_ROWS_CLOSE: i64 = 7
+
+// The cursor is one-shot: STMT_QUERY arms it, the first ROWS_NEXT
+// yields a row, the next marks end-of-set. A scalar static mut is a
+// real shared global on every tier.
+static mut ROW_PENDING: bool = false
+
+struct FakeDriver {
+    greeting: String
+    padding: Vec<i64>
+}
+
+impl FakeDriver {
+    fn dispatch(&self, op: i64, h: i64) -> i64 {
+        if op == OP_OPEN {
+            return 0
+        }
+        if op == OP_PREPARE {
+            return 0
+        }
+        if op == OP_STMT_QUERY {
+            let rows = sql::native_out_handle(h)
+            sql::native_push_column(rows, "greeting")
+            ROW_PENDING = true
+            return 0
+        }
+        if op == OP_ROWS_NEXT {
+            if ROW_PENDING {
+                sql::native_push_value(h, sql::value_text(self.greeting))
+                sql::native_row_ready(h)
+                ROW_PENDING = false
+            }
+            return 0
+        }
+        if op == OP_CLOSE {
+            return 0
+        }
+        if op == OP_STMT_CLOSE {
+            return 0
+        }
+        if op == OP_ROWS_CLOSE {
+            return 0
+        }
+        sql::native_set_error(h, "fake driver: unsupported op")
+        -1
+    }
+}
+
+fn setup() {
+    let mut greeting = "hello, "
+    greeting += "stateful driver"
+    sql::register_native("fake", FakeDriver { greeting: greeting, padding: #[1, 2, 3] })
+}
+
+fn churn() -> i64 {
+    let mut total = 0
+    for i in 0..1000 {
+        let s = f"filler {i}"
+        let v = #[i, i + 1, i + 2]
+        total += s.len() + v.len()
+    }
+    total
+}
+
+fn run() -> Result<(), errors::Error> {
+    setup()
+    println("churn {}", churn())
+    let mut db = sql::open("fake", "memory://x")?
+    let mut rows = db.query("SELECT greeting", [])?
+    while let Some(row) = rows.next_row()? {
+        println("greeting = {}", row.get_text("greeting")?)
+    }
+    rows.close()?
+    db.close()?
+    Ok(())
+}
+
+fn main() {
+    match run() {
+        Ok(()) => println("done")
+        Err(e) => println(f"error: {e}")
+    }
+}

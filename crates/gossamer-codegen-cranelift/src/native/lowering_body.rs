@@ -270,6 +270,68 @@ fn param_storage_is_written(body: &Body, local: Local) -> bool {
         })
 }
 
+/// A body's preemption polls: the loop headers that poll, and the address of
+/// the runtime's yield-request byte.
+struct PreemptPolls {
+    headers: HashSet<gossamer_mir::BlockId>,
+    requested: ir::Value,
+}
+
+/// Takes the headers that poll ([`gossamer_mir::preempt::preemption_polls`])
+/// and materialises the yield-request byte's address in the entry block, which
+/// must be current.
+fn plan_preemption_polls(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    body: &Body,
+    program: &HashMap<String, FuncId>,
+    intrinsics: &IntrinsicContext,
+) -> Result<Option<PreemptPolls>> {
+    let headers = gossamer_mir::preempt::preemption_polls(body, |callee| match callee {
+        Operand::Const(gossamer_mir::ConstValue::Str(name)) => program.contains_key(name.as_str()),
+        Operand::FnRef { .. } | Operand::Copy(_) => true,
+        Operand::Const(_) => false,
+    });
+    if headers.is_empty() {
+        return Ok(None);
+    }
+    let data = match intrinsics.preempt_requested {
+        Some(data) => data,
+        None => module
+            .declare_data("gos_rt_preempt_requested", Linkage::Import, true, false)
+            .map_err(|e| anyhow!("declare gos_rt_preempt_requested: {e}"))?,
+    };
+    let global = module.declare_data_in_func(data, builder.func);
+    let ptr_ty = module.target_config().pointer_type();
+    let requested = builder.ins().symbol_value(ptr_ty, global);
+    Ok(Some(PreemptPolls { headers, requested }))
+}
+
+/// Cooperative preemption poll at a loop header: tests the runtime's
+/// yield-request byte, and when it is set, asks the runtime whether this
+/// worker yields.
+fn emit_preempt_poll(
+    module: &mut dyn Module,
+    builder: &mut FunctionBuilder<'_>,
+    intrinsics: &mut IntrinsicContext,
+    polls: &PreemptPolls,
+) -> Result<()> {
+    let flag = builder
+        .ins()
+        .atomic_load(types::I8, MemFlagsData::trusted(), polls.requested);
+    let check = builder.create_block();
+    let cont = builder.create_block();
+    builder.set_cold_block(check);
+    builder.ins().brif(flag, check, &[], cont, &[]);
+    builder.switch_to_block(check);
+    let poll = intrinsics.extern_fn_by_name(module, "gos_rt_preempt_check_and_yield")?;
+    let poll = module.declare_func_in_func(poll, builder.func);
+    builder.ins().call(poll, &[]);
+    builder.ins().jump(cont, &[]);
+    builder.switch_to_block(cont);
+    Ok(())
+}
+
 pub(super) fn lower_body(
     module: &mut dyn Module,
     func: &mut Function,
@@ -529,6 +591,8 @@ pub(super) fn lower_body(
         callees_by_name.insert(name.clone(), func_ref);
     }
 
+    let preempt =
+        plan_preemption_polls(module, &mut builder, body, function_ids_by_name, intrinsics)?;
     let cleanup_plan = gossamer_mir::plan_cleanup_with_summary(body, capture_summary);
     // A lane loop whose blocks carry cleanup keeps its scalar form, where the
     // cleanup is emitted.
@@ -567,6 +631,13 @@ pub(super) fn lower_body(
         // every function entry blocks leaf-function inlining and
         // serialises on a global lock - unacceptable in hot loops.
         entry_block_filled = true;
+
+        if let Some(polls) = &preempt
+            && polls.headers.contains(&block.id)
+            && lane_loops.headed_by(block.id).is_none()
+        {
+            emit_preempt_poll(module, &mut builder, intrinsics, polls)?;
+        }
 
         if !cleanup_plan.is_empty() {
             for entry in cleanup_plan.at_block_entry(block.id) {

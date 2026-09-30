@@ -5,8 +5,8 @@
 use std::crypto
 
 fn main() {
-    println("sha256(abc) = {}", crypto::sha256::hex("abc"))
-    println("sha512(abc) = {}", crypto::sha512::hex("abc"))
-    println("blake3(abc) = {}", crypto::blake3::hex("abc"))
-    println("hmac256(key, msg) = {}", crypto::hmac::sha256_hex("key", "msg"))
+    println("sha256(abc) = {}", crypto::sha256::hex("abc".as_bytes()))
+    println("sha512(abc) = {}", crypto::sha512::hex("abc".as_bytes()))
+    println("blake3(abc) = {}", crypto::blake3::hex("abc".as_bytes()))
+    println("hmac256(key, msg) = {}", crypto::hmac::sha256_hex("key".as_bytes(), "msg".as_bytes()))
 }

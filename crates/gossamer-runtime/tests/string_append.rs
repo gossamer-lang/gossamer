@@ -1,6 +1,6 @@
 //! String append runtime tests.
 
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 
 use gossamer_runtime::c_abi::{
     alloc_cstring, gos_rt_arena_pop, gos_rt_arena_push, gos_rt_str_append_bytes,
@@ -11,9 +11,11 @@ use gossamer_runtime::c_abi::{
 
 #[test]
 fn append_i64_formats_into_existing_builder() {
-    let prefix = CString::new("id=").expect("literal has no nul");
+    let prefix = alloc_cstring(b"id=");
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
-        let first = gos_rt_str_append_i64(prefix.as_ptr(), -42);
+        let first = gos_rt_str_append_i64(prefix, -42);
         let second = gos_rt_str_append_i64(first, 17);
         let out = CStr::from_ptr(second).to_str().unwrap().to_owned();
         gos_rt_str_free(second);
@@ -22,7 +24,13 @@ fn append_i64_formats_into_existing_builder() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "the arena maps its slabs with guard pages, which Miri cannot model"
+)]
 fn growable_string_survives_the_arena_that_created_it() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         gos_rt_arena_push();
         let arena_string = gos_rt_str_with_capacity(64);
@@ -42,10 +50,12 @@ fn growable_string_survives_the_arena_that_created_it() {
 
 #[test]
 fn concat_drop_a_appends_header_backed_fragment() {
-    let prefix = CString::new("name=").expect("literal has no nul");
+    let prefix = alloc_cstring(b"name=");
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let fragment = alloc_cstring(b"user-000042");
-        let out_ptr = gos_rt_str_concat_drop_a(prefix.as_ptr(), fragment);
+        let out_ptr = gos_rt_str_concat_drop_a(prefix, fragment);
         let out = CStr::from_ptr(out_ptr).to_str().unwrap().to_owned();
         gos_rt_str_free(fragment);
         gos_rt_str_free(out_ptr);
@@ -55,6 +65,8 @@ fn concat_drop_a_appends_header_backed_fragment() {
 
 #[test]
 fn character_pushes_reuse_unique_reserved_storage() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let string = gos_rt_str_with_capacity(16);
         let after_char = gos_rt_str_push_char(string, 'a' as i32);
@@ -73,6 +85,8 @@ fn character_pushes_reuse_unique_reserved_storage() {
 
 #[test]
 fn character_push_grows_an_exhausted_buffer() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let string = alloc_cstring(b"full");
         let grown = gos_rt_str_push_char(string, '!' as i32);
@@ -84,6 +98,8 @@ fn character_push_grows_an_exhausted_buffer() {
 
 #[test]
 fn incremental_append_index_preserves_unicode_lookup() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let mut string = gos_rt_str_with_capacity(512);
         for _ in 0..100 {
@@ -96,6 +112,8 @@ fn incremental_append_index_preserves_unicode_lookup() {
 
 #[test]
 fn clearing_a_unique_builder_keeps_its_storage_for_the_next_append() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let string = gos_rt_str_with_capacity(32);
         let filled = gos_rt_str_append_bytes(string, b"first row".as_ptr(), 9);
@@ -112,6 +130,8 @@ fn clearing_a_unique_builder_keeps_its_storage_for_the_next_append() {
 
 #[test]
 fn clearing_a_shared_builder_leaves_the_other_holder_its_text() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let string = gos_rt_str_with_capacity(32);
         let filled = gos_rt_str_append_bytes(string, b"kept".as_ptr(), 4);
@@ -127,6 +147,8 @@ fn clearing_a_shared_builder_leaves_the_other_holder_its_text() {
 
 #[test]
 fn truncating_a_unique_builder_shortens_it_at_a_character_boundary() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let string = gos_rt_str_with_capacity(32);
         let text = "a\u{e7}\u{e7}b";

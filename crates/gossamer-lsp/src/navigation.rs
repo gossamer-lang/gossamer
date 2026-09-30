@@ -78,22 +78,54 @@ pub(crate) enum Locate {
         name_span: Span,
         /// Field name text.
         name: String,
+        /// The field-access expression itself, whose checked type is the
+        /// field's; `None` for a method name or a pattern or literal field.
+        access_id: Option<NodeId>,
     },
 }
 
-/// Walks `sf` and returns the most-specific cursor target at `offset`.
-pub(crate) fn locate(sf: &SourceFile, offset: u32) -> Option<Locate> {
-    let mut walker = Walker { offset, best: None };
+/// Walks `sf`, parsed from `source`, and returns the most-specific cursor
+/// target at `offset`.
+pub(crate) fn locate(sf: &SourceFile, source: &str, offset: u32) -> Option<Locate> {
+    let mut walker = Walker {
+        offset,
+        best: None,
+        source,
+    };
     walker.visit_source_file(sf);
     walker.best
 }
 
-struct Walker {
+struct Walker<'src> {
     offset: u32,
     best: Option<Locate>,
+    /// The text the tree was parsed from, which places a member name the
+    /// tree records only by its spelling.
+    source: &'src str,
 }
 
-impl Walker {
+impl Walker<'_> {
+    /// The span of the member `name` written after the `.` that follows a
+    /// receiver ending at `receiver_end`, within an expression ending at
+    /// `end`; whitespace and line breaks may sit either side of the `.`.
+    fn member_span(&self, name: &Ident, receiver_end: u32, end: u32, fallback: Span) -> Span {
+        let window = self
+            .source
+            .get(receiver_end as usize..(end as usize).min(self.source.len()))
+            .unwrap_or_default();
+        let after_dot = window
+            .find('.')
+            .map(|dot| dot + 1 + (window[dot + 1..].len() - window[dot + 1..].trim_start().len()));
+        match after_dot {
+            Some(at) if window[at..].starts_with(name.name.as_str()) => {
+                let start = receiver_end + u32::try_from(at).unwrap_or(0);
+                let len = u32::try_from(name.name.len()).unwrap_or(0);
+                Span::new(fallback.file, start, start + len)
+            }
+            _ => ident_span(name, fallback),
+        }
+    }
+
     fn record(&mut self, candidate: Locate, span: Span) {
         if !contains(span, self.offset) {
             return;
@@ -278,6 +310,7 @@ impl Walker {
                 owner_id,
                 name_span: span,
                 name: field.name.name.clone(),
+                access_id: None,
             },
             span,
         );
@@ -336,12 +369,13 @@ impl Walker {
                 ..
             } => {
                 self.visit_expr(receiver);
-                let span = ident_span(name, expr.span);
+                let span = self.member_span(name, receiver.span.end, expr.span.end, expr.span);
                 self.record(
                     Locate::Field {
                         owner_id: receiver.id,
                         name_span: span,
                         name: name.name.clone(),
+                        access_id: None,
                     },
                     span,
                 );
@@ -352,12 +386,13 @@ impl Walker {
             ExprKind::FieldAccess { receiver, field } => {
                 self.visit_expr(receiver);
                 if let FieldSelector::Named(name) = field {
-                    let span = ident_span(name, expr.span);
+                    let span = self.member_span(name, receiver.span.end, expr.span.end, expr.span);
                     self.record(
                         Locate::Field {
                             owner_id: receiver.id,
                             name_span: span,
                             name: name.name.clone(),
+                            access_id: Some(expr.id),
                         },
                         span,
                     );
@@ -537,6 +572,7 @@ impl Walker {
                 owner_id,
                 name_span: span,
                 name: field.name.name.clone(),
+                access_id: None,
             },
             span,
         );

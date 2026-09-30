@@ -4,5 +4,5 @@ fn double(n: i64) -> i64 { n * 2 }
 
 let nums = #[1, 2, 3]
 for n in nums {
-    println("{} -> {}", n, double(n))
+    println(f"{n} -> {double(n)}")
 }

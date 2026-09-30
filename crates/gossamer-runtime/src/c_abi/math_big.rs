@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::doc_markdown)]
 
 //! C-ABI shims for `std::math::big::*`. Big integers are carried as
@@ -23,10 +22,13 @@ use super::vec::gos_rt_result_new;
 
 fn err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
-fn cstr<'a>(s: *const c_char) -> &'a str {
+/// # Safety
+///
+/// `s` is null or a live string body.
+unsafe fn cstr<'a>(s: *const c_char) -> &'a str {
     if s.is_null() {
         return "0";
     }
@@ -35,12 +37,22 @@ fn cstr<'a>(s: *const c_char) -> &'a str {
     std::str::from_utf8(bytes).unwrap_or("0")
 }
 
-fn int(s: *const c_char) -> BigInt {
-    cstr(s).parse::<BigInt>().unwrap_or_else(|_| BigInt::zero())
+/// # Safety
+///
+/// `s` is null or a live string body.
+unsafe fn int(s: *const c_char) -> BigInt {
+    // SAFETY: this function's contract covers `s`, as `cstr` requires.
+    unsafe { cstr(s) }
+        .parse::<BigInt>()
+        .unwrap_or_else(|_| BigInt::zero())
 }
 
-fn uint(s: *const c_char) -> BigUint {
-    cstr(s)
+/// # Safety
+///
+/// `s` is null or a live string body.
+unsafe fn uint(s: *const c_char) -> BigUint {
+    // SAFETY: this function's contract covers `s`, as `cstr` requires.
+    unsafe { cstr(s) }
         .parse::<BigUint>()
         .unwrap_or_else(|_| BigUint::zero())
 }
@@ -51,21 +63,21 @@ fn dec(value: &impl std::fmt::Display) -> *mut c_char {
 
 fn ok_str(value: &impl std::fmt::Display) -> i128 {
     let p = alloc_cstring(value.to_string().as_bytes());
-    unsafe { gos_rt_result_new(0, p as i64) }
+    gos_rt_result_new(0, p as i64)
 }
 
 fn some_i64(n: i64) -> i128 {
-    unsafe { gos_rt_result_new(0, n) }
+    gos_rt_result_new(0, n)
 }
 
 fn none_opt() -> i128 {
-    unsafe { gos_rt_result_new(1, 0) }
+    gos_rt_result_new(1, 0)
 }
 
 // --- factorial -------------------------------------------------------
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_math_big_factorial(n: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_math_big_factorial(n: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let mut result = BigInt::one();
         let mut i: i64 = 2;
@@ -80,14 +92,15 @@ pub unsafe extern "C" fn gos_rt_math_big_factorial(n: i64) -> *mut c_char {
 // --- signed Int ------------------------------------------------------
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_math_big_int_from_i64(n: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_math_big_int_from_i64(n: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), { dec(&BigInt::from(n)) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_from_str(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match cstr(s).parse::<BigInt>() {
+        // SAFETY: `s` is this shim's argument, as `cstr` requires (C-ABI contract).
+        match unsafe { cstr(s) }.parse::<BigInt>() {
             Ok(n) => ok_str(&n),
             Err(e) => err_result(&format!("big::Int: {e}")),
         }
@@ -96,20 +109,24 @@ pub unsafe extern "C" fn gos_rt_math_big_int_from_str(s: *const c_char) -> i128 
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_to_str(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&int(s)) })
+    // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+    ffi_entry!(std::ptr::null_mut(), { dec(&unsafe { int(s) }) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_to_hex(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(format!("{:x}", int(s)).as_bytes())
+        // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+        let n = unsafe { int(s) };
+        alloc_cstring(format!("{n:x}").as_bytes())
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_to_i64(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match int(s).to_i64() {
+        // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+        match unsafe { int(s) }.to_i64() {
             Some(n) => some_i64(n),
             None => none_opt(),
         }
@@ -118,17 +135,20 @@ pub unsafe extern "C" fn gos_rt_math_big_int_to_i64(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_is_zero(s: *const c_char) -> i32 {
-    ffi_entry!(0, { i32::from(int(s).is_zero()) })
+    // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+    ffi_entry!(0, { i32::from(unsafe { int(s) }.is_zero()) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_is_positive(s: *const c_char) -> i32 {
-    ffi_entry!(0, { i32::from(int(s) > BigInt::zero()) })
+    // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+    ffi_entry!(0, { i32::from(unsafe { int(s) } > BigInt::zero()) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_is_negative(s: *const c_char) -> i32 {
-    ffi_entry!(0, { i32::from(int(s) < BigInt::zero()) })
+    // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+    ffi_entry!(0, { i32::from(unsafe { int(s) } < BigInt::zero()) })
 }
 
 #[unsafe(no_mangle)]
@@ -136,7 +156,15 @@ pub unsafe extern "C" fn gos_rt_math_big_int_add(
     a: *const c_char,
     b: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&(int(a) + int(b))) })
+    ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `a` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let a = unsafe { int(a) };
+        // SAFETY: `b` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let b = unsafe { int(b) };
+        dec(&(a + b))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -144,7 +172,15 @@ pub unsafe extern "C" fn gos_rt_math_big_int_sub(
     a: *const c_char,
     b: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&(int(a) - int(b))) })
+    ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `a` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let a = unsafe { int(a) };
+        // SAFETY: `b` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let b = unsafe { int(b) };
+        dec(&(a - b))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -152,17 +188,27 @@ pub unsafe extern "C" fn gos_rt_math_big_int_mul(
     a: *const c_char,
     b: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&(int(a) * int(b))) })
+    ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `a` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let a = unsafe { int(a) };
+        // SAFETY: `b` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let b = unsafe { int(b) };
+        dec(&(a * b))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_div(a: *const c_char, b: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let d = int(b);
+        // SAFETY: `b` is this shim's argument, as `int` requires (C-ABI contract).
+        let d = unsafe { int(b) };
         if d.is_zero() {
             err_result("big::Int: division by zero")
         } else {
-            ok_str(&(int(a) / d))
+            // SAFETY: `a` is this shim's argument, as `int` requires (C-ABI contract).
+            ok_str(&(unsafe { int(a) } / d))
         }
     })
 }
@@ -170,11 +216,13 @@ pub unsafe extern "C" fn gos_rt_math_big_int_div(a: *const c_char, b: *const c_c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_rem(a: *const c_char, b: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let d = int(b);
+        // SAFETY: `b` is this shim's argument, as `int` requires (C-ABI contract).
+        let d = unsafe { int(b) };
         if d.is_zero() {
             err_result("big::Int: division by zero")
         } else {
-            ok_str(&(int(a) % d))
+            // SAFETY: `a` is this shim's argument, as `int` requires (C-ABI contract).
+            ok_str(&(unsafe { int(a) } % d))
         }
     })
 }
@@ -183,18 +231,21 @@ pub unsafe extern "C" fn gos_rt_math_big_int_rem(a: *const c_char, b: *const c_c
 pub unsafe extern "C" fn gos_rt_math_big_int_pow(s: *const c_char, exp: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let e = u32::try_from(exp.max(0)).unwrap_or(0);
-        dec(&int(s).pow(e))
+        // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+        dec(&unsafe { int(s) }.pow(e))
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_abs(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&int(s).abs()) })
+    // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+    ffi_entry!(std::ptr::null_mut(), { dec(&unsafe { int(s) }.abs()) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_neg(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&(-int(s))) })
+    // SAFETY: `s` is this shim's argument, as `int` requires (C-ABI contract).
+    ffi_entry!(std::ptr::null_mut(), { dec(&(-unsafe { int(s) })) })
 }
 
 #[unsafe(no_mangle)]
@@ -202,7 +253,15 @@ pub unsafe extern "C" fn gos_rt_math_big_int_gcd(
     a: *const c_char,
     b: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&int(a).gcd(&int(b))) })
+    ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `a` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let a = unsafe { int(a) };
+        // SAFETY: `b` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let b = unsafe { int(b) };
+        dec(&a.gcd(&b))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -210,13 +269,23 @@ pub unsafe extern "C" fn gos_rt_math_big_int_lcm(
     a: *const c_char,
     b: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&int(a).lcm(&int(b))) })
+    ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `a` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let a = unsafe { int(a) };
+        // SAFETY: `b` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `int` accepts.
+        let b = unsafe { int(b) };
+        dec(&a.lcm(&b))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_int_cmp(a: *const c_char, b: *const c_char) -> i64 {
     ffi_entry!(0, {
-        match int(a).cmp(&int(b)) {
+        // SAFETY: `a` is this shim's argument, as `int` requires (C-ABI contract). `b` is this
+        // shim's argument, as `int` requires (C-ABI contract).
+        match unsafe { int(a) }.cmp(&unsafe { int(b) }) {
             std::cmp::Ordering::Less => -1,
             std::cmp::Ordering::Equal => 0,
             std::cmp::Ordering::Greater => 1,
@@ -227,7 +296,7 @@ pub unsafe extern "C" fn gos_rt_math_big_int_cmp(a: *const c_char, b: *const c_c
 // --- unsigned Uint ---------------------------------------------------
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_math_big_uint_from_u64(n: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_math_big_uint_from_u64(n: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         dec(&BigUint::from(n.max(0) as u64))
     })
@@ -236,7 +305,8 @@ pub unsafe extern "C" fn gos_rt_math_big_uint_from_u64(n: i64) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_uint_from_str(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match cstr(s).parse::<BigUint>() {
+        // SAFETY: `s` is this shim's argument, as `cstr` requires (C-ABI contract).
+        match unsafe { cstr(s) }.parse::<BigUint>() {
             Ok(n) => ok_str(&n),
             Err(e) => err_result(&format!("big::Uint: {e}")),
         }
@@ -245,20 +315,24 @@ pub unsafe extern "C" fn gos_rt_math_big_uint_from_str(s: *const c_char) -> i128
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_uint_to_str(s: *const c_char) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&uint(s)) })
+    // SAFETY: `s` is this shim's argument, as `uint` requires (C-ABI contract).
+    ffi_entry!(std::ptr::null_mut(), { dec(&unsafe { uint(s) }) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_uint_to_hex(s: *const c_char) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        alloc_cstring(format!("{:x}", uint(s)).as_bytes())
+        // SAFETY: `s` is this shim's argument, as `uint` requires (C-ABI contract).
+        let n = unsafe { uint(s) };
+        alloc_cstring(format!("{n:x}").as_bytes())
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_uint_to_u64(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match uint(s).to_u64() {
+        // SAFETY: `s` is this shim's argument, as `uint` requires (C-ABI contract).
+        match unsafe { uint(s) }.to_u64() {
             Some(n) => some_i64(n as i64),
             None => none_opt(),
         }
@@ -267,7 +341,8 @@ pub unsafe extern "C" fn gos_rt_math_big_uint_to_u64(s: *const c_char) -> i128 {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_uint_is_zero(s: *const c_char) -> i32 {
-    ffi_entry!(0, { i32::from(uint(s).is_zero()) })
+    // SAFETY: `s` is this shim's argument, as `uint` requires (C-ABI contract).
+    ffi_entry!(0, { i32::from(unsafe { uint(s) }.is_zero()) })
 }
 
 #[unsafe(no_mangle)]
@@ -275,7 +350,15 @@ pub unsafe extern "C" fn gos_rt_math_big_uint_add(
     a: *const c_char,
     b: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&(uint(a) + uint(b))) })
+    ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `a` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `uint` accepts.
+        let a = unsafe { uint(a) };
+        // SAFETY: `b` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `uint` accepts.
+        let b = unsafe { uint(b) };
+        dec(&(a + b))
+    })
 }
 
 #[unsafe(no_mangle)]
@@ -283,14 +366,23 @@ pub unsafe extern "C" fn gos_rt_math_big_uint_mul(
     a: *const c_char,
     b: *const c_char,
 ) -> *mut c_char {
-    ffi_entry!(std::ptr::null_mut(), { dec(&(uint(a) * uint(b))) })
+    ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `a` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `uint` accepts.
+        let a = unsafe { uint(a) };
+        // SAFETY: `b` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `uint` accepts.
+        let b = unsafe { uint(b) };
+        dec(&(a * b))
+    })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_uint_pow(s: *const c_char, exp: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let e = u32::try_from(exp.max(0)).unwrap_or(0);
-        dec(&uint(s).pow(e))
+        // SAFETY: `s` is this shim's argument, as `uint` requires (C-ABI contract).
+        dec(&unsafe { uint(s) }.pow(e))
     })
 }
 
@@ -301,11 +393,15 @@ pub unsafe extern "C" fn gos_rt_math_big_uint_pow_mod(
     modulus: *const c_char,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
-        dec(&uint(base).modpow(&uint(exp), &uint(modulus)))
+        // SAFETY: `base` is this shim's argument, as `uint` requires (C-ABI contract). `exp` is
+        // this shim's argument, as `uint` requires (C-ABI contract). `modulus` is this shim's
+        // argument, as `uint` requires (C-ABI contract).
+        dec(&unsafe { uint(base) }.modpow(&unsafe { uint(exp) }, &unsafe { uint(modulus) }))
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_math_big_uint_bit_len(s: *const c_char) -> i64 {
-    ffi_entry!(0, { uint(s).bits() as i64 })
+    // SAFETY: `s` is this shim's argument, as `uint` requires (C-ABI contract).
+    ffi_entry!(0, { unsafe { uint(s) }.bits() as i64 })
 }

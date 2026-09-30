@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::doc_markdown)]
 
 //! C-ABI shims for `std::encoding::xml::{parse, encode}` so the
@@ -48,7 +47,10 @@ enum Node {
     Text(String),
 }
 
-fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
+/// # Safety
+///
+/// `s` is null or a live string body that outlives the returned borrow.
+unsafe fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
     // SAFETY: callers pass a Gossamer `String`, read through its length
     // header so interior NUL bytes survive; non-UTF-8 falls back to empty.
     unsafe { crate::c_abi::gos_str_arg_text(s) }
@@ -56,7 +58,7 @@ fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
 
 fn err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { super::vec::gos_rt_result_new(1, err as i64) }
+    super::vec::gos_rt_result_new(1, err as i64)
 }
 
 /// Parses an XML document into a tree, returning the root element.
@@ -286,10 +288,11 @@ fn json_to_node(value: &serde_json::Value) -> Option<Node> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_xml_parse(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        match parse(cstr_to_str(s)) {
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        match parse(unsafe { cstr_to_str(s) }) {
             Ok(node) => {
                 let handle = super::json::GosJson::into_raw(node_to_json(&node));
-                unsafe { super::vec::gos_rt_result_new(0, handle as i64) }
+                super::vec::gos_rt_result_new(0, handle as i64)
             }
             Err(e) => err_result(&e),
         }

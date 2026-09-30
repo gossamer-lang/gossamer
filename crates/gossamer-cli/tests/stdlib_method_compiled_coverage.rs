@@ -24,14 +24,16 @@ use std::path::PathBuf;
 
 use gossamer_cli::repl_handles::HANDLE_SIGNATURES;
 
-/// MIR lowering files whose `match` arms key on a method name or on a
-/// `Type::name` path. Their string-literal patterns are the enumerable set of
-/// compiled-lowerable method spellings.
+/// MIR lowering files, and module directories, whose `match` arms key on a
+/// method name or on a `Type::name` path. Their string-literal patterns are
+/// the enumerable set of compiled-lowerable method spellings.
 const DISPATCH_SOURCES: &[&str] = &[
     "crates/gossamer-mir/src/lower/builder/method_call.rs",
+    "crates/gossamer-mir/src/lower/builder/method_call",
     "crates/gossamer-mir/src/lower/builder/method_call_dispatch.rs",
     "crates/gossamer-mir/src/lower/builder/expr_call.rs",
     "crates/gossamer-mir/src/lower/builder/intrinsic.rs",
+    "crates/gossamer-mir/src/lower/builder/intrinsic",
     "crates/gossamer-mir/src/lower/builder/stdlib.rs",
     "crates/gossamer-mir/src/lower/builder/stdlib_binding.rs",
     "crates/gossamer-mir/src/lower/builder/stdlib_free.rs",
@@ -140,18 +142,46 @@ fn associated_fn_reachable(owner: &str, name: &str, paths: &BTreeSet<String>) ->
         .any(|path| path == &tail || path.ends_with(&format!("::{tail}")))
 }
 
+/// The text of every `.rs` file a dispatch source names: the file itself, or
+/// each file under it when it is a module directory.
+fn source_texts(root: &std::path::Path, rel: &str) -> Vec<String> {
+    let path = root.join(rel);
+    if path.is_file() {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        return vec![text];
+    }
+    let mut texts = Vec::new();
+    let mut pending = vec![path];
+    while let Some(dir) = pending.pop() {
+        let entries =
+            std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display()));
+        for entry in entries {
+            let entry = entry.expect("a directory entry").path();
+            if entry.is_dir() {
+                pending.push(entry);
+            } else if entry.extension().and_then(|e| e.to_str()) == Some("rs") {
+                texts.push(
+                    std::fs::read_to_string(&entry)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", entry.display())),
+                );
+            }
+        }
+    }
+    texts
+}
+
 #[test]
 fn stdlib_method_compiled_coverage() {
     let root = workspace_root();
     let mut bare = BTreeSet::new();
     let mut paths = BTreeSet::new();
     for rel in DISPATCH_SOURCES {
-        let path = root.join(rel);
-        let src = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-        let (file_bare, file_paths) = dispatch_literals(&src);
-        bare.extend(file_bare);
-        paths.extend(file_paths);
+        for src in source_texts(&root, rel) {
+            let (file_bare, file_paths) = dispatch_literals(&src);
+            bare.extend(file_bare);
+            paths.extend(file_paths);
+        }
     }
     let excused: BTreeSet<(&str, &str)> = COMPILED_VIA_SPECIAL_MECHANISM
         .iter()

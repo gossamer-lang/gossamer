@@ -1,3 +1,5 @@
+struct P { x: i64, y: i64, z: i64 }
+
 fn main() {
     let mut xs = Vec::from([1, 2, 3, 4])
     let _ = xs.insert(0, 10)
@@ -12,4 +14,16 @@ fn main() {
     println("{:?}", ys)
     let _ = ys.remove(2)
     println("{:?}", ys)
+
+    // The qualified forms take a slot-block element by address, as the
+    // method forms do.
+    let mut ps = #[P { x: 1, y: 2, z: 3 }]
+    let _ = Vec::insert(&mut ps, 0, P { x: 7, y: 8, z: 9 })
+    let _ = ps.insert(1, P { x: 4, y: 5, z: 6 })
+    println("{:?}", ps)
+    let taken = Vec::remove(&mut ps, 1)
+    println("{:?} {:?}", taken, ps)
+    let mut ts = #[(1, "a")]
+    let _ = Vec::insert(&mut ts, 1, (2, "b"))
+    println("{:?}", ts)
 }

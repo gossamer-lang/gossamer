@@ -1769,6 +1769,9 @@ impl Resolver {
     /// reject `impl Add for Vec3`.
     fn resolve_trait_bound_at(&mut self, bound: &TraitBound, span: Option<Span>) {
         self.resolve_type_path_in(&bound.path, None, None);
+        for binding in &bound.bindings {
+            self.resolve_type(&binding.ty);
+        }
         let (Some(span), Some(head)) = (span, bound.path.segments.first()) else {
             return;
         };
@@ -1789,12 +1792,18 @@ impl Resolver {
     }
 
     fn bind_generics(&mut self, generics: &Generics) {
+        // Every type parameter is in scope before any bound is resolved, so
+        // `S: Source<Out = T>` names a `T` declared after `S`.
+        for param in &generics.params {
+            if let GenericParam::Type { name, .. } = param {
+                let def = self.defs.next();
+                let binding = Binding::def(def, DefKind::TypeParam);
+                self.scopes.top_mut().insert_type(&name.name, binding);
+            }
+        }
         for param in &generics.params {
             match param {
-                GenericParam::Type { name, bounds, .. } => {
-                    let def = self.defs.next();
-                    let binding = Binding::def(def, DefKind::TypeParam);
-                    self.scopes.top_mut().insert_type(&name.name, binding);
+                GenericParam::Type { bounds, .. } => {
                     for bound in bounds {
                         self.resolve_trait_bound(bound);
                     }
@@ -2681,6 +2690,14 @@ impl Resolver {
     /// module path and the `sub::member` binding spelling is bound.
     fn stdlib_member_resolves(&self, joined: &str, effective: &[&str]) -> bool {
         if crate::stdlib_exports::is_stdlib_qualified(joined) {
+            return true;
+        }
+        // An associated item an `impl char { .. }` block in the program
+        // declares is the program's own, reached through the primitive.
+        if let [head, _] = effective
+            && is_scalar_primitive_name(head)
+            && self.local_item_paths.contains(joined)
+        {
             return true;
         }
         if let [head, sub, member] = effective {

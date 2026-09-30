@@ -148,9 +148,13 @@ fn a_project_with_no_feed_is_quiet_and_clean() {
 #[test]
 fn publish_warns_about_a_reachable_advisory_without_blocking() {
     let dir = project("preflight");
+    // A dry run packs and signs as a real publish does, so it needs a
+    // registry to name and a key to sign with; it contacts neither.
     let out = Command::new(gos_bin())
         .args(["publish", "--dry-run"])
         .current_dir(&dir)
+        .env("GOS_REGISTRY_URL", "http://127.0.0.1:9/")
+        .env("GOS_PUBLISH_KEY", "11".repeat(32))
         .output()
         .expect("spawn gos publish");
     let text = format!(

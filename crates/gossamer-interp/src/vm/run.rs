@@ -318,6 +318,17 @@ pub(crate) struct SuspendedFrame {
     pub(crate) prev_pc: u32,
 }
 
+impl SuspendedFrame {
+    /// Heap bytes this frame keeps alive while its callee runs.
+    pub(crate) fn heap_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.registers.capacity() * std::mem::size_of::<Value>()
+            + self.floats.capacity() * std::mem::size_of::<f64>()
+            + self.ints.capacity() * std::mem::size_of::<i64>()
+            + self.ref_cells.capacity() * std::mem::size_of::<(usize, Arc<ThreadConfinedCell>)>()
+    }
+}
+
 impl Vm {
     pub(crate) fn run(
         &self,

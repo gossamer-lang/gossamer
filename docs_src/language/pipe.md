@@ -14,7 +14,7 @@ struct Order { id: i64, total: f64 }
 
 fn with_tax(o: Order) -> Order { Order { id: o.id, total: o.total * 1.2 } }
 fn discount(pct: f64, o: Order) -> Order { Order { id: o.id, total: o.total * (1.0 - pct) } }
-fn label(o: Order) -> String { format("#{} {}", o.id, o.total) }
+fn label(o: Order) -> String { f"#{o.id} {o.total}" }
 
 fn main() {
     let o = Order { id: 1, total: 100.0 }

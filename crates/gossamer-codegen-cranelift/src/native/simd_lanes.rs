@@ -264,7 +264,9 @@ fn recognise(
         return None;
     }
 
-    // The body ends by storing the result lane and stepping the counter.
+    // The body ends by storing the result lane and stepping the counter. The
+    // step is wrapping once the overflow proof has seen the counter stays
+    // below the lane count, which is the same step.
     let [lane_stmts @ .., store, step, advance] = loop_body.stmts.as_slice() else {
         return None;
     };
@@ -272,7 +274,7 @@ fn recognise(
         place: step_place,
         rvalue:
             Rvalue::BinaryOp {
-                op: BinOp::Add,
+                op: BinOp::Add | BinOp::WrappingAdd,
                 lhs: step_lhs,
                 rhs: Operand::Const(ConstValue::Int(1)),
             },

@@ -217,7 +217,7 @@ pub(crate) fn builtin_time_instant_elapsed_ms(args: &[Value]) -> RuntimeResult<V
 }
 
 pub(crate) fn builtin_time_instant_elapsed(args: &[Value]) -> RuntimeResult<Value> {
-    Ok(Value::Int(unsafe {
+    Ok(Value::Int({
         gossamer_runtime::c_abi::time::gos_rt_instant_elapsed(int_arg(args, 0))
     }))
 }

@@ -46,8 +46,8 @@ pub struct CatalogueEntry {
     pub tarball_sha256: Option<String>,
     /// Optional yank reason for surfacing to users.
     pub yank_reason: Option<String>,
-    /// Hex-encoded ed25519 signature over the tarball bytes, as
-    /// advertised by the registry index. Required for a registry fetch
+    /// Hex-encoded ed25519 signature over the tarball's lowercase SHA-256
+    /// hex digest, as advertised by the registry index. Required for a registry fetch
     /// to be admitted.
     pub signature: Option<String>,
     /// Hex-encoded ed25519 public key of the publisher.

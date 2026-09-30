@@ -729,8 +729,8 @@ fn builtin_u8vec_window_key(args: &[Value]) -> RuntimeResult<Value> {
         .ok_or_else(|| RuntimeError::Type("window_key: receiver must be U8Vec".to_string()))?;
     let vec_arc = u8vec_lookup(handle)
         .ok_or_else(|| RuntimeError::Type("window_key: stale U8Vec handle".to_string()))?;
-    let i = non_negative_arg(args, 1, 0, "increment_sorted: index")?;
-    let k = non_negative_arg(args, 2, 0, "increment_sorted: count")?;
+    let i = non_negative_arg(args, 1, 0, "window_key: index")?;
+    let k = non_negative_arg(args, 2, 0, "window_key: count")?;
     let len = vec_arc.len();
     let mut key: i64 = 0;
     let stop = i.saturating_add(k).min(len);

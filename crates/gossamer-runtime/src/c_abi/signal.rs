@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -125,7 +123,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
 /// `signal::on(sig_raw) -> i64` - registers a notifier for the
 /// given raw signal number and returns an opaque handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
+pub extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
     ffi_entry!(-1, {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let waiter = std::sync::Arc::new(SignalWaiter::default());
@@ -152,7 +150,7 @@ pub unsafe extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
 
 /// `signal::wait(handle)` - blocks until the registered signal fires.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_signal_wait(handle: i64) {
+pub extern "C" fn gos_rt_signal_wait(handle: i64) {
     ffi_entry!((), {
         let notifiers = signal_registry().notifiers.lock();
         let Some(Some(n)) = notifiers.get(handle as usize) else {
@@ -174,7 +172,7 @@ pub unsafe extern "C" fn gos_rt_signal_wait(handle: i64) {
 /// `signal::try_wait(handle) -> i32` - returns 1 if the signal
 /// fired since the last check, 0 otherwise. Non-blocking.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_signal_try_wait(handle: i64) -> i32 {
+pub extern "C" fn gos_rt_signal_try_wait(handle: i64) -> i32 {
     ffi_entry!(-1, {
         let notifiers = signal_registry().notifiers.lock();
         let Some(Some(n)) = notifiers.get(handle as usize) else {
@@ -205,18 +203,25 @@ pub unsafe extern "C" fn gos_rt_arr_sort_by_i64(p: *mut i64, len: i64, env: *con
             return;
         }
         let len_usize = len.max(0) as usize;
+        // SAFETY: `p` is non-null (checked above) and addresses `len` elements (C-ABI contract).
         let buf = unsafe { std::slice::from_raw_parts_mut(p, len_usize) };
         // Closure body sig: (env, i64, i64) -> i64.
         type CmpFn = unsafe extern "C" fn(env: *const u8, a: i64, b: i64) -> i64;
         // env[0] holds the body address (cranelift / LLVM both use
         // this layout for Fn(...)-shaped values).
+        // SAFETY: `env` is non-null (checked above) and a live closure environment, whose first
+        // word is the body address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
         if fn_addr_raw == 0 {
             return;
         }
         super::fn_registry::verify(fn_addr_raw, super::fn_registry::FnKind::SortCmp);
-        let cmp: CmpFn = unsafe { std::mem::transmute(fn_addr_raw) };
+        // SAFETY: the address is a compiled comparator of `CmpFn`'s signature (C-ABI contract),
+        // which `fn_registry::verify` has checked.
+        let cmp: CmpFn = unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr_raw)) };
         buf.sort_by(|a, b| {
+            // SAFETY: `cmp` is the comparator whose environment `env` is live for the call (C-ABI
+            // contract).
             let r = unsafe { cmp(env, *a, *b) };
             r.cmp(&0)
         });
@@ -229,6 +234,7 @@ pub unsafe extern "C" fn gos_rt_arr_sort_i64(p: *mut i64, len: i64) {
         if p.is_null() || len <= 1 {
             return;
         }
+        // SAFETY: `p` is non-null (checked above) and addresses `len` elements (C-ABI contract).
         unsafe { std::slice::from_raw_parts_mut(p, len as usize) }.sort_unstable();
     });
 }
@@ -241,6 +247,7 @@ pub unsafe extern "C" fn gos_rt_arr_sort_f64(p: *mut i64, len: i64) {
         if p.is_null() || len <= 1 {
             return;
         }
+        // SAFETY: `p` is non-null (checked above) and addresses `len` elements (C-ABI contract).
         sort_float_words(unsafe { std::slice::from_raw_parts_mut(p, len as usize) });
     });
 }
@@ -259,9 +266,12 @@ pub unsafe extern "C" fn gos_rt_arr_sort_str(p: *mut usize, len: i64) {
         if p.is_null() || len <= 1 {
             return;
         }
+        // SAFETY: `p` is non-null (checked above) and addresses `len` elements (C-ABI contract).
         let slots = unsafe { std::slice::from_raw_parts_mut(p, len as usize) };
         slots.sort_by(|&a, &b| {
+            // SAFETY: each slot of a `String` array holds a live string body (C-ABI contract).
             let a = unsafe { crate::c_abi::gos_str_arg_bytes(a as *const c_char) };
+            // SAFETY: each slot of a `String` array holds a live string body (C-ABI contract).
             let b = unsafe { crate::c_abi::gos_str_arg_bytes(b as *const c_char) };
             a.cmp(b)
         });
@@ -276,6 +286,8 @@ pub unsafe extern "C" fn gos_rt_arr_reverse(p: *mut u8, len: i64, elem_bytes: i6
         }
         let width = elem_bytes as usize;
         for i in 0..(len as usize / 2) {
+            // SAFETY: `p` is non-null (checked above) and addresses `len` elements of `width`
+            // bytes, and `i` and `len - 1 - i` are distinct indices below `len`.
             unsafe {
                 std::ptr::swap_nonoverlapping(
                     p.add(i * width),
@@ -295,16 +307,24 @@ pub unsafe extern "C" fn gos_rt_arr_reverse(p: *mut u8, len: i64, elem_bytes: i6
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *const u8) {
     ffi_entry!((), {
+        // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
+        // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
             return;
         };
+        // SAFETY: `env` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `sort_cmp_addr` accepts.
         let Some(cmp_addr) = (unsafe { sort_cmp_addr(env) }) else {
             return;
         };
         // SAFETY: the address is the closure body the sort lowering stored,
         // whose comparator shape `fn_registry::verify` has just confirmed.
         let cmp: WordCmpFn = unsafe { std::mem::transmute(cmp_addr) };
+        // SAFETY: `cmp` is the comparator whose environment `env` is live for the call (C-ABI
+        // contract).
         elems.sort_by(|a, b| unsafe { cmp(env, *a, *b) }.cmp(&0));
+        // SAFETY: `v` is non-null (`sortable_elems` answered `Some`) and live for the call, and
+        // `elems` holds its own elements.
         unsafe { store_elems(v, &elems) };
     });
 }
@@ -314,9 +334,13 @@ pub unsafe extern "C" fn gos_rt_vec_sort_by_i64(v: *mut GosVec, env: *const u8) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *const u8) {
     ffi_entry!((), {
+        // SAFETY: `v`, `env` are this shim's arguments, live for the call (C-ABI contract) or
+        // null, which `sortable_elems` accepts.
         let Some(mut elems) = (unsafe { sortable_elems(v, env) }) else {
             return;
         };
+        // SAFETY: `env` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `sort_cmp_addr` accepts.
         let Some(cmp_addr) = (unsafe { sort_cmp_addr(env) }) else {
             return;
         };
@@ -324,8 +348,12 @@ pub unsafe extern "C" fn gos_rt_vec_sort_by_f64(v: *mut GosVec, env: *const u8) 
         let cmp: FloatCmpFn = unsafe { std::mem::transmute(cmp_addr) };
         elems.sort_by(|a, b| {
             let (a, b) = (f64::from_bits(*a as u64), f64::from_bits(*b as u64));
+            // SAFETY: `cmp` is the comparator whose environment `env` is live for the call (C-ABI
+            // contract).
             unsafe { cmp(env, a, b) }.cmp(&0)
         });
+        // SAFETY: `v` is non-null (`sortable_elems` answered `Some`) and live for the call, and
+        // `elems` holds its own elements.
         unsafe { store_elems(v, &elems) };
     });
 }
@@ -338,12 +366,17 @@ pub unsafe extern "C" fn gos_rt_arr_sort_by_f64(p: *mut f64, len: i64, env: *con
         if p.is_null() || len <= 0 {
             return;
         }
+        // SAFETY: `env` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `sort_cmp_addr` accepts.
         let Some(cmp_addr) = (unsafe { sort_cmp_addr(env) }) else {
             return;
         };
+        // SAFETY: `p` is non-null (checked above) and addresses `len` elements (C-ABI contract).
         let buf = unsafe { std::slice::from_raw_parts_mut(p, len as usize) };
         // SAFETY: as in `gos_rt_vec_sort_by_f64`.
         let cmp: FloatCmpFn = unsafe { std::mem::transmute(cmp_addr) };
+        // SAFETY: `cmp` is the comparator whose environment `env` is live for the call (C-ABI
+        // contract).
         buf.sort_by(|a, b| unsafe { cmp(env, *a, *b) }.cmp(&0));
     });
 }
@@ -370,19 +403,12 @@ unsafe fn sort_cmp_addr(env: *const u8) -> Option<*const ()> {
 /// Every element of `v` as a slot word, or `None` when there is nothing to
 /// sort.
 unsafe fn sortable_elems(v: *const GosVec, env: *const u8) -> Option<Vec<i64>> {
-    if v.is_null() || env.is_null() {
+    if env.is_null() {
         return None;
     }
-    // SAFETY: caller supplies a live header.
-    let vec = unsafe { &*v };
-    if vec.len <= 0 || vec.ptr.is_null() {
-        return None;
-    }
-    Some(
-        (0..vec.len)
-            .map(|i| unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) })
-            .collect(),
-    )
+    // SAFETY: this `unsafe fn`'s caller passes `v` null or a live `Vec`.
+    let vec = unsafe { crate::c_abi::vec::VecView::of(v) }?;
+    (vec.len() > 0).then(|| vec.words().collect())
 }
 
 /// Writes `elems` back over `v`'s storage at the header's own stride.
@@ -390,6 +416,7 @@ unsafe fn store_elems(v: *mut GosVec, elems: &[i64]) {
     // SAFETY: caller supplies a live header whose length `elems` came from.
     let vec = unsafe { &mut *v };
     for (i, &value) in elems.iter().enumerate() {
+        // SAFETY: `elems` came from this vec, so `i` is below its length.
         unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, i as i64, value) };
     }
 }
@@ -402,11 +429,14 @@ pub unsafe extern "C" fn gos_rt_vec_sort_f64(v: *mut GosVec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 1 || vec.ptr.is_null() {
             return;
         }
         let len = vec.len as usize;
+        // SAFETY: the vec's buffer is non-null (checked above) and holds `len` initialized word
+        // slots.
         sort_float_words(unsafe { std::slice::from_raw_parts_mut(vec.ptr.cast::<i64>(), len) });
     });
 }
@@ -419,6 +449,7 @@ pub unsafe extern "C" fn gos_rt_vec_sort_i64(v: *mut GosVec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 || vec.ptr.is_null() {
             return;
@@ -428,10 +459,14 @@ pub unsafe extern "C" fn gos_rt_vec_sort_i64(v: *mut GosVec) {
         // as `i64` would order eight elements at a time and write the
         // combined words back over the buffer.
         if vec.elem_bytes == 1 {
+            // SAFETY: the vec's buffer is non-null (checked above) and holds `len_usize`
+            // initialized byte slots.
             let buf = unsafe { std::slice::from_raw_parts_mut(vec.ptr.as_ptr(), len_usize) };
             buf.sort_unstable();
             return;
         }
+        // SAFETY: the vec's buffer is non-null (checked above) and holds `len_usize` initialized
+        // word slots.
         let buf = unsafe { std::slice::from_raw_parts_mut(vec.ptr.cast::<i64>(), len_usize) };
         buf.sort_unstable();
     });
@@ -448,14 +483,19 @@ pub unsafe extern "C" fn gos_rt_vec_sort_str(v: *mut GosVec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 1 || vec.ptr.is_null() {
             return;
         }
         let len_usize = vec.len.max(0) as usize;
+        // SAFETY: the vec's buffer is non-null (checked above) and holds `len_usize` initialized
+        // word slots.
         let slots = unsafe { std::slice::from_raw_parts_mut(vec.ptr.cast::<usize>(), len_usize) };
         slots.sort_by(|&a, &b| {
+            // SAFETY: each slot of a `Vec<String>` holds a live string body (C-ABI contract).
             let sa = unsafe { crate::c_abi::gos_str_arg_bytes(a as *const c_char) };
+            // SAFETY: each slot of a `Vec<String>` holds a live string body (C-ABI contract).
             let sb = unsafe { crate::c_abi::gos_str_arg_bytes(b as *const c_char) };
             sa.cmp(sb)
         });
@@ -468,10 +508,13 @@ pub unsafe extern "C" fn gos_rt_vec_reverse(v: *mut GosVec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.ptr.is_null() || vec.len <= 1 || vec.elem_bytes == 0 {
             return;
         }
+        // SAFETY: the vec's buffer is non-null (checked above) and holds `len` elements of
+        // `elem_bytes` each.
         unsafe {
             gos_rt_arr_reverse(vec.ptr.as_ptr(), vec.len, i64::from(vec.elem_bytes));
         }
@@ -499,20 +542,30 @@ pub unsafe extern "C" fn gos_rt_arr_sort_by_aggr(
         let len_usize = len.max(0) as usize;
         let stride = elem_bytes.max(0) as usize;
         type CmpFn = unsafe extern "C" fn(env: *const u8, a: *const u8, b: *const u8) -> i64;
+        // SAFETY: `env` is non-null (checked above) and a live closure environment, whose first
+        // word is the body address (C-ABI contract).
         let fn_addr_raw = unsafe { (env as *const usize).read() };
         if fn_addr_raw == 0 {
             return;
         }
         super::fn_registry::verify(fn_addr_raw, super::fn_registry::FnKind::SortCmpAggr);
-        let cmp: CmpFn = unsafe { std::mem::transmute(fn_addr_raw) };
+        // SAFETY: the address is a compiled comparator of `CmpFn`'s signature (C-ABI contract),
+        // which `fn_registry::verify` has checked.
+        let cmp: CmpFn = unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr_raw)) };
         // Indirect sort: rank the indices, then permute the buffer.
         // Sorting indices keeps the comparator pointer-stable across
         // swaps and avoids `unsafe` slice juggling for variable
         // strides that `slice::sort_by` doesn't support natively.
         let mut indices: Vec<usize> = (0..len_usize).collect();
         indices.sort_by(|&ai, &bi| {
+            // SAFETY: `ai` is an index below `len`, and `p` addresses `len` elements of `stride`
+            // bytes (C-ABI contract).
             let pa = unsafe { p.add(ai * stride) };
+            // SAFETY: `bi` is an index below `len`, and `p` addresses `len` elements of `stride`
+            // bytes (C-ABI contract).
             let pb = unsafe { p.add(bi * stride) };
+            // SAFETY: `cmp` is the comparator whose environment `env` is live for the call, and
+            // `pa` and `pb` address elements of the array.
             let r = unsafe { cmp(env, pa, pb) };
             r.cmp(&0)
         });
@@ -525,12 +578,15 @@ pub unsafe extern "C" fn gos_rt_arr_sort_by_aggr(
         let total = len_usize.checked_mul(stride).unwrap_or(0);
         let mut tmp: Vec<u8> = vec![0u8; total];
         for (new_idx, &old_idx) in indices.iter().enumerate() {
+            // SAFETY: `old_idx` and `new_idx` are indices below `len`, so both windows lie inside
+            // `p`'s `total` bytes and `tmp`'s.
             unsafe {
                 let src = p.add(old_idx * stride);
                 let dst = tmp.as_mut_ptr().add(new_idx * stride);
                 std::ptr::copy_nonoverlapping(src, dst, stride);
             }
         }
+        // SAFETY: `tmp` and `p` each hold `total` bytes, and `tmp` is this function's own buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(tmp.as_ptr(), p, total);
         }
@@ -546,10 +602,13 @@ pub unsafe extern "C" fn gos_rt_vec_sort_by_aggr(v: *mut GosVec, env: *const u8)
         if v.is_null() || env.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 || vec.ptr.is_null() {
             return;
         }
+        // SAFETY: the vec's buffer is non-null (checked above) and holds `len` elements of
+        // `elem_bytes` each, and `env` is this shim's live closure environment (C-ABI contract).
         unsafe {
             gos_rt_arr_sort_by_aggr(vec.ptr.as_ptr(), vec.len, i64::from(vec.elem_bytes), env);
         }
@@ -573,7 +632,7 @@ struct CallbackEntry {
     /// C-ABI entry point - receives `(ctx, args, args_len,
     /// result_out)` and returns a status code (0 = ok, non-zero
     /// = caller-defined error).
-    invoke: extern "C" fn(*const u8, *const u8, u32, *mut u8) -> i32,
+    invoke: unsafe extern "C" fn(*const u8, *const u8, u32, *mut u8) -> i32,
     state: parking_lot::Mutex<CallbackState>,
     idle: parking_lot::Condvar,
 }
@@ -611,7 +670,7 @@ fn callback_table()
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_callback_register(
     ctx: *const u8,
-    invoke: extern "C" fn(*const u8, *const u8, u32, *mut u8) -> i32,
+    invoke: unsafe extern "C" fn(*const u8, *const u8, u32, *mut u8) -> i32,
 ) -> u64 {
     ffi_entry!(0, {
         let handle = NEXT_CALLBACK_HANDLE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -699,7 +758,10 @@ pub unsafe extern "C" fn gos_rt_callback_invoke(
             state.active += 1;
         }
         ACTIVE_CALLBACKS.with(|active| active.borrow_mut().push(handle));
-        let result = (entry.invoke)(entry.ctx.as_const_ptr(), args, args_len, result_out);
+        // SAFETY: `invoke` was registered with `ctx`, and `args` / `result_out` are this shim's
+        // arguments for it (C-ABI contract).
+        let result =
+            unsafe { (entry.invoke)(entry.ctx.as_const_ptr(), args, args_len, result_out) };
         ACTIVE_CALLBACKS.with(|active| {
             let popped = active.borrow_mut().pop();
             debug_assert_eq!(popped, Some(handle));
@@ -746,14 +808,18 @@ pub unsafe extern "C" fn gos_rt_arr_iter_next(iter: *mut GosArrIter) -> i128 {
         if iter.is_null() {
             return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `iter` is a handle from compiled code, checked non-null above and live for the whole call.
         let iter_ref = unsafe { &mut *iter };
         if iter_ref.vec.is_null() {
             return gos_rt_result_new(1, 0);
         }
+        // SAFETY: a non-null iterator vec is the live vector the iterator was built over (C-ABI
+        // contract).
         let vec_ref = unsafe { &*iter_ref.vec.as_ptr() };
         if iter_ref.idx >= vec_ref.len {
             return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `iter_ref.vec` is non-null (checked above) and live.
         let value = unsafe { gos_rt_vec_get_i64(iter_ref.vec.as_ptr(), iter_ref.idx) };
         iter_ref.idx += 1;
         gos_rt_result_new(0, value)
@@ -768,6 +834,8 @@ pub unsafe extern "C" fn gos_rt_arr_iter_free(iter: *mut GosArrIter) {
         if iter.is_null() {
             return;
         }
+        // SAFETY: `iter` is non-null (checked above), and a non-null iterator handle is the `Box`
+        // `gos_rt_arr_iter` allocated, which this call consumes.
         drop(unsafe { Box::from_raw(iter) });
     });
 }
@@ -783,10 +851,13 @@ pub unsafe extern "C" fn gos_rt_vec_get_i64(v: *const GosVec, idx: i64) -> i64 {
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
+        // SAFETY: `v` is non-null (the null case panics above) and live for the call (C-ABI
+        // contract).
         let vec = unsafe { &*v };
         if idx < 0 || idx >= vec.len {
             crate::c_abi::panic::panic_oob_text("vec index", idx, vec.len);
         }
+        // SAFETY: `idx` is in `[0, len)` (the other cases panic above).
         unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, idx) }
     })
 }
@@ -802,7 +873,9 @@ pub unsafe extern "C" fn gos_rt_vec_get_i64(v: *const GosVec, idx: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_i64_unchecked(v: *const GosVec, idx: i64) -> i64 {
     ffi_entry!(-1, {
+        // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &*v };
+        // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
         unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, idx) }
     })
 }
@@ -816,7 +889,10 @@ pub unsafe extern "C" fn gos_rt_vec_get_i64_unchecked(v: *const GosVec, idx: i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_get_ptr_unchecked(v: *const GosVec, idx: i64) -> *mut u8 {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &*v };
+        // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`, so the offset stays
+        // inside the buffer.
         unsafe { vec.ptr.add(idx as usize * vec.elem_bytes as usize) }
     })
 }
@@ -829,11 +905,15 @@ pub unsafe extern "C" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
+        // SAFETY: `v` is non-null (the null case panics above) and live for the call (C-ABI
+        // contract).
         let vec = unsafe { &mut *v };
         if idx < 0 || idx >= vec.len {
             crate::c_abi::panic::panic_oob_text("vec index", idx, vec.len);
         }
+        // SAFETY: `idx` is in `[0, len)` (the other cases panic above).
         unsafe { crate::c_abi::vec::vec_release_owned_elem(vec, idx, value) };
+        // SAFETY: `idx` is in `[0, len)` (the other cases panic above).
         unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, idx, value) };
     });
 }
@@ -850,8 +930,11 @@ pub unsafe extern "C" fn gos_rt_vec_set_i64(v: *mut GosVec, idx: i64, value: i64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_set_i64_unchecked(v: *mut GosVec, idx: i64, value: i64) {
     ffi_entry!((), {
+        // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec`.
         let vec = unsafe { &mut *v };
+        // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
         unsafe { crate::c_abi::vec::vec_release_owned_elem(vec, idx, value) };
+        // SAFETY: this `unsafe fn`'s contract puts `idx` in `[0, v.len)`.
         unsafe { crate::c_abi::vec::vec_elem_store_i64(vec, idx, value) };
     });
 }
@@ -864,6 +947,7 @@ pub unsafe extern "C" fn gos_rt_vec_swap_i64(v: *mut GosVec, i: i64, j: i64) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if i < 0 || i >= vec.len || j < 0 || j >= vec.len || i == j {
             return;
@@ -873,9 +957,13 @@ pub unsafe extern "C" fn gos_rt_vec_swap_i64(v: *mut GosVec, i: i64, j: i64) {
             return;
         }
         crate::c_abi::vec::bump_vec_mutation_generation(vec);
+        // SAFETY: `i` is in `[0, len)` (checked above), so the offset stays inside the buffer.
         let i_addr = unsafe { vec.ptr.add((i as usize) * elem_bytes) };
+        // SAFETY: `j` is in `[0, len)` (checked above), so the offset stays inside the buffer.
         let j_addr = unsafe { vec.ptr.add((j as usize) * elem_bytes) };
         let mut tmp = vec![0u8; elem_bytes];
+        // SAFETY: `i` and `j` are distinct indices below `len` (checked above), so the two slots
+        // do not overlap, and `tmp` holds `elem_bytes` bytes.
         unsafe {
             std::ptr::copy_nonoverlapping(i_addr, tmp.as_mut_ptr(), elem_bytes);
             std::ptr::copy_nonoverlapping(j_addr, i_addr, elem_bytes);
@@ -892,6 +980,8 @@ pub unsafe extern "C" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec swap index", i, 0);
         }
+        // SAFETY: `v` is non-null (the null case panics above) and live for the call (C-ABI
+        // contract).
         let len = unsafe { (*v).len };
         if i < 0 || i >= len {
             crate::c_abi::panic::panic_oob_text("vec swap index", i, len);
@@ -899,6 +989,7 @@ pub unsafe extern "C" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
         if j < 0 || j >= len {
             crate::c_abi::panic::panic_oob_text("vec swap index", j, len);
         }
+        // SAFETY: `v` is this shim's live argument (C-ABI contract).
         unsafe { gos_rt_vec_swap_i64(v, i, j) };
     });
 }
@@ -913,6 +1004,8 @@ pub unsafe extern "C" fn gos_rt_vec_swap_safe(v: *mut GosVec, i: i64, j: i64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_swap_unchecked(v: *mut GosVec, i: i64, j: i64) {
     ffi_entry!((), {
+        // SAFETY: this `unsafe fn`'s contract makes `v` a non-null `GosVec` with `i` and `j` in
+        // bounds.
         unsafe { gos_rt_vec_swap_i64(v, i, j) };
     });
 }
@@ -923,19 +1016,20 @@ pub unsafe extern "C" fn gos_rt_vec_get_ptr(v: *const GosVec, idx: i64) -> *mut 
         if v.is_null() {
             return std::ptr::null_mut();
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let len = unsafe { (*v).len };
         if idx < 0 || idx >= len {
             return std::ptr::null_mut();
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let ptr = unsafe { (*v).ptr };
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let elem_bytes = unsafe { (*v).elem_bytes };
+        // SAFETY: `idx` is in `[0, len)` (checked above), so the offset stays inside the buffer.
         unsafe { ptr.add((idx as usize) * (elem_bytes as usize)) }
     })
 }
 
-/// Removes the last element of `v` and writes its bytes to
-/// `out`. Returns 1 on success, 0 if the vec was empty. `out`
-/// must be sized for `v.elem_bytes`.
 /// `vec[lo..hi]` - copies the subrange `[lo, hi)` of `v`'s
 /// elements into a fresh `GosVec` and returns a pointer to it.
 /// Out-of-range bounds are clamped. Element bytes are copied
@@ -945,25 +1039,31 @@ pub unsafe extern "C" fn gos_rt_vec_get_ptr(v: *const GosVec, idx: i64) -> *mut 
 pub unsafe extern "C" fn gos_rt_vec_slice(v: *const GosVec, lo: i64, hi: i64) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let src = unsafe { &*v };
         let elem_bytes = src.elem_bytes;
         let len = src.len;
         let lo = lo.max(0).min(len);
         let hi = hi.max(lo).min(len);
         let count = hi - lo;
-        let out = unsafe { gos_rt_vec_with_capacity(elem_bytes, count) };
+        let out = gos_rt_vec_with_capacity(elem_bytes, count);
         // Propagate the guarded-aggregate tag before the pushes so each
         // copied element retains its copy-blob children.
         if !out.is_null() && src.elem_kind == crate::c_abi::vec::vec_elem_kind::AGGR_GUARDED {
-            let meta = crate::c_abi::vec::vec_elem_meta(v);
+            // SAFETY: `v` is this shim's argument, as `vec_elem_meta` requires (C-ABI contract).
+            let meta = unsafe { crate::c_abi::vec::vec_elem_meta(v) };
             if !meta.is_null() {
+                // SAFETY: `out` is non-null (checked above) and `meta` is the source's non-null
+                // element meta.
                 unsafe { crate::c_abi::vec::gos_rt_vec_set_elem_meta(out, meta) };
             }
         }
         if !out.is_null() && count > 0 {
             for i in 0..count {
+                // SAFETY: `lo + i` is below `hi`, which is clamped to the source's length, and
+                // `out` is non-null (checked above).
                 unsafe {
                     let src_ptr = src.ptr.add(((lo + i) as usize) * (elem_bytes as usize));
                     gos_rt_vec_push(out, src_ptr);
@@ -973,6 +1073,8 @@ pub unsafe extern "C" fn gos_rt_vec_slice(v: *const GosVec, lo: i64, hi: i64) ->
         // STRING / VEC / AGGR_OWNED elements: the slice now shares the
         // copied slots' heap children with the source; re-tag and retain
         // so both vecs' deep-frees are balanced.
+        // SAFETY: `v` is this shim's live argument (C-ABI contract), and
+        // `vec_share_owned_elements` accepts a null `out`.
         unsafe { crate::c_abi::vec::vec_share_owned_elements(v, out) };
         out
     })
@@ -987,14 +1089,16 @@ pub unsafe extern "C" fn gos_rt_vec_slice(v: *const GosVec, lo: i64, hi: i64) ->
 pub unsafe extern "C" fn gos_rt_vec_first(v: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
         if v.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if vec.len <= 0 {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: the vec holds at least one element (checked above).
         let value = unsafe { crate::c_abi::vec::vec_elem_shared_payload_word(vec, 0) };
-        unsafe { gos_rt_result_new(0, value) }
+        gos_rt_result_new(0, value)
     })
 }
 
@@ -1004,14 +1108,16 @@ pub unsafe extern "C" fn gos_rt_vec_first(v: *const GosVec) -> i128 {
 pub unsafe extern "C" fn gos_rt_vec_last(v: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
         if v.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if vec.len <= 0 {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: the vec holds at least one element (checked above), so `len - 1` is in bounds.
         let value = unsafe { crate::c_abi::vec::vec_elem_shared_payload_word(vec, vec.len - 1) };
-        unsafe { gos_rt_result_new(0, value) }
+        gos_rt_result_new(0, value)
     })
 }
 
@@ -1020,14 +1126,16 @@ pub unsafe extern "C" fn gos_rt_vec_last(v: *const GosVec) -> i128 {
 pub unsafe extern "C" fn gos_rt_vec_get_opt(v: *const GosVec, idx: i64) -> i128 {
     ffi_entry!(0i128, {
         if v.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if idx < 0 || idx >= vec.len {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `idx` is in `[0, len)` (checked above).
         let value = unsafe { crate::c_abi::vec::vec_elem_shared_payload_word(vec, idx) };
-        unsafe { gos_rt_result_new(0, value) }
+        gos_rt_result_new(0, value)
     })
 }
 
@@ -1038,21 +1146,24 @@ pub unsafe extern "C" fn gos_rt_vec_get_opt(v: *const GosVec, idx: i64) -> i128 
 pub unsafe extern "C" fn gos_rt_vec_reversed(v: *const GosVec) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
+            return gos_rt_vec_new(8);
         }
-        let src = unsafe { &*v };
-        let elem_bytes = src.elem_bytes;
-        let len = src.len;
-        let out = unsafe { gos_rt_vec_with_capacity(elem_bytes, len) };
-        if !out.is_null() && len > 0 {
-            for i in 0..len {
-                let from_idx = len - 1 - i;
-                let src_ptr = unsafe { src.ptr.add((from_idx as usize) * (elem_bytes as usize)) };
-                unsafe { gos_rt_vec_push(out, src_ptr) };
+        // SAFETY: `v` is non-null (checked above), a live `Vec` for the call (C-ABI contract).
+        let Some(src) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+            return gos_rt_vec_new(8);
+        };
+        let out = gos_rt_vec_with_capacity(src.header().elem_bytes, src.header().len);
+        if !out.is_null() {
+            for i in (0..src.len()).rev() {
+                // SAFETY: `out` is non-null (checked above), and the element holds one slot of the
+                // source's width, which `out` shares.
+                unsafe { gos_rt_vec_push(out, src.elem(i).as_ptr()) };
             }
         }
         // Same sharing contract as `gos_rt_vec_slice`: the rev copy
         // owns its own share of every element's heap children.
+        // SAFETY: `v` is this shim's live argument (C-ABI contract), and
+        // `vec_share_owned_elements` accepts a null `out`.
         unsafe { crate::c_abi::vec::vec_share_owned_elements(v, out) };
         out
     })
@@ -1066,21 +1177,22 @@ pub unsafe extern "C" fn gos_rt_vec_step_by(v: *const GosVec, step: i64) -> *mut
         if step <= 0 {
             crate::c_abi::panic::panic_text("Vec::step_by: count must be positive");
         }
-        if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
-        }
-        let src = unsafe { &*v };
-        let out = unsafe { gos_rt_vec_with_capacity(src.elem_bytes, src.len / step + 1) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
+        let Some(src) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+            return gos_rt_vec_new(8);
+        };
+        let out = gos_rt_vec_with_capacity(src.header().elem_bytes, src.header().len / step + 1);
         if !out.is_null() {
-            let mut i = 0;
-            while i < src.len {
-                let src_ptr = unsafe { src.ptr.add((i as usize) * (src.elem_bytes as usize)) };
-                unsafe { gos_rt_vec_push(out, src_ptr) };
-                i += step;
+            for i in (0..src.len()).step_by(step as usize) {
+                // SAFETY: `out` is non-null (checked above), and the element holds one slot of the
+                // source's width, which `out` shares.
+                unsafe { gos_rt_vec_push(out, src.elem(i).as_ptr()) };
             }
         }
         // Same sharing contract as `gos_rt_vec_slice`: the stepped copy
         // owns its own share of every element's heap children.
+        // SAFETY: `v` is this shim's live argument (C-ABI contract), and
+        // `vec_share_owned_elements` accepts a null `out`.
         unsafe { crate::c_abi::vec::vec_share_owned_elements(v, out) };
         out
     })
@@ -1094,20 +1206,23 @@ pub unsafe extern "C" fn gos_rt_vec_take(v: *const GosVec, n: i64) -> *mut GosVe
         if n < 0 {
             crate::c_abi::panic::panic_text("Vec::take: count must be non-negative");
         }
-        if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
-        }
-        let src = unsafe { &*v };
-        let count = n.min(src.len);
-        let out = unsafe { gos_rt_vec_with_capacity(src.elem_bytes, count.max(1)) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
+        let Some(src) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+            return gos_rt_vec_new(8);
+        };
+        let count = usize::try_from(n).unwrap_or(0).min(src.len());
+        let out = gos_rt_vec_with_capacity(src.header().elem_bytes, (count as i64).max(1));
         if !out.is_null() {
             for i in 0..count {
-                let src_ptr = unsafe { src.ptr.add((i as usize) * (src.elem_bytes as usize)) };
-                unsafe { gos_rt_vec_push(out, src_ptr) };
+                // SAFETY: `out` is non-null (checked above), and the element holds one slot of the
+                // source's width, which `out` shares.
+                unsafe { gos_rt_vec_push(out, src.elem(i).as_ptr()) };
             }
         }
         // Same sharing contract as `gos_rt_vec_slice`: the taken copy
         // owns its own share of every element's heap children.
+        // SAFETY: `v` is this shim's live argument (C-ABI contract), and
+        // `vec_share_owned_elements` accepts a null `out`.
         unsafe { crate::c_abi::vec::vec_share_owned_elements(v, out) };
         out
     })
@@ -1122,19 +1237,22 @@ pub unsafe extern "C" fn gos_rt_vec_skip(v: *const GosVec, n: i64) -> *mut GosVe
         if n < 0 {
             crate::c_abi::panic::panic_text("Vec::skip: count must be non-negative");
         }
-        if v.is_null() {
-            return unsafe { gos_rt_vec_new(8) };
-        }
-        let src = unsafe { &*v };
-        let start = n.min(src.len);
-        let count = src.len - start;
-        let out = unsafe { gos_rt_vec_with_capacity(src.elem_bytes, count.max(1)) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
+        let Some(src) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+            return gos_rt_vec_new(8);
+        };
+        let start = usize::try_from(n).unwrap_or(0).min(src.len());
+        let count = (src.len() - start) as i64;
+        let out = gos_rt_vec_with_capacity(src.header().elem_bytes, count.max(1));
         if !out.is_null() {
-            for i in start..src.len {
-                let src_ptr = unsafe { src.ptr.add((i as usize) * (src.elem_bytes as usize)) };
-                unsafe { gos_rt_vec_push(out, src_ptr) };
+            for i in start..src.len() {
+                // SAFETY: `out` is non-null (checked above), and the element holds one slot of the
+                // source's width, which `out` shares.
+                unsafe { gos_rt_vec_push(out, src.elem(i).as_ptr()) };
             }
         }
+        // SAFETY: `v` is this shim's live argument (C-ABI contract), and
+        // `vec_share_owned_elements` accepts a null `out`.
         unsafe { crate::c_abi::vec::vec_share_owned_elements(v, out) };
         out
     })
@@ -1144,17 +1262,14 @@ pub unsafe extern "C" fn gos_rt_vec_skip(v: *const GosVec, n: i64) -> *mut GosVe
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_index_of_i64(v: *const GosVec, needle: i64) -> i128 {
     ffi_entry!(0i128, {
-        if v.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
+        let Some(vec) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
+            return gos_rt_result_new(1, 0);
+        };
+        match vec.words().position(|elem| elem == needle) {
+            Some(i) => gos_rt_result_new(0, i as i64),
+            None => gos_rt_result_new(1, 0),
         }
-        let vec = unsafe { &*v };
-        for i in 0..vec.len {
-            let elem = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) };
-            if elem == needle {
-                return unsafe { gos_rt_result_new(0, i) };
-            }
-        }
-        unsafe { gos_rt_result_new(1, 0) }
     })
 }
 
@@ -1162,26 +1277,22 @@ pub unsafe extern "C" fn gos_rt_vec_index_of_i64(v: *const GosVec, needle: i64) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_index_of_str(v: *const GosVec, needle: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        if v.is_null() || needle.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+        if needle.is_null() {
+            return gos_rt_result_new(1, 0);
         }
-        let vec = unsafe { &*v };
-        for i in 0..vec.len {
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let elem = unsafe {
-                crate::c_abi::vec::slot_read_word(p)
-                    .cast_const()
-                    .cast::<c_char>()
-            };
-            if !elem.is_null()
-                && unsafe {
-                    crate::c_abi::gos_str_arg_bytes(elem) == crate::c_abi::gos_str_arg_bytes(needle)
-                }
-            {
-                return unsafe { gos_rt_result_new(0, i) };
-            }
+        // SAFETY: `v` is this shim's argument, null or a live `Vec<String>` for the call (C-ABI
+        // contract).
+        let Some(vec) = (unsafe { crate::c_abi::vec::StrVecView::of(v) }) else {
+            return gos_rt_result_new(1, 0);
+        };
+        // SAFETY: `needle` is this shim's non-null string argument (checked above), live for the
+        // call (C-ABI contract).
+        let needle = unsafe { crate::c_abi::gos_str_arg_bytes(needle) };
+        let found = (0..vec.len()).find(|&i| !vec.is_null(i) && vec.bytes(i) == needle);
+        match found {
+            Some(i) => gos_rt_result_new(0, i as i64),
+            None => gos_rt_result_new(1, 0),
         }
-        unsafe { gos_rt_result_new(1, 0) }
     })
 }
 
@@ -1189,45 +1300,31 @@ pub unsafe extern "C" fn gos_rt_vec_index_of_str(v: *const GosVec, needle: *cons
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_count_of_i64(v: *const GosVec, needle: i64) -> i64 {
     ffi_entry!(-1, {
-        if v.is_null() {
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
+        let Some(vec) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
             return 0;
-        }
-        let vec = unsafe { &*v };
-        let mut count: i64 = 0;
-        for i in 0..vec.len {
-            let elem = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) };
-            if elem == needle {
-                count += 1;
-            }
-        }
-        count
+        };
+        vec.words().filter(|&elem| elem == needle).count() as i64
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_count_of_str(v: *const GosVec, needle: *const c_char) -> i64 {
     ffi_entry!(-1, {
-        if v.is_null() || needle.is_null() {
+        if needle.is_null() {
             return 0;
         }
-        let vec = unsafe { &*v };
-        let mut count: i64 = 0;
-        for i in 0..vec.len {
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let elem = unsafe {
-                crate::c_abi::vec::slot_read_word(p)
-                    .cast_const()
-                    .cast::<c_char>()
-            };
-            if !elem.is_null()
-                && unsafe {
-                    crate::c_abi::gos_str_arg_bytes(elem) == crate::c_abi::gos_str_arg_bytes(needle)
-                }
-            {
-                count += 1;
-            }
-        }
-        count
+        // SAFETY: `v` is this shim's argument, null or a live `Vec<String>` for the call (C-ABI
+        // contract).
+        let Some(vec) = (unsafe { crate::c_abi::vec::StrVecView::of(v) }) else {
+            return 0;
+        };
+        // SAFETY: `needle` is this shim's non-null string argument (checked above), live for the
+        // call (C-ABI contract).
+        let needle = unsafe { crate::c_abi::gos_str_arg_bytes(needle) };
+        (0..vec.len())
+            .filter(|&i| !vec.is_null(i) && vec.bytes(i) == needle)
+            .count() as i64
     })
 }
 
@@ -1235,43 +1332,29 @@ pub unsafe extern "C" fn gos_rt_vec_count_of_str(v: *const GosVec, needle: *cons
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_contains_i64(v: *const GosVec, needle: i64) -> i8 {
     ffi_entry!(0, {
-        if v.is_null() {
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI contract).
+        let Some(vec) = (unsafe { crate::c_abi::vec::VecView::of(v) }) else {
             return 0;
-        }
-        let vec = unsafe { &*v };
-        for i in 0..vec.len {
-            let elem = unsafe { crate::c_abi::vec::vec_elem_load_i64(vec, i) };
-            if elem == needle {
-                return 1;
-            }
-        }
-        0
+        };
+        i8::from(vec.words().any(|elem| elem == needle))
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_contains_str(v: *const GosVec, needle: *const c_char) -> i8 {
     ffi_entry!(0, {
-        if v.is_null() || needle.is_null() {
+        if needle.is_null() {
             return 0;
         }
-        let vec = unsafe { &*v };
-        for i in 0..vec.len {
-            let p = unsafe { vec.ptr.add((i as usize) * (vec.elem_bytes as usize)) };
-            let elem = unsafe {
-                crate::c_abi::vec::slot_read_word(p)
-                    .cast_const()
-                    .cast::<c_char>()
-            };
-            if !elem.is_null()
-                && unsafe {
-                    crate::c_abi::gos_str_arg_bytes(elem) == crate::c_abi::gos_str_arg_bytes(needle)
-                }
-            {
-                return 1;
-            }
-        }
-        0
+        // SAFETY: `v` is this shim's argument, null or a live `Vec<String>` for the call (C-ABI
+        // contract).
+        let Some(vec) = (unsafe { crate::c_abi::vec::StrVecView::of(v) }) else {
+            return 0;
+        };
+        // SAFETY: `needle` is this shim's non-null string argument (checked above), live for the
+        // call (C-ABI contract).
+        let needle = unsafe { crate::c_abi::gos_str_arg_bytes(needle) };
+        i8::from((0..vec.len()).any(|i| !vec.is_null(i) && vec.bytes(i) == needle))
     })
 }
 
@@ -1282,14 +1365,17 @@ pub unsafe extern "C" fn gos_rt_vec_contains_str(v: *const GosVec, needle: *cons
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_slice_result(v: *const GosVec, start: i64, end: i64) -> i128 {
     ffi_entry!(0i128, {
-        let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+        // SAFETY: `v` is null or live for the call (C-ABI contract).
+        let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `v` is this shim's live argument (C-ABI contract), and `gos_rt_vec_slice`
+        // accepts null.
         let out = unsafe { gos_rt_vec_slice(v, start, end) };
-        unsafe { gos_rt_result_new(0, out as i64) }
+        gos_rt_result_new(0, out as i64)
     })
 }
 
@@ -1313,20 +1399,22 @@ pub unsafe extern "C" fn gos_rt_intarr_slice_result(
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
         let count = end - start;
-        let out = unsafe { gos_rt_vec_with_capacity(8, count) };
+        let out = gos_rt_vec_with_capacity(8, count);
         if !out.is_null() && count > 0 {
             for i in 0..count {
                 let element_index = (start + i) as usize;
+                // SAFETY: `element_index` is below `end`, at most `len`, and `p` addresses `len`
+                // words (C-ABI contract); `out` is non-null (checked above).
                 unsafe {
                     let src_ptr = p.add(element_index) as *const u8;
                     gos_rt_vec_push(out, src_ptr);
                 }
             }
         }
-        unsafe { gos_rt_result_new(0, out as i64) }
+        gos_rt_result_new(0, out as i64)
     })
 }
 
@@ -1350,20 +1438,26 @@ pub unsafe extern "C" fn gos_rt_bytearr_slice_result(
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
         let count = end - start;
-        let out = unsafe { gos_rt_vec_with_capacity(1, count) };
+        let out = gos_rt_vec_with_capacity(1, count);
         if !out.is_null() && count > 0 {
+            // SAFETY: `out` is non-null (checked above).
             let dst = unsafe { (*out).ptr.as_ptr() };
             for i in 0..(count as usize) {
+                // SAFETY: `i` is below `count`, the capacity `out` was allocated with, and `start
+                // + i` is below `end`, at most `len`, the word count `p` addresses (C-ABI
+                // contract).
                 unsafe {
                     *dst.add(i) = *p.add(start as usize + i) as u8;
                 }
             }
+            // SAFETY: `out` is non-null (checked above), and its first `count` bytes were just
+            // written.
             unsafe { (*out).len = count };
         }
-        unsafe { gos_rt_result_new(0, out as i64) }
+        gos_rt_result_new(0, out as i64)
     })
 }
 
@@ -1378,18 +1472,22 @@ pub unsafe extern "C" fn gos_rt_packed_bytearr_slice_result(
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
         let count = end - start;
-        let out = unsafe { gos_rt_vec_with_capacity(1, count) };
+        let out = gos_rt_vec_with_capacity(1, count);
         if !out.is_null() && count > 0 {
+            // SAFETY: `out` is non-null (checked above).
             let dst = unsafe { (*out).ptr.as_ptr() };
+            // SAFETY: `out` has capacity for `count` bytes, and `p` addresses `len` bytes (C-ABI
+            // contract) with `start + count` at most `len`; the fresh buffer does not overlap
+            // `p`.
             unsafe {
                 std::ptr::copy_nonoverlapping(p.add(start as usize), dst, count as usize);
                 (*out).len = count;
             }
         }
-        unsafe { gos_rt_result_new(0, out as i64) }
+        gos_rt_result_new(0, out as i64)
     })
 }
 
@@ -1408,20 +1506,22 @@ pub unsafe extern "C" fn gos_rt_floatarr_slice_result(
         if p.is_null() || start < 0 || end < 0 || start > end || end > len {
             let msg = format!("slice: range [{start}, {end}) out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
         let count = end - start;
-        let out = unsafe { gos_rt_vec_with_capacity(8, count) };
+        let out = gos_rt_vec_with_capacity(8, count);
         if !out.is_null() && count > 0 {
             for i in 0..count {
                 let element_index = (start + i) as usize;
+                // SAFETY: `element_index` is below `end`, at most `len`, and `p` addresses `len`
+                // words (C-ABI contract); `out` is non-null (checked above).
                 unsafe {
                     let src_ptr = p.add(element_index) as *const u8;
                     gos_rt_vec_push(out, src_ptr);
                 }
             }
         }
-        unsafe { gos_rt_result_new(0, out as i64) }
+        gos_rt_result_new(0, out as i64)
     })
 }
 
@@ -1429,14 +1529,17 @@ pub unsafe extern "C" fn gos_rt_floatarr_slice_result(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_insert_safe(v: *mut GosVec, idx: i64, value: i64) -> i128 {
     ffi_entry!(0i128, {
-        let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+        // SAFETY: `v` is null or live for the call (C-ABI contract).
+        let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if idx < 0 || idx > len {
             let msg = format!("insert: index {idx} out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `v` is this shim's live argument (C-ABI contract), and `gos_rt_vec_insert_at`
+        // accepts null.
         unsafe { gos_rt_vec_insert_at(v, idx, value) };
-        unsafe { gos_rt_result_new(0, 0) }
+        gos_rt_result_new(0, 0)
     })
 }
 
@@ -1445,7 +1548,8 @@ pub unsafe extern "C" fn gos_rt_vec_insert_safe(v: *mut GosVec, idx: i64, value:
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_insert_at(v: *mut GosVec, idx: i64, value: i64) {
     ffi_entry!((), {
-        let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+        // SAFETY: `v` is null or live for the call (C-ABI contract).
+        let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx > len {
             let msg = format!("insert: index {idx} out of bounds for length {len}");
             crate::c_abi::panic::panic_text(&msg);
@@ -1454,13 +1558,19 @@ pub unsafe extern "C" fn gos_rt_vec_insert_at(v: *mut GosVec, idx: i64, value: i
         // Grow by one (handling region/global reallocation) with the new
         // element parked at the tail, then rotate it down to `idx`.
         let val_ptr = std::ptr::addr_of!(value).cast::<u8>();
+        // SAFETY: `v` is non-null (checked above), and `val_ptr` addresses the eight bytes of
+        // `value`: an element wider than a word is inserted through
+        // `gos_rt_vec_insert_slots_safe`, so the vec's width fits.
         unsafe { gos_rt_vec_push(v, val_ptr) };
+        // SAFETY: `v` is non-null (checked above) and live for the call (C-ABI contract).
         let vec = unsafe { &mut *v };
         let stride = vec.elem_bytes as usize;
         if !vec.ptr.is_null() && stride > 0 && idx < len {
             let base = vec.ptr.as_ptr();
             let span = ((len - idx + 1) as usize) * stride;
             let region =
+                // SAFETY: the push made the length `len + 1`, so the `len - idx + 1` elements
+                // from `idx` lie inside the buffer.
                 unsafe { std::slice::from_raw_parts_mut(base.add(idx as usize * stride), span) };
             region.rotate_right(stride);
         }
@@ -1482,30 +1592,39 @@ pub unsafe extern "C" fn gos_rt_vec_insert_slots_safe(
     slots: *const u8,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+        // SAFETY: `v` is null or live for the call (C-ABI contract).
+        let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if idx < 0 || idx > len {
             let msg = format!("insert: index {idx} out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
         if !v.is_null() && !slots.is_null() {
+            // SAFETY: `v` and `slots` are non-null (checked above), and `slots` addresses one
+            // element of the vec's width (C-ABI contract).
             unsafe { vec_insert_payload_at(v, idx, slots) };
         }
-        unsafe { gos_rt_result_new(0, 0) }
+        gos_rt_result_new(0, 0)
     })
 }
 
 /// Shared body of the two insert entry points: grow by one with the new
 /// element parked at the tail, then rotate it down to `idx`.
 unsafe fn vec_insert_payload_at(v: *mut GosVec, idx: i64, payload: *const u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `v` non-null and live.
     let len = unsafe { (*v).len };
+    // SAFETY: this `unsafe fn`'s caller passes `v`, `payload` live or null, which
+    // `gos_rt_vec_push` accepts.
     unsafe { gos_rt_vec_push(v, payload) };
+    // SAFETY: this `unsafe fn`'s caller passes `v` non-null and live.
     let vec = unsafe { &mut *v };
     let stride = vec.elem_bytes as usize;
     if !vec.ptr.is_null() && stride > 0 && idx < len {
         let base = vec.ptr.as_ptr();
         let span = ((len - idx + 1) as usize) * stride;
         let region =
+            // SAFETY: the push made the length `len + 1`, so the `len - idx + 1` elements from
+            // `idx` lie inside the buffer.
             unsafe { std::slice::from_raw_parts_mut(base.add(idx as usize * stride), span) };
         region.rotate_right(stride);
     }
@@ -1518,6 +1637,7 @@ unsafe fn vec_insert_payload_at(v: *mut GosVec, idx: i64, payload: *const u8) {
 /// closes the gap writes over the slot it was read from, and the payload has
 /// to outlive that.
 unsafe fn removed_elem_payload(vec: &GosVec, idx: i64) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     unsafe { crate::c_abi::vec::vec_elem_owned_payload_word(vec, idx) }
 }
 
@@ -1525,14 +1645,17 @@ unsafe fn removed_elem_payload(vec: &GosVec, idx: i64) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i128 {
     ffi_entry!(0i128, {
-        let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+        // SAFETY: `v` is null or live for the call (C-ABI contract).
+        let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx >= len {
             let msg = format!("remove: index {idx} out of bounds for length {len}");
             let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `v` is non-null (checked above) and live for the call (C-ABI contract).
         let vec = unsafe { &mut *v };
         crate::c_abi::vec::bump_vec_mutation_generation(vec);
+        // SAFETY: `idx` is in `[0, len)` (checked above).
         let removed = unsafe { removed_elem_payload(vec, idx) };
         // Shift the tail [idx+1, len) down one element so the removal is
         // reflected in place (the caller owns the returned element, so its
@@ -1540,13 +1663,18 @@ pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i12
         let stride = vec.elem_bytes as usize;
         if !vec.ptr.is_null() && idx + 1 < len {
             let base = vec.ptr.as_ptr();
+            // SAFETY: `idx` is below `len`, so the offset stays inside the buffer.
             let dst = unsafe { base.add(idx as usize * stride) };
+            // SAFETY: `idx + 1` is below `len` (checked above), so the offset stays inside the
+            // buffer.
             let src = unsafe { base.add((idx as usize + 1) * stride) };
             let count = ((len - idx - 1) as usize) * stride;
+            // SAFETY: both windows lie inside the vec's `len` elements, and `ptr::copy` allows
+            // the overlap.
             unsafe { std::ptr::copy(src, dst, count) };
         }
         vec.len = len - 1;
-        unsafe { gos_rt_result_new(0, removed) }
+        gos_rt_result_new(0, removed)
     })
 }
 
@@ -1555,21 +1683,30 @@ pub unsafe extern "C" fn gos_rt_vec_remove_safe(v: *mut GosVec, idx: i64) -> i12
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -> i64 {
     ffi_entry!(0, {
-        let len = if v.is_null() { 0 } else { unsafe { (*v).len } };
+        // SAFETY: `v` is null or live for the call (C-ABI contract).
+        let len = unsafe { v.as_ref() }.map_or(0, |vec| vec.len);
         if v.is_null() || idx < 0 || idx >= len {
             let msg = format!("remove: index {idx} out of bounds for length {len}");
             crate::c_abi::panic::panic_text(&msg);
             return 0;
         }
+        // SAFETY: `v` is non-null (the other case panics above) and live for the call (C-ABI
+        // contract).
         let vec = unsafe { &mut *v };
         crate::c_abi::vec::bump_vec_mutation_generation(vec);
+        // SAFETY: `idx` is in `[0, len)` (checked above).
         let removed = unsafe { removed_elem_payload(vec, idx) };
         let stride = vec.elem_bytes as usize;
         if !vec.ptr.is_null() && idx + 1 < len {
             let base = vec.ptr.as_ptr();
+            // SAFETY: `idx` is below `len`, so the offset stays inside the buffer.
             let dst = unsafe { base.add(idx as usize * stride) };
+            // SAFETY: `idx + 1` is below `len` (checked above), so the offset stays inside the
+            // buffer.
             let src = unsafe { base.add((idx as usize + 1) * stride) };
             let count = ((len - idx - 1) as usize) * stride;
+            // SAFETY: both windows lie inside the vec's `len` elements, and `ptr::copy` allows
+            // the overlap.
             unsafe { std::ptr::copy(src, dst, count) };
         }
         vec.len = len - 1;
@@ -1584,16 +1721,19 @@ pub unsafe extern "C" fn gos_rt_vec_remove_at(v: *mut GosVec, idx: i64) -> i64 {
 pub unsafe extern "C" fn gos_rt_vec_pop_opt(v: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
         if v.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
         crate::c_abi::vec::bump_vec_mutation_generation(vec);
         vec.len -= 1;
+        // SAFETY: the decremented length is the index of the last element, still inside the
+        // buffer.
         let value = unsafe { crate::c_abi::vec::vec_elem_owned_payload_word(vec, vec.len) };
-        unsafe { gos_rt_result_new(0, value) }
+        gos_rt_result_new(0, value)
     })
 }
 
@@ -1607,13 +1747,18 @@ pub unsafe extern "C" fn gos_rt_vec_pop_into(v: *mut GosVec, out: *mut u8) -> i6
         if v.is_null() || out.is_null() {
             return 1;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 || vec.ptr.is_null() {
             return 1;
         }
         crate::c_abi::vec::bump_vec_mutation_generation(vec);
         vec.len -= 1;
+        // SAFETY: the decremented length is the index of the last element, still inside the
+        // buffer.
         let src = unsafe { vec.ptr.add((vec.len as usize) * (vec.elem_bytes as usize)) };
+        // SAFETY: `out` is non-null (checked above) and addresses storage for one element of the
+        // vec's width (C-ABI contract), apart from the vec's buffer.
         unsafe { std::ptr::copy_nonoverlapping(src, out, vec.elem_bytes as usize) };
         0
     })
@@ -1625,13 +1770,18 @@ pub unsafe extern "C" fn gos_rt_vec_pop(v: *mut GosVec, out: *mut u8) -> i32 {
         if v.is_null() || out.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 {
             return 0;
         }
         crate::c_abi::vec::bump_vec_mutation_generation(vec);
         vec.len -= 1;
+        // SAFETY: the decremented length is the index of the last element, still inside the
+        // buffer.
         let src = unsafe { vec.ptr.add((vec.len as usize) * (vec.elem_bytes as usize)) };
+        // SAFETY: `out` is non-null (checked above) and addresses storage for one element of the
+        // vec's width (C-ABI contract), apart from the vec's buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(src, out, vec.elem_bytes as usize);
         }

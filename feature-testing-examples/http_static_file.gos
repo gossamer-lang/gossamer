@@ -34,7 +34,7 @@ fn doc_root() -> String {
 
 fn serve_files(root: String) {
     let server = static_files::FileServer::new(root, "")
-    if let Err(e) = http::serve("127.0.0.1:23890", server) {
+    if let Err(e) = http::serve("127.0.0.1:23883", server) {
         eprintln("serve failed: {e}")
     }
 }
@@ -73,13 +73,13 @@ fn main() {
     let _ = fs::write(path::join(tour, "index.html"), "tour index".as_bytes())
 
     spawn(|| serve_files(root))
-    await_ready("http://127.0.0.1:23890/hello.txt")
+    await_ready("http://127.0.0.1:23883/hello.txt")
 
-    match http::get("http://127.0.0.1:23890/hello.txt", Vec::from([])) {
+    match http::get("http://127.0.0.1:23883/hello.txt", Vec::from([])) {
         Ok(r) => println("status={} body={}", r.status, r.body)
         Err(e) => println("error: {}", e)
     }
-    match http::get("http://127.0.0.1:23890/missing.txt", Vec::from([])) {
+    match http::get("http://127.0.0.1:23883/missing.txt", Vec::from([])) {
         Ok(r) => println("missing status={}", r.status)
         Err(e) => println("missing error: {}", e)
     }
@@ -87,22 +87,22 @@ fn main() {
     // A directory is served as the index.html inside it, and a request
     // that named the directory without a trailing slash is redirected
     // to the form the page's own relative links resolve under.
-    match http::get("http://127.0.0.1:23890/", Vec::from([])) {
+    match http::get("http://127.0.0.1:23883/", Vec::from([])) {
         Ok(r) => println("root status={} body={}", r.status, r.body)
         Err(e) => println("root error: {}", e)
     }
-    match http::get("http://127.0.0.1:23890/tour/", Vec::from([])) {
+    match http::get("http://127.0.0.1:23883/tour/", Vec::from([])) {
         Ok(r) => println("dir status={} body={}", r.status, r.body)
         Err(e) => println("dir error: {}", e)
     }
     // A client that does not follow redirects sees the 301 itself; the
     // default client follows it and lands on the same index.
     let direct = http::Client::builder().max_redirects(0).build()
-    match direct.request("GET", "http://127.0.0.1:23890/tour", "", Vec::from([])) {
+    match direct.request("GET", "http://127.0.0.1:23883/tour", "", Vec::from([])) {
         Ok(r) => println("dir-no-slash status={} location={}", r.status, header_of(r.headers, "location"))
         Err(e) => println("dir-no-slash error: {}", e)
     }
-    match http::get("http://127.0.0.1:23890/tour", Vec::from([])) {
+    match http::get("http://127.0.0.1:23883/tour", Vec::from([])) {
         Ok(r) => println("dir-followed status={} body={}", r.status, r.body)
         Err(e) => println("dir-followed error: {}", e)
     }

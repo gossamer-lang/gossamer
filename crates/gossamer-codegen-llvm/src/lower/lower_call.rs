@@ -335,15 +335,11 @@ impl<'a> Lowerer<'a> {
             return self.emit_named_call(mangled.as_ref(), args, destination, target);
         }
         let name = resolve_external_binding_symbol(&name, args.len()).unwrap_or(name);
-        // The debug profile checks integer overflow, so an integer shim calls
-        // the entry that panics where its `+` or `*` would.
+        // Integer overflow is checked, so an integer shim calls the entry that
+        // panics where its `+` or `*` would.
         let name = match gossamer_abi::checked_integer_entry(&name) {
-            Some(checked)
-                if matches!(crate::emit::opt_profile(), crate::emit::OptProfile::Debug) =>
-            {
-                checked.to_string()
-            }
-            _ => name,
+            Some(checked) => checked.to_string(),
+            None => name,
         };
         let name = if name == "gos_rt_bytearr_slice_result" {
             "gos_rt_packed_bytearr_slice_result".to_string()
@@ -411,7 +407,11 @@ impl<'a> Lowerer<'a> {
         // with an `f64.abs`-style name. Dispatch from the destination type,
         // which is the authoritative MIR representation, before selecting a
         // floating-point LLVM intrinsic.
-        if name.rsplit("::").next().is_some_and(|tail| tail == "abs")
+        // A function the program defines is that function, whatever its
+        // name's last segment spells (`impl i64 { fn sqrt(&self) }`).
+        let program_fn = self.param_tys_by_name.contains_key(&name);
+        if !program_fn
+            && name.rsplit("::").next().is_some_and(|tail| tail == "abs")
             && args.len() == 1
             && render_ty(self.tcx, self.body.local_ty(destination.local)) != "double"
         {
@@ -422,7 +422,8 @@ impl<'a> Lowerer<'a> {
         // LLVM intrinsic invocation instead of routing
         // through an undefined `@"math::sqrt"` symbol. These
         // lower to the host's SSE/AVX instruction via `llc`.
-        if let Some(intrinsic_name) = math_intrinsic(&name)
+        if !program_fn
+            && let Some(intrinsic_name) = math_intrinsic(&name)
             && args.len() == 1
         {
             self.lower_math_intrinsic(intrinsic_name, &args[0], destination, target)?;

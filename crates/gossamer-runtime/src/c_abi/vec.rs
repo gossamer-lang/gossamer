@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use super::*;
@@ -113,6 +111,13 @@ pub mod vec_elem_kind {
     /// `GosVec` written in place, so a copied slot takes a heap of its own via
     /// `gos_rt_vec_clone` and the vec's teardown frees the one it holds.
     pub const HEAP: u8 = 14;
+    /// Slot-child kind: the slot word holds a share of a lazy iterator handle.
+    /// Its holders advance one cursor, so a copied slot takes a share and the
+    /// teardown gives one back.
+    pub const ITER: u8 = 15;
+    /// Slot-child kind: as [`ITER`], for the two-word pair state `zip` and
+    /// `enumerate` build.
+    pub const ITER_PAIR: u8 = 16;
 }
 
 #[repr(C)]
@@ -210,7 +215,8 @@ fn new_vec_owner() -> SyncRawPtr<VecOwner> {
     let owner = Box::into_raw(owner);
     crate::c_abi::ledger::vec_owner_alloc(
         std::mem::size_of::<VecOwner>(),
-        allocator_usable_bytes(owner.cast(), std::mem::size_of::<VecOwner>()),
+        // SAFETY: `owner` is the block `Box::into_raw` just returned.
+        unsafe { allocator_usable_bytes(owner.cast(), std::mem::size_of::<VecOwner>()) },
     );
     SyncRawPtr::new(owner)
 }
@@ -219,8 +225,12 @@ fn new_vec_owner() -> SyncRawPtr<VecOwner> {
 /// storage. The runtime deliberately uses the system allocator under TSan,
 /// Miri, fuzzing, and wasm, where a mimalloc query would be invalid; those
 /// configurations report the exact requested layout size instead.
+///
+/// # Safety
+///
+/// `ptr` is a live block from the global allocator.
 #[inline]
-fn allocator_usable_bytes(ptr: *const u8, requested: usize) -> usize {
+unsafe fn allocator_usable_bytes(ptr: *const u8, requested: usize) -> usize {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
         let _ = requested;
@@ -361,12 +371,7 @@ fn inline_cap(elem_bytes: u32) -> i64 {
 /// the data region is left zeroed for the caller to fill. Increments the
 /// vec ledger and sets the strong count to 1, symmetric with
 /// [`super::map::gos_rt_vec_free`].
-pub(crate) unsafe fn alloc_box_vec(
-    elem_bytes: u32,
-    elem_kind: u8,
-    cap: i64,
-    len: i64,
-) -> *mut GosVec {
+pub(crate) fn alloc_box_vec(elem_bytes: u32, elem_kind: u8, cap: i64, len: i64) -> *mut GosVec {
     let cap = cap.max(len).max(0);
     let icap = inline_cap(elem_bytes);
     let (init_ptr, real_cap, flag) = if cap <= icap {
@@ -397,14 +402,18 @@ pub(crate) unsafe fn alloc_box_vec(
         let boxed_ptr = Box::into_raw(boxed);
         crate::c_abi::ledger::vec_inline_alloc(
             std::mem::size_of::<GosVec>(),
-            allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<GosVec>()),
+            // SAFETY: `boxed_ptr` is the block `Box::into_raw` just returned.
+            unsafe { allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<GosVec>()) },
         );
         crate::c_abi::ledger::vec_split_alloc(
             checked_buffer_bytes(cap as usize, elem_bytes as usize),
-            allocator_usable_bytes(
-                init_ptr.as_const_ptr(),
-                checked_buffer_bytes(cap as usize, elem_bytes as usize),
-            ),
+            // SAFETY: `init_ptr` is the buffer the global allocator returned above.
+            unsafe {
+                allocator_usable_bytes(
+                    init_ptr.as_const_ptr(),
+                    checked_buffer_bytes(cap as usize, elem_bytes as usize),
+                )
+            },
         );
         return boxed_ptr;
     }
@@ -427,15 +436,19 @@ pub(crate) unsafe fn alloc_box_vec(
     let boxed_ptr = Box::into_raw(boxed);
     crate::c_abi::ledger::vec_inline_alloc(
         std::mem::size_of::<InlineVec>(),
-        allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<InlineVec>()),
+        // SAFETY: `boxed_ptr` is the block `Box::into_raw` just returned.
+        unsafe { allocator_usable_bytes(boxed_ptr.cast(), std::mem::size_of::<InlineVec>()) },
     );
     if flag != 0 {
         crate::c_abi::ledger::vec_split_alloc(
             checked_buffer_bytes(cap as usize, elem_bytes as usize),
-            allocator_usable_bytes(
-                init_ptr.as_const_ptr(),
-                checked_buffer_bytes(cap as usize, elem_bytes as usize),
-            ),
+            // SAFETY: `init_ptr` is the buffer the global allocator returned above.
+            unsafe {
+                allocator_usable_bytes(
+                    init_ptr.as_const_ptr(),
+                    checked_buffer_bytes(cap as usize, elem_bytes as usize),
+                )
+            },
         );
     }
     if flag == 0 {
@@ -446,6 +459,8 @@ pub(crate) unsafe fn alloc_box_vec(
         // later `&mut *boxed_ptr` reborrow of the header. A borrow taken
         // before `into_raw` is narrower than the allocation and would be
         // invalidated when `into_raw` reasserts uniqueness over it.
+        // SAFETY: `boxed_ptr` is the box `Box::into_raw` just returned, whose provenance covers
+        // its header and inline buffer.
         unsafe {
             let bufptr = (&raw mut (*boxed_ptr).buf).cast::<u8>();
             (*boxed_ptr).header.ptr = SyncRawPtr::new(bufptr);
@@ -469,8 +484,11 @@ pub(crate) fn vec_has_compact_header(v: &GosVec) -> bool {
 }
 
 pub(crate) unsafe fn consume_byte_vec<R>(v: *mut GosVec, f: impl FnOnce(&[u8]) -> R) -> R {
+    // SAFETY: this `unsafe fn`'s caller passes `v` a live `Vec<u8>` it hands over, not otherwise
+    // accessed.
     let vec = unsafe { &mut *v };
     let bytes = if vec.elem_bytes == 1 && vec.len > 0 && !vec.ptr.is_null() {
+        // SAFETY: a byte vec holds `len` initialised bytes at its non-null `ptr` (checked above).
         unsafe { std::slice::from_raw_parts(vec.ptr.as_ptr(), vec.len as usize) }
     } else {
         &[]
@@ -490,8 +508,11 @@ pub(crate) unsafe fn consume_byte_vec_preserving_source<R>(
     v: *mut GosVec,
     f: impl FnOnce(&[u8]) -> R,
 ) -> R {
+    // SAFETY: this `unsafe fn`'s caller passes `v` a live `Vec<u8>`, not otherwise accessed
+    // during the call.
     let vec = unsafe { &mut *v };
     let bytes = if vec.elem_bytes == 1 && vec.len > 0 && !vec.ptr.is_null() {
+        // SAFETY: a byte vec holds `len` initialised bytes at its non-null `ptr` (checked above).
         unsafe { std::slice::from_raw_parts(vec.ptr.as_ptr(), vec.len as usize) }
     } else {
         &[]
@@ -512,11 +533,12 @@ pub(crate) unsafe fn consume_byte_vec_preserving_source<R>(
 unsafe fn alloc_vec_header(mut v: GosVec) -> *mut GosVec {
     let p = crate::c_abi::rc::region_alloc_bytes(std::mem::size_of::<GosVec>());
     if p.is_null() {
-        unsafe { alloc_box_vec(v.elem_bytes, v.elem_kind, v.cap, v.len) }
+        alloc_box_vec(v.elem_bytes, v.elem_kind, v.cap, v.len)
     } else {
         crate::c_abi::ledger::vec_region_alloc(std::mem::size_of::<GosVec>());
         v.region_flag = VEC_REGION_FLAG;
         let hp = p.cast::<GosVec>();
+        // SAFETY: `hp` is a fresh region block of a header's size.
         unsafe { std::ptr::write(hp, v) };
         hp
     }
@@ -528,13 +550,14 @@ unsafe fn alloc_vec_header(mut v: GosVec) -> *mut GosVec {
 /// from `with_capacity` bypasses the arena even when the caller's loop is
 /// regioned.  Start from the ordinary region-aware empty constructor, then
 /// reserve the requested capacity through the shared growth path.
-unsafe fn alloc_vec_with_capacity(elem_bytes: u32, elem_kind: u8, cap: i64) -> *mut GosVec {
+fn alloc_vec_with_capacity(elem_bytes: u32, elem_kind: u8, cap: i64) -> *mut GosVec {
     if cap < 0 {
         crate::c_abi::panic::panic_text("Vec::with_capacity: capacity must be non-negative");
     }
     if !crate::c_abi::rc::region_is_active() {
-        return unsafe { alloc_box_vec(elem_bytes, elem_kind, cap, 0) };
+        return alloc_box_vec(elem_bytes, elem_kind, cap, 0);
     }
+    // SAFETY: the header's pointer fields are null, so nothing it names needs to be live.
     let v = unsafe {
         alloc_vec_header(GosVec {
             len: 0,
@@ -551,12 +574,16 @@ unsafe fn alloc_vec_with_capacity(elem_bytes: u32, elem_kind: u8, cap: i64) -> *
         })
     };
     if !v.is_null() && cap > 0 {
+        // SAFETY: `v` is the non-null vec just made, not otherwise accessed.
         unsafe { vec_reserve_to(&mut *v, cap, true) };
     }
     v
 }
 
-pub(crate) fn vec_elem_meta(v: *const GosVec) -> *const i64 {
+/// # Safety
+///
+/// `v` is null or a live `Vec`.
+pub(crate) unsafe fn vec_elem_meta(v: *const GosVec) -> *const i64 {
     if v.is_null() {
         return std::ptr::null();
     }
@@ -609,7 +636,11 @@ pub fn vec_slot_children(v: &GosVec) -> Option<&[VecSlotChild]> {
 ///
 /// No-op for null / region vecs (region storage is freed wholesale at
 /// `arena_pop` and never walked).
-pub fn vec_set_slot_children(v: *mut GosVec, children: &'static [VecSlotChild]) {
+///
+/// # Safety
+///
+/// `v` is null or a live `Vec`.
+pub unsafe fn vec_set_slot_children(v: *mut GosVec, children: &'static [VecSlotChild]) {
     if v.is_null() {
         return;
     }
@@ -629,6 +660,8 @@ unsafe fn visit_slot_children(
     children: &[VecSlotChild],
     mut f: impl FnMut(*mut u8, u8),
 ) {
+    // SAFETY: this `unsafe fn`'s caller passes `slot` an element laid out as `children`
+    // describes.
     unsafe { visit_slot_child_words(slot, children, |_, child, kind| f(child, kind)) };
 }
 
@@ -642,6 +675,7 @@ unsafe fn visit_slot_child_words(
 ) {
     for c in children {
         if c.gate >= 0 {
+            // SAFETY: each child entry names a word inside the element.
             let disc = unsafe { slot.add(c.disc_word * 8).cast::<i64>().read_unaligned() };
             if disc != c.gate {
                 continue;
@@ -649,7 +683,9 @@ unsafe fn visit_slot_child_words(
         }
         // Slots hold child pointers exposed as integers by the flat-slot
         // ABI; recover provenance before use.
+        // SAFETY: each child entry names a word inside the element.
         let word = unsafe { slot.add(c.word * 8).cast_mut() };
+        // SAFETY: `word` is that word.
         let child = unsafe { slot_read_word(word) };
         if !child.is_null() {
             f(word, child, c.kind);
@@ -665,9 +701,11 @@ unsafe fn visit_slot_child_words(
 /// slot, leaving the vec's own table to the vec. The counted children are
 /// retained, as a second owner of each.
 pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `v` a live `Vec`.
     let Some(children) = vec_slot_children(unsafe { &*v }) else {
         return;
     };
+    // SAFETY: `slot` is an element of `v`, laid out as its slot children describe.
     unsafe {
         visit_slot_child_words(slot, children, |word, child, kind| match kind {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_retain(child.cast()),
@@ -689,6 +727,8 @@ pub(crate) unsafe fn vec_retain_slot_children(v: *const GosVec, slot: *mut u8) {
                 let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
                 slot_write_word(word, cloned.cast::<u8>());
             }
+            vec_elem_kind::ITER => crate::c_abi::rc::lazy_children::retain(child.cast(), false),
+            vec_elem_kind::ITER_PAIR => crate::c_abi::rc::lazy_children::retain(child.cast(), true),
             _ => {}
         });
     }
@@ -710,7 +750,9 @@ pub unsafe extern "C" fn gos_rt_vec_borrow_arr(
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
         let view_elem_bytes = elem_bytes.max(8);
-        let v = unsafe { alloc_box_vec(view_elem_bytes, vec_elem_kind::PRIMITIVE, 0, 0) };
+        let v = alloc_box_vec(view_elem_bytes, vec_elem_kind::PRIMITIVE, 0, 0);
+        // SAFETY: `v` is the fresh vec made above, and `data` this shim's array argument of `len`
+        // elements (C-ABI contract).
         unsafe {
             (*v).len = len;
             (*v).cap = len;
@@ -733,7 +775,9 @@ pub unsafe extern "C" fn gos_rt_vec_borrow_packed_arr(
         if len < 0 {
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
-        let v = unsafe { alloc_box_vec(elem_bytes.max(1), vec_elem_kind::PRIMITIVE, 0, 0) };
+        let v = alloc_box_vec(elem_bytes.max(1), vec_elem_kind::PRIMITIVE, 0, 0);
+        // SAFETY: `v` is the fresh vec made above, and `data` this shim's array argument of `len`
+        // elements (C-ABI contract).
         unsafe {
             (*v).len = len;
             (*v).cap = len;
@@ -746,9 +790,11 @@ pub unsafe extern "C" fn gos_rt_vec_borrow_packed_arr(
 /// Release the owned children of the element slot at `slot` of the
 /// `AGGR_OWNED` vec `v` (the slot is about to be overwritten).
 pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `v` a live `Vec`.
     let Some(children) = vec_slot_children(unsafe { &*v }) else {
         return;
     };
+    // SAFETY: `slot` is an element of `v` whose child shares it holds, given back here.
     unsafe {
         visit_slot_children(slot, children, |child, kind| match kind {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(child.cast()),
@@ -757,6 +803,10 @@ pub(crate) unsafe fn vec_release_slot_children(v: *const GosVec, slot: *const u8
             vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
             vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
             vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
+            vec_elem_kind::ITER => crate::c_abi::rc::lazy_children::drop_share(child.cast(), false),
+            vec_elem_kind::ITER_PAIR => {
+                crate::c_abi::rc::lazy_children::drop_share(child.cast(), true);
+            }
             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_release(child),
             _ => {}
         });
@@ -781,6 +831,8 @@ pub unsafe extern "C" fn gos_rt_vec_set_slots(v: *mut GosVec, idx: i64, slots: *
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument, not
+        // otherwise accessed during the call (C-ABI contract).
         let vec = unsafe { &mut *v };
         if idx < 0 || idx >= vec.len {
             crate::c_abi::panic::panic_oob_text("vec index", idx, vec.len);
@@ -790,8 +842,12 @@ pub unsafe extern "C" fn gos_rt_vec_set_slots(v: *mut GosVec, idx: i64, slots: *
             return;
         }
         let kind = vec.elem_kind;
-        let meta = vec_elem_meta(vec);
+        // SAFETY: `vec` is a live `Vec` (a reference).
+        let meta = unsafe { vec_elem_meta(vec) };
+        // SAFETY: `idx` is below the vec's length (checked above), so the element lies inside its
+        // buffer.
         let destination = unsafe { vec.ptr.as_ptr().add(idx as usize * stride) };
+        // SAFETY: `destination` is the element being overwritten, whose child shares it held.
         unsafe {
             match kind {
                 vec_elem_kind::AGGR_OWNED => vec_release_slot_children(vec, destination),
@@ -836,6 +892,8 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
         return;
     }
     for i in 0..v.len.max(0) as usize {
+        // SAFETY: `i` is below the vec's length, and each element holds the child shares its slot
+        // children name.
         unsafe {
             visit_slot_children(v.ptr.add(i * stride), children, |child, kind| match kind {
                 vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(child.cast()),
@@ -844,6 +902,12 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
                 vec_elem_kind::SET => crate::c_abi::map::gos_rt_set_free(child.cast()),
                 vec_elem_kind::DEQUE => crate::c_abi::deque::gos_rt_deque_free(child.cast()),
                 vec_elem_kind::HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
+                vec_elem_kind::ITER => {
+                    crate::c_abi::rc::lazy_children::drop_share(child.cast(), false);
+                }
+                vec_elem_kind::ITER_PAIR => {
+                    crate::c_abi::rc::lazy_children::drop_share(child.cast(), true);
+                }
                 vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_release(child),
                 _ => {}
             });
@@ -860,6 +924,8 @@ pub(crate) unsafe fn vec_release_owned_children(v: &GosVec) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_vec_retain(v: *mut GosVec) {
     ffi_entry!((), {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `vec_retain_header` accepts.
         unsafe { vec_retain_header(v) };
     });
 }
@@ -875,6 +941,7 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if vec.ptr.is_null() || vec.len <= 0 {
             return;
@@ -884,13 +951,17 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
         match vec.elem_kind {
             vec_elem_kind::STRING | vec_elem_kind::RC_ENUM | vec_elem_kind::VEC if stride == 8 => {
                 for index in 0..len {
+                    // SAFETY: `index` is below the vec's length.
                     let child = unsafe { slot_read_word(vec.ptr.add(index * stride)) };
                     if child.is_null() {
                         continue;
                     }
                     if vec.elem_kind == vec_elem_kind::VEC {
+                        // SAFETY: a non-null element of a `VEC`-kind vec is a live `Vec`.
                         unsafe { gos_rt_vec_mark_shared(child.cast()) };
                     } else {
+                        // SAFETY: a non-null element of a `STRING`, `RC_ENUM` vec is a live
+                        // counted value.
                         unsafe { crate::c_abi::rc::gos_rt_rc_mark_shared(child) };
                     }
                 }
@@ -898,7 +969,10 @@ pub unsafe extern "C" fn gos_rt_vec_mark_shared(v: *mut GosVec) {
             vec_elem_kind::AGGR_OWNED => {
                 if let Some(children) = vec_slot_children(vec) {
                     for index in 0..len {
+                        // SAFETY: `index` is below the vec's length.
                         let slot = unsafe { vec.ptr.add(index * stride) };
+                        // SAFETY: `slot` is an element laid out as the vec's slot children
+                        // describe.
                         unsafe {
                             visit_slot_children(slot, children, |child, kind| match kind {
                                 vec_elem_kind::VEC => gos_rt_vec_mark_shared(child.cast()),
@@ -936,6 +1010,7 @@ pub(crate) unsafe fn vec_retain_header(v: *mut GosVec) {
     if rc_trace_enabled() {
         eprintln!("VRETAIN v={v:p}");
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let vec = unsafe { &*v };
     if vec_is_region(vec) {
         return;
@@ -977,20 +1052,30 @@ pub(crate) unsafe fn vec_adopt_element_shares(src: *const GosVec, out: *mut GosV
     if src.is_null() || out.is_null() {
         return;
     }
+    // SAFETY: `src` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `Vec`.
     let s = unsafe { &*src };
     if s.elem_kind == vec_elem_kind::AGGR_GUARDED {
-        let meta = vec_elem_meta(src);
+        // SAFETY: this function's contract covers `src`, as `vec_elem_meta` requires.
+        let meta = unsafe { vec_elem_meta(src) };
         if !meta.is_null() {
+            // SAFETY: `out` is a live vec the caller made to hold `src`'s elements.
             unsafe { gos_rt_vec_set_elem_meta(out, meta) };
+            // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes a
+            // live `Vec`.
             let data = unsafe { (*out).ptr.as_ptr() };
             let stride = s.elem_bytes as usize;
             for i in 0..s.len.max(0) as usize {
+                // SAFETY: `i` is below `src`'s length, which `out` matches, and each element is
+                // laid out as `meta` describes.
                 unsafe {
                     crate::c_abi::rc::gos_rt_aggr_retain_children(data.add(i * stride), meta);
                 }
             }
         }
     }
+    // SAFETY: this `unsafe fn`'s caller passes `src`, `out` live; each is checked above or
+    // accepted null by `vec_share_owned_elements`.
     unsafe { vec_share_owned_elements(src, out) };
 }
 
@@ -998,6 +1083,8 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
     if src.is_null() || out.is_null() {
         return;
     }
+    // SAFETY: `src` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `Vec`.
     let s = unsafe { &*src };
     match s.elem_kind {
         vec_elem_kind::STRING
@@ -1007,24 +1094,34 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
         | vec_elem_kind::JSON
             if s.elem_bytes == 8 =>
         {
+            // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes a
+            // live `Vec` not otherwise accessed during the call.
             unsafe { (*out).elem_kind = s.elem_kind };
+            // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes a
+            // live `Vec`.
             let len = unsafe { (*out).len.max(0) as usize };
             for i in 0..len {
                 // Exposed-integer slot (flat-slot ABI); recover provenance.
+                // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes
+                // a live `Vec`.
                 let slot = unsafe { (*out).ptr.add(i * 8) };
+                // SAFETY: `slot` is an element of `out` below its length.
                 let child = unsafe { slot_read_word(slot) };
                 if child.is_null() {
                     continue;
                 }
                 match s.elem_kind {
+                    // SAFETY: a non-null element of a `STRING` vec is a live string body.
                     vec_elem_kind::STRING => unsafe {
                         crate::c_abi::string::gos_rt_str_retain(child.cast());
                     },
+                    // SAFETY: a non-null element of an `RC_ENUM` vec is a live node.
                     vec_elem_kind::RC_ENUM => unsafe {
                         crate::c_abi::rc::gos_rt_rc_retain(child);
                     },
                     // A JSON handle carries no count, so the copy takes a box
                     // of its own onto the same document.
+                    // SAFETY: a non-null element of a `JSON` vec is a live handle.
                     vec_elem_kind::JSON => unsafe {
                         let cloned = crate::c_abi::json::json_clone_handle(child.cast());
                         slot_write_word(slot, cloned.cast::<u8>());
@@ -1034,10 +1131,14 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // the new handle goes back into the slot, leaving the
                     // source's table to the source. Both vectors free their
                     // elements, so one table under two of them is freed twice.
+                    // SAFETY: a non-null element of a `MAP` vec is a live `Map`, and `slot` is
+                    // its word in `out`.
                     vec_elem_kind::MAP => unsafe {
                         let cloned = crate::c_abi::gos_rt_map_clone(child.cast());
                         slot_write_word(slot, cloned as *mut u8);
                     },
+                    // SAFETY: a non-null element of a container vec is a live `Vec`, and `slot`
+                    // is its word in `out`.
                     _ => unsafe {
                         let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
                         slot_write_word(slot, cloned.cast::<u8>());
@@ -1057,7 +1158,9 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                 // borrow to create the lazy metadata carrier. Do not retain a
                 // prior `&mut GosVec` across that call: doing so violates
                 // Stacked Borrows when the clone path later reads its fields.
-                vec_set_slot_children(out, children);
+                // SAFETY: this function's contract covers `out`.
+                unsafe { vec_set_slot_children(out, children) };
+                // SAFETY: `out` is a live `Vec` (this `unsafe fn`'s caller).
                 let (data, stride, len) = unsafe {
                     let o = &*out;
                     (o.ptr.as_ptr(), o.elem_bytes as usize, o.len.max(0) as usize)
@@ -1066,6 +1169,7 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     return;
                 }
                 for i in 0..len {
+                    // SAFETY: `i` is below `out`'s length.
                     let slot = unsafe { data.add(i * stride) };
                     // The one walk every slot-child kind goes through, so a
                     // kind added to the layout reaches the copy as well as
@@ -1073,6 +1177,7 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                     // counted, so both are shared; a `GosVec`, a `GosMap`,
                     // and a `GosSet` are mutable and the copy takes storage
                     // of its own, written back through the slot word.
+                    // SAFETY: `slot` is an element laid out as `children` describe.
                     unsafe {
                         visit_slot_child_words(slot, children, |word, child, kind| match kind {
                             vec_elem_kind::STRING => {
@@ -1098,6 +1203,12 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
                                 let cloned = crate::c_abi::gos_rt_vec_clone(child.cast());
                                 slot_write_word(word, cloned.cast::<u8>());
                             }
+                            vec_elem_kind::ITER => {
+                                crate::c_abi::rc::lazy_children::retain(child.cast(), false);
+                            }
+                            vec_elem_kind::ITER_PAIR => {
+                                crate::c_abi::rc::lazy_children::retain(child.cast(), true);
+                            }
                             vec_elem_kind::RC_NODE => crate::c_abi::rc::gos_rt_rc_retain(child),
                             _ => {}
                         });
@@ -1106,6 +1217,8 @@ pub(crate) unsafe fn vec_share_owned_elements(src: *const GosVec, out: *mut GosV
             } else {
                 // Layout unknown (cannot happen for live vecs; defensive):
                 // fall back to a shallow copy that never double-frees.
+                // SAFETY: `out` is non-null (checked above), and this `unsafe fn`'s caller passes
+                // a live `Vec` not otherwise accessed during the call.
                 let o = unsafe { &mut *out };
                 o.elem_kind = vec_elem_kind::PRIMITIVE;
             }
@@ -1126,6 +1239,7 @@ pub unsafe extern "C" fn gos_rt_vec_mark_rc_elems(v: *mut GosVec) {
     if v.is_null() {
         return;
     }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
     let vec = unsafe { &mut *v };
     if vec_is_region(vec) || vec.elem_kind != vec_elem_kind::PRIMITIVE || vec.elem_bytes != 8 {
         return;
@@ -1144,6 +1258,7 @@ pub unsafe extern "C" fn gos_rt_vec_mark_vec_elems(v: *mut GosVec) {
     if v.is_null() {
         return;
     }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
     let vec = unsafe { &mut *v };
     if vec_is_region(vec) || vec.elem_kind != vec_elem_kind::PRIMITIVE || vec.elem_bytes != 8 {
         return;
@@ -1161,6 +1276,7 @@ pub unsafe extern "C" fn gos_rt_vec_mark_str_elems(v: *mut GosVec) {
     if v.is_null() {
         return;
     }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
     let vec = unsafe { &mut *v };
     if vec_is_region(vec) || vec.elem_kind != vec_elem_kind::PRIMITIVE || vec.elem_bytes != 8 {
         return;
@@ -1188,9 +1304,10 @@ pub unsafe extern "C" fn gos_rt_vec_header_table(v: *const GosVec) -> *mut GosVe
         let len = if v.is_null() {
             0
         } else {
+            // SAFETY: `v` is non-null and this shim's live `Vec` argument (C-ABI contract).
             unsafe { (*v).len.max(0) }
         };
-        let table = unsafe {
+        let table = {
             alloc_box_vec(
                 VEC_HEADER_PREFIX_BYTES as u32,
                 vec_elem_kind::PRIMITIVE,
@@ -1201,14 +1318,21 @@ pub unsafe extern "C" fn gos_rt_vec_header_table(v: *const GosVec) -> *mut GosVe
         if len == 0 || table.is_null() {
             return table;
         }
+        // SAFETY: `v` is non-null (its length was read above) and live.
         let rows = unsafe { (*v).ptr };
+        // SAFETY: `table` is the non-null vec just made.
         let out = unsafe { (*table).ptr };
         for i in 0..len as usize {
+            // SAFETY: `i` is below the row vec's length.
             let row = unsafe { slot_read_word(rows.add(i * 8)) }.cast::<u8>();
+            // SAFETY: `table` holds `len` prefixes of `VEC_HEADER_PREFIX_BYTES` bytes.
             let dst = unsafe { out.add(i * VEC_HEADER_PREFIX_BYTES) };
             if row.is_null() {
+                // SAFETY: `dst` addresses one prefix of the table.
                 unsafe { std::ptr::write_bytes(dst, 0, VEC_HEADER_PREFIX_BYTES) };
             } else {
+                // SAFETY: a non-null row is a live `Vec` header of at least the prefix's size,
+                // and `dst` one prefix of the table.
                 unsafe { std::ptr::copy_nonoverlapping(row, dst, VEC_HEADER_PREFIX_BYTES) };
             }
         }
@@ -1234,6 +1358,7 @@ pub unsafe extern "C" fn gos_rt_vec_compact_elems(v: *mut GosVec) {
     if v.is_null() {
         return;
     }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
     let vec = unsafe { &mut *v };
     if vec_is_region(vec)
         || vec.elem_kind != vec_elem_kind::VEC
@@ -1244,16 +1369,21 @@ pub unsafe extern "C" fn gos_rt_vec_compact_elems(v: *mut GosVec) {
     }
     for i in 0..vec.len.max(0) as usize {
         // Exposed-integer slot (flat-slot ABI); recover provenance.
+        // SAFETY: `i` is below the vec's length.
         let slot = unsafe { vec.ptr.add(i * 8) };
+        // SAFETY: `slot` is that element's word.
         let child = unsafe { slot_read_word(slot) }.cast::<GosVec>();
         if child.is_null() {
             continue;
         }
+        // SAFETY: a non-null element of this nested vec is a live `Vec`.
         let fresh = unsafe { crate::c_abi::string::gos_rt_vec_clone(child) };
         if fresh.is_null() {
             continue;
         }
+        // SAFETY: `slot` is the element's word.
         unsafe { slot_write_word(slot, fresh.cast::<u8>()) };
+        // SAFETY: `child` is the element the vec owned alone, now replaced by its compact copy.
         unsafe { crate::c_abi::map::gos_rt_vec_free(child) };
     }
 }
@@ -1268,6 +1398,7 @@ pub unsafe extern "C" fn gos_rt_vec_set_elem_meta(v: *mut GosVec, meta: *const i
     if v.is_null() || meta.is_null() {
         return;
     }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
     let vec = unsafe { &mut *v };
     if vec_is_region(vec) {
         return;
@@ -1289,17 +1420,28 @@ pub unsafe extern "C" fn gos_rt_vec_set_slot_children(v: *mut GosVec, meta: *con
     if v.is_null() || meta.is_null() {
         return;
     }
+    // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for the call
+    // (C-ABI contract).
     let count = unsafe { *meta }.max(0) as usize;
     let mut children = Vec::with_capacity(count);
     for i in 0..count {
         let base = 1 + i * 4;
         children.push(VecSlotChild {
+            // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for
+            // the call (C-ABI contract).
             gate: unsafe { *meta.add(base) },
+            // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for
+            // the call (C-ABI contract).
             disc_word: unsafe { *meta.add(base + 1) }.max(0) as usize,
+            // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for
+            // the call (C-ABI contract).
             word: unsafe { *meta.add(base + 2) }.max(0) as usize,
+            // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for
+            // the call (C-ABI contract).
             kind: unsafe { *meta.add(base + 3) } as u8,
         });
     }
+    // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
     let vec = unsafe { &mut *v };
     if !vec_is_region(vec) {
         vec.elem_kind = vec_elem_kind::AGGR_OWNED;
@@ -1310,7 +1452,11 @@ pub unsafe extern "C" fn gos_rt_vec_set_slot_children(v: *mut GosVec, meta: *con
 /// Declares that `v`'s elements own the counted words `children` names, so
 /// each push takes a share of them and the vec's free gives those back. No-op
 /// for a null or region vec, or when no word is counted.
-pub(crate) fn vec_own_slot_children(v: *mut GosVec, children: Box<[VecSlotChild]>) {
+///
+/// # Safety
+///
+/// `v` is null or a live `Vec`.
+pub(crate) unsafe fn vec_own_slot_children(v: *mut GosVec, children: Box<[VecSlotChild]>) {
     if v.is_null() || children.is_empty() {
         return;
     }
@@ -1327,7 +1473,8 @@ pub(crate) fn vec_own_slot_children(v: *mut GosVec, children: Box<[VecSlotChild]
 /// `AGGR_GUARDED` vec. Called by `gos_rt_vec_free` before the buffer
 /// is reclaimed.
 pub(crate) unsafe fn vec_release_guarded_elements(v: &GosVec) {
-    let meta = vec_elem_meta(v);
+    // SAFETY: `v` is a live `Vec` (a reference).
+    let meta = unsafe { vec_elem_meta(v) };
     if meta.is_null() || v.ptr.is_null() {
         return;
     }
@@ -1336,6 +1483,8 @@ pub(crate) unsafe fn vec_release_guarded_elements(v: &GosVec) {
         return;
     }
     for i in 0..v.len.max(0) as usize {
+        // SAFETY: `i` is below the vec's length, and each element is laid out as `meta`
+        // describes.
         unsafe {
             crate::c_abi::rc::gos_rt_aggr_release_children(v.ptr.add(i * stride), meta);
         }
@@ -1348,16 +1497,170 @@ pub fn vec_is_region(v: &GosVec) -> bool {
     v.region_flag & VEC_REGION_FLAG != 0
 }
 
+/// A live vec's elements for as long as the view is held.
+///
+/// Building one is the single audited step a shim takes from its handle
+/// argument; every element read after it is bounds-checked safe code, so the
+/// shim's `unsafe` is that one conversion.
+#[derive(Clone, Copy)]
+pub(crate) struct VecView<'a> {
+    header: &'a GosVec,
+}
+
+impl<'a> VecView<'a> {
+    /// The view of the vec `v` names, or `None` for null.
+    ///
+    /// # Safety
+    /// `v` is null or a live `GosVec` whose buffer holds `len` initialized
+    /// elements of `elem_bytes` each, which nothing writes for `'a` - what the
+    /// C-ABI contract promises of a `Vec` argument.
+    pub(crate) unsafe fn of(v: *const GosVec) -> Option<Self> {
+        // SAFETY: this `unsafe fn`'s caller passes `v` null or live for `'a`.
+        unsafe { v.as_ref() }.map(|header| Self { header })
+    }
+
+    /// The header the view reads.
+    pub(crate) fn header(self) -> &'a GosVec {
+        self.header
+    }
+
+    /// Number of elements.
+    pub(crate) fn len(self) -> usize {
+        usize::try_from(self.header.len).unwrap_or(0)
+    }
+
+    /// Bytes each element occupies.
+    pub(crate) fn width(self) -> usize {
+        self.header.elem_bytes as usize
+    }
+
+    /// Every element's bytes, back to back at the element width.
+    pub(crate) fn buffer(self) -> &'a [u8] {
+        let bytes = self.len() * self.width();
+        if bytes == 0 {
+            return &[];
+        }
+        // SAFETY: the constructor's contract makes the buffer hold `len` initialized elements of
+        // `width` bytes, unchanged for `'a`, and a non-empty buffer is a live allocation.
+        unsafe { std::slice::from_raw_parts(self.header.ptr.as_const_ptr(), bytes) }
+    }
+
+    /// The bytes of element `i`.
+    ///
+    /// # Panics
+    /// When `i` is not below the length.
+    pub(crate) fn elem(self, i: usize) -> &'a [u8] {
+        assert!(
+            i < self.len(),
+            "vec view index {i} out of bounds for length {}",
+            self.len()
+        );
+        let width = self.width();
+        &self.buffer()[i * width..(i + 1) * width]
+    }
+
+    /// Element `i` as the word its slot holds: a narrower element zero-extends,
+    /// a wider one answers its first word, as [`vec_elem_load_i64`] reads it.
+    pub(crate) fn word(self, i: usize) -> i64 {
+        slot_word(self.elem(i))
+    }
+
+    /// Every element as the word its slot holds.
+    pub(crate) fn words(self) -> impl Iterator<Item = i64> + 'a {
+        let width = self.width();
+        let zero_width = if width == 0 { self.len() } else { 0 };
+        self.buffer()
+            .chunks_exact(width.max(1))
+            .map(slot_word)
+            .chain(std::iter::repeat_n(0, zero_width))
+    }
+
+    /// Element `i` as the address its slot word holds (a string body, a
+    /// nested vec, a handle), with the provenance compiled code exposed
+    /// when it stored it; null for an empty slot.
+    pub(crate) fn pointer_at<T>(self, i: usize) -> *const T {
+        std::ptr::with_exposed_provenance(self.word(i) as usize)
+    }
+}
+
+/// The word an element's bytes hold: a narrower element zero-extends and a
+/// wider one answers its first word. Each width is a fixed-size load.
+fn slot_word(elem: &[u8]) -> i64 {
+    if let Some(word) = elem.first_chunk::<8>() {
+        return i64::from_ne_bytes(*word);
+    }
+    match *elem {
+        [b] => i64::from(b),
+        [a, b] => i64::from(u16::from_ne_bytes([a, b])),
+        [a, b, c, d] => i64::from(u32::from_ne_bytes([a, b, c, d])),
+        _ => {
+            let mut word = [0u8; 8];
+            word[..elem.len()].copy_from_slice(elem);
+            i64::from_ne_bytes(word)
+        }
+    }
+}
+
+/// A live `Vec<String>`'s elements as text, for as long as the view is held.
+#[derive(Clone, Copy)]
+pub(crate) struct StrVecView<'a> {
+    elems: VecView<'a>,
+}
+
+impl<'a> StrVecView<'a> {
+    /// The text view of the `Vec<String>` `v` names, or `None` for null.
+    ///
+    /// # Safety
+    /// As [`VecView::of`], and each element is null or a string body live for
+    /// `'a` - what the C-ABI contract promises of a `Vec<String>` argument.
+    pub(crate) unsafe fn of(v: *const GosVec) -> Option<Self> {
+        // SAFETY: this `unsafe fn`'s caller passes `v` null or a live `Vec` for `'a`.
+        unsafe { VecView::of(v) }.map(|elems| Self { elems })
+    }
+
+    /// Number of elements.
+    pub(crate) fn len(self) -> usize {
+        self.elems.len()
+    }
+
+    /// The bytes of element `i`; empty for an empty slot.
+    pub(crate) fn bytes(self, i: usize) -> &'a [u8] {
+        let body = self.elems.pointer_at::<std::ffi::c_char>(i);
+        // SAFETY: the constructor's contract makes each element null or a string body live for
+        // `'a`, and `gos_str_arg_bytes` answers empty for null.
+        unsafe { crate::c_abi::gos_str_arg_bytes(body) }
+    }
+
+    /// Element `i` as owned text, replacing any ill-formed UTF-8.
+    pub(crate) fn text(self, i: usize) -> String {
+        String::from_utf8_lossy(self.bytes(i)).into_owned()
+    }
+
+    /// Whether element `i` is an empty slot rather than a string.
+    pub(crate) fn is_null(self, i: usize) -> bool {
+        self.elems.pointer_at::<std::ffi::c_char>(i).is_null()
+    }
+
+    /// Every element as owned text, an empty slot as the empty string.
+    pub(crate) fn texts(self) -> impl Iterator<Item = String> + 'a {
+        (0..self.len()).map(move |i| self.text(i))
+    }
+}
+
 /// Reads element `idx` of `v` as an i64, honoring the header's
 /// `elem_bytes` (packed byte vecs zero-extend, word vecs read the
 /// full 8 bytes). `idx` must already be bounds-checked by the
 /// caller. 16-byte elements are regex-internal and never reach the
 /// scalar helpers; reading their first word is a safe fallback.
 pub(crate) unsafe fn vec_elem_load_i64(v: &GosVec, idx: i64) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     let p = unsafe { v.ptr.add((idx as usize) * (v.elem_bytes as usize)) };
     match v.elem_bytes {
+        // SAFETY: `p` addresses one 1-byte element.
         1 => i64::from(unsafe { p.read() }),
+        // SAFETY: `p` addresses one 2-byte element.
         2 => i64::from(unsafe { p.cast::<u16>().read_unaligned() }),
+        // SAFETY: `p` addresses one 4-byte element.
         4 => i64::from(unsafe { p.cast::<u32>().read_unaligned() }),
         _ => {
             debug_assert!(
@@ -1365,6 +1668,7 @@ pub(crate) unsafe fn vec_elem_load_i64(v: &GosVec, idx: i64) -> i64 {
                 "vec_elem_load_i64: unexpected elem_bytes {}",
                 v.elem_bytes
             );
+            // SAFETY: `p` addresses one element of at least 8 bytes.
             unsafe { p.cast::<i64>().read_unaligned() }
         }
     }
@@ -1389,6 +1693,7 @@ pub(crate) fn vec_elem_is_inline_aggregate(v: &GosVec) -> bool {
 /// value has to stay readable across the next mutation of the storage it came
 /// from, and the carrier holding it gives back the children those words own.
 pub(crate) unsafe fn vec_elem_owned_payload_word(v: &GosVec, idx: i64) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     unsafe { vec_elem_payload_blob(v, idx, false) }
 }
 
@@ -1398,6 +1703,7 @@ pub(crate) unsafe fn vec_elem_owned_payload_word(v: &GosVec, idx: i64) -> i64 {
 /// An inline aggregate is copied into a counted blob as for an owned read.
 /// Both holders are then live, so each of the copy's children gains a share.
 pub(crate) unsafe fn vec_elem_shared_payload_word(v: &GosVec, idx: i64) -> i64 {
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     unsafe { vec_elem_payload_blob(v, idx, true) }
 }
 
@@ -1407,9 +1713,11 @@ pub(crate) unsafe fn vec_elem_shared_payload_word(v: &GosVec, idx: i64) -> i64 {
 unsafe fn vec_elem_payload_blob(v: &GosVec, idx: i64, shared: bool) -> i64 {
     let stride = v.elem_bytes as usize;
     if stride == 0 || v.ptr.is_null() || !vec_elem_is_inline_aggregate(v) || vec_elem_is_handle(v) {
+        // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
         return unsafe { vec_elem_load_i64(v, idx) };
     }
-    let guarded = vec_elem_meta(std::ptr::from_ref(v));
+    // SAFETY: `v` is a live `Vec` (a reference).
+    let guarded = unsafe { vec_elem_meta(std::ptr::from_ref(v)) };
     let meta = match v.elem_kind {
         vec_elem_kind::AGGR_GUARDED if !guarded.is_null() => guarded,
         vec_elem_kind::AGGR_OWNED => vec_slot_children(v)
@@ -1418,17 +1726,21 @@ unsafe fn vec_elem_payload_blob(v: &GosVec, idx: i64, shared: bool) -> i64 {
             }),
         _ => crate::c_abi::rc::LEAF_BLOB_META.as_ptr(),
     };
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     let src = unsafe { v.ptr.add((idx as usize) * stride) };
     let (copy, counted) =
+        // SAFETY: `src` is one `stride`-byte element, laid out as `meta` describes.
         unsafe { crate::c_abi::rc::counted_element_copy(stride as u64, meta, src) };
     if copy.is_null() {
         return 0;
     }
     if shared && counted {
         match v.elem_kind {
+            // SAFETY: `copy` is laid out as `guarded` describes.
             vec_elem_kind::AGGR_GUARDED if !guarded.is_null() => unsafe {
                 crate::c_abi::rc::gos_rt_aggr_retain_children(copy, guarded);
             },
+            // SAFETY: `copy` is laid out as `v`'s slot children describe.
             vec_elem_kind::AGGR_OWNED => unsafe {
                 vec_retain_slot_children(std::ptr::from_ref(v), copy);
             },
@@ -1497,7 +1809,9 @@ pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64)
     if v.elem_bytes != 8 || v.ptr.is_null() || idx < 0 || idx >= v.len {
         return;
     }
+    // SAFETY: `idx` is below the vec's length (checked above).
     let p = unsafe { v.ptr.add((idx as usize) * 8) };
+    // SAFETY: `p` addresses one 8-byte element.
     let raw = unsafe { slot_read_word(p) }.expose_provenance();
     // A slot storing back what it already holds keeps its one share.
     if raw == 0 || raw == (incoming as usize) {
@@ -1505,23 +1819,33 @@ pub(crate) unsafe fn vec_release_owned_elem(v: &GosVec, idx: i64, incoming: i64)
     }
     let old: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
     match v.elem_kind {
+        // SAFETY: a non-null element of a `STRING` vec is a string share the vec holds.
         vec_elem_kind::STRING => unsafe {
             crate::c_abi::string::gos_rt_str_free_typed(old.cast());
         },
+        // SAFETY: a non-null element of a `VEC` vec is a `Vec` the vec owns.
         vec_elem_kind::VEC => unsafe { crate::c_abi::map::gos_rt_vec_free(old.cast()) },
+        // SAFETY: a non-null element of a `MAP` vec is a `Map` the vec owns.
         vec_elem_kind::MAP => unsafe { crate::c_abi::map::gos_rt_map_free(old.cast()) },
+        // SAFETY: a non-null element of a `SET` vec is a `Set` the vec owns.
         vec_elem_kind::SET => unsafe { crate::c_abi::map::gos_rt_set_free(old.cast()) },
+        // SAFETY: a non-null element of an `RC_ENUM` vec is a node share the vec holds.
         vec_elem_kind::RC_ENUM => unsafe { crate::c_abi::rc::gos_rt_rc_release(old) },
+        // SAFETY: a non-null element of a `JSON` vec is a handle the vec owns.
         vec_elem_kind::JSON => unsafe { crate::c_abi::json::gos_rt_json_free(old.cast()) },
         _ => {}
     }
 }
 
 pub(crate) unsafe fn vec_elem_store_i64(v: &GosVec, idx: i64, value: i64) {
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     let p = unsafe { v.ptr.add((idx as usize) * (v.elem_bytes as usize)) };
     match v.elem_bytes {
+        // SAFETY: `p` addresses one 1-byte element.
         1 => unsafe { p.write(value as u8) },
+        // SAFETY: `p` addresses one 2-byte element.
         2 => unsafe { p.cast::<u16>().write_unaligned(value as u16) },
+        // SAFETY: `p` addresses one 4-byte element.
         4 => unsafe { p.cast::<u32>().write_unaligned(value as u32) },
         _ => {
             debug_assert!(
@@ -1529,6 +1853,7 @@ pub(crate) unsafe fn vec_elem_store_i64(v: &GosVec, idx: i64, value: i64) {
                 "vec_elem_store_i64: unexpected elem_bytes {}",
                 v.elem_bytes
             );
+            // SAFETY: `p` addresses one element of at least 8 bytes.
             unsafe { p.cast::<i64>().write_unaligned(value) };
         }
     }
@@ -1545,6 +1870,7 @@ pub(crate) unsafe fn vec_elem_store_i64(v: &GosVec, idx: i64, value: i64) {
 /// `slot` addresses eight readable bytes.
 #[inline]
 pub(crate) unsafe fn slot_read_word(slot: *const u8) -> *mut u8 {
+    // SAFETY: this `unsafe fn`'s caller passes `slot` addressing one 8-byte word.
     let raw = unsafe { slot.cast::<u64>().read_unaligned() };
     std::ptr::with_exposed_provenance_mut(usize::try_from(raw).unwrap_or_default())
 }
@@ -1557,6 +1883,7 @@ pub(crate) unsafe fn slot_read_word(slot: *const u8) -> *mut u8 {
 #[inline]
 pub(crate) unsafe fn slot_write_word(slot: *mut u8, child: *mut u8) {
     let raw = child.expose_provenance() as u64;
+    // SAFETY: this `unsafe fn`'s caller passes `slot` addressing one writable 8-byte word.
     unsafe { slot.cast::<u64>().write_unaligned(raw) };
 }
 
@@ -1581,8 +1908,9 @@ pub fn vec_set_rc(v: &GosVec, rc: u16) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_new(elem_bytes: u32) -> *mut GosVec {
+pub extern "C" fn gos_rt_vec_new(elem_bytes: u32) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: the header's pointer fields are null, so nothing it names needs to be live.
         unsafe {
             alloc_vec_header(GosVec {
                 len: 0,
@@ -1636,9 +1964,10 @@ fn header_elem_kind(requested: u8, site: &str) -> u8 {
 /// out-of-range values fall back to `PRIMITIVE` with an `eprintln!`
 /// warning.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_new_typed(elem_bytes: u32, elem_kind: u8) -> *mut GosVec {
+pub extern "C" fn gos_rt_vec_new_typed(elem_bytes: u32, elem_kind: u8) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         let kind = header_elem_kind(elem_kind, "gos_rt_vec_new_typed");
+        // SAFETY: the header's pointer fields are null, so nothing it names needs to be live.
         unsafe {
             alloc_vec_header(GosVec {
                 len: 0,
@@ -1703,13 +2032,13 @@ pub(crate) unsafe fn free_vec_buffer(ptr: *mut u8, bytes: usize) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_with_capacity(elem_bytes: u32, cap: i64) -> *mut GosVec {
+pub extern "C" fn gos_rt_vec_with_capacity(elem_bytes: u32, cap: i64) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         // Header + reserved element buffer in one `Box<InlineVec>` (or a
         // separate buffer for a capacity larger than the inline slot). Only
         // initialized slots below len are readable; spare split capacity is
         // intentionally not zero-filled.
-        unsafe { alloc_vec_with_capacity(elem_bytes, vec_elem_kind::PRIMITIVE, cap) }
+        alloc_vec_with_capacity(elem_bytes, vec_elem_kind::PRIMITIVE, cap)
     })
 }
 
@@ -1732,12 +2061,13 @@ pub unsafe extern "C" fn gos_rt_vec_repeat_primitive(
         if !matches!(elem_bytes, 1 | 2 | 4 | 8) {
             crate::c_abi::panic::panic_text("invalid primitive array element width");
         }
-        let vec = unsafe { alloc_vec_with_capacity(elem_bytes, vec_elem_kind::PRIMITIVE, count) };
+        let vec = alloc_vec_with_capacity(elem_bytes, vec_elem_kind::PRIMITIVE, count);
         if vec.is_null() {
             return vec;
         }
         let bytes = checked_buffer_bytes(count as usize, elem_bytes as usize);
         if bytes != 0 {
+            // SAFETY: `vec` is the non-null vec made above with room for `count` elements.
             let data = unsafe { (*vec).ptr.as_ptr() };
             let encoded = value.to_ne_bytes();
             let width = elem_bytes as usize;
@@ -1745,20 +2075,25 @@ pub unsafe extern "C" fn gos_rt_vec_repeat_primitive(
             if pattern.iter().all(|byte| *byte == pattern[0]) {
                 // Every byte of the element is the same, so the whole buffer is
                 // one fill - the case a zeroed or byte-repeating element takes.
+                // SAFETY: `data` holds `bytes` bytes, the buffer's size.
                 unsafe { std::ptr::write_bytes(data, pattern[0], bytes) };
             } else {
                 // Write one element, then double the filled region until the
                 // buffer is covered: each step is one `memcpy` rather than one
                 // call per element.
+                // SAFETY: `data` holds at least one element of `width` bytes.
                 unsafe { std::ptr::copy_nonoverlapping(pattern.as_ptr(), data, width) };
                 let mut filled = width;
                 while filled < bytes {
                     let step = filled.min(bytes - filled);
+                    // SAFETY: `filled + step <= bytes`, and the source and destination ranges do
+                    // not overlap.
                     unsafe { std::ptr::copy_nonoverlapping(data, data.add(filled), step) };
                     filled += step;
                 }
             }
         }
+        // SAFETY: `vec` is the vec made above, whose `count` elements are now written.
         unsafe { (*vec).len = count };
         vec
     })
@@ -1770,14 +2105,14 @@ pub unsafe extern "C" fn gos_rt_vec_repeat_primitive(
 /// encoding. Out-of-range tags fall back to `PRIMITIVE` with an
 /// `eprintln!` warning.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_vec_with_capacity_typed(
+pub extern "C" fn gos_rt_vec_with_capacity_typed(
     elem_bytes: u32,
     cap: i64,
     elem_kind: u8,
 ) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         let kind = header_elem_kind(elem_kind, "gos_rt_vec_with_capacity_typed");
-        unsafe { alloc_vec_with_capacity(elem_bytes, kind, cap) }
+        alloc_vec_with_capacity(elem_bytes, kind, cap)
     })
 }
 
@@ -1807,11 +2142,13 @@ pub unsafe extern "C" fn gos_rt_vec_from_arr(
         // Header + element buffer in one `Box<InlineVec>` (inline for a
         // small array, else a separate buffer); `ptr` lands at the data
         // region either way, so the copy target is uniform.
-        let v = unsafe { alloc_box_vec(elem_bytes, vec_elem_kind::PRIMITIVE, len, len) };
+        let v = alloc_box_vec(elem_bytes, vec_elem_kind::PRIMITIVE, len, len);
         if n > 0 && !data.is_null() {
             let eb = elem_bytes as usize;
             if eb < 8 {
                 for i in 0..(len as usize) {
+                    // SAFETY: `i` is below `len`: the source holds `len` 8-byte slots and the vec
+                    // `len` elements of `eb` bytes.
                     unsafe {
                         std::ptr::copy_nonoverlapping(
                             data.add(i * 8),
@@ -1821,6 +2158,8 @@ pub unsafe extern "C" fn gos_rt_vec_from_arr(
                     }
                 }
             } else {
+                // SAFETY: `data` is this shim's array argument of `n` bytes, and the vec holds
+                // `n` bytes (C-ABI contract).
                 unsafe { std::ptr::copy_nonoverlapping(data, (*v).ptr.as_ptr(), n) };
             }
         }
@@ -1843,8 +2182,10 @@ pub unsafe extern "C" fn gos_rt_vec_from_packed_arr(
             crate::c_abi::panic::panic_text("Vec length must be non-negative");
         }
         let n = checked_buffer_bytes(len as usize, elem_bytes as usize);
-        let v = unsafe { alloc_box_vec(elem_bytes.max(1), vec_elem_kind::PRIMITIVE, len, len) };
+        let v = alloc_box_vec(elem_bytes.max(1), vec_elem_kind::PRIMITIVE, len, len);
         if n > 0 && !data.is_null() {
+            // SAFETY: `data` is this shim's array argument of `n` bytes, and the vec holds `n`
+            // bytes (C-ABI contract).
             unsafe { std::ptr::copy_nonoverlapping(data, (*v).ptr.as_ptr(), n) };
         }
         v
@@ -1864,7 +2205,7 @@ pub unsafe extern "C" fn gos_rt_nested_arr_to_vec(
 ) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
         // Outer Vec holds pointer-sized elements (*mut GosVec).
-        let outer = unsafe { gos_rt_vec_new(8) };
+        let outer = gos_rt_vec_new(8);
         if raw.is_null() || outer_len <= 0 || inner_len <= 0 || inner_elem_bytes <= 0 {
             return outer;
         }
@@ -1873,11 +2214,15 @@ pub unsafe extern "C" fn gos_rt_nested_arr_to_vec(
         // `gos_rt_vec_from_arr` repacks each row's sub-word elements.
         let stride = checked_buffer_bytes(inner_len as usize, 8);
         for i in 0..(outer_len as usize) {
+            // SAFETY: `raw` is this shim's argument of `outer_len` rows of `stride` bytes (C-ABI
+            // contract).
             let inner_raw = unsafe { raw.add(i * stride) };
             let inner_vec =
+                // SAFETY: `inner_raw` is one row of `inner_len` 8-byte slots.
                 unsafe { gos_rt_vec_from_arr(inner_elem_bytes as u32, inner_raw, inner_len) };
             let inner_ptr_i64 = inner_vec as i64;
             let bytes = inner_ptr_i64.to_ne_bytes();
+            // SAFETY: `outer` is the live vec made above, and `bytes` one 8-byte element.
             unsafe { gos_rt_vec_push(outer, bytes.as_ptr()) };
         }
         outer
@@ -1890,6 +2235,7 @@ pub unsafe extern "C" fn gos_rt_vec_len(v: *const GosVec) -> i64 {
         if v.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*v).len }
     })
 }
@@ -1907,6 +2253,7 @@ pub unsafe extern "C" fn gos_rt_vec_capacity(v: *const GosVec) -> i64 {
         if v.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*v).cap.max(0) }
     })
 }
@@ -1921,6 +2268,8 @@ pub unsafe extern "C" fn gos_rt_vec_capacity(v: *const GosVec) -> i64 {
 pub unsafe extern "C" fn gos_rt_vec_push_i64(v: *mut GosVec, value: i64) {
     ffi_entry!((), {
         let bytes = value.to_ne_bytes();
+        // SAFETY: `v` is this shim's `Vec` argument, null or live (C-ABI contract), and `bytes`
+        // one 8-byte element.
         unsafe { gos_rt_vec_push(v, bytes.as_ptr()) };
     });
 }
@@ -1932,6 +2281,8 @@ pub unsafe extern "C" fn gos_rt_vec_push_i64(v: *mut GosVec, value: i64) {
 pub unsafe extern "C" fn gos_rt_vec_push_i128(v: *mut GosVec, value: i128) {
     ffi_entry!((), {
         let bytes = value.to_ne_bytes();
+        // SAFETY: `v` is this shim's `Vec` argument, null or live (C-ABI contract), and `bytes`
+        // one 16-byte element.
         unsafe { gos_rt_vec_push(v, bytes.as_ptr()) };
     });
 }
@@ -1944,11 +2295,14 @@ pub unsafe extern "C" fn gos_rt_vec_get_i128(v: *const GosVec, idx: i64) -> i128
         if v.is_null() {
             return 0;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if idx < 0 || idx >= vec.len {
             return 0;
         }
+        // SAFETY: `idx` is below the vec's length (checked above).
         let p = unsafe { vec.ptr.add((idx as usize) * (vec.elem_bytes as usize)) };
+        // SAFETY: `p` addresses one 16-byte element.
         unsafe { (p as *const i128).read_unaligned() }
     })
 }
@@ -1964,11 +2318,15 @@ pub unsafe extern "C" fn gos_rt_vec_set_i128(v: *mut GosVec, idx: i64, value: i1
         if v.is_null() {
             crate::c_abi::panic::panic_oob_text("vec index", idx, 0);
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument, not
+        // otherwise accessed during the call (C-ABI contract).
         let vec = unsafe { &mut *v };
         if idx < 0 || idx >= vec.len {
             crate::c_abi::panic::panic_oob_text("vec index", idx, vec.len);
         }
+        // SAFETY: `idx` is below the vec's length (checked above).
         let p = unsafe { vec.ptr.add((idx as usize) * (vec.elem_bytes as usize)) };
+        // SAFETY: `p` addresses one 16-byte element.
         unsafe { (p as *mut i128).write_unaligned(value) };
     });
 }
@@ -2006,7 +2364,8 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
             let new_buf = alloc_vec_buffer(new_bytes);
             crate::c_abi::ledger::vec_split_alloc(
                 new_bytes,
-                allocator_usable_bytes(new_buf, new_bytes),
+                // SAFETY: `new_buf` is the block the global allocator just returned.
+                unsafe { allocator_usable_bytes(new_buf, new_bytes) },
             );
             new_buf
         } else {
@@ -2014,6 +2373,8 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
             region_buf
         };
         if !vec.ptr.is_null() && old_bytes > 0 {
+            // SAFETY: `new_buf` holds at least `old_bytes` bytes, and the old buffer holds
+            // `old_bytes`; they do not overlap.
             unsafe {
                 std::ptr::copy_nonoverlapping(vec.ptr.as_ptr(), new_buf, old_bytes);
             }
@@ -2026,14 +2387,21 @@ unsafe fn vec_reserve_to(vec: &mut GosVec, min_cap: i64, exact: bool) {
     // Spare split capacity is intentionally uninitialised; only the old live
     // slots copied below are readable.
     let new_buf = alloc_vec_buffer(new_bytes);
-    crate::c_abi::ledger::vec_split_alloc(new_bytes, allocator_usable_bytes(new_buf, new_bytes));
+    // SAFETY: `new_buf` is the block the global allocator just returned.
+    crate::c_abi::ledger::vec_split_alloc(new_bytes, unsafe {
+        allocator_usable_bytes(new_buf, new_bytes)
+    });
     let was_split = vec.region_flag & VEC_SPLIT_FLAG != 0;
     if !vec.ptr.is_null() && old_bytes > 0 {
+        // SAFETY: `new_buf` holds at least `old_bytes` bytes, and the old buffer holds
+        // `old_bytes`; they do not overlap.
         unsafe {
             std::ptr::copy_nonoverlapping(vec.ptr.as_ptr(), new_buf, old_bytes);
         }
         if was_split {
             // The old buffer was a standalone `alloc_vec_buffer` block.
+            // SAFETY: a split vec's old buffer is the standalone block `alloc_vec_buffer` made,
+            // of `old_bytes`, used nowhere else now.
             unsafe { free_vec_buffer(vec.ptr.as_ptr(), old_bytes) };
         }
     }
@@ -2056,6 +2424,7 @@ pub unsafe fn vec_byte_slice<'a>(v: *const GosVec) -> Option<&'a [u8]> {
     if v.is_null() {
         return None;
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let header = unsafe { &*v };
     let len = usize::try_from(header.len.max(0)).unwrap_or(0);
     if header.ptr.is_null() || len == 0 {
@@ -2064,6 +2433,7 @@ pub unsafe fn vec_byte_slice<'a>(v: *const GosVec) -> Option<&'a [u8]> {
     if header.elem_bytes != 1 {
         return None;
     }
+    // SAFETY: a byte vec holds `len` initialised bytes at a non-null `ptr` (checked above).
     Some(unsafe { std::slice::from_raw_parts(header.ptr.as_const_ptr(), len) })
 }
 
@@ -2087,6 +2457,7 @@ pub unsafe fn vec_bytes_window<'a>(
     if v.is_null() || end < start {
         return None;
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let header = unsafe { &*v };
     let len = usize::try_from(header.len.max(0)).unwrap_or(0);
     if end > len {
@@ -2099,10 +2470,12 @@ pub unsafe fn vec_bytes_window<'a>(
         return None;
     }
     if header.elem_bytes == 1 {
+        // SAFETY: `start..end` lies inside the byte vec's `len` bytes (checked above).
         return Some(Cow::Borrowed(unsafe {
             std::slice::from_raw_parts(header.ptr.as_const_ptr().add(start), end - start)
         }));
     }
+    // SAFETY: `start..end` lies inside the vec's `len` 8-byte words (checked above).
     let words = unsafe {
         std::slice::from_raw_parts(
             header.ptr.as_const_ptr().cast::<i64>().add(start),
@@ -2122,8 +2495,10 @@ pub unsafe fn vec_bytes_window<'a>(
 /// returned value.
 #[must_use]
 pub unsafe fn vec_bytes_cow<'a>(v: *const GosVec) -> std::borrow::Cow<'a, [u8]> {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `vec_byte_slice` accepts.
     match unsafe { vec_byte_slice(v) } {
         Some(slice) => std::borrow::Cow::Borrowed(slice),
+        // SAFETY: this `unsafe fn`'s caller passes `v` null or live, which `vec_bytes` accepts.
         None => std::borrow::Cow::Owned(unsafe { vec_bytes(v) }),
     }
 }
@@ -2141,14 +2516,18 @@ pub unsafe fn vec_bytes(v: *const GosVec) -> Vec<u8> {
     if v.is_null() {
         return Vec::new();
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let header = unsafe { &*v };
     let len = usize::try_from(header.len.max(0)).unwrap_or(0);
     if header.ptr.is_null() || len == 0 {
         return Vec::new();
     }
     if header.elem_bytes == 1 {
+        // SAFETY: a byte vec holds `len` initialised bytes at a non-null `ptr` (checked above).
         return unsafe { std::slice::from_raw_parts(header.ptr.as_const_ptr(), len) }.to_vec();
     }
+    // SAFETY: a word vec holds `len` initialised 8-byte words at a non-null `ptr` (checked
+    // above).
     let words = unsafe { std::slice::from_raw_parts(header.ptr.as_const_ptr().cast::<i64>(), len) };
     words.iter().map(|&w| w as u8).collect()
 }
@@ -2161,8 +2540,10 @@ pub unsafe extern "C" fn gos_rt_vec_reserve_at_least(v: *mut GosVec, min_cap: i6
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         bump_vec_mutation_generation(vec);
+        // SAFETY: `vec` is this shim's live `Vec`, not otherwise accessed during the call.
         unsafe { vec_reserve_to(vec, min_cap, false) };
     });
 }
@@ -2175,8 +2556,10 @@ pub unsafe extern "C" fn gos_rt_vec_reserve_exact(v: *mut GosVec, cap: i64) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         bump_vec_mutation_generation(vec);
+        // SAFETY: `vec` is this shim's live `Vec`, not otherwise accessed during the call.
         unsafe { vec_reserve_to(vec, cap, true) };
     });
 }
@@ -2191,6 +2574,7 @@ unsafe fn vec_reserve_as_pushed(vec: &mut GosVec, need: i64) {
     while cap < need {
         cap = next_geometric_cap(cap, cap.saturating_add(1));
     }
+    // SAFETY: this `unsafe fn`'s caller passes `vec` a live `Vec`.
     unsafe { vec_reserve_to(vec, cap, true) };
 }
 
@@ -2212,22 +2596,28 @@ pub unsafe extern "C" fn gos_rt_vec_extend_str_bytes(
         if v.is_null() || s.is_null() {
             return;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes: &[u8] = unsafe { crate::c_abi::string::gos_str_arg_bytes(s) };
         if bytes.is_empty() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         let added = bytes.len() as i64;
         vec.mutation_generation = vec.mutation_generation.wrapping_add(bytes.len() as u64);
         let need = vec.len.saturating_add(added);
+        // SAFETY: `vec` is this shim's live `Vec`, not otherwise accessed during the call.
         unsafe { vec_reserve_as_pushed(vec, need) };
         let stride = vec.elem_bytes as usize;
+        // SAFETY: the reserve above made room for `added` more elements past `len`.
         let base = unsafe { vec.ptr.add((vec.len as usize) * stride) };
         if stride == 1 {
+            // SAFETY: `base` has room for `bytes.len()` bytes.
             unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), base, bytes.len()) };
         } else {
             for (i, &b) in bytes.iter().enumerate() {
                 let word = u64::from(b).to_le_bytes();
+                // SAFETY: `base` has room for `bytes.len()` elements of `stride` bytes.
                 unsafe {
                     crate::c_abi::string::copy_small_bytes(
                         word.as_ptr(),
@@ -2247,10 +2637,12 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
         if v.is_null() || elem.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         bump_vec_mutation_generation(vec);
         if vec.len == vec.cap {
             // Grow geometrically (cap -> max(4, cap*2)).
+            // SAFETY: `vec` is this shim's live `Vec`, not otherwise accessed during the call.
             unsafe { vec_reserve_to(vec, vec.len.saturating_add(1), false) };
         }
         // STRING / VEC / MAP elements are pointer-sized and transferred by
@@ -2263,6 +2655,7 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
         // since the container held the copy, not the original). `gos_rt_str_free`
         // tag-checks each pointer at deep-free, so a stored `.rodata` literal or
         // region string is skipped rather than mis-freed.
+        // SAFETY: `len < cap` after the reserve above, so the slot lies inside the buffer.
         let dst = unsafe { vec.ptr.add((vec.len as usize) * (vec.elem_bytes as usize)) };
         if vec.elem_bytes as usize == 8
             && matches!(
@@ -2274,10 +2667,14 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
                     | vec_elem_kind::RC_ENUM
             )
         {
+            // SAFETY: `elem` is this shim's element argument of the vec's width (C-ABI contract).
             let child = unsafe { elem.cast::<*mut u8>().read_unaligned() };
             let _ = child.expose_provenance();
+            // SAFETY: `dst` is the free slot past the length.
             unsafe { dst.cast::<*mut u8>().write_unaligned(child) };
         } else {
+            // SAFETY: `elem` is this shim's element argument of the vec's width, and `dst` the
+            // free slot past the length (C-ABI contract).
             unsafe {
                 crate::c_abi::string::copy_small_bytes(elem, dst, vec.elem_bytes as usize);
             }
@@ -2287,14 +2684,18 @@ pub unsafe extern "C" fn gos_rt_vec_push(v: *mut GosVec, elem: *const u8) {
         // the source slots (which keep their own shares and release them
         // when the source dies); the vec's copy must hold its own.
         if vec.elem_kind == vec_elem_kind::AGGR_GUARDED {
-            let meta = vec_elem_meta(v);
+            // SAFETY: `v` is this shim's argument, as `vec_elem_meta` requires (C-ABI contract).
+            let meta = unsafe { vec_elem_meta(v) };
             if !meta.is_null() {
+                // SAFETY: `dst` is the new element, laid out as `meta` describes.
                 unsafe { crate::c_abi::rc::gos_rt_aggr_retain_children(dst, meta) };
             }
         }
         // Same sharing contract for owned-slot-children vecs: the source
         // slot keeps its share, the vec's copy holds its own.
         if vec.elem_kind == vec_elem_kind::AGGR_OWNED {
+            // SAFETY: `v` is live, and `dst` the new element laid out as its slot children
+            // describe.
             unsafe { vec_retain_slot_children(v, dst) };
         }
     });
@@ -2330,6 +2731,7 @@ unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
     if v.is_null() || idx < 0 {
         return;
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let vec = unsafe { &*v };
     if vec.ptr.is_null() || idx >= vec.len {
         return;
@@ -2338,26 +2740,33 @@ unsafe fn vec_release_elem_at(v: *mut GosVec, idx: i64) {
     if stride == 0 {
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     let slot = unsafe { vec.ptr.add((idx as usize) * stride) };
     if vec.elem_kind == vec_elem_kind::AGGR_GUARDED {
-        let meta = vec_elem_meta(vec);
+        // SAFETY: `vec` is a live `Vec` (a reference).
+        let meta = unsafe { vec_elem_meta(vec) };
         if !meta.is_null() {
+            // SAFETY: `slot` is the element, laid out as `meta` describes.
             unsafe { crate::c_abi::rc::gos_rt_aggr_release_children(slot, meta) };
         }
         return;
     }
     if vec.elem_kind == vec_elem_kind::AGGR_OWNED {
+        // SAFETY: `slot` is the element, laid out as the vec's slot children describe.
         unsafe { vec_release_slot_children(vec, slot) };
         return;
     }
     if vec.elem_bytes as usize != 8 {
         return;
     }
+    // SAFETY: `slot` is an 8-byte element.
     let raw = unsafe { slot_read_word(slot) }.expose_provenance();
     if raw == 0 {
         return;
     }
     let ptr: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+    // SAFETY: a non-null element holds the share of the kind the vec's element kind names, given
+    // back here.
     unsafe {
         match vec.elem_kind {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_free_typed(ptr.cast()),
@@ -2381,15 +2790,21 @@ pub(crate) unsafe fn vec_push_elem_from(dst: *mut GosVec, src: *const GosVec, id
     if dst.is_null() || src.is_null() {
         return false;
     }
+    // SAFETY: `src` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `Vec`.
     let src_ref = unsafe { &*src };
     let stride = src_ref.elem_bytes as usize;
     if stride == 0 || src_ref.ptr.is_null() || idx < 0 || idx >= src_ref.len {
         return false;
     }
+    // SAFETY: `idx` is below `src`'s length (checked above).
     if !unsafe { vec_retain_elem_at_for_copy(src, idx) } {
         return false;
     }
+    // SAFETY: `idx` is below `src`'s length (checked above).
     let elem = unsafe { src_ref.ptr.add((idx as usize) * stride) };
+    // SAFETY: this `unsafe fn`'s caller passes `dst` a live vec of `src`'s width, and `elem` is
+    // one element.
     unsafe { gos_rt_vec_push(dst, elem) };
     true
 }
@@ -2403,6 +2818,8 @@ pub(crate) unsafe fn vec_elem_bytes_eq(a: *const GosVec, i: i64, b: *const GosVe
     if a.is_null() || b.is_null() {
         return false;
     }
+    // SAFETY: `a` and `b` are non-null (checked above) and, per this `unsafe fn`'s caller, live
+    // vecs.
     let (av, bv) = unsafe { (&*a, &*b) };
     let stride = av.elem_bytes as usize;
     if stride == 0 || stride != bv.elem_bytes as usize {
@@ -2411,8 +2828,11 @@ pub(crate) unsafe fn vec_elem_bytes_eq(a: *const GosVec, i: i64, b: *const GosVe
     if av.ptr.is_null() || bv.ptr.is_null() || i < 0 || j < 0 || i >= av.len || j >= bv.len {
         return false;
     }
+    // SAFETY: `i` is below `a`'s length (checked above).
     let pa = unsafe { av.ptr.add((i as usize) * stride) };
+    // SAFETY: `j` is below `b`'s length (checked above).
     let pb = unsafe { bv.ptr.add((j as usize) * stride) };
+    // SAFETY: `pa` and `pb` each address one `stride`-byte element.
     unsafe { std::slice::from_raw_parts(pa, stride) == std::slice::from_raw_parts(pb, stride) }
 }
 
@@ -2420,6 +2840,7 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
     if v.is_null() || idx < 0 {
         return false;
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`.
     let vec = unsafe { &*v };
     if vec.ptr.is_null() || idx >= vec.len {
         return false;
@@ -2428,6 +2849,7 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
     if stride == 0 {
         return false;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `idx` below the vec's length.
     let slot = unsafe { vec.ptr.add((idx as usize) * stride) };
     if matches!(
         vec.elem_kind,
@@ -2441,11 +2863,14 @@ unsafe fn vec_retain_elem_at_for_copy(v: *const GosVec, idx: i64) -> bool {
     if vec.elem_bytes as usize != 8 {
         return false;
     }
+    // SAFETY: `slot` is an 8-byte element.
     let raw = unsafe { slot_read_word(slot) }.expose_provenance();
     if raw == 0 {
         return true;
     }
     let ptr: *mut u8 = std::ptr::with_exposed_provenance_mut(raw);
+    // SAFETY: a non-null element holds a value of the kind the vec's element kind names, which
+    // the copy takes a share of.
     unsafe {
         match vec.elem_kind {
             vec_elem_kind::STRING => crate::c_abi::string::gos_rt_str_retain(ptr.cast()),
@@ -2474,13 +2899,20 @@ pub unsafe extern "C" fn gos_rt_vec_clear(v: *mut GosVec) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let len = unsafe { (*v).len.max(0) };
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument, not
+        // otherwise accessed during the call (C-ABI contract).
         unsafe { bump_vec_mutation_generation(&mut *v) };
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         if !vec_elems_release_nothing(unsafe { &*v }) {
             for idx in 0..len {
+                // SAFETY: `idx` is below the vec's length.
                 unsafe { vec_release_elem_at(v, idx) };
             }
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument, not
+        // otherwise accessed during the call (C-ABI contract).
         unsafe {
             (*v).len = 0;
         }
@@ -2498,16 +2930,23 @@ pub unsafe extern "C" fn gos_rt_vec_truncate(v: *mut GosVec, len: i64) {
             crate::c_abi::panic::panic_text("truncate: length must be non-negative");
         }
         let new_len = len;
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let old_len = unsafe { (*v).len.max(0) };
         if new_len >= old_len {
             return;
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument, not
+        // otherwise accessed during the call (C-ABI contract).
         unsafe { bump_vec_mutation_generation(&mut *v) };
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         if !vec_elems_release_nothing(unsafe { &*v }) {
             for idx in new_len..old_len {
+                // SAFETY: `idx` is below the old length.
                 unsafe { vec_release_elem_at(v, idx) };
             }
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument, not
+        // otherwise accessed during the call (C-ABI contract).
         unsafe {
             (*v).len = new_len;
         }
@@ -2524,11 +2963,15 @@ pub unsafe extern "C" fn gos_rt_vec_assign(dst: *mut GosVec, src: *const GosVec)
         if dst.is_null() || src.is_null() || std::ptr::addr_eq(dst.cast_const(), src) {
             return;
         }
+        // SAFETY: `dst` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         unsafe { gos_rt_vec_clear(dst) };
+        // SAFETY: `src` is a handle from compiled code, checked non-null above and live for the whole call.
         let s = unsafe { &*src };
         let len = s.len.max(0);
         let stride = s.elem_bytes as usize;
         {
+            // SAFETY: `dst` is a handle from compiled code, checked non-null above and live for the whole call.
             let d = unsafe { &mut *dst };
             // The emptied buffer holds bytes, so a new slot width recounts
             // its capacity rather than reallocating it.
@@ -2538,9 +2981,13 @@ pub unsafe extern "C" fn gos_rt_vec_assign(dst: *mut GosVec, src: *const GosVec)
                 d.cap = bytes.checked_div(stride).unwrap_or(0) as i64;
             }
             d.elem_kind = s.elem_kind;
+            // SAFETY: `d` is the non-null destination, not otherwise accessed during the call
+            // (C-ABI contract).
             unsafe { vec_reserve_to(d, len, true) };
         }
         if len > 0 && stride > 0 && !s.ptr.is_null() {
+            // SAFETY: the destination holds room for `len` elements of `stride` bytes, and the
+            // source `len` elements; they are distinct vecs.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     s.ptr.as_ptr(),
@@ -2549,7 +2996,9 @@ pub unsafe extern "C" fn gos_rt_vec_assign(dst: *mut GosVec, src: *const GosVec)
                 );
             }
         }
+        // SAFETY: `dst` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*dst).len = len };
+        // SAFETY: `dst` holds raw copies of `src`'s elements.
         unsafe { vec_adopt_element_shares(src, dst) };
     });
 }
@@ -2566,15 +3015,21 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
             return;
         }
         if std::ptr::addr_eq(dst.cast_const(), src) {
+            // SAFETY: `src` is this shim's argument, live for the call (C-ABI contract) or null,
+            // which `gos_rt_vec_clone` accepts.
             let snapshot = unsafe { crate::c_abi::gos_rt_vec_clone(src) };
             if snapshot.is_null() {
                 return;
             }
+            // SAFETY: `dst` is live and `snapshot` a live copy of `src`.
             unsafe { gos_rt_vec_extend(dst, snapshot) };
+            // SAFETY: `snapshot` is the copy made above, owned here.
             unsafe { crate::c_abi::map::gos_rt_vec_free(snapshot) };
             return;
         }
+        // SAFETY: `src` is a handle from compiled code, checked non-null above and live for the whole call.
         let src_ref = unsafe { &*src };
+        // SAFETY: `dst` is a handle from compiled code, checked non-null above and live for the whole call.
         let dst_ref = unsafe { &*dst };
         if src_ref.elem_bytes != dst_ref.elem_bytes || src_ref.elem_kind != dst_ref.elem_kind {
             return;
@@ -2596,10 +3051,15 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
             if len == 0 {
                 return;
             }
+            // SAFETY: `dst` is a handle from compiled code, checked non-null above and live for the whole call.
             let dst_mut = unsafe { &mut *dst };
             dst_mut.mutation_generation = dst_mut.mutation_generation.wrapping_add(len as u64);
             let need = dst_mut.len.saturating_add(len);
+            // SAFETY: `dst_mut` is this shim's live destination, not otherwise accessed during
+            // the call.
             unsafe { vec_reserve_as_pushed(dst_mut, need) };
+            // SAFETY: the reserve above made room for `len` elements past the destination's
+            // length.
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     src_ref.ptr.as_ptr(),
@@ -2611,10 +3071,14 @@ pub unsafe extern "C" fn gos_rt_vec_extend(dst: *mut GosVec, src: *const GosVec)
             return;
         }
         for idx in 0..len {
+            // SAFETY: `idx` is below `src`'s length.
             if !unsafe { vec_retain_elem_at_for_copy(src, idx) } {
                 return;
             }
+            // SAFETY: `idx` is below `src`'s length.
             let elem = unsafe { src_ref.ptr.add((idx as usize) * stride) };
+            // SAFETY: `dst` is this shim's live destination of `src`'s width, and `elem` one
+            // element (C-ABI contract).
             unsafe { gos_rt_vec_push(dst, elem) };
         }
     });
@@ -2685,8 +3149,14 @@ pub unsafe extern "C" fn gos_rt_binding_variant_to_result(p: *const u8) -> i128 
         }
         // GosVariant layout (repr(C) in gossamer-binding):
         // tag i32 | payload_len i32 | payload *mut GosVariantValue.
+        // SAFETY: `p` is this shim's `u8` argument, non-null (checked above), live for the call
+        // (C-ABI contract).
         let tag = unsafe { *p.cast::<i32>() };
+        // SAFETY: `p` is this shim's `u8` argument, non-null (checked above), live for the call
+        // (C-ABI contract).
         let payload_len = unsafe { *p.add(4).cast::<i32>() };
+        // SAFETY: `p` is this shim's `u8` argument, non-null (checked above), live for the call
+        // (C-ABI contract).
         let payload_ptr = unsafe { *p.add(8).cast::<*const u8>() };
         let disc = i64::from(tag != 1);
         if payload_len <= 0 || payload_ptr.is_null() {
@@ -2694,12 +3164,16 @@ pub unsafe extern "C" fn gos_rt_binding_variant_to_result(p: *const u8) -> i128 
         }
         // GosVariantValue layout: tag i32 | (pad) | data union at +8.
         // Value tag 4 = string; see `gossamer-binding::native`.
+        // SAFETY: `payload_ptr` is the non-null variant payload, whose tag word is its first four
+        // bytes.
         let value_tag = unsafe { *payload_ptr.cast::<i32>() };
+        // SAFETY: the variant payload holds its data word at offset 8.
         let word = unsafe { *payload_ptr.add(8).cast::<i64>() };
         let payload = if value_tag == 4 && word != 0 {
             // HOST-CSTRING: a native Rust binding owns this pointer and
             // publishes it as a NUL-terminated C string, not a Gossamer
             // `String`, so it carries no length header.
+            // SAFETY: a non-zero string payload is a NUL-terminated C string the binding owns.
             let c = unsafe { std::ffi::CStr::from_ptr(word as *const std::ffi::c_char) };
             super::string::alloc_cstring(c.to_bytes()) as i64
         } else {
@@ -2737,8 +3211,12 @@ pub extern "C" fn gos_rt_result_payload_f64(r: i128) -> f64 {
 /// user enums). Construction heap-copied the inner 2-word value and
 /// stored its address in the payload word; this loads it back by
 /// value so the destination local holds `[disc, payload]` directly.
+///
+/// # Safety
+///
+/// The payload of `r` addresses the live two-word copy its construction made.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_payload_i128(r: i128) -> i128 {
+pub unsafe extern "C" fn gos_rt_result_payload_i128(r: i128) -> i128 {
     let addr = result_payload_of(r);
     if addr == 0 {
         return 0;
@@ -2770,15 +3248,26 @@ pub(crate) unsafe fn adt_fmt_string(value: *const u8, fmt: *const std::ffi::c_vo
     // the `ptr(ptr)` signature `AdtFmt` names, and `value` is the receiver
     // that `fmt` expects for its type.
     let f: AdtFmt = unsafe { std::mem::transmute::<*const std::ffi::c_void, AdtFmt>(fmt) };
+    // SAFETY: `f` is the formatter this `unsafe fn`'s contract names, and `value` its receiver.
     unsafe { take_rt_string(f(value)) }
 }
 
 /// Renders one enum payload word, extending [`debug_payload_string`] with the
 /// aggregate tag: the word is then the address of the payload's slot buffer
 /// and `fmt` its derived formatter.
-fn debug_payload_string_with(payload: i64, kind: i64, fmt: *const std::ffi::c_void) -> String {
+///
+/// # Safety
+///
+/// `payload` is a live value of the shape its descriptor names.
+unsafe fn debug_payload_string_with(
+    payload: i64,
+    kind: i64,
+    fmt: *const std::ffi::c_void,
+) -> String {
     if kind == i64::from(gossamer_abi::DEBUG_PAYLOAD_ADT) {
         let slots: *const u8 = std::ptr::with_exposed_provenance(payload as usize);
+        // SAFETY: `slots` is the aggregate payload and `fmt` its formatter (this `unsafe fn`'s
+        // contract).
         return unsafe { adt_fmt_string(slots, fmt) };
     }
     // A tuple payload is its slot buffer, and `fmt` addresses a tag stream
@@ -2789,10 +3278,13 @@ fn debug_payload_string_with(payload: i64, kind: i64, fmt: *const std::ffi::c_vo
         if slots.is_null() || tags.is_null() {
             return String::new();
         }
+        // SAFETY: `tags` is non-null (checked above), a tuple descriptor whose second byte is its
+        // arity.
         let arity = unsafe { *tags.add(1) } as usize;
         let mut out = String::new();
         let mut slot_cursor = 0usize;
         let mut tag_cursor = 2usize;
+        // SAFETY: `slots` holds the tuple, laid out as `tags` describes.
         unsafe {
             crate::c_abi::map::render_tuple_elements(
                 &mut out,
@@ -2812,10 +3304,12 @@ fn debug_payload_string_with(payload: i64, kind: i64, fmt: *const std::ffi::c_vo
         if tags.is_null() {
             return String::new();
         }
+        // SAFETY: `tags` is a non-null descriptor block (checked above).
         let tags = unsafe { crate::c_abi::map::DescStream::new(tags) };
         let mut out = String::new();
         let mut cursor = 0usize;
         let slot = std::ptr::from_ref(&payload).cast::<u8>();
+        // SAFETY: `slot` addresses the payload word, laid out as the descriptor describes.
         unsafe {
             crate::c_abi::map::render_desc_storage(
                 &mut out,
@@ -2827,14 +3321,19 @@ fn debug_payload_string_with(payload: i64, kind: i64, fmt: *const std::ffi::c_vo
         }
         return out;
     }
-    debug_payload_string(payload, kind)
+    // SAFETY: this function's contract covers `payload`.
+    unsafe { debug_payload_string(payload, kind) }
 }
 
 /// Renders a single enum payload word for `{:?}` Debug output, as the VM
 /// renders a nested value: a `char` and a `String` in the spelling that builds
 /// them. `kind`: 0=i64, 1=u64, 2=f64 (bit pattern), 3=bool, 4=char,
 /// 5=String pointer.
-fn debug_payload_string(payload: i64, kind: i64) -> String {
+///
+/// # Safety
+///
+/// `payload` is a live value of the shape its descriptor names.
+unsafe fn debug_payload_string(payload: i64, kind: i64) -> String {
     match kind {
         1 => (payload as u64).to_string(),
         2 => crate::builtins::format_float_debug(f64::from_bits(payload as u64)),
@@ -2854,6 +3353,7 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
                 let sptr: *const std::ffi::c_char =
                     std::ptr::with_exposed_provenance(payload as usize);
                 let mut out = String::new();
+                // SAFETY: a string payload is a live string body.
                 super::map::push_quoted_str(&mut out, &unsafe {
                     crate::c_abi::gos_str_arg_string(sptr)
                 });
@@ -2863,8 +3363,12 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
         // A collection payload arrives as its `GosVec` pointer, so the
         // element formatter that renders a bare `{:?}` of that vec renders
         // it inside the variant too.
+        // SAFETY: a payload of kind 6 is a live `Vec<i64>` or null, which the formatter accepts.
         6 => unsafe { take_rt_string(super::btmap::gos_rt_vec_format_i64(vec_ptr(payload), 0)) },
+        // SAFETY: a payload of kind 7 is a live `Vec<String>` or null, which the formatter
+        // accepts.
         7 => unsafe { take_rt_string(super::btmap::gos_rt_vec_format_string(vec_ptr(payload), 0)) },
+        // SAFETY: a payload of kind 8 is a live `Vec<f64>` or null, which the formatter accepts.
         8 => unsafe {
             take_rt_string(crate::c_abi::gos_rt_json_debug(
                 std::ptr::with_exposed_provenance(payload as usize),
@@ -2872,6 +3376,7 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
         },
         // An error payload renders as the colon-joined cause chain, the way
         // a bare `{}` on the error does.
+        // SAFETY: a payload of kind 10 is a live error or null, which the display accepts.
         10 => unsafe {
             take_rt_string(crate::c_abi::gos_rt_error_display(
                 std::ptr::with_exposed_provenance(payload as usize),
@@ -2882,6 +3387,8 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
         // A `dyn::Value` payload arrives as its runtime handle; render it
         // through the DynValue debug renderer, which quotes string payloads
         // the way the VM's Debug output does.
+        // SAFETY: a payload of kind 14 is a live `DynValue` handle or null, which the renderer
+        // accepts.
         14 => unsafe {
             take_rt_string(crate::c_abi::gos_rt_dyn_format(
                 std::ptr::with_exposed_provenance(payload as usize),
@@ -2892,7 +3399,11 @@ fn debug_payload_string(payload: i64, kind: i64) -> String {
 }
 
 /// Reinterprets a payload slot as the `GosVec` pointer it holds.
-fn vec_ptr(payload: i64) -> *const crate::c_abi::GosVec {
+///
+/// # Safety
+///
+/// A non-zero `payload` is a live `Vec` handle.
+unsafe fn vec_ptr(payload: i64) -> *const crate::c_abi::GosVec {
     std::ptr::with_exposed_provenance(payload as usize)
 }
 
@@ -2902,7 +3413,9 @@ unsafe fn take_rt_string(ptr: *mut std::ffi::c_char) -> String {
     if ptr.is_null() {
         return String::new();
     }
+    // SAFETY: this `unsafe fn`'s caller passes `ptr` live; non-null, checked above.
     let out = unsafe { crate::c_abi::gos_str_arg_string(ptr) };
+    // SAFETY: `ptr` is the fresh string this call took ownership of.
     unsafe { super::string::gos_rt_str_free(ptr) };
     out
 }
@@ -2910,15 +3423,21 @@ unsafe fn take_rt_string(ptr: *mut std::ffi::c_char) -> String {
 /// `{:?}` of an `Option<T>` (the by-value `i128` enum, disc 0 = Some): renders
 /// `Some(<payload>)` or `None`, matching the VM. `payload_kind` selects the
 /// payload formatter (see `debug_payload_string`).
+///
+/// # Safety
+///
+/// A `Some` payload of `opt` is a live value of the shape `payload_kind` names.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_debug_option(opt: i128, payload_kind: i64) -> *mut std::ffi::c_char {
+pub unsafe extern "C" fn gos_rt_debug_option(
+    opt: i128,
+    payload_kind: i64,
+) -> *mut std::ffi::c_char {
     let s = if result_disc_of(opt) != 0 {
         "None".to_string()
     } else {
-        format!(
-            "Some({})",
-            debug_payload_string(result_payload_of(opt), payload_kind)
-        )
+        // SAFETY: this function's contract covers the payload.
+        let payload = unsafe { debug_payload_string(result_payload_of(opt), payload_kind) };
+        format!("Some({payload})")
     };
     super::string::alloc_cstring(s.as_bytes())
 }
@@ -2926,17 +3445,28 @@ pub extern "C" fn gos_rt_debug_option(opt: i128, payload_kind: i64) -> *mut std:
 /// `{:?}` of a `Result<T, E>` (the by-value `i128` enum, disc 0 = Ok): renders
 /// `Ok(<payload>)` or `Err(<payload>)`, matching the VM. `ok_kind` / `err_kind`
 /// select the per-arm payload formatter.
+///
+/// # Safety
+///
+/// The payload of `res` is a live value of the shape its arm's kind names.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_debug_result(
+pub unsafe extern "C" fn gos_rt_debug_result(
     res: i128,
     ok_kind: i64,
     err_kind: i64,
 ) -> *mut std::ffi::c_char {
     let payload = result_payload_of(res);
-    let s = if result_disc_of(res) == 0 {
-        format!("Ok({})", debug_payload_string(payload, ok_kind))
+    let kind = if result_disc_of(res) == 0 {
+        ok_kind
     } else {
-        format!("Err({})", debug_payload_string(payload, err_kind))
+        err_kind
+    };
+    // SAFETY: this function's contract covers the payload of either arm.
+    let rendered = unsafe { debug_payload_string(payload, kind) };
+    let s = if result_disc_of(res) == 0 {
+        format!("Ok({rendered})")
+    } else {
+        format!("Err({rendered})")
     };
     super::string::alloc_cstring(s.as_bytes())
 }
@@ -2944,8 +3474,13 @@ pub extern "C" fn gos_rt_debug_result(
 /// [`gos_rt_debug_option`] for an `Option` whose payload is an aggregate:
 /// `payload_kind` may be `gossamer_abi::DEBUG_PAYLOAD_ADT`, in which case `fmt` is the
 /// payload type's derived formatter.
+///
+/// # Safety
+///
+/// A `Some` payload of `opt` is a live value of the shape `payload_kind` names,
+/// and `fmt` is its formatter when that shape is an aggregate.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_debug_option_fmt(
+pub unsafe extern "C" fn gos_rt_debug_option_fmt(
     opt: i128,
     payload_kind: i64,
     fmt: *const std::ffi::c_void,
@@ -2953,10 +3488,10 @@ pub extern "C" fn gos_rt_debug_option_fmt(
     let s = if result_disc_of(opt) != 0 {
         "None".to_string()
     } else {
-        format!(
-            "Some({})",
-            debug_payload_string_with(result_payload_of(opt), payload_kind, fmt)
-        )
+        // SAFETY: this function's contract covers the payload and `fmt`.
+        let payload =
+            unsafe { debug_payload_string_with(result_payload_of(opt), payload_kind, fmt) };
+        format!("Some({payload})")
     };
     super::string::alloc_cstring(s.as_bytes())
 }
@@ -2964,8 +3499,13 @@ pub extern "C" fn gos_rt_debug_option_fmt(
 /// [`gos_rt_debug_result`] for a `Result` with an aggregate arm: either kind
 /// may be `gossamer_abi::DEBUG_PAYLOAD_ADT`, with the matching `fmt` naming that arm's
 /// derived formatter.
+///
+/// # Safety
+///
+/// The payload of `res` is a live value of the shape its arm's kind names, and
+/// that arm's formatter is its formatter when the shape is an aggregate.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_debug_result_fmt(
+pub unsafe extern "C" fn gos_rt_debug_result_fmt(
     res: i128,
     ok_kind: i64,
     err_kind: i64,
@@ -2973,16 +3513,18 @@ pub extern "C" fn gos_rt_debug_result_fmt(
     err_fmt: *const std::ffi::c_void,
 ) -> *mut std::ffi::c_char {
     let payload = result_payload_of(res);
-    let s = if result_disc_of(res) == 0 {
-        format!(
-            "Ok({})",
-            debug_payload_string_with(payload, ok_kind, ok_fmt)
-        )
+    let (kind, fmt) = if result_disc_of(res) == 0 {
+        (ok_kind, ok_fmt)
     } else {
-        format!(
-            "Err({})",
-            debug_payload_string_with(payload, err_kind, err_fmt)
-        )
+        (err_kind, err_fmt)
+    };
+    // SAFETY: this function's contract covers the payload of either arm and
+    // its formatter.
+    let rendered = unsafe { debug_payload_string_with(payload, kind, fmt) };
+    let s = if result_disc_of(res) == 0 {
+        format!("Ok({rendered})")
+    } else {
+        format!("Err({rendered})")
     };
     super::string::alloc_cstring(s.as_bytes())
 }
@@ -2990,7 +3532,7 @@ pub extern "C" fn gos_rt_debug_result_fmt(
 /// `result.unwrap()` / `option.unwrap()`. Returns the payload on the happy
 /// path; panics on Err / None.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_result_unwrap(r: i128) -> i64 {
+pub extern "C" fn gos_rt_result_unwrap(r: i128) -> i64 {
     ffi_entry!(-1, {
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
@@ -3004,7 +3546,7 @@ pub unsafe extern "C" fn gos_rt_result_unwrap(r: i128) -> i64 {
 /// [`gos_rt_result_unwrap`] and differs only in the message the empty case
 /// panics with, which names the shape the program actually wrote.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_option_unwrap(r: i128) -> i64 {
+pub extern "C" fn gos_rt_option_unwrap(r: i128) -> i64 {
     ffi_entry!(-1, {
         if result_disc_of(r) != 0 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
@@ -3016,7 +3558,11 @@ pub unsafe extern "C" fn gos_rt_option_unwrap(r: i128) -> i64 {
 
 /// The carrier a two-word payload was boxed as, read back by value. A null box
 /// reads as `None`.
-fn boxed_carrier_of(r: i128) -> i128 {
+///
+/// # Safety
+///
+/// The payload of `r`, when non-null, addresses a live boxed two-word carrier.
+unsafe fn boxed_carrier_of(r: i128) -> i128 {
     let boxed: *const u8 = std::ptr::with_exposed_provenance(result_payload_of(r) as usize);
     if boxed.is_null() {
         return gos_rt_result_new(1, 0);
@@ -3030,6 +3576,10 @@ fn boxed_carrier_of(r: i128) -> i128 {
 /// `option.unwrap()` / `option.expect(msg)` where the payload is itself an
 /// `Option` / `Result`. The answer is the boxed carrier as it stands; the box
 /// keeps its own share of that carrier's payload.
+///
+/// # Safety
+///
+/// A `Some` payload of `r` addresses a live boxed two-word carrier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
     ffi_entry!(0, {
@@ -3037,12 +3587,17 @@ pub unsafe extern "C" fn gos_rt_option_unwrap_carrier(r: i128) -> i128 {
             crate::c_abi::panic::panic_text("called `Option::unwrap()` on a `None` value");
             return 0;
         }
-        boxed_carrier_of(r)
+        // SAFETY: this function's contract is the one the callee states.
+        unsafe { boxed_carrier_of(r) }
     })
 }
 
 /// `result.unwrap()` / `result.expect(msg)` where the `Ok` payload is itself an
 /// `Option` / `Result`, answered as [`gos_rt_option_unwrap_carrier`] does.
+///
+/// # Safety
+///
+/// An `Ok` payload of `r` addresses a live boxed two-word carrier.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_result_unwrap_carrier(r: i128) -> i128 {
     ffi_entry!(0, {
@@ -3050,7 +3605,8 @@ pub unsafe extern "C" fn gos_rt_result_unwrap_carrier(r: i128) -> i128 {
             crate::c_abi::panic::panic_text("called `Result::unwrap()` on an `Err` value");
             return 0;
         }
-        boxed_carrier_of(r)
+        // SAFETY: this function's contract is the one the callee states.
+        unsafe { boxed_carrier_of(r) }
     })
 }
 
@@ -3071,12 +3627,17 @@ pub extern "C" fn gos_rt_result_unwrap_or(r: i128, default: i64) -> i64 {
 /// IS the answer those are the same Vec, so it needs the second share the
 /// caller is going to give back; the word-returning form above cannot tell the
 /// two apart and left the caller releasing one Vec twice.
+///
+/// # Safety
+///
+/// A non-zero `default` is a live `Vec` handle.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_unwrap_or_vec(r: i128, default: i64) -> i64 {
+pub unsafe extern "C" fn gos_rt_result_unwrap_or_vec(r: i128, default: i64) -> i64 {
     if result_disc_of(r) == 0 {
         return result_payload_of(r);
     }
     if default != 0 {
+        // SAFETY: a non-zero `default` is a live `Vec` (this shim's contract).
         unsafe { crate::c_abi::vec::gos_rt_vec_retain(default as usize as *mut GosVec) };
     }
     default
@@ -3087,8 +3648,12 @@ pub extern "C" fn gos_rt_result_unwrap_or_vec(r: i128, default: i64) -> i64 {
 /// A carrier never owns a table: an `Option<Map>` from a map read lends the
 /// stored table, and the fallback belongs to its own binding, which frees it.
 /// The answer is therefore a table of the caller's own either way.
+///
+/// # Safety
+///
+/// The payload of `r` and a non-zero `default` are live `Map` handles.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_unwrap_or_map(r: i128, default: i64) -> i64 {
+pub unsafe extern "C" fn gos_rt_result_unwrap_or_map(r: i128, default: i64) -> i64 {
     let chosen = if result_disc_of(r) == 0 {
         result_payload_of(r)
     } else {
@@ -3108,8 +3673,12 @@ pub extern "C" fn gos_rt_result_unwrap_or_map(r: i128, default: i64) -> i64 {
 /// IS the answer those are the same string, so it needs the second share the
 /// caller is going to give back; the word-returning form above cannot tell the
 /// two apart and left the caller releasing one string twice.
+///
+/// # Safety
+///
+/// A non-zero `default` is a live runtime string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_unwrap_or_str(r: i128, default: i64) -> i64 {
+pub unsafe extern "C" fn gos_rt_result_unwrap_or_str(r: i128, default: i64) -> i64 {
     if result_disc_of(r) == 0 {
         return result_payload_of(r);
     }
@@ -3132,8 +3701,12 @@ pub extern "C" fn gos_rt_result_unwrap_or_str(r: i128, default: i64) -> i64 {
 /// [`gos_rt_result_unwrap_or_str`] does: the payload's share moves out of the
 /// carrier, and a fallback that becomes the answer takes a second share, since
 /// its own binding still gives one back.
+///
+/// # Safety
+///
+/// A non-zero `default` is a live counted node.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_unwrap_or_node(r: i128, default: i64) -> i64 {
+pub unsafe extern "C" fn gos_rt_result_unwrap_or_node(r: i128, default: i64) -> i64 {
     if result_disc_of(r) == 0 {
         return result_payload_of(r);
     }
@@ -3145,8 +3718,12 @@ pub extern "C" fn gos_rt_result_unwrap_or_node(r: i128, default: i64) -> i64 {
 
 /// Reads the two-word carrier a map keeps boxed, answering `None` for a null
 /// box: a map reader answers the box's address rather than the carrier.
+///
+/// # Safety
+///
+/// A non-zero `word` addresses a live boxed two-word carrier.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_carrier_from_box(word: i64) -> i128 {
+pub unsafe extern "C" fn gos_rt_carrier_from_box(word: i64) -> i128 {
     let boxed: *const u8 = std::ptr::with_exposed_provenance(word as usize);
     if boxed.is_null() {
         return gos_rt_result_new(1, 0);
@@ -3158,8 +3735,12 @@ pub extern "C" fn gos_rt_carrier_from_box(word: i64) -> i128 {
 
 /// Takes a share of a carrier's `Ok` / `Some` `String` payload, for a field
 /// copy that holds the carrier alongside its source. A no-op on the other arm.
+///
+/// # Safety
+///
+/// An `Ok` / `Some` payload of `r` is a live runtime string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_option_str_payload_retain(r: i128) {
+pub unsafe extern "C" fn gos_rt_option_str_payload_retain(r: i128) {
     if result_disc_of(r) != 0 || result_payload_of(r) == 0 {
         return;
     }
@@ -3174,15 +3755,25 @@ pub extern "C" fn gos_rt_option_str_payload_retain(r: i128) {
 
 /// Gives back a carrier field's `Ok` / `Some` `String` payload at the field's
 /// death. A no-op on the other arm.
+///
+/// # Safety
+///
+/// An `Ok` / `Some` payload of `r` is a live runtime string body holding the
+/// share this releases.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_option_str_payload_release(r: i128) {
-    gos_rt_result_ok_payload_release(r, 1);
+pub unsafe extern "C" fn gos_rt_option_str_payload_release(r: i128) {
+    // SAFETY: this function's contract is the one the callee states.
+    unsafe { gos_rt_result_ok_payload_release(r, 1) };
 }
 
 /// Takes a share of a carrier's `Ok` / `Some` `Vec` payload, for a field copy
 /// that holds the carrier alongside its source. A no-op on the other arm.
+///
+/// # Safety
+///
+/// An `Ok` / `Some` payload of `r` is a live `Vec` handle.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_option_vec_payload_retain(r: i128) {
+pub unsafe extern "C" fn gos_rt_option_vec_payload_retain(r: i128) {
     if result_disc_of(r) != 0 || result_payload_of(r) == 0 {
         return;
     }
@@ -3193,9 +3784,15 @@ pub extern "C" fn gos_rt_option_vec_payload_retain(r: i128) {
 
 /// Gives back a carrier field's `Ok` / `Some` `Vec` payload at the field's
 /// death. A no-op on the other arm.
+///
+/// # Safety
+///
+/// An `Ok` / `Some` payload of `r` is a live `Vec` handle holding the share
+/// this releases.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_option_vec_payload_release(r: i128) {
-    gos_rt_result_ok_payload_release(r, 2);
+pub unsafe extern "C" fn gos_rt_option_vec_payload_release(r: i128) {
+    // SAFETY: this function's contract is the one the callee states.
+    unsafe { gos_rt_result_ok_payload_release(r, 2) };
 }
 
 /// The carrier with its map payload replaced by a table of its own, so a
@@ -3205,8 +3802,13 @@ pub extern "C" fn gos_rt_option_vec_payload_release(r: i128) {
 /// `ok_is_map` / `err_is_map` say which arm holds a `GosMap` word; the live
 /// arm decides which one is read, and an arm holding anything else passes
 /// through untouched.
+///
+/// # Safety
+///
+/// The payload of an arm `ok_is_map` / `err_is_map` names is a live `Map`
+/// handle.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_carrier_own_map(r: i128, ok_is_map: i64, err_is_map: i64) -> i128 {
+pub unsafe extern "C" fn gos_rt_carrier_own_map(r: i128, ok_is_map: i64, err_is_map: i64) -> i128 {
     let disc = result_disc_of(r);
     let is_map = match disc {
         0 => ok_is_map != 0,
@@ -3230,8 +3832,13 @@ pub extern "C" fn gos_rt_carrier_own_map(r: i128, ok_is_map: i64, err_is_map: i6
 /// `json::Value` handle, 4 an `errors::Error` cell. This is the give-back for `map`, which hands the
 /// payload to a closure that answers a value of its own; the carrier itself
 /// never releases a payload of any of those kinds.
+///
+/// # Safety
+///
+/// An `Ok` payload of `r` is a live value of the storage `kind` names, holding
+/// the share this releases.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
+pub unsafe extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
     if result_disc_of(r) != 0 {
         return;
     }
@@ -3266,9 +3873,11 @@ pub extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
         5 => unsafe {
             crate::c_abi::map::gos_rt_map_free(payload as usize as *mut crate::c_abi::map::GosMap);
         },
+        // SAFETY: a payload of kind 6 is a `Set` the carrier owns.
         6 => unsafe {
             crate::c_abi::map::gos_rt_set_free(payload as usize as *mut crate::c_abi::set::GosSet);
         },
+        // SAFETY: a payload of kind 7 is the storage this kind names, which the carrier owns.
         7 => unsafe {
             crate::c_abi::deque::gos_rt_deque_free(
                 payload as usize as *mut crate::c_abi::deque::GosDeque,
@@ -3282,22 +3891,33 @@ pub extern "C" fn gos_rt_result_ok_payload_release(r: i128, kind: i64) {
 /// the `Ok` / `Some` payload's storage and `err_kind` the `Err` payload's, in
 /// the kinds [`gos_rt_result_ok_payload_release`] takes, with 0 for an arm
 /// whose payload is not heap storage the carrier owns.
+///
+/// # Safety
+///
+/// The payload of `r` is a live value of the storage its arm's kind names,
+/// holding the share this releases.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_payload_release(r: i128, ok_kind: i64, err_kind: i64) {
-    match result_disc_of(r) {
-        0 => gos_rt_result_ok_payload_release(r, ok_kind),
-        // The error arm's payload word is laid out as the ok arm's is, so the
-        // same release reads it once the discriminant has chosen the kind.
-        1 => gos_rt_result_ok_payload_release(gos_rt_result_new(0, result_payload_of(r)), err_kind),
-        _ => {}
-    }
+pub unsafe extern "C" fn gos_rt_result_payload_release(r: i128, ok_kind: i64, err_kind: i64) {
+    // The error arm's payload word is laid out as the ok arm's is, so the
+    // same release reads it once the discriminant has chosen the kind.
+    let (as_ok, kind) = match result_disc_of(r) {
+        0 => (r, ok_kind),
+        1 => (gos_rt_result_new(0, result_payload_of(r)), err_kind),
+        _ => return,
+    };
+    // SAFETY: this function's contract covers the payload of either arm.
+    unsafe { gos_rt_result_ok_payload_release(as_ok, kind) };
 }
 
 /// Takes a share of the heap payload of whichever arm a carrier holds, by the
 /// kinds [`gos_rt_result_payload_release`] takes: 1 a `String`, 2 a `Vec`, 4 an
 /// `errors::Error` cell, 0 an arm with nothing to share.
+///
+/// # Safety
+///
+/// The payload of `r` is a live value of the storage its arm's kind names.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_payload_retain(r: i128, ok_kind: i64, err_kind: i64) {
+pub unsafe extern "C" fn gos_rt_result_payload_retain(r: i128, ok_kind: i64, err_kind: i64) {
     let kind = match result_disc_of(r) {
         0 => ok_kind,
         1 => err_kind,
@@ -3329,8 +3949,13 @@ pub extern "C" fn gos_rt_result_payload_retain(r: i128, ok_kind: i64, err_kind: 
 /// A carrier is two words, so the word-returning `unwrap_or` above keeps
 /// only the payload half and loses the discriminant, which reads back as
 /// an `Err` whatever the value was.
+///
+/// # Safety
+///
+/// The payload of `r` addresses a live boxed two-word carrier, and `default` is
+/// a live carrier of the same type.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_unwrap_or_carrier(r: i128, default: i128) -> i128 {
+pub unsafe extern "C" fn gos_rt_result_unwrap_or_carrier(r: i128, default: i128) -> i128 {
     if result_disc_of(r) != 0 {
         return default;
     }
@@ -3371,10 +3996,16 @@ pub extern "C" fn gos_rt_result_err(r: i128) -> i64 {
 /// hands its share over once and never gives it back itself. `err_kind` names
 /// the replacement's storage in the kinds
 /// [`gos_rt_result_ok_payload_release`] takes.
+///
+/// # Safety
+///
+/// A non-zero `new_err` is a live value of the storage `err_kind` names,
+/// holding the share this call consumes.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_result_ok_or(r: i128, new_err: i64, err_kind: i64) -> i128 {
+pub unsafe extern "C" fn gos_rt_result_ok_or(r: i128, new_err: i64, err_kind: i64) -> i128 {
     if result_disc_of(r) == 0 {
-        gos_rt_result_ok_payload_release(pack_result(0, new_err), err_kind);
+        // SAFETY: this function's contract covers `new_err`.
+        unsafe { gos_rt_result_ok_payload_release(pack_result(0, new_err), err_kind) };
         r
     } else {
         pack_result(1, new_err)
@@ -3411,14 +4042,14 @@ pub unsafe extern "C" fn gos_rt_main_exit_code(raw: i64) -> i32 {
         // Flush before the root cohort reports: stdout is buffered here
         // and stderr is not, so a report printed first would appear
         // ahead of output the program had already written.
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         // The root cohort joins what `main` spawned, and reports any
         // failure nothing observed, before the drain below.
         crate::c_abi::cohort::close_root();
         crate::sched_global::drain_goroutines_for_exit();
         // Flush any buffered stdout that workers wrote so it
         // reaches the user before the process exits.
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         raw as i32
     })
 }
@@ -3433,16 +4064,18 @@ pub unsafe extern "C" fn gos_rt_main_exit_code(raw: i64) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_main_exit_code_err(disc: i64, payload: i64) -> i32 {
     ffi_entry!(-1, {
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         crate::c_abi::cohort::close_root();
         crate::sched_global::drain_goroutines_for_exit();
-        unsafe { gos_rt_flush_stdout() };
+        gos_rt_flush_stdout();
         if disc == 0 {
             return 0;
         }
         if payload != 0 {
+            // SAFETY: a non-zero `payload` is this shim's live error argument (C-ABI contract).
             let msg = unsafe { crate::c_abi::gos_rt_error_display(payload as *const _) };
             if !msg.is_null() {
+                // SAFETY: `msg` is the fresh non-null rendering, owned here.
                 unsafe {
                     crate::c_abi::gos_rt_eprint_str(msg);
                     crate::c_abi::gos_rt_eprintln();
@@ -3468,6 +4101,8 @@ pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: 
         if v.is_null() {
             crate::c_abi::panic::panic_text("copy_within: null vector");
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument (C-ABI
+        // contract).
         let vec_len = unsafe { (*v).len.max(0) };
         if src < 0 || dest < 0 || len < 0 || src + len > vec_len || dest + len > vec_len {
             crate::c_abi::panic::panic_text("copy_within: range outside the vector");
@@ -3475,14 +4110,23 @@ pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: 
         if len == 0 || src == dest {
             return;
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument (C-ABI
+        // contract).
         let stride = unsafe { (*v).elem_bytes } as usize;
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument (C-ABI
+        // contract).
         let base = unsafe { (*v).ptr };
         if stride == 0 || base.is_null() {
             return;
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument, not
+        // otherwise accessed during the call (C-ABI contract).
         unsafe { bump_vec_mutation_generation(&mut *v) };
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument (C-ABI
+        // contract).
         if !vec_elems_copy_without_retain(unsafe { &*v }) {
             for offset in 0..len {
+                // SAFETY: `src + offset` is below the vec's length (checked above).
                 if !unsafe { vec_retain_elem_at_for_copy(v, src + offset) } {
                     crate::c_abi::panic::panic_text("copy_within: element type cannot be copied");
                 }
@@ -3490,6 +4134,8 @@ pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: 
         }
         let span = (len as usize) * stride;
         let mut staged = vec![0u8; span];
+        // SAFETY: the source range `src..src + len` lies inside the buffer (checked above), and
+        // `staged` holds `span` bytes.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 base.add((src as usize) * stride),
@@ -3497,11 +4143,16 @@ pub unsafe extern "C" fn gos_rt_vec_copy_within(v: *mut GosVec, src: i64, dest: 
                 span,
             );
         }
+        // SAFETY: `v` is non-null (checked above) and this shim's live `Vec` argument (C-ABI
+        // contract).
         if !vec_elems_release_nothing(unsafe { &*v }) {
             for offset in 0..len {
+                // SAFETY: `dest + offset` is below the vec's length (checked above).
                 unsafe { vec_release_elem_at(v, dest + offset) };
             }
         }
+        // SAFETY: the destination range `dest..dest + len` lies inside the buffer (checked
+        // above), and `staged` holds `span` bytes.
         unsafe {
             std::ptr::copy_nonoverlapping(
                 staged.as_ptr(),
@@ -3524,28 +4175,37 @@ pub unsafe extern "C" fn gos_rt_vec_copy_from_slice(dst: *mut GosVec, src: *cons
         if std::ptr::addr_eq(dst.cast_const(), src) {
             return;
         }
+        // SAFETY: `dst` is non-null (checked above) and this shim's live destination (C-ABI
+        // contract).
         let dst_len = unsafe { (*dst).len.max(0) };
+        // SAFETY: `src` is non-null (checked above) and this shim's live source (C-ABI contract).
         let src_len = unsafe { (*src).len.max(0) };
         if dst_len != src_len {
-            unsafe {
-                crate::c_abi::panic::panic_text(
-                    "copy_from_slice: source and destination differ in length",
-                );
-            }
+            crate::c_abi::panic::panic_text(
+                "copy_from_slice: source and destination differ in length",
+            );
         }
+        // SAFETY: `dst` is non-null and live (C-ABI contract).
         let stride = unsafe { (*dst).elem_bytes } as usize;
+        // SAFETY: `src` is non-null and live (C-ABI contract).
         if unsafe { (*src).elem_bytes } as usize != stride
+            // SAFETY: `src` and `dst` are non-null and live (C-ABI contract).
             || unsafe { (*src).elem_kind } != unsafe { (*dst).elem_kind }
         {
             crate::c_abi::panic::panic_text("copy_from_slice: element shapes differ");
         }
+        // SAFETY: `src` and `dst` are non-null and live (C-ABI contract).
         let (dst_base, src_base) = unsafe { ((*dst).ptr.as_ptr(), (*src).ptr.as_const_ptr()) };
         if stride == 0 || dst_base.is_null() || src_base.is_null() || dst_len == 0 {
             return;
         }
+        // SAFETY: `dst` is this shim's live destination, not otherwise accessed during the call
+        // (C-ABI contract).
         unsafe { bump_vec_mutation_generation(&mut *dst) };
+        // SAFETY: `src` is non-null and live (C-ABI contract).
         if !vec_elems_copy_without_retain(unsafe { &*src }) {
             for idx in 0..src_len {
+                // SAFETY: `idx` is below `src`'s length.
                 if !unsafe { vec_retain_elem_at_for_copy(src, idx) } {
                     crate::c_abi::panic::panic_text(
                         "copy_from_slice: element type cannot be copied",
@@ -3553,11 +4213,15 @@ pub unsafe extern "C" fn gos_rt_vec_copy_from_slice(dst: *mut GosVec, src: *cons
                 }
             }
         }
+        // SAFETY: `dst` is non-null and live (C-ABI contract).
         if !vec_elems_release_nothing(unsafe { &*dst }) {
             for idx in 0..dst_len {
+                // SAFETY: `idx` is below `dst`'s length.
                 unsafe { vec_release_elem_at(dst, idx) };
             }
         }
+        // SAFETY: both buffers hold `dst_len` elements of `stride` bytes, and they are distinct
+        // vecs (checked above).
         unsafe {
             std::ptr::copy_nonoverlapping(src_base, dst_base, (src_len as usize) * stride);
         }
@@ -3570,11 +4234,17 @@ pub unsafe extern "C" fn gos_rt_vec_copy_from_slice(dst: *mut GosVec, src: *cons
 /// Lives here rather than beside the HTTP client because the shape is
 /// the ABI's, not any one module's: header lists and a child process's
 /// environment overrides are the same pairs.
-pub(crate) fn decode_header_tuple_vec(headers: *const GosVec) -> Vec<(String, String)> {
+///
+/// # Safety
+///
+/// `headers` is null or a live `Vec` of `(String, String)` tuples.
+pub(crate) unsafe fn decode_header_tuple_vec(headers: *const GosVec) -> Vec<(String, String)> {
     let mut header_pairs: Vec<(String, String)> = Vec::new();
     if headers.is_null() {
         return header_pairs;
     }
+    // SAFETY: `headers` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `Vec`.
     let v = unsafe { &*headers };
     let elem_bytes = v.elem_bytes as usize;
     if elem_bytes == 0 || v.ptr.is_null() {
@@ -3587,23 +4257,29 @@ pub(crate) fn decode_header_tuple_vec(headers: *const GosVec) -> Vec<(String, St
         return header_pairs;
     }
     for i in 0..v.len {
+        // SAFETY: `i` is below the vec's length, and each element is at least 16 bytes (checked
+        // above).
         let slot = unsafe { v.ptr.add((i as usize) * elem_bytes) };
         // Slots hold cstring pointers exposed as integers by the
         // flat-slot ABI; recover provenance before reading the bytes.
+        // SAFETY: `slot` addresses the element's key word.
         let key_ptr = unsafe { slot_read_word(slot) }
             .cast_const()
             .cast::<std::os::raw::c_char>();
+        // SAFETY: the element's value word is at offset 8.
         let val_ptr = unsafe { slot_read_word(slot.add(8)) }
             .cast_const()
             .cast::<std::os::raw::c_char>();
         let key = if key_ptr.is_null() {
             String::new()
         } else {
+            // SAFETY: a non-null key word is a live string body.
             unsafe { crate::c_abi::gos_str_arg_string(key_ptr) }
         };
         let val = if val_ptr.is_null() {
             String::new()
         } else {
+            // SAFETY: a non-null value word is a live string body.
             unsafe { crate::c_abi::gos_str_arg_string(val_ptr) }
         };
         header_pairs.push((key, val));
@@ -3617,6 +4293,8 @@ mod repeat_primitive_tests {
 
     #[test]
     fn primitive_repeat_constructs_final_length_and_values() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let zeros = gos_rt_vec_repeat_primitive(8, 1024, 0);
             assert_eq!((*zeros).len, 1024);
@@ -3643,26 +4321,37 @@ mod unwrap_or_vec_tests {
     /// A `Vec` with one reference, as the compiler's ownership lowering hands
     /// one to a call.
     fn one_share() -> *mut GosVec {
-        unsafe { gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::PRIMITIVE) }
+        gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::PRIMITIVE)
     }
 
-    fn shares(v: *mut GosVec) -> u16 {
+    /// # Safety
+    ///
+    /// `v` is a live `Vec`.
+    unsafe fn shares(v: *mut GosVec) -> u16 {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         vec_rc_atomic(unsafe { &*v }).load(std::sync::atomic::Ordering::SeqCst)
     }
 
     #[test]
     fn a_returned_fallback_carries_a_share_for_every_release_the_caller_owes() {
         let fallback = one_share();
-        let before = shares(fallback);
+        // SAFETY: `fallback` is the live Vec made above.
+        let before = unsafe { shares(fallback) };
         // Err: the fallback becomes the answer, so the caller now holds it
         // twice - once as the fallback binding, once as the answer.
-        let answered = gos_rt_result_unwrap_or_vec(
-            crate::c_abi::vec::gos_rt_result_new(1, 0),
-            fallback as i64,
-        );
+        // SAFETY: `fallback` is the live Vec made above.
+        let answered = unsafe {
+            gos_rt_result_unwrap_or_vec(crate::c_abi::vec::gos_rt_result_new(1, 0), fallback as i64)
+        };
         assert_eq!(answered, fallback as i64);
-        assert_eq!(shares(fallback), before + 1);
+        // SAFETY: `fallback` is the live Vec made above.
+        assert_eq!(unsafe { shares(fallback) }, before + 1);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(fallback) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(fallback) };
     }
 
@@ -3670,16 +4359,25 @@ mod unwrap_or_vec_tests {
     fn an_unused_fallback_keeps_the_one_share_its_caller_releases() {
         let fallback = one_share();
         let payload = one_share();
-        let before = shares(fallback);
+        // SAFETY: `fallback` is the live Vec made above.
+        let before = unsafe { shares(fallback) };
         // Ok: the payload is the answer and the fallback is untouched, so the
         // caller's single release of it stays correct.
-        let answered = gos_rt_result_unwrap_or_vec(
-            crate::c_abi::vec::gos_rt_result_new(0, payload as i64),
-            fallback as i64,
-        );
+        // SAFETY: `fallback` is the live Vec made above.
+        let answered = unsafe {
+            gos_rt_result_unwrap_or_vec(
+                crate::c_abi::vec::gos_rt_result_new(0, payload as i64),
+                fallback as i64,
+            )
+        };
         assert_eq!(answered, payload as i64);
-        assert_eq!(shares(fallback), before);
+        // SAFETY: `fallback` is the live Vec made above.
+        assert_eq!(unsafe { shares(fallback) }, before);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(fallback) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(payload) };
     }
 }
@@ -3694,6 +4392,8 @@ mod extend_str_bytes_tests {
     fn a_bulk_append_matches_one_push_per_byte() {
         let text =
             crate::c_abi::string::alloc_cstring_from_slices(&["ab\u{e9}cdefghij".as_bytes()]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let bulk = gos_rt_vec_new_typed(1, vec_elem_kind::PRIMITIVE);
             let pushed = gos_rt_vec_new_typed(1, vec_elem_kind::PRIMITIVE);
@@ -3726,6 +4426,8 @@ mod swap_unchecked_tests {
     /// for indices inside the length.
     #[test]
     fn an_unchecked_swap_matches_the_checked_one_in_range() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let a = gos_rt_vec_new_typed(8, vec_elem_kind::PRIMITIVE);
             let b = gos_rt_vec_new_typed(8, vec_elem_kind::PRIMITIVE);
@@ -3762,6 +4464,8 @@ mod slot_word_tests {
         let mut slot = [0xABu8; 8];
         let mut target = 0u64;
         let child: *mut u8 = std::ptr::addr_of_mut!(target).cast();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             slot_write_word(slot.as_mut_ptr(), child);
             assert_eq!(slot_read_word(slot.as_ptr()), child);
@@ -3774,10 +4478,128 @@ mod slot_word_tests {
         );
 
         let mut zero = [0x5Au8; 8];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             slot_write_word(zero.as_mut_ptr(), std::ptr::null_mut());
             assert!(slot_read_word(zero.as_ptr()).is_null());
         }
         assert_eq!(u64::from_le_bytes(zero), 0, "a null child clears the slot");
+    }
+}
+
+#[cfg(test)]
+mod miri_core_tests {
+    use super::*;
+
+    /// One element of `width` bytes whose first and last bytes name `i`.
+    fn element(width: usize, i: usize) -> Vec<u8> {
+        let mut elem = vec![0u8; width];
+        elem[0] = (i as u8).wrapping_mul(3);
+        elem[width - 1] = i as u8 ^ 0x5a;
+        elem
+    }
+
+    #[test]
+    fn elements_survive_growth_and_removal_at_every_width() {
+        for width in [1usize, 8, 24] {
+            let v = gos_rt_vec_new(width as u32);
+            let mut expect: Vec<Vec<u8>> = (0..40).map(|i| element(width, i)).collect();
+            for elem in &expect {
+                // SAFETY: `v` is the live vec made above and `elem` holds one element of its width.
+                unsafe { gos_rt_vec_push(v, elem.as_ptr()) };
+            }
+            let taken = expect.remove(5);
+            let mut slot = vec![0u8; width];
+            // SAFETY: `v` is live, `5` is below its length, and `slot` holds one element.
+            let removed = unsafe { crate::c_abi::signal::gos_rt_vec_remove_safe(v, 5) };
+            assert_eq!(gos_rt_result_disc(removed), 0);
+            let payload = gos_rt_result_payload(removed);
+            if width <= 8 {
+                slot.copy_from_slice(&payload.to_le_bytes()[..width]);
+            } else {
+                let blob = payload as *mut u8;
+                // SAFETY: a wide element leaves as a counted copy of its slots, `width` bytes.
+                slot.copy_from_slice(unsafe { std::slice::from_raw_parts(blob, width) });
+                // SAFETY: the copy's one share is this test's, given back once.
+                unsafe { crate::c_abi::rc::gos_rt_rc_release(blob) };
+            }
+            assert_eq!(slot, taken);
+            // SAFETY: `v` is live and `expect` mirrors its elements.
+            let len = unsafe { (*v).len };
+            assert_eq!(len as usize, expect.len());
+            for (i, elem) in expect.iter().enumerate() {
+                // SAFETY: `v` is live and `i` is below its length.
+                let p = unsafe { crate::c_abi::signal::gos_rt_vec_get_ptr(v, i as i64) };
+                // SAFETY: `p` addresses one element of `width` bytes inside the buffer.
+                let got = unsafe { std::slice::from_raw_parts(p, width) };
+                assert_eq!(got, elem.as_slice());
+            }
+            // SAFETY: `v` is live and `slot` has room for one element of its width.
+            let popped = unsafe { crate::c_abi::signal::gos_rt_vec_pop_into(v, slot.as_mut_ptr()) };
+            assert_eq!(popped, 0);
+            assert_eq!(Some(&slot), expect.last());
+            // SAFETY: `v` is the live vec this test owns, freed once.
+            unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+        }
+    }
+
+    #[test]
+    fn a_view_reads_each_element_at_the_width_its_vec_declares() {
+        for width in [1u32, 2, 4, 8, 24] {
+            let v = gos_rt_vec_new(width);
+            for n in [0i64, 1, 0x7f, 0xff] {
+                let mut elem = vec![0u8; width as usize];
+                let bytes = n.to_ne_bytes();
+                let take = elem.len().min(8);
+                elem[..take].copy_from_slice(&bytes[..take]);
+                // SAFETY: `v` is the live vec made above and `elem` holds one element of its width.
+                unsafe { gos_rt_vec_push(v, elem.as_ptr()) };
+            }
+            // SAFETY: `v` is the live vec made above, unchanged while the view is read.
+            let view = unsafe { VecView::of(v) }.expect("non-null vec");
+            assert_eq!(
+                view.words().collect::<Vec<_>>(),
+                [0, 1, 0x7f, 0xff],
+                "width {width}"
+            );
+            // SAFETY: `v` is the live vec this test owns, freed once.
+            unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+        }
+        // SAFETY: a null handle is what the constructor answers `None` for.
+        assert!(unsafe { VecView::of(std::ptr::null()) }.is_none());
+    }
+
+    #[test]
+    fn a_string_vec_shares_and_releases_its_elements_across_copies() {
+        let v = gos_rt_vec_new_typed(8, vec_elem_kind::STRING);
+        for word in ["alpha", "beta", "gamma", "delta"] {
+            let s = crate::c_abi::string::alloc_cstring(word.as_bytes()) as i64;
+            // SAFETY: `v` is the live vec made above, and `s` is one fresh string word it takes.
+            unsafe { gos_rt_vec_push(v, std::ptr::addr_of!(s).cast()) };
+        }
+        // SAFETY: `v` is live; the slice and the clone each take their own element shares.
+        let (slice, copy) = unsafe {
+            (
+                crate::c_abi::signal::gos_rt_vec_slice(v, 1, 3),
+                crate::c_abi::string::gos_rt_vec_clone(v),
+            )
+        };
+        // SAFETY: `v` is live and owns its elements until this free.
+        unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+        let text = |vec: *mut GosVec, i: i64| -> String {
+            // SAFETY: `vec` is a live `Vec<String>` and `i` below its length.
+            let word = unsafe { crate::c_abi::signal::gos_rt_vec_get_i64(vec, i) };
+            // SAFETY: a `Vec<String>` element is a live string body.
+            unsafe { crate::c_abi::gos_str_arg_string(word as *const std::ffi::c_char) }
+        };
+        assert_eq!(text(slice, 0), "beta");
+        assert_eq!(text(slice, 1), "gamma");
+        assert_eq!(text(copy, 3), "delta");
+        // SAFETY: both are live vecs this test owns, each freed once.
+        unsafe {
+            crate::c_abi::map::gos_rt_vec_free(slice);
+            crate::c_abi::map::gos_rt_vec_free(copy);
+        }
     }
 }

@@ -29,8 +29,155 @@ fn generated_head(page: &str) -> &str {
 fn merge_handwritten(body: &str, on_disk: &str) -> String {
     on_disk.find(HANDWRITTEN_MARKER).map_or_else(
         || body.to_string(),
-        |idx| format!("{}\n\n{}", body.trim_end(), &on_disk[idx..]),
+        |idx| {
+            format!(
+                "{}\n\n{}",
+                body.trim_end(),
+                without_copied_api_table(&on_disk[idx..])
+            )
+        },
     )
+}
+
+/// Heading of the item table pages once carried by hand; the generated head
+/// now holds the table, so a copy in the handwritten tail is dropped.
+const COPIED_API_HEADING: &str = "## API details and source";
+
+/// `tail` without its hand-kept copy of the item table, which runs from its
+/// heading to the next section.
+fn without_copied_api_table(tail: &str) -> String {
+    let Some(start) = tail.find(COPIED_API_HEADING) else {
+        return tail.to_string();
+    };
+    let rest = &tail[start + COPIED_API_HEADING.len()..];
+    let end = rest
+        .find("\n## ")
+        .map_or(tail.len(), |i| start + COPIED_API_HEADING.len() + i + 1);
+    format!("{}{}", &tail[..start], &tail[end..])
+        .trim_end()
+        .to_string()
+        + "\n"
+}
+
+/// The item table of a stdlib module page: every item the manifest lists,
+/// with the signature the checker holds for a function.
+fn api_table(module_path: &str) -> String {
+    let mut items: Vec<&gossamer_std::registry::StdItem> = Vec::new();
+    for module in gossamer_std::manifest::ALL_MODULES
+        .iter()
+        .filter(|m| m.path == module_path)
+    {
+        for item in module.items {
+            if !items.iter().any(|seen| seen.name == item.name) {
+                items.push(item);
+            }
+        }
+    }
+    if items.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## Items\n\n| Item | Signature | Description |\n|---|---|---|\n");
+    for item in items {
+        let signature =
+            gossamer_types::stdlib_signatures::function_signature(module_path, item.name)
+                .map_or_else(
+                    || format!("{} {}", item_kind_tag(item.kind), item.name),
+                    str::to_string,
+                );
+        out.push_str(&format!(
+            "| `{}` | `{}` | {} |\n",
+            item.name,
+            signature,
+            gossamer_std::manifest::escape_table_cell(item.doc)
+        ));
+    }
+    out
+}
+
+/// Library paths a module summary or item description names in backticks
+/// that the manifest does not declare, as `(module, path)`. A path counts as
+/// a library path when its head names a module; it resolves when what follows
+/// the module is empty or begins with one of that module's items.
+fn unresolved_doc_paths() -> Vec<(&'static str, String)> {
+    unresolved_doc_paths_in(gossamer_std::manifest::ALL_MODULES)
+}
+
+fn unresolved_doc_paths_in(
+    modules: &[gossamer_std::registry::StdModule],
+) -> Vec<(&'static str, String)> {
+    let items_of = |candidates: &[&str], name: &str| {
+        modules
+            .iter()
+            .filter(|m| candidates.contains(&m.path))
+            .any(|m| m.items.iter().any(|item| item.name == name))
+    };
+    let resolves = |path: &str| -> Option<bool> {
+        let segments: Vec<&str> = path.split("::").collect();
+        let segments = segments.strip_prefix(&["std"]).unwrap_or(&segments);
+        for split in (1..=segments.len()).rev() {
+            let head = segments[..split].join("::");
+            let candidates: Vec<&str> = modules
+                .iter()
+                .map(|m| m.path)
+                .filter(|p| {
+                    p.strip_prefix("std::") == Some(head.as_str())
+                        || p.ends_with(&format!("::{head}"))
+                })
+                .collect();
+            if candidates.is_empty() {
+                continue;
+            }
+            return Some(match segments.get(split) {
+                None => true,
+                Some(item) => items_of(&candidates, item),
+            });
+        }
+        None
+    };
+    let mut unresolved = Vec::new();
+    for module in modules {
+        let texts = std::iter::once(module.summary).chain(module.items.iter().map(|i| i.doc));
+        for text in texts {
+            for code in text.split('`').skip(1).step_by(2) {
+                for token in
+                    code.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+                {
+                    let is_path = token.contains("::")
+                        && token.starts_with(|c: char| c.is_ascii_lowercase())
+                        && !token.ends_with(':');
+                    if is_path && resolves(token) == Some(false) {
+                        unresolved.push((module.path, token.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    unresolved.sort();
+    unresolved.dedup();
+    unresolved
+}
+
+/// Every stdlib page: the manifest's head, then the generated item table.
+fn stdlib_pages() -> Vec<(String, String)> {
+    let paths: std::collections::HashMap<String, &str> = gossamer_std::manifest::ALL_MODULES
+        .iter()
+        .map(|m| (gossamer_std::manifest::module_slug(m.path), m.path))
+        .collect();
+    gossamer_std::manifest::render_all_docs()
+        .into_iter()
+        .map(|(slug, head)| {
+            let table = paths
+                .get(&slug)
+                .map(|path| api_table(path))
+                .unwrap_or_default();
+            let body = if table.is_empty() {
+                head
+            } else {
+                format!("{}\n\n{table}", head.trim_end())
+            };
+            (slug, body)
+        })
+        .collect()
 }
 
 /// Emits one Markdown page per stdlib module under `out_dir`, plus
@@ -44,7 +191,7 @@ fn merge_handwritten(body: &str, on_disk: &str) -> String {
 /// for CI). The check covers both the stdlib and language
 /// directories.
 pub(crate) fn cmd_emit_stdlib(out_dir: &Path, check: bool) -> Result<()> {
-    let stdlib_pages = gossamer_std::manifest::render_all_docs();
+    let stdlib_pages = stdlib_pages();
     let mut language_pages = gossamer_std::manifest::render_all_language_docs();
     // The trait catalog is rendered from `gossamer_types::BUILTIN_TRAITS`
     // rather than from the feature manifest, so the page and the checker
@@ -58,7 +205,10 @@ pub(crate) fn cmd_emit_stdlib(out_dir: &Path, check: bool) -> Result<()> {
         |p| p.join("language"),
     );
     if check {
-        let mut drift: Vec<String> = Vec::new();
+        let mut drift: Vec<String> = unresolved_doc_paths()
+            .into_iter()
+            .map(|(module, path)| format!("{module} names `{path}`, which no module declares"))
+            .collect();
         for (slug, body) in &stdlib_pages {
             let path = out_dir.join(format!("{slug}.md"));
             let on_disk = fs::read_to_string(&path).unwrap_or_default();
@@ -487,4 +637,28 @@ fn html_escape(text: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use gossamer_std::registry::{StdItem, StdItemKind, StdModule};
+
+    use super::unresolved_doc_paths_in;
+
+    #[test]
+    fn a_description_naming_an_undeclared_item_is_reported() {
+        let modules = [StdModule {
+            path: "std::compress::gzip",
+            summary: "gzip encoder and decoder.",
+            items: &[StdItem {
+                name: "encode",
+                kind: StdItemKind::Function,
+                doc: "Compresses at a `gzip::Level`; see `gzip::encode` and `compress::gzip`.",
+            }],
+        }];
+        assert_eq!(
+            unresolved_doc_paths_in(&modules),
+            vec![("std::compress::gzip", "gzip::Level".to_string())]
+        );
+    }
 }

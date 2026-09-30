@@ -20,7 +20,7 @@ use gossamer_ast::{
     ArrayExpr, Block, ClosureParam, Expr, ExprKind, FnDecl, ImplItem, Item, ItemKind, MatchArm,
     ModBody, Pattern, PatternKind, SelectArm, Stmt, StmtKind, TraitItem,
 };
-use gossamer_types::{TyCtxt, TypeTable, render_ty};
+use gossamer_types::{TyCtxt, TypeTable, render_public_ty, render_ty};
 
 use crate::session::DocumentAnalysis;
 
@@ -293,7 +293,7 @@ impl Walker<'_> {
         self.out.push(InlayHint {
             line,
             character,
-            label: format!(": {rendered}"),
+            label: format!(": {}", render_public_ty(self.tcx, ty)),
         });
     }
 

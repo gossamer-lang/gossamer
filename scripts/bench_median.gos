@@ -22,14 +22,14 @@ const RECORD: String = "^(\\S+)\\s+\\.\\.\\.\\s+([0-9]+)\\s+ns/op(\\s+\\(.*\\))?
 /// Samples per label, in the order the transcripts were read.
 fn samples(paths: Vec<String>) -> Map<String, Vec<i64>> {
     let mut records: Map<String, Vec<i64>> = Map::new()
-    let ansi = match regex::compile(ANSI) {
+    let ansi = match regex::new(ANSI) {
         Ok(pattern) => pattern
         Err(e) => {
             eprintln("bench_median: {}", e)
             process::exit(1)
         }
     }
-    let record = match regex::compile(RECORD) {
+    let record = match regex::new(RECORD) {
         Ok(pattern) => pattern
         Err(e) => {
             eprintln("bench_median: {}", e)

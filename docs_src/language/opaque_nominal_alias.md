@@ -16,6 +16,7 @@ newtype Score = i64
 `UserId` and `i64` are now different types, and so are `UserId` and
 `Score`. Nothing converts between them on its own:
 
+<!-- fragment -->
 ```gossamer
 let id: UserId = 41.into()
 let n: i64 = id       // error[GT0001]: type mismatch: expected `i64`, found `UserId`
@@ -34,6 +35,7 @@ and behaves identically on the bytecode VM, the JIT, and a native build.
 `.into()` crosses between an alias and its own representation, in both
 directions. The two are one value, so the conversion carries no work:
 
+<!-- fragment -->
 ```gossamer
 let id: UserId = 41.into()
 let raw: i64 = id.into()
@@ -45,12 +47,14 @@ the program runs. So is a call no use site gives a target: the target of
 `.into()` comes from the annotation, parameter, or return that receives
 it, never from the receiver.
 
+<!-- fragment -->
 ```gossamer
 let s: Score = id.into()
 // error[GT0066]: no conversion from `UserId` to `Score`
 //   = help: write `impl From<UserId> for Score`
 ```
 
+<!-- fragment -->
 ```gossamer
 impl From<UserId> for Score {
     fn from(u: UserId) -> Score { (u.value() * 10).into() }
@@ -65,6 +69,7 @@ Nothing from its representation's behaviour. Hiding what the type is
 made of is the whole point, so the representation's API is not part of
 the alias:
 
+<!-- fragment -->
 ```gossamer
 newtype Name = String
 
@@ -85,6 +90,7 @@ describe the value, which the alias and its representation genuinely
 share, and they are what let an alias be a `Map` or `Set` key, sort, and
 print:
 
+<!-- fragment -->
 ```gossamer
 let mut seats: Map<UserId, String> = Map::new()
 seats.insert(a, "front")
@@ -96,6 +102,7 @@ println("{} {} {}", a < b, a == b, a)   // true false 1
 An opaque alias carries inherent and operator `impl` blocks like any
 other type:
 
+<!-- fragment -->
 ```gossamer
 impl UserId {
     fn value(&self) -> i64 { self.into() }

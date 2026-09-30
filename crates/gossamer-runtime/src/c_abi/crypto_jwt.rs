@@ -38,7 +38,6 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_wrap)]
@@ -49,7 +48,6 @@ use std::time::UNIX_EPOCH;
 
 use sha2::Digest;
 
-use super::encoding::gosvec_u8;
 use super::vec::{GosVec, gos_rt_result_new};
 
 /// Packs an `Ok(String)` result (disc 0, payload = runtime c-string).
@@ -66,6 +64,8 @@ fn jwt_err(msg: &str) -> i128 {
 }
 
 unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_text`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_text(p) }
 }
 
@@ -625,13 +625,23 @@ pub unsafe extern "C" fn gos_rt_jwt_verify(
     audience: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `alg` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let expected = match Alg::parse(unsafe { cstr(alg) }) {
             Ok(a) => a,
             Err(e) => return jwt_err(&e),
         };
+        // SAFETY: `key` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let key = unsafe { cstr(key) };
+        // SAFETY: `issuer` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let issuer = unsafe { cstr(issuer) };
+        // SAFETY: `audience` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let audience = unsafe { cstr(audience) };
+        // SAFETY: `token` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let dec = match decode_token(unsafe { cstr(token) }) {
             Ok(d) => d,
             Err(e) => return jwt_err(&e),
@@ -694,6 +704,8 @@ pub unsafe extern "C" fn gos_rt_jwt_verify(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_jwt_header(token: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `token` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let token = unsafe { cstr(token) };
         let Some(header_b64) = token.split('.').next() else {
             return jwt_err("jwt: token has no header segment");
@@ -723,6 +735,8 @@ pub unsafe extern "C" fn gos_rt_jwt_sign_hs(
     key: *const GosVec,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `alg` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let alg = match Alg::parse(unsafe { cstr(alg) }) {
             Ok(a) => a,
             Err(e) => return jwt_err(&e),
@@ -733,8 +747,12 @@ pub unsafe extern "C" fn gos_rt_jwt_sign_hs(
                 alg.as_str()
             ));
         }
+        // SAFETY: `claims_json` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let claims_json = unsafe { cstr(claims_json) };
-        let key = unsafe { gosvec_u8(key) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
         let signing_input = match build_signing_input(alg, claims_json) {
             Ok(s) => s,
             Err(e) => return jwt_err(&e),
@@ -755,6 +773,8 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_hs(
     leeway_secs: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `alg` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let expected = match Alg::parse(unsafe { cstr(alg) }) {
             Ok(a) => a,
             Err(e) => return jwt_err(&e),
@@ -765,7 +785,11 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_hs(
                 expected.as_str()
             ));
         }
-        let key = unsafe { gosvec_u8(key) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
+        // SAFETY: `token` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let dec = match decode_token(unsafe { cstr(token) }) {
             Ok(d) => d,
             Err(e) => return jwt_err(&e),
@@ -810,10 +834,14 @@ pub unsafe extern "C" fn gos_rt_jwt_sign_es256(
         use p256::ecdsa::{Signature, SigningKey, signature::Signer};
         use p256::pkcs8::DecodePrivateKey;
 
+        // SAFETY: `claims_json` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let signing_input = match build_signing_input(Alg::Es256, unsafe { cstr(claims_json) }) {
             Ok(s) => s,
             Err(e) => return jwt_err(&e),
         };
+        // SAFETY: `signing_key_pem` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let signing = match SigningKey::from_pkcs8_pem(unsafe { cstr(signing_key_pem) }) {
             Ok(k) => k,
             Err(e) => return jwt_err(&format!("jwt: ES256 secret pem: {e}")),
@@ -837,6 +865,8 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_es256(
         use p256::ecdsa::{Signature, VerifyingKey, signature::Verifier};
         use p256::pkcs8::DecodePublicKey;
 
+        // SAFETY: `token` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let dec = match decode_token(unsafe { cstr(token) }) {
             Ok(d) => d,
             Err(e) => return jwt_err(&e),
@@ -859,6 +889,8 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_es256(
                 dec.sig.len()
             ));
         }
+        // SAFETY: `verifying_key_pem` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let key = match VerifyingKey::from_public_key_pem(unsafe { cstr(verifying_key_pem) }) {
             Ok(k) => k,
             Err(e) => return jwt_err(&format!("jwt: ES256 public pem: {e}")),
@@ -896,10 +928,14 @@ pub unsafe extern "C" fn gos_rt_jwt_sign_eddsa(
         use ed25519_dalek::pkcs8::DecodePrivateKey;
         use ed25519_dalek::{Signer, SigningKey};
 
+        // SAFETY: `claims_json` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let signing_input = match build_signing_input(Alg::EdDsa, unsafe { cstr(claims_json) }) {
             Ok(s) => s,
             Err(e) => return jwt_err(&e),
         };
+        // SAFETY: `signing_key_pem` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let signing = match SigningKey::from_pkcs8_pem(unsafe { cstr(signing_key_pem) }) {
             Ok(k) => k,
             Err(e) => return jwt_err(&format!("jwt: EdDSA secret pem: {e}")),
@@ -924,6 +960,8 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_eddsa(
         use ed25519_dalek::pkcs8::DecodePublicKey;
         use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
+        // SAFETY: `token` is this shim's argument, null or a live string body (C-ABI contract),
+        // which `cstr` accepts.
         let dec = match decode_token(unsafe { cstr(token) }) {
             Ok(d) => d,
             Err(e) => return jwt_err(&e),
@@ -946,6 +984,8 @@ pub unsafe extern "C" fn gos_rt_jwt_verify_eddsa(
                 dec.sig.len()
             ));
         }
+        // SAFETY: `verifying_key_pem` is this shim's argument, null or a live string body (C-ABI
+        // contract), which `cstr` accepts.
         let key = match VerifyingKey::from_public_key_pem(unsafe { cstr(verifying_key_pem) }) {
             Ok(k) => k,
             Err(e) => return jwt_err(&format!("jwt: EdDSA public pem: {e}")),

@@ -408,6 +408,11 @@ pub const TIME: StdModule = StdModule {
             doc: "Immutable IANA or fixed-offset time-zone location.",
         },
         StdItem {
+            name: "Time",
+            kind: StdItemKind::Type,
+            doc: "A wall-clock instant with the location it is read in: `now()`, `from_unix` / `from_unix_ms` / `from_unix_nanos`, `parse_rfc3339` (keeps the written offset), `format_rfc3339`, `civil()`, `in_location` / `utc`, `+` / `-` a `Duration`, and `a - b` answering the `Duration` between two instants.",
+        },
+        StdItem {
             name: "sleep",
             kind: StdItemKind::Function,
             doc: "Suspends the current goroutine for a `Duration`, or for an integer count of milliseconds.",

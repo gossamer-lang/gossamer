@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_wrap)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
@@ -37,21 +36,20 @@ use super::vec::GosVec;
 
 /// Reads a Gossamer c-string argument into an owned `String`.
 unsafe fn read_cstr(s: *const c_char) -> String {
+    // SAFETY: this `unsafe fn`'s caller passes `s` live or null, which `gos_str_arg_string`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_string(s) }
 }
 
 /// Reads a Gossamer `[f64]` / `Vec<f64>` argument into a `Vec<f64>`.
 /// The backing buffer is a contiguous run of `len` 8-byte `f64`s.
 unsafe fn read_f64_vec(v: *const GosVec) -> Vec<f64> {
-    if v.is_null() {
-        return Vec::new();
-    }
-    let vec = unsafe { &*v };
-    let n = usize::try_from(vec.len).unwrap_or(0);
-    let base = vec.ptr.as_const_ptr().cast::<f64>();
-    (0..n)
-        .map(|i| unsafe { base.add(i).read_unaligned() })
-        .collect()
+    // SAFETY: this `unsafe fn`'s caller passes `v` null or a live `Vec`.
+    unsafe { crate::c_abi::vec::VecView::of(v) }.map_or_else(Vec::new, |vec| {
+        vec.words()
+            .map(|bits| f64::from_bits(bits as u64))
+            .collect()
+    })
 }
 
 struct HistState {
@@ -104,7 +102,11 @@ pub unsafe extern "C" fn gos_rt_metrics_counter_new(
 ) -> *mut GosMetric {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosMetric {
+            // SAFETY: `name` and `help` are this shim's arguments, each null or a live string
+            // body (C-ABI contract), which `read_cstr` accepts.
             name: unsafe { read_cstr(name) },
+            // SAFETY: `name` and `help` are this shim's arguments, each null or a live string
+            // body (C-ABI contract), which `read_cstr` accepts.
             help: unsafe { read_cstr(help) },
             body: MetricBody::Counter(AtomicU64::new(0)),
         }))
@@ -114,6 +116,8 @@ pub unsafe extern "C" fn gos_rt_metrics_counter_new(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_counter_inc(m: *mut GosMetric) {
     ffi_entry!((), {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         if let Some(MetricBody::Counter(v)) = unsafe { m.as_ref() }.map(|m| &m.body) {
             v.fetch_add(1, Ordering::Relaxed);
         }
@@ -123,6 +127,8 @@ pub unsafe extern "C" fn gos_rt_metrics_counter_inc(m: *mut GosMetric) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_counter_value(m: *mut GosMetric) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         match unsafe { m.as_ref() }.map(|m| &m.body) {
             Some(MetricBody::Counter(v)) => v.load(Ordering::Relaxed) as i64,
             _ => 0,
@@ -137,7 +143,11 @@ pub unsafe extern "C" fn gos_rt_metrics_gauge_new(
 ) -> *mut GosMetric {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosMetric {
+            // SAFETY: `name` and `help` are this shim's arguments, each null or a live string
+            // body (C-ABI contract), which `read_cstr` accepts.
             name: unsafe { read_cstr(name) },
+            // SAFETY: `name` and `help` are this shim's arguments, each null or a live string
+            // body (C-ABI contract), which `read_cstr` accepts.
             help: unsafe { read_cstr(help) },
             body: MetricBody::Gauge(AtomicU64::new(0_f64.to_bits())),
         }))
@@ -147,6 +157,8 @@ pub unsafe extern "C" fn gos_rt_metrics_gauge_new(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_gauge_set(m: *mut GosMetric, v: f64) {
     ffi_entry!((), {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         if let Some(MetricBody::Gauge(bits)) = unsafe { m.as_ref() }.map(|m| &m.body) {
             bits.store(v.to_bits(), Ordering::Relaxed);
         }
@@ -156,6 +168,8 @@ pub unsafe extern "C" fn gos_rt_metrics_gauge_set(m: *mut GosMetric, v: f64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_gauge_inc(m: *mut GosMetric) {
     ffi_entry!((), {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         if let Some(MetricBody::Gauge(bits)) = unsafe { m.as_ref() }.map(|m| &m.body) {
             gauge_update(bits, |c| c + 1.0);
         }
@@ -165,6 +179,8 @@ pub unsafe extern "C" fn gos_rt_metrics_gauge_inc(m: *mut GosMetric) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_gauge_dec(m: *mut GosMetric) {
     ffi_entry!((), {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         if let Some(MetricBody::Gauge(bits)) = unsafe { m.as_ref() }.map(|m| &m.body) {
             gauge_update(bits, |c| c - 1.0);
         }
@@ -174,6 +190,8 @@ pub unsafe extern "C" fn gos_rt_metrics_gauge_dec(m: *mut GosMetric) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_gauge_value(m: *mut GosMetric) -> f64 {
     ffi_entry!(0.0, {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         match unsafe { m.as_ref() }.map(|m| &m.body) {
             Some(MetricBody::Gauge(bits)) => f64::from_bits(bits.load(Ordering::Relaxed)),
             _ => 0.0,
@@ -188,10 +206,16 @@ pub unsafe extern "C" fn gos_rt_metrics_histogram_new(
     buckets: *const GosVec,
 ) -> *mut GosMetric {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `buckets` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `read_f64_vec` accepts.
         let bounds = unsafe { read_f64_vec(buckets) };
         let counts = vec![0_u64; bounds.len()];
         Box::into_raw(Box::new(GosMetric {
+            // SAFETY: `name` and `help` are this shim's arguments, each null or a live string
+            // body (C-ABI contract), which `read_cstr` accepts.
             name: unsafe { read_cstr(name) },
+            // SAFETY: `name` and `help` are this shim's arguments, each null or a live string
+            // body (C-ABI contract), which `read_cstr` accepts.
             help: unsafe { read_cstr(help) },
             body: MetricBody::Histogram {
                 bounds,
@@ -209,6 +233,8 @@ pub unsafe extern "C" fn gos_rt_metrics_histogram_new(
 pub unsafe extern "C" fn gos_rt_metrics_histogram_observe(m: *mut GosMetric, v: f64) {
     ffi_entry!((), {
         if let Some(MetricBody::Histogram { bounds, state }) =
+            // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+            // `as_ref` accepts.
             unsafe { m.as_ref() }.map(|m| &m.body)
         {
             let mut s = state.lock();
@@ -226,6 +252,8 @@ pub unsafe extern "C" fn gos_rt_metrics_histogram_observe(m: *mut GosMetric, v: 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_histogram_sum(m: *mut GosMetric) -> f64 {
     ffi_entry!(0.0, {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         match unsafe { m.as_ref() }.map(|m| &m.body) {
             Some(MetricBody::Histogram { state, .. }) => state.lock().sum,
             _ => 0.0,
@@ -236,6 +264,8 @@ pub unsafe extern "C" fn gos_rt_metrics_histogram_sum(m: *mut GosMetric) -> f64 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_histogram_count(m: *mut GosMetric) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `m` is this shim's argument, null or a live metric (C-ABI contract), which
+        // `as_ref` accepts.
         match unsafe { m.as_ref() }.map(|m| &m.body) {
             Some(MetricBody::Histogram { state, .. }) => state.lock().count as i64,
             _ => 0,
@@ -244,7 +274,7 @@ pub unsafe extern "C" fn gos_rt_metrics_histogram_count(m: *mut GosMetric) -> i6
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_metrics_registry_new() -> *mut GosRegistry {
+pub extern "C" fn gos_rt_metrics_registry_new() -> *mut GosRegistry {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosRegistry {
             metrics: Mutex::new(Vec::new()),
@@ -255,6 +285,8 @@ pub unsafe extern "C" fn gos_rt_metrics_registry_new() -> *mut GosRegistry {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_registry_register(r: *mut GosRegistry, m: *mut GosMetric) {
     ffi_entry!((), {
+        // SAFETY: `r` is this shim's argument, null or a live registry (C-ABI contract), which
+        // `as_ref` accepts.
         if let (Some(reg), false) = (unsafe { r.as_ref() }, m.is_null()) {
             reg.metrics.lock().push(SyncRawPtr::new(m));
         }
@@ -264,6 +296,8 @@ pub unsafe extern "C" fn gos_rt_metrics_registry_register(r: *mut GosRegistry, m
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_metrics_registry_render(r: *mut GosRegistry) -> *mut c_char {
     ffi_entry!(alloc_cstring(b""), {
+        // SAFETY: `r` is this shim's argument, null or a live registry (C-ABI contract), which
+        // `as_ref` accepts.
         let Some(reg) = (unsafe { r.as_ref() }) else {
             return alloc_cstring(b"");
         };
@@ -278,6 +312,8 @@ pub unsafe extern "C" fn gos_rt_metrics_registry_render(r: *mut GosRegistry) -> 
 fn render_registry(reg: &GosRegistry) -> String {
     let mut out = String::new();
     for slot in reg.metrics.lock().iter() {
+        // SAFETY: a registered slot is a metric handle, and metric handles are never freed, so it
+        // lives for the program.
         if let Some(metric) = unsafe { slot.as_const_ptr().as_ref() } {
             render_metric(&mut out, metric);
         }
@@ -291,6 +327,7 @@ fn render_registry(reg: &GosRegistry) -> String {
 /// `HandlerFn` ABI `gos_rt_http_serve` invokes.
 unsafe extern "C" fn metrics_handler(env: *mut u8, req: *mut GosHttpRequest) -> i128 {
     ffi_entry!(metrics_not_found(), {
+        // SAFETY: the server passes the request it owns, null or live for the call.
         let Some(request) = (unsafe { req.as_ref() }) else {
             return metrics_not_found();
         };
@@ -299,6 +336,8 @@ unsafe extern "C" fn metrics_handler(env: *mut u8, req: *mut GosHttpRequest) -> 
         if path != "/metrics" {
             return metrics_not_found();
         }
+        // SAFETY: `env` is the registry `gos_rt_metrics_serve` registered, and registries are
+        // never freed.
         let body = match unsafe { (env as *mut GosRegistry).as_ref() } {
             Some(reg) => render_registry(reg),
             None => String::new(),
@@ -339,6 +378,9 @@ pub unsafe extern "C-unwind" fn gos_rt_metrics_serve(
     addr: *const c_char,
     registry: *mut GosRegistry,
 ) -> i128 {
+    // SAFETY: `addr` and `registry` are this shim's arguments (C-ABI contract), and
+    // `metrics_handler` is the environment-taking handler `gos_rt_http_serve` calls with that
+    // registry.
     unsafe {
         super::http_server::gos_rt_http_serve(
             addr,

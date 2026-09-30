@@ -22,7 +22,7 @@ use std::time
 
 // POST /login - frame the posted user as a signed session cookie.
 fn login(r: http::Request) -> http::Response {
-    let payload = format("{{\"user\":\"{}\"}}", r.body)
+    let payload = f"{{\"user\":\"{r.body}\"}}"
     http::Response::text(200, http::session::sign(payload, #[9, 8, 7, 6, 5, 4, 3, 2]))
 }
 
@@ -32,7 +32,7 @@ fn get_order(r: http::Request) -> http::Response {
         return http::Response::text(401, "unauthorized")
     }
     match r.path_int("id") {
-        Some(id) => http::Response::json(200, format("{{\"order\":{}}}", id))
+        Some(id) => http::Response::json(200, f"{{\"order\":{id}}}")
         None => http::Response::text(400, "bad order id")
     }
 }
@@ -47,7 +47,7 @@ fn base() -> String { "http://" + addr() }
 fn serve() {
     let r = router::Router::new().post("/login", login).get("/orders/{id}", get_order)
     if let Err(e) = http::serve(addr(), r) {
-        eprintln("serve failed: {e}")
+        eprintln(f"serve failed: {e}")
     }
 }
 
@@ -69,23 +69,23 @@ await_ready(base() + "/orders/0")
 // 1) Log in, then verify the returned cookie round-trips locally.
 match http::request("POST", base() + "/login", "ada", #[]) {
     Ok(r) => match http::session::verify(r.body, #[9, 8, 7, 6, 5, 4, 3, 2]) {
-        Ok(data) => println("login session={}", data)
+        Ok(data) => println(f"login session={data}")
         Err(_) => println("login verify failed")
     }
-    Err(e) => println("login error: {}", e)
+    Err(e) => println(f"login error: {e}")
 }
 
 // 2) Authorized request with a typed path parameter.
 let auth: Vec<(String, String)> = #[("Authorization", "Bearer s3cret-token")]
 match http::request("GET", base() + "/orders/42", "", auth) {
-    Ok(r) => println("order status={} body={}", r.status, r.body)
-    Err(e) => println("order error: {}", e)
+    Ok(r) => println(f"order status={r.status} body={r.body}")
+    Err(e) => println(f"order error: {e}")
 }
 
 // 3) Missing token → 401.
 match http::get(base() + "/orders/42", #[]) {
-    Ok(r) => println("noauth status={}", r.status)
-    Err(e) => println("noauth error: {}", e)
+    Ok(r) => println(f"noauth status={r.status}")
+    Err(e) => println(f"noauth error: {e}")
 }
 
 process::exit(0)

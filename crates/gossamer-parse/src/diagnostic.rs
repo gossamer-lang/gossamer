@@ -13,13 +13,11 @@ use thiserror::Error;
 /// variant here is a shape outside that, named so the report says which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SerdeTargetRefusal {
-    /// A generic struct. Codecs are synthesized per declared struct, not per
-    /// instantiation, so there is no single shape to encode.
+    /// A generic struct or enum. Codecs are synthesized per declared type,
+    /// not per instantiation, so there is no single shape to encode.
     Generic,
-    /// An enum. Typed serde has no encoding for a tagged union.
-    Enum,
-    /// Not a struct declared in this unit - a scalar, a stdlib type, or a
-    /// name that does not resolve to a struct at all.
+    /// Not a struct or enum declared in this unit - a scalar, a stdlib type,
+    /// or a name that does not resolve to a declared type at all.
     NotAStruct,
     /// A struct the synthesizer declined for a reason the caller could not
     /// attribute to a single field.
@@ -31,9 +29,10 @@ impl SerdeTargetRefusal {
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {
-            Self::Generic => "typed serde covers concrete structs, and this one is generic",
-            Self::Enum => "typed serde covers structs, and this is an enum",
-            Self::NotAStruct => "typed serde covers structs, and this does not name one",
+            Self::Generic => {
+                "typed serde covers concrete structs and enums, and this one is generic"
+            }
+            Self::NotAStruct => "typed serde covers structs and enums, and this does not name one",
             Self::Unsupported => "typed serde has no encoding for this type",
         }
     }
@@ -48,12 +47,11 @@ impl SerdeTargetRefusal {
                 "wrap the instantiation in a concrete struct (`struct Ids {{ v: Vec<i64> }}`), \
                  or hand-write `{op}`"
             ),
-            Self::Enum => format!(
-                "give the enum a struct wrapper carrying the payload you exchange, \
-                 or hand-write `{op}`; {dynamic}"
-            ),
             Self::NotAStruct | Self::Unsupported => {
-                format!("name a struct declared in this program, or hand-write `{op}`; {dynamic}")
+                format!(
+                    "name a struct or enum declared in this program, or hand-write `{op}`; \
+                     {dynamic}"
+                )
             }
         }
     }
@@ -112,6 +110,29 @@ pub enum ParseError {
     /// An inclusive range operator appeared without its required upper bound.
     #[error("inclusive range operator `..=` requires an upper bound")]
     InclusiveRangeMissingEnd,
+    /// `#[derive(Default)]` on a struct with a field whose type has no zero
+    /// value to fill it with.
+    #[error("`#[derive(Default)]` on `{ty}` cannot fill field `{field}`")]
+    DeriveDefaultField {
+        /// The deriving struct.
+        ty: String,
+        /// The field without a zero value.
+        field: String,
+        /// The field's type as written.
+        field_ty: String,
+    },
+    /// A feature the language declines (SPEC §17.5), written where it would
+    /// start.
+    #[error("{feature} are not part of Gossamer")]
+    DeclinedFeature {
+        /// The feature, as a plural noun phrase (`` `async` functions ``).
+        feature: String,
+        /// What a program writes instead.
+        instead: String,
+        /// Source text that replaces the construct's span, when the rewrite
+        /// is mechanical.
+        replacement: Option<String>,
+    },
     /// A struct literal written unparenthesised in an `if` / `while` /
     /// `match` / `for` head, where `{` opens the body.
     #[error("struct literal `{name} {{ .. }}` must be parenthesized here")]
@@ -155,8 +176,11 @@ pub enum ParseError {
         name: String,
     },
     /// A build-time validated call handed something other than a literal.
-    #[error("`sql::statement` takes a literal")]
-    ValidatedCallNeedsLiteral,
+    #[error("`{call}` takes a literal")]
+    ValidatedCallNeedsLiteral {
+        /// The call as written, `regex::compile` or `sql::statement`.
+        call: &'static str,
+    },
     /// A literal handed to `regex::compile` is not a pattern it compiles.
     #[error("invalid regex: {reason}")]
     InvalidRegexLiteral {
@@ -337,6 +361,28 @@ pub enum ParseError {
     /// placeholders can be checked during parsing.
     #[error("format argument must be a string literal")]
     FormatStringMustBeLiteral,
+    /// `vec![..]`, Rust's Vec macro, where the Vec literal is `#[..]`.
+    #[error("`vec!` is not part of Gossamer; a Vec literal is `#[...]`")]
+    VecMacroRetired,
+    /// An `f"..."` string holds a `{}` placeholder, which names nothing: an
+    /// interpolated string has no arguments to fill it in order.
+    #[error("interpolated string placeholder `{{{text}}}` names no value")]
+    InterpolatedPositional {
+        /// The placeholder's inner text (without the braces).
+        text: String,
+    },
+    /// An `f"..."` placeholder's spec is not one the format grammar takes.
+    #[error("malformed format spec `:{spec}`")]
+    MalformedInterpolationSpec {
+        /// The spec's text after the `:`.
+        spec: String,
+    },
+    /// An `f"..."` string holds a brace that opens or closes no placeholder.
+    #[error("unmatched `{brace}` in an interpolated string")]
+    UnmatchedInterpolationBrace {
+        /// The lone brace.
+        brace: char,
+    },
     /// A `const` or `static` declaration whose name was followed directly by
     /// `=`. These items carry no inference, so the type annotation is part of
     /// the grammar rather than an option.
@@ -445,10 +491,6 @@ impl ParseDiagnostic {
     /// Renders this parse diagnostic as a structured
     /// [`gossamer_diagnostics::Diagnostic`].
     #[must_use]
-    #[allow(
-        clippy::too_many_lines,
-        reason = "one arm per diagnostic that carries a suggestion"
-    )]
     pub fn to_diagnostic(&self) -> gossamer_diagnostics::Diagnostic {
         use gossamer_diagnostics::{Code, Diagnostic, Location, Suggestion};
         let location = Location::new(self.span.file, self.span);
@@ -457,122 +499,71 @@ impl ParseDiagnostic {
         if let Some(help) = help {
             out = out.with_help(help);
         }
-        // The span of a missing-type diagnostic is the item's name, so the
-        // annotated name is a drop-in replacement an editor can apply.
-        if let ParseError::MissingItemType {
-            name,
-            inferred: Some(ty),
-            ..
-        } = &self.error
-        {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                format!("annotate the type: `{name}: {ty}`"),
-                format!("{name}: {ty}"),
-            ));
-        }
-        if let ParseError::ValidatingMacroMoved { name } = &self.error {
-            let replacement = if name == "regex" {
-                "regex::compile"
-            } else {
-                "sql::statement"
-            };
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                format!("write `{replacement}`"),
-                String::new(),
-            ));
-        }
-        if matches!(self.error, ParseError::MacroSigilRetired { .. }) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "drop the `!`".to_string(),
-                String::new(),
-            ));
-        }
-        if let ParseError::CohortIsolationSpelling { replacement } = &self.error {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                format!("write `{replacement}`"),
-                replacement.clone(),
-            ));
-        }
-        if matches!(self.error, ParseError::SharedReferenceArgument) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "drop the `&`".to_string(),
-                String::new(),
-            ));
-        }
-        if matches!(self.error, ParseError::SharedReferenceParameter) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "drop the `&`".to_string(),
-                String::new(),
-            ));
-        }
-        if matches!(self.error, ParseError::DisplayContractMethod) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "write `fmt`".to_string(),
-                "fmt".to_string(),
-            ));
-        }
-        if matches!(self.error, ParseError::OpaqueAliasSpelling) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "drop `new` and write `newtype` in place of `type`".to_string(),
-                String::new(),
-            ));
-        }
-        if matches!(self.error, ParseError::UnsafeGrantsNothing) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "drop `unsafe`".to_string(),
-                String::new(),
-            ));
-        }
-        if let ParseError::ArgumentLabelSeparator { name } = &self.error {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                format!("write `{name}:`"),
-                ":".to_string(),
-            ));
-        }
-        if matches!(self.error, ParseError::CallableTypeSpelling { .. }) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "write `Fn`".to_string(),
-                "Fn".to_string(),
-            ));
-        }
-        if matches!(self.error, ParseError::ModDeclSemicolon) {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                "drop the `;`".to_string(),
-                String::new(),
-            ));
-        }
-        if let ParseError::LetPatternParens { replacement } = &self.error {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                format!("write `{replacement}`"),
-                replacement.clone(),
-            ));
-        }
-        // The rewrite covers the step alone, so every step of a chain
-        // converges in a single `--fix` pass.
-        if let ParseError::PipeStepNeedsClosure {
-            replacement: Some(replacement),
-        } = &self.error
-        {
-            out = out.with_suggestion(Suggestion::replacement(
-                location,
-                format!("write `{replacement}`"),
-                replacement.clone(),
-            ));
+        if let Some((label, replacement)) = self.error.rewrite() {
+            out = out.with_suggestion(Suggestion::replacement(location, label, replacement));
         }
         out
+    }
+}
+
+impl ParseError {
+    /// The label and replacement text of the mechanical rewrite that
+    /// resolves this error over its span, when it has one.
+    fn rewrite(&self) -> Option<(String, String)> {
+        let write = |text: &str| (format!("write `{text}`"), text.to_string());
+        let drop = |what: &str| (format!("drop {what}"), String::new());
+        match self {
+            // The span of a missing-type diagnostic is the item's name, so
+            // the annotated name is a drop-in replacement.
+            ParseError::MissingItemType {
+                name,
+                inferred: Some(ty),
+                ..
+            } => Some((
+                format!("annotate the type: `{name}: {ty}`"),
+                format!("{name}: {ty}"),
+            )),
+            // The span is the `!`, so `::compile` in its place spells the call.
+            ParseError::ValidatingMacroMoved { name } => Some(if name == "regex" {
+                (
+                    "write `regex::compile`".to_string(),
+                    "::compile".to_string(),
+                )
+            } else {
+                (
+                    "write `sql::statement`".to_string(),
+                    "::statement".to_string(),
+                )
+            }),
+            ParseError::VecMacroRetired => Some(("write `#[...]`".to_string(), "#".to_string())),
+            ParseError::MacroSigilRetired { .. } => Some(drop("the `!`")),
+            ParseError::SharedReferenceArgument | ParseError::SharedReferenceParameter => {
+                Some(drop("the `&`"))
+            }
+            ParseError::UnsafeGrantsNothing => Some(drop("`unsafe`")),
+            ParseError::ModDeclSemicolon => Some(drop("the `;`")),
+            ParseError::DisplayContractMethod => Some(write("fmt")),
+            ParseError::CallableTypeSpelling { .. } => Some(write("Fn")),
+            ParseError::OpaqueAliasSpelling => Some((
+                "drop `new` and write `newtype` in place of `type`".to_string(),
+                String::new(),
+            )),
+            ParseError::ArgumentLabelSeparator { name } => {
+                Some((format!("write `{name}:`"), ":".to_string()))
+            }
+            // A pipe step's rewrite covers the step alone, so every step of a
+            // chain converges in a single `--fix` pass.
+            ParseError::CohortIsolationSpelling { replacement }
+            | ParseError::LetPatternParens { replacement }
+            | ParseError::DeclinedFeature {
+                replacement: Some(replacement),
+                ..
+            }
+            | ParseError::PipeStepNeedsClosure {
+                replacement: Some(replacement),
+            } => Some(write(replacement)),
+            _ => None,
+        }
     }
 }
 
@@ -743,6 +734,34 @@ impl ParseError {
     #[allow(clippy::too_many_lines, reason = "one arm per diagnostic code")]
     fn code_title_help_syntax(&self) -> (&'static str, String, Option<String>) {
         match self {
+            ParseError::DeriveDefaultField {
+                ty,
+                field,
+                field_ty,
+            } => (
+                "GP0062",
+                format!("`#[derive(Default)]` on `{ty}` cannot fill field `{field}`"),
+                Some(format!(
+                    "`{field_ty}` has no `default()`: derive it with `#[derive(Default)]`, write \
+                     `impl Default for {field_ty}`, or implement `default` for `{ty}` by hand"
+                )),
+            ),
+            ParseError::VecMacroRetired => (
+                "GP0064",
+                "`vec!` is not part of Gossamer; a Vec literal is `#[...]`".to_string(),
+                Some(
+                    "`#[1, 2]` builds a `Vec`, `[1, 2]` a fixed array, and `#[0; n]` a `Vec` \
+                     of `n` zeros"
+                        .to_string(),
+                ),
+            ),
+            ParseError::DeclinedFeature {
+                feature, instead, ..
+            } => (
+                "GP0061",
+                format!("{feature} are not part of Gossamer"),
+                Some(instead.clone()),
+            ),
             ParseError::StructLiteralInHead { name } => (
                 "GP0060",
                 format!("struct literal `{name} {{ .. }}` must be parenthesized here"),
@@ -795,15 +814,20 @@ impl ParseError {
                     )),
                 )
             }
-            ParseError::ValidatedCallNeedsLiteral => (
+            ParseError::ValidatedCallNeedsLiteral { call } => (
                 "GP0052",
-                "`sql::statement` takes a literal".to_string(),
-                Some(
+                format!("`{call}` takes a literal"),
+                Some(if *call == "regex::compile" {
+                    "the pattern is checked while the program is compiled, so it answers the \
+                     `Pattern` itself; a pattern built at run time goes to `regex::new`, \
+                     which answers a `Result`"
+                        .to_string()
+                } else {
                     "the statement is checked while the program is compiled, so it has to \
                      be there to check; a statement built at run time is an ordinary \
                      `String` and needs no wrapper"
-                        .to_string(),
-                ),
+                        .to_string()
+                }),
             ),
             ParseError::InvalidRegexLiteral { reason } => (
                 "GP0057",
@@ -989,7 +1013,7 @@ impl ParseError {
         }
     }
 
-    /// Code/title/help for the entry-form and format-placeholder errors.
+    /// Code/title/help for the entry-form and serde-derive errors.
     /// Split out of [`Self::code_title_help`] to keep each match small.
     fn code_title_help_entry(&self) -> (&'static str, String, Option<String>) {
         match self {
@@ -1012,13 +1036,42 @@ impl ParseError {
                         .to_string(),
                 ),
             ),
+            ParseError::SerdeUnserializableField {
+                ty,
+                field,
+                field_ty,
+                op,
+            } => (
+                "GP0022",
+                format!(
+                    "`{ty}` cannot derive `{op}`: field `{field}` has type `{field_ty}`, which is not serializable"
+                ),
+                Some(format!(
+                    "give `{field}` a serializable type (scalar, String, Vec, Option, tuple, \
+                     Map<String, _>, json::Value, or a nested struct), or hand-write `{op}`"
+                )),
+            ),
+            ParseError::SerdeUnsupportedTarget { ty, op, reason } => (
+                "GP0039",
+                format!("`{ty}` cannot derive `{op}`: {}", reason.describe()),
+                Some(reason.help(op)),
+            ),
+            other => other.code_title_help_format(),
+        }
+    }
+
+    /// Code/title/help for the format-template and interpolated-string errors.
+    fn code_title_help_format(&self) -> (&'static str, String, Option<String>) {
+        match self {
             ParseError::MalformedFormatPlaceholder { text } => (
                 "GP0021",
                 format!("malformed format placeholder `{{{text}}}`"),
                 Some(
-                    "a placeholder names a binding or a positional argument, with an optional \
-                     `:spec` of fill, alignment, zero-pad, width, precision, and radix (`{:>8}`, \
-                     `{:08.3}`, `{:#x}`) or `?`; bind an expression first"
+                    "a `format` placeholder is `{}` or a binding or field path, with an optional \
+                     `:spec` of fill, alignment, sign, zero-pad, width, precision, and radix or \
+                     exponent (`{:>8}`, `{:+08.3}`, `{:#x}`, `{:.2e}`) or `?`; pass a computed \
+                     value as an argument, or write the string as `f\"...\"`, whose placeholders \
+                     hold any expression"
                         .to_string(),
                 ),
             ),
@@ -1041,6 +1094,35 @@ impl ParseError {
                         .to_string(),
                 ),
             ),
+            ParseError::MalformedInterpolationSpec { spec } => (
+                "GP0021",
+                format!("malformed format spec `:{spec}`"),
+                Some(
+                    "a spec is fill, alignment, sign, zero-pad, width, precision, and radix or \
+                     exponent (`:>8`, `:+08.3`, `:#x`, `:.2e`), or `?`; an expression that needs \
+                     a `:` of its own is written in parentheses"
+                        .to_string(),
+                ),
+            ),
+            ParseError::UnmatchedInterpolationBrace { brace } => (
+                "GP0065",
+                format!("unmatched `{brace}` in an interpolated string"),
+                Some(
+                    "a placeholder is `{expr}` or `{expr:spec}`; write a literal brace twice, as \
+                     `{{` or `}}`"
+                        .to_string(),
+                ),
+            ),
+            ParseError::InterpolatedPositional { text } => (
+                "GP0063",
+                format!("interpolated string placeholder `{{{text}}}` names no value"),
+                Some(
+                    "an `f\"...\"` string fills each placeholder from the expression inside \
+                     it, as in `f\"{total}\"` or `f\"{a + b:>8}\"`; to fill `{}` placeholders in \
+                     order, call `format(\"...\", a, b)`"
+                        .to_string(),
+                ),
+            ),
             ParseError::FormatStringMustBeLiteral => (
                 "GP0024",
                 "format argument must be a string literal".to_string(),
@@ -1050,26 +1132,6 @@ impl ParseError {
                      template, as in `format(\"value: {}\", value)`"
                         .to_string(),
                 ),
-            ),
-            ParseError::SerdeUnserializableField {
-                ty,
-                field,
-                field_ty,
-                op,
-            } => (
-                "GP0022",
-                format!(
-                    "`{ty}` cannot derive `{op}`: field `{field}` has type `{field_ty}`, which is not serializable"
-                ),
-                Some(format!(
-                    "give `{field}` a serializable type (scalar, String, Vec, Option, tuple, \
-                     Map<String, _>, json::Value, or a nested struct), or hand-write `{op}`"
-                )),
-            ),
-            ParseError::SerdeUnsupportedTarget { ty, op, reason } => (
-                "GP0039",
-                format!("`{ty}` cannot derive `{op}`: {}", reason.describe()),
-                Some(reason.help(op)),
             ),
             other => other.code_title_help_shape(),
         }

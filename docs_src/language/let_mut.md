@@ -8,11 +8,14 @@ Binding mutability and reference capability are separate:
 
 ```gossamer
 let mut value = [1, 2]
-let reference = &mut value
-reference[0] = 0       // writes value
+{
+    let reference = &mut value
+    reference[0] = 0       // writes value
+}
 
+let other = [3, 4]
 let mut shared = &value
-shared = &[3, 4]       // rebinds shared; it remains read-only
+shared = &other        // rebinds shared; it remains read-only
 ```
 
 The left side of `=` is a pattern and the right side is an expression.
@@ -21,12 +24,12 @@ left matches a mutable reference, removes that reference layer, and copies the
 referent into the inner pattern:
 
 ```gossamer
-let mut source = [1, 2, 3]
-let reference = &mut source
+let mut count = 3
+let reference = &mut count
 let &mut copy = reference
 ```
 
-`copy` is an independent `[i64; 3]` value and is not reassignable. Only
+`copy` is an independent `i64` value and is not reassignable. Only
 `mut name` makes a binding reassignable. Reference patterns also compose with
 other patterns, for example `let name, &mut count = entry`. For a simple
 top-level copy, `let copy = *reference` is usually clearer.

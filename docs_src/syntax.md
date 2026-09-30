@@ -73,8 +73,8 @@ impl Area for Shape {
 
 A function that answers a value declares the type it answers with. A body
 whose tail expression produces one through a signature with no `-> T`
-reports `GT0074`, since the caller reads the signature and would take back a
-unit. A body with no tail expression answers a unit and declares nothing.
+reports the `GL0055` warning, since the caller reads the signature and takes
+back a unit. A body with no tail expression answers a unit and declares nothing.
 
 ## Top-level statements
 
@@ -105,14 +105,14 @@ struct Cell<T>    { value: T }
 fn main() {
     // Parameters inferred: Pair<i64, String>
     let p = Pair { fst: 42, snd: "answer" }
-    println("{} = {}", p.fst, p.snd)   // 42 = answer
+    println(f"{p.fst} = {p.snd}")   // 42 = answer
 
     // Same struct, different instantiation: Pair<i64, i64>
     let nums = Pair { fst: 10, snd: 32 }
     println("{}", nums.fst + nums.snd)  // 42
 
     let c = Cell { value: 99 }
-    println("{}", c.value)              // 99
+    println(f"{c.value}")              // 99
 }
 ```
 
@@ -130,6 +130,7 @@ instantiation. Field access and methods run on all three tiers.
 
 Everything is an expression. Blocks evaluate to their tail:
 
+<!-- fragment -->
 ```gossamer
 let max = if x > y { x } else { y }
 let label = match status {
@@ -147,9 +148,8 @@ typed bounds preserve their integer type and otherwise default to `i64`. See
 the [lazy iterator protocol](design/lazy_iterators.md) for ownership, adapters,
 and terminal behavior. `lo..hi` excludes `hi`, while `lo..=hi` includes it. An
 omitted lower bound starts at zero. An omitted upper bound is unbounded:
-like Rust's `RangeFrom`, it
-panics on overflow in debug builds, while release builds wrap to `i64::MIN`
-and continue. The REPL prints open ranges without
+like Rust's `RangeFrom`, it panics when a step would pass the type's
+maximum, on every tier and in every profile. The REPL prints open ranges without
 realising them, such as `10..` or `..10`. Because `..=` is inclusive, it
 always requires an upper bound; `10..=` is a parse error.
 
@@ -159,6 +159,7 @@ A tuple on the left of `=` writes each element to its own target. The
 right-hand side is evaluated before the first write, so a swap needs no
 temporary:
 
+<!-- fragment -->
 ```gossamer
 let mut a = 1
 let mut b = 2
@@ -301,9 +302,10 @@ An `if` or `while` condition may chain clauses with `&&`, where each
 clause is either `let PAT = expr` or a boolean. Earlier `let` bindings
 are in scope for later clauses and the body:
 
+<!-- fragment -->
 ```gossamer
 if let Some(x) = a && let Some(y) = b && x > 0 {
-    use(x + y)
+    process(x + y)
 }
 while i < xs.len() && let n = xs[i] && n > 0 {
     sum += n
@@ -316,6 +318,7 @@ without parentheses.
 
 ## Loops
 
+<!-- fragment -->
 ```gossamer
 loop { ... break value }
 while cond { ... }
@@ -369,6 +372,7 @@ The sequence combinators are methods on any Vec or range -
 `position`, `fold`, `min` / `max`, `take`, `step_by`, `join` - so a
 query chains directly with no accumulator:
 
+<!-- fragment -->
 ```gossamer
 let odds_sq = (1..=9).filter(|n| n % 2 == 1).map(|n| n * n).sum()
 let primes = (2..limit).filter(|k| sieve[k])
@@ -393,6 +397,7 @@ fn load(path: String) -> Result<String, io::Error> {
 
 ## Arenas
 
+<!-- fragment -->
 ```gossamer
 arena {
     let tree = build_tree(16)
@@ -411,6 +416,7 @@ referenced after it exits. See the
 
 ## Concurrency
 
+<!-- fragment -->
 ```gossamer
 // Structured: the block owns what it starts, waits for all of it, and
 // reports the first failure as its own `Result<(), errors::Error>`.
@@ -497,6 +503,7 @@ with automatic memory management).
 
 ## Attributes
 
+<!-- fragment -->
 ```gossamer
 #[test]
 fn add_adds() { ... }
@@ -527,7 +534,7 @@ use std::fmt::Display
 struct Tagged { id: i64 }
 
 impl Display for Tagged {
-    fn fmt(&self) -> String { format("#{}", self.id) }
+    fn fmt(&self) -> String { f"#{self.id}" }
 }
 ```
 
@@ -572,15 +579,17 @@ names what the language does and what to write in the block's place.
 
 ## Modules
 
+<!-- fragment -->
 ```gossamer
 use std::http
 use std::http::{Handler, Request, Response}
-use example.org/other::widget
+use "example.org/other"
 ```
 
 Standard library modules require an explicit import. The import binds the
 module's final path segment, or the requested alias, into the file:
 
+<!-- fragment -->
 ```gossamer
 use std::encoding::json
 use std::fs as filesystem
@@ -651,7 +660,7 @@ Rust-style format string with `{}` placeholders, plus named captures
 let name = "jane"
 let age = 30
 println("hello, {name}! you are {age} years old.")
-let greeting = format("welcome, {}", name)
+let greeting = f"welcome, {name}"
 ```
 
 A named capture may walk a field path - `{account.balance}`, tuple
@@ -686,5 +695,6 @@ For the single-`String` output shape, `+` concatenates without
 adding a separator:
 
 ```gossamer
-let greeting = "hello, " + &name
+let name = "world"
+let greeting = "hello, " + name
 ```

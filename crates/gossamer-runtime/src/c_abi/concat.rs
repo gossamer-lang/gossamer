@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -30,7 +28,7 @@ thread_local! {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_init() {
+pub extern "C" fn gos_rt_concat_init() {
     ffi_entry!((), {
         CONCAT_BUF.with(|b| {
             let mut buf = b.borrow_mut();
@@ -53,13 +51,14 @@ pub unsafe extern "C" fn gos_rt_concat_str(s: *const c_char) {
         if s.is_null() {
             return;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(s) };
         CONCAT_BUF.with(|b| b.borrow_mut().extend_from_slice(bytes));
     });
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_i64(n: i64) {
+pub extern "C" fn gos_rt_concat_i64(n: i64) {
     ffi_entry!((), {
         use std::io::Write;
         // `Vec<u8>` is an `io::Write` sink, so the digits format straight
@@ -76,7 +75,7 @@ pub unsafe extern "C" fn gos_rt_concat_i64(n: i64) {
 /// sign-flipped two's-complement view a single `i64` printer would
 /// produce.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_u64(n: u64) {
+pub extern "C" fn gos_rt_concat_u64(n: u64) {
     ffi_entry!((), {
         use std::io::Write;
         CONCAT_BUF.with(|b| {
@@ -86,7 +85,7 @@ pub unsafe extern "C" fn gos_rt_concat_u64(n: u64) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_f64(x: f64) {
+pub extern "C" fn gos_rt_concat_f64(x: f64) {
     ffi_entry!((), {
         let mut text = crate::builtins::FloatText::new();
         let digits = crate::builtins::f64_display(x, &mut text);
@@ -98,7 +97,7 @@ pub unsafe extern "C" fn gos_rt_concat_f64(x: f64) {
 /// value keeps a `.0` and an out-of-window magnitude switches to exponent
 /// form, so the text always reads back as a float.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_f64_debug(x: f64) {
+pub extern "C" fn gos_rt_concat_f64_debug(x: f64) {
     ffi_entry!((), {
         let s = crate::builtins::format_float_debug(x);
         CONCAT_BUF.with(|b| b.borrow_mut().extend_from_slice(s.as_bytes()));
@@ -110,7 +109,7 @@ pub unsafe extern "C" fn gos_rt_concat_f64_debug(x: f64) {
 /// pipeline can route the value directly without an intermediate
 /// allocation.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_f64_prec(x: f64, prec: i64) {
+pub extern "C" fn gos_rt_concat_f64_prec(x: f64, prec: i64) {
     ffi_entry!((), {
         let prec = prec.clamp(0, 64) as usize;
         let s = format!("{x:.prec$}");
@@ -119,7 +118,7 @@ pub unsafe extern "C" fn gos_rt_concat_f64_prec(x: f64, prec: i64) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_bool(b: i32) {
+pub extern "C" fn gos_rt_concat_bool(b: i32) {
     ffi_entry!((), {
         let s = if b != 0 { "true" } else { "false" };
         CONCAT_BUF.with(|buf| buf.borrow_mut().extend_from_slice(s.as_bytes()));
@@ -127,7 +126,7 @@ pub unsafe extern "C" fn gos_rt_concat_bool(b: i32) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_char(c: i32) {
+pub extern "C" fn gos_rt_concat_char(c: i32) {
     ffi_entry!((), {
         let ch = char::from_u32(c as u32).unwrap_or('\u{FFFD}');
         let s = ch.to_string();
@@ -136,7 +135,7 @@ pub unsafe extern "C" fn gos_rt_concat_char(c: i32) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_concat_finish() -> *mut c_char {
+pub extern "C" fn gos_rt_concat_finish() -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         CONCAT_BUF.with(|b| {
             let buf = b.borrow();
@@ -155,6 +154,7 @@ pub unsafe extern "C" fn gos_rt_error_cause(err: *const GosError) -> i128 {
         let cause = if err.is_null() {
             std::ptr::null_mut::<GosError>()
         } else {
+            // SAFETY: `err` is non-null on this branch and live for the call (C-ABI contract).
             unsafe { (*err).cause.as_ptr() }
         };
         // The `Some` arm borrows the cause the error holds a share of, so a
@@ -182,98 +182,101 @@ pub unsafe extern "C" fn gos_rt_error_is(err: *const GosError, needle: *const c_
         if err.is_null() || needle.is_null() {
             return 0;
         }
+        // SAFETY: `needle` is a String argument from compiled code, null or a live string body for the whole call.
         let needle = unsafe { crate::c_abi::gos_str_arg_bytes(needle) };
         let mut cur = err;
         while !cur.is_null() {
+            // SAFETY: `cur` is non-null (the loop condition) and a live error: `err` per the
+            // C-ABI contract, then each cause.
             let m = unsafe { (*cur).message };
             if !m.is_null()
                 && contains_bytes(
+                    // SAFETY: a non-null message is the runtime string the error owns.
                     unsafe { crate::c_abi::gos_str_arg_bytes(m.as_ptr()) },
                     needle,
                 )
             {
                 return 1;
             }
+            // SAFETY: `cur` is non-null (the loop condition), and a live error's `cause` is null
+            // or a share of a live error, so the chain walk only reaches live errors.
             cur = unsafe { (*cur).cause.as_ptr() };
         }
         0
     })
 }
 
-/// Joins every error message in `vec` (a `*mut GosVec` of `*mut GosError`)
-/// with "; " and returns `Some(joined_error)` as a `*mut GosResult`.
-/// Returns a `None`-shaped `GosResult` when the array is null or empty.
-/// `ptr` points directly to the array of `GosError*` elements (stack-allocated
-/// fixed-size array from the compiled tier); `len` is the compile-time count.
+/// The top message of the error `err` names, or `None` for a null error or one
+/// with no message.
+///
+/// # Safety
+/// `err` is null or a live error.
+unsafe fn error_message_of(err: *const GosError) -> Option<String> {
+    // SAFETY: this `unsafe fn`'s caller passes `err` null or live.
+    let err = unsafe { err.as_ref() }?;
+    let message = err.message.as_ptr();
+    // SAFETY: a non-null message is the runtime string the live error owns.
+    (!message.is_null()).then(|| unsafe { crate::c_abi::gos_str_arg_string(message) })
+}
+
+/// `Some` of one error whose message joins `parts` with "; ", or `None` when
+/// there is nothing to join.
+fn joined_error(parts: &[String]) -> i128 {
+    if parts.is_empty() {
+        return crate::c_abi::vec::pack_result(1, 0);
+    }
+    let combined = parts.join("; ");
+    // SAFETY: the message is a fresh string and there is no cause.
+    let err = unsafe {
+        super::errors::error_alloc(
+            alloc_cstring(combined.as_bytes()),
+            std::ptr::null_mut(),
+            Vec::new(),
+        )
+    };
+    crate::c_abi::vec::pack_result(0, err as i64)
+}
+
+/// Joins every error message in the `len` errors at `ptr` with "; " and
+/// returns `Some(joined_error)` as a `*mut GosResult`; `None` when the array
+/// is null or holds no message. `ptr` is the compiled tier's fixed-size array
+/// of `GosError*` elements and `len` its compile-time count.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_errors_join(ptr: *const *mut GosError, len: i64) -> i128 {
     ffi_entry!(0i128, {
-        let none = || crate::c_abi::vec::pack_result(1, 0);
-        if ptr.is_null() || len <= 0 {
-            return none();
+        let count = usize::try_from(len).unwrap_or(0);
+        if ptr.is_null() || count == 0 {
+            return joined_error(&[]);
         }
-        let len = len as usize;
-        let mut parts: Vec<String> = Vec::with_capacity(len);
-        for i in 0..len {
-            let err = unsafe { *ptr.add(i) }; // ptr is the array base from the caller
-            if err.is_null() {
-                continue;
-            }
-            let m = unsafe { (*err).message };
-            if m.is_null() {
-                continue;
-            }
-            parts.push(unsafe { crate::c_abi::gos_str_arg_string(m.as_ptr()) });
-        }
-        if parts.is_empty() {
-            return none();
-        }
-        let combined = parts.join("; ");
-        let err = super::errors::error_alloc(
-            alloc_cstring(combined.as_bytes()),
-            std::ptr::null_mut(),
-            Vec::new(),
-        );
-        crate::c_abi::vec::pack_result(0, err as i64)
+        // SAFETY: `ptr` is non-null (checked above) and addresses `count` error words (C-ABI
+        // contract).
+        let errors = unsafe { std::slice::from_raw_parts(ptr, count) };
+        let parts: Vec<String> = errors
+            .iter()
+            // SAFETY: each element is null or a live error (C-ABI contract), which
+            // `error_message_of` accepts.
+            .filter_map(|&err| unsafe { error_message_of(err) })
+            .collect();
+        joined_error(&parts)
     })
 }
 
-/// Joins every error in `vec` (a `*mut GosVec` of `*mut GosError` elements)
-/// with "; " and returns `Some(joined_error)` as a `*mut GosResult`.
-/// Returns a None-shaped result when `vec` is null or empty.
+/// Joins every error in `vec` (a `Vec<errors::Error>`) with "; " and returns
+/// `Some(joined_error)` as a `*mut GosResult`; `None` when `vec` is null or
+/// holds no message.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_errors_join_vec(vec: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let none = || crate::c_abi::vec::pack_result(1, 0);
-        if vec.is_null() {
-            return none();
-        }
-        let len = unsafe { (*vec).len } as usize;
-        if len == 0 {
-            return none();
-        }
-        let data = unsafe { (*vec).ptr.as_ptr() } as *const *mut GosError;
-        let mut parts: Vec<String> = Vec::with_capacity(len);
-        for i in 0..len {
-            let err = unsafe { *data.add(i) };
-            if err.is_null() {
-                continue;
-            }
-            let m = unsafe { (*err).message };
-            if m.is_null() {
-                continue;
-            }
-            parts.push(unsafe { crate::c_abi::gos_str_arg_string(m.as_ptr()) });
-        }
-        if parts.is_empty() {
-            return none();
-        }
-        let combined = parts.join("; ");
-        let err = super::errors::error_alloc(
-            alloc_cstring(combined.as_bytes()),
-            std::ptr::null_mut(),
-            Vec::new(),
-        );
-        crate::c_abi::vec::pack_result(0, err as i64)
+        // SAFETY: `vec` is this shim's argument, null or a live `Vec<errors::Error>` (C-ABI
+        // contract).
+        let Some(errors) = (unsafe { crate::c_abi::vec::VecView::of(vec) }) else {
+            return joined_error(&[]);
+        };
+        let parts: Vec<String> = (0..errors.len())
+            // SAFETY: each element of a `Vec<errors::Error>` is null or a live error (C-ABI
+            // contract), which `error_message_of` accepts.
+            .filter_map(|i| unsafe { error_message_of(errors.pointer_at::<GosError>(i)) })
+            .collect();
+        joined_error(&parts)
     })
 }

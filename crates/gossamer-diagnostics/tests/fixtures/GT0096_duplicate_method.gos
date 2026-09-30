@@ -1,0 +1,14 @@
+// ERROR: GT0096
+
+struct Counter { n: i64 }
+trait Step { fn next(&self) -> i64 }
+
+impl Counter {
+    fn next(&self) -> i64 { self.n + 1 }
+}
+
+impl Step for Counter {
+    fn next(&self) -> i64 { self.n + 2 }
+}
+
+fn main() {}

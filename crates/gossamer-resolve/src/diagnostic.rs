@@ -523,6 +523,22 @@ impl ResolveDiagnostic {
         let mut out =
             Diagnostic::error(Code(self.error.code()), title.clone()).with_primary(location, title);
         if let ResolveError::UnresolvedName { name } = &self.error {
+            // Names other languages give to constructs this one declines
+            // (SPEC §17.5) point at what replaces them.
+            let declined = match name.as_str() {
+                "nil" | "null" | "undefined" => Some(
+                    "there is no `nil`: absence is `Option<T>`, written `None` and matched as \
+                     `Some(v)` / `None`",
+                ),
+                "recover" => Some(
+                    "a panic is not recovered: return `Result<T, E>` for a failure the caller \
+                     handles, and let a goroutine's panic end that goroutine",
+                ),
+                _ => None,
+            };
+            if let Some(help) = declined {
+                return out.with_help(help);
+            }
             if let Some(replacement) = crate::stdlib_exports::canonical_collection_name(name) {
                 return out.with_help(format!(
                     "`{replacement}` is the one spelling for this type; write `{replacement}` \

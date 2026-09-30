@@ -54,6 +54,10 @@ pub enum JitKind {
     /// point in an integer register. The trampoline reads a `Value::Char`
     /// for a parameter and re-wraps a returned word through `char::from_u32`.
     Char,
+    /// A shared reference to a scalar (`&self` on a primitive): the body
+    /// reads the value through the address, so the trampoline passes a
+    /// slot holding it.
+    ScalarRef,
     /// The unit value (no representation; the body has no return).
     Unit,
     /// A runtime [`gossamer_runtime::GossamerValue`] - the u64-packed shape the
@@ -1484,14 +1488,12 @@ fn body_calls_jit_unsafe(
         if body_names.contains(n) {
             continue;
         }
-        // Bare prelude I/O intrinsics the cranelift backend lowers directly
-        // (`intrinsic_io_math.rs`): the `println!` family and the format-prec
-        // helper `__fmt_prec` (also `__`-prefixed below). They are NOT registered
-        // runtime symbols, so without this a top-level `main` that ends in a
-        // `println!` would be judged unsafe and never promote. `panic` is
-        // deliberately excluded - panicking bodies stay on bytecode so the VM
-        // renders the call-stack trace (the interp gates them separately).
-        if matches!(n, "println" | "print" | "eprintln" | "eprint") {
+        // Bare prelude intrinsics the cranelift backend lowers directly
+        // (`intrinsic_io_math.rs`): the `println!` family and `panic`. They
+        // are not registered runtime symbols. A native frame that panics is
+        // named in the trace through its registered unwind info, as a fault
+        // a runtime shim raises already is.
+        if matches!(n, "println" | "print" | "eprintln" | "eprint" | "panic") {
             continue;
         }
         if matches!(
@@ -2301,8 +2303,9 @@ fn body_kinds(
         struct_shapes,
     )?;
     // A flat array block is an inbound marshalling shape only: a returned
-    // one would have to outlive the body with no owner to free it.
-    if matches!(returns, JitKind::ArrayBlockPtr(..)) {
+    // one would have to outlive the body with no owner to free it. A
+    // borrowed scalar is lent for the call and has nothing to return.
+    if matches!(returns, JitKind::ArrayBlockPtr(..) | JitKind::ScalarRef) {
         return None;
     }
     Some((params, returns))
@@ -2550,6 +2553,16 @@ fn ty_to_kind(
         was_borrowed = true;
     }
     trace_ty_to_kind(tcx, ty);
+    // A reference to a scalar is an address the body loads through, unlike
+    // a reference to a heap value, which is the value's own pointer.
+    if was_borrowed
+        && matches!(
+            tcx.kind_of(ty),
+            TyKind::Bool | TyKind::Int(_) | TyKind::Float(_) | TyKind::Char
+        )
+    {
+        return Some(JitKind::ScalarRef);
+    }
     match tcx.kind_of(ty) {
         TyKind::Bool => Some(JitKind::Bool),
         TyKind::Int(_) => Some(JitKind::I64),
@@ -2722,6 +2735,12 @@ fn ty_to_tuple_elem(
 /// JIT-eligibility check can identify a body that calls something the
 /// runtime does not define.
 fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashSet<&'static str> {
+    // The one data symbol compiled code reads: the yield-request byte every
+    // loop-header preemption poll tests.
+    builder.symbol(
+        "gos_rt_preempt_requested",
+        std::ptr::from_ref(&gossamer_runtime::preempt::PREEMPT_REQUESTED).cast::<u8>(),
+    );
     gossamer_runtime::symbols::entries()
         .map(|(name, addr)| {
             builder.symbol(name, addr.cast::<u8>());

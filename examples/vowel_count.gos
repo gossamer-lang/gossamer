@@ -39,5 +39,5 @@ let lines = #[
 ]
 for s in lines {
     let counts = count_vowels(s)
-    println("{}: vowels={}, consonants={}", s, counts.vowels, counts.consonants)
+    println(f"{s}: vowels={counts.vowels}, consonants={counts.consonants}")
 }

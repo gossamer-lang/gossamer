@@ -51,7 +51,7 @@ fn seed_notes() -> Vec<Note> {
 }
 
 fn render_note_json(note: Note) -> String {
-    format("{{\"id\":{},\"body\":\"{}\"}}", note.id, escape_json(note.body))
+    f"{{\"id\":{note.id},\"body\":\"{escape_json(note.body)}\"}}"
 }
 
 fn render_notes_json(notes: [Note]) -> String {
@@ -62,7 +62,7 @@ fn render_notes_json(notes: [Note]) -> String {
         if !first { out.push(',') }
         first = false
         out.push_str("{\"id\":")
-        out.push_str(format("{}", note.id))
+        out.push_str(f"{note.id}")
         out.push_str(",\"body\":\"")
         out.push_str(escape_json(note.body))
         out.push_str("\"}")
@@ -76,7 +76,7 @@ fn render_notes_html(notes: [Note]) -> String {
     out.push_str("<!doctype html><html><head><title>notes</title></head><body><ul>")
     for note in notes {
         out.push_str("<li>#")
-        out.push_str(format("{}", note.id))
+        out.push_str(f"{note.id}")
         out.push_str(": ")
         out.push_str(escape_html(note.body))
         out.push_str("</li>")

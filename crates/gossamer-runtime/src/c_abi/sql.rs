@@ -13,7 +13,6 @@
 //! boundaries and semantics are identical by construction.
 
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::too_many_lines)]
 #![allow(missing_docs)]
@@ -49,7 +48,10 @@ pub(crate) fn driver_registry() -> &'static Mutex<Vec<Arc<dyn Driver>>> {
 
 // --- helpers -------------------------------------------------------
 
-fn c_str_to_string(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn c_str_to_string(p: *const c_char) -> String {
     // SAFETY: callers pass a Gossamer `String`, read through its length
     // header; non-UTF-8 falls back to the empty string.
     unsafe { crate::c_abi::gos_str_arg_text(p) }.to_string()
@@ -1037,28 +1039,29 @@ pub fn sql_migrate_up(conn: i64, dir: &str) -> i64 {
 // linker keeps every symbol on its own. No `#[used]` anchor needed.
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_value_null() -> i64 {
+pub extern "C" fn gos_rt_sql_value_null() -> i64 {
     value_register(Value::Null)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_value_bool(b: i32) -> i64 {
+pub extern "C" fn gos_rt_sql_value_bool(b: i32) -> i64 {
     value_register(Value::Bool(b != 0))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_value_int(n: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_value_int(n: i64) -> i64 {
     value_register(Value::Int(n))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_value_float(f: f64) -> i64 {
+pub extern "C" fn gos_rt_sql_value_float(f: f64) -> i64 {
     value_register(Value::Float(f))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_value_text(s: *const c_char) -> i64 {
-    value_register(Value::Text(c_str_to_string(s)))
+    // SAFETY: `s` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    value_register(Value::Text(unsafe { c_str_to_string(s) }))
 }
 
 // --- conn / open ---------------------------------------------------
@@ -1067,52 +1070,57 @@ pub unsafe extern "C" fn gos_rt_sql_value_text(s: *const c_char) -> i64 {
 /// error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_open(name: *const c_char, url: *const c_char) -> i64 {
-    sql_open_handle(&c_str_to_string(name), &c_str_to_string(url))
+    // SAFETY: `name` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    // `url` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_open_handle(&unsafe { c_str_to_string(name) }, &unsafe {
+        c_str_to_string(url)
+    })
 }
 
 /// Returns the most recent SQL error message as a c-string (and
 /// clears it). Caller frees via `gos_rt_free_cstring`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_last_error() -> *mut c_char {
+pub extern "C" fn gos_rt_sql_last_error() -> *mut c_char {
     alloc_cstring(sql_take_last_error().as_bytes())
 }
 
 /// Returns a c-string of `,`-separated driver names. Caller frees
 /// via `gos_rt_free_cstring`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_drivers() -> *mut c_char {
+pub extern "C" fn gos_rt_sql_drivers() -> *mut c_char {
     alloc_cstring(sql_drivers_joined().as_bytes())
 }
 
 /// Allocates a parameter list; returns its handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_params_new() -> i64 {
+pub extern "C" fn gos_rt_sql_params_new() -> i64 {
     sql_params_new()
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_params_push_null(p: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_params_push_null(p: i64) -> i64 {
     sql_params_push(p, Value::Null)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_params_push_bool(p: i64, b: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_params_push_bool(p: i64, b: i64) -> i64 {
     sql_params_push(p, Value::Bool(b != 0))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_params_push_int(p: i64, n: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_params_push_int(p: i64, n: i64) -> i64 {
     sql_params_push(p, Value::Int(n))
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_params_push_float(p: i64, f: f64) -> i64 {
+pub extern "C" fn gos_rt_sql_params_push_float(p: i64, f: f64) -> i64 {
     sql_params_push(p, Value::Float(f))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_params_push_text(p: i64, s: *const c_char) -> i64 {
-    sql_params_push(p, Value::Text(c_str_to_string(s)))
+    // SAFETY: `s` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_params_push(p, Value::Text(unsafe { c_str_to_string(s) }))
 }
 
 #[unsafe(no_mangle)]
@@ -1121,7 +1129,7 @@ pub unsafe extern "C" fn gos_rt_sql_params_push_blob(
     bytes: *const super::vec::GosVec,
 ) -> i64 {
     // SAFETY: codegen passes a live GosVec pointer for a `[u8]` arg.
-    let data = unsafe { super::encoding::gosvec_u8(bytes) };
+    let data = unsafe { crate::c_abi::vec::vec_bytes(bytes) };
     sql_params_push(p, Value::Blob(data))
 }
 
@@ -1129,7 +1137,8 @@ pub unsafe extern "C" fn gos_rt_sql_params_push_blob(
 /// Returns rows affected, or -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_conn_execute(handle: i64, sql: *const c_char) -> i64 {
-    sql_conn_execute_params(handle, &c_str_to_string(sql), 0)
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_execute_params(handle, &unsafe { c_str_to_string(sql) }, 0)
 }
 
 /// Executes `sql` with bound parameters (the params handle is
@@ -1140,13 +1149,15 @@ pub unsafe extern "C" fn gos_rt_sql_conn_execute_params(
     sql: *const c_char,
     params: i64,
 ) -> i64 {
-    sql_conn_execute_params(handle, &c_str_to_string(sql), params)
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_execute_params(handle, &unsafe { c_str_to_string(sql) }, params)
 }
 
 /// Runs a query. Returns a Rows handle, or -1 on error.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_conn_query(handle: i64, sql: *const c_char) -> i64 {
-    sql_conn_query_params(handle, &c_str_to_string(sql), 0)
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_query_params(handle, &unsafe { c_str_to_string(sql) }, 0)
 }
 
 /// Runs a query with bound parameters (the params handle is
@@ -1157,12 +1168,13 @@ pub unsafe extern "C" fn gos_rt_sql_conn_query_params(
     sql: *const c_char,
     params: i64,
 ) -> i64 {
-    sql_conn_query_params(handle, &c_str_to_string(sql), params)
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_query_params(handle, &unsafe { c_str_to_string(sql) }, params)
 }
 
 /// Begins a transaction. Returns a Tx handle, or -1 on error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_begin(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_conn_begin(handle: i64) -> i64 {
     sql_conn_begin(handle)
 }
 
@@ -1170,33 +1182,33 @@ pub unsafe extern "C" fn gos_rt_sql_conn_begin(handle: i64) -> i64 {
 /// 1=ReadUncommitted, 2=ReadCommitted, 3=RepeatableRead,
 /// 4=Serializable). Returns a Tx handle, or -1 on error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_begin_with(handle: i64, iso: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_conn_begin_with(handle: i64, iso: i64) -> i64 {
     sql_conn_begin_with(handle, iso)
 }
 
 /// Pings the connection. Returns 0 on success, -1 on error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_ping(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_conn_ping(handle: i64) -> i64 {
     sql_conn_ping(handle)
 }
 
 /// Sets the driver-specific busy timeout in milliseconds. Returns 0
 /// on success, -1 on error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_set_busy_timeout(handle: i64, ms: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_conn_set_busy_timeout(handle: i64, ms: i64) -> i64 {
     sql_conn_set_busy_timeout(handle, ms)
 }
 
 /// Cancels any in-flight statement on the connection.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_interrupt(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_conn_interrupt(handle: i64) -> i64 {
     sql_conn_interrupt(handle)
 }
 
 /// Closes the connection and releases its handle. Returns 0 on
 /// success, -1 on error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_close(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_conn_close(handle: i64) -> i64 {
     sql_conn_close(handle)
 }
 
@@ -1205,19 +1217,19 @@ pub unsafe extern "C" fn gos_rt_sql_conn_close(handle: i64) -> i64 {
 /// Advances `rows` and returns a Row handle, 0 on end-of-set, -1 on
 /// error.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_rows_next_row(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_rows_next_row(handle: i64) -> i64 {
     sql_rows_next_row(handle)
 }
 
 /// Releases a Rows cursor and its current Row. Idempotent; always 0.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_rows_close(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_rows_close(handle: i64) -> i64 {
     sql_rows_close(handle)
 }
 
 /// Returns a c-string of `,`-separated column names for `rows`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_rows_columns(handle: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sql_rows_columns(handle: i64) -> *mut c_char {
     let joined = sql_rows_columns_joined(handle);
     if joined.is_empty() {
         return empty_cstring();
@@ -1238,29 +1250,34 @@ fn row_value_by_column(row: &Row, column: &str) -> Option<Value> {
 /// 1 Bool, 2 Int, 3 Float, 4 Text, 5 Blob.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_row_kind(handle: i64, column: *const c_char) -> i64 {
-    sql_row_kind(handle, &c_str_to_string(column))
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_row_kind(handle, &unsafe { c_str_to_string(column) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_row_get_i64(handle: i64, column: *const c_char) -> i64 {
-    sql_row_get_i64(handle, &c_str_to_string(column))
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_row_get_i64(handle, &unsafe { c_str_to_string(column) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_row_get_f64(handle: i64, column: *const c_char) -> f64 {
-    sql_row_get_f64(handle, &c_str_to_string(column))
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_row_get_f64(handle, &unsafe { c_str_to_string(column) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_row_get_bool(handle: i64, column: *const c_char) -> i32 {
-    sql_row_get_bool(handle, &c_str_to_string(column)) as i32
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_row_get_bool(handle, &unsafe { c_str_to_string(column) }) as i32
 }
 
 /// Like `gos_rt_sql_row_get_bool` with a uniform i64 return for the
 /// injected-wrapper call path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_row_get_bool_i64(handle: i64, column: *const c_char) -> i64 {
-    sql_row_get_bool(handle, &c_str_to_string(column))
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_row_get_bool(handle, &unsafe { c_str_to_string(column) })
 }
 
 #[unsafe(no_mangle)]
@@ -1268,7 +1285,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_text(
     handle: i64,
     column: *const c_char,
 ) -> *mut c_char {
-    let text = sql_row_get_text(handle, &c_str_to_string(column));
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let text = sql_row_get_text(handle, &unsafe { c_str_to_string(column) });
     alloc_cstring(text.as_bytes())
 }
 
@@ -1277,7 +1295,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_blob(
     handle: i64,
     column: *const c_char,
 ) -> *mut c_char {
-    let bytes = sql_row_get_blob(handle, &c_str_to_string(column));
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let bytes = sql_row_get_blob(handle, &unsafe { c_str_to_string(column) });
     alloc_cstring(&bytes)
 }
 
@@ -1287,7 +1306,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_blob_vec(
     handle: i64,
     column: *const c_char,
 ) -> *mut super::vec::GosVec {
-    let bytes = sql_row_get_blob(handle, &c_str_to_string(column));
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let bytes = sql_row_get_blob(handle, &unsafe { c_str_to_string(column) });
     super::encoding::bytes_to_gosvec(&bytes)
 }
 
@@ -1297,7 +1317,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_i64(
     column: *const c_char,
     out_present: *mut i32,
 ) -> i64 {
-    let col = c_str_to_string(column);
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let col = unsafe { c_str_to_string(column) };
     let result = row_with(handle, |row| match row_value_by_column(row, &col) {
         Some(Value::Null) | None => (0, 0_i32),
         Some(Value::Int(n)) => (n, 1),
@@ -1305,6 +1326,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_i64(
     })
     .unwrap_or((0, 0));
     if !out_present.is_null() {
+        // SAFETY: `out_present` is non-null (checked above) and addresses the caller's flag word
+        // (C-ABI contract).
         unsafe {
             *out_present = result.1;
         }
@@ -1318,7 +1341,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_f64(
     column: *const c_char,
     out_present: *mut i32,
 ) -> f64 {
-    let col = c_str_to_string(column);
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let col = unsafe { c_str_to_string(column) };
     let result = row_with(handle, |row| match row_value_by_column(row, &col) {
         Some(Value::Null) | None => (0.0, 0_i32),
         Some(Value::Float(f)) => (f, 1),
@@ -1327,6 +1351,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_f64(
     })
     .unwrap_or((0.0, 0));
     if !out_present.is_null() {
+        // SAFETY: `out_present` is non-null (checked above) and addresses the caller's flag word
+        // (C-ABI contract).
         unsafe {
             *out_present = result.1;
         }
@@ -1340,7 +1366,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_bool(
     column: *const c_char,
     out_present: *mut i32,
 ) -> i32 {
-    let col = c_str_to_string(column);
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let col = unsafe { c_str_to_string(column) };
     let result = row_with(handle, |row| match row_value_by_column(row, &col) {
         Some(Value::Null) | None => (0_i32, 0_i32),
         Some(Value::Bool(b)) => (i32::from(b), 1),
@@ -1348,6 +1375,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_bool(
     })
     .unwrap_or((0, 0));
     if !out_present.is_null() {
+        // SAFETY: `out_present` is non-null (checked above) and addresses the caller's flag word
+        // (C-ABI contract).
         unsafe {
             *out_present = result.1;
         }
@@ -1361,7 +1390,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_text(
     column: *const c_char,
     out_present: *mut i32,
 ) -> *mut c_char {
-    let col = c_str_to_string(column);
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let col = unsafe { c_str_to_string(column) };
     let (text, present) = row_with(handle, |row| match row_value_by_column(row, &col) {
         Some(Value::Null) | None => (String::new(), 0_i32),
         Some(Value::Text(s)) => (s, 1),
@@ -1369,6 +1399,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_text(
     })
     .unwrap_or_default();
     if !out_present.is_null() {
+        // SAFETY: `out_present` is non-null (checked above) and addresses the caller's flag word
+        // (C-ABI contract).
         unsafe {
             *out_present = present;
         }
@@ -1378,7 +1410,8 @@ pub unsafe extern "C" fn gos_rt_sql_row_get_opt_text(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_row_is_null(handle: i64, column: *const c_char) -> i32 {
-    let col = c_str_to_string(column);
+    // SAFETY: `column` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    let col = unsafe { c_str_to_string(column) };
     row_with(handle, |row| {
         matches!(row_value_by_column(row, &col), Some(Value::Null) | None)
     })
@@ -1386,35 +1419,38 @@ pub unsafe extern "C" fn gos_rt_sql_row_is_null(handle: i64, column: *const c_ch
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_row_width(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_row_width(handle: i64) -> i64 {
     sql_row_width(handle)
 }
 
 // --- transaction ---------------------------------------------------
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_tx_commit(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_tx_commit(handle: i64) -> i64 {
     sql_tx_commit(handle)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_tx_rollback(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_tx_rollback(handle: i64) -> i64 {
     sql_tx_rollback(handle)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_tx_execute(handle: i64, sql: *const c_char) -> i64 {
-    sql_tx_execute(handle, &c_str_to_string(sql))
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_tx_execute(handle, &unsafe { c_str_to_string(sql) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_tx_savepoint(handle: i64, name: *const c_char) -> i64 {
-    sql_tx_savepoint(handle, &c_str_to_string(name))
+    // SAFETY: `name` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_tx_savepoint(handle, &unsafe { c_str_to_string(name) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_tx_release_savepoint(handle: i64, name: *const c_char) -> i64 {
-    sql_tx_release_savepoint(handle, &c_str_to_string(name))
+    // SAFETY: `name` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_tx_release_savepoint(handle, &unsafe { c_str_to_string(name) })
 }
 
 #[unsafe(no_mangle)]
@@ -1422,26 +1458,28 @@ pub unsafe extern "C" fn gos_rt_sql_tx_rollback_to_savepoint(
     handle: i64,
     name: *const c_char,
 ) -> i64 {
-    sql_tx_rollback_to_savepoint(handle, &c_str_to_string(name))
+    // SAFETY: `name` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_tx_rollback_to_savepoint(handle, &unsafe { c_str_to_string(name) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_conn_prepare(handle: i64, sql: *const c_char) -> i64 {
-    sql_conn_prepare(handle, &c_str_to_string(sql))
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_prepare(handle, &unsafe { c_str_to_string(sql) })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_stmt_execute(handle: i64, params: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_stmt_execute(handle: i64, params: i64) -> i64 {
     sql_stmt_execute(handle, params)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_stmt_query(handle: i64, params: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_stmt_query(handle: i64, params: i64) -> i64 {
     sql_stmt_query(handle, params)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_stmt_close(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_stmt_close(handle: i64) -> i64 {
     sql_stmt_close(handle)
 }
 
@@ -1451,7 +1489,8 @@ pub unsafe extern "C" fn gos_rt_sql_tx_execute_params(
     sql: *const c_char,
     params: i64,
 ) -> i64 {
-    sql_tx_execute_params(handle, &c_str_to_string(sql), params)
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_tx_execute_params(handle, &unsafe { c_str_to_string(sql) }, params)
 }
 
 #[unsafe(no_mangle)]
@@ -1460,7 +1499,8 @@ pub unsafe extern "C" fn gos_rt_sql_tx_query_params(
     sql: *const c_char,
     params: i64,
 ) -> i64 {
-    sql_tx_query_params(handle, &c_str_to_string(sql), params)
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_tx_query_params(handle, &unsafe { c_str_to_string(sql) }, params)
 }
 
 #[unsafe(no_mangle)]
@@ -1470,8 +1510,9 @@ pub unsafe extern "C" fn gos_rt_sql_conn_copy_in(
     data: *const super::vec::GosVec,
 ) -> i64 {
     // SAFETY: codegen passes a live GosVec pointer for a `[u8]` arg.
-    let bytes = unsafe { super::encoding::gosvec_u8(data) };
-    sql_conn_copy_in(handle, &c_str_to_string(sql), &bytes)
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_copy_in(handle, &unsafe { c_str_to_string(sql) }, &bytes)
 }
 
 /// Runs COPY TO and stores the bytes in the connection's copy-out
@@ -1480,7 +1521,8 @@ pub unsafe extern "C" fn gos_rt_sql_conn_copy_in(
 /// scalar status before materializing the bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_conn_copy_out_run(handle: i64, sql: *const c_char) -> i64 {
-    match sql_conn_copy_out(handle, &c_str_to_string(sql)) {
+    // SAFETY: `sql` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    match sql_conn_copy_out(handle, &unsafe { c_str_to_string(sql) }) {
         Some(bytes) => {
             let n = bytes.len() as i64;
             let mut guard = COPY_OUT_SLOTS.lock();
@@ -1495,7 +1537,7 @@ pub unsafe extern "C" fn gos_rt_sql_conn_copy_out_run(handle: i64, sql: *const c
 /// `gos_rt_sql_conn_copy_out_run` on this connection as a `[u8]`
 /// GosVec (empty if none).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_copy_out_take(handle: i64) -> *mut super::vec::GosVec {
+pub extern "C" fn gos_rt_sql_conn_copy_out_take(handle: i64) -> *mut super::vec::GosVec {
     let bytes = {
         let mut guard = COPY_OUT_SLOTS.lock();
         guard
@@ -1508,31 +1550,33 @@ pub unsafe extern "C" fn gos_rt_sql_conn_copy_out_take(handle: i64) -> *mut supe
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_conn_listen(handle: i64, channel: *const c_char) -> i64 {
-    sql_conn_listen(handle, &c_str_to_string(channel))
+    // SAFETY: `channel` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_listen(handle, &unsafe { c_str_to_string(channel) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_conn_unlisten(handle: i64, channel: *const c_char) -> i64 {
-    sql_conn_unlisten(handle, &c_str_to_string(channel))
+    // SAFETY: `channel` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_conn_unlisten(handle, &unsafe { c_str_to_string(channel) })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_conn_poll_notification(handle: i64, timeout_ms: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_conn_poll_notification(handle: i64, timeout_ms: i64) -> i64 {
     sql_conn_poll_notification(handle, timeout_ms)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_notification_channel(conn: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sql_notification_channel(conn: i64) -> *mut c_char {
     alloc_cstring(sql_notification_channel(conn).as_bytes())
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_notification_payload(conn: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sql_notification_payload(conn: i64) -> *mut c_char {
     alloc_cstring(sql_notification_payload(conn).as_bytes())
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_notification_pid(conn: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_notification_pid(conn: i64) -> i64 {
     sql_notification_pid(conn)
 }
 
@@ -1547,8 +1591,11 @@ pub unsafe extern "C" fn gos_rt_sql_pool_new(
     max_lifetime_ms: i64,
 ) -> i64 {
     sql_pool_new(
-        &c_str_to_string(driver),
-        &c_str_to_string(url),
+        // SAFETY: `driver` is this shim's argument, as `c_str_to_string` requires (C-ABI
+        // contract).
+        &unsafe { c_str_to_string(driver) },
+        // SAFETY: `url` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+        &unsafe { c_str_to_string(url) },
         min,
         max,
         acquire_timeout_ms,
@@ -1558,28 +1605,29 @@ pub unsafe extern "C" fn gos_rt_sql_pool_new(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_pool_get(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_pool_get(handle: i64) -> i64 {
     sql_pool_get(handle)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_pool_live(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_pool_live(handle: i64) -> i64 {
     sql_pool_live(handle)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_pool_idle(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_pool_idle(handle: i64) -> i64 {
     sql_pool_idle(handle)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_pool_close_idle(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_pool_close_idle(handle: i64) -> i64 {
     sql_pool_close_idle(handle)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_migrate_up(conn: i64, dir: *const c_char) -> i64 {
-    sql_migrate_up(conn, &c_str_to_string(dir))
+    // SAFETY: `dir` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    sql_migrate_up(conn, &unsafe { c_str_to_string(dir) })
 }
 
 // --- native (Gossamer-implemented) driver dispatch ------------------
@@ -1964,11 +2012,13 @@ struct Dispatcher {
     fn_addr: usize,
 }
 
-// SAFETY: the dispatch fn pointer is a stable code address and the
-// env is treated as an opaque pointer that the ZST driver never
-// dereferences; the façade serializes per connection so no token is
-// dispatched concurrently.
+// SAFETY: `fn_addr` is a code address, and `env` is either a stateless
+// driver's never-read address or a counted copy of the driver that the
+// registry owns for the process, marked shared so its children count
+// atomically; `dispatch` only reads it.
 unsafe impl Send for Dispatcher {}
+// SAFETY: as for `Send`: every thread only reads the driver, and its counts
+// are atomic.
 unsafe impl Sync for Dispatcher {}
 
 type DispatchFn = unsafe extern "C" fn(env: *mut u8, op: i64, h: i64) -> i64;
@@ -1978,7 +2028,11 @@ impl Dispatcher {
         // SAFETY: `fn_addr` came from `gos_fn_addr("<Type>::dispatch")`
         // at the user's `sql::register_native` call site; the signature
         // matches the compiled `dispatch(&self, op, h) -> i64` ABI.
-        let f: DispatchFn = unsafe { std::mem::transmute::<usize, DispatchFn>(self.fn_addr) };
+        let f: DispatchFn = unsafe {
+            std::mem::transmute::<*const (), DispatchFn>(crate::c_abi::code_address(self.fn_addr))
+        };
+        // SAFETY: `f` is the driver's compiled `dispatch`, and `env` the driver value the
+        // registry keeps alive for the program.
         unsafe { f(self.env as *mut u8, op, h) }
     }
 }
@@ -2728,7 +2782,12 @@ pub fn native_facade_poll_notification(
 /// Builds and registers a `.gos` driver (compiled tier). `name` is the
 /// driver name for `sql::open`; `env`/`fn_addr` are the driver value's
 /// env pointer and the address of its `dispatch` method.
-pub fn register_native_driver(name: &str, env: usize, fn_addr: usize) {
+///
+/// # Safety
+///
+/// `env` is a driver value that stays live for the process, and `fn_addr` the
+/// entry address of its compiled `dispatch` method.
+pub unsafe fn register_native_driver(name: &str, env: usize, fn_addr: usize) {
     crate::sql::register(Arc::new(GossamerDriver {
         name: name.to_string(),
         disp: Dispatcher { env, fn_addr },
@@ -2744,85 +2803,88 @@ pub unsafe extern "C" fn gos_rt_sql_register_native(
     env: *mut u8,
     fn_addr: i64,
 ) {
-    register_native_driver(&c_str_to_string(name), env as usize, fn_addr as usize);
+    // SAFETY: this function's contract is the one the callee states.
+    unsafe { register_native_driver(&c_str_to_string(name), env as usize, fn_addr as usize) };
 }
 
 // --- native_* C-ABI shims (compiled tier) --------------------------
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_url(h: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sql_native_url(h: i64) -> *mut c_char {
     alloc_cstring(native_url(h).as_bytes())
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_sql(h: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sql_native_sql(h: i64) -> *mut c_char {
     alloc_cstring(native_sql(h).as_bytes())
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_parent(h: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_parent(h: i64) -> i64 {
     native_parent(h)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_out_handle(h: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_out_handle(h: i64) -> i64 {
     native_out_handle(h)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_iso(h: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_iso(h: i64) -> i64 {
     native_iso(h)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_timeout(h: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_timeout(h: i64) -> i64 {
     native_timeout(h)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_channel(h: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sql_native_channel(h: i64) -> *mut c_char {
     alloc_cstring(native_channel(h).as_bytes())
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_param_count(h: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_param_count(h: i64) -> i64 {
     native_param_count(h)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_param(h: i64, i: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_param(h: i64, i: i64) -> i64 {
     native_param(h, i)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_data(h: i64) -> *mut super::vec::GosVec {
+pub extern "C" fn gos_rt_sql_native_data(h: i64) -> *mut super::vec::GosVec {
     bytes_to_gosvec(&native_data(h))
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_native_push_column(h: i64, name: *const c_char) {
-    native_push_column(h, &c_str_to_string(name));
+    // SAFETY: `name` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    native_push_column(h, &unsafe { c_str_to_string(name) });
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_push_value(h: i64, value_handle: i64) {
+pub extern "C" fn gos_rt_sql_native_push_value(h: i64, value_handle: i64) {
     native_push_value(h, value_handle);
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_row_ready(h: i64) {
+pub extern "C" fn gos_rt_sql_native_row_ready(h: i64) {
     native_row_ready(h);
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_native_set_error(h: i64, msg: *const c_char) {
-    native_set_error(h, &c_str_to_string(msg));
+    // SAFETY: `msg` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    native_set_error(h, &unsafe { c_str_to_string(msg) });
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_native_emit_bytes(h: i64, data: *const super::vec::GosVec) {
     // SAFETY: codegen passes a live GosVec pointer for a `[u8]` arg.
-    let bytes = unsafe { super::encoding::gosvec_u8(data) };
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
     native_emit_bytes(h, &bytes);
 }
 
@@ -2833,73 +2895,81 @@ pub unsafe extern "C" fn gos_rt_sql_native_set_notification(
     payload: *const c_char,
     pid: i64,
 ) {
-    native_set_notification(h, &c_str_to_string(chan), &c_str_to_string(payload), pid);
+    // SAFETY: `chan` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    // `payload` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    native_set_notification(
+        h,
+        &unsafe { c_str_to_string(chan) },
+        &unsafe { c_str_to_string(payload) },
+        pid,
+    );
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_set_handle(h: i64, value: i64) {
+pub extern "C" fn gos_rt_sql_native_set_handle(h: i64, value: i64) {
     native_set_handle(h, value);
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_handle(h: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_handle(h: i64) -> i64 {
     native_handle(h)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_null() -> i64 {
+pub extern "C" fn gos_rt_sql_native_value_null() -> i64 {
     native_value_null()
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_bool(b: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_value_bool(b: i64) -> i64 {
     native_value_bool(b != 0)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_int(n: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_value_int(n: i64) -> i64 {
     native_value_int(n)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_float(f: f64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_value_float(f: f64) -> i64 {
     native_value_float(f)
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_native_value_text(s: *const c_char) -> i64 {
-    native_value_text(&c_str_to_string(s))
+    // SAFETY: `s` is this shim's argument, as `c_str_to_string` requires (C-ABI contract).
+    native_value_text(&unsafe { c_str_to_string(s) })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_sql_native_value_blob(data: *const super::vec::GosVec) -> i64 {
     // SAFETY: codegen passes a live GosVec pointer for a `[u8]` arg.
-    let bytes = unsafe { super::encoding::gosvec_u8(data) };
+    let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
     native_value_blob(&bytes)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_kind(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_value_kind(handle: i64) -> i64 {
     native_value_kind(handle)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_int_of(handle: i64) -> i64 {
+pub extern "C" fn gos_rt_sql_native_value_int_of(handle: i64) -> i64 {
     native_value_int_of(handle)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_float_of(handle: i64) -> f64 {
+pub extern "C" fn gos_rt_sql_native_value_float_of(handle: i64) -> f64 {
     native_value_float_of(handle)
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_text_of(handle: i64) -> *mut c_char {
+pub extern "C" fn gos_rt_sql_native_value_text_of(handle: i64) -> *mut c_char {
     alloc_cstring(native_value_text_of(handle).as_bytes())
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sql_native_value_blob_of(handle: i64) -> *mut super::vec::GosVec {
+pub extern "C" fn gos_rt_sql_native_value_blob_of(handle: i64) -> *mut super::vec::GosVec {
     bytes_to_gosvec(&native_value_blob_of(handle))
 }
 

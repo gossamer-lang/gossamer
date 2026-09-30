@@ -14,8 +14,8 @@ use std::encoding
 
 fn main() {
     // Legacy digests - string input, lowercase-hex output.
-    println("md5(abc) = {}", crypto::insecure::md5_hex("abc"))
-    println("sha1(abc) = {}", crypto::insecure::sha1_hex("abc"))
+    println("md5(abc) = {}", crypto::insecure::md5_hex("abc".as_bytes()))
+    println("sha1(abc) = {}", crypto::insecure::sha1_hex("abc".as_bytes()))
 
     // "password" / "salt" as raw bytes.
     let pw: Vec<u8> = Vec::from([112, 97, 115, 115, 119, 111, 114, 100])

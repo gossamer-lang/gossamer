@@ -1,0 +1,41 @@
+// `time::Time` is an instant with the UTC offset it was read or placed in:
+// parsing keeps the offset, formatting writes it back, arithmetic moves the
+// instant, and comparison looks at the instant alone.
+
+use std::time
+
+fn show(label: String, t: time::Time) {
+    println("{label}: {} unix={} ms={}", t, t.unix(), t.unix_ms())
+}
+
+fn main() {
+    let t = time::Time::parse_rfc3339("2024-03-01T10:00:00+02:00").unwrap()
+    show("parsed", t)
+    println("rfc3339: {}", t.format_rfc3339().unwrap())
+    println("utc: {}", t.utc().format_rfc3339().unwrap())
+
+    let later = t + time::Duration::from_secs(90)
+    show("plus 90s", later)
+    let earlier = t - time::Duration::from_millis(1500)
+    show("minus 1.5s", earlier)
+    println("later - t = {} ms", (later - t).as_millis())
+    println("since = {} ms", later.duration_since(earlier).as_millis())
+
+    let same = time::Time::parse_rfc3339("2024-03-01T08:00:00Z").unwrap()
+    println("equal instants: {}", t == same)
+    println("before: {} after: {}", earlier.before(t), later.after(t))
+    println("ordered: {}", earlier < t && t < later)
+
+    let c = t.civil().unwrap()
+    println("civil: {}-{}-{} {}:{}", c.year, c.month, c.day, c.hour, c.minute)
+
+    let epoch = time::Time::from_unix(0)
+    show("epoch", epoch)
+    let leap = time::Time::parse_rfc3339("2024-02-29T23:59:59.250-05:00").unwrap()
+    println("leap: {} ms={}", leap.format_rfc3339().unwrap(), leap.unix_ms())
+
+    match time::Time::parse_rfc3339("2024-02-30T00:00:00Z") {
+        Ok(bad) => println("accepted {}", bad)
+        Err(e) => println("rejected: {}", e)
+    }
+}

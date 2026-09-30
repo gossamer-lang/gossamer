@@ -611,6 +611,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
         insert_drops_at_returns(body, tcx);
         complete_ok_or_err_kind(body, tcx);
         insert_rc_releases(body, tcx);
+        retain_borrowed_fallback_payloads(body, tcx);
         insert_aggr_copy_drops(body, tcx);
         insert_json_frees(body, tcx, &json_borrowing_fns);
         insert_vec_elem_metas(body, tcx, &user_fn_names);
@@ -701,6 +702,7 @@ pub(crate) fn finish_lowered_bodies(bodies: &mut [Body], start: usize, tcx: &mut
     }
     #[cfg(debug_assertions)]
     crate::verify::debug_verify_program(bodies, tcx);
+    crate::rc_verify::check_program(&bodies[start..]);
 }
 
 pub mod builder;

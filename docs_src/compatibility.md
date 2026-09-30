@@ -83,6 +83,15 @@ observation about the code you wrote, and you are entitled to disagree
 with it. A migration is a mechanical upgrade the toolchain owns; there
 is nothing to have an opinion about.
 
+## Rust bindings
+
+A `[rust-bindings]` crate is compiled from source against the toolchain that
+builds the program, so the promise to a binding author is about the Rust
+source API of `gossamer-binding` - its attribute macros, the `BindingAbi`
+trait, and the wire types - which a minor release only adds to. The binary
+layout between a binding and the runtime is internal and may change in any
+release; see [Rust bindings](rust_bindings.md#what-stays-compatible).
+
 ## What is not covered
 
 - **Performance.** A release may make a program slower or faster. Timing

@@ -163,13 +163,24 @@ fn optimize_tail_call_argument_moves(instrs: &mut [Op], mut_ref_params: &[Reg]) 
         let Some(first_move_idx) = call_idx.checked_sub(usize::from(argc)) else {
             continue;
         };
+        // A register two arguments read (`f(x, x)`) is handed over by
+        // neither: the first transfer would leave the second reading an
+        // emptied slot.
+        let sources: Vec<Reg> = instrs[first_move_idx.saturating_sub(1)..call_idx]
+            .iter()
+            .filter_map(|op| match op {
+                Op::Move { src, .. } => Some(*src),
+                _ => None,
+            })
+            .collect();
+        let reads = |reg: Reg| sources.iter().filter(|src| **src == reg).count();
         for offset in 0..argc {
             let arg_slot = args + offset;
             let move_idx = first_move_idx + usize::from(offset);
             let Op::Move { dst: move_dst, src } = instrs[move_idx] else {
                 continue;
             };
-            if move_dst != arg_slot || mut_ref_params.contains(&src) {
+            if move_dst != arg_slot || mut_ref_params.contains(&src) || reads(src) != 1 {
                 continue;
             }
             instrs[move_idx] = Op::MoveConsume { dst: arg_slot, src };
@@ -181,6 +192,7 @@ fn optimize_tail_call_argument_moves(instrs: &mut [Op], mut_ref_params: &[Reg]) 
                 } = instrs[move_idx - 1]
                 && producer_dst == src
                 && !mut_ref_params.contains(&original)
+                && reads(original) == 1
             {
                 instrs[move_idx - 1] = Op::MoveConsume {
                     dst: src,

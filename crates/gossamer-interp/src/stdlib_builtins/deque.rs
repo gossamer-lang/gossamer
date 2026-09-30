@@ -194,12 +194,9 @@ fn builtin_stack_from(args: &[Value]) -> RuntimeResult<Value> {
 
 fn builtin_deque_from_named(args: &[Value], name: &'static str) -> RuntimeResult<Value> {
     let id = next_deque_handle();
-    let mut deque = StdVecDeque::new();
-    match args.first().unwrap_or(&Value::Unit) {
-        Value::Array(values) => deque.extend(values.iter().cloned()),
-        Value::IntArray(values) => deque.extend(values.iter().copied().map(Value::Int)),
-        other => deque.push_back(other.clone()),
-    }
+    let deque = StdVecDeque::from(crate::stdlib_builtins::encoding_pem::collect_array(
+        args.first().unwrap_or(&Value::Unit),
+    ));
     DEQUE_REGISTRY.with(|r| {
         r.borrow_mut().insert(id, deque);
     });

@@ -361,11 +361,8 @@ pub mod symbols;
 pub mod value;
 pub mod yaml_node;
 
-// Native-only runtime services that pull crates with no wasm32 build:
-// `ffi` (libloading dynamic loading) and `http2_server` (h2 / tokio).
-// The wasm VM never needs either; native is unaffected.
-#[cfg(not(target_arch = "wasm32"))]
-pub mod ffi;
+// `http2_server` pulls h2 / tokio, which have no wasm32 build; the wasm VM
+// never serves HTTP/2.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod http2_server;
 

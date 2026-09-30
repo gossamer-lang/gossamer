@@ -30,7 +30,7 @@ fn main() {
         for i in 1..=100 { acc += i }
         acc
     }
-    println("{}", triangular)   // 5050
+    println(f"{triangular}")   // 5050
     println("{}", fib(10))      // 55, computed at build time
 }
 ```
@@ -53,6 +53,7 @@ A function parameter declared `comptime` has its argument evaluated at
 compile time and replaced with the result literal, while the function
 itself runs normally:
 
+<!-- fragment -->
 ```gossamer
 fn scale(comptime factor: i64, x: i64) -> i64 { factor * x }
 
@@ -86,7 +87,7 @@ spellings a `match` arm binds:
 enum Shape { Circle(f64), Rect { w: f64, h: f64 }, Nothing }
 
 for (variant, payload) in typeInfo::<Shape>() {
-    println("{} carries {}", variant, payload)
+    println(f"{variant} carries {payload}")
 }
 // Circle carries f64
 // Rect carries (f64, f64)
@@ -99,7 +100,7 @@ fields that instantiation actually has:
 ```gossamer
 struct Wrapper<T> { inner: T, count: i64 }
 
-for (name, ty) in typeInfo::<Wrapper<String>>() { println("{}: {}", name, ty) }
+for (name, ty) in typeInfo::<Wrapper<String>>() { println(f"{name}: {ty}") }
 // inner: String
 // count: i64
 ```
@@ -126,7 +127,7 @@ comptime fn create_table(table: String, fields: [(String, String)]) -> String {
         }
         cols += name + " " + sql_ty
     }
-    "CREATE TABLE " + &table + " (" + &cols + ")"
+    "CREATE TABLE " + table + " (" + cols + ")"
 }
 
 // Evaluated at build time; the binary embeds the finished DDL string.
@@ -181,6 +182,8 @@ expression is type-checked in place, so it must produce the type the call
 site expects:
 
 ```gossamer
+struct Point { x: i64, y: i64 }
+
 comptime fn gen_show(fields: [(String, String)], v: String) -> String {
     let mut out = "\"\""
     for (name, _) in fields {
@@ -199,14 +202,20 @@ fn show(p: Point) -> String {
 `regex::compile("…")` and `sql::statement("…")` check a literal argument
 while the program is parsed, so a malformed pattern or statement fails the
 build with a diagnostic at the literal rather than reaching runtime - the
-project's "if it compiles, it works" goal. A pattern is compiled with the
-engine `regex::compile` uses at run time; `sql::statement` answers the
+project's "if it compiles, it works" goal. A pattern is checked with the
+engine that compiles it at run time, so it cannot fail there and
+`regex::compile` answers the `Pattern` itself; `sql::statement` answers the
 statement it checked:
 
 ```gossamer
+use std::regex
 let pattern = regex::compile("^\\d{4}-\\d{2}-\\d{2}$")   // compiled + checked at build time
 let query   = sql::statement("SELECT id, name FROM users WHERE id = 1")
 ```
+
+Both take only a literal (`GP0052` otherwise). A pattern built at run time
+goes to `regex::new(pattern)`, which answers a `Result` because that one can
+be refused.
 
 `regex::compile("(unclosed")` fails the build with `GP0057` (`unclosed
 group`); an empty or unbalanced `sql::statement` fails with `GP0058`. Neither

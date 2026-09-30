@@ -145,6 +145,12 @@ impl Vm {
         self.apply(resolved, vec![arg]).is_ok()
     }
 
+    /// Returns `bytes` of suspended heap frames to this goroutine's budget.
+    fn release_heap_frame(&self, bytes: usize) {
+        self.heap_frame_bytes
+            .set(self.heap_frame_bytes.get().saturating_sub(bytes));
+    }
+
     pub(crate) fn apply(&self, global: Global, args: Vec<Value>) -> RuntimeResult<Value> {
         match global {
             Global::Fn(chunk) => {
@@ -154,26 +160,25 @@ impl Vm {
                 // than recursively entering `apply -> run`. The destination
                 // register belongs to the suspended frame; the child result
                 // is written just before that frame resumes.
-                let mut suspended: Vec<(u16, crate::vm::run::SuspendedFrame)> = Vec::new();
+                let mut suspended: Vec<(u16, crate::vm::run::SuspendedFrame, usize)> = Vec::new();
                 let mut resumed: Option<crate::vm::run::SuspendedFrame> = None;
                 // Byte-precise native-stack guard, consulted before the frame
                 // count. A JIT-compiled body recurses on the real OS stack
-                // (not the heap frame pool `MAX_CALL_DEPTH` bounds), so a
+                // (not the heap frame pool `MAX_HEAP_FRAME_BYTES` bounds), so a
                 // frame count alone cannot stop it before the guard page; the
                 // armed byte budget catches that recursion at the boundary and
                 // raises a clean stack-overflow, ending only the current
                 // goroutine instead of aborting the whole process. No-op when
                 // unarmed.
-                if gossamer_coro::stack_guard_tripped() {
-                    return Err(RuntimeError::StackOverflow(MAX_CALL_DEPTH));
-                }
-                // Refuse non-tail calls beyond the goroutine call-depth cap.
-                // Every ordinary call still adds an `apply()` + `run()` pair
-                // to the native stack; direct named tail calls are replaced
-                // by the loop below after their old frame is dropped.
                 let depth = self.call_depth.get();
-                if depth >= MAX_CALL_DEPTH {
-                    return Err(RuntimeError::StackOverflow(MAX_CALL_DEPTH));
+                if gossamer_coro::stack_guard_tripped() {
+                    return Err(RuntimeError::StackOverflow(depth));
+                }
+                // Every ordinary call adds an `apply()` + `run()` pair to the
+                // native stack. Where no guard watches that stack, a frame
+                // count is what stops the recursion before it overflows.
+                if !gossamer_coro::stack_guard_armed() && depth >= MAX_UNGUARDED_CALL_DEPTH {
+                    return Err(RuntimeError::StackOverflow(depth));
                 }
                 self.call_depth.set(depth + 1);
 
@@ -290,7 +295,8 @@ impl Vm {
                                 if jit_call::jit_trace() {
                                     eprintln!("jit: native hit {}", prepared.jit.name);
                                 }
-                                if let Some((dst, mut parent)) = suspended.pop() {
+                                if let Some((dst, mut parent, bytes)) = suspended.pop() {
+                                    self.release_heap_frame(bytes);
                                     // A nested native body completes exactly
                                     // like `RunControl::Return`: publish its
                                     // result into the suspended bytecode
@@ -358,6 +364,7 @@ impl Vm {
                             let released = suspended.len().saturating_add(1);
                             self.call_depth
                                 .set(self.call_depth.get().saturating_sub(released));
+                            self.release_heap_frame(suspended.iter().map(|s| s.2).sum());
                             // Preserve the failing frame for traceback parity
                             // with the non-trampolined call path.
                             return Err(err);
@@ -365,7 +372,8 @@ impl Vm {
                     };
                     match control {
                         crate::vm::run::RunControl::Return(value) => {
-                            if let Some((dst, mut parent)) = suspended.pop() {
+                            if let Some((dst, mut parent, bytes)) = suspended.pop() {
+                                self.release_heap_frame(bytes);
                                 // The child completed successfully. Its
                                 // logical frame (and any tail frames it grew)
                                 // can disappear before the parent resumes.
@@ -444,17 +452,22 @@ impl Vm {
                             parent,
                         } => {
                             let depth = self.call_depth.get();
-                            if depth >= MAX_CALL_DEPTH {
+                            let bytes =
+                                parent.heap_bytes() + std::mem::size_of::<VmCallStackFrame>();
+                            let held = self.heap_frame_bytes.get();
+                            if held.saturating_add(bytes) > MAX_HEAP_FRAME_BYTES {
                                 let released = suspended.len().saturating_add(1);
                                 self.call_depth
                                     .set(self.call_depth.get().saturating_sub(released));
-                                return Err(RuntimeError::StackOverflow(MAX_CALL_DEPTH));
+                                self.release_heap_frame(suspended.iter().map(|s| s.2).sum());
+                                return Err(RuntimeError::StackOverflow(depth));
                             }
+                            self.heap_frame_bytes.set(held + bytes);
                             self.call_depth.set(depth + 1);
                             self.call_stack
                                 .borrow_mut()
                                 .push(VmCallStackFrame::new(next_chunk.name));
-                            suspended.push((dst, parent));
+                            suspended.push((dst, parent, bytes));
                             chunk = next_chunk;
                             args = call_args;
                             tail_frames = 0;

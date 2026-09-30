@@ -270,6 +270,8 @@ impl<'a> Builder<'a> {
                                 crate::lower::FieldRcKind::Carrier { .. } => {
                                     "gos_rt_result_payload_retain"
                                 }
+                                crate::lower::FieldRcKind::Iter
+                                | crate::lower::FieldRcKind::IterPair => kind.helpers().0,
                                 // Takes the field's address and swaps in a
                                 // clone: a container with no reference count
                                 // cannot be co-owned.

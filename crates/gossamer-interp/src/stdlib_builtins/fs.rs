@@ -908,10 +908,9 @@ pub(crate) fn builtin_fs_write_mode(args: &[Value]) -> RuntimeResult<Value> {
         Ok(s) => s,
         Err(v) => return Ok(v),
     };
-    let Some(contents) = args.get(1).and_then(as_str).map(str::as_bytes) else {
-        return Ok(err_variant("write_mode: expected string contents"));
+    let Some(contents) = args.get(1).map(Value::bytes_or_empty) else {
+        return Ok(err_variant("write_mode: expected byte contents"));
     };
-    let contents = contents.to_vec();
     let Some(mode) = args.get(2).and_then(value_to_int) else {
         return Ok(err_variant("write_mode: expected integer mode"));
     };

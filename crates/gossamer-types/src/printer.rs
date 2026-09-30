@@ -19,12 +19,30 @@ pub fn render_ty(tcx: &TyCtxt, ty: Ty) -> String {
     out
 }
 
+/// The name a user writes for a type: a stdlib type the parser injects as
+/// `__gos_<module>_<Type>` is `module::Type`, and every other name is itself.
+#[must_use]
+pub fn public_type_name(name: &str) -> std::borrow::Cow<'_, str> {
+    let Some(rest) = name.strip_prefix("__gos_") else {
+        return std::borrow::Cow::Borrowed(name);
+    };
+    let split = rest
+        .char_indices()
+        .find(|&(i, c)| c == '_' && rest[i + 1..].starts_with(|n: char| n.is_ascii_uppercase()));
+    match split {
+        Some((i, _)) if i > 0 => {
+            std::borrow::Cow::Owned(format!("{}::{}", &rest[..i], &rest[i + 1..]))
+        }
+        _ => std::borrow::Cow::Borrowed(name),
+    }
+}
+
 /// Renders a type for user-facing output without exposing compiler inference
-/// variable identifiers.
+/// variable identifiers or the injected names of stdlib types.
 #[must_use]
 pub fn render_public_ty(tcx: &TyCtxt, ty: Ty) -> String {
     render_ty(tcx, ty)
-        .split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '?')
+        .split_inclusive(|c: char| !c.is_ascii_alphanumeric() && c != '?' && c != '_')
         .map(|part| {
             if part.starts_with('?')
                 && part
@@ -37,7 +55,8 @@ pub fn render_public_ty(tcx: &TyCtxt, ty: Ty) -> String {
                 let suffix = part.trim_start_matches(|c: char| c == '?' || c.is_ascii_digit());
                 format!("_{suffix}")
             } else {
-                part.to_string()
+                let word = part.trim_end_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                format!("{}{}", public_type_name(word), &part[word.len()..])
             }
         })
         .collect()
@@ -269,5 +288,19 @@ pub fn structural_impl_owner(tcx: &TyCtxt, ty: Ty) -> Option<String> {
     match tcx.kind_of(ty) {
         TyKind::Tuple(parts) => Some(format!("tuple_{}", parts.len())),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_type_name;
+
+    #[test]
+    fn injected_stdlib_types_render_under_their_module() {
+        assert_eq!(public_type_name("__gos_time_Time"), "time::Time");
+        assert_eq!(public_type_name("__gos_time_CivilTime"), "time::CivilTime");
+        assert_eq!(public_type_name("__gos_x509_CertInfo"), "x509::CertInfo");
+        assert_eq!(public_type_name("Point"), "Point");
+        assert_eq!(public_type_name("__gos_eta0"), "__gos_eta0");
     }
 }

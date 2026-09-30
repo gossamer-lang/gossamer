@@ -23,9 +23,10 @@ const LESSONS = [
       default</strong> - reach for <code>let mut</code> only when a value
       genuinely changes after construction.</p>
       <p>String literals are already <code>String</code>, so there is no
-      <code>.to_string()</code> noise. <code>println</code> pulls bindings
-      straight from scope by name - <code>{name}</code> - and the
-      format macros are built in: there are no user-defined macros.</p>
+      <code>.to_string()</code> noise. An <code>f"..."</code> string
+      interpolates any expression in braces - <code>{name}</code>,
+      <code>{name.len()}</code>, <code>{pi * 2.0:.2}</code> - with an
+      optional format spec after the <code>:</code>.</p>
       <p>Press <strong>Run</strong> (or Ctrl / Cmd + Enter) to execute the
       program on the right. Edit it freely and run it again.</p>`,
     code: `// Bindings are immutable by default; reach for \`let mut\` only when
@@ -34,11 +35,11 @@ let name = "Gossamer"
 let pi = 3.14159
 
 let greeting = "hello, " + name
-println("{greeting}!")
+println(f"{greeting}!")
 
-// Named interpolation reads bindings straight from scope.
-println("{name} is {} bytes long", name.len())
-println("pi is about {pi}")
+// A placeholder holds any expression, with an optional \`:spec\`.
+println(f"{name} is {name.len()} bytes long")
+println(f"pi is about {pi:.2}, tau about {pi * 2.0:.2}")
 `,
   },
   {
@@ -959,8 +960,10 @@ println("hex round-trips = {}", round.len() == secret.len())
     title: "Regular expressions",
     prose: `
       <p><code>std::regex</code> wraps Rust's <code>regex</code> crate.
-      <code>compile</code> once into a <code>Pattern</code> - it carries
-      its source for diagnostics - then reuse it across
+      <code>regex::compile</code> checks a literal pattern while the program
+      compiles and answers the <code>Pattern</code> itself;
+      <code>regex::new</code> is the fallible spelling for a pattern built
+      at run time. Compile once, then reuse the pattern across
       <code>is_match</code>, <code>find</code> / <code>find_all</code>,
       <code>captures</code>, <code>replace_all</code>, and
       <code>split</code>.</p>
@@ -971,11 +974,8 @@ println("hex round-trips = {}", round.len() == secret.len())
       <code>if</code>.</p>`,
     code: `use std::regex
 
-// Compile once; the pattern carries its source for diagnostics.
-let re = match regex::compile("([0-9]{4}-[0-9]{2}-[0-9]{2}) ([A-Z]+) (.+)") {
-    Ok(r) => r,
-    Err(e) => { eprintln("bad pattern: {e}"); return }
-}
+// A literal pattern is checked while compiling, so this is the Pattern.
+let re = regex::compile("([0-9]{4}-[0-9]{2}-[0-9]{2}) ([A-Z]+) (.+)")
 
 let lines = ["2026-06-29 ERROR disk full", "2026-06-30 INFO restarted"]
 for line in lines {
@@ -985,7 +985,7 @@ for line in lines {
         && let Some(date) = c[1]
         && let Some(level) = c[2]
         && let Some(msg) = c[3] {
-        println("{date}  [{level}]  {msg}")
+        println(f"{date}  [{level}]  {msg}")
     }
 }
 `,

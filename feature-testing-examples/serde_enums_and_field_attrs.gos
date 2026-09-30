@@ -1,0 +1,47 @@
+// Typed serde over enums (externally tagged, the shape `{:?}` prints) and
+// struct field attributes: `#[rename("key")]`, `#[skip]`, `#[default]`.
+use std::encoding::{json, toml, yaml}
+
+enum Color { Red, Green, Blue }
+enum Shape {
+    Circle(f64)
+    Rect { w: f64, h: f64 }
+    Pair(i64, String)
+    Empty
+}
+struct Drawing {
+    #[rename("title_text")]
+    title: String
+    color: Color
+    shapes: Vec<Shape>
+    #[skip]
+    cache: i64
+    #[default]
+    layer: i64
+    note: Option<String>
+}
+fn main() {
+    let d = Drawing {
+        title: "t"
+        color: Color::Green
+        shapes: #[Shape::Circle(1.5), Shape::Rect { w: 2.0, h: 3.0 }, Shape::Pair(7, "x"), Shape::Empty]
+        cache: 99
+        layer: 4
+        note: None
+    }
+    let text = json::to_json::<Drawing>(d).unwrap()
+    println("{}", text)
+    let back = json::from_json::<Drawing>(text).unwrap()
+    println("{:?} {:?} {} {} {}", back.color, back.shapes, back.cache, back.layer, back.title)
+    let partial = json::from_json::<Drawing>("{\"title_text\":\"p\",\"color\":\"Red\",\"shapes\":[]}").unwrap()
+    println("{} {} {:?}", partial.layer, partial.title, partial.color)
+    println("{:?}", json::from_json::<Color>("\"Purple\""))
+    println("{:?}", json::from_json::<Shape>("{\"Rect\":{\"w\":1}}"))
+    println("{}", json::to_json::<Color>(Color::Blue).unwrap())
+    let cfg = Config { mode: Color::Blue, level: 3 }
+    let t = toml::to_toml::<Config>(cfg).unwrap()
+    println("{:?}", toml::from_toml::<Config>(t).unwrap().mode)
+    let y = yaml::to_yaml::<Config>(cfg).unwrap()
+    println("{:?}", yaml::from_yaml::<Config>(y).unwrap().mode)
+}
+struct Config { mode: Color, level: i64 }

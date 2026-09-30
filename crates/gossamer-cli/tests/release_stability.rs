@@ -1155,8 +1155,8 @@ fn main() -> Result<(), errors::Error> {
 #[test]
 fn release_narrow_casts_mask_and_float_casts_saturate() {
     // `as` is the single masking point for narrow int types
-    // (`300 as u8` == 44, `200 as i8` == -56); release arithmetic
-    // wraps at the declared width (`200u8 + 200u8` == 144); and
+    // (`300 as u8` == 44, `200 as i8` == -56); wrapping arithmetic
+    // wraps at the declared width (`200u8 +% 200u8` == 144); and
     // float -> int saturates at the TARGET's own range
     // (`300.7 as u8` == 255, `-1.5 as u8` == 0, `1e20 as i64` ==
     // i64::MAX). All match the bytecode VM.
@@ -1169,7 +1169,7 @@ fn main() {
     let y = 200
     println("{}", y as i8)
     let z: u8 = 200
-    println("{}", z + z)
+    println("{}", z +% z)
     let f = 300.7
     println("{}", f as u8)
     let g = -1.5

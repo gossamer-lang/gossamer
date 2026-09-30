@@ -73,18 +73,29 @@ fn writers() -> &'static Mutex<std::collections::HashMap<i64, Sender<Vec<u8>>>> 
 }
 
 /// The handle a `ResponseStream` blob carries in its first slot.
-fn handle_of(rs: *const i64) -> i64 {
+///
+/// # Safety
+///
+/// `rs` is null or addresses a live response-stream cell.
+unsafe fn handle_of(rs: *const i64) -> i64 {
     if rs.is_null() {
         return -1;
     }
+    // SAFETY: `rs` is non-null (checked above) and, per this `unsafe fn`'s contract, a live
+    // response-stream cell.
     unsafe { *rs }
 }
 
 /// Hands `bytes` to the stream's reader. Answers how many bytes were
 /// queued, or `-1` when the stream is closed - which is also what a
 /// client that hung up looks like, so a producer can stop.
-fn push(rs: *const i64, bytes: Vec<u8>) -> i64 {
-    let handle = handle_of(rs);
+///
+/// # Safety
+///
+/// `rs` is null or addresses a live response-stream cell.
+unsafe fn push(rs: *const i64, bytes: Vec<u8>) -> i64 {
+    // SAFETY: this function's contract covers `rs`, as `handle_of` requires.
+    let handle = unsafe { handle_of(rs) };
     let len = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
     let guard = writers().lock();
     match guard.get(&handle) {
@@ -96,7 +107,7 @@ fn push(rs: *const i64, bytes: Vec<u8>) -> i64 {
 /// `http::ResponseStream::new() -> ResponseStream` - a body the handler
 /// writes as it goes.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_response_stream_open() -> *mut i64 {
+pub extern "C" fn gos_rt_http_response_stream_open() -> *mut i64 {
     ffi_entry!(std::ptr::null_mut(), {
         let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
         let reader = QueueReader {
@@ -122,8 +133,11 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_write(
         if text.is_null() {
             return 0;
         }
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(text) }.to_vec();
-        push(rs, bytes)
+        // SAFETY: `rs` is this shim's argument, null or a live response-stream cell (C-ABI
+        // contract).
+        unsafe { push(rs, bytes) }
     })
 }
 
@@ -138,6 +152,7 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_write_bytes(
         if bytes.is_null() {
             return 0;
         }
+        // SAFETY: `bytes` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*bytes };
         let len = vec.len.max(0) as usize;
         let elem = vec.elem_bytes.max(1) as usize;
@@ -145,10 +160,16 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_write_bytes(
         for i in 0..len {
             // A byte vector's slot is one byte wide; a wider element means
             // the caller passed something that is not `Vec<u8>`.
+            // SAFETY: `i` counts below the vec's length, so the element's slot lies inside its
+            // buffer.
             let slot = unsafe { vec.ptr.add(i * elem) };
+            // SAFETY: `slot` addresses the first byte of an element, which a byte vector stores
+            // at any width.
             out.push(unsafe { slot.read() });
         }
-        push(rs, out)
+        // SAFETY: `rs` is this shim's argument, null or a live response-stream cell (C-ABI
+        // contract).
+        unsafe { push(rs, out) }
     })
 }
 
@@ -156,7 +177,8 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_write_bytes(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_response_stream_close(rs: *const i64) {
     ffi_entry!((), {
-        writers().lock().remove(&handle_of(rs));
+        // SAFETY: `rs` is this shim's argument, as `handle_of` requires (C-ABI contract).
+        writers().lock().remove(&unsafe { handle_of(rs) });
     });
 }
 
@@ -165,7 +187,8 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_close(rs: *const i64) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_response_stream_is_open(rs: *const i64) -> i64 {
     ffi_entry!(0, {
-        i64::from(writers().lock().contains_key(&handle_of(rs)))
+        // SAFETY: `rs` is this shim's argument, as `handle_of` requires (C-ABI contract).
+        i64::from(writers().lock().contains_key(&unsafe { handle_of(rs) }))
     })
 }
 

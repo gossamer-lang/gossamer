@@ -203,6 +203,7 @@ loop.
 An `arena` block bump-allocates everything created while it runs and
 frees the whole lot at once when the block exits:
 
+<!-- fragment -->
 ```gossamer
 fn main() {
     let mut total = 0
@@ -214,7 +215,7 @@ fn main() {
         }
         i += 1
     }
-    println("{}", total)
+    println(f"{total}")
 }
 ```
 

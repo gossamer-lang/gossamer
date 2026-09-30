@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::cache::default_cache_root;
+use crate::cache::{cached_source_dir, default_cache_root};
 use crate::lockfile::Lockfile;
 use crate::resolver::dependency_identity;
 use crate::{DependencySpec, InlineDependency, Manifest};
@@ -241,7 +241,7 @@ fn prepared_dependency_root(
         .find(|entry| entry.resolved.id == id)?
         .sha256
         .as_deref()?;
-    let cached = default_cache_root()?.join("pkg").join(digest);
+    let cached = cached_source_dir(&default_cache_root()?, digest)?;
     cached.join("project.toml").is_file().then_some(cached)
 }
 

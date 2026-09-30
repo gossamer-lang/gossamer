@@ -4,21 +4,18 @@ Status: experimental
 
 Goroutine-driven HTTP/1.1 client over std::net (no ureq, no blocking pool).
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_native_client.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`Client`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_native_client.rs) | `type Client` | Native h1 client (Rust-side; full builder surface). |
-| [`Error`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_native_client.rs) | `type Error` | Connect / Tls / Http / Redirect / Timeout / Io. |
-| [`delete`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_native_client.rs) | `fn delete(url: String) -> Result<http::Response, errors::Error>` | One-shot DELETE → Result<Response, Error>. Interp tier. |
-| [`get`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_native_client.rs) | `fn get(url: String) -> Result<http::Response, errors::Error>` | One-shot GET → Result<Response, Error>. Interp tier (compiled tier shares http::get). |
-| [`post`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_native_client.rs) | `fn post(url: String, body: Vec<u8>, content_type: String) -> Result<http::Response, errors::Error>` | One-shot POST: `(url, body, content_type)`. Interp tier. |
-| [`put`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_native_client.rs) | `fn put(url: String, body: Vec<u8>, content_type: String) -> Result<http::Response, errors::Error>` | One-shot PUT: `(url, body, content_type)`. Interp tier. |
+| `Client` | `type Client` | Native h1 client (Rust-side; full builder surface). |
+| `Error` | `type Error` | Connect / Tls / Http / Redirect / Timeout / Io. |
+| `get` | `fn get(url: String) -> Result<http::Response, errors::Error>` | One-shot GET → Result<Response, Error>. Interp tier (compiled tier shares http::get). |
+| `post` | `fn post(url: String, body: Vec<u8>, content_type: String) -> Result<http::Response, errors::Error>` | One-shot POST: `(url, body, content_type)`. Interp tier. |
+| `put` | `fn put(url: String, body: Vec<u8>, content_type: String) -> Result<http::Response, errors::Error>` | One-shot PUT: `(url, body, content_type)`. Interp tier. |
+| `delete` | `fn delete(url: String) -> Result<http::Response, errors::Error>` | One-shot DELETE → Result<Response, Error>. Interp tier. |
 
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
 ## Configured clients - `Client::builder()`
 

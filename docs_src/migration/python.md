@@ -16,17 +16,19 @@ are returned as `Result<T, E>` instead of raised as exceptions.
 | `None` | `Option<T>` with `Some(v)` or `None` |
 | `try` / `except` | `Result<T, E>` with `?` or `match` |
 | `isinstance` dispatch | `enum` plus `match`, or traits |
-| list | `Vec<T>` with `[...]`; use `#[...]` for a fixed array and `&[T]` for a borrowed slice |
+| list | `Vec<T>` with `#[...]`; `[...]` is a fixed array, and a `[T]` parameter takes either |
 | dict | `Map<K, V>` with `{key: value}` and `{}` literals |
 | set | `Set<T>` with `#{...}` literals, or typed `BTreeSet<T>` with `#{...}` |
 | `collections.deque` as queue | `Queue<i64>` from `Queue::from([a, b])`, `push`, and FIFO `pop` |
 | `collections.deque` as deque | `Deque<i64>` with explicit front/back methods |
 | stack list | `Stack<i64>` from `Stack::from([a, b])`, `push`, and LIFO `pop` |
 | `heapq` min-heap | `MinHeap::from([...])`; use `MaxHeap::from([...])` for max-heap order |
-| `asyncio.create_task` | `spawn(|| { ... })` |
+| `f"{name} is {age}"` | `f"{name} is {age}"` - any expression, the same specs |
+| `asyncio.create_task` | `spawn(|| { ... })` inside a `cohort { }` |
+| `asyncio.gather(...)` | `cohort { }` |
 | `if __name__ == "__main__"` | entry-file top-level statements |
 
-## Gossamer 0.47 Syntax At A Glance
+## Syntax At A Glance
 
 Python uses indentation and permits trailing commas in multiline literals and
 calls. Gossamer uses braces, permits semicolons only between statements on one
@@ -80,10 +82,11 @@ enabled = pair[1]
 cached = by_name.get("Ada")  # User | None
 ```
 
+<!-- fragment -->
 ```gos
 let users = #[user, rename(user, "Grace")]
 let first = users[0]              // Vec/array index; traps if out of bounds
-let initial = first.name[0]       // UTF-8 byte as i64, not a Python character
+let initial = first.name[0]       // a char, as Python's s[0] is a character
 let pair = (first.name, first.active)
 let enabled = pair.1
 let mut by_name: Map<String, User> = Map::new()
@@ -94,6 +97,31 @@ let found = Lookup::Found {
     user: cached.unwrap()
 }
 ```
+
+## F-Strings
+
+Python's f-strings port almost unchanged. A placeholder holds any
+expression, with the format specs Python uses:
+
+```python
+print(f"{user.name} is {user.age}")
+print(f"{ratio:.2f} {count:>6} {mask:08b} {user!r}")
+print(f"{len(items)} items")
+```
+
+<!-- fragment -->
+```gos
+println(f"{user.name} is {user.age}")
+println(f"{ratio:.2} {count:>6} {mask:08b} {user:?}")
+println(f"{items.len()} items")
+```
+
+Python's own spellings inside a placeholder change with the rest of the
+language: `len(items)` is `items.len()`, and `{x=}` has no counterpart.
+`{:?}` plays the part of `!r`, `{{` and `}}` write braces, and `f"""..."""`
+is the multiline form.
+`{}` renders any value, including lists, dicts, and structs, so there is no
+`__str__` to write unless you want to override it with `impl Display`.
 
 ## Data Types
 
@@ -112,6 +140,7 @@ let older = User { age: 37, ..user }
 
 Use enums for a closed set of shapes:
 
+<!-- fragment -->
 ```gos
 enum Event {
     Click(i64, i64)
@@ -133,6 +162,7 @@ name = user.get("name")
 display = name or "anonymous"
 ```
 
+<!-- fragment -->
 ```gos
 let name: Option<String> = user_name()
 let display = name.unwrap_or("anonymous")
@@ -156,6 +186,7 @@ except Exception as e:
     cfg = default_config()
 ```
 
+<!-- fragment -->
 ```gos
 use std::{errors, fs}
 
@@ -181,7 +212,18 @@ Python:
 total = sum(n * n for n in range(1, 11) if n % 2 == 0)
 ```
 
-Gossamer:
+Gossamer has no comprehensions (GP0061); a range is already an iterator,
+and the generator expression becomes a chain:
+
+```gos
+let total = (1..=10).filter(|n| n % 2 == 0).map(|n| n * n).sum()
+let words = #["1", "2", "x"]
+let parsed: Option<Vec<i64>> = words.iter().map(|w| w.to_i64()).collect()
+```
+
+Collecting into `Option<Vec<T>>` or `Result<Vec<T>, E>` stops at the first
+`None` or `Err`, which replaces a comprehension followed by a check. Free
+functions in `std::iter` compose with the pipe operator:
 
 ```gos
 use std::iter
@@ -193,6 +235,7 @@ let total = iter::range_inclusive(1, 10)
 
 For stateful code, ordinary loops are still idiomatic:
 
+<!-- fragment -->
 ```gos
 let mut counts: Map<String, i64> = Map::new()
 for word in words {
@@ -202,18 +245,22 @@ for word in words {
 
 ## Strings And Bytes
 
-`String` is UTF-8. Indexing works on bytes, not Python code points.
-Use UTF-8 helpers when code-point semantics matter. Use `[u8]` for
-binary data.
+`String` is UTF-8. `s.len()`, `s[i]`, and `for c in s` count characters
+(Unicode scalars), as Python's `len(s)` and `s[i]` do; `s.byte_len()`,
+`s.byte_at(i)`, and `s.bytes()` work in bytes, like `s.encode()`. Do not mix
+the two. Use `Vec<u8>` for binary data.
 
 ```gos
-let body: [u8] = fs::read("image.bin")?
+use std::fs
+
+let body: Vec<u8> = fs::read("image.bin")?
 let text = fs::read_to_string("message.txt")?
 ```
 
 HTTP responses can serve binary bodies directly:
 
 ```gos
+use std::http
 http::Response {
     status: 200
     body: [65, 0, 66]
@@ -223,9 +270,28 @@ http::Response {
 
 ## Concurrency
 
-Python `async` code usually becomes goroutines plus channels when work
-must run concurrently:
+Python `async` code becomes goroutines; `async` and `await` are declined
+keywords (GP0061). A `cohort { }` is `asyncio.gather` and a `TaskGroup` in
+one: it joins every goroutine spawned in it on every exit and answers the
+first failure, which cancels the rest. Outside `main`, a `spawn` sits inside
+one (GT0086).
 
+```gos
+use std::{errors, http}
+
+fn fetch_both(a: String, b: String) -> Result<(), errors::Error> {
+    cohort {
+        let first = spawn(|| http::get(a, #[]))
+        let second = spawn(|| http::get(b, #[]))
+        let _ = first.join()
+        let _ = second.join()
+    }
+}
+```
+
+Results can also arrive over a channel:
+
+<!-- fragment -->
 ```gos
 let tx, rx = channel()
 
@@ -233,7 +299,7 @@ for url in urls {
     let tx = tx.clone()
     spawn(|| {
         tx.send(http::get(url, #[]))
-    }()
+    })
 }
 
 while let Some(result) = rx.recv() {
@@ -248,11 +314,9 @@ Close the sender when no more values will arrive, or coordinate with
 
 Python integers grow without bound, so a hash or checksum written in Python
 masks by hand to stay in 32 or 64 bits. Gossamer integers have a fixed
-width: plain `+`, `-`, and `*` panic when a result leaves the type's range
-under `gos run`, the JIT, and `gos build`, and wrap only under
-`gos build --release`. The wrapping operators `+%`, `-%`, and `*%` wrap at
-the declared width on every tier and in every profile, so the mask becomes
-the type.
+width: plain `+`, `-`, and `*` panic when a result leaves the type's range,
+on every tier and in every profile. The wrapping operators `+%`, `-%`, and
+`*%` wrap at the declared width everywhere, so the mask becomes the type.
 
 | Python | Gossamer |
 | --- | --- |
@@ -335,9 +399,11 @@ not a lint. Anything you want another module to reach needs `pub` or
 | `os.environ.get("X")` | `env::var("X")` |
 | `sys.argv` | `env::args()` |
 | `subprocess.run([...])` | `process::run(program, args)` |
-| `print(x)` | `println("{x}")` |
+| `print(x)` | `println(f"{x}")` |
 | `json.dumps(v)` | `encoding::json::encode(v)` |
 | `json.loads(s)` | `encoding::json::decode::<T>(s)` |
-| `re.compile(p)` | `regex::compile(p)` |
-| `s.strip()` | `strings::trim(s)` |
-| `int(s)` | `strconv::parse_i64(s)` |
+| `re.compile(p)` | `regex::compile("literal")`, or `regex::new(p)?` for a pattern built at run time |
+| `s.strip()` | `s.trim()` |
+| `int(s)` | `s.to_i64()`, an `Option<i64>` |
+| `@dataclass` to and from JSON | `json::to_json::<T>(v)?` / `json::from_json::<T>(text)?` |
+| `zlib.crc32(b)` | `hash::crc32::checksum(b)`, a `u32` |

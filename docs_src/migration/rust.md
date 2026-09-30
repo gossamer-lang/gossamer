@@ -16,10 +16,13 @@ concurrency, and which Rust features are intentionally absent.
 | named struct positional shorthand is unavailable | Same. Use keyed fields. |
 | `Option<T>` and `Result<T, E>` | Same core shape. |
 | `?` | Same propagation model. |
-| `async fn` and `.await` | Use `spawn(|| expr)` plus channels or blocking calls. |
-| `std::thread::spawn` | `spawn(|| { ... })` |
-| `dyn Trait` | Prefer generics or an enum. |
+| `format!("{name}: {}", x)`, `println!(..)` | `f"{name}: {x}"`, `println(..)` - no `!` on any call |
+| `vec![a, b]` | `#[a, b]` (GP0064 rewrites it) |
+| `async fn` and `.await` | Declined (GP0061). Use `spawn(|| expr)` plus channels or blocking calls. |
+| `std::thread::spawn` | `spawn(|| { ... })` inside a `cohort { }` |
+| `dyn Trait` | Declined (GP0061). Use generics or an enum. |
 | `x.wrapping_add(y)`, `x.wrapping_mul(y)` | `x +% y`, `x *% y` |
+| `x.checked_add(y)`, `x.saturating_sub(y)` | Same. |
 | `cargo build` | `gos build` |
 | `cargo test` | `gos test` |
 | `cargo fmt` | `gos fmt` |
@@ -27,7 +30,7 @@ concurrency, and which Rust features are intentionally absent.
 Entry files may omit `fn main`. Bare statements at file scope become an
 implicit `fn main()`.
 
-## Gossamer 0.47 Syntax At A Glance
+## Syntax At A Glance
 
 Rust and Gossamer use similar delimiters, but not the same separators.
 Gossamer accepts semicolons only between statements on the same line; trailing
@@ -81,10 +84,11 @@ let enabled = pair.1;
 let cached = by_name.get("Ada"); // Option<&User>
 ```
 
+<!-- fragment -->
 ```gos
 let users = #[user, rename(user, "Grace")]
 let first = users[0]              // Vec/array index; traps if out of bounds
-let initial = first.name[0]       // String index is a UTF-8 byte as i64
+let initial = first.name[0]       // String index is a char (a Unicode scalar)
 let pair = (first.name, first.active)
 let enabled = pair.1              // tuple field
 let mut by_name: Map<String, User> = Map::new()
@@ -120,6 +124,31 @@ let max_heap = MaxHeap::from([1, 2, 3])
 let min_heap = MinHeap::from([1, 2, 3])
 let pair = (1, "two")
 ```
+
+## Formatting And Interpolated Strings
+
+Rust's `format!` family has no `!` here: `format`, `println`, `print`,
+`eprintln`, and `panic` are ordinary calls with the same `{}` and `{:spec}`
+placeholders. An `f"..."` string interpolates any expression, each with an
+optional spec, so Rust's inline captures port directly and the positional
+arguments move inline:
+
+```rust
+let line = format!("{name} is {age} years old");
+println!("{:>8} {:.2} {:?}", user.name, ratio, tags);
+```
+
+<!-- fragment -->
+```gos
+let line = f"{name} is {age} years old"
+println(f"{user.name:>8} {ratio:.2} {tags:?}")
+```
+
+A placeholder holds any expression, `f"{xs.len()} items"` and
+`f"{a + b:>8}"` included; the first `:` outside the expression's brackets
+starts the spec, and a `::` path is not one. `{{` and `}}` write braces, `f"""..."""`
+interpolates a multiline string, and `{:+}` / `{:e}` format a sign and an
+exponent as in Rust.
 
 ## Ownership And References
 
@@ -167,6 +196,11 @@ fn total<T: Area>(xs: [T]) -> f64 {
 }
 ```
 
+A trait-qualified call names the implementation explicitly, as in Rust:
+`Area::area(circle)`. Operator traits take one impl per right-hand type,
+so `impl Mul<f64> for Vec2` sits beside `impl Mul for Vec2`, each with an
+optional `type Output`.
+
 There is no `unsafe` in Gossamer source.
 
 ## Derives And Value Operations
@@ -184,14 +218,39 @@ struct User {
 ```
 
 Do not port Rust derives mechanically. `Clone`, `Copy`, `Hash`,
-`Serialize`, and `Deserialize` are not Rust-compatible derive surfaces in
-Gossamer source. For JSON, use `std::encoding::json` APIs and the shapes
-that module supports.
+`Serialize`, and `Deserialize` are automatic rather than derived, and
+writing them reports GT0025. `#[derive(Default)]` needs every field to
+have a default (GP0062). Typed serde is a pair of functions named by a
+turbofish; `#[rename("key")]`, `#[skip]`, and `#[default]` play the part
+of the `#[serde(..)]` field attributes, and enums are externally tagged:
 
-Aggregate values can be used directly in vectors and ordinary structs.
-Map and Set support is strongest for scalar and string keys;
-aggregate map keys have tier-specific limits, so prefer stable scalar
-keys when code must run across all tiers.
+```rust
+#[derive(Serialize, Deserialize)]
+struct User {
+    name: String,
+    #[serde(rename = "years")]
+    age: i64,
+}
+let text = serde_json::to_string(&user)?;
+let back: User = serde_json::from_str(&text)?;
+```
+
+<!-- fragment -->
+```gos
+use std::encoding::json
+
+struct User {
+    name: String
+    #[rename("years")]
+    age: i64
+}
+let text = json::to_json::<User>(user)?
+let back = json::from_json::<User>(text)?
+```
+
+Aggregate values can be used directly in vectors and ordinary structs, and
+any hashable value keys a `Map` or `Set`: integers, strings, tuples,
+structs, and enums, compared by value. Floats are not hashable, as in Rust.
 
 ## Async Code
 
@@ -214,6 +273,7 @@ fn fetch(url: String) -> Result<String, errors::Error> {
 
 For fan-out, spawn goroutines and collect through channels:
 
+<!-- fragment -->
 ```gos
 let tx, rx = channel()
 
@@ -221,7 +281,7 @@ for url in urls {
     let tx = tx.clone()
     spawn(|| {
         tx.send(http::get(url, #[]))
-    }()
+    })
 }
 
 let mut responses = #[]
@@ -233,20 +293,50 @@ for _ in urls {
 Blocking IO is acceptable. The runtime parks goroutines around blocking
 operations where the standard library provides integration.
 
+Outside `main`, a `spawn` sits inside a `cohort { }` in its own function
+(GT0086). The block joins every child on every exit, like
+`std::thread::scope`, and answers the first failure as its `Err`:
+
+```gos
+use std::{errors, http}
+
+fn fetch_both(a: String, b: String) -> Result<(), errors::Error> {
+    cohort {
+        let first = spawn(|| http::get(a, #[]))
+        let second = spawn(|| http::get(b, #[]))
+        let _ = first.join()
+        let _ = second.join()
+    }
+}
+```
+
 ## Collections And Pipelines
 
-Rust iterator method chains become `std::iter` pipelines. Gossamer's
-pipe operator passes the left-hand value into a free function: a bare
-callable takes it as its only argument, and a closure names the slot it
-fills (`v` below), so a data-first callee reads left to right.
+Rust iterator chains port as written, without the `*` dereferences:
+`iter()` answers a lazy iterator, adapters stay lazy, and a terminal ends
+the chain. A type with `impl Iterator for T` gains the same adapters and
+terminals, and `collect()` into `Result<Vec<T>, E>` or `Option<Vec<T>>`
+stops at the first failure, as in Rust.
 
 ```rust
 let total: i64 = xs.iter()
     .filter(|n| **n % 2 == 0)
     .map(|n| n * n)
     .sum();
+let parsed: Result<Vec<i64>, _> = words.iter().map(|w| w.parse()).collect();
 ```
 
+<!-- fragment -->
+```gos
+let total = xs.iter().filter(|n| n % 2 == 0).map(|n| n * n).sum()
+let parsed: Option<Vec<i64>> = words.iter().map(|w| w.to_i64()).collect()
+```
+
+Free functions compose with the pipe operator, which passes the left-hand
+value into a function: a bare callable takes it as its only argument, and a
+closure names the slot it fills, so a data-first callee reads left to right.
+
+<!-- fragment -->
 ```gos
 use std::iter
 
@@ -260,12 +350,12 @@ Mutating collection helpers such as `push`, `sort`, `insert`, and
 
 ## Integer Overflow And Wrapping Arithmetic
 
-Plain `+`, `-`, and `*` follow Rust's profile rules at the declared width:
-they panic on overflow under `gos run`, the JIT, and `gos build`, and wrap
-under `gos build --release`. Where wrapping is the intent - hashes,
-checksums, pseudo-random generators - say so with an operator. The
-`wrapping_*` methods do not exist: a call reports GT0087, and
-`gos check --fix` rewrites it to the operator.
+Plain `+`, `-`, and `*` panic on overflow at the declared width on every
+tier and in every profile - including `gos build --release`, where Rust's
+default wraps. There is no counterpart to `overflow-checks = false`: where
+wrapping is the intent - hashes, checksums, pseudo-random generators - say
+so with an operator. The `wrapping_*` methods do not exist: a call reports
+GT0087, and `gos check --fix` rewrites it to the operator.
 
 | Rust | Gossamer |
 | --- | --- |
@@ -274,7 +364,7 @@ checksums, pseudo-random generators - say so with an operator. The
 | `a.wrapping_mul(b)` | `a *% b` |
 | `a = a.wrapping_mul(b)` | `a *%= b` (also `+%=`, `-%=`) |
 | `Wrapping<u32>` | a plain `u32` combined with `+%`, `-%`, `*%` |
-| `checked_*`, `overflowing_*`, `saturating_*` | Not available; compare against the type's bounds first. |
+| `checked_*`, `overflowing_*`, `saturating_*` | Same names and answers. |
 
 ```rust
 fn fnv1a(data: &[u8]) -> u32 {
@@ -363,4 +453,8 @@ Gossamer's `pub(crate)`, and it is the only restricted form: `pub(crate)`,
 | `std::sync::Mutex` | `sync::Mutex` |
 | `std::time::Duration::from_millis` | `time::Duration::from_millis` |
 | `reqwest::blocking::get(url)` | `http::get(url, [])` |
-| `serde_json` | `encoding::json` |
+| `serde_json::to_string(&v)` / `from_str` | `json::to_json::<T>(v)` / `json::from_json::<T>(text)` |
+| `Regex::new("literal")` | `regex::compile("literal")`, checked while compiling |
+| `Regex::new(pattern)?` for a run-time pattern | `regex::new(pattern)?` |
+| `crc32fast::hash(bytes)` | `hash::crc32::checksum(bytes)`, a `u32` |
+| `std::io::Error` from `std::fs` | `io::Error` from every `fs` function |

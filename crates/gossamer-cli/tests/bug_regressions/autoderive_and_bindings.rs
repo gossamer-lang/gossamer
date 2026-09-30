@@ -218,7 +218,7 @@ fn deref_assign_through_mut_i64_runs_under_llvm() {
     // benches use.
     let src = r#"
 fn lcg(s: &mut i64) -> i64 {
-    *s = *s * 6364136223846793005 + 1442695040888963407
+    *s = *s *% 6364136223846793005 +% 1442695040888963407
     (*s >> 33) & 0x7fffffff
 }
 fn main() {
@@ -815,7 +815,7 @@ fn regex_captures_all_option_string_match_reads_real_discriminant() {
     let src = r#"
 use std::regex
 fn parse_pairs(line: String) -> Vec<Vec<Option<String>>> {
-    let re = match regex::compile("(\\w+)=(\\w+)") { Ok(r) => r, Err(_) => { return Vec::from([]) } }
+    let re = regex::compile("(\\w+)=(\\w+)")
     regex::captures_all(re, line)
 }
 fn main() {

@@ -304,6 +304,8 @@ extern "C" fn report() {
 #[inline]
 fn arm() {
     #[cfg(all(any(unix, windows), not(miri)))]
+    // SAFETY: `report` is an `extern "C" fn()` that touches only process-lifetime statics, which
+    // is what `atexit` requires.
     ARMED.call_once(|| unsafe {
         atexit(report);
     });

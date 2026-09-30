@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::collections::HashMap;
@@ -40,6 +38,7 @@ pub unsafe extern "C" fn gos_rt_testing_check(cond: bool, msg: *const c_char) ->
             let m = if msg.is_null() {
                 "check failed".to_string()
             } else {
+                // SAFETY: `msg` is a String argument from compiled code, null or a live string body for the whole call.
                 unsafe { crate::c_abi::gos_str_arg_string(msg) }
             };
             eprintln!("test check failed: {m}");
@@ -56,6 +55,7 @@ pub unsafe extern "C" fn gos_rt_testing_check_eq_i64(a: i64, b: i64, msg: *const
             let m = if msg.is_null() {
                 String::new()
             } else {
+                // SAFETY: `msg` is a String argument from compiled code, null or a live string body for the whole call.
                 unsafe { crate::c_abi::gos_str_arg_string(msg) }
             };
             eprintln!("test check_eq failed: {a} != {b} ({m})");
@@ -65,7 +65,7 @@ pub unsafe extern "C" fn gos_rt_testing_check_eq_i64(a: i64, b: i64, msg: *const
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_testing_wait_for_scheduler_idle(timeout_ms: i64) -> bool {
+pub extern "C" fn gos_rt_testing_wait_for_scheduler_idle(timeout_ms: i64) -> bool {
     ffi_entry!(false, {
         let deadline = crate::platform::Instant::now()
             + std::time::Duration::from_millis(timeout_ms.max(0) as u64);
@@ -140,6 +140,7 @@ pub unsafe extern "C" fn gos_rt_httptest_server(status: i64, body: *const c_char
         let body = if body.is_null() {
             String::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(body) }
         };
         let Ok(url) = httptest_server(status, &body) else {
@@ -175,6 +176,8 @@ pub unsafe extern "C" fn gos_rt_httptest_record(
             if p.is_null() {
                 String::new()
             } else {
+                // SAFETY: a non-null `p` is one of this shim's string arguments, live for the
+                // call (C-ABI contract).
                 unsafe { crate::c_abi::gos_str_arg_string(p) }
             }
         };
@@ -198,8 +201,12 @@ pub unsafe extern "C" fn gos_rt_httptest_record(
         ) -> i128;
         // SAFETY: `handler_fn` came from `gos_fn_addr` over a handler
         // dispatch symbol at the call site, with `handler_env` alongside.
-        let handler: HandlerFn = unsafe { std::mem::transmute(handler_fn as usize) };
+        let handler: HandlerFn =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(handler_fn as usize)) };
         let req_ptr: *mut crate::c_abi::http_client::GosHttpRequest = &raw mut request;
+        // SAFETY: `handler` is the compiled handler at `handler_fn`, whose environment
+        // `handler_env` is live for the call (C-ABI contract), and `req_ptr` is this frame's own
+        // request.
         let result = unsafe { handler(handler_env, req_ptr) };
         crate::c_abi::context::close_request_context(std::mem::replace(&mut request.context, 0));
         result

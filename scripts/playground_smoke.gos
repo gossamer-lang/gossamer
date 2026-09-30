@@ -8,7 +8,8 @@
 // portability job type-checks it - so this walks every fixture through
 // the real module and fails on a throw. A front-end rejection, a runtime
 // error, and an exit status all come back inside the result and are not
-// failures here.
+// failures here. The programs the site itself runs in the browser - every
+// tour lesson and every home-page listing - must also finish without one.
 //
 // Usage: gos run scripts/playground_smoke.gos [bindgen-dir]
 //
@@ -39,6 +40,85 @@ fn programs_in(dir: String) -> Vec<String> {
     }
     found.sort()
     found
+}
+
+/// A JavaScript template literal's text, from `body` up to its closing
+/// backtick: each backslash escape stands for the character after it.
+fn template_text(body: String) -> String {
+    let mut text = String::new()
+    let mut escaped = false
+    for c in body {
+        if !escaped && c == '`' {
+            return text
+        }
+        if !escaped && c == '\\' {
+            escaped = true
+            continue
+        }
+        text.push(c)
+        escaped = false
+    }
+    text
+}
+
+/// The tour's lesson programs, each as its slug and source, in page order.
+fn tour_lessons(source: String) -> Vec<(String, String)> {
+    let slugs = source.split("slug: \"").iter().skip(1).map(|piece| piece.split("\"")[0]).collect()
+    let codes = source.split("    code: `").iter().skip(1).map(template_text).collect()
+    slugs.iter().zip(codes.iter()).collect()
+}
+
+/// The home page's Gossamer listings, with the markup's entities decoded.
+fn landing_listings(page: String) -> Vec<String> {
+    page.split("<code class=\"language-gossamer\">")
+        .iter()
+        .skip(1)
+        .map(|piece| {
+            piece.split("</code>")[0]
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replace("&quot;", "\"")
+                .replace("&#39;", "'")
+                .replace("&amp;", "&")
+        })
+        .collect()
+}
+
+/// The text of `file`, or the process ends naming it.
+fn read_site_source(file: String) -> String {
+    match fs::read_to_string(file) {
+        Ok(text) => text
+        Err(e) => {
+            eprintln("playground_smoke: reading {}: {}", file, e)
+            process::exit(1)
+        }
+    }
+}
+
+/// Writes every program the site runs in the browser into `dir`, answering
+/// their paths: the tour's lessons, then the home page's listings.
+fn site_programs(dir: String) -> Vec<String> {
+    if let Err(e) = fs::create_dir_all(dir) {
+        eprintln("playground_smoke: creating {}: {}", dir, e)
+        process::exit(1)
+    }
+    let mut written = #[]
+    let mut programs = #[]
+    for (slug, code) in tour_lessons(read_site_source("landing/tour/tour.js")) {
+        programs.push((f"tour-{slug}.gos", code))
+    }
+    for (index, code) in landing_listings(read_site_source("landing/index.html")).iter().enumerate() {
+        programs.push((f"listing-{index}.gos", code))
+    }
+    for (name, code) in programs {
+        let file = path::join(dir, name)
+        if let Err(e) = fs::write(file, code.as_bytes()) {
+            eprintln("playground_smoke: writing {}: {}", file, e)
+            process::exit(1)
+        }
+        written.push(file)
+    }
+    written
 }
 
 /// Builds the playground wasm and lays a nodejs-target `wasm-bindgen`
@@ -103,13 +183,18 @@ fn main() {
             count += 1
         }
     }
+    argv.push("--must-run")
+    for file in site_programs(path::join(dir, "site")) {
+        argv.push(file)
+        count += 1
+    }
     println("playground_smoke: {} program(s) through the wasm runtime", count)
 
     let run = process::run("node", argv)
     match run {
         Ok(out) => {
             for line in out.stdout.split("\n") {
-                if line.starts_with("TRAP") || line.contains("trapped") {
+                if line.starts_with("TRAP") || line.starts_with("FAIL") || line.contains("trapped") {
                     println("{}", line)
                 }
             }

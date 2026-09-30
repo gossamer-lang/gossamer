@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -77,6 +75,7 @@ pub unsafe extern "C" fn gos_rt_url_query_escape(s: *const c_char) -> *mut c_cha
         if s.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(s) };
         alloc_cstring(percent_encode(s, true).as_bytes())
     })
@@ -88,6 +87,7 @@ pub unsafe extern "C" fn gos_rt_url_path_escape(s: *const c_char) -> *mut c_char
         if s.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(s) };
         alloc_cstring(percent_encode(s, false).as_bytes())
     })
@@ -99,6 +99,7 @@ pub unsafe extern "C" fn gos_rt_url_query_unescape(s: *const c_char) -> *mut c_c
         if s.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(s) };
         alloc_cstring(percent_decode(s, true).as_bytes())
     })
@@ -110,6 +111,7 @@ pub unsafe extern "C" fn gos_rt_url_path_unescape(s: *const c_char) -> *mut c_ch
         if s.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let s = unsafe { crate::c_abi::gos_str_arg_text(s) };
         alloc_cstring(percent_decode(s, false).as_bytes())
     })

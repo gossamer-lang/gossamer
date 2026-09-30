@@ -31,10 +31,8 @@ fn main() {
     println("base32hex = {}", encoding::base32::encode_hex(raw))
 
     // Regex first-match replacement.
-    match regex::compile("[0-9]") {
-        Ok(p) => println("replace = {}", regex::replace(p, "a1b2c3", "X"))
-        Err(_) => println("replace = err")
-    }
+    let digit = regex::compile("[0-9]")
+    println("replace = {}", regex::replace(digit, "a1b2c3", "X"))
 
     // json::Value mutator round-trip: the `&mut` update must persist.
     let mut obj = json::Value::object()

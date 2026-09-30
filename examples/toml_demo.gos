@@ -11,15 +11,15 @@ use std::errors
 
 let config = "port = 8080\nhost = \"localhost\"\nverbose = true\n"
 
-println("valid: {}", toml::is_valid(config))
-println("invalid: {}", toml::is_valid("port == 8080"))
+println(f"valid: {toml::is_valid(config)}")
+println(f"invalid: {toml::is_valid("port == 8080")}")
 
 let json = toml::to_json(config)?
-println("as json contains port: {}", json.contains("\"port\":8080"))
-println("as json contains host: {}", json.contains("\"host\":\"localhost\""))
+println(f"as json contains port: {json.contains("\"port\":8080")}")
+println(f"as json contains host: {json.contains("\"host\":\"localhost\"")}")
 
 let roundtrip = toml::from_json(json)?
-println("rt contains port = 8080: {}", roundtrip.contains("port = 8080"))
+println(f"rt contains port = 8080: {roundtrip.contains("port = 8080")}")
 
 let pp = toml::pretty(config)?
-println("pretty contains host: {}", pp.contains("host"))
+println(f"pretty contains host: {pp.contains("host")}")

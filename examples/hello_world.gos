@@ -3,7 +3,7 @@
  *
  * Output goes through the `println!` macro - no `use` declaration
  * is required. The macro interpolates captured identifiers and
- * `{}` placeholders: `println("hello, {name}")`.
+ * `{}` placeholders: `println(f"hello, {name}")`.
  */
 
 println("hello, world")

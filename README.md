@@ -281,14 +281,14 @@ fn clamp(lo: i64, hi: i64, x: i64) -> i64 {
 fn main() {
     // 3 -> double -> add 10 -> clamp to [0, 100]
     let n = 3 |> double |> |v| add(10, v) |> |v| clamp(0, 100, v)
-    println("arithmetic: {}", n)
+    println(f"arithmetic: {n}")
 
     // A method chain is an ordinary operand, so it can feed a pipe.
     let words = "  Hello  World  ".to_lowercase()
         |> strings::split_whitespace
         |> iter::count
 
-    println("words: {}", words)
+    println(f"words: {words}")
 }
 ```
 
@@ -306,7 +306,7 @@ impl Add for Vec2 {
 
 fn main() {
     let sum = Vec2 { x: 1.5, y: 2.0 } + Vec2 { x: 3.0, y: 4.0 }
-    println("({}, {})", sum.x, sum.y)   // (4.5, 6)
+    println(f"({sum.x}, {sum.y})")   // (4.5, 6)
     println("{}", sum == sum.clone())   // true
 }
 ```
@@ -322,7 +322,7 @@ fn main() {
     let tx, rx = channel::<i64>()
     spawn(|| { tx.send(40 |> |v| add(2, v)) })
     if let Some(answer) = rx.recv() {
-        println("answer: {}", answer)
+        println(f"answer: {answer}")
     }
 }
 ```
@@ -336,8 +336,8 @@ fn add(a: i64, b: i64) -> i64 { a + b }
 fn main() {
     let h = spawn(|| 40 |> |v| add(2, v))
     match h.join() {
-        Ok(v) => println("answer: {}", v),
-        Err(e) => println("worker failed: {}", e),
+        Ok(v) => println(f"answer: {v}"),
+        Err(e) => println(f"worker failed: {e}"),
     }
 }
 ```

@@ -31,5 +31,5 @@ fn main() {
     let height = 30
     let limit = 500
     let rows = (0..height).par_map(|i| row(i, width, height, limit))
-    for line in rows { println("{}", line) }
+    for line in rows { println(line) }
 }

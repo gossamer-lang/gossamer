@@ -1,0 +1,10 @@
+// ERROR: GP0062
+
+struct Inner { a: i64 }
+
+#[derive(Default)]
+struct Outer { inner: Inner }
+
+fn main() {
+    println("{}", Outer::default().inner.a)
+}

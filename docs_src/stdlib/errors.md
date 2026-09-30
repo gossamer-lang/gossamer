@@ -4,21 +4,18 @@ Status: experimental
 
 Error construction, wrapping, and chain traversal.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/errors.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`Error`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/errors.rs) | `type Error` | Reference-counted error value with optional cause chain. |
-| [`is`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/errors.rs) | `fn is(error: errors::Error, needle: String) -> bool` | Checks whether an error's chain contains a matching message. |
-| [`join`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/errors.rs) | `fn join(errors: Vec<errors::Error>) -> Option<errors::Error>` | Joins a list of errors into one; messages are joined with "; " (None for an empty list). |
-| [`new`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/errors.rs) | `fn new(message: String) -> errors::Error` | Constructs a fresh error from a message. |
-| [`newf`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/errors.rs) | `fn newf(format: String, args: Vec<String>) -> errors::Error` | Constructs a fresh error from a format template, e.g. `newf("status {}", code)`. |
-| [`wrap`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/errors.rs) | `fn wrap(error: errors::Error, context: String) -> errors::Error` | Wraps a cause with a higher-level message. |
+| `Error` | `type Error` | Error value carrying a message, an optional cause, and structured diagnostic fields. Methods: `message() -> String` (top message only), `cause() -> Option<Error>`, `chain() -> Vec<Error>` (self then every ancestor cause), `is(needle) -> bool`, `with_field(key, value) -> Error` (an immutable copy carrying one more field; re-setting a key replaces its value), `field(key) -> Option<String>`, `fields() -> Vec<(String, String)>` in insertion order. `{}` renders the colon-joined chain. Example: `let e = errors::new("query failed").with_field("sqlstate", "23505")`. |
+| `new` | `fn new(message: String) -> errors::Error` | Constructs a fresh error from a message. |
+| `newf` | `fn newf(format: String, args: Vec<String>) -> errors::Error` | Constructs a fresh error from a format template, e.g. `newf("status {}", code)`. |
+| `wrap` | `fn wrap(error: errors::Error, context: String) -> errors::Error` | Wraps a cause with a higher-level message. |
+| `is` | `fn is(error: errors::Error, needle: T) -> bool` | `is(error, needle) -> bool` - true when `needle` matches `error` or any link of its cause chain. Prefer a sentinel error VALUE, which matches by identity so two errors sharing a message stay distinct: `let NOT_FOUND = errors::new("not found")`, then `errors::is(err, NOT_FOUND)`. A String `needle` falls back to a message substring test. |
+| `join` | `fn join(errors: Vec<errors::Error>) -> Option<errors::Error>` | Joins a list of errors into one; messages are joined with "; " (None for an empty list). |
 
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
 ## Rendering
 

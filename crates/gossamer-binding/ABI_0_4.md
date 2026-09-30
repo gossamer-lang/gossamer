@@ -2,6 +2,11 @@
 
 Status: shipped in `gossamer-binding` 0.4.0.
 
+This layout is internal to one toolchain. Every binding is compiled from
+source against the toolchain building the program, so these structs never
+cross a toolchain boundary; the compatibility promise is the Rust source API
+(`docs_src/rust_bindings.md`, "What stays compatible").
+
 This document specifies the four new ABI shapes added in 0.4 and
 defines their ownership, lifetime, reclamation, FFI, and threading
 guarantees. Earlier shapes (`Unit`, `Bool`, `I64`, `F64`, `Char`,

@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -48,7 +46,7 @@ pub struct GosWaitGroup {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_wg_new() -> *mut GosWaitGroup {
+pub extern "C" fn gos_rt_wg_new() -> *mut GosWaitGroup {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosWaitGroup {
             counter: parking_lot::Mutex::new(0),
@@ -74,6 +72,7 @@ pub unsafe extern "C" fn gos_rt_wg_add(wg: *mut GosWaitGroup, n: i64) -> i64 {
         if wg.is_null() {
             return -1;
         }
+        // SAFETY: `wg` is a handle from compiled code, checked non-null above and live for the whole call.
         let wg = unsafe { &*wg };
         let mut c = wg.counter.lock();
         if let Some(v) = c.checked_add(n) {
@@ -99,6 +98,7 @@ pub unsafe extern "C" fn gos_rt_wg_done(wg: *mut GosWaitGroup) -> i64 {
         if wg.is_null() {
             return -1;
         }
+        // SAFETY: `wg` is a handle from compiled code, checked non-null above and live for the whole call.
         let wg = unsafe { &*wg };
         let mut c = wg.counter.lock();
         *c -= 1;
@@ -123,6 +123,7 @@ pub unsafe extern "C" fn gos_rt_wg_wait(wg: *mut GosWaitGroup) {
         if wg.is_null() {
             return;
         }
+        // SAFETY: `wg` is a handle from compiled code, checked non-null above and live for the whole call.
         let wg = unsafe { &*wg };
         // A goroutine gives its carrier back while it waits: it registers for
         // the zero-crossing wakeup, suspends, and re-checks the counter on
@@ -174,9 +175,12 @@ pub unsafe extern "C" fn gos_rt_wg_wait_ctx(wg: *mut GosWaitGroup, ctx_handle: *
         }
         let addr = ctx_handle as usize;
         if addr == 0 {
+            // SAFETY: `wg` is this shim's argument, live for the call (C-ABI contract); non-null,
+            // checked above.
             unsafe { gos_rt_wg_wait(wg) };
             return 1;
         }
+        // SAFETY: `wg` is a handle from compiled code, checked non-null above and live for the whole call.
         let wg = unsafe { &*wg };
         let cancelled = || super::context::addr_is_cancelled(addr);
         loop {
@@ -227,6 +231,7 @@ pub unsafe extern "C" fn gos_rt_wg_error(wg: *const GosWaitGroup) -> i64 {
         if wg.is_null() {
             return 0;
         }
+        // SAFETY: `wg` is a handle from compiled code, checked non-null above and live for the whole call.
         let wg = unsafe { &*wg };
         wg.error.load(Ordering::Relaxed)
     })
@@ -240,6 +245,7 @@ pub unsafe extern "C" fn gos_rt_wg_error_clear(wg: *mut GosWaitGroup) -> i64 {
         if wg.is_null() {
             return 0;
         }
+        // SAFETY: `wg` is a handle from compiled code, checked non-null above and live for the whole call.
         let wg = unsafe { &*wg };
         wg.error.swap(0, Ordering::Relaxed)
     })

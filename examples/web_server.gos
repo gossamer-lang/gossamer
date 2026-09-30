@@ -41,7 +41,7 @@ fn list_users(_request: http::Request) -> Result<http::Response, http::Error> {
 }
 
 fn create_user(request: http::Request) -> Result<http::Response, http::Error> {
-    Ok(http::Response::json(201, format("{{\"created\":true,\"body\":\"{}\"}}", request.body)))
+    Ok(http::Response::json(201, f"{{\"created\":true,\"body\":\"{request.body}\"}}"))
 }
 
 // Echoes the full request shape back as JSON. The integration
@@ -52,12 +52,12 @@ fn echo(request: http::Request) -> Result<http::Response, http::Error> {
     let query = &request.query
     let body = &request.body
     Ok(http::Response::json(200
-        format("{{\"method\":\"{method}\",\"path\":\"{path}\",\"query\":\"{query}\",\"body\":\"{body}\"}}")))
+        f"{{\"method\":\"{method}\",\"path\":\"{path}\",\"query\":\"{query}\",\"body\":\"{body}\"}}"))
 }
 
 fn main() -> Result<(), http::Error> {
     let addr = env::args().first().unwrap_or("0.0.0.0:8080")
-    println("listening on {}", addr)
+    println(f"listening on {addr}")
     router::Router::new().get("/", index).get("/health", health).get("/users", list_users).post("/users", create_user).get("/echo", echo)
         |> |v| http::serve(addr, v)
 }

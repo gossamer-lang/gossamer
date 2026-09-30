@@ -18,12 +18,12 @@ let port = fs.uint("port", 8080, "listen port")
 let verbose = fs.bool("verbose", false, "enable chatty output")
 let positional = fs.parse(env::args())?
 
-println("hello, {}!", *name)
+println(f"hello, {*name}!")
 if *verbose {
-    println("config: port={}, {} positional arg(s)", *port, positional.len())
+    println(f"config: port={*port}, {positional.len()} positional arg(s)")
     for i in 0..positional.len() {
-        println("  [{i}] = {}", positional[i])
+        println(f"  [{i}] = {positional[i]}")
     }
 } else {
-    println("running on port {}", *port)
+    println(f"running on port {*port}")
 }

@@ -1,0 +1,17 @@
+// `{:+}` signs a number and `{:e}` / `{:E}` render scientific notation, with
+// width, fill, zero padding, and precision composing as for any spec.
+
+fn main() {
+    let a = 42
+    let b = -7
+    let x = 1234.5
+    let y = 0.00012
+    let name = "abc"
+    println("[{:+}] [{:+}] [{:+}] [{:+}]", a, b, 0, x)
+    println("[{:+8}] [{:<+8}] [{:+08}] [{:+.2}]", a, a, b, x)
+    println("[{name:+}] [{:+}]", "text")
+    println("{:e} {:e} {:e} {:e} {:e}", x, y, 100.0, 1500, 0.0)
+    println("{:E} {:.2e} {:.0e} {:.3e} {:e}", x, x, 9.99, 1.0, -0.5)
+    println("[{:12.2e}] [{:+e}] [{:>10e}]", x, x, 7)
+    println("{:e} {:e}", i64::MAX, f64::MAX)
+}

@@ -610,25 +610,6 @@
       "reference_status": "catalog_only"
     },
     {
-      "id": "std-compress-gzip-Level",
-      "name": "std::compress::gzip::Level",
-      "kind": "type",
-      "signature": null,
-      "description": "Compression level (`0` store-only … `9` best); default is gzip(1)'s `6`.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdcompressgzip",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
       "id": "std-compress-gzip-decode",
       "name": "std::compress::gzip::decode",
       "kind": "function",
@@ -652,7 +633,7 @@
       "name": "std::compress::gzip::encode",
       "kind": "function",
       "signature": "fn encode(data: Vec<u8>, level: i64) -> Result<Vec<u8>, errors::Error>",
-      "description": "Compresses bytes at the supplied Level.",
+      "description": "Compresses bytes at `level`, `0` (store only) to `9` (best); gzip(1) uses `6`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -879,7 +860,7 @@
       "id": "std-crypto-blake3-hex",
       "name": "std::crypto::blake3::hex",
       "kind": "function",
-      "signature": "fn hex(text: String) -> String",
+      "signature": "fn hex(data: Vec<u8>) -> String",
       "description": "Returns the digest as lowercase hex.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -1012,7 +993,7 @@
       "id": "std-crypto-hmac-sha256-hex",
       "name": "std::crypto::hmac::sha256_hex",
       "kind": "function",
-      "signature": "fn sha256_hex(key: String, message: String) -> String",
+      "signature": "fn sha256_hex(key: Vec<u8>, message: Vec<u8>) -> String",
       "description": "HMAC-SHA-256 over a message, hex-encoded.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -1069,7 +1050,7 @@
       "id": "std-crypto-insecure-md5-hex",
       "name": "std::crypto::insecure::md5_hex",
       "kind": "function",
-      "signature": "fn md5_hex(text: String) -> String",
+      "signature": "fn md5_hex(data: Vec<u8>) -> String",
       "description": "One-shot MD5, hex-encoded.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -1107,7 +1088,7 @@
       "id": "std-crypto-insecure-sha1-hex",
       "name": "std::crypto::insecure::sha1_hex",
       "kind": "function",
-      "signature": "fn sha1_hex(text: String) -> String",
+      "signature": "fn sha1_hex(data: Vec<u8>) -> String",
       "description": "One-shot SHA-1, hex-encoded.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -1297,7 +1278,7 @@
       "id": "std-crypto-sha256-hex",
       "name": "std::crypto::sha256::hex",
       "kind": "function",
-      "signature": "fn hex(text: String) -> String",
+      "signature": "fn hex(data: Vec<u8>) -> String",
       "description": "Returns the digest as lowercase hex.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -1335,7 +1316,7 @@
       "id": "std-crypto-sha512-hex",
       "name": "std::crypto::sha512::hex",
       "kind": "function",
-      "signature": "fn hex(text: String) -> String",
+      "signature": "fn hex(data: Vec<u8>) -> String",
       "description": "Returns the digest as lowercase hex.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -3045,7 +3026,7 @@
       "id": "std-encoding-pem-decode",
       "name": "std::encoding::pem::decode",
       "kind": "function",
-      "signature": "fn decode(data: String) -> Result<pem::Block, errors::Error>",
+      "signature": "fn decode(text: String) -> Result<pem::Block, errors::Error>",
       "description": "Decodes the first PEM block from a string.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -3064,7 +3045,7 @@
       "id": "std-encoding-pem-decode-all",
       "name": "std::encoding::pem::decode_all",
       "kind": "function",
-      "signature": "fn decode_all(data: String) -> Result<Vec<pem::Block>, errors::Error>",
+      "signature": "fn decode_all(text: String) -> Result<Vec<pem::Block>, errors::Error>",
       "description": "Decodes all PEM blocks from a string.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -3175,68 +3156,11 @@
       "reference_status": "catalog_only"
     },
     {
-      "id": "std-encoding-xml-Event",
-      "name": "std::encoding::xml::Event",
-      "kind": "type",
-      "signature": null,
-      "description": "Start / End / Text / CData / Comment / Eof.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdencodingxml",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
-      "id": "std-encoding-xml-Reader",
-      "name": "std::encoding::xml::Reader",
-      "kind": "type",
-      "signature": null,
-      "description": "Pull-style XML reader.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdencodingxml",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
-      "id": "std-encoding-xml-Writer",
-      "name": "std::encoding::xml::Writer",
-      "kind": "type",
-      "signature": null,
-      "description": "Streaming XML writer.",
-      "lifecycle": "experimental",
-      "tier_support": [
-        "not_audited",
-        "not_audited",
-        "not_audited"
-      ],
-      "platform_support": "not_audited",
-      "limits": [],
-      "cookbook_tags": [],
-      "doc_anchor": "docs_src/stdlib.md#stdencodingxml",
-      "example_id": null,
-      "reference_status": "catalog_only"
-    },
-    {
       "id": "std-encoding-xml-encode",
       "name": "std::encoding::xml::encode",
       "kind": "function",
       "signature": "fn encode(value: json::Value) -> String",
-      "description": "Serialises a sequence of events to XML text.",
+      "description": "Serialises a tree of the shape `parse` answers to XML text; any other value encodes as the empty string.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -3274,7 +3198,7 @@
       "name": "std::encoding::xml::parse",
       "kind": "function",
       "signature": "fn parse(source: String) -> Result<json::Value, errors::Error>",
-      "description": "Parses an XML document into a Vec of events.",
+      "description": "Parses an XML document into a `json::Value` tree: an element is `{\"__xml_type\": \"element\", \"name\", \"attrs\", \"children\"}`, a text node `{\"__xml_type\": \"text\", \"value\"}`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -4223,7 +4147,7 @@
       "id": "std-fs-create-dir-all-mode",
       "name": "std::fs::create_dir_all_mode",
       "kind": "function",
-      "signature": "fn create_dir_all_mode(path: String, mode: i64) -> Result<(), errors::Error>",
+      "signature": "fn create_dir_all_mode(path: String, mode: i64) -> Result<(), io::Error>",
       "description": "Creates a directory and any missing ancestors, giving each one it creates exactly this mode.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4242,7 +4166,7 @@
       "id": "std-fs-create-dir-mode",
       "name": "std::fs::create_dir_mode",
       "kind": "function",
-      "signature": "fn create_dir_mode(path: String, mode: i64) -> Result<(), errors::Error>",
+      "signature": "fn create_dir_mode(path: String, mode: i64) -> Result<(), io::Error>",
       "description": "Creates a single directory with exactly this mode, whatever the umask is. On Windows only the owner write bit is meaningful: it sets the read-only attribute.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4394,7 +4318,7 @@
       "id": "std-fs-permissions",
       "name": "std::fs::permissions",
       "kind": "function",
-      "signature": "fn permissions(path: String) -> Result<i64, errors::Error>",
+      "signature": "fn permissions(path: String) -> Result<i64, io::Error>",
       "description": "The permission bits of a path, in the chmod(2) encoding. On Windows the read-only attribute is widened into the bits an equivalent Unix path would carry.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4546,7 +4470,7 @@
       "id": "std-fs-set-permissions",
       "name": "std::fs::set_permissions",
       "kind": "function",
-      "signature": "fn set_permissions(path: String, mode: i64) -> Result<(), errors::Error>",
+      "signature": "fn set_permissions(path: String, mode: i64) -> Result<(), io::Error>",
       "description": "Sets the permission bits of a path, in the chmod(2) encoding. On Windows only the owner write bit is meaningful: it sets or clears the read-only attribute.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4565,7 +4489,7 @@
       "id": "std-fs-sync-dir",
       "name": "std::fs::sync_dir",
       "kind": "function",
-      "signature": "fn sync_dir(path: String) -> Result<(), errors::Error>",
+      "signature": "fn sync_dir(path: String) -> Result<(), io::Error>",
       "description": "Makes a directory's own entries durable - the barrier a create, rename, or delete needs after the file itself is synced. On Windows this is satisfied by NTFS metadata ordering and performs no flush.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4660,7 +4584,7 @@
       "id": "std-fs-write-mode",
       "name": "std::fs::write_mode",
       "kind": "function",
-      "signature": "fn write_mode(path: String, contents: String, mode: i64) -> Result<(), errors::Error>",
+      "signature": "fn write_mode(path: String, contents: Vec<u8>, mode: i64) -> Result<(), io::Error>",
       "description": "Writes a file and leaves it at exactly this mode, whatever the umask is.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4679,7 +4603,7 @@
       "id": "std-hash-adler32-checksum",
       "name": "std::hash::adler32::checksum",
       "kind": "function",
-      "signature": "fn checksum(data: Vec<u8>) -> i64",
+      "signature": "fn checksum(data: Vec<u8>) -> u32",
       "description": "Adler-32 checksum of a byte slice.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4698,7 +4622,7 @@
       "id": "std-hash-adler32-checksum-string",
       "name": "std::hash::adler32::checksum_string",
       "kind": "function",
-      "signature": "fn checksum_string(text: String) -> i64",
+      "signature": "fn checksum_string(text: String) -> u32",
       "description": "Adler-32 checksum of a String.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4717,7 +4641,7 @@
       "id": "std-hash-adler32-update",
       "name": "std::hash::adler32::update",
       "kind": "function",
-      "signature": "fn update(seed: i64, data: Vec<u8>) -> i64",
+      "signature": "fn update(seed: u32, data: Vec<u8>) -> u32",
       "description": "Continues an Adler-32 from a running value over more bytes.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4736,7 +4660,7 @@
       "id": "std-hash-crc32-checksum",
       "name": "std::hash::crc32::checksum",
       "kind": "function",
-      "signature": "fn checksum(data: Vec<u8>) -> i64",
+      "signature": "fn checksum(data: Vec<u8>) -> u32",
       "description": "CRC-32 checksum of a byte slice.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4755,7 +4679,7 @@
       "id": "std-hash-crc32-checksum-string",
       "name": "std::hash::crc32::checksum_string",
       "kind": "function",
-      "signature": "fn checksum_string(text: String) -> i64",
+      "signature": "fn checksum_string(text: String) -> u32",
       "description": "CRC-32 checksum of a String.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4774,7 +4698,7 @@
       "id": "std-hash-crc32-update",
       "name": "std::hash::crc32::update",
       "kind": "function",
-      "signature": "fn update(seed: i64, data: Vec<u8>) -> i64",
+      "signature": "fn update(seed: u32, data: Vec<u8>) -> u32",
       "description": "Continues a CRC-32 from a running value over more bytes.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4793,7 +4717,7 @@
       "id": "std-hash-crc32-update-window",
       "name": "std::hash::crc32::update_window",
       "kind": "function",
-      "signature": "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
+      "signature": "fn update_window(seed: u32, data: Vec<u8>, start: i64, end: i64) -> u32",
       "description": "Continues a CRC-32 over `data[start..end]`, checking a record where it lies rather than copying the window out first.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4812,7 +4736,7 @@
       "id": "std-hash-crc32c-checksum",
       "name": "std::hash::crc32c::checksum",
       "kind": "function",
-      "signature": "fn checksum(data: Vec<u8>) -> i64",
+      "signature": "fn checksum(data: Vec<u8>) -> u32",
       "description": "CRC-32C checksum of a byte slice.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4831,7 +4755,7 @@
       "id": "std-hash-crc32c-checksum-string",
       "name": "std::hash::crc32c::checksum_string",
       "kind": "function",
-      "signature": "fn checksum_string(text: String) -> i64",
+      "signature": "fn checksum_string(text: String) -> u32",
       "description": "CRC-32C checksum of a String.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4850,7 +4774,7 @@
       "id": "std-hash-crc32c-update",
       "name": "std::hash::crc32c::update",
       "kind": "function",
-      "signature": "fn update(seed: i64, data: Vec<u8>) -> i64",
+      "signature": "fn update(seed: u32, data: Vec<u8>) -> u32",
       "description": "Continues a CRC-32C from a running value over more bytes.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4869,7 +4793,7 @@
       "id": "std-hash-crc32c-update-window",
       "name": "std::hash::crc32c::update_window",
       "kind": "function",
-      "signature": "fn update_window(seed: i64, data: Vec<u8>, start: i64, end: i64) -> i64",
+      "signature": "fn update_window(seed: u32, data: Vec<u8>, start: i64, end: i64) -> u32",
       "description": "Continues a CRC-32C over `data[start..end]`, checking a record where it lies rather than copying the window out first.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4888,7 +4812,7 @@
       "id": "std-hash-fnv-hash32",
       "name": "std::hash::fnv::hash32",
       "kind": "function",
-      "signature": "fn hash32(data: Vec<u8>) -> i64",
+      "signature": "fn hash32(data: Vec<u8>) -> u32",
       "description": "32-bit FNV-1a of a byte slice.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4907,7 +4831,7 @@
       "id": "std-hash-fnv-hash64",
       "name": "std::hash::fnv::hash64",
       "kind": "function",
-      "signature": "fn hash64(data: Vec<u8>) -> i64",
+      "signature": "fn hash64(data: Vec<u8>) -> u64",
       "description": "64-bit FNV-1a of a byte slice.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -4926,7 +4850,7 @@
       "id": "std-hash-fnv-hash-string",
       "name": "std::hash::fnv::hash_string",
       "kind": "function",
-      "signature": "fn hash_string(text: String) -> i64",
+      "signature": "fn hash_string(text: String) -> u64",
       "description": "64-bit FNV-1a of a String.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -7358,7 +7282,7 @@
       "id": "std-image-decode-base64",
       "name": "std::image::decode_base64",
       "kind": "function",
-      "signature": "fn decode_base64(data: String) -> i64",
+      "signature": "fn decode_base64(encoded: String) -> i64",
       "description": "Decodes a base64 PNG or JPEG; returns zero for malformed input.",
       "lifecycle": "experimental",
       "tier_support": [
@@ -13325,7 +13249,7 @@
       "name": "std::regex::Pattern",
       "kind": "type",
       "signature": null,
-      "description": "Compiled pattern handle returned by `compile`.",
+      "description": "Compiled pattern handle returned by `compile` and `new`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -13381,8 +13305,8 @@
       "id": "std-regex-compile",
       "name": "std::regex::compile",
       "kind": "function",
-      "signature": "fn compile(pattern: String) -> Result<regex::Pattern, errors::Error>",
-      "description": "Parses a pattern into a reusable `Pattern` or returns an `Err`.",
+      "signature": "fn compile(pattern: String) -> regex::Pattern",
+      "description": "Compiles a literal pattern, checked while the program is built, into a `Pattern`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -13459,6 +13383,25 @@
       "kind": "function",
       "signature": "fn is_match(pattern: regex::Pattern, text: String) -> bool",
       "description": "Returns whether the pattern matches anywhere in the text.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdregex",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-regex-new",
+      "name": "std::regex::new",
+      "kind": "function",
+      "signature": "fn new(pattern: String) -> Result<regex::Pattern, errors::Error>",
+      "description": "Compiles a pattern built at run time into a `Pattern`, or an `Err` with the reason.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15772,6 +15715,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-time-Time",
+      "name": "std::time::Time",
+      "kind": "type",
+      "signature": null,
+      "description": "A wall-clock instant with the location it is read in: `now()`, `from_unix` / `from_unix_ms` / `from_unix_nanos`, `parse_rfc3339` (keeps the written offset), `format_rfc3339`, `civil()`, `in_location` / `utc`, `+` / `-` a `Duration`, and `a - b` answering the `Duration` between two instants.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdtime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-time---sleep-ns",
       "name": "std::time::__sleep_ns",
       "kind": "builtin",
@@ -17010,8 +16972,8 @@
       "id": "std-utf16-decode-surrogate-pair",
       "name": "std::utf16::decode_surrogate_pair",
       "kind": "function",
-      "signature": "fn decode_surrogate_pair(high: char, low: char) -> Result<char, errors::Error>",
-      "description": "Decodes a high+low surrogate pair to a char.",
+      "signature": "fn decode_surrogate_pair(high: u16, low: u16) -> Option<char>",
+      "description": "The `char` a high and low surrogate pair encode, or `None` when they are not a pair.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -17029,8 +16991,8 @@
       "id": "std-utf16-decode-to-string",
       "name": "std::utf16::decode_to_string",
       "kind": "function",
-      "signature": "fn decode_to_string(units: Vec<u16>) -> Result<String, errors::Error>",
-      "description": "Decodes a []u16 to String.",
+      "signature": "fn decode_to_string(units: Vec<u16>) -> String",
+      "description": "Decodes UTF-16 code units to a String; an unpaired surrogate becomes U+FFFD.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -17067,8 +17029,8 @@
       "id": "std-utf16-is-surrogate",
       "name": "std::utf16::is_surrogate",
       "kind": "function",
-      "signature": "fn is_surrogate(rune: char) -> bool",
-      "description": "True iff r falls in the surrogate range U+D800..U+DFFF.",
+      "signature": "fn is_surrogate(unit: u16) -> bool",
+      "description": "Whether a code unit lies in the surrogate range `0xD800..=0xDFFF`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -17087,7 +17049,7 @@
       "name": "std::utf16::rune_len",
       "kind": "function",
       "signature": "fn rune_len(rune: char) -> i64",
-      "description": "Number of UTF-16 code units needed to encode r (1 or 2).",
+      "description": "Number of UTF-16 code units a `char` encodes to (1 or 2).",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

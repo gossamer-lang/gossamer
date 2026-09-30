@@ -47,7 +47,7 @@ fn main() {
     let tx, rx = channel::<i64>()
     spawn(|| { tx.send(40 |> |v| add(2, v)) })
     if let Some(answer) = rx.recv() {
-        println("answer: {}", answer)
+        println(f"answer: {answer}")
     }
 }
 ```

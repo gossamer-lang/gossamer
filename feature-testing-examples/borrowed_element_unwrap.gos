@@ -1,0 +1,23 @@
+// An element answered by `first`, `last`, or `max_by_key` stays the
+// sequence's: `unwrap` and `unwrap_or` on it give the binding a share of its
+// own, and a fallback answers one too.
+
+enum Shape { Rect(i64, i64), Square(i64) }
+fn area(s: Shape) -> i64 { match s { Rect(w, h) => w * h, Square(x) => x * x } }
+fn describe(s: Shape) -> String { match s { Rect(w, h) => f"rect {w}x{h}", Square(x) => f"square {x}" } }
+
+let shapes = #[Rect(3, 4), Square(5), Rect(2, 2)]
+let none: Vec<Shape> = #[]
+let areas = shapes.map(|s| area(s))
+println(f"total {areas.sum()} big {areas.count(|a| a >= 20)}")
+let first = shapes.first().unwrap()
+let biggest = shapes.max_by_key(|s| area(s)).unwrap()
+let fallback = none.first().unwrap_or(Square(1))
+let kept = shapes.last().unwrap_or(Square(9))
+println(f"{describe(first)} {describe(biggest)} {describe(fallback)} {describe(kept)}")
+let words = #["alpha", "beta"]
+let empty: Vec<String> = #[]
+println(f"{words.first().unwrap_or("none")} {empty.first().unwrap_or("none")}")
+let rows = #[#[1, 2], #[3]]
+let no_rows: Vec<Vec<i64>> = #[]
+println(f"{rows.last().unwrap_or(#[0])} {no_rows.last().unwrap_or(#[0])}")

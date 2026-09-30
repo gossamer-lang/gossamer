@@ -71,7 +71,8 @@ const TOOLS: &[Tool] = &[
         description: "Parse + resolve + typecheck + exhaustiveness + arena-escape + lints \
                       for a Gossamer file or project. `structuredContent.diagnostics` holds \
                       one parsed object per diagnostic (stable schema); an empty array means \
-                      no findings.",
+                      no findings. With fix=true, applies the rewrites the diagnostics carry \
+                      and reports what remains.",
         args: &[
             Arg {
                 name: "file",
@@ -80,6 +81,13 @@ const TOOLS: &[Tool] = &[
                 required: false,
             },
             SOURCE_ARG,
+            Arg {
+                name: "fix",
+                ty: "boolean",
+                description: "Apply every machine-applicable suggestion, keeping only edits a \
+                              re-check proves better; inline `source` comes back rewritten.",
+                required: false,
+            },
         ],
     },
     Tool {
@@ -383,6 +391,11 @@ impl SourceFile {
     fn display(&self) -> String {
         self.path.display().to_string()
     }
+
+    /// The file's text as it stands, after any tool rewrote it.
+    fn read(&self) -> Result<String, String> {
+        std::fs::read_to_string(&self.path).map_err(|e| format!("reading inline source: {e}"))
+    }
 }
 
 impl Drop for SourceFile {
@@ -423,12 +436,10 @@ pub(crate) fn call(
             Err(e) => Err(e),
             Ok((None, _)) => Err("`file` or `source` is required".to_string()),
             Ok((Some(file), _guard)) => {
-                let source = std::path::PathBuf::from(&file);
                 let mut command = vec!["run".to_string(), file];
                 if let Some(extra) = json::as_array(field(args, "args")) {
                     command.extend(extra.iter().filter_map(json::as_str).map(String::from));
                 }
-                let _ = &source;
                 exec::run_gos(&config.gos_exe, &command, timeout_from(args))
                     .map(|outcome| exec_result(&outcome))
             }
@@ -457,13 +468,15 @@ pub(crate) fn call(
         "fmt" => match target_of(args, "file") {
             Err(e) => Err(e),
             Ok((None, _)) => Err("`file` or `source` is required".to_string()),
-            Ok((Some(file), _guard)) => {
+            Ok((Some(file), guard)) => {
                 let mut command = vec!["fmt".to_string()];
-                if json::as_bool(field(args, "check")) == Some(true) {
+                let check = json::as_bool(field(args, "check")) == Some(true);
+                if check {
                     command.push("--check".to_string());
                 }
                 command.push(file);
-                exec_tool(config, command, args)
+                let rewritten = if check { None } else { guard.as_ref() };
+                rewriting_tool(config, command, args, rewritten)
             }
         },
         "doc" => match target_of(args, "file") {
@@ -473,9 +486,10 @@ pub(crate) fn call(
         },
         "lint" => match target_of(args, "path") {
             Err(e) => Err(e),
-            Ok((path, _guard)) => {
+            Ok((path, guard)) => {
                 let mut command = vec!["lint".to_string()];
-                if json::as_bool(field(args, "fix")) == Some(true) {
+                let fix = json::as_bool(field(args, "fix")) == Some(true);
+                if fix {
                     command.push("--fix".to_string());
                 }
                 if json::as_bool(field(args, "deny_warnings")) == Some(true) {
@@ -484,7 +498,8 @@ pub(crate) fn call(
                 if let Some(path) = path {
                     command.push(path);
                 }
-                exec_tool(config, command, args)
+                let rewritten = if fix { guard.as_ref() } else { None };
+                rewriting_tool(config, command, args, rewritten)
             }
         },
         "fix" => fix_tool(config, args),
@@ -532,12 +547,14 @@ fn audit_tool(config: &ServerConfig, args: &Value) -> Result<Value, String> {
 
 /// Runs `gos fix`, resolving an inline `source` to a temporary file.
 fn fix_tool(config: &ServerConfig, args: &Value) -> Result<Value, String> {
-    let (path, _guard) = target_of(args, "path")?;
+    let (path, guard) = target_of(args, "path")?;
     let mut command = vec!["fix".to_string()];
-    if json::as_bool(field(args, "list")) == Some(true) {
+    let list = json::as_bool(field(args, "list")) == Some(true);
+    let check = json::as_bool(field(args, "check")) == Some(true);
+    if list {
         command.push("--list".to_string());
     }
-    if json::as_bool(field(args, "check")) == Some(true) {
+    if check {
         command.push("--check".to_string());
     }
     if let Some(id) = field_str(args, "rewriter") {
@@ -547,15 +564,19 @@ fn fix_tool(config: &ServerConfig, args: &Value) -> Result<Value, String> {
     if let Some(path) = path {
         command.push(path);
     }
-    exec_tool(config, command, args)
+    let rewritten = if list || check { None } else { guard.as_ref() };
+    rewriting_tool(config, command, args, rewritten)
 }
 
-fn check_args(target: Option<&str>) -> Vec<String> {
+fn check_args(target: Option<&str>, fix: bool) -> Vec<String> {
     let mut command = vec![
         "check".to_string(),
         "--message-format".to_string(),
         "json".to_string(),
     ];
+    if fix {
+        command.push("--fix".to_string());
+    }
     if let Some(file) = target {
         command.push(file.to_string());
     }
@@ -580,16 +601,46 @@ fn exec_tool(config: &ServerConfig, command: Vec<String>, args: &Value) -> Resul
 /// JSON object per diagnostic; parsing them here hands the caller a
 /// ready array instead of a text blob it would have to re-split.
 fn check_tool(config: &ServerConfig, args: &Value) -> Result<Value, String> {
-    let (target, _guard) = target_of(args, "file")?;
+    let (target, guard) = target_of(args, "file")?;
+    let fix = json::as_bool(field(args, "fix")) == Some(true);
     let outcome = exec::run_gos(
         &config.gos_exe,
-        &check_args(target.as_deref()),
+        &check_args(target.as_deref(), fix),
         timeout_from(args),
     )?;
-    let structured = check_report(&outcome);
+    let mut structured = check_report(&outcome);
+    if fix
+        && let Some(file) = &guard
+        && let Value::Object(fields) = &mut structured
+    {
+        fields.insert("source".to_string(), s(&file.read()?));
+    }
     let mut result = text_result(&json::to_string(&structured), tool_failed(&outcome));
     if let Value::Object(fields) = &mut result {
         fields.insert("structuredContent".to_string(), structured);
+    }
+    Ok(result)
+}
+
+/// Runs a tool that may rewrite its target. An inline `source` lives in a
+/// temporary file the call removes, so its rewritten text is handed back as
+/// a second content item.
+fn rewriting_tool(
+    config: &ServerConfig,
+    command: Vec<String>,
+    args: &Value,
+    guard: Option<&SourceFile>,
+) -> Result<Value, String> {
+    let mut result = exec_tool(config, command, args)?;
+    if let Some(file) = guard
+        && let Value::Object(fields) = &mut result
+        && let Some(Value::Array(content)) = fields.get_mut("content")
+    {
+        let rewritten = file.read()?;
+        content.push(obj(vec![
+            ("type", s("text")),
+            ("text", s(&format!("--- source ---\n{rewritten}"))),
+        ]));
     }
     Ok(result)
 }

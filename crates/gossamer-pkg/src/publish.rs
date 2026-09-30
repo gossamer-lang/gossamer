@@ -28,8 +28,6 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-#[cfg(test)]
-use serde_json::Value;
 use serde_json::json;
 use thiserror::Error;
 
@@ -506,29 +504,11 @@ fn should_skip(name: &str) -> bool {
     ) || name.ends_with(".rs.bk")
 }
 
-/// Per-publish metadata recorded by `gos publish`.
-#[derive(Debug, Clone)]
-pub struct PublishRequest<'a> {
-    /// Project id being published (e.g. `example.com/widget`).
-    pub project_id: &'a str,
-    /// Version being published (`MAJOR.MINOR.PATCH`).
-    pub version: &'a str,
-    /// Deterministic tar payload + sha256.
-    pub artifact: &'a PublishedArtifact,
-    /// Optional ed25519 signature over `artifact.bytes`.
-    pub signature: Option<[u8; 64]>,
-    /// Optional ed25519 public key for the signature.
-    pub public_key: Option<[u8; 32]>,
-    /// Bearer token authenticating the upload.
-    pub auth_token: Option<&'a str>,
-}
-
-/// Version-2 publish request whose body is the archive itself.
+/// A publish request whose body is the archive itself.
 ///
-/// The legacy [`PublishRequest`] JSON envelope remains available for registry
-/// compatibility. New clients should use this request with
-/// [`upload_streaming_with`]: the deterministic tar spool is copied directly
-/// to the transport and its small metadata travels in protocol headers.
+/// The deterministic tar spool is copied directly to the transport by
+/// [`upload_streaming_with`] and its small metadata travels in protocol
+/// headers.
 /// When present, `signature` is over the lowercase ASCII SHA-256 digest named
 /// by `X-Gossamer-Signature-Input`, not the archive body. That deliberately
 /// makes signing possible without materialising the archive after it has been
@@ -549,34 +529,6 @@ pub struct StreamingPublishRequest<'a> {
     pub auth_token: Option<&'a str>,
 }
 
-/// Uploads `request` to `<registry_url>/v1/upload/<id>/<ver>` using
-/// the given transport. The publish body is a tiny JSON wrapper
-/// embedding the artifact (hex), the sha256, and optional
-/// signature/public-key (both hex).
-///
-/// `transport` is expected to dispatch `request_with_body` for the
-/// PUT/POST. The `Transport` trait only exposes `get`, so we route
-/// the upload via the wrapper [`upload_with`].
-pub fn upload_with(
-    transport: &dyn UploadTransport,
-    registry_url: &str,
-    request: &PublishRequest<'_>,
-) -> Result<(), PublishError> {
-    let (project_id, version) = validated_publish_location(request.project_id, request.version)?;
-    let url = format!(
-        "{base}/v1/upload/{id}/{version}",
-        base = registry_url.trim_end_matches('/'),
-        id = project_id,
-        version = version,
-    );
-    let mut body = PublishBodyReader::new(request)?;
-    let body_len = body.len();
-    transport
-        .post_reader(&url, &mut body, body_len, request.auth_token)
-        .map_err(PublishError::Transport)?;
-    Ok(())
-}
-
 /// Uploads a version-2 raw archive request without allocating a JSON/base16
 /// copy of the package. The protocol is deliberately explicit:
 ///
@@ -584,10 +536,6 @@ pub fn upload_with(
 /// - `X-Gossamer-Publish-Protocol: 2` selects this representation;
 /// - the archive hash and optional signature/key are carried in named headers.
 ///
-/// Registry implementations can retain [`upload_with`] while rolling out
-/// version 2. There is no automatic downgrade here: retrying with the legacy
-/// representation would silently turn a bounded streaming publish back into a
-/// package-sized allocation.
 pub fn upload_streaming_with(
     transport: &dyn UploadTransport,
     registry_url: &str,
@@ -636,179 +584,6 @@ pub fn upload_streaming_with(
             &header_refs,
         )
         .map_err(PublishError::Transport)
-}
-
-struct PublishBodyParts {
-    project_id: String,
-    version: String,
-    signature_hex: String,
-    public_key_hex: String,
-}
-
-fn publish_body_parts(request: &PublishRequest<'_>) -> Result<PublishBodyParts, PublishError> {
-    let (project_id, version) = validated_publish_location(request.project_id, request.version)?;
-    validate_artifact(request.artifact)?;
-    Ok(PublishBodyParts {
-        project_id,
-        version,
-        signature_hex: request
-            .signature
-            .map(|signature| crate::signing::hex_encode(&signature))
-            .unwrap_or_default(),
-        public_key_hex: request
-            .public_key
-            .map(|public_key| crate::signing::hex_encode(&public_key))
-            .unwrap_or_default(),
-    })
-}
-
-/// Reader that emits the publish JSON envelope without allocating a second
-/// archive-sized hex string. Project IDs and versions have already passed the
-/// strict package parsers, and the remaining metadata is fixed-format hex, so
-/// the hand-built JSON tokens are safe and deterministic.
-struct PublishBodyReader<'a> {
-    prefix: Vec<u8>,
-    artifact: &'a [u8],
-    suffix: Vec<u8>,
-    prefix_at: usize,
-    artifact_nibble: usize,
-    suffix_at: usize,
-    len: usize,
-}
-
-impl<'a> PublishBodyReader<'a> {
-    fn new(request: &'a PublishRequest<'a>) -> Result<Self, PublishError> {
-        let parts = publish_body_parts(request)?;
-        let prefix = format!(
-            "{{\"id\":\"{}\",\"version\":\"{}\",\"sha256\":\"{}\",\"signature\":\"{}\",\"public_key\":\"{}\",\"artifact\":\"",
-            parts.project_id,
-            parts.version,
-            request.artifact.sha256,
-            parts.signature_hex,
-            parts.public_key_hex,
-        )
-        .into_bytes();
-        let suffix = b"\"}".to_vec();
-        let hex_len = request
-            .artifact
-            .bytes
-            .len()
-            .checked_mul(2)
-            .ok_or_else(|| PublishError::Config("publish JSON length overflow".to_string()))?;
-        let len = prefix
-            .len()
-            .checked_add(hex_len)
-            .and_then(|len| len.checked_add(suffix.len()))
-            .ok_or_else(|| PublishError::Config("publish JSON length overflow".to_string()))?;
-        Ok(Self {
-            prefix,
-            artifact: &request.artifact.bytes,
-            suffix,
-            prefix_at: 0,
-            artifact_nibble: 0,
-            suffix_at: 0,
-            len,
-        })
-    }
-
-    fn len(&self) -> usize {
-        self.len
-    }
-}
-
-impl Read for PublishBodyReader<'_> {
-    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
-        if out.is_empty() {
-            return Ok(0);
-        }
-        let mut written = 0usize;
-        while written < out.len() {
-            if self.prefix_at < self.prefix.len() {
-                let count = (self.prefix.len() - self.prefix_at).min(out.len() - written);
-                out[written..written + count]
-                    .copy_from_slice(&self.prefix[self.prefix_at..self.prefix_at + count]);
-                self.prefix_at += count;
-                written += count;
-                continue;
-            }
-            if self.artifact_nibble < self.artifact.len().saturating_mul(2) {
-                let byte = self.artifact[self.artifact_nibble / 2];
-                let nibble = if self.artifact_nibble.is_multiple_of(2) {
-                    byte >> 4
-                } else {
-                    byte & 0x0f
-                };
-                out[written] = hex_nibble(nibble);
-                self.artifact_nibble += 1;
-                written += 1;
-                continue;
-            }
-            if self.suffix_at < self.suffix.len() {
-                let count = (self.suffix.len() - self.suffix_at).min(out.len() - written);
-                out[written..written + count]
-                    .copy_from_slice(&self.suffix[self.suffix_at..self.suffix_at + count]);
-                self.suffix_at += count;
-                written += count;
-                continue;
-            }
-            break;
-        }
-        Ok(written)
-    }
-}
-
-fn hex_nibble(value: u8) -> u8 {
-    match value {
-        0..=9 => b'0' + value,
-        _ => b'a' + (value - 10),
-    }
-}
-
-#[cfg(test)]
-mod streaming_tests {
-    use super::*;
-
-    #[test]
-    fn publish_body_reader_emits_valid_json_in_tiny_reads() {
-        let artifact = PublishedArtifact {
-            bytes: vec![0x00, 0x1f, 0xa5, 0xff],
-            sha256: sha256::hex(&[0x00, 0x1f, 0xa5, 0xff]),
-        };
-        let request = PublishRequest {
-            project_id: "example.com/stream",
-            version: "1.2.3",
-            artifact: &artifact,
-            signature: None,
-            public_key: None,
-            auth_token: None,
-        };
-        let mut reader = PublishBodyReader::new(&request).unwrap();
-        let expected_len = reader.len();
-        let mut bytes = Vec::new();
-        let mut one = [0u8; 1];
-        while reader.read(&mut one).unwrap() != 0 {
-            bytes.push(one[0]);
-        }
-        assert_eq!(bytes.len(), expected_len);
-        let value: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(value["id"], "example.com/stream");
-        assert_eq!(value["artifact"], "001fa5ff");
-    }
-}
-
-fn validate_artifact(artifact: &PublishedArtifact) -> Result<(), PublishError> {
-    let limit = tar::PackLimits::default().max_archive_bytes;
-    if artifact.bytes.len() > limit {
-        return Err(PublishError::ArtifactTooLarge { limit });
-    }
-    let actual = sha256::hex(&artifact.bytes);
-    if artifact.sha256 != actual {
-        return Err(PublishError::ArtifactDigestMismatch {
-            expected: artifact.sha256.clone(),
-            found: actual,
-        });
-    }
-    Ok(())
 }
 
 fn validate_streaming_artifact(artifact: &StreamingArtifact) -> Result<(), PublishError> {
@@ -1212,49 +987,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
-    #[test]
-    fn recording_uploader_captures_post() {
-        let mut tmp = std::env::temp_dir();
-        tmp.push(format!("gossamer-pack-up-{}", std::process::id()));
+    /// A packed archive of a one-file project under a fresh temporary root.
+    fn streaming_fixture(tag: &str) -> (PathBuf, StreamingArtifact) {
+        let tmp = std::env::temp_dir().join(format!(
+            "gossamer-{tag}-{}-{}",
+            std::process::id(),
+            ARCHIVE_SPOOL_ID.fetch_add(1, Ordering::Relaxed),
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         std::fs::write(tmp.join("project.toml"), b"[project]\nid = \"a.b/c\"\n").unwrap();
-        let artifact = pack_crate(&tmp).unwrap();
-        let uploader = RecordingUploader::new();
-        let req = PublishRequest {
-            project_id: "a.b/c",
-            version: "0.1.0",
-            artifact: &artifact,
-            signature: None,
-            public_key: None,
-            auth_token: Some("tkn"),
-        };
-        upload_with(&uploader, "https://reg.example.test", &req).unwrap();
-        let posts = uploader.take_posts();
-        assert_eq!(posts.len(), 1);
-        assert_eq!(posts[0].0, "https://reg.example.test/v1/upload/a.b/c/0.1.0");
-        assert_eq!(posts[0].2.as_deref(), Some("tkn"));
-        let body = std::str::from_utf8(&posts[0].1).unwrap();
-        assert!(body.contains("\"sha256\""));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let artifact = pack_crate_streaming(&tmp).unwrap();
+        (tmp, artifact)
     }
 
     #[test]
-    fn publish_and_owner_payloads_are_structured_json() {
-        let artifact = PublishedArtifact {
-            bytes: vec![0, 1, 2],
-            sha256: sha256::hex(&[0, 1, 2]),
-        };
-        let request = PublishRequest {
-            project_id: "example.com/widget",
-            version: "1.2.3+build.7",
-            artifact: &artifact,
-            signature: None,
-            public_key: None,
-            auth_token: None,
-        };
+    fn owner_payloads_are_structured_json() {
         let uploader = RecordingUploader::new();
-        upload_with(&uploader, "https://registry.example", &request).unwrap();
         owner_op_with(
             &uploader,
             "https://registry.example",
@@ -1265,20 +1014,15 @@ mod tests {
         )
         .unwrap();
         let posts = uploader.take_posts();
-        let upload: serde_json::Value = serde_json::from_slice(&posts[0].1).unwrap();
-        assert_eq!(upload["id"], "example.com/widget");
-        assert_eq!(upload["version"], "1.2.3+build.7");
-        let owner: serde_json::Value = serde_json::from_slice(&posts[1].1).unwrap();
+        let owner: serde_json::Value = serde_json::from_slice(&posts[0].1).unwrap();
+        assert_eq!(owner["op"], "add");
         assert_eq!(owner["user"], "a\"quoted\nowner");
     }
 
     #[test]
     fn upload_rejects_unvalidated_path_components_before_posting() {
-        let artifact = PublishedArtifact {
-            bytes: Vec::new(),
-            sha256: "ab".repeat(32),
-        };
-        let request = PublishRequest {
+        let (tmp, artifact) = streaming_fixture("pub-path");
+        let request = StreamingPublishRequest {
             project_id: "example.com/widget/../escape",
             version: "1.2.3",
             artifact: &artifact,
@@ -1288,19 +1032,19 @@ mod tests {
         };
         let uploader = RecordingUploader::new();
         assert!(matches!(
-            upload_with(&uploader, "https://registry.example", &request),
+            upload_streaming_with(&uploader, "https://registry.example", &request),
             Err(PublishError::Config(_))
         ));
-        assert!(uploader.take_posts().is_empty());
+        assert!(uploader.take_stream_posts().is_empty());
+        drop(artifact);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn upload_rejects_a_forged_artifact_digest_before_posting() {
-        let artifact = PublishedArtifact {
-            bytes: b"actual payload".to_vec(),
-            sha256: "00".repeat(32),
-        };
-        let request = PublishRequest {
+        let (tmp, mut artifact) = streaming_fixture("pub-digest");
+        artifact.sha256 = "00".repeat(32);
+        let request = StreamingPublishRequest {
             project_id: "example.com/widget",
             version: "1.2.3",
             artifact: &artifact,
@@ -1310,10 +1054,12 @@ mod tests {
         };
         let uploader = RecordingUploader::new();
         assert!(matches!(
-            upload_with(&uploader, "https://registry.example", &request),
+            upload_streaming_with(&uploader, "https://registry.example", &request),
             Err(PublishError::ArtifactDigestMismatch { .. })
         ));
-        assert!(uploader.take_posts().is_empty());
+        assert!(uploader.take_stream_posts().is_empty());
+        drop(artifact);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

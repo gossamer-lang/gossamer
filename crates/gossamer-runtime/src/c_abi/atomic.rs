@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::sync::atomic::{AtomicI64, Ordering};
@@ -46,7 +44,7 @@ fn record_atomic_release(a: &GosAtomicI64) {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_atomic_i64_new(initial: i64) -> *mut GosAtomicI64 {
+pub extern "C" fn gos_rt_atomic_i64_new(initial: i64) -> *mut GosAtomicI64 {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosAtomicI64 {
             inner: AtomicI64::new(initial),
@@ -61,6 +59,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_load(a: *const GosAtomicI64) -> i64 {
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let value = a.inner.load(Ordering::SeqCst);
         record_atomic_acquire(a);
@@ -74,6 +73,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_store(a: *mut GosAtomicI64, val: i64)
         if a.is_null() {
             return;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         a.inner.store(val, Ordering::SeqCst);
         record_atomic_release(a);
@@ -86,6 +86,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_add(a: *mut GosAtomicI64, delta
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let prior = a.inner.fetch_add(delta, Ordering::SeqCst);
         record_atomic_acquire(a);
@@ -106,7 +107,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_add(a: *mut GosAtomicI64, delta
 
 /// Allocate a new atomic boolean initialised to `initial`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_atomic_bool_new(initial: bool) -> *mut GosAtomicI64 {
+pub extern "C" fn gos_rt_atomic_bool_new(initial: bool) -> *mut GosAtomicI64 {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosAtomicI64 {
             inner: AtomicI64::new(i64::from(initial)),
@@ -122,6 +123,7 @@ pub unsafe extern "C" fn gos_rt_atomic_bool_load(a: *const GosAtomicI64) -> bool
         if a.is_null() {
             return false;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let value = a.inner.load(Ordering::SeqCst) != 0;
         record_atomic_acquire(a);
@@ -136,6 +138,7 @@ pub unsafe extern "C" fn gos_rt_atomic_bool_store(a: *mut GosAtomicI64, val: boo
         if a.is_null() {
             return;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         a.inner.store(i64::from(val), Ordering::SeqCst);
         record_atomic_release(a);
@@ -149,6 +152,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_sub(a: *mut GosAtomicI64, delta
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let prior = a.inner.fetch_sub(delta, Ordering::SeqCst);
         record_atomic_acquire(a);
@@ -165,6 +169,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i32_fetch_add(a: *mut GosAtomicI64, delta
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let prior = atomic_i32_update(a, |v| v.wrapping_add(narrow_i32(delta)));
         record_atomic_acquire(a);
@@ -181,6 +186,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i32_fetch_sub(a: *mut GosAtomicI64, delta
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let prior = atomic_i32_update(a, |v| v.wrapping_sub(narrow_i32(delta)));
         record_atomic_acquire(a);
@@ -221,6 +227,7 @@ pub unsafe extern "C" fn gos_rt_atomic_bool_cas(
         if a.is_null() {
             return false;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         match a.inner.compare_exchange(
             i64::from(expected),
@@ -249,6 +256,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_load_acquire(a: *const GosAtomicI64) 
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let value = a.inner.load(Ordering::Acquire);
         record_atomic_acquire(a);
@@ -263,6 +271,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_store_release(a: *mut GosAtomicI64, v
         if a.is_null() {
             return;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         a.inner.store(val, Ordering::Release);
         record_atomic_release(a);
@@ -278,6 +287,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_load_relaxed(a: *const GosAtomicI64) 
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         a.inner.load(Ordering::Relaxed)
     })
@@ -290,6 +300,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_store_relaxed(a: *mut GosAtomicI64, v
         if a.is_null() {
             return;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         a.inner.store(val, Ordering::Relaxed);
     });
@@ -306,6 +317,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_fetch_add_acqrel(
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let prior = a.inner.fetch_add(delta, Ordering::AcqRel);
         record_atomic_acquire(a);
@@ -328,6 +340,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_cas(
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         match a
             .inner
@@ -355,6 +368,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_cas_acq_rel(
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         match a
             .inner
@@ -377,6 +391,7 @@ pub unsafe extern "C" fn gos_rt_atomic_i64_swap(a: *mut GosAtomicI64, val: i64) 
         if a.is_null() {
             return 0;
         }
+        // SAFETY: `a` is a handle from compiled code, checked non-null above and live for the whole call.
         let a = unsafe { &*a };
         let prior = a.inner.swap(val, Ordering::AcqRel);
         record_atomic_acquire(a);
@@ -392,20 +407,32 @@ mod tests {
     #[test]
     fn release_store_records_the_publishing_goroutine() {
         crate::race::set_current_gid(701);
-        let atomic = unsafe { gos_rt_atomic_i64_new(0) };
+        let atomic = gos_rt_atomic_i64_new(0);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_atomic_i64_store_release(atomic, 1) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let published = unsafe { &*atomic }.last_release_gid.load(Ordering::Acquire);
         assert_eq!(published, 701);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         unsafe { drop(Box::from_raw(atomic)) };
     }
 
     #[test]
     fn relaxed_store_does_not_create_a_happens_before_publication() {
         crate::race::set_current_gid(702);
-        let atomic = unsafe { gos_rt_atomic_i64_new(0) };
+        let atomic = gos_rt_atomic_i64_new(0);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_atomic_i64_store_relaxed(atomic, 1) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let published = unsafe { &*atomic }.last_release_gid.load(Ordering::Acquire);
         assert_eq!(published, -1);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         unsafe { drop(Box::from_raw(atomic)) };
     }
 }

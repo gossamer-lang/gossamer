@@ -74,6 +74,9 @@ use gossamer_mir::{
 };
 use gossamer_types::{FloatTy, IntTy, Ty, TyCtxt, TyKind};
 
+/// The preemption poll's slow path, one per module: a `preserve_mostcc`
+/// function around the runtime's yield call.
+const PREEMPT_SLOW_PATH: &str = "define internal preserve_mostcc void @gos_preempt_slow_path() cold noinline nounwind {\n  %1 = call i32 @gos_rt_preempt_check_and_yield()\n  ret void\n}";
 impl<'a> Lowerer<'a> {
     pub(crate) fn emit_cleanup_call(&mut self, entry: &gossamer_mir::CleanupEntry) {
         declare_rt(&mut self.runtime_refs, entry.free_fn);
@@ -92,109 +95,75 @@ impl<'a> Lowerer<'a> {
         .unwrap();
     }
 
-    fn successor_blocks(term: &Terminator) -> Vec<u32> {
-        match term {
-            Terminator::Goto { target } => vec![target.as_u32()],
-            Terminator::SwitchInt { arms, default, .. } => arms
-                .iter()
-                .map(|(_, target)| target.as_u32())
-                .chain(std::iter::once(default.as_u32()))
-                .collect(),
-            Terminator::Call { target, .. } => target.iter().map(|b| b.as_u32()).collect(),
-            Terminator::Assert { target, .. } | Terminator::Drop { target, .. } => {
-                vec![target.as_u32()]
-            }
-            Terminator::Return | Terminator::Unreachable | Terminator::Panic { .. } => Vec::new(),
-        }
-    }
-
-    /// A cycle edge is a back edge only when its target dominates its source.
-    /// Test dominance directly by asking whether the source remains reachable
-    /// from entry after removing the proposed target from the CFG.
-    pub(crate) fn is_cfg_back_edge(&self, source: u32, target: u32) -> bool {
-        if source as usize >= self.body.blocks.len() || target as usize >= self.body.blocks.len() {
-            return false;
-        }
-        if target == 0 {
-            return true;
-        }
-        let mut seen = vec![false; self.body.blocks.len()];
-        let mut pending = vec![0u32];
-        seen[0] = true;
-        while let Some(block) = pending.pop() {
-            if block == source {
-                return false;
-            }
-            for next in Self::successor_blocks(&self.body.blocks[block as usize].terminator) {
-                if next != target && !seen[next as usize] {
-                    seen[next as usize] = true;
-                    pending.push(next);
+    /// Takes the loop headers that poll for preemption
+    /// ([`gossamer_mir::preempt::preemption_polls`]).
+    pub(crate) fn plan_preemption_polls(&mut self) {
+        let program = &self.param_tys_by_name;
+        let headers: std::collections::HashSet<u32> =
+            gossamer_mir::preempt::preemption_polls(self.body, |callee| match callee {
+                gossamer_mir::Operand::Const(gossamer_mir::ConstValue::Str(name)) => {
+                    program.contains_key(name.as_str())
                 }
-            }
-        }
-        true
-    }
-
-    /// Returns the natural loop formed by a dominating target and its source.
-    fn natural_loop_blocks(&self, source: u32, target: u32) -> Vec<u32> {
-        let mut predecessors = vec![Vec::new(); self.body.blocks.len()];
-        for (block, data) in self.body.blocks.iter().enumerate() {
-            for successor in Self::successor_blocks(&data.terminator) {
-                predecessors[successor as usize].push(block as u32);
-            }
-        }
-        let mut included = vec![false; self.body.blocks.len()];
-        included[target as usize] = true;
-        included[source as usize] = true;
-        let mut pending = if source == target {
-            Vec::new()
-        } else {
-            vec![source]
-        };
-        while let Some(block) = pending.pop() {
-            for &pred in &predecessors[block as usize] {
-                if !included[pred as usize] {
-                    included[pred as usize] = true;
-                    pending.push(pred);
-                }
-            }
-        }
-        included
+                gossamer_mir::Operand::FnRef { .. } | gossamer_mir::Operand::Copy(_) => true,
+                gossamer_mir::Operand::Const(_) => false,
+            })
             .into_iter()
-            .enumerate()
-            .filter_map(|(block, yes)| yes.then_some(block as u32))
-            .collect()
-    }
-
-    /// Estimates the work represented by a back edge. Calls dominate the
-    /// charge because they can hide allocation, hashing, or collection work;
-    /// statement count distinguishes tiny arithmetic loops from larger loop
-    /// bodies without requiring a target-specific instruction cost model.
-    fn preempt_charge(&self, target: u32) -> i32 {
-        let source = self.current_block.unwrap_or(target);
-        let mut statements = 0usize;
-        let mut calls = 0usize;
-        for block in self.natural_loop_blocks(source, target) {
-            let block = &self.body.blocks[block as usize];
-            statements += block.stmts.len();
-            if matches!(block.terminator, Terminator::Call { .. }) {
-                calls += 1;
-            }
+            .map(|block| block.as_u32())
+            .collect();
+        if headers.is_empty() {
+            return;
         }
-        // A maximum charge of 16 preserves the old 1024-iteration interval
-        // for expensive loops. A tiny loop charges one and polls every 16384
-        // iterations, which is still well below the scheduler watchdog slice.
-        (1 + statements / 8 + calls * 2).clamp(1, 16) as i32
+        // The runtime is linked into the same image as the program, so the
+        // flag is addressed directly rather than through the GOT.
+        self.runtime_refs
+            .insert("@gos_rt_preempt_requested = external dso_local global i8".to_string());
+        declare_rt(&mut self.runtime_refs, "gos_rt_preempt_check_and_yield");
+        self.preempt_headers = headers;
     }
 
-    /// Back-edge safepoint for cooperative preemption.
+    /// Cooperative preemption poll at a loop header: tests the runtime's
+    /// yield-request byte, and when it is set, asks the runtime whether this
+    /// worker yields. An atomic load stronger than `unordered` is neither
+    /// hoisted out of a loop nor merged with another, so it is made on every
+    /// pass; leaving it non-volatile lets it fold into the compare.
     ///
-    /// Native loop polling is intentionally disabled for now. The opaque
-    /// runtime call and its countdown state block the optimizers on the exact
-    /// numeric loops this backend is meant to recover.
-    pub(crate) fn emit_preempt_check(&mut self, target: u32) {
-        let _ = target;
-        let _ = self.preempt_seq;
+    /// The call touches only memory the program cannot reach: goroutines share
+    /// no mutable data except through synchronization calls, so nothing that
+    /// runs during a yield writes what this frame reads, and the optimizer may
+    /// keep what the loop has loaded across it.
+    pub(crate) fn emit_preempt_poll(&mut self) {
+        let flag = self.fresh_label("preempt_flag");
+        let set = self.fresh_label("preempt_set");
+        let check = self.fresh_label("preempt_check");
+        let cont = self.fresh_label("preempt_cont");
+        writeln!(
+            self.out,
+            "  %{flag} = load atomic i8, ptr @gos_rt_preempt_requested monotonic, align 1"
+        )
+        .unwrap();
+        writeln!(self.out, "  %{set} = icmp ne i8 %{flag}, 0").unwrap();
+        writeln!(self.out, "  br i1 %{set}, label %{check}, label %{cont}").unwrap();
+        writeln!(self.out, "{check}:").unwrap();
+        if crate::emit::target_has_preserve_most() {
+            // The yield call clobbers every caller-saved register, so a value
+            // the loop keeps live across it would be spilled on the hot path.
+            // The slow path preserves the caller's registers instead and
+            // saves only what its own call needs, on the cold path.
+            self.runtime_refs.insert(PREEMPT_SLOW_PATH.to_string());
+            writeln!(
+                self.out,
+                "  call preserve_mostcc void @gos_preempt_slow_path() cold nounwind memory(inaccessiblemem: readwrite)"
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                self.out,
+                "  call i32 @gos_rt_preempt_check_and_yield() cold nounwind memory(inaccessiblemem: readwrite)"
+            )
+            .unwrap();
+        }
+        writeln!(self.out, "  br label %{cont}").unwrap();
+        writeln!(self.out, "{cont}:").unwrap();
     }
 
     pub(crate) fn fresh_label(&mut self, prefix: &str) -> String {
@@ -487,6 +456,7 @@ impl<'a> Lowerer<'a> {
         // address - an aggregate's own storage, or a fresh slot holding a
         // two-word `Option` carrier.
         let skey_by_address = gossamer_abi::takes_key_by_address(symbol);
+        let meta_arg = gossamer_abi::meta_symbol_arg(symbol);
 
         // HashMap insert with a struct value: the value arg is the
         // stack address of an Rvalue::Aggregate local that goes out
@@ -577,6 +547,13 @@ impl<'a> Lowerer<'a> {
                 )
                 .unwrap();
                 let _ = write!(arg_text, "i64 {code}");
+                continue;
+            }
+            if meta_arg == Some(i)
+                && let Operand::Const(ConstValue::Str(sym)) = arg
+            {
+                let _ = write!(arg_text, "ptr @\"{sym}\"");
+                arg_tys_for_decl.push("ptr".to_string());
                 continue;
             }
             if (heap_push_by_address || skey_by_address) && i == 1 {

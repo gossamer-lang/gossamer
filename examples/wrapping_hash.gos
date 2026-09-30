@@ -36,11 +36,11 @@ fn countdown(start: u8, steps: i64) -> u8 {
 }
 
 fn main() {
-    println("djb2(hello) = {}", djb2("hello"))
-    println("fnv1a(hello) = {}", fnv1a("hello"))
-    println("250 +% 10 as u8 = {}", 250 as u8 +% 10)
-    println("countdown(2, 5) = {}", countdown(2, 5))
+    println(f"djb2(hello) = {djb2("hello")}")
+    println(f"fnv1a(hello) = {fnv1a("hello")}")
+    println(f"250 +% 10 as u8 = {250 as u8 +% 10}")
+    println(f"countdown(2, 5) = {countdown(2, 5)}")
     let mut total: i32 = 2_147_483_000
     total +%= 1_000
-    println("i32 total wraps to {}", total)
+    println(f"i32 total wraps to {total}")
 }

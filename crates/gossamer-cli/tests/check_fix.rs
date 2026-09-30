@@ -135,3 +135,54 @@ fn a_clean_file_is_left_untouched() {
     assert_eq!(std::fs::read_to_string(&file).unwrap(), before);
     let _ = std::fs::remove_dir_all(file.parent().unwrap());
 }
+
+/// A source that does not parse reports nothing past its parse errors, so
+/// the type error the repair unmasks was already there and the repair lands.
+#[test]
+fn a_parse_repair_lands_although_it_unmasks_a_type_error() {
+    let file = case(
+        "unmasks",
+        "fn main() {\n    let x = 1\n    println!(\"{}\", x)\n    let y: i64 = \"s\"\n}\n",
+    );
+    let report = run_fix(&file);
+    assert!(
+        report.contains("fix: 2 edit"),
+        "the `!` and the unused `y`: {report}"
+    );
+    assert!(
+        report.contains("GT0001"),
+        "the unmasked error is reported: {report}"
+    );
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(after.contains("    println(\"{}\", x)\n"), "after: {after}");
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}
+
+/// The verdict is the rewritten source's: a run whose edits leave the file
+/// clean succeeds, here rewriting the retired `go expr` into `spawn`.
+#[test]
+fn a_fix_that_leaves_the_file_clean_succeeds() {
+    let file = case(
+        "go_statement",
+        "fn work() {\n    println(\"ran\")\n}\n\nfn main() {\n    go work()\n    go || { work() }\n}\n",
+    );
+    let out = Command::new(gos_bin())
+        .args(["check", "--fix"])
+        .arg(&file)
+        .output()
+        .expect("spawn gos check --fix");
+    let report = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out.status.success(), "report was: {report}");
+    assert!(report.contains("check: ok"), "report was: {report}");
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(after.contains("    spawn(|| work())\n"), "after: {after}");
+    assert!(
+        after.contains("    spawn(|| { work() })\n"),
+        "after: {after}"
+    );
+    let _ = std::fs::remove_dir_all(file.parent().unwrap());
+}

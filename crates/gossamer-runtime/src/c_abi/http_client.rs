@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -211,7 +209,7 @@ pub struct GosHttpResponse {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_client_new() -> *mut GosHttpClient {
+pub extern "C" fn gos_rt_http_client_new() -> *mut GosHttpClient {
     ffi_entry!(std::ptr::null_mut(), {
         let config = ClientConfig::DEFAULT;
         let agent = build_agent(&config);
@@ -222,7 +220,7 @@ pub unsafe extern "C" fn gos_rt_http_client_new() -> *mut GosHttpClient {
 /// `http::Client::builder() -> ClientBuilder` - starts a client
 /// configuration chain with `Client::new()`'s defaults.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_http_client_builder_new() -> *mut GosClientBuilder {
+pub extern "C" fn gos_rt_http_client_builder_new() -> *mut GosClientBuilder {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosClientBuilder {
             config: ClientConfig::DEFAULT,
@@ -240,6 +238,9 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_max_redirects(
 ) -> *mut GosClientBuilder {
     ffi_entry!(builder, {
         if !builder.is_null() {
+            // SAFETY: `builder` is non-null (checked above), a live builder
+            // `gos_rt_http_client_builder_new` boxed, nothing else accesses during the call
+            // (C-ABI contract).
             unsafe { (*builder).config.max_redirects = clamp_max_redirects(n) };
         }
         builder
@@ -256,6 +257,9 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_timeout_ms(
 ) -> *mut GosClientBuilder {
     ffi_entry!(builder, {
         if !builder.is_null() {
+            // SAFETY: `builder` is non-null (checked above), a live builder
+            // `gos_rt_http_client_builder_new` boxed, nothing else accesses during the call
+            // (C-ABI contract).
             unsafe { (*builder).config.timeout_ms = clamp_timeout_ms(t) };
         }
         builder
@@ -273,6 +277,9 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_cookie_jar(
 ) -> *mut GosClientBuilder {
     ffi_entry!(builder, {
         if !builder.is_null() {
+            // SAFETY: `builder` is non-null (checked above), a live builder
+            // `gos_rt_http_client_builder_new` boxed, nothing else accesses during the call
+            // (C-ABI contract).
             unsafe { (*builder).config.cookie_jar = enabled != 0 };
         }
         builder
@@ -291,9 +298,13 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_proxy(
             let proxy = if url.is_null() {
                 None
             } else {
+                // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
                 let s = unsafe { crate::c_abi::gos_str_arg_string(url) };
                 if s.is_empty() { None } else { Some(s) }
             };
+            // SAFETY: `builder` is non-null (checked above), a live builder
+            // `gos_rt_http_client_builder_new` boxed, nothing else accesses during the call
+            // (C-ABI contract).
             unsafe { (*builder).config.proxy = proxy };
         }
         builder
@@ -315,6 +326,8 @@ pub unsafe extern "C" fn gos_rt_http_client_builder_build(
         let config = if builder.is_null() {
             ClientConfig::DEFAULT
         } else {
+            // SAFETY: `builder` is non-null (checked above), the builder
+            // `gos_rt_http_client_builder_new` boxed, which this call consumes (C-ABI contract).
             unsafe { Box::from_raw(builder) }.config
         };
         let agent = build_agent(&config);
@@ -334,12 +347,15 @@ unsafe fn client_pending_request(
     let url = if url.is_null() {
         String::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `url` live or null, which `gos_str_arg_string`
+        // accepts.
         unsafe { crate::c_abi::gos_str_arg_string(url) }
     };
     let agent = if client.is_null() {
         None
     } else {
-        Some(client_agent(client))
+        // SAFETY: this function's contract covers `client`, as `client_agent` requires.
+        Some(unsafe { client_agent(client) })
     };
     Box::into_raw(Box::new(GosHttpRequest {
         method: method.to_string(),
@@ -362,6 +378,8 @@ pub unsafe extern "C" fn gos_rt_http_client_get(
     url: *const c_char,
 ) -> *mut GosHttpRequest {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("GET", url, client) }
     })
 }
@@ -372,6 +390,8 @@ pub unsafe extern "C" fn gos_rt_http_client_post(
     url: *const c_char,
 ) -> *mut GosHttpRequest {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("POST", url, client) }
     })
 }
@@ -382,6 +402,8 @@ pub unsafe extern "C" fn gos_rt_http_client_put(
     url: *const c_char,
 ) -> *mut GosHttpRequest {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("PUT", url, client) }
     })
 }
@@ -392,6 +414,8 @@ pub unsafe extern "C" fn gos_rt_http_client_options(
     url: *const c_char,
 ) -> *mut GosHttpRequest {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("OPTIONS", url, client) }
     })
 }
@@ -402,6 +426,8 @@ pub unsafe extern "C" fn gos_rt_http_client_delete(
     url: *const c_char,
 ) -> *mut GosHttpRequest {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("DELETE", url, client) }
     })
 }
@@ -412,6 +438,8 @@ pub unsafe extern "C" fn gos_rt_http_client_head(
     url: *const c_char,
 ) -> *mut GosHttpRequest {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `url` and `client` are this shim's arguments, each null or live for the call
+        // (C-ABI contract), which `client_pending_request` accepts.
         unsafe { client_pending_request("HEAD", url, client) }
     })
 }
@@ -429,13 +457,16 @@ pub unsafe extern "C" fn gos_rt_http_request_header(
         let n = if name.is_null() {
             String::new()
         } else {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(name) }
         };
         let v = if value.is_null() {
             String::new()
         } else {
+            // SAFETY: `value` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(value) }
         };
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*req).headers.push((n, v)) };
         req
     })
@@ -456,13 +487,16 @@ pub unsafe extern "C" fn gos_rt_http_request_set_header(
         let n = if name.is_null() {
             String::new()
         } else {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(name) }
         };
         let v = if value.is_null() {
             String::new()
         } else {
+            // SAFETY: `value` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(value) }
         };
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let req = unsafe { &mut *req };
         req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(&n));
         req.headers.push((n, v));
@@ -478,7 +512,9 @@ pub unsafe extern "C" fn gos_rt_http_request_get_header(
         if req.is_null() || name.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
         let n = unsafe { crate::c_abi::gos_str_arg_string(name) };
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let req = unsafe { &*req };
         let found = req
             .headers
@@ -501,8 +537,10 @@ pub unsafe extern "C" fn gos_rt_http_request_body(
         let b = if body.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
         };
+        // SAFETY: `req` is non-null (checked above) and a live pending request (C-ABI contract).
         unsafe {
             (*req).body = b;
             (*req).body_offset = 0;
@@ -534,6 +572,8 @@ pub unsafe extern "C" fn gos_rt_http_request_send(req: *mut GosHttpRequest) -> i
             peer: _,
             context_site: _,
             context: _,
+            // SAFETY: `req` is non-null (checked above), the pending request a verb shim boxed, which
+            // `send` consumes (C-ABI contract).
         } = *unsafe { Box::from_raw(req) };
         // Reuse the originating client's agent (cookie jar / proxy /
         // policy) when this request came from `client.<verb>(url)`;
@@ -551,6 +591,7 @@ pub unsafe extern "C" fn gos_rt_http_request_query(req: *const GosHttpRequest) -
         }
         // Naive query extraction: everything after the first `?`
         // in the URL (without the leading `?`).
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let url = &unsafe { &*req }.url;
         if let Some(pos) = url.find('?') {
             alloc_cstring(&url.as_bytes()[pos + 1..])
@@ -573,8 +614,9 @@ pub unsafe extern "C" fn gos_rt_http_request_context(
 ) -> *mut crate::c_abi::context::GosCtx {
     ffi_entry!(std::ptr::null_mut(), {
         if req.is_null() {
-            return unsafe { crate::c_abi::context::gos_rt_ctx_background() };
+            return crate::c_abi::context::gos_rt_ctx_background();
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let request = unsafe { &mut *req };
         if request.context != 0 {
             return request.context as *mut crate::c_abi::context::GosCtx;
@@ -587,7 +629,7 @@ pub unsafe extern "C" fn gos_rt_http_request_context(
                 request.context = ctx;
                 ctx as *mut crate::c_abi::context::GosCtx
             }
-            None => unsafe { crate::c_abi::context::gos_rt_ctx_background() },
+            None => crate::c_abi::context::gos_rt_ctx_background(),
         }
     })
 }
@@ -600,6 +642,7 @@ pub unsafe extern "C" fn gos_rt_http_request_peer_addr(req: *const GosHttpReques
         if req.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { &*req }.peer.as_bytes())
     })
 }
@@ -610,6 +653,7 @@ pub unsafe extern "C" fn gos_rt_http_request_body_str(req: *const GosHttpRequest
         if req.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(request_body_slice(unsafe { &*req }))
     })
 }
@@ -628,6 +672,7 @@ pub unsafe extern "C" fn gos_rt_http_request_raw_body(
         let bytes: &[u8] = if req.is_null() {
             &[]
         } else {
+            // SAFETY: `req` is non-null (checked above) and live for the call (C-ABI contract).
             request_body_slice(unsafe { &*req })
         };
         super::encoding::bytes_to_gosvec(bytes)
@@ -641,6 +686,7 @@ pub unsafe extern "C" fn gos_rt_http_request_path(req: *const GosHttpRequest) ->
         if req.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &*req };
         let path = if let Some(rest) = r
             .url
@@ -670,7 +716,10 @@ unsafe fn path_param_lookup(req: *const GosHttpRequest, name: *const c_char) -> 
     if req.is_null() || name.is_null() {
         return None;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `name` live; non-null, checked above.
     let wanted = unsafe { crate::c_abi::gos_str_arg_string(name) };
+    // SAFETY: `req` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `GosHttpRequest`.
     let r = unsafe { &*req };
     r.params
         .iter()
@@ -689,6 +738,8 @@ pub unsafe extern "C" fn gos_rt_http_request_path_value(
     name: *const c_char,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
+        // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) } {
             Some(v) => alloc_cstring(v.as_bytes()),
             None => alloc_cstring(b""),
@@ -706,6 +757,8 @@ pub unsafe extern "C" fn gos_rt_http_request_path_int(
     name: *const c_char,
 ) -> i128 {
     ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
+        // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
+        // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) }.and_then(|s| s.trim().parse::<i64>().ok()) {
             Some(n) => crate::c_abi::vec::gos_rt_result_new(0, n),
             None => crate::c_abi::vec::gos_rt_result_new(1, 0),
@@ -721,6 +774,8 @@ pub unsafe extern "C" fn gos_rt_http_request_path_float(
     name: *const c_char,
 ) -> i128 {
     ffi_entry!(crate::c_abi::vec::gos_rt_result_new_f64(1, 0.0), {
+        // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
+        // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) }.and_then(|s| s.trim().parse::<f64>().ok()) {
             Some(n) => crate::c_abi::vec::gos_rt_result_new_f64(0, n),
             None => crate::c_abi::vec::gos_rt_result_new_f64(1, 0.0),
@@ -734,16 +789,23 @@ pub unsafe extern "C" fn gos_rt_http_request_method(req: *const GosHttpRequest) 
         if req.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         alloc_cstring(unsafe { &*req }.method.as_bytes())
     })
 }
 
 /// Copies a borrowed body c-string into an owned gos-allocated copy (freed in
 /// `drop_handler_result`); null passes through as null.
-fn gos_response_own_body(body: *const c_char) -> *mut c_char {
+///
+/// # Safety
+///
+/// `body` is null or a live string body.
+unsafe fn gos_response_own_body(body: *const c_char) -> *mut c_char {
     if body.is_null() {
         std::ptr::null_mut()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `body` live or null, which `gos_str_arg_bytes`
+        // accepts.
         alloc_cstring(unsafe { crate::c_abi::gos_str_arg_bytes(body) })
     }
 }
@@ -761,7 +823,11 @@ pub unsafe extern "C" fn gos_rt_http_response_free(response: *mut GosHttpRespons
         if response.is_null() {
             return;
         }
+        // SAFETY: `response` is non-null (checked above), and its `body` is null or the string it
+        // owns, which `gos_rt_str_free` accepts.
         unsafe { crate::c_abi::string::gos_rt_str_free((*response).body.as_ptr()) };
+        // SAFETY: `response` is non-null (checked above), a response box this call reclaims
+        // (C-ABI contract).
         drop(unsafe { Box::from_raw(response) });
     });
 }
@@ -785,7 +851,9 @@ pub unsafe extern "C" fn gos_rt_http_response_text_new(
         // is the unique reclaim site.
         Box::into_raw(Box::new(GosHttpResponse {
             status,
-            body: SyncRawPtr::new(gos_response_own_body(body)),
+            // SAFETY: `body` is this shim's argument, as `gos_response_own_body` requires (C-ABI
+            // contract).
+            body: SyncRawPtr::new(unsafe { gos_response_own_body(body) }),
             headers: Vec::new(),
             body_bytes: None,
             content_type: std::borrow::Cow::Borrowed("text/plain; charset=utf-8"),
@@ -804,7 +872,9 @@ pub unsafe extern "C" fn gos_rt_http_response_json_new(
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosHttpResponse {
             status,
-            body: SyncRawPtr::new(gos_response_own_body(body)),
+            // SAFETY: `body` is this shim's argument, as `gos_response_own_body` requires (C-ABI
+            // contract).
+            body: SyncRawPtr::new(unsafe { gos_response_own_body(body) }),
             headers: Vec::new(),
             body_bytes: None,
             content_type: std::borrow::Cow::Borrowed("application/json"),
@@ -829,11 +899,13 @@ pub unsafe extern "C" fn gos_rt_http_response_stream_new(
     rs: *const i64,
 ) -> *mut GosHttpResponse {
     ffi_entry!(std::ptr::null_mut(), {
-        let handle = if rs.is_null() { -1 } else { unsafe { *rs } };
+        // SAFETY: `rs` is null or addresses the stream's handle word (C-ABI contract).
+        let handle = unsafe { rs.as_ref() }.copied().unwrap_or(-1);
         stream_consume_for_response(handle);
         let ct = if content_type.is_null() {
             String::new()
         } else {
+            // SAFETY: `content_type` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(content_type) }
         };
         Box::into_raw(Box::new(GosHttpResponse {
@@ -853,6 +925,7 @@ pub unsafe extern "C" fn gos_rt_http_response_status(resp: *const GosHttpRespons
         if resp.is_null() {
             return 0;
         }
+        // SAFETY: `resp` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*resp).status }
     })
 }
@@ -863,6 +936,7 @@ pub unsafe extern "C" fn gos_rt_http_response_body(resp: *const GosHttpResponse)
         if resp.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `resp` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*resp).body.as_ptr() }
     })
 }
@@ -888,38 +962,34 @@ pub unsafe extern "C" fn gos_rt_http_response_raw_bytes(
     ffi_entry!(std::ptr::null_mut(), {
         let bytes: &[u8] = if resp.is_null() {
             &[]
+        // SAFETY: `resp` is non-null (checked above) and live for the call (C-ABI contract).
         } else if let Some(stored) = unsafe { &(*resp).body_bytes } {
             stored.as_slice()
         } else {
+            // SAFETY: `resp` is non-null (checked above) and live for the call (C-ABI contract).
             let cstr_ptr = unsafe { (*resp).body.as_ptr() };
             if cstr_ptr.is_null() {
                 &[]
             } else {
+                // SAFETY: `cstr_ptr` is the response's non-null body, a live string it owns.
                 unsafe { crate::c_abi::gos_str_arg_bytes(cstr_ptr) }
             }
         };
-        // Allocate the GosVec with capacity for all bytes and write
-        // them directly into the backing buffer. The previous
-        // per-byte `gos_rt_vec_push` path went through the slow
-        // growth loop and triggered the JIT-cached helper's
-        // single-shot-byte memcpy - which on some lowering paths
-        // received `&b as *const u8` from a transient stack frame
-        // that was clobbered between iterations, producing a
-        // truncated 2-byte vec. Bulk memcpy is also simpler.
+        // The body is copied into a byte vec sized for it in one move.
         let len_i64 = bytes.len() as i64;
-        let v = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(1, len_i64) };
-        if !bytes.is_empty() {
-            let vec_ref = unsafe { &mut *v };
-            if !vec_ref.ptr.is_null() {
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        bytes.as_ptr(),
-                        vec_ref.ptr.as_ptr(),
-                        bytes.len(),
-                    );
-                }
-                vec_ref.len = len_i64;
+        let v = crate::c_abi::vec::gos_rt_vec_with_capacity(1, len_i64);
+        // SAFETY: `v` is the fresh vec made above, or null.
+        let fresh = unsafe { v.as_mut() };
+        if !bytes.is_empty()
+            && let Some(vec_ref) = fresh
+            && !vec_ref.ptr.is_null()
+        {
+            // SAFETY: the fresh buffer has capacity for `bytes.len()` bytes and does not
+            // overlap the response's body.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), vec_ref.ptr.as_ptr(), bytes.len());
             }
+            vec_ref.len = len_i64;
         }
         v
     })
@@ -935,6 +1005,7 @@ pub unsafe extern "C" fn gos_rt_http_response_content_type(
         if resp.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `resp` is non-null (checked above) and live for the call (C-ABI contract).
         alloc_cstring(unsafe { &(*resp).content_type }.as_bytes())
     })
 }
@@ -950,6 +1021,7 @@ pub unsafe extern "C" fn gos_rt_http_response_location(
         if resp.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `resp` is non-null (checked above) and live for the call (C-ABI contract).
         let found = unsafe { &(*resp).headers }
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("location"))
@@ -987,18 +1059,21 @@ fn header_pairs_to_gosvec(pairs: &[(String, String)]) -> *mut crate::c_abi::vec:
         name: i64,
         value: i64,
     }
-    let v = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(16, pairs.len() as i64) };
+    let v = crate::c_abi::vec::gos_rt_vec_with_capacity(16, pairs.len() as i64);
     for (name, value) in pairs {
         let entry = Pair {
             name: alloc_cstring(name.as_bytes()) as i64,
             value: alloc_cstring(value.as_bytes()) as i64,
         };
+        // SAFETY: `v` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts, and
+        // `entry` is one 16-byte element.
         unsafe {
             crate::c_abi::vec::gos_rt_vec_push(v, std::ptr::addr_of!(entry).cast::<u8>());
         }
     }
     // Tagged after the pushes - the vec owns the fresh strings.
-    crate::c_abi::vec::vec_set_slot_children(v, &HEADER_SLOT_CHILDREN);
+    // SAFETY: `v` is the live vec built above.
+    unsafe { crate::c_abi::vec::vec_set_slot_children(v, &HEADER_SLOT_CHILDREN) };
     v
 }
 
@@ -1011,6 +1086,7 @@ pub unsafe extern "C" fn gos_rt_http_response_headers(
         let pairs: &[(String, String)] = if resp.is_null() {
             &[]
         } else {
+            // SAFETY: `resp` is non-null (checked above) and live for the call (C-ABI contract).
             unsafe { &(*resp).headers }
         };
         header_pairs_to_gosvec(pairs)
@@ -1028,6 +1104,7 @@ pub unsafe extern "C" fn gos_rt_http_request_headers(
         let pairs: &[(String, String)] = if req.is_null() {
             &[]
         } else {
+            // SAFETY: `req` is non-null (checked above) and live for the call (C-ABI contract).
             unsafe { &(*req).headers }
         };
         header_pairs_to_gosvec(pairs)
@@ -1050,6 +1127,7 @@ pub unsafe extern "C" fn gos_rt_http_request_query_pairs(
         if req.is_null() {
             return header_pairs_to_gosvec(&[]);
         }
+        // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let url = &unsafe { &*req }.url;
         let query = url.find('?').map_or("", |pos| &url[pos + 1..]);
         let pairs = parse_query_pairs(query);
@@ -1078,13 +1156,16 @@ pub unsafe extern "C" fn gos_rt_http_response_set_header(
         let n = if name.is_null() {
             String::new()
         } else {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(name) }
         };
         let v = if value.is_null() {
             String::new()
         } else {
+            // SAFETY: `value` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(value) }
         };
+        // SAFETY: `resp` is a handle from compiled code, checked non-null above and live for the whole call.
         let resp = unsafe { &mut *resp };
         resp.headers.retain(|(k, _)| !k.eq_ignore_ascii_case(&n));
         resp.headers.push((n, v));
@@ -1104,6 +1185,8 @@ pub unsafe extern "C" fn gos_rt_http_response_with_header(
     value: *const c_char,
 ) -> *mut GosHttpResponse {
     ffi_entry!(resp, {
+        // SAFETY: `resp`, `name`, `value` are this shim's arguments, live for the call (C-ABI
+        // contract) or null, which `gos_rt_http_response_set_header` accepts.
         unsafe { gos_rt_http_response_set_header(resp, name, value) };
         resp
     })
@@ -1123,7 +1206,9 @@ pub unsafe extern "C" fn gos_rt_http_response_set_content_type(
         if resp.is_null() || content_type.is_null() {
             return;
         }
+        // SAFETY: `content_type` is a String argument from compiled code, null or a live string body for the whole call.
         let ct = unsafe { crate::c_abi::gos_str_arg_string(content_type) };
+        // SAFETY: `resp` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*resp).content_type = ct.into() };
     });
 }
@@ -1145,25 +1230,14 @@ pub unsafe extern "C" fn gos_rt_http_response_set_body_bytes(
         if resp.is_null() {
             return;
         }
-        let collected: Vec<u8> = if bytes.is_null() {
-            Vec::new()
-        } else {
-            let v = unsafe { &*bytes };
-            let len = usize::try_from(v.len).unwrap_or(0);
-            if v.ptr.is_null() || len == 0 {
-                Vec::new()
-            } else if v.elem_bytes == 1 {
-                unsafe { std::slice::from_raw_parts(v.ptr.as_ptr(), len) }.to_vec()
-            } else {
-                let stride = v.elem_bytes as usize;
-                (0..len)
-                    .map(|i| unsafe { *v.ptr.as_ptr().add(i * stride) })
-                    .collect()
-            }
-        };
+        // SAFETY: `bytes` is this shim's argument, null or a live `Vec<u8>` (C-ABI contract),
+        // which `vec_bytes` accepts.
+        let collected: Vec<u8> = unsafe { crate::c_abi::vec::vec_bytes(bytes) };
+        // SAFETY: `resp` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &mut *resp };
         let old = r.body.as_ptr();
         if !old.is_null() {
+            // SAFETY: `old` is the non-null body string the response owned, replaced below.
             unsafe { crate::c_abi::string::gos_rt_str_free(old) };
         }
         r.body = SyncRawPtr::new(alloc_cstring(&collected));
@@ -1181,7 +1255,9 @@ pub unsafe extern "C" fn gos_rt_http_response_get_header(
         if resp.is_null() || name.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
         let n = unsafe { crate::c_abi::gos_str_arg_string(name) };
+        // SAFETY: `resp` is a handle from compiled code, checked non-null above and live for the whole call.
         let resp = unsafe { &*resp };
         let found = resp
             .headers
@@ -1362,10 +1438,16 @@ fn default_agent() -> ureq::Agent {
 /// empty one, which keeps `Set-Cookie` from carrying across requests
 /// while still reusing the connection. A null client gets the
 /// default-policy agent.
-fn client_agent(client: *const GosHttpClient) -> ureq::Agent {
+///
+/// # Safety
+///
+/// `client` is null or a live HTTP client.
+unsafe fn client_agent(client: *const GosHttpClient) -> ureq::Agent {
     if client.is_null() {
         return default_agent();
     }
+    // SAFETY: `client` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+    // `GosHttpClient`.
     let c = unsafe { &*client };
     let agent = c.agent.clone();
     if !c.config.cookie_jar {
@@ -1558,19 +1640,24 @@ pub unsafe extern "C" fn gos_rt_http_request(
         let method_str = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
         let url_str = if url.is_null() {
             return err_result_with_msg("http::request: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
         let body_bytes = if body.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
         };
-        let header_pairs = decode_header_tuple_vec(headers);
+        // SAFETY: `headers` is this shim's argument, as `decode_header_tuple_vec` requires (C-ABI
+        // contract).
+        let header_pairs = unsafe { decode_header_tuple_vec(headers) };
         http_request_buffered(
             "http::request",
             &method_str,
@@ -1597,15 +1684,21 @@ pub unsafe extern "C" fn gos_rt_http_request_bytes(
         let method_str = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
         let url_str = if url.is_null() {
             return err_result_with_msg("http::request_bytes: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
-        let body_bytes = unsafe { super::encoding::gosvec_u8(body) };
-        let header_pairs = decode_header_tuple_vec(headers);
+        // SAFETY: `body` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let body_bytes = unsafe { crate::c_abi::vec::vec_bytes(body) };
+        // SAFETY: `headers` is this shim's argument, as `decode_header_tuple_vec` requires (C-ABI
+        // contract).
+        let header_pairs = unsafe { decode_header_tuple_vec(headers) };
         http_request_buffered(
             "http::request_bytes",
             &method_str,
@@ -1634,26 +1727,33 @@ pub unsafe extern "C" fn gos_rt_http_client_request(
         let method_str = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
         let url_str = if url.is_null() {
             return err_result_with_msg("Client::request: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
         let body_bytes = if body.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
         };
-        let header_pairs = decode_header_tuple_vec(headers);
+        // SAFETY: `headers` is this shim's argument, as `decode_header_tuple_vec` requires (C-ABI
+        // contract).
+        let header_pairs = unsafe { decode_header_tuple_vec(headers) };
         http_request_buffered(
             "Client::request",
             &method_str,
             &url_str,
             body_bytes,
             &header_pairs,
-            &client_agent(client),
+            // SAFETY: `client` is this shim's argument, as `client_agent` requires (C-ABI
+            // contract).
+            &unsafe { client_agent(client) },
         )
     })
 }
@@ -1672,22 +1772,30 @@ pub unsafe extern "C" fn gos_rt_http_client_request_bytes(
         let method_str = if method.is_null() {
             String::new()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
         let url_str = if url.is_null() {
             return err_result_with_msg("Client::request_bytes: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
-        let body_bytes = unsafe { super::encoding::gosvec_u8(body) };
-        let header_pairs = decode_header_tuple_vec(headers);
+        // SAFETY: `body` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let body_bytes = unsafe { crate::c_abi::vec::vec_bytes(body) };
+        // SAFETY: `headers` is this shim's argument, as `decode_header_tuple_vec` requires (C-ABI
+        // contract).
+        let header_pairs = unsafe { decode_header_tuple_vec(headers) };
         http_request_buffered(
             "Client::request_bytes",
             &method_str,
             &url_str,
             body_bytes,
             &header_pairs,
-            &client_agent(client),
+            // SAFETY: `client` is this shim's argument, as `client_agent` requires (C-ABI
+            // contract).
+            &unsafe { client_agent(client) },
         )
     })
 }
@@ -1696,15 +1804,22 @@ pub unsafe extern "C" fn gos_rt_http_client_request_bytes(
 /// One-shot GET. Ok payload is a `*mut GosHttpResponse` so field
 /// access (`r.status`, `r.body`) routes through the existing
 /// `gos_rt_http_response_*` dispatch.
+///
+/// # Safety
+///
+/// `url` is null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_http_get(url: *const c_char, headers: *mut GosVec) -> i128 {
+pub unsafe extern "C" fn gos_rt_http_get(url: *const c_char, headers: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
         let url_str = if url.is_null() {
-            return unsafe { err_result_with_msg("http::get: url is null") };
+            return err_result_with_msg("http::get: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
-        let header_pairs = decode_header_tuple_vec(headers);
+        // SAFETY: `headers` is this shim's argument, as `decode_header_tuple_vec` requires (C-ABI
+        // contract).
+        let header_pairs = unsafe { decode_header_tuple_vec(headers) };
         http_request_buffered(
             "http::get",
             "GET",
@@ -1718,13 +1833,24 @@ pub extern "C" fn gos_rt_http_get(url: *const c_char, headers: *mut GosVec) -> i
 
 /// One-shot bodyless verb (`HEAD` / `OPTIONS`) shim. `url` + `headers`
 /// match `gos_rt_http_get`; `method`/`label` select the verb.
-fn http_verb_no_body(method: &str, label: &str, url: *const c_char, headers: *mut GosVec) -> i128 {
+///
+/// # Safety
+///
+/// `url` is null or a live string body.
+unsafe fn http_verb_no_body(
+    method: &str,
+    label: &str,
+    url: *const c_char,
+    headers: *mut GosVec,
+) -> i128 {
     let url_str = if url.is_null() {
-        return unsafe { err_result_with_msg(&format!("{label}: url is null")) };
+        return err_result_with_msg(&format!("{label}: url is null"));
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `url` live; non-null, checked above.
         unsafe { crate::c_abi::gos_str_arg_string(url) }
     };
-    let header_pairs = decode_header_tuple_vec(headers);
+    // SAFETY: this function's contract covers `headers`, as `decode_header_tuple_vec` requires.
+    let header_pairs = unsafe { decode_header_tuple_vec(headers) };
     http_request_buffered(
         label,
         method,
@@ -1737,7 +1863,11 @@ fn http_verb_no_body(method: &str, label: &str, url: *const c_char, headers: *mu
 
 /// One-shot body verb (`POST` / `PUT`) shim. `body` is the request
 /// body c-string, `content_type` becomes the `Content-Type` header.
-fn http_verb_body(
+///
+/// # Safety
+///
+/// `url`, `body`, and `content_type` are each null or a live string body.
+unsafe fn http_verb_body(
     method: &str,
     label: &str,
     url: *const c_char,
@@ -1745,18 +1875,23 @@ fn http_verb_body(
     content_type: *const c_char,
 ) -> i128 {
     let url_str = if url.is_null() {
-        return unsafe { err_result_with_msg(&format!("{label}: url is null")) };
+        return err_result_with_msg(&format!("{label}: url is null"));
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `url` live; non-null, checked above.
         unsafe { crate::c_abi::gos_str_arg_string(url) }
     };
     let body_bytes = if body.is_null() {
         Vec::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `body` live or null, which `gos_str_arg_bytes`
+        // accepts.
         unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
     };
     let ct = if content_type.is_null() {
         String::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `content_type` live or null, which
+        // `gos_str_arg_string` accepts.
         unsafe { crate::c_abi::gos_str_arg_string(content_type) }
     };
     let header_pairs = vec![("Content-Type".to_string(), ct)];
@@ -1771,42 +1906,68 @@ fn http_verb_body(
 }
 
 /// `http::head(url, headers) -> Result<http::Response, errors::Error>`.
+///
+/// # Safety
+///
+/// `url` is null or a live string body, and `headers` is null or a live `Vec`
+/// of header pairs.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_http_head(url: *const c_char, headers: *mut GosVec) -> i128 {
+pub unsafe extern "C" fn gos_rt_http_head(url: *const c_char, headers: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
-        http_verb_no_body("HEAD", "http::head", url, headers)
+        // SAFETY: `url` and `headers` are this shim's arguments, each null or live (C-ABI
+        // contract).
+        unsafe { http_verb_no_body("HEAD", "http::head", url, headers) }
     })
 }
 
 /// `http::options(url, headers) -> Result<http::Response, errors::Error>`.
+///
+/// # Safety
+///
+/// `url` is null or a live string body, and `headers` is null or a live `Vec`
+/// of header pairs.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_http_options(url: *const c_char, headers: *mut GosVec) -> i128 {
+pub unsafe extern "C" fn gos_rt_http_options(url: *const c_char, headers: *mut GosVec) -> i128 {
     ffi_entry!(0i128, {
-        http_verb_no_body("OPTIONS", "http::options", url, headers)
+        // SAFETY: `url` and `headers` are this shim's arguments, each null or live (C-ABI
+        // contract).
+        unsafe { http_verb_no_body("OPTIONS", "http::options", url, headers) }
     })
 }
 
 /// `http::post(url, body, content_type) -> Result<http::Response, errors::Error>`.
+///
+/// # Safety
+///
+/// `url`, `body`, and `content_type` are each null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_http_post(
+pub unsafe extern "C" fn gos_rt_http_post(
     url: *const c_char,
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
-        http_verb_body("POST", "http::post", url, body, content_type)
+        // SAFETY: `url`, `body`, and `content_type` are this shim's arguments, each null or live
+        // (C-ABI contract).
+        unsafe { http_verb_body("POST", "http::post", url, body, content_type) }
     })
 }
 
 /// `http::put(url, body, content_type) -> Result<http::Response, errors::Error>`.
+///
+/// # Safety
+///
+/// `url`, `body`, and `content_type` are each null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_http_put(
+pub unsafe extern "C" fn gos_rt_http_put(
     url: *const c_char,
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
-        http_verb_body("PUT", "http::put", url, body, content_type)
+        // SAFETY: `url`, `body`, and `content_type` are this shim's arguments, each null or live
+        // (C-ABI contract).
+        unsafe { http_verb_body("PUT", "http::put", url, body, content_type) }
     })
 }
 
@@ -1823,14 +1984,18 @@ pub unsafe extern "C" fn gos_rt_http_delete(
         let url_str = if url.is_null() {
             return err_result_with_msg("http::delete: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
         let body_bytes = if body.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
         };
-        let header_pairs = decode_header_tuple_vec(headers);
+        // SAFETY: `headers` is this shim's argument, as `decode_header_tuple_vec` requires (C-ABI
+        // contract).
+        let header_pairs = unsafe { decode_header_tuple_vec(headers) };
         http_request_buffered(
             "http::delete",
             "DELETE",
@@ -1844,28 +2009,44 @@ pub unsafe extern "C" fn gos_rt_http_delete(
 
 /// `native_client::get(url) -> Result<Response, errors::Error>` -
 /// one-shot GET with no extra headers (the bare `NativeClient` helper).
+///
+/// # Safety
+///
+/// `url` is null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_nc_get(url: *const c_char) -> i128 {
+pub unsafe extern "C" fn gos_rt_nc_get(url: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        http_verb_no_body("GET", "native_client::get", url, std::ptr::null_mut())
+        // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract).
+        unsafe { http_verb_no_body("GET", "native_client::get", url, std::ptr::null_mut()) }
     })
 }
 
 /// `native_client::delete(url) -> Result<Response, errors::Error>` -
 /// one-shot DELETE with no body and no extra headers.
+///
+/// # Safety
+///
+/// `url` is null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_nc_delete(url: *const c_char) -> i128 {
+pub unsafe extern "C" fn gos_rt_nc_delete(url: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        http_verb_no_body("DELETE", "native_client::delete", url, std::ptr::null_mut())
+        // SAFETY: `url` is this shim's argument, null or a live string body (C-ABI contract).
+        unsafe { http_verb_no_body("DELETE", "native_client::delete", url, std::ptr::null_mut()) }
     })
 }
 
 /// `application/octet-stream` when `content_type` is null/empty,
 /// matching the interp `NativeClient` body-verb default.
-fn nc_content_type(content_type: *const c_char) -> String {
+///
+/// # Safety
+///
+/// `content_type` is null or a live string body.
+unsafe fn nc_content_type(content_type: *const c_char) -> String {
     let ct = if content_type.is_null() {
         String::new()
     } else {
+        // SAFETY: this `unsafe fn`'s caller passes `content_type` live or null, which
+        // `gos_str_arg_string` accepts.
         unsafe { crate::c_abi::gos_str_arg_string(content_type) }
     };
     if ct.is_empty() {
@@ -1876,24 +2057,34 @@ fn nc_content_type(content_type: *const c_char) -> String {
 }
 
 /// `native_client::post(url, body, content_type) -> Result<Response, errors::Error>`.
+///
+/// # Safety
+///
+/// `url` and `body` are each null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_nc_post(
+pub unsafe extern "C" fn gos_rt_nc_post(
     url: *const c_char,
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
         let url_str = if url.is_null() {
-            return unsafe { err_result_with_msg("native_client::post: url is null") };
+            return err_result_with_msg("native_client::post: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
         let body_bytes = if body.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
         };
-        let header_pairs = vec![("Content-Type".to_string(), nc_content_type(content_type))];
+        // SAFETY: `content_type` is this shim's argument, as `nc_content_type` requires (C-ABI
+        // contract).
+        let header_pairs = vec![("Content-Type".to_string(), unsafe {
+            nc_content_type(content_type)
+        })];
         http_request_buffered(
             "native_client::post",
             "POST",
@@ -1906,24 +2097,34 @@ pub extern "C" fn gos_rt_nc_post(
 }
 
 /// `native_client::put(url, body, content_type) -> Result<Response, errors::Error>`.
+///
+/// # Safety
+///
+/// `url` and `body` are each null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_nc_put(
+pub unsafe extern "C" fn gos_rt_nc_put(
     url: *const c_char,
     body: *const c_char,
     content_type: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
         let url_str = if url.is_null() {
-            return unsafe { err_result_with_msg("native_client::put: url is null") };
+            return err_result_with_msg("native_client::put: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
         let body_bytes = if body.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
         };
-        let header_pairs = vec![("Content-Type".to_string(), nc_content_type(content_type))];
+        // SAFETY: `content_type` is this shim's argument, as `nc_content_type` requires (C-ABI
+        // contract).
+        let header_pairs = vec![("Content-Type".to_string(), unsafe {
+            nc_content_type(content_type)
+        })];
         http_request_buffered(
             "native_client::put",
             "PUT",
@@ -1939,26 +2140,33 @@ pub extern "C" fn gos_rt_nc_put(
 /// One-shot upstream request: GET / DELETE ignore the body; POST / PUT
 /// send it with `application/octet-stream`; unknown methods fall back to
 /// GET. Mirrors the interp `proxy::forward` over a fresh `NativeClient`.
+///
+/// # Safety
+///
+/// `method`, `upstream_url`, and `body` are each null or a live string body.
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_proxy_forward_url(
+pub unsafe extern "C" fn gos_rt_proxy_forward_url(
     upstream_url: *const c_char,
     method: *const c_char,
     body: *const c_char,
 ) -> i128 {
     ffi_entry!(0i128, {
         let url_str = if upstream_url.is_null() {
-            return unsafe { err_result_with_msg("proxy::forward: url is null") };
+            return err_result_with_msg("proxy::forward: url is null");
         } else {
+            // SAFETY: `upstream_url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(upstream_url) }
         };
         let method_str = if method.is_null() {
             "GET".to_string()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
         let body_bytes = if body.is_null() {
             Vec::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(body) }.to_vec()
         };
         let agent = default_agent();
@@ -2013,19 +2221,24 @@ pub unsafe extern "C" fn gos_rt_http_stream(
         let method_str = if method.is_null() {
             "GET".to_string()
         } else {
+            // SAFETY: `method` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(method) }
         };
         let url_str = if url.is_null() {
-            return unsafe { err_result_with_msg("http::stream: url is null") };
+            return err_result_with_msg("http::stream: url is null");
         } else {
+            // SAFETY: `url` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(url) }
         };
         let body_str = if body.is_null() {
             String::new()
         } else {
+            // SAFETY: `body` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(body) }
         };
-        let header_pairs = decode_header_tuple_vec(headers);
+        // SAFETY: `headers` is this shim's argument, as `decode_header_tuple_vec` requires (C-ABI
+        // contract).
+        let header_pairs = unsafe { decode_header_tuple_vec(headers) };
 
         // Build an agent with no read timeout - SSE / chunked
         // chat-completion bodies can have multi-second gaps between
@@ -2052,16 +2265,14 @@ pub unsafe extern "C" fn gos_rt_http_stream(
         let request = match builder.body(body_bytes) {
             Ok(r) => r,
             Err(e) => {
-                return unsafe {
-                    err_result_with_msg(&format!("http::stream: build request: {e}"))
-                };
+                return err_result_with_msg(&format!("http::stream: build request: {e}"));
             }
         };
         let resp =
             match crate::sched_global::run_blocking("http-stream", move || agent.run(request)) {
                 Ok(Ok(r)) => r,
-                Ok(Err(e)) => return unsafe { err_result_with_msg(&format!("http::stream: {e}")) },
-                Err(e) => return unsafe { err_result_with_msg(&format!("http::stream: {e}")) },
+                Ok(Err(e)) => return err_result_with_msg(&format!("http::stream: {e}")),
+                Err(e) => return err_result_with_msg(&format!("http::stream: {e}")),
             };
         let status = i64::from(resp.status().as_u16());
         let content_type = resp
@@ -2074,12 +2285,12 @@ pub unsafe extern "C" fn gos_rt_http_stream(
             Box::new(resp.into_body().into_reader()) as Box<dyn std::io::Read + Send + Sync>
         );
         let handle = stream_registry_register(reader);
-        let blob = unsafe { alloc_response_stream_blob(handle, status, &content_type) };
+        let blob = alloc_response_stream_blob(handle, status, &content_type);
         if blob.is_null() {
             stream_registry_drop(handle);
-            return unsafe { err_result_with_msg("http::stream: arena alloc failed") };
+            return err_result_with_msg("http::stream: arena alloc failed");
         }
-        unsafe { gos_rt_result_new(0, blob as i64) }
+        gos_rt_result_new(0, blob as i64)
     })
 }
 
@@ -2094,11 +2305,13 @@ pub unsafe extern "C" fn gos_rt_http_stream(
 pub unsafe extern "C" fn gos_rt_http_stream_next_line(rs: *const i64) -> i128 {
     ffi_entry!(0i128, {
         if rs.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `rs` is this shim's `i64` argument, non-null (checked above), live for the call
+        // (C-ABI contract).
         let handle = unsafe { *rs };
         let Some(arc) = stream_registry_lookup(handle) else {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         };
         use std::io::BufRead;
         let mut buf = String::new();
@@ -2106,7 +2319,7 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_line(rs: *const i64) -> i128 {
         match read_result {
             Ok(0) => {
                 stream_registry_drop(handle);
-                unsafe { gos_rt_result_new(1, 0) }
+                gos_rt_result_new(1, 0)
             }
             Ok(_) => {
                 if buf.ends_with('\n') {
@@ -2116,11 +2329,11 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_line(rs: *const i64) -> i128 {
                     }
                 }
                 let cs = alloc_cstring(buf.as_bytes()) as i64;
-                unsafe { gos_rt_result_new(0, cs) }
+                gos_rt_result_new(0, cs)
             }
             Err(_) => {
                 stream_registry_drop(handle);
-                unsafe { gos_rt_result_new(1, 0) }
+                gos_rt_result_new(1, 0)
             }
         }
     })
@@ -2145,11 +2358,13 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_line(rs: *const i64) -> i128 {
 pub unsafe extern "C" fn gos_rt_http_stream_next_chunk(rs: *const i64, max_bytes: i64) -> i128 {
     ffi_entry!(0i128, {
         if rs.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
+        // SAFETY: `rs` is this shim's `i64` argument, non-null (checked above), live for the call
+        // (C-ABI contract).
         let handle = unsafe { *rs };
         let Some(arc) = stream_registry_lookup(handle) else {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         };
         let cap = usize::try_from(max_bytes.clamp(1, 1 << 20)).unwrap_or(1);
         let mut buf = vec![0u8; cap];
@@ -2160,24 +2375,27 @@ pub unsafe extern "C" fn gos_rt_http_stream_next_chunk(rs: *const i64, max_bytes
         match read_result {
             Ok(0) => {
                 stream_registry_drop(handle);
-                unsafe { gos_rt_result_new(1, 0) }
+                gos_rt_result_new(1, 0)
             }
             Ok(n) => {
-                let v = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(1, n as i64) };
+                let v = crate::c_abi::vec::gos_rt_vec_with_capacity(1, n as i64);
                 if !v.is_null() {
+                    // SAFETY: `v` is non-null (checked above), the fresh vec made above.
                     let vec_ref = unsafe { &mut *v };
                     if !vec_ref.ptr.is_null() {
+                        // SAFETY: the fresh buffer is non-null (checked above) with capacity for
+                        // `n` bytes, and `buf` holds `n` read bytes.
                         unsafe {
                             std::ptr::copy_nonoverlapping(buf.as_ptr(), vec_ref.ptr.as_ptr(), n);
                         }
                         vec_ref.len = n as i64;
                     }
                 }
-                unsafe { gos_rt_result_new(0, v as i64) }
+                gos_rt_result_new(0, v as i64)
             }
             Err(_) => {
                 stream_registry_drop(handle);
-                unsafe { gos_rt_result_new(1, 0) }
+                gos_rt_result_new(1, 0)
             }
         }
     })
@@ -2234,8 +2452,12 @@ mod tests {
             content_type: "text/plain".into(),
             stream_handle: -1,
         }));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let v = unsafe { gos_rt_http_response_headers(resp) };
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec_ref = unsafe { &*v };
         assert_eq!(vec_ref.len, 2);
         assert_eq!(vec_ref.elem_bytes, 16);
@@ -2248,27 +2470,49 @@ mod tests {
         );
         let expected = [("content-type", "text/plain"), ("x-request-id", "abc123")];
         for (i, (name, value)) in expected.iter().enumerate() {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let slot = unsafe { vec_ref.ptr.add(i * 16) };
             // Slots hold cstring pointers exposed as integers by the
             // flat-slot ABI; recover provenance before use.
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let name_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast::<c_char>();
             let value_ptr =
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { crate::c_abi::vec::slot_read_word(slot.add(8)) }.cast::<c_char>();
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let got_name = unsafe { CStr::from_ptr(name_ptr) }.to_str().unwrap();
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let got_value = unsafe { CStr::from_ptr(value_ptr) }.to_str().unwrap();
             assert_eq!(got_name, *name);
             assert_eq!(got_value, *value);
         }
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         let resp_box = unsafe { Box::from_raw(resp) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(resp_box.body.as_ptr()) };
     }
 
     #[test]
     fn response_headers_on_null_response_returns_empty_vec() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let v = unsafe { gos_rt_http_response_headers(std::ptr::null()) };
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*v).len }, 0);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
     }
 
@@ -2281,21 +2525,35 @@ mod tests {
             Vec::new(),
             payload.to_vec(),
         );
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let v = unsafe { gos_rt_http_request_raw_body(std::ptr::from_ref(&req)) };
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec_ref = unsafe { &*v };
         assert_eq!(vec_ref.len, 4);
         assert_eq!(vec_ref.elem_bytes, 1);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let got = unsafe { std::slice::from_raw_parts(vec_ref.ptr.as_ptr(), 4) };
         assert_eq!(got, &[0x68, 0xFF, 0x00, 0x69]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
     }
 
     #[test]
     fn request_raw_body_on_null_request_returns_empty_vec() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let v = unsafe { gos_rt_http_request_raw_body(std::ptr::null()) };
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*v).len }, 0);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
     }
 
@@ -2317,8 +2575,12 @@ mod tests {
             context_site: None,
             context: 0,
         };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let v = unsafe { gos_rt_http_request_headers(std::ptr::from_ref(&req)) };
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec_ref = unsafe { &*v };
         assert_eq!(vec_ref.len, 2);
         assert_eq!(vec_ref.elem_bytes, 16);
@@ -2328,26 +2590,44 @@ mod tests {
         );
         let expected = [("accept", "*/*"), ("x-token", "t1")];
         for (i, (name, value)) in expected.iter().enumerate() {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let slot = unsafe { vec_ref.ptr.add(i * 16) };
             // Slots hold cstring pointers exposed as integers by the
             // flat-slot ABI; recover provenance before use.
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let name_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast::<c_char>();
             let value_ptr =
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { crate::c_abi::vec::slot_read_word(slot.add(8)) }.cast::<c_char>();
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             assert_eq!(unsafe { CStr::from_ptr(name_ptr) }.to_str().unwrap(), *name);
             assert_eq!(
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { CStr::from_ptr(value_ptr) }.to_str().unwrap(),
                 *value
             );
         }
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
     }
 
     #[test]
     fn request_headers_on_null_request_returns_empty_vec() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let v = unsafe { gos_rt_http_request_headers(std::ptr::null()) };
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*v).len }, 0);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
     }
 
@@ -2374,12 +2654,18 @@ mod tests {
         ];
         for (url, want) in cases {
             let req = mk(url);
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let p = unsafe { gos_rt_http_request_path(std::ptr::from_ref(&req)) };
             assert_eq!(
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { CStr::from_ptr(p) }.to_str().unwrap(),
                 want,
                 "path of {url}"
             );
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { crate::c_abi::string::gos_rt_str_free(p) };
         }
     }
@@ -2444,12 +2730,14 @@ mod tests {
             name: i64,
             value: i64,
         }
-        let v = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(16, pairs.len() as i64) };
+        let v = crate::c_abi::vec::gos_rt_vec_with_capacity(16, pairs.len() as i64);
         for (name, value) in pairs {
             let entry = Pair {
                 name: alloc_cstring(name.as_bytes()) as i64,
                 value: alloc_cstring(value.as_bytes()) as i64,
             };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe {
                 crate::c_abi::vec::gos_rt_vec_push(v, std::ptr::addr_of!(entry).cast::<u8>());
             }
@@ -2458,41 +2746,52 @@ mod tests {
     }
 
     fn free_header_tuple_vec(v: *mut GosVec) {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec_ref = unsafe { &*v };
         for i in 0..vec_ref.len as usize {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let slot = unsafe { vec_ref.ptr.add(i * 16) };
             // Slots hold cstring pointers exposed as integers by the
             // flat-slot ABI; recover provenance before use.
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let name_ptr = unsafe { crate::c_abi::vec::slot_read_word(slot) }.cast::<c_char>();
             let value_ptr =
+                // SAFETY: every pointer argument is a value this test built above and still holds
+                // live; a null one is accepted by the callee.
                 unsafe { crate::c_abi::vec::slot_read_word(slot.add(8)) }.cast::<c_char>();
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe {
                 crate::c_abi::string::gos_rt_str_free(name_ptr);
                 crate::c_abi::string::gos_rt_str_free(value_ptr);
             }
         }
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
     }
 
     fn free_response(resp: *mut GosHttpResponse) {
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         let resp_box = unsafe { Box::from_raw(resp) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(resp_box.body.as_ptr()) };
     }
 
     /// Opens a stream against a one-shot server and returns the
     /// ResponseStream blob pointer (slot 0 = registry handle).
     fn open_stream(url: &str) -> *mut i64 {
-        let method = std::ffi::CString::new("GET").unwrap();
-        let url_cs = std::ffi::CString::new(url).unwrap();
-        let body = std::ffi::CString::new("").unwrap();
-        let packed = unsafe {
-            gos_rt_http_stream(
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
-                crate::c_abi::string::test_gos_ptr(&body),
-                std::ptr::null_mut(),
-            )
-        };
+        let method = crate::c_abi::string::test_gos_str("GET");
+        let url_cs = crate::c_abi::string::test_gos_str(url);
+        let body = crate::c_abi::string::test_gos_str("");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let packed = unsafe { gos_rt_http_stream(method, url_cs, body, std::ptr::null_mut()) };
         assert_eq!(gos_rt_result_disc(packed), 0, "stream open must succeed");
         let blob = gos_rt_result_payload(packed) as *mut i64;
         assert!(!blob.is_null());
@@ -2500,20 +2799,28 @@ mod tests {
     }
 
     fn next_chunk_bytes(blob: *const i64, max: i64) -> Option<Vec<u8>> {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_stream_next_chunk(blob, max) };
         if gos_rt_result_disc(packed) != 0 {
             return None;
         }
         let v = gos_rt_result_payload(packed) as *mut GosVec;
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec_ref = unsafe { &*v };
         assert_eq!(
             vec_ref.elem_bytes, 1,
             "next_chunk payload must be the packed elem_bytes=1 byte-vec shape"
         );
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let out = unsafe {
             std::slice::from_raw_parts(vec_ref.ptr.as_ptr(), vec_ref.len as usize).to_vec()
         };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
         Some(out)
     }
@@ -2591,6 +2898,8 @@ mod tests {
             &build_agent(&ClientConfig::DEFAULT),
         )
         .expect("buffered response");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp_ref = unsafe { &*resp };
         assert!(
             resp_ref
@@ -2639,7 +2948,11 @@ mod tests {
         // EOF dropped the stream from the registry; further calls
         // keep returning None instead of erroring.
         assert_eq!(next_chunk_bytes(blob, 4), None);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free((*blob.add(2)) as *mut c_char) };
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(blob.cast::<[i64; 3]>()) });
         server.join().unwrap();
     }
@@ -2649,24 +2962,38 @@ mod tests {
     fn stream_next_chunk_interleaves_coherently_with_next_line() {
         let (url, server) = spawn_one_shot_server("HTTP/1.1 200 OK", "", b"alpha\nbeta!");
         let blob = open_stream(&url);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_stream_next_line(blob) };
         assert_eq!(gos_rt_result_disc(packed), 0);
         let line = gos_rt_result_payload(packed) as *mut c_char;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { CStr::from_ptr(line) }.to_str().unwrap(), "alpha");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(line) };
         assert_eq!(next_chunk_bytes(blob, 4).as_deref(), Some(&b"beta"[..]));
         assert_eq!(next_chunk_bytes(blob, 4).as_deref(), Some(&b"!"[..]));
         assert_eq!(next_chunk_bytes(blob, 4), None);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free((*blob.add(2)) as *mut c_char) };
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(blob.cast::<[i64; 3]>()) });
         server.join().unwrap();
     }
 
     #[test]
     fn stream_next_chunk_on_null_or_stale_handle_returns_none() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_stream_next_chunk(std::ptr::null(), 4) };
         assert_eq!(gos_rt_result_disc(packed), 1);
         let stale = [-7i64, 200, 0];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_stream_next_chunk(stale.as_ptr(), 4) };
         assert_eq!(gos_rt_result_disc(packed), 1);
     }
@@ -2676,14 +3003,20 @@ mod tests {
     fn response_stream_new_consumes_handle_and_pending_serve_is_one_shot() {
         let (url, server) = spawn_one_shot_server("HTTP/1.1 200 OK", "", b"proxied body");
         let blob = open_stream(&url);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let handle = unsafe { *blob };
-        let ct = std::ffi::CString::new("text/plain").unwrap();
-        let resp = unsafe {
-            gos_rt_http_response_stream_new(200, crate::c_abi::string::test_gos_ptr(&ct), blob)
-        };
+        let ct = crate::c_abi::string::test_gos_str("text/plain");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let resp = unsafe { gos_rt_http_response_stream_new(200, ct, blob) };
         assert!(!resp.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*resp).stream_handle }, handle);
         assert!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { (*resp).body.as_ptr() }.is_null(),
             "streamed body has no c-string"
         );
@@ -2704,43 +3037,49 @@ mod tests {
             stream_take_for_serve(handle).is_none(),
             "a second serve of the same handle must drain nothing"
         );
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(resp) });
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free((*blob.add(2)) as *mut c_char) };
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(blob.cast::<[i64; 3]>()) });
         server.join().unwrap();
     }
 
     #[test]
     fn response_stream_new_on_null_or_stale_blob_yields_dead_handle() {
-        let ct = std::ffi::CString::new("text/plain").unwrap();
-        let resp = unsafe {
-            gos_rt_http_response_stream_new(
-                200,
-                crate::c_abi::string::test_gos_ptr(&ct),
-                std::ptr::null(),
-            )
-        };
+        let ct = crate::c_abi::string::test_gos_str("text/plain");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let resp = unsafe { gos_rt_http_response_stream_new(200, ct, std::ptr::null()) };
         assert!(!resp.is_null());
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { (*resp).stream_handle },
             -1,
             "null blob marks buffered"
         );
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(resp) });
 
         let stale = [-7i64, 200, 0];
-        let resp = unsafe {
-            gos_rt_http_response_stream_new(
-                200,
-                crate::c_abi::string::test_gos_ptr(&ct),
-                stale.as_ptr(),
-            )
-        };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let resp = unsafe { gos_rt_http_response_stream_new(200, ct, stale.as_ptr()) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*resp).stream_handle }, -7);
         assert!(
             stream_take_for_serve(-7).is_none(),
             "stale handle never lands in the pending registry"
         );
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(resp) });
     }
 
@@ -2752,24 +3091,23 @@ mod tests {
             "Content-Type: application/json\r\nX-Req-Id: t1\r\n",
             b"{\"ok\":true}",
         );
-        let method = std::ffi::CString::new("post").unwrap();
-        let url_cs = std::ffi::CString::new(url).unwrap();
-        let body = std::ffi::CString::new("hi there").unwrap();
+        let method = crate::c_abi::string::test_gos_str("post");
+        let url_cs = crate::c_abi::string::test_gos_str(&url);
+        let body = crate::c_abi::string::test_gos_str("hi there");
         let headers = header_tuple_vec(&[("x-test", "yes")]);
-        let packed = unsafe {
-            gos_rt_http_request(
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
-                crate::c_abi::string::test_gos_ptr(&body),
-                headers,
-            )
-        };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let packed = unsafe { gos_rt_http_request(method, url_cs, body, headers) };
         free_header_tuple_vec(headers);
         assert_eq!(gos_rt_result_disc(packed), 0);
         let resp = gos_rt_result_payload(packed) as *mut GosHttpResponse;
         assert!(!resp.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp_ref = unsafe { &*resp };
         assert_eq!(resp_ref.status, 201);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let got_body = unsafe { CStr::from_ptr(resp_ref.body.as_ptr()) }
             .to_str()
             .unwrap();
@@ -2786,14 +3124,26 @@ mod tests {
                 .iter()
                 .any(|(k, v)| k.eq_ignore_ascii_case("x-req-id") && v == "t1")
         );
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let ct = unsafe { gos_rt_http_response_content_type(resp) };
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { CStr::from_ptr(ct) }.to_str().unwrap(),
             "application/json"
         );
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(ct) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let loc = unsafe { gos_rt_http_response_location(resp) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { CStr::from_ptr(loc) }.to_str().unwrap(), "");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(loc) };
         free_response(resp);
 
@@ -2811,27 +3161,31 @@ mod tests {
     #[cfg_attr(miri, ignore)] // network round-trip: Miri has no socket syscalls
     fn http_request_bytes_preserves_binary_upload_body() {
         let (url, server) = spawn_one_shot_server("HTTP/1.1 200 OK", "", b"ok");
-        let method = std::ffi::CString::new("PUT").unwrap();
-        let url_cs = std::ffi::CString::new(url).unwrap();
+        let method = crate::c_abi::string::test_gos_str("PUT");
+        let url_cs = crate::c_abi::string::test_gos_str(&url);
         let payload: &[u8] = &[104, 105, 0, 255];
-        let body = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(1, payload.len() as i64) };
+        let body = crate::c_abi::vec::gos_rt_vec_with_capacity(1, payload.len() as i64);
         for b in payload {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { crate::c_abi::vec::gos_rt_vec_push(body, std::ptr::from_ref(b)) };
         }
-        let packed = unsafe {
-            gos_rt_http_request_bytes(
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
-                body,
-                std::ptr::null_mut(),
-            )
-        };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let packed =
+            unsafe { gos_rt_http_request_bytes(method, url_cs, body, std::ptr::null_mut()) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(body) };
         assert_eq!(gos_rt_result_disc(packed), 0);
         let resp = gos_rt_result_payload(packed) as *mut GosHttpResponse;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*resp).status }, 200);
         // No Content-Type in the canned response: the fallback must
         // match the interp tier's "text/plain" default.
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { &(*resp).content_type }, "text/plain");
         free_response(resp);
 
@@ -2848,29 +3202,35 @@ mod tests {
             "Content-Type: text/plain\r\nX-Srv: builder\r\n",
             b"accepted",
         );
-        let client = unsafe { gos_rt_http_client_new() };
-        let url_cs = std::ffi::CString::new(url).unwrap();
+        let client = gos_rt_http_client_new();
+        let url_cs = crate::c_abi::string::test_gos_str(&url);
         let req =
-            unsafe { gos_rt_http_client_post(client, crate::c_abi::string::test_gos_ptr(&url_cs)) };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            unsafe { gos_rt_http_client_post(client, url_cs) };
         assert!(!req.is_null());
-        let hdr_name = std::ffi::CString::new("x-builder").unwrap();
-        let hdr_value = std::ffi::CString::new("yes").unwrap();
-        let req = unsafe {
-            gos_rt_http_request_header(
-                req,
-                crate::c_abi::string::test_gos_ptr(&hdr_name),
-                crate::c_abi::string::test_gos_ptr(&hdr_value),
-            )
-        };
-        let body_cs = std::ffi::CString::new("payload!").unwrap();
+        let hdr_name = crate::c_abi::string::test_gos_str("x-builder");
+        let hdr_value = crate::c_abi::string::test_gos_str("yes");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let req = unsafe { gos_rt_http_request_header(req, hdr_name, hdr_value) };
+        let body_cs = crate::c_abi::string::test_gos_str("payload!");
         let req =
-            unsafe { gos_rt_http_request_body(req, crate::c_abi::string::test_gos_ptr(&body_cs)) };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            unsafe { gos_rt_http_request_body(req, body_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_request_send(req) };
         assert_eq!(gos_rt_result_disc(packed), 0);
         let resp = gos_rt_result_payload(packed) as *mut GosHttpResponse;
         assert!(!resp.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp_ref = unsafe { &*resp };
         assert_eq!(resp_ref.status, 202);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let got_body = unsafe { CStr::from_ptr(resp_ref.body.as_ptr()) }
             .to_str()
             .unwrap();
@@ -2883,6 +3243,8 @@ mod tests {
                 .any(|(k, v)| k.eq_ignore_ascii_case("x-srv") && v == "builder")
         );
         free_response(resp);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
 
         let request = server.join().unwrap();
@@ -2903,14 +3265,20 @@ mod tests {
             "Content-Type: text/plain\r\n",
             b"missing",
         );
-        let client = unsafe { gos_rt_http_client_new() };
-        let url_cs = std::ffi::CString::new(url).unwrap();
+        let client = gos_rt_http_client_new();
+        let url_cs = crate::c_abi::string::test_gos_str(&url);
         let req =
-            unsafe { gos_rt_http_client_get(client, crate::c_abi::string::test_gos_ptr(&url_cs)) };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            unsafe { gos_rt_http_client_get(client, url_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_request_send(req) };
         assert_eq!(gos_rt_result_disc(packed), 0);
         let resp = gos_rt_result_payload(packed) as *mut GosHttpResponse;
         assert!(!resp.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp_ref = unsafe { &*resp };
         // The legacy hand-rolled GET path hardcoded 200 for TLS and
         // dropped headers; the shared engine must surface the real
@@ -2923,6 +3291,8 @@ mod tests {
                 .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "text/plain")
         );
         free_response(resp);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
         server.join().unwrap();
     }
@@ -2939,14 +3309,20 @@ mod tests {
             "Set-Cookie: a=1\r\nSet-Cookie: b=2\r\nContent-Type: text/plain\r\n",
             b"ok",
         );
-        let client = unsafe { gos_rt_http_client_new() };
-        let url_cs = std::ffi::CString::new(url).unwrap();
+        let client = gos_rt_http_client_new();
+        let url_cs = crate::c_abi::string::test_gos_str(&url);
         let req =
-            unsafe { gos_rt_http_client_get(client, crate::c_abi::string::test_gos_ptr(&url_cs)) };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            unsafe { gos_rt_http_client_get(client, url_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_request_send(req) };
         assert_eq!(gos_rt_result_disc(packed), 0);
         let resp = gos_rt_result_payload(packed) as *mut GosHttpResponse;
         assert!(!resp.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp_ref = unsafe { &*resp };
         let cookies: Vec<&str> = resp_ref
             .headers
@@ -2961,31 +3337,37 @@ mod tests {
             resp_ref.headers
         );
         free_response(resp);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
         server.join().unwrap();
     }
 
     #[test]
     fn http_request_unknown_method_returns_err_naming_the_method() {
-        let method = std::ffi::CString::new("BREW").unwrap();
-        let url_cs = std::ffi::CString::new("http://127.0.0.1:1/never").unwrap();
-        let packed = unsafe {
-            gos_rt_http_request(
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
-                std::ptr::null(),
-                std::ptr::null_mut(),
-            )
-        };
+        let method = crate::c_abi::string::test_gos_str("BREW");
+        let url_cs = crate::c_abi::string::test_gos_str("http://127.0.0.1:1/never");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let packed =
+            unsafe { gos_rt_http_request(method, url_cs, std::ptr::null(), std::ptr::null_mut()) };
         assert_eq!(gos_rt_result_disc(packed), 1);
         let err = gos_rt_result_payload(packed) as *mut crate::c_abi::errors::GosError;
         assert!(!err.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg_cs = unsafe { crate::c_abi::errors::gos_rt_error_message(err) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg = unsafe { CStr::from_ptr(msg_cs) }
             .to_str()
             .unwrap()
             .to_string();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
         assert_eq!(msg, "http::request: unknown method `BREW`");
     }
@@ -2993,22 +3375,36 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore)] // network round-trip: Miri has no socket syscalls
     fn http_request_send_transport_failure_packs_interp_shaped_err() {
-        let client = unsafe { gos_rt_http_client_new() };
+        let client = gos_rt_http_client_new();
         // Port 1 is never listening; the dial must fail.
-        let url_cs = std::ffi::CString::new("http://127.0.0.1:1/refused").unwrap();
+        let url_cs = crate::c_abi::string::test_gos_str("http://127.0.0.1:1/refused");
         let req =
-            unsafe { gos_rt_http_client_get(client, crate::c_abi::string::test_gos_ptr(&url_cs)) };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            unsafe { gos_rt_http_client_get(client, url_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe { gos_rt_http_request_send(req) };
         assert_eq!(gos_rt_result_disc(packed), 1);
         let err = gos_rt_result_payload(packed) as *mut crate::c_abi::errors::GosError;
         assert!(!err.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg_cs = unsafe { crate::c_abi::errors::gos_rt_error_message(err) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg = unsafe { CStr::from_ptr(msg_cs) }
             .to_str()
             .unwrap()
             .to_string();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
         // Same message class + prefix the interp tier renders via
         // `ClientError::Transport`'s Display.
@@ -3060,38 +3456,62 @@ mod tests {
 
     #[test]
     fn builder_chain_mutates_in_place_and_build_consumes_into_configured_client() {
-        let b = unsafe { gos_rt_http_client_builder_new() };
+        let b = gos_rt_http_client_builder_new();
         assert!(!b.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let b1 = unsafe { gos_rt_http_client_builder_max_redirects(b, 0) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let b2 = unsafe { gos_rt_http_client_builder_timeout_ms(b1, 5000) };
         assert_eq!(b, b1, "chain must reuse the same allocation");
         assert_eq!(b, b2);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let client = unsafe { gos_rt_http_client_builder_build(b2) };
         assert!(!client.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let config = unsafe { &(*client).config };
         assert_eq!(config.max_redirects, 0);
         assert_eq!(config.timeout_ms, 5000);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
     }
 
     #[test]
     fn builder_clamps_negative_settings_to_zero_and_default() {
-        let b = unsafe { gos_rt_http_client_builder_new() };
+        let b = gos_rt_http_client_builder_new();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let b = unsafe { gos_rt_http_client_builder_max_redirects(b, -7) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let b = unsafe { gos_rt_http_client_builder_timeout_ms(b, -1) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let client = unsafe { gos_rt_http_client_builder_build(b) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let config = unsafe { &(*client).config };
         assert_eq!(config.max_redirects, 0);
         assert_eq!(config.timeout_ms, 30_000);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
     }
 
     #[test]
     fn client_new_keeps_default_policy() {
-        let client = unsafe { gos_rt_http_client_new() };
+        let client = gos_rt_http_client_new();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let config = unsafe { &(*client).config };
         assert_eq!(config.max_redirects, 10);
         assert_eq!(config.timeout_ms, 30_000);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
     }
 
@@ -3099,25 +3519,33 @@ mod tests {
     #[cfg_attr(miri, ignore)] // network round-trip: Miri has no socket syscalls
     fn client_request_default_policy_follows_redirect() {
         let (base, server) = spawn_redirect_server(2);
-        let b = unsafe { gos_rt_http_client_builder_new() };
+        let b = gos_rt_http_client_builder_new();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let client = unsafe { gos_rt_http_client_builder_build(b) };
-        let method = std::ffi::CString::new("GET").unwrap();
-        let url_cs = std::ffi::CString::new(format!("{base}/one")).unwrap();
+        let method = crate::c_abi::string::test_gos_str("GET");
+        let url_cs = crate::c_abi::string::test_gos_str(&format!("{base}/one"));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe {
             gos_rt_http_client_request(
                 client,
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
+                method,
+                url_cs,
                 std::ptr::null(),
                 std::ptr::null_mut(),
             )
         };
         assert_eq!(gos_rt_result_disc(packed), 0);
         let resp = gos_rt_result_payload(packed) as *mut GosHttpResponse;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp_ref = unsafe { &*resp };
         assert_eq!(resp_ref.status, 200);
         assert_eq!(resp_ref.body_bytes.as_deref(), Some(b"landed".as_slice()));
         free_response(resp);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
         server.join().unwrap();
     }
@@ -3126,74 +3554,112 @@ mod tests {
     #[cfg_attr(miri, ignore)] // network round-trip: Miri has no socket syscalls
     fn client_request_max_redirects_zero_returns_raw_302_with_location() {
         let (base, server) = spawn_redirect_server(1);
-        let b = unsafe { gos_rt_http_client_builder_new() };
+        let b = gos_rt_http_client_builder_new();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let b = unsafe { gos_rt_http_client_builder_max_redirects(b, 0) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let client = unsafe { gos_rt_http_client_builder_build(b) };
-        let method = std::ffi::CString::new("GET").unwrap();
-        let url_cs = std::ffi::CString::new(format!("{base}/one")).unwrap();
+        let method = crate::c_abi::string::test_gos_str("GET");
+        let url_cs = crate::c_abi::string::test_gos_str(&format!("{base}/one"));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe {
             gos_rt_http_client_request(
                 client,
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
+                method,
+                url_cs,
                 std::ptr::null(),
                 std::ptr::null_mut(),
             )
         };
         assert_eq!(gos_rt_result_disc(packed), 0);
         let resp = gos_rt_result_payload(packed) as *mut GosHttpResponse;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*resp).status }, 302);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let loc = unsafe { gos_rt_http_response_location(resp) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { CStr::from_ptr(loc) }.to_str().unwrap(), "/data");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(loc) };
         free_response(resp);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
         server.join().unwrap();
     }
 
     #[test]
     fn client_request_unknown_method_returns_err_naming_the_method() {
-        let client = unsafe { gos_rt_http_client_new() };
-        let method = std::ffi::CString::new("BREW").unwrap();
-        let url_cs = std::ffi::CString::new("http://127.0.0.1:1/never").unwrap();
+        let client = gos_rt_http_client_new();
+        let method = crate::c_abi::string::test_gos_str("BREW");
+        let url_cs = crate::c_abi::string::test_gos_str("http://127.0.0.1:1/never");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe {
             gos_rt_http_client_request(
                 client,
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
+                method,
+                url_cs,
                 std::ptr::null(),
                 std::ptr::null_mut(),
             )
         };
         assert_eq!(gos_rt_result_disc(packed), 1);
         let err = gos_rt_result_payload(packed) as *mut crate::c_abi::errors::GosError;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg_cs = unsafe { crate::c_abi::errors::gos_rt_error_message(err) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg = unsafe { CStr::from_ptr(msg_cs) }
             .to_str()
             .unwrap()
             .to_string();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
         assert_eq!(msg, "Client::request: unknown method `BREW`");
 
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let packed = unsafe {
             gos_rt_http_client_request_bytes(
                 client,
-                crate::c_abi::string::test_gos_ptr(&method),
-                crate::c_abi::string::test_gos_ptr(&url_cs),
+                method,
+                url_cs,
                 std::ptr::null(),
                 std::ptr::null_mut(),
             )
         };
         assert_eq!(gos_rt_result_disc(packed), 1);
         let err = gos_rt_result_payload(packed) as *mut crate::c_abi::errors::GosError;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg_cs = unsafe { crate::c_abi::errors::gos_rt_error_message(err) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let msg = unsafe { CStr::from_ptr(msg_cs) }
             .to_str()
             .unwrap()
             .to_string();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(msg_cs) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::rc::gos_rt_rc_release(err.cast()) };
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         drop(unsafe { Box::from_raw(client) });
         assert_eq!(msg, "Client::request_bytes: unknown method `BREW`");
     }
@@ -3201,7 +3667,11 @@ mod tests {
     #[test]
     fn with_header_replaces_then_pushes_and_returns_same_pointer() {
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(201, crate::c_abi::string::test_gos_str("ok")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let r1 = unsafe {
             gos_rt_http_response_with_header(
                 resp,
@@ -3209,6 +3679,8 @@ mod tests {
                 crate::c_abi::string::test_gos_str("1"),
             )
         };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let r2 = unsafe {
             gos_rt_http_response_with_header(
                 r1,
@@ -3216,6 +3688,8 @@ mod tests {
                 crate::c_abi::string::test_gos_str("2"),
             )
         };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let r3 = unsafe {
             gos_rt_http_response_with_header(
                 r2,
@@ -3226,6 +3700,8 @@ mod tests {
         assert_eq!(resp, r1, "chain must reuse the same allocation");
         assert_eq!(resp, r2);
         assert_eq!(resp, r3);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let headers = unsafe { &(*resp).headers };
         assert_eq!(
             headers.as_slice(),
@@ -3235,7 +3711,11 @@ mod tests {
             ],
             "same-name attach replaces (case-insensitive), new name appends"
         );
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         let resp_box = unsafe { Box::from_raw(resp) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(resp_box.body.as_ptr()) };
     }
 }

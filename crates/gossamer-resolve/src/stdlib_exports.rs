@@ -1276,11 +1276,11 @@ pub const STDLIB_QUALIFIED: &[&str] = &[
     "rand::bytes",
     "regex::Pattern::captures",
     "regex::Pattern::captures_all",
-    "regex::Pattern::compile",
     "regex::Pattern::count",
     "regex::Pattern::find",
     "regex::Pattern::find_all",
     "regex::Pattern::is_match",
+    "regex::Pattern::new",
     "regex::Pattern::replace",
     "regex::Pattern::replace_all",
     "regex::Pattern::split",
@@ -1291,6 +1291,7 @@ pub const STDLIB_QUALIFIED: &[&str] = &[
     "regex::find",
     "regex::find_all",
     "regex::is_match",
+    "regex::new",
     "regex::replace",
     "regex::replace_all",
     "regex::split",
@@ -1483,6 +1484,22 @@ pub const STDLIB_QUALIFIED: &[&str] = &[
     "time::Location::name",
     "time::Location::resolve",
     "time::Location::utc",
+    "time::Time::after",
+    "time::Time::before",
+    "time::Time::civil",
+    "time::Time::duration_since",
+    "time::Time::format_rfc3339",
+    "time::Time::from_unix",
+    "time::Time::from_unix_ms",
+    "time::Time::from_unix_nanos",
+    "time::Time::in_location",
+    "time::Time::location",
+    "time::Time::now",
+    "time::Time::parse_rfc3339",
+    "time::Time::unix",
+    "time::Time::unix_ms",
+    "time::Time::unix_nanos",
+    "time::Time::utc",
     "time::__sleep_ns",
     "time::__sleep_ns_ctx",
     "time::add_date",
@@ -2351,6 +2368,7 @@ pub const STDLIB_MANIFEST_ITEMS: &[&str] = &[
     "regex::find",
     "regex::find_all",
     "regex::is_match",
+    "regex::new",
     "regex::replace",
     "regex::replace_all",
     "regex::split",
@@ -2472,6 +2490,7 @@ pub const STDLIB_MANIFEST_ITEMS: &[&str] = &[
     "time::Instant",
     "time::Location",
     "time::SystemTime",
+    "time::Time",
     "time::__sleep_ns",
     "time::__sleep_ns_ctx",
     "time::add_date",
@@ -2619,6 +2638,30 @@ pub fn stdlib_macro_named(path: &str) -> Option<&'static str> {
         .ok()
         .and_then(|idx| STDLIB_MACRO_ITEMS.get(idx).copied())
         .and_then(|entry| entry.rsplit("::").next())
+}
+
+/// True when `module::ty` names a type a stdlib module exports, with `module`
+/// the module's last segment as a program writes it after a `use`.
+#[must_use]
+pub fn is_stdlib_type_path(module: &str, ty: &str) -> bool {
+    let path = format!("{module}::{ty}");
+    let suffix = format!("::{path}");
+    STDLIB_MANIFEST_ITEMS
+        .iter()
+        .any(|item| *item == path || item.ends_with(suffix.as_str()))
+        || table_covers_prefix(STDLIB_QUALIFIED, &path)
+}
+
+/// The associated items the runtime binds on the stdlib type `module::ty`,
+/// named by the module's last segment (`regex`, `Pattern`).
+#[must_use]
+pub fn stdlib_type_member_names(module: &str, ty: &str) -> Vec<&'static str> {
+    let prefix = format!("{module}::{ty}::");
+    let idx = STDLIB_QUALIFIED.partition_point(|candidate| *candidate < prefix.as_str());
+    STDLIB_QUALIFIED[idx..]
+        .iter()
+        .map_while(|candidate| candidate.strip_prefix(prefix.as_str()))
+        .collect()
 }
 
 /// True when some entry of `table` equals `prefix` or extends it by a

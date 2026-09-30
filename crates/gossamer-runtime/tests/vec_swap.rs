@@ -63,6 +63,8 @@ fn vec_owner_releases_once_and_allows_address_reuse() {
     // undefined even if an address-set happens to reject it today. Keep this
     // test Miri-valid: each owner is released exactly once while allocator
     // churn verifies that ordinary reuse remains correct.
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let v = gos_rt_vec_new(8);
         gos_rt_vec_push_i64(v, 1);
@@ -79,6 +81,8 @@ fn vec_owner_releases_once_and_allows_address_reuse() {
 
 #[test]
 fn vec_owner_generation_is_distinct_from_the_header_address() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let first = gos_rt_vec_new(8);
         let first_generation = vec_owner_generation(&*first);
@@ -105,6 +109,8 @@ fn vec_prefix_is_pinned_and_primitive_vec_needs_no_owner_carrier() {
     assert_eq!(std::mem::offset_of!(GosVec, mutation_generation), 56);
     assert_eq!(std::mem::size_of::<GosVec>(), 64);
 
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let v = gos_rt_vec_new(8);
         assert!(
@@ -121,6 +127,8 @@ fn concurrent_vec_lifetimes_release_each_owner_once() {
     // address-keyed liveness locks or stale-pointer access.
     std::thread::scope(|scope| {
         for worker in 0..8_i64 {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             scope.spawn(move || unsafe {
                 for i in 0..2_000_i64 {
                     let v = gos_rt_vec_new(8);

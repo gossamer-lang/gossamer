@@ -638,11 +638,6 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     ),
     (
         "Pattern",
-        "compile",
-        "fn compile(pattern: String) -> Result<regex::Pattern, errors::Error>",
-    ),
-    (
-        "Pattern",
         "count",
         "fn count(self: regex::Pattern, text: String) -> i64",
     ),
@@ -660,6 +655,11 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
         "Pattern",
         "is_match",
         "fn is_match(self: regex::Pattern, text: String) -> bool",
+    ),
+    (
+        "Pattern",
+        "new",
+        "fn new(pattern: String) -> Result<regex::Pattern, errors::Error>",
     ),
     (
         "Pattern",

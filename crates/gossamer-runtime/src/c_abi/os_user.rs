@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 // The C-ABI signatures below return `*mut c_char` on every platform; only the
@@ -28,7 +26,7 @@ use super::*;
 
 /// Login name of the current process user, or empty string.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_os_user_current_name() -> *mut c_char {
+pub extern "C" fn gos_rt_os_user_current_name() -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         #[cfg(unix)]
         let name = {
@@ -46,7 +44,7 @@ pub unsafe extern "C" fn gos_rt_os_user_current_name() -> *mut c_char {
 
 /// uid of the current process user, or -1 on non-unix.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_os_user_current_uid() -> i64 {
+pub extern "C" fn gos_rt_os_user_current_uid() -> i64 {
     ffi_entry!(-1, {
         #[cfg(unix)]
         {
@@ -62,7 +60,7 @@ pub unsafe extern "C" fn gos_rt_os_user_current_uid() -> i64 {
 
 /// gid of the current process user, or -1 on non-unix.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_os_user_current_gid() -> i64 {
+pub extern "C" fn gos_rt_os_user_current_gid() -> i64 {
     ffi_entry!(-1, {
         #[cfg(unix)]
         {
@@ -78,7 +76,7 @@ pub unsafe extern "C" fn gos_rt_os_user_current_gid() -> i64 {
 
 /// Home directory of the current process user.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_os_user_current_home() -> *mut c_char {
+pub extern "C" fn gos_rt_os_user_current_home() -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         #[cfg(unix)]
         let home = {
@@ -127,6 +125,7 @@ pub unsafe extern "C" fn gos_rt_os_user_lookup_name(name: *const c_char) -> i64 
         }
         #[cfg(unix)]
         {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             let n = unsafe { crate::c_abi::gos_str_arg_text(name) };
             use nix::unistd::User;
             match User::from_name(n) {

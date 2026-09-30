@@ -9,6 +9,7 @@ binds to it. Arms must be exhaustive - a non-exhaustive `match` is a
 compile error (`GM0001`), so add a `_` arm only when every remaining case
 genuinely means the same thing.
 
+<!-- fragment -->
 ```gossamer
 let label = match shape {
     Shape::Circle(r) => "round"
@@ -38,6 +39,7 @@ Same-line expression arms use a comma. Block-bodied arms need no comma.
 - Or-patterns `a | b`, `@`-bindings `n @ 1..=3`, and guards `Some(n) if n
   > 0`.
 
+<!-- fragment -->
 ```gossamer
 let kind = match s {
     Shape::Dot => 0,

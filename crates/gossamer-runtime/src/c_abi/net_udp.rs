@@ -19,7 +19,6 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::doc_markdown)]
@@ -40,7 +39,11 @@ fn next_handle() -> i64 {
     NEXT_UDP_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
 
-fn cstr_to_str(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_str(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -63,7 +66,8 @@ fn socket_clone(h: i64) -> Option<Arc<UdpSocket>> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_udp_bind(addr: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let a = cstr_to_str(addr);
+        // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let a = unsafe { cstr_to_str(addr) };
         match UdpSocket::bind(&a) {
             Ok(s) => {
                 let h = next_handle();
@@ -91,8 +95,11 @@ pub unsafe extern "C" fn gos_rt_udp_send_to(
         let Some(sock) = socket_clone(h) else {
             return udp_err("UdpSocket::send_to: stale handle");
         };
-        let bytes = unsafe { super::encoding::gosvec_u8(data) };
-        let target = cstr_to_str(addr);
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
+        // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let target = unsafe { cstr_to_str(addr) };
         match sock.send_to(&bytes, &target) {
             Ok(n) => super::vec::gos_rt_result_new(0, n as i64),
             Err(e) => udp_err(&socket_error(&e, &target)),
@@ -104,7 +111,7 @@ pub unsafe extern "C" fn gos_rt_udp_send_to(
 /// Ok payload is a heap `#[repr(C)] Pair { bytes: i64, addr: i64 }` -
 /// the 2-slot tuple `([u8]-vec, sender-address-string)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_udp_recv_from(h: i64, max: i64) -> i128 {
+pub extern "C" fn gos_rt_udp_recv_from(h: i64, max: i64) -> i128 {
     ffi_entry!(0i128, {
         let Some(sock) = socket_clone(h) else {
             return udp_err("UdpSocket::recv_from: stale handle");
@@ -139,7 +146,7 @@ pub unsafe extern "C" fn gos_rt_udp_recv_from(h: i64, max: i64) -> i128 {
 
 /// `net::UdpSocket::local_addr(handle) -> Result<String, Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_udp_local_addr(h: i64) -> i128 {
+pub extern "C" fn gos_rt_udp_local_addr(h: i64) -> i128 {
     ffi_entry!(0i128, {
         let Some(sock) = socket_clone(h) else {
             return udp_err("UdpSocket::local_addr: stale handle");
@@ -156,7 +163,7 @@ pub unsafe extern "C" fn gos_rt_udp_local_addr(h: i64) -> i128 {
 
 /// `net::UdpSocket::close(handle)`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_udp_close(h: i64) {
+pub extern "C" fn gos_rt_udp_close(h: i64) {
     ffi_entry!((), {
         if let Some(m) = UDP_SOCKETS.lock().as_mut() {
             m.remove(&h);
@@ -196,7 +203,7 @@ mod tests {
 
         let (tx, rx) = mpsc::sync_channel(1);
         crate::sched_global::spawn(Box::new(move || {
-            let result = unsafe { gos_rt_udp_recv_from(handle, 64) };
+            let result = gos_rt_udp_recv_from(handle, 64);
             let is_ok = result & i128::from(u64::MAX) == 0;
             tx.send(is_ok).expect("report receive result");
         }));
@@ -215,6 +222,6 @@ mod tests {
             "UDP receive must return an Ok runtime Result"
         );
         sender.join().expect("sender thread");
-        unsafe { gos_rt_udp_close(handle) };
+        gos_rt_udp_close(handle);
     }
 }

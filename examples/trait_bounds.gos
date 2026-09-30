@@ -33,7 +33,7 @@ impl Shape for Rect {
 
 // Generic over any `Shape`: calls trait methods on the bound parameter.
 fn report<T: Shape>(s: T) -> String {
-    format("{}: {}", s.name(), s.area())
+    f"{s.name()}: {s.area()}"
 }
 
 // A second generic that returns a value derived from the bound methods.
@@ -45,7 +45,7 @@ let sq = Square { side: 4 }
 let r = Rect { width: 3, height: 5 }
 
 // The same generic function serves both concrete types.
-println("{}", report(sq))
-println("{}", report(r))
-println("{}", is_larger_than(sq, 10))
-println("{}", is_larger_than(r, 100))
+println(report(sq))
+println(report(r))
+println(is_larger_than(sq, 10))
+println(is_larger_than(r, 100))

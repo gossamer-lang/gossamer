@@ -33,6 +33,7 @@ fn main() {
 The block is an expression. Its value is `Result<(), errors::Error>`, so
 it binds like any other fallible call and composes with `?`:
 
+<!-- fragment -->
 ```gossamer
 fn stage() -> Result<(), errors::Error> {
     cohort {
@@ -49,6 +50,7 @@ fn stage() -> Result<(), errors::Error> {
 the enclosing cohort, so the block waits for it, reports what went wrong,
 and hands back a `JoinHandle<T>` for the value.
 
+<!-- fragment -->
 ```gossamer
 let outcome = cohort {
     let _a = spawn(|| index_shard(0))
@@ -59,6 +61,7 @@ let outcome = cohort {
 A closure body runs on the child, so an operand that has to be read where
 the spawn is written is bound first:
 
+<!-- fragment -->
 ```gossamer
 let shard = shards[i]
 spawn(|| index_shard(shard))
@@ -87,7 +90,11 @@ function, a method in an `impl` block, a `#[test]` body - must be written
 lexically inside a `cohort { }` in that same function body, at any nesting
 depth and through any number of closures. Anywhere else it is `GT0086`:
 
+<!-- compile_fail GT0086 -->
 ```gossamer
+use std::errors
+use std::sync::channel
+
 fn handle(id: i64) -> Result<i64, errors::Error> {
     let tx, rx = channel()
     spawn(|| tx.send(id))         // GT0086
@@ -110,6 +117,7 @@ the caller to join is the leak this rule exists to refuse.
 A child fails by panicking or by answering `Err`. By default the first
 failure cancels its siblings and becomes the block's error:
 
+<!-- fragment -->
 ```gossamer
 let outcome = cohort {
     let _a = spawn(|| work(1))
@@ -129,6 +137,7 @@ sees it as an operation's ordinary "nothing more is coming" answer: a
 returns early. The child then leaves through its own normal exit path,
 so its `defer` frames and destructors run in order:
 
+<!-- fragment -->
 ```gossamer
 fn worker(rx: Receiver<Job>) -> Result<(), errors::Error> {
     defer println("worker stopped")
@@ -143,6 +152,7 @@ fn worker(rx: Receiver<Job>) -> Result<(), errors::Error> {
 Pure computation is not a cancellation point. A CPU-bound child decides
 where it is willing to stop:
 
+<!-- fragment -->
 ```gossamer
 use std::runtime
 
@@ -179,6 +189,7 @@ above is one, and so is any ordinary call on an outer iteration.
 
 ## Settings
 
+<!-- fragment -->
 ```gossamer
 cohort(policy: Policy::CollectAll) { ... }
 cohort(timeout: 500) { ... }
@@ -225,6 +236,7 @@ cohort(drain: 2000) { ... }
 prints: the cohort's enumeration and its drain report name a labelled child
 by it in place of the bare spawn index.
 
+<!-- fragment -->
 ```gossamer
 let bounded = cohort(drain: 2000) {
     let _a = spawn(|| flush_logs(), reason: "log flush")
@@ -247,6 +259,7 @@ the cohort `main` runs inside, and the one whose drain bounds process exit.
 The two concurrency primitives are `cohort` and `spawn`; everything built on
 them is an ordinary function. Two ship in `std::sync`:
 
+<!-- fragment -->
 ```gossamer
 use std::sync
 
@@ -272,6 +285,7 @@ Cohorts nest, and a nested one is joined before the block containing it
 continues. Cancelling the outer cohort cancels the inner one through the
 same chain a child's own check walks.
 
+<!-- fragment -->
 ```gossamer
 let outcome = cohort {
     let _top = spawn(|| stage_one())

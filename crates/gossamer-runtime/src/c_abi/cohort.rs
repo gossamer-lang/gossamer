@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_truncation)]
 
@@ -633,7 +632,7 @@ pub fn unwind_open_cohorts() {
 
 /// `runtime::cohort_push(policy, timeout_ms, isolation)` - opens a cohort.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_cohort_push(
+pub extern "C" fn gos_rt_cohort_push(
     policy: i64,
     timeout_ms: i64,
     isolation: i64,
@@ -656,7 +655,7 @@ pub unsafe extern "C" fn gos_rt_cohort_push(
 /// `runtime::cohort_join()` - waits for the cohort's children and
 /// answers `Result<(), errors::Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_cohort_join() -> i128 {
+pub extern "C" fn gos_rt_cohort_join() -> i128 {
     ffi_entry!(super::vec::pack_result(0, 0), {
         match join_current() {
             None => super::vec::pack_result(0, 0),
@@ -670,7 +669,7 @@ pub unsafe extern "C" fn gos_rt_cohort_join() -> i128 {
 
 /// `runtime::cohort_pop()` - closes the cohort.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_cohort_pop() {
+pub extern "C" fn gos_rt_cohort_pop() {
     ffi_entry!((), { pop_current() });
 }
 
@@ -678,7 +677,7 @@ pub unsafe extern "C" fn gos_rt_cohort_pop() {
 /// cohort has been cancelled. Source-visible so a CPU-bound child can
 /// cooperate at a point of its own choosing.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_cohort_cancelled() -> i64 {
+pub extern "C" fn gos_rt_cohort_cancelled() -> i64 {
     ffi_entry!(0, { i64::from(current_is_cancelled()) })
 }
 
@@ -686,7 +685,7 @@ pub unsafe extern "C" fn gos_rt_cohort_cancelled() -> i64 {
 /// from inside it, so a child that finds its own answer can wind the
 /// others down without failing.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_cohort_cancel() {
+pub extern "C" fn gos_rt_cohort_cancel() {
     ffi_entry!((), {
         let id = current_cohort();
         if id != 0 {
@@ -920,7 +919,7 @@ fn on_error_name(on_error: i64) -> &'static str {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_cohorts() -> *mut crate::c_abi::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let vec = unsafe {
+        let vec = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
         if vec.is_null() {
@@ -928,6 +927,7 @@ pub unsafe extern "C" fn gos_rt_cohorts() -> *mut crate::c_abi::vec::GosVec {
         }
         for line in cohort_report_lines() {
             let cs = crate::c_abi::string::alloc_cstring(line.as_bytes()) as i64;
+            // SAFETY: `vec` is the fresh non-null vec made above, and `cs` is one 8-byte element.
             unsafe { crate::c_abi::vec::gos_rt_vec_push(vec, std::ptr::addr_of!(cs).cast::<u8>()) };
         }
         vec
@@ -936,7 +936,7 @@ pub unsafe extern "C" fn gos_rt_cohorts() -> *mut crate::c_abi::vec::GosVec {
 
 /// `runtime::root()` - the root cohort's descriptor line as a String.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_cohort_root() -> *mut std::os::raw::c_char {
+pub extern "C" fn gos_rt_cohort_root() -> *mut std::os::raw::c_char {
     ffi_entry!(std::ptr::null_mut(), {
         crate::c_abi::string::alloc_cstring(root_report_line().as_bytes())
     })

@@ -1,5 +1,4 @@
 #![allow(clippy::missing_safety_doc)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 
 //! Runtime support for `std::sync::Shared` - a value one goroutine
 //! publishes and any number reach under a lock.
@@ -28,7 +27,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 type GuardFn = unsafe extern "C" fn(env: *const u8, value: i64) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null/zero env.
-fn env_fn_addr(env: *const u8) -> Option<*const ()> {
+///
+/// # Safety
+///
+/// `env` is null or a live closure environment, whose first word is the
+/// closure's entry address.
+unsafe fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     if env.is_null() {
         return None;
     }
@@ -69,7 +73,7 @@ impl GosShared {
 
 /// Allocate a `sync::Shared` holding `value`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_shared_new(value: i64) -> *mut GosShared {
+pub extern "C" fn gos_rt_shared_new(value: i64) -> *mut GosShared {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosShared {
             inner: parking_lot::Mutex::new(value),
@@ -85,6 +89,7 @@ pub unsafe extern "C" fn gos_rt_shared_get(shared: *mut GosShared) -> i64 {
         if shared.is_null() {
             return 0;
         }
+        // SAFETY: `shared` is a handle from compiled code, checked non-null above and live for the whole call.
         let shared = unsafe { &*shared };
         let value = *shared.inner.lock();
         shared.record_acquire();
@@ -99,6 +104,7 @@ pub unsafe extern "C" fn gos_rt_shared_set(shared: *mut GosShared, value: i64) {
         if shared.is_null() {
             return;
         }
+        // SAFETY: `shared` is a handle from compiled code, checked non-null above and live for the whole call.
         let shared = unsafe { &*shared };
         *shared.inner.lock() = value;
         shared.record_release();
@@ -113,18 +119,21 @@ pub unsafe extern "C" fn gos_rt_shared_with(shared: *mut GosShared, env: *const 
         if shared.is_null() {
             return 0;
         }
+        // SAFETY: `shared` is a handle from compiled code, checked non-null above and live for the whole call.
         let shared = unsafe { &*shared };
         // The guard is held across the callback: a reader must see one
         // whole value, not a state another goroutine is midway through.
         let guard = shared.inner.lock();
         shared.record_acquire();
         let value = *guard;
-        match env_fn_addr(env) {
-            // SAFETY: addr is the callable stored by the closure
-            // lowering; a one-argument closure lowers to the
-            // `fn(env, i64) -> i64` value-thunk shape.
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        match unsafe { env_fn_addr(env) } {
             Some(addr) => {
+                // SAFETY: `addr` is the callable the closure lowering stored, and a one-argument
+                // closure lowers to the `fn(env, i64) -> i64` value-thunk shape.
                 let f: GuardFn = unsafe { std::mem::transmute(addr) };
+                // SAFETY: `f` is that callable, whose environment `env` is live for the call (C-ABI
+                // contract).
                 unsafe { f(env, value) }
             }
             None => value,
@@ -141,14 +150,19 @@ pub unsafe extern "C" fn gos_rt_shared_update(shared: *mut GosShared, env: *cons
         if shared.is_null() {
             return 0;
         }
+        // SAFETY: `shared` is a handle from compiled code, checked non-null above and live for the whole call.
         let shared = unsafe { &*shared };
         let mut guard = shared.inner.lock();
         shared.record_acquire();
         let current = *guard;
-        let next = match env_fn_addr(env) {
-            // SAFETY: see `with`.
+        // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+        let next = match unsafe { env_fn_addr(env) } {
             Some(addr) => {
+                // SAFETY: `addr` is the callable the closure lowering stored, and a one-argument
+                // closure lowers to the `fn(env, i64) -> i64` value-thunk shape.
                 let f: GuardFn = unsafe { std::mem::transmute(addr) };
+                // SAFETY: `f` is that callable, whose environment `env` is live for the call (C-ABI
+                // contract).
                 unsafe { f(env, current) }
             }
             None => current,

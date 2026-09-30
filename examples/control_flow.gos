@@ -39,14 +39,14 @@ fn main() {
         total += n
         n += 1
     }
-    println("while total (0..5): {total}")
+    println(f"while total (0..5): {total}")
 
     // for loop over a range
     let mut product = 1
     for i in 1..6 {
         product *= i
     }
-    println("5! = {product}")
+    println(f"5! = {product}")
 
     // loop { break value }
     let first_square_over_100 = loop {
@@ -58,7 +58,7 @@ fn main() {
         }
         break sq
     }
-    println("first square > 100: {first_square_over_100}")
+    println(f"first square > 100: {first_square_over_100}")
 
     // match with guards (binds the value directly - no `*n` deref)
     for n in [-3, 0, 3, 42] {
@@ -68,13 +68,13 @@ fn main() {
             1..=9 => "single-digit"
             _ => "many"
         }
-        println("{} -> {}", n, label)
+        println(f"{n} -> {label}")
     }
 
     // `if let` over an `Option` - one line where `match` was four.
     let maybe: Option<i64> = Some(7)
     if let Some(n) = maybe {
-        println("got {n}")
+        println(f"got {n}")
     } else {
         println("got nothing")
     }
@@ -86,12 +86,12 @@ fn main() {
         Shape::Line
     ]
     for s in shapes {
-        println("area={}", area(s))
+        println(f"area={area(s)}")
     }
 
     // classification helper
-    println("classify(-5) = {}", classify(-5))
-    println("classify(0)  = {}", classify(0))
-    println("classify(7)  = {}", classify(7))
-    println("classify(99) = {}", classify(99))
+    println(f"classify(-5) = {classify(-5)}")
+    println(f"classify(0)  = {classify(0)}")
+    println(f"classify(7)  = {classify(7)}")
+    println(f"classify(99) = {classify(99)}")
 }

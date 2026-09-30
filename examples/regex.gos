@@ -23,47 +23,31 @@ use std::regex
 
 // Pulls every `key=value` pair out of a config line.
 fn parse_pairs(line: String) -> Vec<Vec<Option<String>>> {
-    let re = match regex::compile("(\\w+)=(\\w+)") {
-        Ok(r) => r
-        Err(e) => { eprintln("bad pattern: {}", e)
-            return #[] }
-    }
+    let re = regex::compile("(\\w+)=(\\w+)")
     regex::captures_all(re, line)
 }
 
 // Digit extraction.
-let digits = match regex::compile("\\d+") {
-    Ok(r) => r
-    Err(e) => { eprintln("bad: {}", e)
-        return }
-}
+let digits = regex::compile("\\d+")
 for hit in regex::find_all(digits, "1 and 22 and 333") {
-    println("digit: {}", hit.2)
+    println(f"digit: {hit.2}")
 }
 
 // Group rewrite: "port=80 host=443" -> "80:port 443:host".
-let kv = match regex::compile("(\\w+)=(\\d+)") {
-    Ok(r) => r
-    Err(e) => { eprintln("bad: {}", e)
-        return }
-}
+let kv = regex::compile("(\\w+)=(\\d+)")
 let rewritten = regex::replace_all(kv, "port=80 host=443", "$2:$1")
-println("rewritten: {rewritten}")
+println(f"rewritten: {rewritten}")
 
 // Structured parse: each row is [full, key, value]. A let-chain
 // binds both capture groups and tests them in one condition.
 for row in parse_pairs("addr=localhost port=8080") {
     if let Some(k) = row[1] && let Some(v) = row[2] {
-        println("  {k} = {v}")
+        println(f"  {k} = {v}")
     }
 }
 
 // Split on any run of commas-with-whitespace.
-let comma = match regex::compile("\\s*,\\s*") {
-    Ok(r) => r
-    Err(e) => { eprintln("bad: {}", e)
-        return }
-}
+let comma = regex::compile("\\s*,\\s*")
 for piece in regex::split(comma, "a,  b , c,d") {
-    println("piece: {piece}")
+    println(f"piece: {piece}")
 }

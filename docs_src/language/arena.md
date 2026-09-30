@@ -4,6 +4,7 @@ An `arena` block gives a span of code its own bump allocator:
 everything allocated while the block runs lands in the arena, and the
 whole arena is freed at once when the block exits.
 
+<!-- fragment -->
 ```gossamer
 fn main() {
     let mut total = 0
@@ -15,7 +16,7 @@ fn main() {
         }
         i += 1
     }
-    println("{}", total)
+    println(f"{total}")
 }
 ```
 
@@ -44,6 +45,7 @@ that everything the body allocates dies at the
 iteration boundary, it wraps the body in an arena for you. Idiomatic
 build-and-discard code gets the bulk-free path with no source change:
 
+<!-- fragment -->
 ```gossamer
 let mut total = 0
 for _ in 0..iterations {
@@ -56,6 +58,7 @@ A sequence combinator's closure body runs once per element, so it is
 analyzed and regioned on the same terms. The two ways to spell one
 iteration perform the same:
 
+<!-- fragment -->
 ```gossamer
 // Same bulk-free as the loop above.
 let total = (0..iterations).map(|_| check(build_tree(depth))).sum()
@@ -126,6 +129,7 @@ for the details.
 
 Compute summaries inside, keep survivors outside:
 
+<!-- fragment -->
 ```gossamer
 let mut best = 0
 arena {

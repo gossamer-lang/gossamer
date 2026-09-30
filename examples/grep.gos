@@ -39,15 +39,15 @@ while scanner.scan() {
         hits += 1
         if !count_only {
             if line_numbers {
-                println("{line_no}:{text}")
+                println(f"{line_no}:{text}")
             } else {
-                println("{text}")
+                println(f"{text}")
             }
         }
     }
 }
 if count_only {
-    println("{hits}")
+    println(f"{hits}")
 }
 if hits == 0 {
     process::exit(1)

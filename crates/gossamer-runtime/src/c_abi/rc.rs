@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 // wasm32 has no mimalloc backend, so it joins the
@@ -354,6 +352,8 @@ const SHARED_RECLAIM_BIT: u32 = 1 << COLOR_SHIFT;
 #[cfg(test)]
 #[inline]
 unsafe fn is_region(h: *const RcHeader) -> bool {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     (unsafe { (*h).strong }) & REGION_BIT != 0
 }
 
@@ -370,12 +370,15 @@ const COLOR_PURPLE: u32 = 3;
 unsafe fn strong_count(h: *const RcHeader) -> u32 {
     // Atomic (relaxed) load: identical codegen to a plain load, but safe to
     // call on a shared object whose count other goroutines mutate atomically.
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     (unsafe { load_strong(h) }) & STRONG_COUNT_MASK
 }
 
 /// Overwrite the count portion of `strong`, preserving the flag bits.
 #[inline]
 unsafe fn set_strong_count(h: *mut RcHeader, count: u32) {
+    // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses during
+    // the call (this `unsafe fn`'s caller).
     let cur = unsafe { (*h).strong };
     // Immortal pin (unit-variant singletons): the count is never
     // mutated - not by retain/release, not by the cycle collector's
@@ -384,6 +387,8 @@ unsafe fn set_strong_count(h: *mut RcHeader, count: u32) {
         return;
     }
     let flags = cur & !STRONG_COUNT_MASK;
+    // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses during
+    // the call (this `unsafe fn`'s caller).
     unsafe { (*h).strong = flags | (count & STRONG_COUNT_MASK) };
 }
 
@@ -402,6 +407,9 @@ unsafe fn set_strong_count(h: *mut RcHeader, count: u32) {
 /// Relaxed atomic load of `strong` - safe to call on shared objects.
 #[inline]
 unsafe fn load_strong(h: *const RcHeader) -> u32 {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller). The count word is
+    // only ever accessed atomically once shared, and an `AtomicU32` has the layout of the `u32`
+    // it views.
     let a = unsafe { AtomicU32::from_ptr(std::ptr::addr_of!((*h).strong).cast_mut()) };
     a.load(Ordering::Relaxed)
 }
@@ -409,6 +417,7 @@ unsafe fn load_strong(h: *const RcHeader) -> u32 {
 /// Whether the object has escaped to another goroutine.
 #[inline]
 unsafe fn is_shared(h: *const RcHeader) -> bool {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     (unsafe { load_strong(h) }) & SHARED_BIT != 0
 }
 
@@ -416,6 +425,7 @@ unsafe fn is_shared(h: *const RcHeader) -> bool {
 /// objects, a plain RMW otherwise. Region / immortal objects untouched.
 #[inline]
 unsafe fn inc_strong(h: *mut RcHeader) {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     let s = unsafe { load_strong(h) };
     if s & REGION_BIT != 0 || s & STRONG_COUNT_MASK == STRONG_IMMORTAL {
         return;
@@ -424,6 +434,8 @@ unsafe fn inc_strong(h: *mut RcHeader) {
         // Count is the low 27 bits; +1 cannot reach SHARED_BIT before
         // 134M live refs (unreachable). Relaxed: a retain needs
         // atomicity, not ordering.
+        // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller). A shared node's
+        // count is only ever accessed atomically.
         let a = unsafe { AtomicU32::from_ptr(std::ptr::addr_of_mut!((*h).strong)) };
         a.fetch_add(1, Ordering::Relaxed);
         return;
@@ -431,6 +443,8 @@ unsafe fn inc_strong(h: *mut RcHeader) {
     let bumped = (s & STRONG_COUNT_MASK)
         .saturating_add(1)
         .min(STRONG_COUNT_MASK);
+    // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses during
+    // the call (this `unsafe fn`'s caller).
     unsafe { (*h).strong = (s & BUFFERED_BIT) | bumped };
 }
 
@@ -449,6 +463,7 @@ struct DecOutcome {
 /// synchronises with the others before reclaiming; plain RMW otherwise.
 #[inline]
 unsafe fn dec_strong(h: *mut RcHeader) -> DecOutcome {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     let s = unsafe { load_strong(h) };
     if s & REGION_BIT != 0 || s & STRONG_COUNT_MASK == STRONG_IMMORTAL {
         return DecOutcome {
@@ -468,6 +483,8 @@ unsafe fn dec_strong(h: *mut RcHeader) -> DecOutcome {
          (double-free, or an untagged/foreign pointer reached RC dispatch)"
     );
     if s & SHARED_BIT != 0 {
+        // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller). A shared node's
+        // count is only ever accessed atomically.
         let a = unsafe { AtomicU32::from_ptr(std::ptr::addr_of_mut!((*h).strong)) };
         let prev = a.fetch_sub(1, Ordering::Release);
         return DecOutcome {
@@ -477,6 +494,8 @@ unsafe fn dec_strong(h: *mut RcHeader) -> DecOutcome {
         };
     }
     let next = (s & STRONG_COUNT_MASK).saturating_sub(1);
+    // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses during
+    // the call (this `unsafe fn`'s caller).
     unsafe { (*h).strong = (s & !STRONG_COUNT_MASK) | (next & STRONG_COUNT_MASK) };
     DecOutcome {
         next,
@@ -493,6 +512,7 @@ unsafe fn dec_strong(h: *mut RcHeader) -> DecOutcome {
 /// the strong count makes at saturation.
 #[inline]
 unsafe fn inc_weak(h: *const RcHeader) {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     let _ = unsafe {
         (*h).weak
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
@@ -509,6 +529,7 @@ unsafe fn inc_weak(h: *const RcHeader) {
 /// block stays pinned (leaked) for good.
 #[inline]
 unsafe fn dec_weak(h: *const RcHeader) -> Option<u8> {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     unsafe {
         (*h).weak
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |w| {
@@ -530,31 +551,41 @@ unsafe fn dec_weak(h: *const RcHeader) -> Option<u8> {
 /// races with no one.
 unsafe fn mark_shared(payload: *mut u8) {
     let base = untag_rc(payload);
-    if base.is_null() || unsafe { in_region_arena(base) } {
+    if base.is_null() || in_region_arena(base) {
         return;
     }
+    // SAFETY: `base` is non-null and outside the region arena (checked above), a candidate the
+    // string probe accepts.
     if unsafe { crate::c_abi::string::is_gos_string(base.cast()) } {
         // A shared string switches to atomic refcounting (it has no RC
         // children to walk), so its concurrent clone/drop cannot tear.
+        // SAFETY: `base` is a live string body (the probe above).
         unsafe { crate::c_abi::string::gos_rt_str_mark_shared(base.cast()) };
         return;
     }
     let mut work: Vec<*mut u8> = vec![base];
     while let Some(p) = work.pop() {
-        if p.is_null() || unsafe { in_region_arena(p) } {
+        if p.is_null() || in_region_arena(p) {
             continue;
         }
+        // SAFETY: `p` is non-null and outside the region arena (checked above), a candidate the
+        // string probe accepts.
         if unsafe { crate::c_abi::string::is_gos_string(p.cast()) } {
             // A child string switches to atomic refcounting; it has no RC
             // children of its own, so there is nothing further to walk.
+            // SAFETY: `p` is a live string body (the probe above).
             unsafe { crate::c_abi::string::gos_rt_str_mark_shared(p.cast()) };
             continue;
         }
+        // SAFETY: `p` is a live counted node reached from the root's children.
         let h = unsafe { header_ptr(p) };
+        // SAFETY: `h` is the header of the live node `p`.
         let s = unsafe { load_strong(h) };
         if s & SHARED_BIT != 0 || s & REGION_BIT != 0 || s & STRONG_COUNT_MASK == STRONG_IMMORTAL {
             continue;
         }
+        // SAFETY: `h` is the header of the live node `p`, whose count is accessed atomically from
+        // here on.
         let a = unsafe { AtomicU32::from_ptr(std::ptr::addr_of_mut!((*h).strong)) };
         // Clear any stale collector color at the thread-local -> shared
         // transition: bit 28 of the color field doubles as the shared
@@ -570,6 +601,7 @@ unsafe fn mark_shared(payload: *mut u8) {
             // This object just transitioned thread-local -> shared.
             rc_shared_inc();
         }
+        // SAFETY: `p` is a live counted node whose children this walk visits.
         unsafe {
             visit_children_raw(p, |c| work.push(c));
             // A container child is reached from other threads through this
@@ -588,19 +620,25 @@ unsafe fn mark_shared(payload: *mut u8) {
 /// entry names.
 unsafe fn mark_shared_child(kind: i64, child: *mut u8) {
     match kind {
+        // SAFETY: a child of kind `RC_CHILD_RC` is a live node or null.
         gossamer_abi::rc::RC_CHILD_RC => unsafe { mark_shared(child) },
+        // SAFETY: a child of kind `RC_CHILD_VEC` is a live `Vec` or null.
         gossamer_abi::rc::RC_CHILD_VEC => unsafe {
             crate::c_abi::vec::gos_rt_vec_mark_shared(child.cast());
         },
+        // SAFETY: a child of kind `RC_CHILD_MAP` is a live `Map` or null.
         gossamer_abi::rc::RC_CHILD_MAP => unsafe {
             crate::c_abi::map::gos_rt_map_mark_shared(child.cast());
         },
+        // SAFETY: a child of kind `RC_CHILD_SET` is a live `Set` or null.
         gossamer_abi::rc::RC_CHILD_SET => unsafe {
             crate::c_abi::set::gos_rt_set_mark_shared(child.cast());
         },
+        // SAFETY: a child of kind `RC_CHILD_DEQUE` is a live deque or null.
         gossamer_abi::rc::RC_CHILD_DEQUE => unsafe {
             crate::c_abi::deque::deque_mark_shared(child.cast());
         },
+        // SAFETY: a child of kind `RC_CHILD_HEAP` is a live heap vec or null.
         gossamer_abi::rc::RC_CHILD_HEAP => unsafe {
             crate::c_abi::vec::gos_rt_vec_mark_shared(child.cast());
         },
@@ -620,6 +658,8 @@ pub unsafe extern "C" fn gos_rt_aggr_mark_shared_children(base: *mut u8, meta: *
     if base.is_null() || meta.is_null() {
         return;
     }
+    // SAFETY: `base` and `meta` are this shim's arguments, non-null (checked above), with `base`
+    // laid out as `meta` describes (C-ABI contract).
     unsafe {
         visit_layout_entry_slots(base, meta, 0, |kind, _slot, child| {
             mark_shared_child(kind, child);
@@ -634,31 +674,43 @@ pub unsafe extern "C" fn gos_rt_aggr_mark_shared_children(base: *mut u8, meta: *
 /// never reach here.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_mark_shared(payload: *mut u8) {
+    // SAFETY: `payload` is this shim's argument, a live counted value or null (C-ABI contract),
+    // which `mark_shared` accepts.
     unsafe { mark_shared(payload) };
 }
 
 #[inline]
 unsafe fn color_of(h: *const RcHeader) -> u32 {
     // Atomic (relaxed) load for the same reason as `strong_count`.
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     ((unsafe { load_strong(h) }) & COLOR_MASK) >> COLOR_SHIFT
 }
 
 #[inline]
 unsafe fn set_color(h: *mut RcHeader, color: u32) {
+    // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses during
+    // the call (this `unsafe fn`'s caller).
     let rest = unsafe { (*h).strong } & !COLOR_MASK;
+    // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses during
+    // the call (this `unsafe fn`'s caller).
     unsafe { (*h).strong = rest | (color << COLOR_SHIFT) };
 }
 
 #[inline]
 unsafe fn is_buffered(h: *const RcHeader) -> bool {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     (unsafe { load_strong(h) }) & BUFFERED_BIT != 0
 }
 
 #[inline]
 unsafe fn set_buffered(h: *mut RcHeader, on: bool) {
     if on {
+        // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses
+        // during the call (this `unsafe fn`'s caller).
         unsafe { (*h).strong |= BUFFERED_BIT };
     } else {
+        // SAFETY: `h` is the header of a live, thread-local node that nothing else accesses
+        // during the call (this `unsafe fn`'s caller).
         unsafe { (*h).strong &= !BUFFERED_BIT };
     }
 }
@@ -671,6 +723,7 @@ unsafe fn set_buffered(h: *mut RcHeader, on: bool) {
 #[inline]
 unsafe fn has_rc_children(payload: *mut u8) -> bool {
     let mut found = false;
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe { visit_rc_children(payload, |_| found = true) };
     found
 }
@@ -794,6 +847,7 @@ pub fn rc_cycles_freed() -> usize {
 /// only remaining references are internal. Buffered once (deduplicated by
 /// the header bit); the buffer auto-collects when it crosses the threshold.
 unsafe fn possible_root(payload: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let h = unsafe { header_ptr(payload) };
     // Objects that have escaped to another goroutine are excluded from
     // the per-thread cycle collector - touching their flag bits here is a
@@ -801,20 +855,27 @@ unsafe fn possible_root(payload: *mut u8) {
     // retain/release, and even reading their payload slots races the
     // owning goroutine's mutations. Their cycles leak (like `Arc`);
     // break with weak refs.
+    // SAFETY: `h` is the header of the live node `payload`.
     if unsafe { is_shared(h) } {
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     if !unsafe { has_rc_children(payload) } {
         return;
     }
     // Color purple marks a candidate; skip if already a tracked root.
+    // SAFETY: `h` is the header of the live node `payload`.
     if unsafe { color_of(h) } == COLOR_PURPLE {
         return;
     }
+    // SAFETY: `h` is the header of the live, thread-local node `payload` (not shared, checked
+    // above).
     unsafe { set_color(h, COLOR_PURPLE) };
+    // SAFETY: `h` is the header of the live node `payload`.
     if unsafe { is_buffered(h) } {
         return;
     }
+    // SAFETY: `h` is the header of the live, thread-local node `payload`.
     unsafe { set_buffered(h, true) };
     let over = ROOTS.with(|r| {
         let mut roots = r.borrow_mut();
@@ -824,6 +885,8 @@ unsafe fn possible_root(payload: *mut u8) {
     if over {
         // Automatic collection processes a bounded slice and adapts the
         // threshold; it never drains the whole buffer in one inline pass.
+        // SAFETY: collection runs on the owning thread, whose root buffer keeps every candidate
+        // alive.
         unsafe { collect_cycles_budgeted(Some(COLLECT_SLICE_ROOTS)) };
     }
 }
@@ -834,13 +897,17 @@ unsafe fn possible_root(payload: *mut u8) {
 /// releases. A candidate already extracted into an active collector slice is
 /// not in the queue, so its pin remains intact until that slice finishes.
 unsafe fn try_reclaim_zero(payload: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is the header of the live node `payload`.
     if unsafe { is_buffered(h) } {
         let removed = ROOTS.with(|roots| roots.borrow_mut().remove(payload));
         if removed {
+            // SAFETY: `h` is the header of the live, thread-local node `payload`.
             unsafe { set_buffered(h, false) };
         }
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe { try_reclaim(payload) };
 }
 
@@ -886,6 +953,7 @@ unsafe fn try_reclaim_zero(payload: *mut u8) {
 fn rc_block_alloc_zeroed(total: usize) -> *mut u8 {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
+        // SAFETY: `mi_zalloc` accepts any size and answers null on failure.
         unsafe { libmimalloc_sys::mi_zalloc(total).cast() }
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
@@ -893,6 +961,7 @@ fn rc_block_alloc_zeroed(total: usize) -> *mut u8 {
         let Ok(layout) = Layout::from_size_align(total, RC_ALIGN) else {
             return std::ptr::null_mut();
         };
+        // SAFETY: `layout` has the non-zero size of a header plus payload.
         let base = unsafe { alloc_zeroed(layout) };
         if !base.is_null() {
             tsan_sizes().lock().insert(base as usize, total);
@@ -913,8 +982,11 @@ fn rc_block_alloc_unzeroed(total: usize) -> *mut u8 {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
         if total <= MI_SMALL_SIZE_MAX {
+            // SAFETY: `mi_malloc_small` accepts a size up to `MI_SMALL_SIZE_MAX` (checked above)
+            // and answers null on failure.
             unsafe { libmimalloc_sys::mi_malloc_small(total).cast() }
         } else {
+            // SAFETY: `mi_malloc` accepts any size and answers null on failure.
             unsafe { libmimalloc_sys::mi_malloc(total).cast() }
         }
     }
@@ -929,6 +1001,8 @@ fn rc_block_alloc_unzeroed(total: usize) -> *mut u8 {
 unsafe fn rc_block_free(base: *mut u8) {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
+        // SAFETY: this `unsafe fn`'s caller passes `base` a block from `rc_block_alloc_*` that
+        // nothing uses afterwards.
         unsafe { libmimalloc_sys::mi_free(base.cast()) };
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
@@ -940,6 +1014,8 @@ unsafe fn rc_block_free(base: *mut u8) {
             .remove(&(base as usize))
             .unwrap_or(RC_HEADER_SIZE);
         if let Ok(layout) = Layout::from_size_align(total, RC_ALIGN) {
+            // SAFETY: `base` was allocated with this layout by the allocation path above, and
+            // this is its one free.
             unsafe { dealloc(base, layout) };
         }
     }
@@ -1044,12 +1120,15 @@ fn meta_intern_slow(key: usize, slot: usize) -> Option<u16> {
 /// The child-layout blob for a header, or null for leaves.
 #[inline]
 unsafe fn meta_of(h: *const RcHeader) -> *const i64 {
+    // SAFETY: `h` is the header of a live node (this `unsafe fn`'s caller).
     let id = unsafe { (*h).meta_id } as usize;
     META_TABLE[id].load(Ordering::Acquire) as *const i64
 }
 
 #[inline]
 unsafe fn header_ptr(payload: *mut u8) -> *mut RcHeader {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node, whose header sits
+    // `RC_HEADER_SIZE` bytes before it.
     unsafe { payload.sub(RC_HEADER_SIZE) as *mut RcHeader }
 }
 
@@ -1274,7 +1353,9 @@ fn region_arena_base() -> usize {
         Err(winner) => {
             // Lost the race; release our reservation.
             if !reserved.is_null() {
-                arena_release(reserved, REGION_ARENA_BYTES);
+                // SAFETY: `reserved` is the mapping `arena_reserve` made above, which lost the
+                // race and is used nowhere.
+                unsafe { arena_release(reserved, REGION_ARENA_BYTES) };
             }
             winner
         }
@@ -1301,20 +1382,31 @@ fn arena_reserve(len: usize) -> *mut u8 {
     }
 }
 
+/// # Safety
+///
+/// `p` and `len` name a mapping `arena_reserve` made, which nothing uses
+/// afterwards.
 #[cfg(unix)]
-fn arena_release(p: *mut u8, len: usize) {
+unsafe fn arena_release(p: *mut u8, len: usize) {
     // SAFETY: releasing exactly the mapping created in arena_reserve.
     unsafe { libc::munmap(p.cast(), len) };
 }
 
+/// # Safety
+///
+/// `p` and `len` name a range inside a reservation `arena_reserve` made.
 #[cfg(unix)]
-fn arena_commit(p: *mut u8, len: usize) -> bool {
+unsafe fn arena_commit(p: *mut u8, len: usize) -> bool {
     // SAFETY: p..p+len lies inside our reservation.
     unsafe { libc::mprotect(p.cast(), len, libc::PROT_READ | libc::PROT_WRITE) == 0 }
 }
 
+/// # Safety
+///
+/// `p` and `len` name a range inside a reservation `arena_reserve` made, whose
+/// contents nothing reads again before they are written.
 #[cfg(unix)]
-fn arena_decommit(p: *mut u8, len: usize) {
+unsafe fn arena_decommit(p: *mut u8, len: usize) {
     // Return the physical pages; keep the address range reserved.
     // SAFETY: range lies inside our reservation.
     unsafe {
@@ -1329,22 +1421,33 @@ fn arena_reserve(len: usize) -> *mut u8 {
     unsafe { VirtualAlloc(std::ptr::null(), len, MEM_RESERVE, PAGE_NOACCESS).cast() }
 }
 
+/// # Safety
+///
+/// `p` and `len` name a mapping `arena_reserve` made, which nothing uses
+/// afterwards.
 #[cfg(windows)]
-fn arena_release(p: *mut u8, _len: usize) {
+unsafe fn arena_release(p: *mut u8, _len: usize) {
     use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
     // SAFETY: releasing exactly the reservation from arena_reserve.
     unsafe { VirtualFree(p.cast(), 0, MEM_RELEASE) };
 }
 
+/// # Safety
+///
+/// `p` and `len` name a range inside a reservation `arena_reserve` made.
 #[cfg(windows)]
-fn arena_commit(p: *mut u8, len: usize) -> bool {
+unsafe fn arena_commit(p: *mut u8, len: usize) -> bool {
     use windows_sys::Win32::System::Memory::{MEM_COMMIT, PAGE_READWRITE, VirtualAlloc};
     // SAFETY: committing pages inside our reservation.
     !unsafe { VirtualAlloc(p.cast(), len, MEM_COMMIT, PAGE_READWRITE) }.is_null()
 }
 
+/// # Safety
+///
+/// `p` and `len` name a range inside a reservation `arena_reserve` made, whose
+/// contents nothing reads again before they are written.
 #[cfg(windows)]
-fn arena_decommit(p: *mut u8, len: usize) {
+unsafe fn arena_decommit(p: *mut u8, len: usize) {
     use windows_sys::Win32::System::Memory::{MEM_DECOMMIT, VirtualFree};
     // SAFETY: decommitting pages inside our reservation.
     unsafe { VirtualFree(p.cast(), len, MEM_DECOMMIT) };
@@ -1360,16 +1463,27 @@ fn arena_reserve(_len: usize) -> *mut u8 {
     std::ptr::null_mut()
 }
 
+/// # Safety
+///
+/// `p` and `len` name a mapping `arena_reserve` made, which nothing uses
+/// afterwards.
 #[cfg(not(any(unix, windows)))]
-fn arena_release(_p: *mut u8, _len: usize) {}
+unsafe fn arena_release(_p: *mut u8, _len: usize) {}
 
+/// # Safety
+///
+/// `p` and `len` name a range inside a reservation `arena_reserve` made.
 #[cfg(not(any(unix, windows)))]
-fn arena_commit(_p: *mut u8, _len: usize) -> bool {
+unsafe fn arena_commit(_p: *mut u8, _len: usize) -> bool {
     false
 }
 
+/// # Safety
+///
+/// `p` and `len` name a range inside a reservation `arena_reserve` made, whose
+/// contents nothing reads again before they are written.
 #[cfg(not(any(unix, windows)))]
-fn arena_decommit(_p: *mut u8, _len: usize) {}
+unsafe fn arena_decommit(_p: *mut u8, _len: usize) {}
 
 /// Carve (or re-commit) a slab of `slab_size` bytes from the arena.
 /// Null when the arena is unavailable or exhausted - callers fall back
@@ -1391,6 +1505,7 @@ fn os_page_size() -> usize {
     #[cfg(windows)]
     let size = {
         use windows_sys::Win32::System::SystemInformation::{GetSystemInfo, SYSTEM_INFO};
+        // SAFETY: `SYSTEM_INFO` is a plain C struct whose all-zero value is valid.
         let mut info: SYSTEM_INFO = unsafe { std::mem::zeroed() };
         // SAFETY: GetSystemInfo fills the struct; no preconditions.
         unsafe { GetSystemInfo(&raw mut info) };
@@ -1414,7 +1529,8 @@ fn arena_acquire(slab_size: usize) -> *mut u8 {
         if let Some(index) = REGION_ARENA_FREE.pop() {
             let off = index * REGION_SLAB_BYTES;
             let p = (base + off) as *mut u8;
-            if arena_commit(p, slab_size) {
+            // SAFETY: `p` is a free slab's range inside the reservation starting at `base`.
+            if unsafe { arena_commit(p, slab_size) } {
                 REGION_ARENA_FREE_POPS.fetch_add(1, Ordering::Relaxed);
                 return p;
             }
@@ -1440,7 +1556,9 @@ fn arena_acquire(slab_size: usize) -> *mut u8 {
         return std::ptr::null_mut();
     }
     let p = (base + off) as *mut u8;
-    if arena_commit(p, rounded) {
+    // SAFETY: `p` and `rounded` name a range inside the reservation starting at `base` (bounds
+    // checked above).
+    if unsafe { arena_commit(p, rounded) } {
         p
     } else {
         std::ptr::null_mut()
@@ -1450,9 +1568,15 @@ fn arena_acquire(slab_size: usize) -> *mut u8 {
 /// Decommit a no-longer-needed standard slab and remember its offset
 /// for re-commit. Oversized slabs are decommitted and their address
 /// range retired (rare; bounded by peak oversized use).
-fn arena_retire(p: *mut u8, slab_size: usize) {
+///
+/// # Safety
+///
+/// `p` is a slab `arena_acquire` returned, `slab_size` bytes long, which
+/// nothing uses afterwards.
+unsafe fn arena_retire(p: *mut u8, slab_size: usize) {
     let base = REGION_ARENA_BASE.load(Ordering::Relaxed);
-    arena_decommit(p, slab_size);
+    // SAFETY: this function's contract covers `p`, `slab_size`, as `arena_decommit` requires.
+    unsafe { arena_decommit(p, slab_size) };
     if slab_size == REGION_SLAB_BYTES {
         let off = p as usize - base;
         debug_assert_eq!(off % REGION_SLAB_BYTES, 0);
@@ -1494,8 +1618,9 @@ pub(crate) struct ArenaState {
     bump_objs: usize,
 }
 
-// Region slabs are uniquely owned by the suspended goroutine. They are moved
-// only between scheduler steps, when no worker can concurrently access them.
+// SAFETY: region slabs are uniquely owned by the suspended goroutine. They are
+// moved only between scheduler steps, when no worker can concurrently access
+// them.
 unsafe impl Send for ArenaState {}
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
@@ -1725,6 +1850,8 @@ fn region_alloc_inner_impl(total: usize, count_obj: bool, zero: bool) -> *mut u8
     let ptr = BUMP.with(|b| {
         let st = b.get();
         if !st.base.is_null() && st.cur + need <= st.end {
+            // SAFETY: `st.cur + need <= st.end` (checked above), so the address lies inside the
+            // bump slab.
             let p = unsafe { st.base.add(st.cur) };
             b.set(BumpState {
                 cur: st.cur + need,
@@ -1748,6 +1875,7 @@ fn region_alloc_inner_impl(total: usize, count_obj: bool, zero: bool) -> *mut u8
     // allocated, and codegen relies on every allocation starting zeroed -
     // except for callers that provably overwrite every byte.
     if zero {
+        // SAFETY: `ptr` addresses the `need` bytes just handed out.
         unsafe { std::ptr::write_bytes(ptr, 0, need) };
     }
     if count_obj {
@@ -1885,7 +2013,9 @@ pub extern "C" fn gos_rt_arena_pop() {
                 continue;
             }
         }
-        arena_retire(base, size);
+        // SAFETY: `base` is the slab this region acquired, `size` bytes long, which the region no
+        // longer uses.
+        unsafe { arena_retire(base, size) };
     }
 }
 
@@ -1919,6 +2049,8 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_tagged(size: u64, meta: *const i64) -> 
     let hit = BUMP.with(|b| {
         let st = b.get();
         if !st.base.is_null() && st.cur + need <= st.end {
+            // SAFETY: `st.cur + need <= st.end` (checked above), so the address lies inside the
+            // bump slab.
             let p = unsafe { st.base.add(st.cur) };
             b.set(BumpState {
                 cur: st.cur + need,
@@ -1954,9 +2086,11 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_tagged(size: u64, meta: *const i64) -> 
     let _ = in_region;
     let base = rc_block_alloc_unzeroed(total);
     if base.is_null() {
+        // SAFETY: `meta` is this shim's argument, null or a live meta table (C-ABI contract).
         return unsafe { gos_rt_rc_alloc(size, meta) };
     }
     let h = base as *mut RcHeader;
+    // SAFETY: `base` is non-null (checked above), a fresh block of at least a header's size.
     unsafe {
         (*h).strong = 1;
         (*h).weak = AtomicU8::new(0);
@@ -1965,11 +2099,13 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_tagged(size: u64, meta: *const i64) -> 
     }
     rc_live_inc();
     let usable = if crate::c_abi::ledger::rc_alloc_stats_enabled() {
+        // SAFETY: `base` is the fresh block from the global allocator.
         unsafe { rc_block_usable_size(base) }
     } else {
         0
     };
     crate::c_abi::ledger::rc_alloc(size as usize, usable, false, false);
+    // SAFETY: the block holds the header followed by the payload.
     unsafe { base.add(RC_HEADER_SIZE) }
 }
 
@@ -1985,6 +2121,7 @@ pub(crate) unsafe fn rc_alloc_global(size: u64, meta: *const i64) -> *mut u8 {
         return std::ptr::null_mut();
     }
     let h = base as *mut RcHeader;
+    // SAFETY: `base` is non-null (checked above), a fresh block of at least a header's size.
     unsafe {
         (*h).strong = 1;
         (*h).weak = AtomicU8::new(0);
@@ -1993,11 +2130,13 @@ pub(crate) unsafe fn rc_alloc_global(size: u64, meta: *const i64) -> *mut u8 {
     }
     rc_live_inc();
     let usable = if crate::c_abi::ledger::rc_alloc_stats_enabled() {
+        // SAFETY: `base` is the fresh block from the global allocator.
         unsafe { rc_block_usable_size(base) }
     } else {
         0
     };
     crate::c_abi::ledger::rc_alloc(size as usize, usable, false, false);
+    // SAFETY: the block holds the header followed by the payload.
     unsafe { base.add(RC_HEADER_SIZE) }
 }
 
@@ -2023,6 +2162,7 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
         return std::ptr::null_mut();
     }
     let h = base as *mut RcHeader;
+    // SAFETY: `base` is non-null (checked above), a fresh block of at least a header's size.
     unsafe {
         (*h).strong = if in_region { 1 | REGION_BIT } else { 1 };
         (*h).weak = AtomicU8::new(0);
@@ -2033,11 +2173,13 @@ pub unsafe extern "C" fn gos_rt_rc_alloc(size: u64, meta: *const i64) -> *mut u8
     let usable = if in_region {
         total
     } else if crate::c_abi::ledger::rc_alloc_stats_enabled() {
+        // SAFETY: `base` is the fresh block from the global allocator.
         unsafe { rc_block_usable_size(base) }
     } else {
         0
     };
     crate::c_abi::ledger::rc_alloc(size as usize, usable, in_region, false);
+    // SAFETY: the block holds the header followed by the payload.
     unsafe { base.add(RC_HEADER_SIZE) }
 }
 
@@ -2063,6 +2205,8 @@ pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
         if base.is_null() {
             return std::ptr::null_mut();
         }
+        // SAFETY: `base` is non-null (checked above), a fresh block of a header plus eight
+        // payload bytes.
         unsafe {
             let h = base as *mut RcHeader;
             (*h).strong = STRONG_IMMORTAL;
@@ -2098,6 +2242,7 @@ pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
     let slot = &SINGLETONS[tag as usize];
     let existing = slot.load(Ordering::Acquire);
     if !existing.is_null() {
+        // SAFETY: `existing` is the cached singleton, pinned for the process.
         unsafe { gos_rt_rc_retain(existing) };
         return existing;
     }
@@ -2112,12 +2257,15 @@ pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
         Ordering::Acquire,
     ) {
         Ok(_) => {
+            // SAFETY: `fresh` is the singleton just installed.
             unsafe { gos_rt_rc_retain(fresh) };
             fresh
         }
         Err(winner) => {
             // Lost the race - drop the redundant node, share the winner's.
+            // SAFETY: `fresh` lost the race, so this call holds its only share.
             unsafe { gos_rt_rc_release(fresh) };
+            // SAFETY: `winner` is the installed singleton, pinned for the process.
             unsafe { gos_rt_rc_retain(winner) };
             winner
         }
@@ -2129,6 +2277,7 @@ pub extern "C" fn gos_rt_enum_unit(tag: i64) -> *mut u8 {
 pub unsafe extern "C" fn gos_rt_rc_retain(payload: *mut u8) {
     let payload = untag_rc(payload);
     if is_odd_string_repr(payload) {
+        // SAFETY: `payload` is an odd-tagged string representation (the probe above).
         unsafe { crate::c_abi::string::gos_rt_str_retain(payload.cast()) };
         return;
     }
@@ -2144,11 +2293,14 @@ pub unsafe extern "C" fn gos_rt_rc_retain(payload: *mut u8) {
     // No string check here: a string body is odd-addressed and was routed
     // above, and `untag_rc` leaves every surviving pointer 8-aligned, which
     // the string carrier's low-bit shape can never match.
+    // SAFETY: `payload` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
     let h = unsafe { header_ptr(payload) };
     // `inc_strong` reads `strong` atomically and dispatches: region /
     // immortal objects are no-ops; escaped (shared) objects bump the
     // count atomically; thread-local objects take the cheap non-atomic
     // bump (count up, color back to black, buffered bit preserved).
+    // SAFETY: `h` is the header of this shim's live counted argument (C-ABI contract).
     unsafe { inc_strong(h) };
 }
 
@@ -2159,6 +2311,8 @@ pub unsafe extern "C" fn gos_rt_rc_retain(payload: *mut u8) {
 pub unsafe extern "C" fn gos_rt_rc_release(payload: *mut u8) {
     let payload = untag_rc(payload);
     if is_odd_string_repr(payload) {
+        // SAFETY: `payload` is an odd-tagged string representation (the probe above), whose share
+        // this release gives back.
         unsafe { crate::c_abi::string::gos_rt_str_free(payload.cast()) };
         return;
     }
@@ -2170,6 +2324,8 @@ pub unsafe extern "C" fn gos_rt_rc_release(payload: *mut u8) {
     if !payload.is_null() {
         crate::c_abi::ledger::benchmark_arc_release();
     }
+    // SAFETY: `payload` is this shim's counted argument, null or live, whose share it gives back
+    // (C-ABI contract).
     unsafe { rc_release_impl(payload) };
 }
 
@@ -2186,11 +2342,16 @@ pub unsafe fn rc_release_no_buffer(payload: *mut u8) {
     if payload.is_null() || in_region_arena(payload) {
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` live; non-null, checked above.
     if unsafe { crate::c_abi::string::is_gos_string(payload.cast()) } {
+        // SAFETY: `payload` is a live string body (the probe above), whose share this release
+        // gives back.
         unsafe { crate::c_abi::string::gos_rt_str_free(payload.cast()) };
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` live; non-null, checked above.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is the header of the live node `payload`.
     let d = unsafe { dec_strong(h) };
     if d.skip {
         return;
@@ -2205,22 +2366,27 @@ pub unsafe fn rc_release_no_buffer(payload: *mut u8) {
         // A shared object's flag bits are never mutated non-atomically;
         // `try_reclaim` takes the atomic claim path. A stale buffered pin
         // defers the free to the owning thread's next collection slice.
+        // SAFETY: `payload` is a live node whose count just reached zero.
         unsafe { try_reclaim(payload) };
         return;
     }
+    // SAFETY: `h` is the header of the live, thread-local node `payload`.
     unsafe { set_color(h, COLOR_BLACK) };
     // Clear any buffered pin a prior release may have set so `try_reclaim`
     // frees the block now rather than leaving it for the collector. The pin
     // and the candidate-buffer entry are dropped together: a freed block
     // must never linger in `ROOTS`, or a later collection dereferences it.
+    // SAFETY: `h` is the header of the live node `payload`.
     if unsafe { is_buffered(h) } {
         ROOTS.with(|r| {
             r.borrow_mut().remove(payload);
         });
+        // SAFETY: `h` is the header of the live, thread-local node `payload`.
         unsafe { set_buffered(h, false) };
     }
     // Child slots are already cleared by the caller, so there are no
     // children to release here.
+    // SAFETY: `payload` is a live node whose count just reached zero.
     unsafe { try_reclaim(payload) };
 }
 
@@ -2237,9 +2403,11 @@ pub unsafe fn rc_release_no_buffer(payload: *mut u8) {
 #[must_use]
 pub(crate) unsafe fn rc_payload_is_shared(payload: *mut u8) -> bool {
     let base = untag_rc(payload);
-    if base.is_null() || unsafe { in_region_arena(base) } {
+    if base.is_null() || in_region_arena(base) {
         return false;
     }
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe { is_shared(header_ptr(base)) }
 }
 
@@ -2248,10 +2416,13 @@ pub unsafe fn rc_strong_count(payload: *mut u8) -> i64 {
     if payload.is_null() || in_region_arena(payload) {
         return 0;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` live; non-null, checked above.
     if unsafe { crate::c_abi::string::is_gos_string(payload.cast()) } {
         return 0;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` live; non-null, checked above.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is the header of the live node `payload`.
     let count = unsafe { strong_count(h) };
     if count == STRONG_IMMORTAL {
         return 0;
@@ -2276,7 +2447,10 @@ pub unsafe extern "C" fn gos_rt_rc_downgrade(payload: *mut u8) -> *mut u8 {
     if base.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `base` is non-null (checked above) and this shim's live counted argument (C-ABI
+    // contract).
     let h = unsafe { header_ptr(base) };
+    // SAFETY: `h` is the header of that live node.
     unsafe { inc_weak(h) };
     payload
 }
@@ -2293,7 +2467,10 @@ pub unsafe extern "C" fn gos_rt_rc_weak_retain(payload: *mut u8) {
     if payload.is_null() {
         return;
     }
+    // SAFETY: `payload` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is the header of this shim's live argument.
     unsafe { inc_weak(h) };
 }
 
@@ -2310,12 +2487,16 @@ pub unsafe extern "C" fn gos_rt_rc_weak_release(payload: *mut u8) {
     if payload.is_null() {
         return;
     }
+    // SAFETY: `payload` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
     let h = unsafe { header_ptr(payload) };
     // `dec_weak` returns the old weak count; the new value is prev - 1. When
     // prev == 1 the count just reached 0, so the allocation can be reclaimed
     // if nothing else pins it. A count pinned at `u8::MAX` yields `None` and
     // is never decremented, so a saturated block is never reclaimed.
+    // SAFETY: `h` is the header of this shim's live weak referent (C-ABI contract).
     if unsafe { dec_weak(h) } == Some(1) {
+        // SAFETY: `payload` is the weak referent, whose last weak share just went.
         unsafe { try_reclaim(payload) };
     }
 }
@@ -2335,7 +2516,9 @@ unsafe fn weak_upgrade_take(payload: *mut u8) -> *mut u8 {
     if base.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `base` is non-null (checked above), a block the weak reference keeps allocated.
     let h = unsafe { header_ptr(base) };
+    // SAFETY: `h` is the header of the block the weak reference keeps allocated.
     let s = unsafe { load_strong(h) };
     let count = s & STRONG_COUNT_MASK;
     if count == 0 {
@@ -2345,6 +2528,7 @@ unsafe fn weak_upgrade_take(payload: *mut u8) -> *mut u8 {
         // CAS loop: atomically upgrade only while the strong count remains
         // non-zero. Two goroutines upgrading the same weak reference
         // simultaneously must not both succeed after the referent dies.
+        // SAFETY: `h` is that header; a shared node's count is only ever accessed atomically.
         let a = unsafe { AtomicU32::from_ptr(std::ptr::addr_of_mut!((*h).strong)) };
         let mut cur = s;
         loop {
@@ -2358,11 +2542,13 @@ unsafe fn weak_upgrade_take(payload: *mut u8) -> *mut u8 {
         }
     } else {
         // Thread-local object: no concurrent writer exists.
+        // SAFETY: `h` is the header of a thread-local node, which no other thread writes.
         unsafe { set_strong_count(h, count.saturating_add(1)) };
         // Color black so a later cycle scan treats the revived object as
         // live. Shared objects never enter the collector and their color
         // bits carry the reclaim-claim flag, so only the thread-local path
         // recolors.
+        // SAFETY: `h` is the header of a thread-local node, which no other thread writes.
         unsafe { set_color(h, COLOR_BLACK) };
     }
     payload
@@ -2373,6 +2559,8 @@ unsafe fn weak_upgrade_take(payload: *mut u8) -> *mut u8 {
 /// payload; otherwise return null (the `None` shape). Null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_weak_upgrade(payload: *mut u8) -> *mut u8 {
+    // SAFETY: `payload` is this shim's weak argument, a block its weak share keeps allocated
+    // (C-ABI contract).
     unsafe { weak_upgrade_take(payload) }
 }
 
@@ -2391,6 +2579,8 @@ pub unsafe extern "C" fn gos_rt_rc_weak_upgrade(payload: *mut u8) -> *mut u8 {
 /// until its binding dies. Null-safe (returns `None`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_weak_upgrade_opt(payload: *mut u8) -> i128 {
+    // SAFETY: `payload` is this shim's weak argument, a block its weak share keeps allocated
+    // (C-ABI contract).
     let taken = unsafe { weak_upgrade_take(payload) };
     if taken.is_null() {
         crate::c_abi::vec::pack_result(1, 0)
@@ -2405,16 +2595,21 @@ pub unsafe extern "C" fn gos_rt_rc_weak_upgrade_opt(payload: *mut u8) -> i128 {
 /// thread-local block the checks need no atomicity (single mutator); a
 /// shared block routes through the CAS claim in [`try_reclaim_shared`].
 unsafe fn try_reclaim(payload: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is the header of the live node `payload`.
     let s = unsafe { load_strong(h) };
     if s & SHARED_BIT != 0 {
+        // SAFETY: `h` is `payload`'s header, and the node is shared.
         unsafe { try_reclaim_shared(payload, h) };
         return;
     }
     if s & STRONG_COUNT_MASK == 0
         && s & BUFFERED_BIT == 0
+        // SAFETY: `h` is the header of the live node `payload`.
         && unsafe { (*h).weak.load(Ordering::Relaxed) } == 0
     {
+        // SAFETY: `payload` has no strong, weak, or buffered reference left (checked above).
         unsafe { free_block(payload) };
     }
 }
@@ -2431,6 +2626,7 @@ unsafe fn try_reclaim(payload: *mut u8) {
 /// under `strong == 0`. A buffered pin defers the free to the owning
 /// thread's collection slice, which clears the pin and re-runs the claim.
 unsafe fn try_reclaim_shared(payload: *mut u8, h: *mut RcHeader) {
+    // SAFETY: this `unsafe fn`'s caller passes `h` the header of the live, shared node `payload`.
     let a = unsafe { AtomicU32::from_ptr(std::ptr::addr_of_mut!((*h).strong)) };
     let mut cur = a.load(Ordering::Acquire);
     loop {
@@ -2438,6 +2634,7 @@ unsafe fn try_reclaim_shared(payload: *mut u8, h: *mut RcHeader) {
         {
             return;
         }
+        // SAFETY: `h` is the header of the live node `payload`.
         if unsafe { (*h).weak.load(Ordering::Acquire) } != 0 {
             return;
         }
@@ -2451,6 +2648,8 @@ unsafe fn try_reclaim_shared(payload: *mut u8, h: *mut RcHeader) {
             Err(actual) => cur = actual,
         }
     }
+    // SAFETY: the claim above made this call the one that frees `payload`, which nothing
+    // references.
     unsafe { free_block(payload) };
 }
 
@@ -2461,6 +2660,7 @@ unsafe fn try_reclaim_shared(payload: *mut u8, h: *mut RcHeader) {
 unsafe fn rc_block_usable_size(base: *mut u8) -> usize {
     #[cfg(not(any(tsan, miri, fuzzing, target_arch = "wasm32")))]
     {
+        // SAFETY: this `unsafe fn`'s caller passes `base` a live block from the global allocator.
         unsafe { libmimalloc_sys::mi_usable_size(base.cast()) }
     }
     #[cfg(any(tsan, miri, fuzzing, target_arch = "wasm32"))]
@@ -2480,6 +2680,7 @@ unsafe fn rc_block_usable_size(base: *mut u8) -> usize {
 /// exactly as a normal release would.
 unsafe fn release_rc_children(payload: *mut u8) {
     use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_VEC};
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
         return;
@@ -2489,6 +2690,7 @@ unsafe fn release_rc_children(payload: *mut u8) {
     // queued for an exit this path does not have; a Map child is queued on
     // the same terms as every other release path, and the cascading
     // `gos_rt_rc_release` below drains it at its own teardown exit.
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe {
         visit_entries(payload, |kind, child| match kind {
             RC_CHILD_RC => {
@@ -2504,6 +2706,8 @@ unsafe fn release_rc_children(payload: *mut u8) {
             gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
             gossamer_abi::rc::RC_CHILD_DEQUE => queue_deque_child(child),
             gossamer_abi::rc::RC_CHILD_HEAP => crate::c_abi::map::gos_rt_vec_free(child.cast()),
+            gossamer_abi::rc::RC_CHILD_ITER => drop_iter_child(child, false),
+            gossamer_abi::rc::RC_CHILD_ITER_PAIR => drop_iter_child(child, true),
             gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => drop(Box::from_raw(
                 child.cast::<crate::c_abi::errors::ErrorFields>(),
             )),
@@ -2529,20 +2733,29 @@ unsafe fn release_rc_children(payload: *mut u8) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_rc_drop_reuse(payload: *mut u8) -> *mut u8 {
     let payload = untag_rc(payload);
-    if payload.is_null() || unsafe { in_region_arena(payload) } {
+    if payload.is_null() || in_region_arena(payload) {
         return std::ptr::null_mut();
     }
+    // SAFETY: `payload` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
     if unsafe { crate::c_abi::string::is_gos_string(payload.cast()) } {
+        // SAFETY: `payload` is a live string body (the probe above), whose share this release
+        // gives back.
         unsafe { crate::c_abi::string::gos_rt_str_free(payload.cast()) };
         return std::ptr::null_mut();
     }
+    // SAFETY: `payload` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is the header of the live node `payload`.
     let d = unsafe { dec_strong(h) };
     if d.skip {
         return std::ptr::null_mut();
     }
     if d.next != 0 {
         if !d.shared {
+            // SAFETY: `payload` is this shim's argument, live for the call (C-ABI contract);
+            // non-null, checked above.
             unsafe { possible_root(payload) };
         }
         return std::ptr::null_mut();
@@ -2552,15 +2765,19 @@ pub unsafe extern "C" fn gos_rt_rc_drop_reuse(payload: *mut u8) -> *mut u8 {
     } else {
         // Shared flag bits are only ever mutated atomically; the color is
         // meaningless for shared objects (they never enter the collector).
+        // SAFETY: `h` is the header of the live, thread-local node `payload`.
         unsafe { set_color(h, COLOR_BLACK) };
     }
+    // SAFETY: `payload` is the live node whose count just reached zero.
     unsafe { release_rc_children(payload) };
     // Reuse only a thread-local, weak-free, unbuffered block; anything else is
     // reclaimed normally (try_reclaim frees iff unpinned).
+    // SAFETY: `h` is the header of the live node `payload`.
     if !d.shared && unsafe { (*h).weak.load(Ordering::Relaxed) } == 0 && !unsafe { is_buffered(h) }
     {
         return h as *mut u8;
     }
+    // SAFETY: `payload` is the node whose count just reached zero.
     unsafe { try_reclaim(payload) };
     std::ptr::null_mut()
 }
@@ -2582,26 +2799,39 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_reuse(
         return std::ptr::null_mut();
     };
     if token.is_null() {
+        // SAFETY: `meta` is this shim's argument, null or a live meta table (C-ABI contract).
         return unsafe { gos_rt_rc_alloc(size, meta) };
     }
     let total = (size as usize).saturating_add(RC_HEADER_SIZE);
+    // SAFETY: `token` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
+    // SAFETY: `token` is non-null (checked above), a block `gos_rt_rc_drop_reuse` handed back.
     if region_active() || unsafe { rc_block_usable_size(token) } < total {
         // Free the recycled block (its children are already released) and make
         // a fresh allocation. `free_block` takes a payload pointer.
+        // SAFETY: `token` is a block `gos_rt_rc_drop_reuse` handed back, released of its
+        // children, which nothing references.
         unsafe { free_block(token.add(RC_HEADER_SIZE)) };
+        // SAFETY: `meta` is this shim's argument, null or a live meta table (C-ABI contract).
         return unsafe { gos_rt_rc_alloc(size, meta) };
     }
     let h = token as *mut RcHeader;
+    // SAFETY: `token` is a block of at least `total` usable bytes (checked above) that this call
+    // owns.
     unsafe {
         (*h).strong = 1;
         (*h).weak = AtomicU8::new(0);
         (*h).disc = 0;
         (*h).meta_id = meta_id;
     }
+    // SAFETY: the block holds the header followed by the payload.
     let payload = unsafe { token.add(RC_HEADER_SIZE) };
+    // SAFETY: the block's usable size covers the header and `size` payload bytes (checked above).
     unsafe { std::ptr::write_bytes(payload, 0, size as usize) };
     rc_reuse_inc();
     let usable = if crate::c_abi::ledger::rc_alloc_stats_enabled() {
+        // SAFETY: `token` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         unsafe { rc_block_usable_size(token) }
     } else {
         0
@@ -2619,10 +2849,14 @@ unsafe fn rc_release_impl(root: *mut u8) {
     if root.is_null() {
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `root` live; non-null, checked above.
     if unsafe { crate::c_abi::string::is_gos_string(root.cast()) } {
+        // SAFETY: `root` is a live string body (the probe above), whose share this release gives
+        // back.
         unsafe { crate::c_abi::string::gos_rt_str_free(root.cast()) };
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `root` live; non-null, checked above.
     let h = unsafe { header_ptr(root) };
     // Region objects are freed wholesale at region pop - never individually.
     // Skipping the decrement-and-walk here is exactly what eliminates the
@@ -2631,6 +2865,7 @@ unsafe fn rc_release_impl(root: *mut u8) {
     // immortal objects are no-ops; escaped (shared) objects decrement
     // atomically (Release); thread-local objects take the cheap
     // non-atomic decrement.
+    // SAFETY: `h` is the header of the live node `root`.
     let d = unsafe { dec_strong(h) };
     if d.skip {
         return;
@@ -2640,6 +2875,7 @@ unsafe fn rc_release_impl(root: *mut u8) {
         // candidates; shared objects are excluded from the per-thread
         // collector (their cycles leak, like `Arc` - break with weak refs).
         if !d.shared {
+            // SAFETY: this `unsafe fn`'s caller passes `root` live; non-null, checked above.
             unsafe { possible_root(root) };
         }
         return;
@@ -2650,14 +2886,17 @@ unsafe fn rc_release_impl(root: *mut u8) {
     if d.shared {
         fence(Ordering::Acquire);
     } else {
+        // SAFETY: `h` is the header of the live, thread-local node `root`.
         unsafe { set_color(h, COLOR_BLACK) };
     }
+    // SAFETY: `h` is the header of the live node `root`.
     let meta = unsafe { meta_of(h) };
     // Leaf fast path: a childless object (no RC-pointer children, the
     // overwhelming common case - every enum payload-free variant, every
     // leaf node) is reclaimed directly. This avoids touching the worklist
     // at all, so the dominant release shape never allocates or recurses.
     if meta.is_null() {
+        // SAFETY: `root` is the node whose count just reached zero.
         unsafe { try_reclaim_zero(root) };
         return;
     }
@@ -2678,20 +2917,25 @@ unsafe fn rc_release_impl(root: *mut u8) {
         // through the tag-checking string path, RC children join the
         // release worklist, and owned containers are queued for the
         // outermost teardown exit.
+        // SAFETY: `root` is the dead node, whose children this release gives back.
         unsafe { release_children_into(root, &mut worklist) };
         let _ = meta;
+        // SAFETY: `h` is `root`'s header, and `root` is dead.
         unsafe { reclaim_dead(root, h, d.shared) };
         while let Some(payload) = worklist.pop() {
             if payload.is_null() {
                 continue;
             }
+            // SAFETY: `payload` is a live child node the release walk reached.
             let h = unsafe { header_ptr(payload) };
+            // SAFETY: `h` is the header of the live node `payload`.
             let d = unsafe { dec_strong(h) };
             if d.skip {
                 continue;
             }
             if d.next != 0 {
                 if !d.shared {
+                    // SAFETY: `payload` is a live, thread-local node.
                     unsafe { possible_root(payload) };
                 }
                 continue;
@@ -2699,14 +2943,18 @@ unsafe fn rc_release_impl(root: *mut u8) {
             if d.shared {
                 fence(Ordering::Acquire);
             } else {
+                // SAFETY: `h` is the header of the live, thread-local node `payload`.
                 unsafe { set_color(h, COLOR_BLACK) };
             }
+            // SAFETY: `payload` is the dead node, whose children this release gives back.
             unsafe {
                 release_children_into(payload, &mut worklist);
             }
+            // SAFETY: `h` is `payload`'s header, and `payload` is dead.
             unsafe { reclaim_dead(payload, h, d.shared) };
         }
     });
+    // SAFETY: this runs at the outermost teardown exit, which drains its queues.
     unsafe { teardown_exit() };
 }
 
@@ -2720,13 +2968,18 @@ unsafe fn rc_release_impl(root: *mut u8) {
 #[inline]
 unsafe fn reclaim_dead(payload: *mut u8, h: *mut RcHeader, shared: bool) {
     if !shared
+        // SAFETY: this `unsafe fn`'s caller passes `h` the header of the dead node `payload`.
         && unsafe { (*h).strong } & BUFFERED_BIT == 0
+        // SAFETY: `h` is the header of the dead node `payload`.
         && unsafe { (*h).weak.load(Ordering::Relaxed) } == 0
     {
         rc_live_dec();
+        // SAFETY: the node is thread-local, unbuffered, and weak-free (checked above), so this
+        // frees its last reference.
         unsafe { rc_block_free(block_base(h)) };
         return;
     }
+    // SAFETY: `payload` is a dead node.
     unsafe { try_reclaim_zero(payload) };
 }
 
@@ -2735,7 +2988,9 @@ unsafe fn reclaim_dead(payload: *mut u8, h: *mut RcHeader, shared: bool) {
 /// header.
 #[inline]
 unsafe fn block_base(h: *mut RcHeader) -> *mut u8 {
+    // SAFETY: this `unsafe fn`'s caller passes `h` a live node's header.
     if unsafe { (*h).disc } == COPY_BLOB_DISC && !in_copy_blob_arena(h.cast()) {
+        // SAFETY: a copy blob outside its arena carries its owner in the bytes before the header.
         unsafe { (h as *mut u8).sub(COPY_BLOB_OWNER_BYTES) }
     } else {
         h.cast::<u8>()
@@ -2758,26 +3013,33 @@ unsafe fn block_base(h: *mut RcHeader) -> *mut u8 {
 )]
 #[inline(always)]
 unsafe fn release_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
         return;
     }
+    // SAFETY: `meta` is non-null (checked above), the node's meta table.
     if unsafe { *meta } == RC_KIND_STRUCT_GUARDED {
+        // SAFETY: `payload` is laid out as `meta` describes.
         unsafe { visit_guarded_children(payload, meta, |child| worklist.push(child)) };
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe { release_structural_children_into(payload, worklist) };
 }
 
 #[inline(never)]
 unsafe fn release_structural_children_into(payload: *mut u8, worklist: &mut Vec<*mut u8>) {
     use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_RC, RC_CHILD_WORD_MASK};
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
         return;
     }
+    // SAFETY: `meta` is non-null (checked above), the node's meta table.
     let kind = unsafe { *meta };
     if kind != RC_KIND_ENUM && kind != RC_KIND_STRUCT {
+        // SAFETY: `payload` is laid out as `meta` describes.
         unsafe {
             visit_entry_slots(payload, |child_kind, _slot, child| {
                 release_child_of_kind(child_kind, child, worklist);
@@ -2788,34 +3050,45 @@ unsafe fn release_structural_children_into(payload: *mut u8, worklist: &mut Vec<
     // The meta walk of `visit_entry_slots`, written out so each counted child
     // joins the worklist in the loop that finds it: a teardown reads every
     // node's children once, and a callback per child is most of that read.
+    // SAFETY: a meta table's second word is its variant count.
     let variant_count = unsafe { *meta.add(1) };
     let target_disc = if kind == RC_KIND_ENUM {
+        // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
         i64::from(unsafe { (*header_ptr(payload)).disc })
     } else {
         0
     };
     let mut idx: usize = 2;
     for _ in 0..variant_count.max(0) {
+        // SAFETY: `idx` stays inside the meta table the variant count describes.
         let disc = unsafe { *meta.add(idx) };
+        // SAFETY: `idx + 1` stays inside the meta table the variant count describes.
         let child_count = usize::try_from(unsafe { *meta.add(idx + 1) }).unwrap_or(0);
         if kind == RC_KIND_STRUCT || disc == target_disc {
             for j in 0..child_count {
+                // SAFETY: the child entries follow the variant header inside the meta table.
                 let entry = unsafe { *meta.add(idx + 2 + j) };
                 let child_kind = entry >> RC_CHILD_KIND_SHIFT;
                 let word = usize::try_from(entry & RC_CHILD_WORD_MASK).unwrap_or(0);
+                // SAFETY: each child entry names a word inside the payload.
                 let slot = unsafe { payload.add(word * 8) };
+                // SAFETY: `slot` is that word.
                 let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
                 if child.is_null() {
                     continue;
                 }
                 if child_kind == RC_CHILD_RC {
                     let c = untag_rc(child);
+                    // SAFETY: `c` is a non-null child word, a candidate the string probe accepts.
                     if unsafe { crate::c_abi::string::is_gos_string(c.cast()) } {
+                        // SAFETY: `c` is a live string body (the probe above), whose share the
+                        // dead parent held.
                         unsafe { crate::c_abi::string::gos_rt_str_free(c.cast()) };
                     } else {
                         worklist.push(c);
                     }
                 } else {
+                    // SAFETY: `child` is the dead parent's child of `child_kind`, held at `slot`.
                     unsafe { release_gated_child(child_kind, slot, child, worklist) };
                 }
             }
@@ -2836,11 +3109,15 @@ unsafe fn release_gated_child(
 ) {
     match gossamer_abi::rc::rc_child_blob_gate(child_kind) {
         Some(gate) => {
+            // SAFETY: a gated carrier child's discriminant is the word before its payload.
             let disc = unsafe { slot.cast::<i64>().sub(1).read_unaligned() };
+            // SAFETY: `child` is the carrier's payload word, which the gate check reads.
             if (gate < 0 || disc == gate) && unsafe { is_copy_blob(child) } {
+                // SAFETY: `child` is a copy blob the dead parent held a share of.
                 unsafe { release_child_of_kind(gossamer_abi::rc::RC_CHILD_RC, child, worklist) };
             }
         }
+        // SAFETY: `child` is the dead parent's child of `child_kind`.
         None => unsafe { release_child_of_kind(child_kind, child, worklist) },
     }
 }
@@ -2853,7 +3130,10 @@ unsafe fn release_child_of_kind(kind: i64, child: *mut u8, worklist: &mut Vec<*m
     match kind {
         RC_CHILD_RC => {
             let c = untag_rc(child);
+            // SAFETY: `c` is a non-null child word, a candidate the string probe accepts.
             if unsafe { crate::c_abi::string::is_gos_string(c.cast()) } {
+                // SAFETY: `c` is a live string body (the probe above), whose share the dead
+                // parent held.
                 unsafe { crate::c_abi::string::gos_rt_str_free(c.cast()) };
             } else {
                 worklist.push(c);
@@ -2864,7 +3144,11 @@ unsafe fn release_child_of_kind(kind: i64, child: *mut u8, worklist: &mut Vec<*m
         gossamer_abi::rc::RC_CHILD_SET => queue_set_child(child),
         gossamer_abi::rc::RC_CHILD_DEQUE => queue_deque_child(child),
         gossamer_abi::rc::RC_CHILD_HEAP => queue_vec_child(child),
+        gossamer_abi::rc::RC_CHILD_ITER => queue_iter_child(child, false),
+        gossamer_abi::rc::RC_CHILD_ITER_PAIR => queue_iter_child(child, true),
         gossamer_abi::rc::RC_CHILD_ERROR_FIELDS => {
+            // SAFETY: an `RC_CHILD_ERROR_FIELDS` child is the boxed field list its error owns
+            // alone.
             drop(unsafe { Box::from_raw(child.cast::<crate::c_abi::errors::ErrorFields>()) });
         }
         _ => {}
@@ -2896,6 +3180,11 @@ thread_local! {
     /// terms as [`PENDING_MAP_FREES`].
     static PENDING_DEQUE_FREES: std::cell::RefCell<Vec<*mut u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Lazy iterator shares held by dead nodes, with whether each is a pair
+    /// handle. Dropping the last share releases the sequence the iterator
+    /// reads, which re-enters the release path.
+    static PENDING_ITER_FREES: std::cell::RefCell<Vec<(*mut u8, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
     /// Nesting depth of teardown frames (release walks / collection
     /// slices) on this thread; pending Vec frees drain when it reaches 0.
     static TEARDOWN_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
@@ -2925,6 +3214,56 @@ fn queue_deque_child(d: *mut u8) {
     PENDING_DEQUE_FREES.with(|q| q.borrow_mut().push(d));
 }
 
+/// Queue a dead node's lazy iterator share for release at the outermost
+/// teardown exit.
+fn queue_iter_child(iter: *mut u8, pair: bool) {
+    PENDING_ITER_FREES.with(|q| q.borrow_mut().push((iter, pair)));
+}
+
+/// Gives up one share of a lazy iterator child.
+unsafe fn drop_iter_child(iter: *mut u8, pair: bool) {
+    // SAFETY: this `unsafe fn`'s caller passes `iter` a lazy iterator holding the share this
+    // gives back.
+    unsafe { lazy_children::drop_share(iter, pair) };
+}
+
+/// Shares of the lazy iterator handles a value can hold as children.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) mod lazy_children {
+    /// Gives up one share of `iter`.
+    pub(crate) unsafe fn drop_share(iter: *mut u8, pair: bool) {
+        if pair {
+            // SAFETY: this `unsafe fn`'s caller passes `iter` a pair iterator holding the share
+            // this gives back.
+            unsafe { crate::c_abi::gos_rt_lazy_iter_drop_pair_i64(iter.cast()) };
+        } else {
+            // SAFETY: this `unsafe fn`'s caller passes `iter` a lazy iterator holding the share
+            // this gives back.
+            unsafe { crate::c_abi::gos_rt_lazy_iter_drop_i64(iter.cast()) };
+        }
+    }
+
+    /// Takes one more share of `iter`.
+    pub(crate) unsafe fn retain(iter: *mut u8, pair: bool) {
+        if pair {
+            // SAFETY: this `unsafe fn`'s caller passes `iter` a live pair iterator.
+            unsafe { crate::c_abi::lazy_iter_pair_retain(iter.cast()) };
+        } else {
+            // SAFETY: this `unsafe fn`'s caller passes `iter` a live lazy iterator.
+            unsafe { crate::c_abi::lazy_iter_retain(iter.cast()) };
+        }
+    }
+}
+
+/// The lazy iterator shims are native-only, so on wasm no value holds a lazy
+/// iterator child and there is no share to take or give up.
+#[cfg(target_arch = "wasm32")]
+pub(crate) mod lazy_children {
+    pub(crate) unsafe fn drop_share(_iter: *mut u8, _pair: bool) {}
+
+    pub(crate) unsafe fn retain(_iter: *mut u8, _pair: bool) {}
+}
+
 /// Enter a teardown frame (release walk or collection slice).
 fn teardown_enter() {
     TEARDOWN_DEPTH.with(|d| d.set(d.get() + 1));
@@ -2945,22 +3284,32 @@ unsafe fn teardown_exit() {
     loop {
         let next = PENDING_VEC_FREES.with(|q| q.borrow_mut().pop());
         let Some(v) = next else { break };
+        // SAFETY: each queued vec is one a dead node owned alone.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v.cast()) };
     }
     loop {
         let next = PENDING_MAP_FREES.with(|q| q.borrow_mut().pop());
         let Some(m) = next else { break };
+        // SAFETY: each queued map is one a dead node owned alone.
         unsafe { crate::c_abi::map::gos_rt_map_free(m.cast()) };
     }
     loop {
         let next = PENDING_SET_FREES.with(|q| q.borrow_mut().pop());
         let Some(s) = next else { break };
+        // SAFETY: each queued set is one a dead node owned alone.
         unsafe { crate::c_abi::map::gos_rt_set_free(s.cast()) };
     }
     loop {
         let next = PENDING_DEQUE_FREES.with(|q| q.borrow_mut().pop());
         let Some(d) = next else { break };
+        // SAFETY: each queued deque is one a dead node owned alone.
         unsafe { crate::c_abi::deque::gos_rt_deque_free(d.cast()) };
+    }
+    loop {
+        let next = PENDING_ITER_FREES.with(|q| q.borrow_mut().pop());
+        let Some((iter, pair)) = next else { break };
+        // SAFETY: each queued iterator carries the share a dead node held.
+        unsafe { drop_iter_child(iter, pair) };
     }
 }
 
@@ -2976,6 +3325,7 @@ unsafe fn visit_rc_children(payload: *mut u8, mut f: impl FnMut(*mut u8)) {
     // color machinery reads garbage, so the RC-graph walk yields only
     // RC-headered children; the release path reclaims string children
     // through [`visit_string_children`].
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe {
         visit_children_raw(payload, |child| {
             // A tagged nullary enum is non-null in its stored representation
@@ -2997,6 +3347,7 @@ unsafe fn visit_children_raw(payload: *mut u8, mut raw_f: impl FnMut(*mut u8)) {
     // must never touch them; the teardown paths walk those separately
     // through [`visit_vec_children`].
     let mut f = |c: *mut u8| raw_f(untag_rc(c));
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe {
         visit_entries(payload, |kind, child| {
             if kind == gossamer_abi::rc::RC_CHILD_RC {
@@ -3007,16 +3358,26 @@ unsafe fn visit_children_raw(payload: *mut u8, mut raw_f: impl FnMut(*mut u8)) {
 }
 
 /// Replaces every owned `Map`, `Set`, deque, and heap child of `payload` with
-/// one of its own. A map, a set, and a deque carry no reference count, and a
-/// heap is written in place, so a copy that kept the source's handle would
-/// leave one store under two owners.
+/// one of its own, and takes a share of every lazy iterator child. A map, a
+/// set, and a deque carry no reference count, and a heap is written in place,
+/// so a copy that kept the source's handle would leave one store under two
+/// owners; an iterator's holders advance one cursor, so a copy shares it.
 unsafe fn clone_map_children(payload: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe {
         visit_entry_slots(payload, |kind, slot, child| {
             if slot.is_null() {
                 return;
             }
             let cloned: *mut u8 = match kind {
+                gossamer_abi::rc::RC_CHILD_ITER => {
+                    lazy_children::retain(child, false);
+                    return;
+                }
+                gossamer_abi::rc::RC_CHILD_ITER_PAIR => {
+                    lazy_children::retain(child, true);
+                    return;
+                }
                 gossamer_abi::rc::RC_CHILD_MAP => {
                     crate::c_abi::gos_rt_map_clone(child.cast()).cast()
                 }
@@ -3045,12 +3406,17 @@ unsafe fn visit_slot_children_meta(
 ) {
     use crate::c_abi::vec::vec_elem_kind;
     use gossamer_abi::rc::{RC_CHILD_MAP, RC_CHILD_RC, RC_CHILD_SET, RC_CHILD_VEC};
+    // SAFETY: this `unsafe fn`'s caller passes `meta` a slot-children table, whose second word is
+    // its entry count.
     let count = usize::try_from(unsafe { *meta.add(1) }).unwrap_or(0);
     for i in 0..count {
+        // SAFETY: `i` is below the entry count, inside the table.
         let entry = unsafe { meta.add(2 + i * 4) };
         let (gate, disc_word, word, child_kind) =
+            // SAFETY: each entry is four words.
             unsafe { (*entry, *entry.add(1), *entry.add(2), *entry.add(3)) };
         if gate >= 0 {
+            // SAFETY: `disc_word` names a word inside the payload.
             let disc = unsafe {
                 payload
                     .add(usize::try_from(disc_word).unwrap_or(0) * 8)
@@ -3068,9 +3434,13 @@ unsafe fn visit_slot_children_meta(
             Ok(vec_elem_kind::SET) => RC_CHILD_SET,
             Ok(vec_elem_kind::DEQUE) => gossamer_abi::rc::RC_CHILD_DEQUE,
             Ok(vec_elem_kind::HEAP) => gossamer_abi::rc::RC_CHILD_HEAP,
+            Ok(vec_elem_kind::ITER) => gossamer_abi::rc::RC_CHILD_ITER,
+            Ok(vec_elem_kind::ITER_PAIR) => gossamer_abi::rc::RC_CHILD_ITER_PAIR,
             _ => continue,
         };
+        // SAFETY: each entry names a word inside the payload.
         let slot = unsafe { payload.add(usize::try_from(word).unwrap_or(0) * 8) };
+        // SAFETY: `slot` is that word.
         let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
         if !child.is_null() {
             f(kind, slot, child);
@@ -3087,6 +3457,7 @@ unsafe fn visit_slot_children_meta(
 /// [`release_children_into`] instead, in one pass; this stays for the copy
 /// and collection paths, which want one kind at a time.
 unsafe fn visit_vec_children(payload: *mut u8, mut f: impl FnMut(*mut u8)) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe {
         visit_entries(payload, |kind, child| {
             if kind == gossamer_abi::rc::RC_CHILD_VEC {
@@ -3101,6 +3472,7 @@ unsafe fn visit_vec_children(payload: *mut u8, mut f: impl FnMut(*mut u8)) {
 /// low 32 bits and the child kind above (`gossamer_abi::rc`); guarded
 /// metas keep their dedicated pair walk and yield kind 0.
 unsafe fn visit_entries(payload: *mut u8, mut f: impl FnMut(i64, *mut u8)) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     unsafe { visit_entry_slots(payload, |kind, _slot, child| f(kind, child)) };
 }
 
@@ -3109,12 +3481,15 @@ unsafe fn visit_entries(payload: *mut u8, mut f: impl FnMut(i64, *mut u8)) {
 /// its own - [`gossamer_abi::rc::RC_CHILD_MAP`] - writes the new handle back
 /// through that address.
 unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *mut u8)) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
     let meta = unsafe { meta_of(header_ptr(payload)) };
     if meta.is_null() {
         return;
     }
+    // SAFETY: `meta` is non-null (checked above), the node's meta table.
     let kind = unsafe { *meta };
     if kind == RC_KIND_STRUCT_GUARDED {
+        // SAFETY: `payload` is laid out as `meta` describes.
         unsafe {
             visit_guarded_children(payload, meta, |c| {
                 f(gossamer_abi::rc::RC_CHILD_RC, std::ptr::null_mut(), c);
@@ -3123,6 +3498,7 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *m
         return;
     }
     if kind == gossamer_abi::rc::RC_KIND_SLOT_CHILDREN {
+        // SAFETY: `payload` is laid out as `meta` describes.
         unsafe { visit_slot_children_meta(payload, meta, f) };
         return;
     }
@@ -3132,10 +3508,12 @@ unsafe fn visit_entry_slots(payload: *mut u8, mut f: impl FnMut(i64, *mut u8, *m
         return;
     }
     let target_disc = if kind == RC_KIND_ENUM {
+        // SAFETY: this `unsafe fn`'s caller passes `payload` a live node.
         i64::from(unsafe { (*header_ptr(payload)).disc })
     } else {
         0
     };
+    // SAFETY: `payload` is laid out as `meta` describes.
     unsafe { visit_layout_entry_slots(payload, meta, target_disc, f) };
 }
 
@@ -3149,22 +3527,30 @@ unsafe fn visit_layout_entry_slots(
     mut f: impl FnMut(i64, *mut u8, *mut u8),
 ) {
     use gossamer_abi::rc::{RC_CHILD_KIND_SHIFT, RC_CHILD_WORD_MASK};
+    // SAFETY: this `unsafe fn`'s caller passes `meta` a live meta table and `payload` laid out as
+    // it describes.
     let kind = unsafe { *meta };
+    // SAFETY: a meta table's second word is its variant count.
     let variant_count = unsafe { *meta.add(1) };
     let mut idx: usize = 2;
     for _ in 0..variant_count.max(0) {
+        // SAFETY: `idx` stays inside the meta table the variant count describes.
         let disc = unsafe { *meta.add(idx) };
+        // SAFETY: `idx + 1` stays inside the meta table the variant count describes.
         let child_count = unsafe { *meta.add(idx + 1) };
         let matches = kind == RC_KIND_STRUCT || disc == target_disc;
         if matches {
             for j in 0..child_count.max(0) {
+                // SAFETY: the child entries follow the variant header inside the meta table.
                 let entry = unsafe { *meta.add(idx + 2 + j as usize) };
                 let child_kind = entry >> RC_CHILD_KIND_SHIFT;
                 let word = entry & RC_CHILD_WORD_MASK;
                 // Aggregate slots cross the C ABI as pointer-sized integer
                 // words. Reconstruct exposed provenance explicitly instead
                 // of treating those integer bits as a Rust pointer load.
+                // SAFETY: each child entry names a word inside the payload.
                 let slot = unsafe { payload.add((word as usize) * 8) };
+                // SAFETY: `slot` is that word.
                 let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
                 if child.is_null() {
                     continue;
@@ -3174,7 +3560,10 @@ unsafe fn visit_layout_entry_slots(
                     // the arm the gate names, so the carrier's discriminant,
                     // the word before the payload, is read first.
                     Some(gate) => {
+                        // SAFETY: a gated carrier child's discriminant is the word before its
+                        // payload.
                         let disc = unsafe { slot.cast::<i64>().sub(1).read_unaligned() };
+                        // SAFETY: `child` is the carrier's payload word.
                         if (gate < 0 || disc == gate) && unsafe { is_copy_blob(child) } {
                             f(gossamer_abi::rc::RC_CHILD_RC, slot, child);
                         }
@@ -3194,18 +3583,22 @@ unsafe fn visit_layout_entry_slots(
 /// size is recovered from the header's `size_u` (or the oversized side table).
 #[inline]
 unsafe fn free_block(payload: *mut u8) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a node with no references left.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is that node's header.
     if unsafe { load_strong(h) } & SHARED_BIT != 0 {
         // A shared object is being reclaimed: keep the live-shared diagnostic
         // count in step. (A shared cycle never reaches here, which is exactly
         // what the non-zero exit count surfaces.)
         rc_shared_dec();
     }
+    // SAFETY: `h` is that node's header.
     let base = unsafe { block_base(h) };
     rc_live_dec();
     // Straight back to mimalloc - see `gos_rt_rc_alloc` for why a custom
     // slab/pool is not used (measured net-neutral), and
     // `rc_block_alloc_zeroed` for why the call is direct.
+    // SAFETY: `base` is the node's block, which nothing references.
     unsafe { rc_block_free(base) };
 }
 
@@ -3402,15 +3795,20 @@ unsafe fn copy_blob_owner(payload: *mut u8) -> Option<&'static CopyBlobOwner> {
     if !payload_may_be_managed(payload) {
         return None;
     }
+    // SAFETY: `payload` may be a managed node (checked above), so its header is readable heap
+    // memory.
     let header = unsafe { header_ptr(payload) };
+    // SAFETY: `header` is readable heap memory (checked above).
     if unsafe { (*header).disc } != COPY_BLOB_DISC {
         return None;
     }
+    // SAFETY: a copy blob carries its owner in the bytes before the header.
     let owner = unsafe {
         &*((header as *mut u8)
             .sub(COPY_BLOB_OWNER_BYTES)
             .cast::<CopyBlobOwner>())
     };
+    // SAFETY: `header` is a copy blob's header.
     (owner.tag == COPY_BLOB_OWNER_TAG && !unsafe { meta_of(header) }.is_null()).then_some(owner)
 }
 
@@ -3423,9 +3821,12 @@ unsafe fn is_copy_blob(payload: *mut u8) -> bool {
     let header = payload.wrapping_sub(RC_HEADER_SIZE).cast::<RcHeader>();
     if in_copy_blob_arena(header.cast()) {
         return (payload as usize).is_multiple_of(std::mem::align_of::<usize>())
+            // SAFETY: `header` lies in the copy-blob arena (checked above).
             && unsafe { (*header).disc } == COPY_BLOB_DISC
+            // SAFETY: `header` lies in the copy-blob arena (checked above).
             && !unsafe { meta_of(header) }.is_null();
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` a candidate the owner probe accepts.
     unsafe { copy_blob_owner(payload).is_some() }
 }
 
@@ -3472,29 +3873,52 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
     if meta.is_null() {
         return false;
     }
+    // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+    // well-formed meta table, which the variant and child counts it records keep this read
+    // inside.
     if unsafe { *meta } == gossamer_abi::rc::RC_KIND_SLOT_CHILDREN {
         use crate::c_abi::vec::vec_elem_kind;
+        // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+        // well-formed meta table, which the variant and child counts it records keep this read
+        // inside.
         let count = usize::try_from(unsafe { *meta.add(1) }).unwrap_or(0);
         return (0..count).any(|i| {
+            // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+            // well-formed meta table, which the variant and child counts it records keep this
+            // read inside.
             let child = unsafe { *meta.add(2 + i * 4 + 3) };
             [
                 vec_elem_kind::MAP,
                 vec_elem_kind::SET,
                 vec_elem_kind::DEQUE,
                 vec_elem_kind::HEAP,
+                vec_elem_kind::ITER,
+                vec_elem_kind::ITER_PAIR,
             ]
             .iter()
             .any(|kind| child == i64::from(*kind))
         });
     }
+    // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+    // well-formed meta table, which the variant and child counts it records keep this read
+    // inside.
     if unsafe { *meta } != RC_KIND_STRUCT {
         return false;
     }
+    // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+    // well-formed meta table, which the variant and child counts it records keep this read
+    // inside.
     let variants = unsafe { *meta.add(1) };
     let mut idx: usize = 2;
     for _ in 0..variants.max(0) {
+        // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+        // well-formed meta table, which the variant and child counts it records keep this read
+        // inside.
         let count = usize::try_from(unsafe { *meta.add(idx + 1) }).unwrap_or(0);
         for j in 0..count {
+            // SAFETY: `meta` is non-null (checked above) and, per this `unsafe fn`'s contract, a
+            // well-formed meta table, which the variant and child counts it records keep this
+            // read inside.
             let entry = unsafe { *meta.add(idx + 2 + j) };
             if matches!(
                 entry >> RC_CHILD_KIND_SHIFT,
@@ -3502,6 +3926,8 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
                     | gossamer_abi::rc::RC_CHILD_SET
                     | gossamer_abi::rc::RC_CHILD_DEQUE
                     | gossamer_abi::rc::RC_CHILD_HEAP
+                    | gossamer_abi::rc::RC_CHILD_ITER
+                    | gossamer_abi::rc::RC_CHILD_ITER_PAIR
             ) {
                 return true;
             }
@@ -3512,22 +3938,31 @@ unsafe fn meta_names_map_child(meta: *const i64) -> bool {
 }
 
 unsafe fn visit_guarded_children(base: *mut u8, meta: *const i64, mut f: impl FnMut(*mut u8)) {
+    // SAFETY: this `unsafe fn`'s caller passes `meta` a guarded-children table, whose second word
+    // is its entry count.
     let entry_count = unsafe { *meta.add(1) };
     for i in 0..entry_count.max(0) {
+        // SAFETY: `i` is below the entry count, inside the table of three-word entries.
         let gate = unsafe { *meta.add(2 + (i as usize) * 3) };
+        // SAFETY: `i` is below the entry count, inside the table of three-word entries.
         let disc_word = unsafe { *meta.add(3 + (i as usize) * 3) };
+        // SAFETY: `i` is below the entry count, inside the table of three-word entries.
         let payload_word = unsafe { *meta.add(4 + (i as usize) * 3) };
         // `gate` is the discriminant value under which the payload word
         // holds a copy-blob pointer (0 = Ok/Some side, 1 = Err side);
         // negative means unconditional (both sides are blobs).
         if gate >= 0 {
+            // SAFETY: `disc_word` names a word inside `base`.
             let disc = unsafe { *(base.add(disc_word as usize * 8) as *const i64) };
             if disc != gate {
                 continue;
             }
         }
+        // SAFETY: `payload_word` names a word inside `base`.
         let slot = unsafe { base.add(payload_word as usize * 8) };
+        // SAFETY: `slot` is that word.
         let child = unsafe { crate::c_abi::vec::slot_read_word(slot) };
+        // SAFETY: `child` is non-null, a candidate the blob probe accepts.
         if !child.is_null() && unsafe { is_copy_blob(child) } {
             f(child);
         }
@@ -3546,6 +3981,8 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_copy(
     meta: *const i64,
     src: *const u8,
 ) -> *mut u8 {
+    // SAFETY: `meta` and `src` are this shim's arguments, each null or live, with `src` holding
+    // `size` bytes (C-ABI contract).
     unsafe { rc_alloc_from(size, meta, src, true) }
 }
 
@@ -3565,6 +4002,8 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_move(
     meta: *const i64,
     src: *const u8,
 ) -> *mut u8 {
+    // SAFETY: `meta` and `src` are this shim's arguments, each null or live, with `src` holding
+    // `size` bytes (C-ABI contract).
     unsafe { rc_alloc_from(size, meta, src, false) }
 }
 
@@ -3575,11 +4014,13 @@ pub unsafe extern "C" fn gos_rt_rc_alloc_move(
 unsafe fn copy_payload(src: *const u8, dst: *mut u8, size: usize) {
     #[inline]
     unsafe fn words<const N: usize>(src: *const u8, dst: *mut u8) {
+        // SAFETY: this `unsafe fn`'s caller passes `src` and `dst` each addressing `N` words.
         unsafe {
             dst.cast::<[u64; N]>()
                 .write_unaligned(src.cast::<[u64; N]>().read_unaligned());
         }
     }
+    // SAFETY: `src` and `dst` each address `size` bytes, which the arms copy in whole words.
     unsafe {
         match size {
             8 => words::<1>(src, dst),
@@ -3607,13 +4048,20 @@ unsafe fn rc_alloc_from(
     retain_children: bool,
 ) -> *mut u8 {
     let in_region = region_active();
+    // SAFETY: this `unsafe fn`'s caller passes `meta` live or null, which `meta_names_map_child`
+    // accepts.
     if in_region && !unsafe { meta_names_map_child(meta) } {
+        // SAFETY: `meta` is not passed, so the allocation carries no children.
         let payload = unsafe { gos_rt_rc_alloc(size, std::ptr::null()) };
         if !payload.is_null() && !src.is_null() {
+            // SAFETY: `payload` is a fresh block of `size` bytes, and `src` holds `size` bytes
+            // (this `unsafe fn`'s caller).
             unsafe { std::ptr::copy_nonoverlapping(src, payload, size as usize) };
         }
         return payload;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `meta` and `src` null or live, `src` holding
+    // `size` bytes.
     unsafe { heap_blob_from(size, meta, src, retain_children) }
 }
 
@@ -3632,9 +4080,15 @@ pub(crate) unsafe fn counted_element_copy(
     meta: *const i64,
     src: *const u8,
 ) -> (*mut u8, bool) {
+    // SAFETY: this `unsafe fn`'s caller passes `meta` live or null, which `meta_names_map_child`
+    // accepts.
     if region_active() && !unsafe { meta_names_map_child(meta) } {
+        // SAFETY: this `unsafe fn`'s caller passes `meta` and `src` null or live, `src` holding
+        // `size` bytes.
         return (unsafe { rc_alloc_from(size, meta, src, false) }, false);
     }
+    // SAFETY: this `unsafe fn`'s caller passes `meta` and `src` null or live, `src` holding
+    // `size` bytes.
     (unsafe { heap_blob_from(size, meta, src, false) }, true)
 }
 
@@ -3680,6 +4134,7 @@ unsafe fn heap_blob_from(
     if header.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `header` is non-null (checked above), a fresh block of a header plus `size` bytes.
     unsafe {
         (*header).strong = 1;
         (*header).weak = AtomicU8::new(0);
@@ -3687,10 +4142,13 @@ unsafe fn heap_blob_from(
         (*header).meta_id = meta_id;
     }
     rc_live_inc();
+    // SAFETY: the block holds the header followed by the payload.
     let payload = unsafe { (header as *mut u8).add(RC_HEADER_SIZE) };
     if payload.is_null() || src.is_null() {
         return payload;
     }
+    // SAFETY: `payload` holds `size` bytes and `src` holds `size` bytes (this `unsafe fn`'s
+    // caller).
     unsafe { copy_payload(src, payload, size as usize) };
     if meta.is_null() {
         // A leaf blob: its words are scalars, so the copy shares no RC
@@ -3703,6 +4161,7 @@ unsafe fn heap_blob_from(
         // count they already carried.
         return payload;
     }
+    // SAFETY: `payload` is laid out as `meta` describes.
     unsafe { retain_blob_children(payload, meta) };
     payload
 }
@@ -3710,6 +4169,7 @@ unsafe fn heap_blob_from(
 /// Takes a share of every child a copy blob's `meta` names, for words that
 /// were copied from storage keeping its own.
 unsafe fn retain_blob_children(payload: *mut u8, meta: *const i64) {
+    // SAFETY: this `unsafe fn`'s caller passes `payload` laid out as `meta` describes.
     unsafe {
         if *meta == gossamer_abi::rc::RC_KIND_STRUCT_GUARDED {
             visit_guarded_children(payload, meta, |child| {
@@ -3739,11 +4199,15 @@ pub(crate) unsafe fn boxed_carrier_child_kind(payload: *mut u8) -> Option<i64> {
     if payload.is_null() || in_region_arena(payload) {
         return None;
     }
+    // SAFETY: `payload` is non-null and outside the region arena (checked above), a live node
+    // (this `unsafe fn`'s caller).
     let meta = unsafe { meta_of(header_ptr(payload)) };
     // `[RC_KIND_STRUCT, variants, disc, child_count, entry..]`.
+    // SAFETY: `meta` is non-null (checked first), a meta table of at least a variant header.
     if meta.is_null() || unsafe { *meta } != RC_KIND_STRUCT || unsafe { *meta.add(3) } != 1 {
         return None;
     }
+    // SAFETY: a one-child struct meta holds its entry at word 4.
     Some(unsafe { *meta.add(4) } >> gossamer_abi::rc::RC_CHILD_KIND_SHIFT)
 }
 
@@ -3756,10 +4220,13 @@ pub(crate) unsafe fn release_blob_moved(payload: *mut u8) {
     if payload.is_null() || in_region_arena(payload) {
         return;
     }
+    // SAFETY: this `unsafe fn`'s caller passes `payload` live; non-null, checked above.
     let h = unsafe { header_ptr(payload) };
+    // SAFETY: `h` is the header of the live node `payload`.
     let strong = unsafe { load_strong(h) };
     let exclusive = strong & (SHARED_BIT | BUFFERED_BIT | REGION_BIT) == 0
         && strong & STRONG_COUNT_MASK == 1
+        // SAFETY: `h` is the header of the live node `payload`.
         && unsafe { (*h).weak.load(Ordering::Relaxed) } == 0;
     if exclusive {
         rc_live_dec();
@@ -3768,10 +4235,13 @@ pub(crate) unsafe fn release_blob_moved(payload: *mut u8) {
         unsafe { rc_block_free(block_base(h)) };
         return;
     }
+    // SAFETY: `h` is the header of the live node `payload`.
     let meta = unsafe { meta_of(h) };
     if !meta.is_null() {
+        // SAFETY: `payload` is laid out as `meta` describes.
         unsafe { retain_blob_children(payload, meta) };
     }
+    // SAFETY: `payload` is a live node whose moved share this gives back.
     unsafe { gos_rt_rc_release(payload) };
 }
 
@@ -3782,6 +4252,8 @@ pub unsafe extern "C" fn gos_rt_aggr_release_children(base: *mut u8, meta: *cons
     if base.is_null() || meta.is_null() {
         return;
     }
+    // SAFETY: `base` and `meta` are this shim's arguments, non-null (checked above), with `base`
+    // laid out as `meta` describes (C-ABI contract).
     unsafe {
         visit_guarded_children(base, meta, |child| {
             gos_rt_rc_release(child);
@@ -3796,6 +4268,8 @@ pub unsafe extern "C" fn gos_rt_aggr_retain_children(base: *mut u8, meta: *const
     if base.is_null() || meta.is_null() {
         return;
     }
+    // SAFETY: `base` and `meta` are this shim's arguments, non-null (checked above), with `base`
+    // laid out as `meta` describes (C-ABI contract).
     unsafe {
         visit_guarded_children(base, meta, |child| {
             gos_rt_rc_retain(child);
@@ -3821,14 +4295,18 @@ pub unsafe extern "C" fn gos_rt_enum_box_aggr(
     src: *const u8,
 ) -> *mut u8 {
     let in_region = region_active();
+    // SAFETY: `meta` is this shim's argument, null or a live meta table (C-ABI contract).
     let payload = unsafe { gos_rt_rc_alloc(size, if in_region { std::ptr::null() } else { meta }) };
     if payload.is_null() || src.is_null() {
         return payload;
     }
+    // SAFETY: `payload` is a fresh block of `size` bytes, and `src` is this shim's `size`-byte
+    // argument (C-ABI contract).
     unsafe { std::ptr::copy_nonoverlapping(src, payload, size as usize) };
     if in_region {
         return payload;
     }
+    // SAFETY: `payload` is laid out as `meta` describes.
     unsafe {
         visit_children_raw(payload, |c| {
             gos_rt_rc_retain(c);
@@ -3910,6 +4388,8 @@ pub unsafe extern "C" fn gos_rt_rc_retain_children(payload: *mut u8) {
     if base.is_null() || in_region_arena(base) {
         return;
     }
+    // SAFETY: `base` is non-null and outside the region arena (checked above), this shim's live
+    // counted argument (C-ABI contract).
     unsafe {
         visit_children_raw(base, |c| {
             gos_rt_rc_retain(c);
@@ -3931,10 +4411,18 @@ pub unsafe extern "C" fn gos_rt_aggr_zero_guarded(base: *mut u8, meta: *const i6
     if base.is_null() || meta.is_null() {
         return;
     }
+    // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for the call
+    // (C-ABI contract).
     let entry_count = unsafe { *meta.add(1) };
     for i in 0..entry_count.max(0) {
+        // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let gate = unsafe { *meta.add(2 + (i as usize) * 3) };
+        // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let disc_word = unsafe { *meta.add(3 + (i as usize) * 3) };
+        // SAFETY: `meta` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         let payload_word = unsafe { *meta.add(4 + (i as usize) * 3) };
         if gate >= 0 && disc_word >= 0 {
             // Write a discriminant that fails every gate (no entry gates
@@ -3942,8 +4430,12 @@ pub unsafe extern "C" fn gos_rt_aggr_zero_guarded(base: *mut u8, meta: *const i6
             // not-yet-assigned field never sees a live payload. For the
             // Option/Result encoding -1 is no valid variant; the real
             // first assignment overwrites it.
+            // SAFETY: `disc_word` names a word inside `base`, laid out as `meta` describes (C-ABI
+            // contract).
             unsafe { *(base.add(disc_word as usize * 8) as *mut i64) = -1 };
         }
+        // SAFETY: `payload_word` names a word inside `base`, laid out as `meta` describes (C-ABI
+        // contract).
         unsafe { *(base.add(payload_word as usize * 8) as *mut i64) = 0 };
     }
 }
@@ -3957,8 +4449,12 @@ pub unsafe extern "C" fn gos_rt_option_slot_release(slot: *const i64) {
     if slot.is_null() {
         return;
     }
+    // SAFETY: `slot` is this shim's two-word carrier argument, non-null (checked above; C-ABI
+    // contract).
     let payload = unsafe { *(slot.add(1) as *const *mut u8) };
+    // SAFETY: `payload` is non-null, a candidate the blob probe accepts.
     if !payload.is_null() && unsafe { is_copy_blob(payload) } {
+        // SAFETY: `payload` is a copy blob whose share the slot held.
         unsafe { gos_rt_rc_release(payload) };
         // Null the payload word so a second release of the same slot
         // (consumption-site release + the unconditional return-sweep)
@@ -3966,6 +4462,8 @@ pub unsafe extern "C" fn gos_rt_option_slot_release(slot: *const i64) {
         // discipline the local-release pass uses. A later allocation can
         // reuse this address, so the explicit null-out
         // remains the second-release guard for this slot.
+        // SAFETY: `slot` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
         unsafe { *slot.add(1).cast_mut() = 0 };
     }
 }
@@ -3979,8 +4477,12 @@ pub unsafe extern "C" fn gos_rt_option_slot_retain(slot: *const i64) {
     if slot.is_null() {
         return;
     }
+    // SAFETY: `slot` is this shim's two-word carrier argument, non-null (checked above; C-ABI
+    // contract).
     let payload = unsafe { *(slot.add(1) as *const *mut u8) };
+    // SAFETY: `payload` is non-null, a candidate the blob probe accepts.
     if !payload.is_null() && unsafe { is_copy_blob(payload) } {
+        // SAFETY: `payload` is a live copy blob.
         unsafe { gos_rt_rc_retain(payload) };
     }
 }
@@ -3992,9 +4494,13 @@ pub unsafe extern "C" fn gos_rt_option_slot_retain(slot: *const i64) {
 /// fresh error, which the answer already owns. Null-safe.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_option_slot_retain_ok(slot: *const i64) {
+    // SAFETY: `slot` is non-null (checked first) and this shim's two-word carrier argument (C-ABI
+    // contract).
     if slot.is_null() || unsafe { *slot } != 0 {
         return;
     }
+    // SAFETY: `slot` is this shim's argument, live for the call (C-ABI contract); non-null,
+    // checked above.
     unsafe { gos_rt_option_slot_retain(slot) };
 }
 
@@ -4023,11 +4529,15 @@ pub unsafe extern "C" fn gos_rt_option_slot_retain_ok(slot: *const i64) {
 unsafe fn mark_gray(root: *mut u8) {
     let mut stack = vec![root];
     while let Some(s) = stack.pop() {
+        // SAFETY: `s` is a live, thread-local candidate the collector's roots keep alive.
         let h = unsafe { header_ptr(s) };
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { color_of(h) } == COLOR_GRAY {
             continue;
         }
+        // SAFETY: `h` is the header of the live, thread-local node `s`.
         unsafe { set_color(h, COLOR_GRAY) };
+        // SAFETY: `s` is a live node whose children this walk visits.
         unsafe {
             visit_rc_children(s, |t| {
                 let th = header_ptr(t);
@@ -4047,16 +4557,22 @@ unsafe fn mark_gray(root: *mut u8) {
 unsafe fn scan(root: *mut u8) {
     let mut stack = vec![root];
     while let Some(s) = stack.pop() {
+        // SAFETY: `s` is a live, thread-local candidate the collector's roots keep alive.
         let h = unsafe { header_ptr(s) };
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { color_of(h) } != COLOR_GRAY {
             continue;
         }
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { strong_count(h) } > 0 {
+            // SAFETY: `s` is a live node.
             unsafe { scan_black(s) };
         } else {
+            // SAFETY: `h` is the header of the live, thread-local node `s`.
             unsafe { set_color(h, COLOR_WHITE) };
             // Shared children were never grayed (external live edges);
             // skip them so their flag word is never even read as a color.
+            // SAFETY: `s` is a live node whose children this walk visits.
             unsafe {
                 visit_rc_children(s, |t| {
                     if load_strong(header_ptr(t)) & SHARED_BIT == 0 {
@@ -4073,11 +4589,15 @@ unsafe fn scan(root: *mut u8) {
 unsafe fn scan_black(root: *mut u8) {
     let mut stack = vec![root];
     while let Some(s) = stack.pop() {
+        // SAFETY: `s` is a live, thread-local node the collector reaches.
         let h = unsafe { header_ptr(s) };
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { color_of(h) } == COLOR_BLACK {
             continue;
         }
+        // SAFETY: `h` is the header of the live, thread-local node `s`.
         unsafe { set_color(h, COLOR_BLACK) };
+        // SAFETY: `s` is a live node whose children this walk visits.
         unsafe {
             visit_rc_children(s, |t| {
                 let th = header_ptr(t);
@@ -4113,13 +4633,17 @@ unsafe fn collect_white(root: *mut u8, freed: &mut Vec<*mut u8>) {
     let mut stack = vec![root];
     let mut to_free: Vec<*mut u8> = Vec::new();
     while let Some(s) = stack.pop() {
+        // SAFETY: `s` is a live, thread-local node the collector reaches.
         let h = unsafe { header_ptr(s) };
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { color_of(h) } != COLOR_WHITE {
             continue;
         }
+        // SAFETY: `h` is the header of the live, thread-local node `s`.
         unsafe { set_color(h, COLOR_BLACK) };
         // Use visit_children_raw so string children are freed via their own
         // destructor rather than silently skipped, mirroring rc_release_impl.
+        // SAFETY: `s` is a garbage cycle member, whose children this walk gives back.
         unsafe {
             visit_children_raw(s, |c| {
                 // `visit_children_raw` stays branch-free for the regular
@@ -4147,10 +4671,13 @@ unsafe fn collect_white(root: *mut u8, freed: &mut Vec<*mut u8>) {
         to_free.push(s);
     }
     for s in to_free {
+        // SAFETY: `s` is a cycle member the walk above collected.
         let h = unsafe { header_ptr(s) };
+        // SAFETY: `h` is the header of the collected node `s`.
         if unsafe { strong_count(h) } == 0 && unsafe { (*h).weak.load(Ordering::Relaxed) } == 0 {
             CYCLES_FREED.fetch_add(1, Ordering::Relaxed);
             freed.push(s);
+            // SAFETY: `s` has no strong or weak reference left (checked above).
             unsafe { free_block(s) };
         }
     }
@@ -4175,11 +4702,16 @@ unsafe fn release_shared_edge(root: *mut u8) {
         if payload.is_null() {
             continue;
         }
+        // SAFETY: `payload` is non-null (checked above), a candidate the string probe accepts.
         if unsafe { crate::c_abi::string::is_gos_string(payload.cast()) } {
+            // SAFETY: `payload` is a live string body (the probe above), whose share the edge
+            // held.
             unsafe { crate::c_abi::string::gos_rt_str_free(payload.cast()) };
             continue;
         }
+        // SAFETY: `payload` is a live node the edge held a share of.
         let h = unsafe { header_ptr(payload) };
+        // SAFETY: `h` is the header of the live node `payload`.
         let d = unsafe { dec_strong(h) };
         if d.skip || d.next != 0 {
             continue;
@@ -4187,9 +4719,12 @@ unsafe fn release_shared_edge(root: *mut u8) {
         if d.shared {
             fence(Ordering::Acquire);
         } else {
+            // SAFETY: `h` is the header of the live, thread-local node `payload`.
             unsafe { set_color(h, COLOR_BLACK) };
         }
+        // SAFETY: `payload` is the node whose children this release gives back.
         unsafe { release_children_into(payload, &mut worklist) };
+        // SAFETY: `payload` is the node whose count this edge just dropped.
         unsafe { try_reclaim(payload) };
     }
 }
@@ -4200,6 +4735,8 @@ unsafe fn release_shared_edge(root: *mut u8) {
 /// processed candidates, not the whole heap. Full drain (`budget = None`),
 /// used by the explicit `runtime::collect_cycles()`.
 unsafe fn collect_cycles() {
+    // SAFETY: collection runs on the owning thread, whose root buffer keeps every candidate
+    // alive.
     unsafe { collect_cycles_budgeted(None) };
 }
 
@@ -4231,7 +4768,9 @@ unsafe fn collect_cycles_budgeted(budget: Option<usize>) {
     // below (or at the enclosing release walk's exit when the collection
     // fired mid-release).
     teardown_enter();
+    // SAFETY: `roots` are candidates the root buffer kept alive, taken on the owning thread.
     unsafe { collect_cycles_slice(budget, roots) };
+    // SAFETY: this runs at the collection's teardown exit, which drains its queues.
     unsafe { teardown_exit() };
 }
 
@@ -4243,47 +4782,62 @@ unsafe fn collect_cycles_slice(budget: Option<usize>, roots: Vec<*mut u8>) {
     let mut scan_roots: Vec<*mut u8> = Vec::new();
     let mut dead: Vec<*mut u8> = Vec::new();
     for s in roots {
+        // SAFETY: `s` is a candidate the root buffer kept alive.
         let h = unsafe { header_ptr(s) };
         // A candidate that escaped to another goroutine after being
         // buffered: drop it from the collector. The stale buffered pin is
         // cleared atomically (its ROOTS entry is being dropped right here),
         // and the block is reclaimed if its count already fell to zero -
         // the releasing goroutine refused to free while the pin was set.
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { is_shared(h) } {
+            // SAFETY: `h` is the header of a shared node, whose count is only ever accessed
+            // atomically.
             let a = unsafe { AtomicU32::from_ptr(std::ptr::addr_of_mut!((*h).strong)) };
             a.fetch_and(!BUFFERED_BIT, Ordering::AcqRel);
+            // SAFETY: `s` is the shared candidate just unpinned.
             unsafe { try_reclaim(s) };
             continue;
         }
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { color_of(h) } == COLOR_PURPLE {
+            // SAFETY: `s` is a live, thread-local purple candidate.
             unsafe { mark_gray(s) };
             scan_roots.push(s);
         } else {
+            // SAFETY: `h` is the header of the live, thread-local node `s`.
             unsafe { set_buffered(h, false) };
             // A candidate whose count later fell to 0 *and* is black is
             // acyclic garbage whose children were already released; reclaim
             // it. A gray candidate is mid-trace (reachable from another
             // purple root) and must be left to scan/collect - never freed
             // here, or a live cycle member would be dropped.
+            // SAFETY: `h` is the header of the live node `s`.
             if unsafe { color_of(h) } == COLOR_BLACK && unsafe { strong_count(h) } == 0 {
                 dead.push(s);
             }
         }
     }
     for &s in &scan_roots {
+        // SAFETY: `s` is a candidate the walk above grayed, still alive.
         unsafe { scan(s) };
     }
     let mut freed_nodes: Vec<*mut u8> = Vec::new();
     for s in scan_roots {
+        // SAFETY: `s` is a candidate the walk above grayed, still alive.
         let h = unsafe { header_ptr(s) };
+        // SAFETY: `h` is the header of the live, thread-local node `s`.
         unsafe { set_buffered(h, false) };
+        // SAFETY: `h` is the header of the live node `s`.
         if unsafe { color_of(h) } == COLOR_WHITE {
+            // SAFETY: `s` is a white candidate: a garbage cycle member.
             unsafe { collect_white(s, &mut freed_nodes) };
         }
     }
     // Reclaim the dead leftovers last: count 0 means nothing references them,
     // so no MarkGray traversal touched them.
     for s in dead {
+        // SAFETY: `s` is a dead candidate with no references left.
         unsafe { try_reclaim(s) };
     }
     // Reconciliation: a garbage component reachable from this slice may include
@@ -4322,6 +4876,8 @@ unsafe fn collect_cycles_slice(budget: Option<usize>, roots: Vec<*mut u8>) {
 /// candidate buffer crosses its threshold.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_collect_cycles() {
+    // SAFETY: collection runs on the calling thread, whose root buffer keeps every candidate
+    // alive.
     unsafe { collect_cycles() };
 }
 
@@ -4482,8 +5038,10 @@ mod tests {
             0,
             "a standard slab starts on a slab boundary"
         );
-        arena_retire(standard, REGION_SLAB_BYTES);
-        arena_retire(oversized, REGION_SLAB_BYTES + os_page_size());
+        // SAFETY: `standard` is the slab acquired above, which nothing uses after this.
+        unsafe { arena_retire(standard, REGION_SLAB_BYTES) };
+        // SAFETY: `oversized` is the slab acquired above, which nothing uses after this.
+        unsafe { arena_retire(oversized, REGION_SLAB_BYTES + os_page_size()) };
     }
 
     /// A pop with no region open still balances the depth it was called at.
@@ -4569,8 +5127,12 @@ mod tests {
     /// Allocate via the runtime entry and write the discriminant into
     /// the header byte (mirroring `gos_enum_set_disc`).
     unsafe fn alloc_with_disc(payload_words: usize, disc: i64, meta: *const i64) -> *mut u8 {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let p = unsafe { gos_rt_rc_alloc((payload_words * 8) as u64, meta) };
         assert!(!p.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { (*header_ptr(p)).disc = u8::try_from(disc).unwrap_or(0) };
         p
     }
@@ -4578,10 +5140,14 @@ mod tests {
     unsafe fn set_child(parent: *mut u8, word: usize, child: *mut u8) {
         // The walks read a child slot as an integer word with its provenance
         // exposed, so the slot is written the same way.
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::vec::slot_write_word(parent.add(word * 8), child) };
     }
 
     unsafe fn strong_of(payload: *mut u8) -> usize {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { strong_count(header_ptr(payload)) as usize }
     }
 
@@ -4594,7 +5160,11 @@ mod tests {
     /// Set `parent`'s child slot (word 1) to `child` and retain it, as the
     /// compiled tier's `gos_store` does when an object gains a child edge.
     unsafe fn link(parent: *mut u8, child: *mut u8) {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { set_child(parent, 1, child) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_rc_retain(child) };
     }
 
@@ -4602,6 +5172,8 @@ mod tests {
     /// transferring the existing reference (the unique-ownership shape, like
     /// `Node { child: existing_b }` where `b` is used once and not aliased).
     unsafe fn move_child(parent: *mut u8, child: *mut u8) {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { set_child(parent, 1, child) };
     }
 
@@ -4609,6 +5181,8 @@ mod tests {
     /// each cycle test starts from a clean candidate buffer (`ROOTS` is
     /// thread-local and tests share worker threads).
     fn fresh_cycle_state() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_collect_cycles() };
     }
 
@@ -4619,6 +5193,8 @@ mod tests {
         let base = rc_live_count();
         let freed_base = rc_cycles_freed();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let a = gos_rt_rc_alloc(16, meta.as_ptr());
             let b = gos_rt_rc_alloc(16, meta.as_ptr());
@@ -4640,6 +5216,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let a = gos_rt_rc_alloc(16, meta.as_ptr());
             link(a, a);
@@ -4656,6 +5234,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let a = gos_rt_rc_alloc(16, meta.as_ptr());
             let b = gos_rt_rc_alloc(16, meta.as_ptr());
@@ -4681,6 +5261,8 @@ mod tests {
         let _g = count_guard();
         fresh_cycle_state();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let b = gos_rt_rc_alloc(16, meta.as_ptr());
             let a = gos_rt_rc_alloc(16, meta.as_ptr());
@@ -4702,6 +5284,8 @@ mod tests {
         let base = rc_live_count();
         let freed_base = rc_cycles_freed();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             // Five independent two-node cycles -> ten buffered candidates.
             for _ in 0..5 {
@@ -4743,6 +5327,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             for _ in 0..8 {
                 let a = gos_rt_rc_alloc(16, meta.as_ptr());
@@ -4772,6 +5358,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             // A uniquely-owned leaf: drop_reuse hands back its block.
             let a = gos_rt_rc_alloc(16, meta.as_ptr());
@@ -4798,6 +5386,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let a = gos_rt_rc_alloc(16, meta.as_ptr());
             // Mark shared (escaped to a goroutine): must NOT be reused.
@@ -4817,6 +5407,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             // parent uniquely owns child via word 1.
             let child = gos_rt_rc_alloc(16, meta.as_ptr());
@@ -4844,6 +5436,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc_reuse(std::ptr::null_mut(), 16, meta.as_ptr());
             assert!(!p.is_null());
@@ -4856,6 +5450,8 @@ mod tests {
     #[test]
     fn allocation_telemetry_separates_payload_header_and_reuse() {
         let before = crate::c_abi::ledger::rc_alloc_stats();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let first = gos_rt_rc_alloc(16, std::ptr::null());
             assert!(!first.is_null());
@@ -4885,6 +5481,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let a = gos_rt_rc_alloc(16, meta.as_ptr());
             gos_rt_rc_retain(a); // a second owner: not unique
@@ -4906,6 +5504,8 @@ mod tests {
         let _g = count_guard();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gos_rt_arena_push();
             assert!(region_active());
@@ -4940,6 +5540,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gos_rt_arena_push();
             // Build a parent that owns a child entirely inside the region.
@@ -4967,6 +5569,8 @@ mod tests {
     fn region_oversized_alloc_gets_its_own_slab() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gos_rt_arena_push();
             // Larger than the default slab - must still allocate, on its own slab.
@@ -4984,6 +5588,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             // Two parents share one child (a diamond, no cycle). The child is
             // owned only by the parents (its construction handle is released).
@@ -5008,6 +5614,8 @@ mod tests {
     }
 
     unsafe fn weak_of(payload: *mut u8) -> usize {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { (*header_ptr(payload)).weak.load(Ordering::Relaxed) as usize }
     }
 
@@ -5015,6 +5623,8 @@ mod tests {
     fn downgrade_increments_weak_not_strong() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             let w = gos_rt_rc_downgrade(p);
@@ -5035,6 +5645,8 @@ mod tests {
     fn upgrade_while_alive_returns_payload_and_bumps_strong() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             gos_rt_rc_downgrade(p);
@@ -5053,6 +5665,8 @@ mod tests {
     fn upgrade_opt_packs_some_when_alive_taking_a_strong_reference() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             gos_rt_rc_downgrade(p);
@@ -5085,6 +5699,8 @@ mod tests {
     fn upgrade_opt_boxes_none_after_last_strong_release() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             gos_rt_rc_downgrade(p);
@@ -5105,6 +5721,8 @@ mod tests {
     fn upgrade_after_last_strong_release_returns_null() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             gos_rt_rc_downgrade(p);
@@ -5121,6 +5739,8 @@ mod tests {
     fn allocation_lingers_until_weak_count_zero() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             gos_rt_rc_downgrade(p);
@@ -5146,6 +5766,8 @@ mod tests {
         let _g = count_guard();
         let base = rc_live_count();
         const WEAKS: usize = 300;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             for _ in 0..WEAKS {
@@ -5189,6 +5811,8 @@ mod tests {
         let _g = count_guard();
         let base = rc_live_count();
         let meta = tree_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let l0 = alloc_with_disc(1, 0, meta.as_ptr());
             let l1 = alloc_with_disc(1, 0, meta.as_ptr());
@@ -5208,6 +5832,8 @@ mod tests {
 
     #[test]
     fn weak_funcs_are_null_safe() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             assert!(gos_rt_rc_downgrade(std::ptr::null_mut()).is_null());
             assert!(gos_rt_rc_weak_upgrade(std::ptr::null_mut()).is_null());
@@ -5220,6 +5846,8 @@ mod tests {
     fn oversized_block_round_trips() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             // A multi-MiB payload: no size is recorded anywhere any more
             // (mi_free recovers the block from the pointer), so this pins
@@ -5237,6 +5865,8 @@ mod tests {
     fn alloc_starts_at_strong_one_and_tracks_live() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             assert!(!p.is_null());
@@ -5251,6 +5881,8 @@ mod tests {
     fn retain_and_release_adjust_strong_count() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             gos_rt_rc_retain(p);
@@ -5265,6 +5897,8 @@ mod tests {
 
     #[test]
     fn null_safe() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gos_rt_rc_retain(std::ptr::null_mut());
             gos_rt_rc_release(std::ptr::null_mut());
@@ -5275,6 +5909,8 @@ mod tests {
     fn leaf_with_no_meta_frees_cleanly() {
         let _g = count_guard();
         let base = rc_live_count();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let p = gos_rt_rc_alloc(8, std::ptr::null());
             gos_rt_rc_release(p);
@@ -5303,6 +5939,8 @@ mod tests {
         let _g = count_guard();
         let base = rc_live_count();
         let meta = tree_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let l0 = alloc_with_disc(1, 0, meta.as_ptr());
             let l1 = alloc_with_disc(1, 0, meta.as_ptr());
@@ -5321,6 +5959,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = tree_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let node = alloc_with_disc(2, 1, meta.as_ptr());
             // Keep a self-cycle alive long enough to enter the cycle
@@ -5339,6 +5979,8 @@ mod tests {
         let _g = count_guard();
         let base = rc_live_count();
         let meta = tree_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let shared = alloc_with_disc(1, 0, meta.as_ptr());
             let l1 = alloc_with_disc(1, 0, meta.as_ptr());
@@ -5372,6 +6014,8 @@ mod tests {
         let _g = count_guard();
         let base = rc_live_count();
         let depth = 1_000_000usize;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let mut head = std::ptr::null_mut::<u8>();
             for _ in 0..depth {
@@ -5394,7 +6038,11 @@ mod tests {
     }
 
     unsafe fn link_at(parent: *mut u8, word: usize, child: *mut u8) {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { set_child(parent, word, child) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_rc_retain(child) };
     }
 
@@ -5406,6 +6054,8 @@ mod tests {
         let meta = two_child_meta();
         // The object borrows a pointer to this meta, so it must outlive S.
         let s_meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             // Shared object S with one extra owner (standing in for the
             // other goroutine's handle).
@@ -5440,6 +6090,8 @@ mod tests {
         fresh_cycle_state();
         let base = rc_live_count();
         let meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             // X owns child C, and X survives a decrement while thread-local,
             // so it is buffered as a cycle candidate (pinning its block).
@@ -5473,6 +6125,8 @@ mod tests {
         let base = rc_live_count();
         // The object borrows a pointer to this meta, so it must outlive S.
         let s_meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let s = gos_rt_rc_alloc(16, s_meta.as_ptr());
             gos_rt_rc_mark_shared(s);
@@ -5496,6 +6150,8 @@ mod tests {
         let base = rc_live_count();
         // The object borrows a pointer to this meta, so it must outlive S.
         let s_meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let s = gos_rt_rc_alloc(16, s_meta.as_ptr());
             let w = gos_rt_rc_downgrade(s);
@@ -5519,6 +6175,8 @@ mod tests {
         let base = rc_live_count();
         let meta = [RC_KIND_STRUCT_GUARDED, 0];
         let source = [17_u64];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let first = gos_rt_rc_alloc_copy(8, meta.as_ptr(), source.as_ptr().cast());
             assert!(is_copy_blob(first), "an allocated blob is recognised");
@@ -5527,7 +6185,7 @@ mod tests {
                 "a blob is either in the arena or carries its owner word"
             );
             assert_eq!(meta_of(header_ptr(first)), meta.as_ptr(), "child layout");
-            assert_eq!(unsafe { first.cast::<u64>().read() }, 17);
+            assert_eq!(first.cast::<u64>().read(), 17);
             gos_rt_rc_release(first);
 
             let second = gos_rt_rc_alloc_copy(8, meta.as_ptr(), source.as_ptr().cast());
@@ -5545,6 +6203,8 @@ mod tests {
         let base = rc_live_count();
         let meta = [RC_KIND_STRUCT_GUARDED, 0];
         let meta_id = meta_intern(meta.as_ptr()).expect("meta id");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let header = owner_blob_header(RC_HEADER_SIZE + 8, true);
             assert!(!header.is_null());
@@ -5573,8 +6233,12 @@ mod tests {
         // element copy or any other untagged allocation might by chance.
         let mut words = [0_u64; 4];
         words[1] = 1 | (u64::from(COPY_BLOB_DISC) << 40) | (u64::from(meta_id) << 48);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let payload = unsafe { words.as_mut_ptr().add(2).cast::<u8>() };
         assert!(!in_copy_blob_arena(payload));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert!(!unsafe { is_copy_blob(payload) });
     }
 
@@ -5599,6 +6263,8 @@ mod tests {
         // buffers must outlive every object that references them - the
         // shared set lives for the whole test, so its meta does too.
         let shared_meta = node_meta();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let shared: Vec<usize> = (0..n_shared)
                 .map(|_| {
@@ -5657,7 +6323,11 @@ mod tests {
 
     /// Whether a runtime string counts its shares atomically.
     unsafe fn string_is_shared(s: *const std::ffi::c_char) -> bool {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let hdr = unsafe { s.cast::<u8>().sub(13) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let rc = u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] });
         rc & crate::c_abi::string::STR_SHARED != 0
     }
@@ -5671,6 +6341,8 @@ mod tests {
         let base = rc_live_count();
         let struct_meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 2, 0, 1];
         let env_meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 1, 1];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let dir = crate::c_abi::string::test_gos_str("/tmp/datadir-marker-string");
             let web = crate::c_abi::string::test_gos_str("/tmp/web-marker-string");
@@ -5700,6 +6372,8 @@ mod tests {
         fresh_cycle_state();
         let vec_child = gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT;
         let meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 1, vec_child];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let tag = crate::c_abi::string::test_gos_str("tag-marker-string");
             let tags = crate::c_abi::vec::gos_rt_vec_new_typed(
@@ -5719,6 +6393,8 @@ mod tests {
     fn aggregate_mark_shared_marks_counted_fields_in_place() {
         let vec_child = gossamer_abi::rc::RC_CHILD_VEC << gossamer_abi::rc::RC_CHILD_KIND_SHIFT;
         let meta: Vec<i64> = vec![RC_KIND_STRUCT, 1, 0, 2, 0, vec_child | 2];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             let dir = crate::c_abi::string::test_gos_str("aggregate-dir-marker");
             let tag = crate::c_abi::string::test_gos_str("aggregate-tag-marker");

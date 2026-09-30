@@ -41,8 +41,8 @@ println("body: {} C = {} F = {} K"
 
 let summer = Fahrenheit { value: 86.0 }
 let summer_c = summer.to_celsius()
-println("summer day: {} F = {} C", summer.value, summer_c.value)
+println(f"summer day: {summer.value} F = {summer_c.value} C")
 
 let helium = Kelvin { value: 4.0 }
 let helium_c = helium.to_celsius()
-println("liquid helium: {} K = {} C", helium.value, helium_c.value)
+println(f"liquid helium: {helium.value} K = {helium_c.value} C")

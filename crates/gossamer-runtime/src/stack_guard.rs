@@ -243,7 +243,7 @@ mod unix {
     }
 
     fn install_alt_stack() {
-        // SAFETY: `Box::into_raw` returns a valid heap allocation
+        // `Box::into_raw` returns a valid heap allocation
         // of `ALT_STACK_BYTES`. The pointer is parked thread-local
         // and never freed - the thread either exits (kernel reaps
         // the alt stack first via SS_DISABLE on thread exit) or
@@ -265,12 +265,13 @@ mod unix {
 
     fn install_sigaction() {
         ACTION_ONCE.call_once(|| {
-            let mut action: libc::sigaction = unsafe { MaybeUninit::zeroed().assume_init() };
             // SAFETY: zero-init `sigaction` is a defined initial
             // state across every supported libc; we set the fields
             // we care about below.
+            let mut action: libc::sigaction = unsafe { MaybeUninit::zeroed().assume_init() };
             action.sa_flags = libc::SA_SIGINFO | libc::SA_ONSTACK | libc::SA_RESTART;
             action.sa_sigaction = sigsegv_handler as *const () as usize;
+            // SAFETY: `action.sa_mask` is a field of the local `action`, a writable `sigset_t`.
             unsafe { libc::sigemptyset(&raw mut action.sa_mask) };
             // SAFETY: `action` is fully initialised; passing null
             // for the old action is the standard "don't care"
@@ -398,7 +399,11 @@ mod unix {
         (0, 0)
     }
 
-    extern "C" fn sigsegv_handler(
+    /// # Safety
+    ///
+    /// Called only by the kernel as the SIGSEGV handler: `info` is null or the
+    /// `siginfo_t` it delivers.
+    unsafe extern "C" fn sigsegv_handler(
         sig: libc::c_int,
         info: *mut libc::siginfo_t,
         _ctx: *mut libc::c_void,
@@ -644,6 +649,8 @@ mod windows {
         if record.is_null() {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+        // SAFETY: `record` is non-null (checked above), the exception record the OS passes for
+        // the fault.
         let code = unsafe { (*record).ExceptionCode };
         // Only hard CPU faults are reported. Rust panics, C++ exceptions
         // and breakpoints are also first-chance exceptions but are
@@ -696,6 +703,8 @@ mod windows {
         if record.is_null() {
             return EXCEPTION_CONTINUE_SEARCH;
         }
+        // SAFETY: `record` is non-null (checked above), the exception record the OS passes for
+        // the fault.
         let code = unsafe { (*record).ExceptionCode };
         if code != EXCEPTION_STACK_OVERFLOW {
             // A non-stack-overflow fault (most often an access violation).

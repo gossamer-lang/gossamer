@@ -53,7 +53,8 @@ fn read(path: &Path) -> String {
 fn abi_of_rust(ty: &str) -> Option<AbiType> {
     let ty = ty.split_whitespace().collect::<Vec<_>>().join(" ");
     let ty = ty.trim().trim_end_matches(',').trim();
-    if ty.is_empty() || ty == "()" {
+    // A diverging function hands nothing back, as a unit one does.
+    if ty.is_empty() || ty == "()" || ty == "!" {
         return Some(AbiType::Void);
     }
     if ty.starts_with('*') {
@@ -171,17 +172,10 @@ fn parse_sig(params: &str, ret: &str) -> ParsedSig {
     Some((tys, abi_of_rust(ret)?))
 }
 
-/// Definitions this scan cannot model, each with the reason. A
-/// diverging (`-> !`) function has no return type to compare, and the
-/// callback registrar takes a function pointer, which is a `Ptr` the
-/// spelling does not say.
-const UNMODELLED: &[&str] = &[
-    "gos_rt_panic_oob",
-    "gos_rt_panic_vec_index",
-    "gos_rt_exit",
-    "gos_rt_process_abort",
-    "gos_rt_callback_register",
-];
+/// Definitions this scan cannot model, each with the reason: the callback
+/// registrar takes a function pointer, which is a `Ptr` the spelling does
+/// not say.
+const UNMODELLED: &[&str] = &["gos_rt_callback_register"];
 
 #[test]
 fn every_registry_entry_matches_its_rust_definition() {

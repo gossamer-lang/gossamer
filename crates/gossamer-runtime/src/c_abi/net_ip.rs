@@ -21,7 +21,6 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::doc_markdown)]
@@ -30,7 +29,11 @@
 use std::net::IpAddr;
 use std::os::raw::c_char;
 
-fn cstr_to_str(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_str(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -47,7 +50,8 @@ fn ip_err(msg: &str) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_net_ip_parse(s: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let text = cstr_to_str(s);
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let text = unsafe { cstr_to_str(s) };
         match text.parse::<IpAddr>() {
             Ok(ip) => {
                 let canon = super::string::alloc_cstring(ip.to_string().as_bytes());
@@ -64,7 +68,8 @@ pub unsafe extern "C" fn gos_rt_net_ip_parse(s: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_net_ip_octets(s: *const c_char) -> *mut super::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let text = cstr_to_str(s);
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let text = unsafe { cstr_to_str(s) };
         let bytes: Vec<u8> = match text.parse::<IpAddr>() {
             Ok(IpAddr::V4(v4)) => v4.octets().to_vec(),
             Ok(IpAddr::V6(v6)) => v6.octets().to_vec(),

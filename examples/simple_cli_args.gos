@@ -7,5 +7,5 @@
 
 use std::{env, iter}
 
-println("program: {}", env::program_name())
-env::args() |> |v| iter::for_each(v, |a| println("arg: {}", a))
+println(f"program: {env::program_name()}")
+env::args() |> |v| iter::for_each(v, |a| println(f"arg: {a}"))

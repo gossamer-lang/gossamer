@@ -1,0 +1,28 @@
+// Recursion deeper than a fixed frame count: a 100,000-deep non-tail call and
+// a depth-first walk down a 20,000-node path, which every tier completes.
+// A `for` over an element of a by-value parameter reads the caller's
+// storage, so the walk passes its graph down without copying it per level.
+
+fn depth(n: i64) -> i64 {
+    if n == 0 { 0 } else { 1 + depth(n - 1) }
+}
+fn visit(adj: Vec<Vec<i64>>, node: i64, seen: &mut Vec<bool>) -> i64 {
+    seen[node] = true
+    let mut count = 1
+    for next in adj[node] {
+        if !seen[next] {
+            count += visit(adj, next, seen)
+        }
+    }
+    count
+}
+fn main() {
+    println("{}", depth(100000))
+    let n = 20000
+    let mut adj: Vec<Vec<i64>> = #[]
+    for i in 0..n {
+        if i + 1 < n { adj.push(#[i + 1]) } else { adj.push(#[]) }
+    }
+    let mut seen = #[false; 20000]
+    println("{}", visit(adj, 0, &mut seen))
+}

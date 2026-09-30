@@ -1,0 +1,80 @@
+// Methods and associated functions a program declares on a primitive, and
+// methods named like a `math` function, reach the program's own body on every
+// tier: through a typed binding, an unsuffixed literal, and a path. A body
+// that loops is compiled while `main` stays on the VM, so the `&self`
+// receiver also crosses into compiled code as the address of its value.
+
+struct V { x: f64, y: f64 }
+
+impl V {
+    fn abs(&self) -> f64 { self.x * self.x + self.y * self.y }
+    fn floor(&self) -> i64 { 42 }
+}
+
+impl i64 {
+    fn sqrt(&self) -> i64 {
+        let mut r = 0
+        while (r + 1) * (r + 1) <= *self { r += 1 }
+        r
+    }
+    fn pow(&self, exp: i64) -> i64 {
+        let mut r = 1
+        for _ in 0..exp { r = r * *self }
+        r
+    }
+    fn max(&self, other: i64) -> i64 { if *self > other { *self * 10 } else { other * 10 } }
+    fn parse_radix(text: String, radix: i64) -> i64 { text.len() * radix }
+}
+
+impl char {
+    fn is_vowel(&self) -> bool { "aeiou".contains(self.to_string()) }
+    fn from_digit(d: i64, radix: i64) -> Option<char> {
+        if d < 0 || d >= radix { return None }
+        if d < 10 { Some(('0' as u8 + d as u8) as char) } else { Some(('a' as u8 + (d - 10) as u8) as char) }
+    }
+}
+
+impl f64 {
+    fn halvings(&self) -> i64 {
+        let mut x = *self
+        let mut n = 0
+        while x > 1.0 {
+            x = x / 2.0
+            n += 1
+        }
+        n
+    }
+}
+
+impl bool {
+    fn times(&self, k: i64) -> i64 {
+        let mut t = 0
+        for _ in 0..k { if *self { t += 1 } }
+        t
+    }
+}
+
+impl u8 {
+    fn bits(&self) -> i64 {
+        let mut x = *self
+        let mut n = 0
+        while x > 0 {
+            n += (x & 1) as i64
+            x = x >> 1
+        }
+        n
+    }
+}
+
+fn main() {
+    let v = V { x: 3.0, y: 4.0 }
+    let m: i64 = 17
+    println("{} {}", v.abs(), v.floor())
+    println("{} {} {} {}", m.sqrt(), 26.sqrt(), m.pow(2), m.max(5))
+    println("{}", (2.25).sqrt())
+    println("{:?} {:?} {}", char::from_digit(11, 16), char::from_digit(3, 2), i64::parse_radix("ab", 10))
+    let vowels: Vec<char> = "education".chars().filter(|c| c.is_vowel()).collect()
+    println("{:?}", vowels)
+    let b: u8 = 0b1011_0110
+    println("{} {} {}", (1000.0).halvings(), true.times(5), b.bits())
+}

@@ -27,7 +27,7 @@ fn render_hover(doc: &DocumentAnalysis, loc: &Locate) -> String {
                 body.push_str(&info.name);
                 if let Some(ty) = doc.types.get(*expr_id) {
                     body.push_str(": ");
-                    body.push_str(&render_ty(&doc.tcx, ty));
+                    body.push_str(&render_public_ty(&doc.tcx, ty));
                 }
                 body.push_str("\n```");
             } else {
@@ -52,7 +52,7 @@ fn render_hover(doc: &DocumentAnalysis, loc: &Locate) -> String {
             }
             if let Some(ty) = doc.types.get(*expr_id) {
                 body.push_str("\n\n*type:* `");
-                body.push_str(&render_ty(&doc.tcx, ty));
+                body.push_str(&render_public_ty(&doc.tcx, ty));
                 body.push('`');
             }
             body
@@ -76,7 +76,7 @@ fn render_hover(doc: &DocumentAnalysis, loc: &Locate) -> String {
             let mut body = format!("```\n{name}\n```");
             if let Some(ty) = doc.types.get(*expr_id) {
                 body.push_str("\n\n*type:* `");
-                body.push_str(&render_ty(&doc.tcx, ty));
+                body.push_str(&render_public_ty(&doc.tcx, ty));
                 body.push('`');
             }
             body
@@ -118,10 +118,18 @@ fn render_hover(doc: &DocumentAnalysis, loc: &Locate) -> String {
             let mut body = format!("```gos\nlet {name}\n```");
             if let Some(ty) = doc.types.get(*pattern_id) {
                 body.push_str("\n\n*type:* `");
-                body.push_str(&render_ty(&doc.tcx, ty));
+                body.push_str(&render_public_ty(&doc.tcx, ty));
                 body.push('`');
             }
             body
+        }
+        Locate::Field {
+            name,
+            access_id: Some(id),
+            ..
+        } if doc.types.get(*id).is_some() => {
+            let ty = doc.types.get(*id).map(|ty| render_public_ty(&doc.tcx, ty));
+            format!("```gos\n{name}: {}\n```\n\nfield", ty.unwrap_or_default())
         }
         Locate::Field { name, .. } => format!("```gos\n{name}\n```\n\nfield / method"),
     }
@@ -349,7 +357,10 @@ fn is_valid_identifier(name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    if RESERVED_KEYWORDS.contains(&name) {
+    // Only the lexer's reserved words are refused; a contextual word such as
+    // `defer` or `select` is an ordinary name everywhere its construct does
+    // not start.
+    if gossamer_lex::Keyword::from_ident(name).is_some() {
         return false;
     }
     let mut chars = name.chars();
@@ -362,12 +373,4 @@ fn is_valid_identifier(name: &str) -> bool {
     chars.all(unicode_ident::is_xid_continue)
 }
 
-/// Reserved keywords the parser rejects as identifiers. Distinct
-/// from the broader `KEYWORDS` constant (which feeds completion)
-/// so rename validation stays narrow and predictable.
-const RESERVED_KEYWORDS: &[&str] = &[
-    "as", "break", "const", "continue", "defer", "else", "enum", "false", "fn", "for", "if",
-    "impl", "in", "let", "loop", "match", "mod", "mut", "pub", "return", "select", "static",
-    "struct", "trait", "true", "type", "unsafe", "use", "where", "while",
-];
 

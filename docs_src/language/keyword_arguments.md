@@ -34,6 +34,7 @@ parameter it fills, so named arguments may appear in any order.
 
 Positional arguments come first, then names:
 
+<!-- fragment -->
 ```gossamer
 volume(2, depth: 10)        // width positionally, depth by name
 volume(width: 2, 3)         // error[GR0013]
@@ -44,6 +45,7 @@ order, so every later argument needs a name too.
 
 A name has to name a parameter of the callee, and may be given once:
 
+<!-- fragment -->
 ```gossamer
 volume(depht: 3)            // error[GR0013]: `depht` is not a parameter
 volume(width: 1, width: 2)  // error[GR0013]: `width` is given twice
@@ -63,6 +65,7 @@ bool literal, optionally negated (`-1`). The default is spliced into
 every call that omits it, so an expression that would have to be resolved
 separately at each of those sites is rejected:
 
+<!-- compile_fail GR0014 -->
 ```gossamer
 fn f(a: i64, b: i64 = a + 1)   // error[GR0014]: a parameter default must be a constant
 ```
@@ -93,6 +96,7 @@ When several types declare a method of the same name, that holds as long
 as they agree on their parameter names and defaults - which is the usual
 case. When they disagree, the call is reported rather than guessed:
 
+<!-- fragment -->
 ```gossamer
 impl A { fn scaled(&self, factor: i64 = 2) -> i64 { .. } }
 impl B { fn scaled(&self, factor: i64 = 3) -> i64 { .. } }

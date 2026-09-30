@@ -1,0 +1,15 @@
+[package]
+name = "gossamer-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Algorithms every Gossamer tier shares, held once: the language's JSON grammar and value."
+
+[dependencies]
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

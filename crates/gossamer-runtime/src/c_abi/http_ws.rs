@@ -22,7 +22,6 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::doc_markdown)]
@@ -55,7 +54,11 @@ fn next_handle() -> i64 {
     NEXT_WS_HANDLE.fetch_add(1, Ordering::Relaxed)
 }
 
-fn cstr_to_str(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_str(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -84,17 +87,25 @@ fn register_conn(ws: WebSocket<WsStream>) -> i64 {
 /// blocking recv/send loop and returns to close; the handle is then
 /// unregistered. A handshake failure drops the socket without invoking
 /// the handler.
-fn serve_ws_conn(mut stream: TcpStream, env_addr: usize, fn_addr: usize) {
+///
+/// # Safety
+///
+/// `env_addr` is a live handler environment and `fn_addr` the entry address of
+/// its compiled `fn(env, ws)` method.
+unsafe fn serve_ws_conn(mut stream: TcpStream, env_addr: usize, fn_addr: usize) {
     if gossamer_ws::server_accept(&mut stream).is_err() {
         return;
     }
     let handle = register_conn(WebSocket::server(stream));
-    // SAFETY: `fn_addr` came from `gos_fn_addr("T::handle")` at the user's
+    // `fn_addr` came from `gos_fn_addr("T::handle")` at the user's
     // `websocket::serve(addr, app)` call site; `env_addr` is the `&app`
     // pointer passed alongside. A `fn handle(&self, ws: i64)` Gossamer
     // method lowers to a `void(ptr, i64)` C-ABI function.
     type WsHandlerFn = unsafe extern "C" fn(env: *mut u8, ws: i64);
+    // SAFETY: this function's contract makes `fn_addr` a compiled
+    // `fn(env, ws)` method.
     let handler: WsHandlerFn = unsafe { std::mem::transmute::<usize, WsHandlerFn>(fn_addr) };
+    // SAFETY: this function's contract keeps `env_addr` live for the call.
     unsafe { handler(env_addr as *mut u8, handle) };
     if let Some(m) = WS_CONNS.lock().as_mut() {
         m.remove(&handle);
@@ -115,6 +126,8 @@ pub unsafe extern "C-unwind" fn gos_rt_ws_serve(
         let addr_s = if addr.is_null() {
             "0.0.0.0:8080".to_string()
         } else {
+            // SAFETY: `addr` is this shim's argument, live for the call (C-ABI contract) or null,
+            // which `gos_str_arg_string` accepts.
             unsafe { crate::c_abi::gos_str_arg_string(addr) }
         };
         let listener = match crate::listen::bind_tcp(&addr_s) {
@@ -127,7 +140,9 @@ pub unsafe extern "C-unwind" fn gos_rt_ws_serve(
             listener,
             super::http_server::ConnHome::Thread,
             move |stream| {
-                serve_ws_conn(stream, env_addr, fn_addr);
+                // SAFETY: the caller keeps the handler environment live while
+                // the server runs, and `handler_fn` is its compiled method.
+                unsafe { serve_ws_conn(stream, env_addr, fn_addr) };
             },
         );
     }
@@ -141,7 +156,8 @@ pub unsafe extern "C-unwind" fn gos_rt_ws_serve(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_ws_serve_connect(url: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let url = cstr_to_str(url);
+        // SAFETY: `url` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let url = unsafe { cstr_to_str(url) };
         match ws_client_connect(&url) {
             Ok(handle) => super::vec::gos_rt_result_new(0, handle),
             Err(e) => ws_err(&format!("websocket::connect: {e}")),
@@ -165,7 +181,8 @@ pub unsafe extern "C" fn gos_rt_ws_send_text(h: i64, s: *const c_char) -> i128 {
         let Some(conn) = conn_clone(h) else {
             return ws_err("send_text: stale handle");
         };
-        let text = cstr_to_str(s);
+        // SAFETY: `s` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
+        let text = unsafe { cstr_to_str(s) };
         let mut ws = conn.lock();
         match ws.send_text(&text) {
             Ok(()) => super::vec::gos_rt_result_new(0, 0),
@@ -181,7 +198,9 @@ pub unsafe extern "C" fn gos_rt_ws_send_binary(h: i64, data: *const super::vec::
         let Some(conn) = conn_clone(h) else {
             return ws_err("send_binary: stale handle");
         };
-        let bytes = unsafe { super::encoding::gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let mut ws = conn.lock();
         match ws.send_binary(&bytes) {
             Ok(()) => super::vec::gos_rt_result_new(0, 0),
@@ -195,7 +214,7 @@ pub unsafe extern "C" fn gos_rt_ws_send_binary(h: i64, data: *const super::vec::
 /// answers ping/pong control frames. A peer close or an I/O error is an
 /// `Err` - the loop's exit signal.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_ws_recv(h: i64) -> i128 {
+pub extern "C" fn gos_rt_ws_recv(h: i64) -> i128 {
     ffi_entry!(0i128, {
         let Some(conn) = conn_clone(h) else {
             return ws_err("recv: stale handle");
@@ -229,7 +248,7 @@ pub unsafe extern "C" fn gos_rt_ws_recv(h: i64) -> i128 {
 /// `websocket::close(ws) -> Result<(), Error>`. Sends a normal close
 /// frame (best effort) and unregisters the handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_ws_close(h: i64) -> i128 {
+pub extern "C" fn gos_rt_ws_close(h: i64) -> i128 {
     ffi_entry!(0i128, {
         if let Some(conn) = conn_clone(h) {
             let _ = conn.lock().send_close(1000, "");

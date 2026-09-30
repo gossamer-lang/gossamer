@@ -7,7 +7,7 @@
 //! freely.
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gossamer_ast::{ItemKind, SourceFile};
 use gossamer_diagnostics::Diagnostic;
@@ -17,9 +17,12 @@ use gossamer_resolve::{ResolveError, resolve_source_file};
 use gossamer_types::{TyCtxt, check_arena_escapes, check_parallel_adapters, typecheck_source_file};
 
 fn collect_diagnostics(source: &str, file_name: &str) -> Vec<Diagnostic> {
+    // The parse `gos check` runs: the synthesized serde tail and the
+    // autoderive passes report diagnostics a bare parse never sees.
+    let source = gossamer_parse::autoderive::augment_source(source);
     let mut map = SourceMap::new();
-    let file = map.add_file(file_name.to_string(), source.to_string());
-    let (mut sf, parse_diags) = parse_source_file(source, file);
+    let file = map.add_file(file_name.to_string(), source.clone());
+    let (mut sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(&source, file);
     let mut out: Vec<Diagnostic> = parse_diags
         .iter()
         .map(gossamer_parse::ParseDiagnostic::to_diagnostic)
@@ -80,85 +83,50 @@ fn extract_expected_code(source: &str) -> Option<String> {
     None
 }
 
-fn run_fixture(path: &PathBuf) {
+/// Why `path` fails to report its declared code, or `None` when it does.
+fn fixture_failure(path: &Path) -> Option<String> {
     let source = fs::read_to_string(path).expect("read fixture");
-    let expected = extract_expected_code(&source)
-        .unwrap_or_else(|| panic!("fixture {} lacks a `// ERROR:` marker", path.display()));
+    let Some(expected) = extract_expected_code(&source) else {
+        return Some(format!("{} lacks a `// ERROR:` marker", path.display()));
+    };
     let file_name = path
         .file_name()
         .and_then(|n| n.to_str())
         .expect("fixture file name");
     let diagnostics = collect_diagnostics(&source, file_name);
-    assert!(
-        diagnostics.iter().any(|d| d.code.as_str() == expected),
-        "fixture {} expected code {expected}, got {:?}",
+    if diagnostics.iter().any(|d| d.code.as_str() == expected) {
+        return None;
+    }
+    Some(format!(
+        "{} expected code {expected}, got {:?}",
         path.display(),
         diagnostics
             .iter()
             .map(|d| d.code.as_str())
             .collect::<Vec<_>>()
-    );
+    ))
 }
 
-macro_rules! fixture_test {
-    ($name:ident, $file:expr) => {
-        #[test]
-        fn $name() {
-            let base = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("tests/fixtures")
-                .join($file);
-            run_fixture(&base);
-        }
-    };
-}
-
-fixture_test!(gp0001_unexpected_token, "GP0001_unexpected_token.gos");
-fixture_test!(gr0001_unresolved_name, "GR0001_unresolved_name.gos");
-fixture_test!(gr0003_duplicate_item, "GR0003_duplicate_item.gos");
-fixture_test!(gt0001_type_mismatch, "GT0001_type_mismatch.gos");
-fixture_test!(gm0003_arena_escape, "GM0003_arena_escape.gos");
-fixture_test!(gr0017_unknown_loop_label, "GR0017_unknown_loop_label.gos");
-fixture_test!(gt0070_unknown_impl_trait, "GT0070_unknown_impl_trait.gos");
-fixture_test!(
-    gt0071_trait_in_type_position,
-    "GT0071_trait_in_type_position.gos"
-);
-fixture_test!(
-    gt0072_impl_item_not_in_trait,
-    "GT0072_impl_item_not_in_trait.gos"
-);
-fixture_test!(
-    gt0073_conflicting_trait_impl,
-    "GT0073_conflicting_trait_impl.gos"
-);
-fixture_test!(
-    gl0055_undeclared_return_value,
-    "GL0055_undeclared_return_value.gos"
-);
-
-#[test]
-fn all_fixtures_have_error_marker() {
+fn fixture_paths() -> Vec<PathBuf> {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
-    let entries: Vec<_> = fs::read_dir(&dir)
+    let mut paths: Vec<PathBuf> = fs::read_dir(&dir)
         .expect("read fixtures dir")
         .filter_map(Result::ok)
-        .filter(|e| {
-            e.path()
-                .extension()
-                .and_then(|s| s.to_str())
-                .is_some_and(|ext| ext == "gos")
-        })
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|ext| ext == "gos"))
         .collect();
-    assert!(!entries.is_empty(), "must have at least one fixture");
-    for entry in entries {
-        let source = fs::read_to_string(entry.path()).unwrap();
-        let expected = extract_expected_code(&source);
-        assert!(
-            expected.is_some(),
-            "fixture {} is missing `// ERROR:` marker",
-            entry.path().display()
-        );
-    }
+    paths.sort();
+    paths
+}
+
+/// Every fixture in the directory runs: a hand-kept list lets a new fixture
+/// sit unchecked.
+#[test]
+fn every_fixture_reports_its_declared_code() {
+    let paths = fixture_paths();
+    assert!(!paths.is_empty(), "no fixtures found");
+    let failures: Vec<String> = paths.iter().filter_map(|p| fixture_failure(p)).collect();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 #[test]

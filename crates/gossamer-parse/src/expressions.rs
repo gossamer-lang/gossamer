@@ -283,6 +283,8 @@ impl Parser<'_> {
             | TokenKind::StringLit
             | TokenKind::RawStringLit { .. }
             | TokenKind::TripleStringLit
+            | TokenKind::FStringLit
+            | TokenKind::FTripleStringLit
             | TokenKind::CharLit
             | TokenKind::ByteLit
             | TokenKind::Keyword(Keyword::True | Keyword::False) => {
@@ -609,6 +611,12 @@ impl Parser<'_> {
 
     fn parse_dot_suffix(&mut self, receiver: Expr) -> Expr {
         self.bump();
+        if self.at_keyword(Keyword::Await) {
+            let span = self.peek_span();
+            self.report_declined(crate::declined::ASYNC, span);
+            self.bump();
+            return receiver;
+        }
         let token = self.peek();
         let start_span = receiver.span;
         match token.kind {
@@ -1100,6 +1108,7 @@ impl Parser<'_> {
         if self.at_keyword(Keyword::Unsafe) {
             let span = self.peek_span();
             self.bump();
+            let span = self.through_trailing_space(span);
             self.record(ParseError::UnsafeGrantsNothing, span);
             self.expect_punct(Punct::LBrace, "to open the block");
             return Some(ExprKind::Unsafe(self.parse_block_body()));
@@ -1126,11 +1135,92 @@ impl Parser<'_> {
         Expr::new(id, span, kind)
     }
 
+    /// Reports a declined construct written where an expression starts
+    /// (`async`, `yield`, `try` / `catch`, `throw`, `move`) and parses the
+    /// expression it leads, so the rest of the program still checks.
+    fn parse_declined_expr_start(&mut self) -> Option<ExprKind> {
+        let span = self.peek_span();
+        let next = self.peek_nth(1).kind;
+        if self.at_keyword(Keyword::Async) {
+            self.report_declined(crate::declined::ASYNC, span);
+            self.bump();
+            self.eat_contextual_word("move");
+            return Some(self.parse_primary_kind());
+        }
+        if self.at_keyword(Keyword::Yield) {
+            self.report_declined(crate::declined::GENERATORS, span);
+            self.bump();
+            return Some(self.parse_primary_kind());
+        }
+        if self.at_contextual_word("try") && next == TokenKind::Punct(Punct::LBrace) {
+            self.report_declined(crate::declined::EXCEPTIONS, span);
+            self.bump();
+            let body = self.parse_primary_kind();
+            if self.eat_contextual_word("catch") {
+                if matches!(self.peek().kind, TokenKind::Ident) {
+                    self.bump();
+                }
+                if self.eat_punct(Punct::LBrace) {
+                    self.recover_to_close(Punct::LBrace, Punct::RBrace);
+                }
+            }
+            return Some(body);
+        }
+        if self.at_contextual_word("throw")
+            && matches!(
+                next,
+                TokenKind::StringLit | TokenKind::Ident | TokenKind::IntLit
+            )
+            && !self.newline_after_peek()
+        {
+            self.report_declined(crate::declined::EXCEPTIONS, span);
+            self.bump();
+            return Some(self.parse_primary_kind());
+        }
+        if self.at_contextual_word("go")
+            && matches!(
+                next,
+                TokenKind::Ident | TokenKind::Punct(Punct::Pipe | Punct::PipePipe)
+            )
+            && !self.newline_after_peek()
+        {
+            self.bump();
+            let operand = self.parse_expr();
+            let (feature, instead) = crate::declined::DETACHED_GO;
+            let text = self.slice(operand.span);
+            let replacement = if matches!(operand.kind, ExprKind::Closure { .. }) {
+                format!("spawn({text})")
+            } else {
+                format!("spawn(|| {text})")
+            };
+            self.record(
+                ParseError::DeclinedFeature {
+                    feature: feature.to_string(),
+                    instead: instead.to_string(),
+                    replacement: Some(replacement),
+                },
+                self.join(span, operand.span),
+            );
+            return Some(operand.kind);
+        }
+        if self.at_contextual_word("move")
+            && matches!(next, TokenKind::Punct(Punct::Pipe | Punct::PipePipe))
+        {
+            self.report_declined(crate::declined::MOVE_CLOSURES, span);
+            self.bump();
+            return Some(self.parse_primary_kind());
+        }
+        None
+    }
+
     fn parse_primary_kind(&mut self) -> ExprKind {
         // The flag reaches the closure that is the step itself and nothing
         // nested inside one: a closure written as a call argument is an
         // ordinary closure whose body runs to the end of the expression.
         let pipe_step = std::mem::replace(&mut self.parsing_pipe_step, false);
+        if let Some(kind) = self.parse_declined_expr_start() {
+            return kind;
+        }
         if self.eat_punct(Punct::LParen) {
             return self.parse_paren_or_tuple();
         }
@@ -1155,6 +1245,12 @@ impl Parser<'_> {
                 return map;
             }
             return ExprKind::Block(self.parse_block_body());
+        }
+        if matches!(
+            self.peek().kind,
+            TokenKind::FStringLit | TokenKind::FTripleStringLit
+        ) {
+            return self.parse_interpolated_string();
         }
         if let Some(literal) = self.try_parse_literal() {
             return ExprKind::Literal(literal);
@@ -1391,6 +1487,12 @@ impl Parser<'_> {
             return ExprKind::FixedArray(ArrayExpr::List(Vec::new()));
         }
         let first = self.parse_expr_no_assign();
+        if self.at_keyword(Keyword::For) {
+            let span = self.peek_span();
+            self.report_declined(crate::declined::COMPREHENSIONS, span);
+            self.recover_to_close(Punct::LBracket, Punct::RBracket);
+            return ExprKind::FixedArray(ArrayExpr::List(vec![first]));
+        }
         if self.eat_punct(Punct::Semi) {
             let count = self.parse_expr_no_assign();
             self.expect_punct(Punct::RBracket, "to close fixed array expression");
@@ -1418,6 +1520,12 @@ impl Parser<'_> {
             return ExprKind::Array(ArrayExpr::List(Vec::new()));
         }
         let first = self.parse_expr_no_assign();
+        if self.at_keyword(Keyword::For) {
+            let span = self.peek_span();
+            self.report_declined(crate::declined::COMPREHENSIONS, span);
+            self.recover_to_close(Punct::LBracket, Punct::RBracket);
+            return ExprKind::Array(ArrayExpr::List(vec![first]));
+        }
         if self.eat_punct(Punct::Semi) {
             let count = self.parse_expr_no_assign();
             self.expect_punct(Punct::RBracket, "to close Vec expression");
@@ -2171,7 +2279,12 @@ impl Parser<'_> {
                     // the statement it checked, and a statement built at run
                     // time is an ordinary `String`.
                     let Some(statement) = literal else {
-                        self.record(ParseError::ValidatedCallNeedsLiteral, call_span);
+                        self.record(
+                            ParseError::ValidatedCallNeedsLiteral {
+                                call: "sql::statement",
+                            },
+                            call_span,
+                        );
                         return ExprKind::Error;
                     };
                     if let Some(reason) = sql_statement_error(&statement) {
@@ -2180,11 +2293,27 @@ impl Parser<'_> {
                     return ExprKind::Literal(Literal::String(statement));
                 }
                 ValidatedCall::RegexCompile => {
-                    if let Some(pattern) = literal
-                        && let Err(err) = regex::Regex::new(&pattern)
-                    {
-                        let reason = regex_error_reason(&err);
-                        self.record(ParseError::InvalidRegexLiteral { reason }, args[0].span);
+                    // A validated pattern cannot fail to compile, so the call
+                    // answers the `Pattern` itself; `regex::new` is the
+                    // fallible spelling for a pattern built at run time.
+                    // The call stays in the tree either way, so `gos fix` can
+                    // rewrite a run-time pattern to `regex::new`.
+                    match literal {
+                        None => self.record(
+                            ParseError::ValidatedCallNeedsLiteral {
+                                call: "regex::compile",
+                            },
+                            call_span,
+                        ),
+                        Some(pattern) => {
+                            if let Err(err) = regex::Regex::new(&pattern) {
+                                let reason = regex_error_reason(&err);
+                                self.record(
+                                    ParseError::InvalidRegexLiteral { reason },
+                                    args[0].span,
+                                );
+                            }
+                        }
                     }
                     let id = self.alloc_id();
                     return ExprKind::Call {
@@ -2245,6 +2374,8 @@ impl Parser<'_> {
                 | TokenKind::StringLit
                 | TokenKind::RawStringLit { .. }
                 | TokenKind::TripleStringLit
+                | TokenKind::FStringLit
+                | TokenKind::FTripleStringLit
                 | TokenKind::CharLit
                 | TokenKind::ByteLit
                 | TokenKind::ByteStringLit
@@ -2387,6 +2518,21 @@ impl Parser<'_> {
             return self.alloc_function_call(&validator, args);
         }
 
+        // `vec![..]` is the Vec literal `#[..]`: the rewrite replaces `vec!`
+        // with `#`, and the brackets parse as that literal so the rest of the
+        // file is diagnosed on its own terms.
+        if macro_name == "vec" && path.segments.len() == 1 && self.at_punct(Punct::LBracket) {
+            let name_start = bang_span.start.saturating_sub(3);
+            let name_span = Span {
+                file: bang_span.file,
+                start: name_start,
+                end: bang_span.start,
+            };
+            if self.slice(name_span) == "vec" {
+                self.record(ParseError::VecMacroRetired, self.join(name_span, bang_span));
+                return self.parse_hash_prefixed_literal();
+            }
+        }
         // Gossamer has no `vec!`: `#[...]` is the Vec literal and a plain
         // `[...]` is the fixed-array form. Steer the common Rust habit to the
         // growable spelling rather than to the misleading "drop the `!`" form.
@@ -2420,6 +2566,158 @@ impl Parser<'_> {
     /// Every one of these parses its arguments exactly as an ordinary call
     /// does; `matches` is the sole exception, and its rule keys on the name,
     /// which is in hand before the `(` is consumed.
+    /// `f"..."`: the concatenation of its literal text and of each
+    /// placeholder's expression, rendered through the placeholder's spec
+    /// exactly as `format` renders an argument. A placeholder holds any
+    /// expression, parsed from its own place in the source.
+    fn parse_interpolated_string(&mut self) -> ExprKind {
+        let token = self.peek();
+        self.bump();
+        let raw = self.slice(token.span);
+        let triple = token.kind == TokenKind::FTripleStringLit;
+        let delimiter = if triple { 3 } else { 1 };
+        let open = 1 + delimiter;
+        if triple
+            && gossamer_lex::triple_string(raw.strip_prefix('f').unwrap_or_default())
+                .opening_line_text
+        {
+            self.record(ParseError::TripleStringOpeningLine, token.span);
+        }
+        let body_end = raw.len().saturating_sub(delimiter).max(open);
+        let body = raw.get(open..body_end).unwrap_or_default().to_string();
+        let body_start = token.span.start + u32::try_from(open).unwrap_or(0);
+        let pieces = gossamer_lex::interpolation_pieces(&body, triple);
+        let texts = interpolated_texts(&body, &pieces, triple);
+        let mut texts = texts.into_iter();
+        let mut args: Vec<Expr> = Vec::new();
+        if triple {
+            self.push_interpolated_text(&mut args, texts.next());
+        }
+        for piece in &pieces {
+            match piece {
+                gossamer_lex::InterpolationPiece::Text(range) => {
+                    if let Some((at, brace)) = lone_brace(&body[range.clone()]) {
+                        let start = body_start + u32::try_from(range.start + at).unwrap_or(0);
+                        self.record(
+                            ParseError::UnmatchedInterpolationBrace { brace },
+                            Span::new(token.span.file, start, start + 1),
+                        );
+                    }
+                    if !triple {
+                        self.push_interpolated_text(&mut args, texts.next());
+                    }
+                }
+                gossamer_lex::InterpolationPiece::Placeholder(placeholder, offset) => {
+                    let at = |range: &std::ops::Range<usize>| {
+                        let base = body_start + u32::try_from(*offset).unwrap_or(0);
+                        (
+                            base + u32::try_from(range.start).unwrap_or(0),
+                            base + u32::try_from(range.end).unwrap_or(0),
+                        )
+                    };
+                    let expr_text =
+                        &body[offset + placeholder.expr.start..offset + placeholder.expr.end];
+                    let spec_text = placeholder
+                        .spec
+                        .as_ref()
+                        .map(|spec| &body[offset + spec.start..offset + spec.end]);
+                    if expr_text.trim().is_empty() {
+                        let text = spec_text.map(|spec| format!(":{spec}")).unwrap_or_default();
+                        let (start, end) = at(&(0..placeholder.len));
+                        self.record(
+                            ParseError::InterpolatedPositional { text },
+                            Span::new(token.span.file, start, end),
+                        );
+                        return ExprKind::Error;
+                    }
+                    let (start, end) = at(&placeholder.expr);
+                    let value = self.parse_embedded_expr(start, end);
+                    let rendered = match (spec_text, &placeholder.spec) {
+                        (Some(spec), Some(range)) => {
+                            let (start, end) = at(range);
+                            self.render_through_spec(
+                                value,
+                                spec,
+                                Span::new(token.span.file, start, end),
+                            )
+                        }
+                        _ => value,
+                    };
+                    args.push(rendered);
+                    if triple {
+                        self.push_interpolated_text(&mut args, texts.next());
+                    }
+                }
+            }
+        }
+        self.alloc_function_call("__concat", args)
+    }
+
+    /// Appends a piece of an interpolated string's literal text, when it has
+    /// any, to the concatenation `args`.
+    fn push_interpolated_text(&mut self, args: &mut Vec<Expr>, text: Option<String>) {
+        if let Some(text) = text.filter(|text| !text.is_empty()) {
+            args.push(self.alloc_literal_expr(Literal::String(text)));
+        }
+    }
+
+    /// `value` rendered through the format spec `spec` (the text after a
+    /// placeholder's `:`), as a `format` argument with that spec renders.
+    fn render_through_spec(&mut self, value: Expr, spec: &str, span: Span) -> Expr {
+        let classified = parse_format_template(&format!("{{v:{spec}}}"));
+        match classified.as_slice() {
+            [FormatSegment::NamedSpec(_, spec)] => self.build_format_spec_expr(value, spec),
+            [FormatSegment::NamedPrec(_, precision)] => {
+                let precision = self.alloc_literal_expr(Literal::Int(precision.to_string()));
+                self.alloc_function_call_expr("__fmt_prec", vec![value, precision])
+            }
+            [FormatSegment::Named(_)] => value,
+            _ => {
+                self.record(
+                    ParseError::MalformedInterpolationSpec {
+                        spec: spec.to_string(),
+                    },
+                    span,
+                );
+                value
+            }
+        }
+    }
+
+    /// Parses the expression whose source is `start..end` of this file - a
+    /// placeholder inside a literal token - as an expression of its own,
+    /// with every span, diagnostic, and node id in this parse.
+    fn parse_embedded_expr(&mut self, start: u32, end: u32) -> Expr {
+        let mut stream =
+            crate::stream::TokenStream::range(self.source, self.tokens.file(), start, end);
+        for err in stream.take_lex_errors() {
+            let span = err.span();
+            self.record(
+                ParseError::Lex {
+                    message: err.to_string(),
+                },
+                span,
+            );
+        }
+        let saved_tokens = std::mem::replace(&mut self.tokens, stream);
+        let saved_separator = self.newline_separator_at.take();
+        let saved_group = std::mem::replace(&mut self.in_paren_group, true);
+        let saved_pipe = std::mem::replace(&mut self.parsing_pipe_step, false);
+        let expr = self.with_struct_literals_allowed(Self::parse_expr_no_assign);
+        if !self.at_eof() {
+            let found = self.peek_text();
+            self.record(
+                ParseError::unexpected("the end of the placeholder".to_string(), found),
+                self.peek_span(),
+            );
+        }
+        self.tokens = saved_tokens;
+        self.newline_separator_at = saved_separator;
+        self.in_paren_group = saved_group;
+        self.parsing_pipe_step = saved_pipe;
+        expr
+    }
+
     fn parse_builtin_call(&mut self, name: &str) -> ExprKind {
         if is_desugar_macro(name) {
             return self.expand_builtin_macro(name);
@@ -2574,9 +2872,12 @@ impl Parser<'_> {
                 let rendered = self.alloc_function_call_expr("__concat", vec![first]);
                 return self.alloc_function_call(macro_name, vec![rendered]);
             }
+            // A template that already failed to parse has its own diagnostic.
+            if !matches!(first.kind, ExprKind::Error) {
+                self.record(ParseError::FormatStringMustBeLiteral, first.span);
+            }
             let mut all = vec![first];
             all.extend(rest);
-            self.record(ParseError::FormatStringMustBeLiteral, all[0].span);
             return self.alloc_function_call(macro_name, all);
         };
         let segments = parse_format_template(&template);
@@ -2682,7 +2983,8 @@ impl Parser<'_> {
                     concat_args.push(self.alloc_literal_expr(Literal::String(text)));
                 }
                 FormatSegment::Named(name) => {
-                    let expr = self.alloc_named_capture_expr(&name);
+                    let span = self.capture_span(first.span, &name, &mut cursor);
+                    let expr = self.alloc_named_capture_expr(&name, span);
                     concat_args.push(expr);
                 }
                 FormatSegment::Positional => {
@@ -2699,7 +3001,8 @@ impl Parser<'_> {
                     }
                 }
                 FormatSegment::NamedPrec(name, prec) => {
-                    let arg = self.alloc_named_capture_expr(&name);
+                    let span = self.capture_span(first.span, &name, &mut cursor);
+                    let arg = self.alloc_named_capture_expr(&name, span);
                     let prec_lit = self.alloc_literal_expr(Literal::Int(prec.to_string()));
                     concat_args
                         .push(self.alloc_function_call_expr("__fmt_prec", vec![arg, prec_lit]));
@@ -2711,7 +3014,8 @@ impl Parser<'_> {
                     }
                 }
                 FormatSegment::NamedSpec(name, spec) => {
-                    let arg = self.alloc_named_capture_expr(&name);
+                    let span = self.capture_span(first.span, &name, &mut cursor);
+                    let arg = self.alloc_named_capture_expr(&name, span);
                     let e = self.build_format_spec_expr(arg, &spec);
                     concat_args.push(e);
                 }
@@ -2732,7 +3036,20 @@ impl Parser<'_> {
     /// `{:.N}`), then pad to width via `strings::pad_left` / `pad_right` /
     /// `center`. No tier-specific lowering is needed.
     fn build_format_spec_expr(&mut self, value: Expr, spec: &FormatSpec) -> Expr {
-        let rendered = if let Some(base) = spec.radix {
+        let rendered = if let Some(upper) = spec.exponent {
+            // Scientific notation is read off the value's shortest digits,
+            // so it renders the number first and rewrites that text.
+            let digits = self.alloc_function_call_expr("__concat", vec![value]);
+            let precision = spec
+                .precision
+                .map_or(-1, |p| i64::try_from(p).unwrap_or(i64::MAX));
+            let precision = self.alloc_literal_expr(Literal::Int(precision.to_string()));
+            let upper = self.alloc_literal_expr(Literal::Bool(upper));
+            self.alloc_function_call_expr(
+                crate::FORMAT_EXPONENT_HELPER,
+                vec![digits, precision, upper],
+            )
+        } else if let Some(base) = spec.radix {
             let base_lit = self.alloc_literal_expr(Literal::Int(base.to_string()));
             let r = self.alloc_function_call_expr("__fmt_radix", vec![value, base_lit]);
             if spec.upper {
@@ -2762,6 +3079,11 @@ impl Parser<'_> {
                 let prefix = self.alloc_literal_expr(Literal::String(prefix.to_string()));
                 self.alloc_function_call_expr("__concat", vec![prefix, rendered])
             }
+        } else {
+            rendered
+        };
+        let rendered = if spec.sign_plus {
+            self.alloc_function_call_expr(crate::FORMAT_SIGN_HELPER, vec![rendered])
         } else {
             rendered
         };
@@ -2807,20 +3129,63 @@ impl Parser<'_> {
         Expr::new(id, span, ExprKind::Path(PathExpr::single(name.to_string())))
     }
 
-    /// Expression for a named format capture: a bare `{ident}` is a
-    /// path, a dotted `{a.balance}` / `{t.0}` folds field / tuple-index
-    /// accesses over the leading binding.
-    fn alloc_named_capture_expr(&mut self, name: &str) -> Expr {
+    /// Where the capture `name` is written inside the template literal at
+    /// `literal`, searched from `cursor` so repeated captures are found in
+    /// order: the span of the name itself, so an editor's references and
+    /// rename reach it. A `{{` escape is literal text, never a capture. The
+    /// whole literal when the source spells the capture differently.
+    fn capture_span(&self, literal: Span, name: &str, cursor: &mut usize) -> Span {
+        let end = (literal.end as usize).min(self.source.len());
+        let bytes = self.source.as_bytes();
+        let needle = format!("{{{name}");
+        let mut from = (*cursor).max(literal.start as usize);
+        while let Some(offset) = self.source.get(from..end).and_then(|w| w.find(&needle)) {
+            let open = from + offset;
+            let after = open + needle.len();
+            let opening_braces = bytes[..=open]
+                .iter()
+                .rev()
+                .take_while(|b| **b == b'{')
+                .count();
+            let closes = matches!(bytes.get(after), Some(b'}' | b':'));
+            if opening_braces % 2 == 1 && closes {
+                *cursor = after;
+                return Span::new(
+                    literal.file,
+                    u32::try_from(open + 1).unwrap_or(literal.start),
+                    u32::try_from(after).unwrap_or(literal.end),
+                );
+            }
+            from = open + 1;
+        }
+        literal
+    }
+
+    /// Expression for a named format capture written at `span`: a bare
+    /// `{ident}` is a path, a dotted `{a.balance}` / `{t.0}` folds field /
+    /// tuple-index accesses over the leading binding. Each node spans the
+    /// part of the name it reads.
+    fn alloc_named_capture_expr(&mut self, name: &str, span: Span) -> Expr {
         let mut parts = name.split('.');
         let head = parts.next().unwrap_or(name);
+        let whole = span.end.saturating_sub(span.start) as usize == name.len();
+        let mut end = if whole {
+            span.start + u32::try_from(head.len()).unwrap_or(0)
+        } else {
+            span.end
+        };
         let mut expr = self.alloc_path_expr(head);
+        expr.span = Span::new(span.file, span.start, end);
         for part in parts {
             let selector = match part.parse::<u32>() {
                 Ok(index) => FieldSelector::Index(index),
                 Err(_) => FieldSelector::Named(Ident::new(part.to_string())),
             };
             let id = self.alloc_id();
-            let span = self.last_span();
+            if whole {
+                end += 1 + u32::try_from(part.len()).unwrap_or(0);
+            }
+            let span = Span::new(span.file, span.start, end);
             expr = Expr::new(
                 id,
                 span,
@@ -3127,6 +3492,8 @@ pub(crate) fn is_expression_start(parser: &Parser<'_>) -> bool {
         | TokenKind::StringLit
         | TokenKind::RawStringLit { .. }
         | TokenKind::TripleStringLit
+        | TokenKind::FStringLit
+        | TokenKind::FTripleStringLit
         | TokenKind::CharLit
         | TokenKind::ByteLit
         | TokenKind::ByteStringLit
@@ -3284,6 +3651,11 @@ struct FormatSpec {
     /// "sign-aware zero pad" on a number and nothing at all on any other
     /// value, a distinction an explicit `{:0>8}` fill does not carry.
     zero_pad: bool,
+    /// `{:+}` - a non-negative number carries a leading `+`.
+    sign_plus: bool,
+    /// `{:e}` / `{:E}` - scientific notation; `Some(true)` for the
+    /// uppercase marker.
+    exponent: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3374,6 +3746,139 @@ fn utf8_char_len(leader: u8) -> usize {
     }
 }
 
+/// Whether `template`'s placeholders ask for a sign (`{:+}`) or for
+/// scientific notation (`{:e}`), the two specs whose rendering is written in
+/// Gossamer and injected into the program that uses them.
+pub(crate) fn format_template_needs(template: &str) -> (bool, bool) {
+    let mut sign = false;
+    let mut exponent = false;
+    for segment in parse_format_template(template) {
+        if let FormatSegment::PositionalSpec(spec) | FormatSegment::NamedSpec(_, spec) = segment {
+            sign |= spec.sign_plus;
+            exponent |= spec.exponent.is_some();
+        }
+    }
+    (sign, exponent)
+}
+
+/// Whether an interpolated string's body - the text between its quotes - has
+/// a placeholder whose spec asks for a sign (`:+`) and one that asks for
+/// scientific notation (`:e`), which is what [`format_template_needs`]
+/// answers for a `format` template.
+pub(crate) fn interpolated_template_needs(body: &str, triple: bool) -> (bool, bool) {
+    let mut sign = false;
+    let mut exponent = false;
+    for piece in gossamer_lex::interpolation_pieces(body, triple) {
+        let gossamer_lex::InterpolationPiece::Placeholder(placeholder, offset) = piece else {
+            continue;
+        };
+        let Some(spec) = placeholder.spec else {
+            continue;
+        };
+        let spec = &body[offset + spec.start..offset + spec.end];
+        let (s, e) = format_template_needs(&format!("{{v:{spec}}}"));
+        sign |= s;
+        exponent |= e;
+    }
+    (sign, exponent)
+}
+
+/// The decoded literal text of an interpolated string's body: one string per
+/// `Text` piece in order for an ordinary literal, and for a triple-quoted one
+/// the text before, between, and after its placeholders, dedented as the
+/// literal is with each placeholder standing in for one character.
+fn interpolated_texts(
+    body: &str,
+    pieces: &[gossamer_lex::InterpolationPiece],
+    triple: bool,
+) -> Vec<String> {
+    if !triple {
+        return pieces
+            .iter()
+            .filter_map(|piece| match piece {
+                gossamer_lex::InterpolationPiece::Text(range) => {
+                    Some(decode_interpolated_text(&body[range.clone()]))
+                }
+                gossamer_lex::InterpolationPiece::Placeholder(..) => None,
+            })
+            .collect();
+    }
+    let mut masked = String::with_capacity(body.len());
+    for piece in pieces {
+        match piece {
+            gossamer_lex::InterpolationPiece::Text(range) => masked.push_str(&body[range.clone()]),
+            gossamer_lex::InterpolationPiece::Placeholder(..) => masked.push(PLACEHOLDER_MARK),
+        }
+    }
+    let dedented = gossamer_lex::triple_string(&format!("\"\"\"{masked}\"\"\"")).body();
+    dedented
+        .split(PLACEHOLDER_MARK)
+        .map(decode_interpolated_text)
+        .collect()
+}
+
+/// The first brace in an interpolated string's literal text that is neither
+/// doubled nor part of an escape, with its byte offset.
+fn lone_brace(raw: &str) -> Option<(usize, char)> {
+    let bytes = raw.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if bytes.get(i + 1) == Some(&b'u') && bytes.get(i + 2) == Some(&b'{') => {
+                i += bytes[i..]
+                    .iter()
+                    .position(|&b| b == b'}')
+                    .map_or(bytes.len(), |off| off + 1);
+            }
+            b'\\' => i += 2,
+            b'{' | b'}' if bytes.get(i + 1) == Some(&bytes[i]) => i += 2,
+            b'{' | b'}' => return Some((i, char::from(bytes[i]))),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Stands in for a placeholder while a triple-quoted interpolated string is
+/// dedented: a private-use character no source text carries unescaped.
+const PLACEHOLDER_MARK: char = '\u{F8FF}';
+
+/// Literal text from an interpolated string with its escapes decoded and its
+/// doubled braces made single.
+fn decode_interpolated_text(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chunk = String::new();
+    let mut chars = raw.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                chunk.push(c);
+                if let Some(next) = chars.next() {
+                    chunk.push(next);
+                    if next == 'u' && chars.peek() == Some(&'{') {
+                        for inner in chars.by_ref() {
+                            chunk.push(inner);
+                            if inner == '}' {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            '{' | '}' if chars.peek() == Some(&c) => {
+                chars.next();
+                out.push_str(&crate::patterns::decode_string_escapes(&std::mem::take(
+                    &mut chunk,
+                )));
+                out.push(c);
+            }
+            _ => chunk.push(c),
+        }
+    }
+    out.push_str(&crate::patterns::decode_string_escapes(&chunk));
+    out
+}
+
 fn parse_format_template(template: &str) -> Vec<FormatSegment> {
     let bytes = template.as_bytes();
     let mut segments: Vec<FormatSegment> = Vec::new();
@@ -3433,7 +3938,7 @@ fn parse_format_template(template: &str) -> Vec<FormatSegment> {
                     head.is_empty() || is_capture_name(head)
                 }) {
                     // A placeholder with a spec the grammar does not take
-                    // (`{:+}`, `{:e}`) is reported rather than printed as text.
+                    // (`{:-}`, `{:z}`) is reported rather than printed as text.
                     segments.push(FormatSegment::Invalid(inner.to_string()));
                 } else {
                     segments.push(FormatSegment::Literal(format!("{{{inner}}}")));
@@ -3521,6 +4026,8 @@ fn debug_format_spec() -> FormatSpec {
         alternate: false,
         debug: true,
         zero_pad: false,
+        sign_plus: false,
+        exponent: None,
     }
 }
 
@@ -3539,6 +4046,42 @@ fn parse_precision_spec(inner: &str) -> Option<FormatSegment> {
     } else {
         None
     }
+}
+
+/// The number a run of decimal digits at `pos` spells, advancing past it;
+/// `None` when no digit is there. A run too long for `usize` leaves `pos`
+/// where it was, so the spec is rejected at the digit that follows.
+fn format_spec_digits(chars: &[char], pos: &mut usize) -> Option<usize> {
+    let start = *pos;
+    let mut value: Option<usize> = None;
+    while let Some(d) = chars.get(*pos).and_then(|c| c.to_digit(10)) {
+        let Some(next) = value
+            .unwrap_or(0)
+            .checked_mul(10)
+            .and_then(|v| v.checked_add(d as usize))
+        else {
+            *pos = start;
+            return None;
+        };
+        value = Some(next);
+        *pos += 1;
+    }
+    value
+}
+
+/// The radix, uppercase flag, and exponent case a format type letter asks
+/// for; `None` for a letter that is not a format type.
+fn format_spec_type(c: char) -> Option<(Option<u32>, bool, Option<bool>)> {
+    Some(match c {
+        'e' => (None, false, Some(false)),
+        'E' => (None, false, Some(true)),
+        'x' => (Some(16), false, None),
+        'X' => (Some(16), true, None),
+        'b' => (Some(2), false, None),
+        'o' => (Some(8), false, None),
+        'd' => (None, false, None),
+        _ => return None,
+    })
 }
 
 /// Parses a full `{[name]:[[fill]align][#][0][width][.prec][type]}` spec into a
@@ -3571,6 +4114,10 @@ fn parse_format_spec(inner: &str) -> Option<FormatSegment> {
         pos = 1;
     }
 
+    // `+` asks a non-negative number for its sign.
+    let sign_plus = chars.get(pos) == Some(&'+');
+    pos += usize::from(sign_plus);
+
     // `#` requests a binary, octal, or hexadecimal radix prefix.
     let alternate = chars.get(pos) == Some(&'#');
     pos += usize::from(alternate);
@@ -3580,64 +4127,37 @@ fn parse_format_spec(inner: &str) -> Option<FormatSegment> {
     let zero_pad = chars.get(pos) == Some(&'0');
     pos += usize::from(zero_pad);
 
-    // width
-    let mut width = 0usize;
-    let mut saw_width = false;
-    while let Some(c) = chars.get(pos) {
-        if let Some(d) = c.to_digit(10) {
-            width = width.checked_mul(10)?.checked_add(d as usize)?;
-            saw_width = true;
-            pos += 1;
-        } else {
-            break;
-        }
-    }
+    let width = format_spec_digits(&chars, &mut pos);
+    let saw_width = width.is_some();
+    let width = width.unwrap_or(0);
 
     // `.precision`
     let mut precision = None;
     if chars.get(pos) == Some(&'.') {
         pos += 1;
-        let mut p = 0usize;
-        let mut saw = false;
-        while let Some(c) = chars.get(pos) {
-            if let Some(d) = c.to_digit(10) {
-                p = p.checked_mul(10)?.checked_add(d as usize)?;
-                saw = true;
-                pos += 1;
-            } else {
-                break;
-            }
-        }
-        if !saw {
-            return None;
-        }
-        precision = Some(p);
+        precision = Some(format_spec_digits(&chars, &mut pos)?);
     }
 
-    // type
-    let mut radix = None;
-    let mut upper = false;
-    if let Some(&c) = chars.get(pos) {
-        match c {
-            'x' => radix = Some(16),
-            'X' => {
-                radix = Some(16);
-                upper = true;
-            }
-            'b' => radix = Some(2),
-            'o' => radix = Some(8),
-            'd' => radix = None,
-            _ => return None,
+    let (radix, upper, exponent) = match chars.get(pos) {
+        Some(&c) => {
+            pos += 1;
+            format_spec_type(c)?
         }
-        pos += 1;
-    }
+        None => (None, false, None),
+    };
 
     // Reject trailing junk and specs that carry no formatting at all
     // (a bare `{x:}` should not shadow the plain-name path).
     if pos != chars.len() {
         return None;
     }
-    if align == Align::Default && !alternate && !saw_width && precision.is_none() && radix.is_none()
+    if align == Align::Default
+        && !alternate
+        && !saw_width
+        && precision.is_none()
+        && radix.is_none()
+        && !sign_plus
+        && exponent.is_none()
     {
         return None;
     }
@@ -3652,6 +4172,8 @@ fn parse_format_spec(inner: &str) -> Option<FormatSegment> {
         alternate,
         debug: false,
         zero_pad,
+        sign_plus,
+        exponent,
     };
     if head.is_empty() {
         Some(FormatSegment::PositionalSpec(spec))

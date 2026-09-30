@@ -141,7 +141,7 @@ fn symbolise(pc: usize) -> Frame {
         file: String::new(),
         line: 0,
     };
-    // SAFETY: `resolve` only reads the process's own symbol tables for an
+    // `resolve` only reads the process's own symbol tables for an
     // address the frame walk produced; an address it cannot resolve
     // yields no symbol rather than misbehaving.
     backtrace::resolve(pc as *mut std::ffi::c_void, |symbol| {

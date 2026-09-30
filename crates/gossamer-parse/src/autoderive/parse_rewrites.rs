@@ -185,6 +185,12 @@ impl gossamer_ast::VisitorMut for TupleCtorRewriter<'_> {
 #[must_use]
 pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<ParseDiagnostic>) {
     let (mut sf, mut diags) = crate::parse_source_file(source, file);
+    // `augment_source` synthesizes nothing from a tree that did not parse, so
+    // a missing serde codec there says nothing about the type it names.
+    let parsed_cleanly = diags.is_empty();
+    splice_iterator_methods(&mut sf);
+    rewrite_operator_impls(&mut sf);
+    rewrite_fallible_collect(&mut sf);
     // The entry file is implicitly `fn main`: fold its bare top-level
     // statements into one (or report a conflict with an explicit `fn main`)
     // before the rewrites below, so the synthesized body receives the same
@@ -196,6 +202,7 @@ pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<Par
     diags.extend(crate::entry_main::synthesize_entry_main(&mut sf));
     rewrite_tuple_struct_ctors(&mut sf);
     materialize_trait_defaults(&mut sf);
+    rewrite_trait_qualified_calls(&mut sf);
     initialize_heap_mut_statics(&mut sf);
     infer_serde_turbofish(&mut sf);
     desugar_sort_by_key(&mut sf);
@@ -206,12 +213,16 @@ pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<Par
     // Runs on the un-mangled AST: `rewrite_serde_generic_calls` below turns a
     // serde turbofish into a bare mangled name, erasing the type argument the
     // check keys on.
-    diags.extend(serde_unsupported_field_diags(&sf));
+    if parsed_cleanly {
+        diags.extend(serde_unsupported_field_diags(&sf));
+    }
+    diags.extend(derive_default_diags(&sf));
     rewrite_serde_generic_calls(&mut sf);
     specialize_inline_for_generics(&mut sf);
     expand_typeinfo_loops(&mut sf);
     rewrite_type_info_calls(&mut sf);
     rewrite_json_set_mutators(&mut sf);
+    rewrite_range_contains(&mut sf);
     rewrite_stdlib_struct_surface(&mut sf);
     // `rewrite_stdlib_struct_surface` turns public qualified wrapper names
     // such as `sql::Rows` and `encoding::pem::Block` into the injected local
@@ -220,7 +231,58 @@ pub fn parse_with_autoderive(source: &str, file: FileId) -> (SourceFile, Vec<Par
     // aggregate expected by every lowering tier.
     rewrite_tuple_struct_ctors(&mut sf);
     inject_synthetic_uses(&mut sf, file);
+    number_synthesized_nodes(&mut sf);
     (sf, diags)
+}
+
+/// Gives every node a rewrite built without an identifier one of its own.
+///
+/// The checker's per-node tables are keyed by identifier, so nodes sharing
+/// the placeholder would share one entry, and the type recorded for one would
+/// answer for all of them.
+fn number_synthesized_nodes(sf: &mut SourceFile) {
+    use gossamer_ast::visitor::{
+        VisitorMut, walk_expr_mut, walk_item_mut, walk_pattern_mut, walk_stmt_mut, walk_type_mut,
+    };
+
+    struct Numberer {
+        next: u32,
+    }
+    impl Numberer {
+        fn assign(&mut self, id: &mut NodeId) {
+            if *id == NodeId::DUMMY {
+                *id = NodeId::from_raw(self.next);
+                self.next = self.next.saturating_add(1);
+            }
+        }
+    }
+    impl VisitorMut for Numberer {
+        fn visit_expr(&mut self, expr: &mut gossamer_ast::Expr) {
+            self.assign(&mut expr.id);
+            walk_expr_mut(self, expr);
+        }
+        fn visit_stmt(&mut self, stmt: &mut gossamer_ast::Stmt) {
+            self.assign(&mut stmt.id);
+            walk_stmt_mut(self, stmt);
+        }
+        fn visit_pattern(&mut self, pattern: &mut gossamer_ast::Pattern) {
+            self.assign(&mut pattern.id);
+            walk_pattern_mut(self, pattern);
+        }
+        fn visit_type(&mut self, ty: &mut gossamer_ast::Type) {
+            self.assign(&mut ty.id);
+            walk_type_mut(self, ty);
+        }
+        fn visit_item(&mut self, item: &mut gossamer_ast::Item) {
+            self.assign(&mut item.id);
+            walk_item_mut(self, item);
+        }
+    }
+    let mut numberer = Numberer {
+        next: sf.next_node_id,
+    };
+    numberer.visit_source_file(sf);
+    sf.next_node_id = numberer.next;
 }
 
 /// Reports serde turbofish calls (`to_json::<T>(v)`, `from_json::<T>(s)`, and
@@ -344,18 +406,18 @@ fn serde_unsupported_field_diags(sf: &SourceFile) -> Vec<ParseDiagnostic> {
 /// synthesized codec exists for it.
 fn refusal_for(sf: &SourceFile, symbol: &str) -> SerdeTargetRefusal {
     for (module, item) in flatten_items_with_modules(&sf.items) {
-        let (name, generic, is_enum) = match &item.kind {
-            ItemKind::Struct(decl) => (&decl.name.name, !decl.generics.params.is_empty(), false),
-            ItemKind::Enum(decl) => (&decl.name.name, !decl.generics.params.is_empty(), true),
+        let (name, generic) = match &item.kind {
+            ItemKind::Struct(decl) => (&decl.name.name, !decl.generics.params.is_empty()),
+            ItemKind::Enum(decl) => (&decl.name.name, !decl.generics.params.is_empty()),
             _ => continue,
         };
         if TyId::new(&module, name).symbol != symbol && name != symbol {
             continue;
         }
-        return match (is_enum, generic) {
-            (true, _) => SerdeTargetRefusal::Enum,
-            (false, true) => SerdeTargetRefusal::Generic,
-            (false, false) => SerdeTargetRefusal::Unsupported,
+        return if generic {
+            SerdeTargetRefusal::Generic
+        } else {
+            SerdeTargetRefusal::Unsupported
         };
     }
     SerdeTargetRefusal::NotAStruct
@@ -458,6 +520,7 @@ const MANGLED_STDLIB_NAMES: &[(&str, &str, &str)] = &[
     ("http", "Http2Config", "__gos_http_Http2Config"),
     ("Http2Config", "default", "__gos_http_Http2Config_default"),
     ("time", "Location", "__gos_time_Location"),
+    ("time", "Time", "__gos_time_Time"),
     ("time", "CivilTime", "__gos_time_CivilTime"),
     ("time", "CivilResolution", "__gos_time_CivilResolution"),
     ("time", "format_in", "__gos_time_format_in"),
@@ -736,6 +799,213 @@ fn rewrite_json_set_mutator(expr: &mut gossamer_ast::expr::Expr) -> bool {
     };
     expr.kind = writeback_block(place, set_call, span);
     true
+}
+
+/// Rewrites a trait-qualified call `Trait::method(recv, args..)` of a method
+/// the program's trait declares with a receiver into `recv.method(args..)`,
+/// with a leading `&` / `&mut` on `recv` dropped since a method call borrows
+/// its receiver itself. A type defines each method name once (GT0096), so the
+/// method call reaches exactly the body the qualified path names.
+pub fn rewrite_trait_qualified_calls(sf: &mut SourceFile) {
+    use gossamer_ast::VisitorMut;
+    use gossamer_ast::common::UnaryOp;
+    use gossamer_ast::expr::{Expr, ExprKind};
+    use gossamer_ast::visitor::walk_expr_mut;
+
+    struct Rewriter {
+        receiver_methods: HashMap<String, HashSet<String>>,
+    }
+    impl VisitorMut for Rewriter {
+        fn visit_expr(&mut self, expr: &mut Expr) {
+            walk_expr_mut(self, expr);
+            let ExprKind::Call { callee, args } = &mut expr.kind else {
+                return;
+            };
+            let ExprKind::Path(path) = &callee.kind else {
+                return;
+            };
+            let [.., trait_segment, method_segment] = path.segments.as_slice() else {
+                return;
+            };
+            let qualifies = self
+                .receiver_methods
+                .get(&trait_segment.name.name)
+                .is_some_and(|methods| methods.contains(&method_segment.name.name));
+            if !qualifies || args.is_empty() || !method_segment.generics.is_empty() {
+                return;
+            }
+            let name = method_segment.name.clone();
+            let name_span = callee.span;
+            let mut rest = std::mem::take(args);
+            let first = rest.remove(0);
+            let receiver = match first.kind {
+                ExprKind::Unary {
+                    op: UnaryOp::RefShared | UnaryOp::RefMut,
+                    operand,
+                } => *operand,
+                _ => first,
+            };
+            expr.kind = ExprKind::MethodCall {
+                receiver: Box::new(receiver),
+                name,
+                name_span,
+                desugared_from: None,
+                generics: Vec::new(),
+                args: rest,
+            };
+        }
+    }
+    let mut receiver_methods: HashMap<String, HashSet<String>> = HashMap::new();
+    for (_, item) in flatten_items_with_modules(&sf.items) {
+        let ItemKind::Trait(decl) = &item.kind else {
+            continue;
+        };
+        let methods = receiver_methods.entry(decl.name.name.clone()).or_default();
+        for trait_item in &decl.items {
+            if let gossamer_ast::TraitItem::Fn(f) = trait_item
+                && matches!(f.params.first(), Some(gossamer_ast::FnParam::Receiver(_)))
+            {
+                methods.insert(f.name.name.clone());
+            }
+        }
+    }
+    if receiver_methods.values().all(HashSet::is_empty) {
+        return;
+    }
+
+    Rewriter { receiver_methods }.visit_source_file(sf);
+}
+
+/// Rewrites `(lo..hi).contains(x)` into comparisons against its bounds,
+/// evaluated once each in source order: a range written in place has no
+/// other use for its bounds, and the comparison is the same code on every
+/// tier. A range held in a binding is iteration state and has no `contains`.
+pub fn rewrite_range_contains(sf: &mut SourceFile) {
+    use gossamer_ast::VisitorMut;
+    use gossamer_ast::common::{BinaryOp, RangeKind};
+    use gossamer_ast::expr::{Block, Expr, ExprKind};
+    use gossamer_ast::visitor::walk_expr_mut;
+
+    use range_contains_nodes::{bind, binary, name_expr};
+
+    struct Rewriter;
+    impl VisitorMut for Rewriter {
+        fn visit_expr(&mut self, expr: &mut Expr) {
+            walk_expr_mut(self, expr);
+            let ExprKind::MethodCall {
+                receiver,
+                name,
+                args,
+                ..
+            } = &expr.kind
+            else {
+                return;
+            };
+            if name.name != "contains" || args.len() != 1 {
+                return;
+            }
+            let ExprKind::Range { start, end, kind } = &receiver.kind else {
+                return;
+            };
+            if start.is_none() && end.is_none() {
+                return;
+            }
+            let span = expr.span;
+            let mut stmts = Vec::new();
+            let mut tests = Vec::new();
+            if let Some(start) = start {
+                stmts.push(bind("__gos_range_lo", (**start).clone(), span));
+            }
+            if let Some(end) = end {
+                stmts.push(bind("__gos_range_hi", (**end).clone(), span));
+            }
+            stmts.push(bind("__gos_range_x", args[0].clone(), span));
+            if start.is_some() {
+                tests.push(binary(
+                    BinaryOp::Ge,
+                    name_expr("__gos_range_x", span),
+                    name_expr("__gos_range_lo", span),
+                    span,
+                ));
+            }
+            if end.is_some() {
+                let op = if matches!(kind, RangeKind::Inclusive) {
+                    BinaryOp::Le
+                } else {
+                    BinaryOp::Lt
+                };
+                tests.push(binary(
+                    op,
+                    name_expr("__gos_range_x", span),
+                    name_expr("__gos_range_hi", span),
+                    span,
+                ));
+            }
+            let mut tests = tests.into_iter();
+            let Some(first) = tests.next() else {
+                return;
+            };
+            let test = tests.fold(first, |all, next| binary(BinaryOp::And, all, next, span));
+            expr.kind = ExprKind::Block(Block {
+                stmts,
+                tail: Some(Box::new(test)),
+                synthetic: true,
+                kind: gossamer_ast::BlockKind::Plain,
+            });
+        }
+    }
+    Rewriter.visit_source_file(sf);
+}
+
+/// The nodes `rewrite_range_contains` builds.
+mod range_contains_nodes {
+    use gossamer_ast::NodeId;
+    use gossamer_ast::common::{BinaryOp, Mutability};
+    use gossamer_ast::expr::{Expr, ExprKind};
+    use gossamer_ast::pattern::{Pattern, PatternKind};
+    use gossamer_ast::stmt::{Stmt, StmtKind};
+
+    pub(super) fn name_expr(name: &str, span: gossamer_lex::Span) -> Expr {
+        Expr {
+            id: NodeId::DUMMY,
+            span,
+            kind: ExprKind::Path(gossamer_ast::PathExpr {
+                segments: vec![gossamer_ast::PathSegment::new(name)],
+            }),
+        }
+    }
+
+    pub(super) fn binary(op: BinaryOp, lhs: Expr, rhs: Expr, span: gossamer_lex::Span) -> Expr {
+        Expr {
+            id: NodeId::DUMMY,
+            span,
+            kind: ExprKind::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            },
+        }
+    }
+
+    pub(super) fn bind(name: &str, init: Expr, span: gossamer_lex::Span) -> Stmt {
+        Stmt::new(
+            NodeId::DUMMY,
+            span,
+            StmtKind::Let {
+                pattern: Pattern {
+                    id: NodeId::DUMMY,
+                    span,
+                    kind: PatternKind::Ident {
+                        mutability: Mutability::Immutable,
+                        name: gossamer_ast::Ident::new(name),
+                        subpattern: None,
+                    },
+                },
+                ty: None,
+                init: Some(Box::new(init)),
+            },
+        )
+    }
 }
 
 /// Walks the program rewriting every `json::set(&mut place, k, v)`

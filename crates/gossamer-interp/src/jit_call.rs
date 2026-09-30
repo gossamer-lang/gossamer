@@ -1180,7 +1180,9 @@ fn carrier_payload_to_value(shape: CarrierShape, at: usize, word: i64) -> Value 
         CarrierNode::Str => native_ptr_to_value(JitKind::NativeStr, word),
         CarrierNode::Error => read_native_error(word),
         CarrierNode::Option | CarrierNode::Result => {
-            let inner = rt::gos_rt_carrier_from_box(word);
+            // SAFETY: the shape names this node a nested carrier, which
+            // compiled code answers as the address of its box.
+            let inner = unsafe { rt::gos_rt_carrier_from_box(word) };
             carrier_to_value(shape, at, inner as i64, (inner >> 64) as i64)
         }
     }
@@ -1948,6 +1950,8 @@ macro_rules! call_through {
             // A flat array block is a parameter-only shape; `body_kinds`
             // keeps a body returning one on bytecode.
             JitKind::ArrayBlockPtr(..) => unreachable!("array blocks are parameter-only"),
+            // `body_kinds` keeps a body returning a borrowed scalar on bytecode.
+            JitKind::ScalarRef => unreachable!("a borrowed scalar is parameter-only"),
             // A tuple return is canonicalised to `I64` in `prepare` and decoded
             // in `invoke_prepared_native`; the stub only ever sees the `I64`.
             JitKind::TupleReturn(_) => {
@@ -3436,6 +3440,7 @@ pub(crate) fn prepare(jit: std::sync::Arc<JitFn>) -> Option<Prepared> {
                     | JitKind::StructPtr(_)
                     | JitKind::ArrayBlockPtr(..)
                     | JitKind::Carrier(_)
+                    | JitKind::ScalarRef
             )
         });
     Some(Prepared {
@@ -3567,7 +3572,8 @@ pub(crate) fn invoke_prepared(p: &Prepared, args: &[Value], graph_cache: &GraphC
                 | JitKind::ArrayBlockPtr(..)
                 | JitKind::ResultEnumPtr(_)
                 | JitKind::Carrier(_)
-                | JitKind::TupleReturn(_),
+                | JitKind::TupleReturn(_)
+                | JitKind::ScalarRef,
                 _,
             ) => return Dispatch::Fallback,
             (_, true) => match value {
@@ -3671,8 +3677,26 @@ fn invoke_prepared_native(p: &Prepared, args: &[Value], graph_cache: &GraphCache
     // realloc updates the slot, read back into the caller's binding after.
     let mut str_cells: Vec<StrCell> = Vec::new();
     let mut built_carriers = BuiltCarriers(Vec::new());
+    // The slots a borrowed scalar is lent through, alive for the whole call.
+    let mut scalar_slots: Vec<Box<i64>> = Vec::new();
     for (i, (kind, value)) in jit.params.iter().zip(args.iter()).enumerate() {
         let slot = match kind {
+            JitKind::ScalarRef => {
+                let bits = match value {
+                    Value::Int(n) => *n,
+                    Value::Float(x) => x.to_bits() as i64,
+                    Value::Bool(b) => i64::from(*b),
+                    Value::Char(c) => i64::from(u32::from(*c)),
+                    _ => {
+                        free_in_flight(&natives, &built_enums, &str_cells);
+                        return Dispatch::Fallback;
+                    }
+                };
+                let mut cell = Box::new(bits);
+                let addr = std::ptr::from_mut::<i64>(cell.as_mut()) as i64;
+                scalar_slots.push(cell);
+                Slot::I(addr)
+            }
             JitKind::NativeStr => match value {
                 Value::MutCell(c) => {
                     // `&mut String`: the native body expects a pointer-to-slot

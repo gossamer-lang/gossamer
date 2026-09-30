@@ -168,13 +168,22 @@ plus a tree-sitter grammar.
 (Claude Code, OpenCode, Cursor, Zed) can drive the toolchain
 directly:
 
-- `check` - parse + resolve + typecheck; one JSON object per
-  diagnostic (the `--message-format json` schema).
+- `check` - parse + resolve + typecheck + lints; one JSON object per
+  diagnostic (the `--message-format json` schema). With `fix: true` it
+  applies the rewrites the diagnostics carry, as `gos check --fix` does.
+- `fix` - the toolchain's source migrations (`gos fix`); `list: true`
+  names them and `check: true` reports without writing.
+- `lint` - the lint suite, with `fix` and `deny_warnings`.
 - `explain` - long-form rationale for a diagnostic code.
 - `execute` / `build` / `test` - execute programs and test suites;
   exit code, stdout, and stderr come back, bounded by a
   per-call `timeout_ms`.
 - `fmt` / `doc` - formatting and item listings.
+- `audit` / `feature_status` - dependency advisories, and whether a
+  language or library feature is settled.
+- `check`, `execute`, `fmt`, `doc`, `lint`, and `fix` take an inline
+  `source` in place of a path; a tool that rewrites it hands the rewritten
+  text back.
 - `hover` / `definition` / `references` / `workspace_symbols` -
   semantic navigation backed by the same analysis engine as
   `gos lsp`.

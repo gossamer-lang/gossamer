@@ -2143,15 +2143,12 @@ impl Fuser<'_> {
         ty: Ty,
         span: Span,
     ) -> HirExpr {
-        self.expr(
-            ty,
-            span,
-            HirExprKind::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            },
-        )
+        let kind = HirExprKind::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        };
+        self.expr(ty, span, kind)
     }
 
     fn assign_stmt(&mut self, place: HirExpr, value: HirExpr, span: Span) -> HirStmt {

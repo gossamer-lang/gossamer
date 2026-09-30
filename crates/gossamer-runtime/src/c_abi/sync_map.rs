@@ -1,6 +1,5 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::cast_lossless)]
 #![allow(clippy::doc_markdown)]
@@ -27,7 +26,7 @@ pub struct GosSyncMap {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_sync_map_new() -> *mut GosSyncMap {
+pub extern "C" fn gos_rt_sync_map_new() -> *mut GosSyncMap {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosSyncMap {
             inner: parking_lot::RwLock::new(HashMap::new()),
@@ -35,7 +34,11 @@ pub unsafe extern "C" fn gos_rt_sync_map_new() -> *mut GosSyncMap {
     })
 }
 
-fn cstr_to_string(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn cstr_to_string(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -49,9 +52,12 @@ pub unsafe extern "C" fn gos_rt_sync_map_set(
         if m.is_null() {
             return;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let m = unsafe { &*m };
-        let k = cstr_to_string(key);
-        let v = cstr_to_string(value);
+        // SAFETY: `key` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let k = unsafe { cstr_to_string(key) };
+        // SAFETY: `value` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let v = unsafe { cstr_to_string(value) };
         m.inner.write().insert(k, v);
     });
 }
@@ -65,16 +71,18 @@ pub unsafe extern "C" fn gos_rt_sync_map_set(
 pub unsafe extern "C" fn gos_rt_sync_map_get(m: *mut GosSyncMap, key: *const c_char) -> i128 {
     ffi_entry!(0i128, {
         if m.is_null() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
-        let k = cstr_to_string(key);
+        // SAFETY: `key` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let k = unsafe { cstr_to_string(key) };
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         let guard = unsafe { &*m }.inner.read();
         match guard.get(&k) {
             Some(v) => {
                 let cs = alloc_cstring(v.as_bytes()) as i64;
-                unsafe { gos_rt_result_new(0, cs) }
+                gos_rt_result_new(0, cs)
             }
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -85,7 +93,9 @@ pub unsafe extern "C" fn gos_rt_sync_map_delete(m: *mut GosSyncMap, key: *const 
         if m.is_null() {
             return;
         }
-        let k = cstr_to_string(key);
+        // SAFETY: `key` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let k = unsafe { cstr_to_string(key) };
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*m }.inner.write().remove(&k);
     });
 }
@@ -96,6 +106,7 @@ pub unsafe extern "C" fn gos_rt_sync_map_len(m: *mut GosSyncMap) -> i64 {
         if m.is_null() {
             return 0;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { &*m }.inner.read().len() as i64
     })
 }
@@ -106,7 +117,9 @@ pub unsafe extern "C" fn gos_rt_sync_map_contains(m: *mut GosSyncMap, key: *cons
         if m.is_null() {
             return 0;
         }
-        let k = cstr_to_string(key);
+        // SAFETY: `key` is this shim's argument, as `cstr_to_string` requires (C-ABI contract).
+        let k = unsafe { cstr_to_string(key) };
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         i64::from(unsafe { &*m }.inner.read().contains_key(&k))
     })
 }
@@ -118,15 +131,18 @@ pub unsafe extern "C" fn gos_rt_sync_map_keys(
     m: *mut GosSyncMap,
 ) -> *mut crate::c_abi::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let v = unsafe {
+        let v = {
             crate::c_abi::vec::gos_rt_vec_new_typed(8, crate::c_abi::vec::vec_elem_kind::STRING)
         };
         if m.is_null() {
             return v;
         }
+        // SAFETY: `m` is a handle from compiled code, checked non-null above and live for the whole call.
         for key in unsafe { &*m }.inner.read().keys() {
             let cs = alloc_cstring(key.as_bytes());
             let cs_i64 = cs as i64;
+            // SAFETY: `v` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts,
+            // and `cs_i64` is one 8-byte element.
             unsafe {
                 crate::c_abi::vec::gos_rt_vec_push(v, std::ptr::addr_of!(cs_i64).cast::<u8>());
             }

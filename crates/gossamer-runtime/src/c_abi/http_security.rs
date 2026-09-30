@@ -30,13 +30,11 @@
 
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 
 use std::os::raw::c_char;
 
-use super::encoding::gosvec_u8;
 use super::string::alloc_cstring;
 use super::vec::{
     GosVec, VecSlotChild, gos_rt_result_new, gos_rt_vec_push, gos_rt_vec_with_capacity,
@@ -156,10 +154,13 @@ fn sec_err(msg: &str) -> i128 {
 }
 
 unsafe fn cstr_bytes<'a>(p: *const c_char) -> &'a [u8] {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_bytes`
+    // accepts.
     unsafe { crate::c_abi::gos_str_arg_bytes(p) }
 }
 
 unsafe fn cstr_str<'a>(p: *const c_char) -> &'a str {
+    // SAFETY: this `unsafe fn`'s caller passes `p` null or live, which `cstr_bytes` accepts.
     std::str::from_utf8(unsafe { cstr_bytes(p) }).unwrap_or("")
 }
 
@@ -238,13 +239,15 @@ fn sanitize_cookie_name(name: &str) -> String {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_cookie_parse_header(header: *const c_char) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `header` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr_str` accepts.
         let header = unsafe { cstr_str(header) };
         #[repr(C)]
         struct Pair {
             name: i64,
             value: i64,
         }
-        let v = unsafe { gos_rt_vec_with_capacity(16, 0) };
+        let v = gos_rt_vec_with_capacity(16, 0);
         for raw in header.split(';') {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
@@ -263,12 +266,15 @@ pub unsafe extern "C" fn gos_rt_http_cookie_parse_header(header: *const c_char) 
                 name: alloc_cstring(name.as_bytes()) as i64,
                 value: alloc_cstring(value.as_bytes()) as i64,
             };
+            // SAFETY: `v` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts,
+            // and `entry` is one 16-byte element.
             unsafe {
                 gos_rt_vec_push(v, std::ptr::addr_of!(entry).cast::<u8>());
             }
         }
         // Tagged after the pushes - the vec owns the fresh strings.
-        vec_set_slot_children(v, &COOKIE_PAIR_SLOT_CHILDREN);
+        // SAFETY: `v` is the live vec built above.
+        unsafe { vec_set_slot_children(v, &COOKIE_PAIR_SLOT_CHILDREN) };
         v
     })
 }
@@ -282,7 +288,11 @@ pub unsafe extern "C" fn gos_rt_http_cookie_serialize(
     value: *const c_char,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `name` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr_str` accepts.
         let name = unsafe { cstr_str(name) };
+        // SAFETY: `value` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr_str` accepts.
         let value = unsafe { cstr_str(value) };
         let mut out = String::with_capacity(name.len() + value.len() + 1);
         out.push_str(&sanitize_cookie_name(name));
@@ -314,7 +324,9 @@ fn split_token(token: &str) -> Option<(&str, &str)> {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_csrf_issue_token(key: *const GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let key = unsafe { gosvec_u8(key) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
         if !csrf_key_is_strong_enough(&key) {
             return sec_err("csrf: key must be at least 32 bytes");
         }
@@ -339,9 +351,15 @@ pub unsafe extern "C" fn gos_rt_http_csrf_verify_token(
     key: *const GosVec,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `cookie_token` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr_str` accepts.
         let cookie_token = unsafe { cstr_str(cookie_token) };
+        // SAFETY: `supplied_token` is this shim's argument, null or a live string body for the
+        // call (C-ABI contract), which `cstr_str` accepts.
         let supplied_token = unsafe { cstr_str(supplied_token) };
-        let key = unsafe { gosvec_u8(key) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
         if !csrf_key_is_strong_enough(&key) {
             return sec_err("csrf: key must be at least 32 bytes");
         }
@@ -382,8 +400,12 @@ pub unsafe extern "C" fn gos_rt_http_session_sign(
     key: *const GosVec,
 ) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `payload` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr_bytes` accepts.
         let payload = unsafe { cstr_bytes(payload) };
-        let key = unsafe { gosvec_u8(key) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
         let b64_payload = b64url_encode(payload);
         let mac = hmac_sha256(&key, b64_payload.as_bytes());
         let wire = format!("{b64_payload}.{}", b64url_encode(&mac));
@@ -400,8 +422,12 @@ pub unsafe extern "C" fn gos_rt_http_session_verify(
     key: *const GosVec,
 ) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `cookie` is this shim's argument, null or a live string body for the call
+        // (C-ABI contract), which `cstr_str` accepts.
         let cookie = unsafe { cstr_str(cookie) };
-        let key = unsafe { gosvec_u8(key) };
+        // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let key = unsafe { crate::c_abi::vec::vec_bytes(key) };
         let Some((left, right)) = cookie.split_once('.') else {
             return sec_err("session: missing separator");
         };

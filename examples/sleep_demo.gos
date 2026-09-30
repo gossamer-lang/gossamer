@@ -17,7 +17,7 @@ let mut total: i64 = 0
 for i in 0..100_000 {
     total += i
 }
-println("  ran tight loop, sum = {}", total)
+println(f"  ran tight loop, sum = {total}")
 
 println("phase 2 - short sleep (10 ms)")
 time::sleep(time::Duration::from_millis(10))

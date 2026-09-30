@@ -385,7 +385,7 @@ pub fn interrupt_connection_by_addr(addr: usize) {
     if addr == 0 {
         return;
     }
-    // SAFETY: the watchdog joins before the original &mut goes out
+    // the watchdog joins before the original &mut goes out
     // of scope, so the trait object is still live. Trait-object
     // pointers are 2 words (data + vtable); we can't reconstruct
     // the dyn pointer from a single address. Instead, we round-trip

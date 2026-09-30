@@ -13,13 +13,7 @@ use std::strings
 use std::collections::Map
 
 fn first_hit() -> String {
-    let re = match regex::compile("ab+") {
-        Ok(p) => p
-        Err(e) => {
-            println("compile error: {}", e)
-            return ""
-        }
-    }
+    let re = regex::compile("ab+")
     let mut found = ""
     for hit in regex::find_all(re, "xabby_ab_abbb_ab") {
         found = hit.2
@@ -29,13 +23,7 @@ fn first_hit() -> String {
 }
 
 fn first_piece() -> String {
-    let re = match regex::compile(",") {
-        Ok(p) => p
-        Err(e) => {
-            println("compile error: {}", e)
-            return ""
-        }
-    }
+    let re = regex::compile(",")
     let mut piece = ""
     for p in regex::split(re, "alpha,beta,gamma,delta") {
         piece = p
@@ -45,13 +33,7 @@ fn first_piece() -> String {
 }
 
 fn first_full_match() -> String {
-    let re = match regex::compile("(a)(b)?") {
-        Ok(p) => p
-        Err(e) => {
-            println("compile error: {}", e)
-            return ""
-        }
-    }
+    let re = regex::compile("(a)(b)?")
     let mut out = ""
     for row in regex::captures_all(re, "a ab a ab") {
         if let Some(m) = row[0] {
@@ -93,13 +75,7 @@ fn main() {
     // Full-iteration pass over a fresh materializer right after the
     // early breaks above: the frees from the broken loops must not
     // have corrupted the allocator.
-    let re = match regex::compile("[0-9]+") {
-        Ok(p) => p
-        Err(e) => {
-            println("compile error: {}", e)
-            return
-        }
-    }
+    let re = regex::compile("[0-9]+")
     let mut total = 0
     for hit in regex::find_all(re, "7 and 22 and 333") {
         total += hit.1 - hit.0

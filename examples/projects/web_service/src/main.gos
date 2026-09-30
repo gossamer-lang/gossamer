@@ -42,7 +42,7 @@ fn render_users() -> String {
 // Echoes the raw query string back as a JSON object. The test
 // suite exercises this directly to avoid spinning up a socket.
 fn render_echo(query: String) -> String {
-    format("{{\"echo\":\"{query}\"}}")
+    f"{{\"echo\":\"{query}\"}}"
 }
 
 fn classify(path: str) -> String {

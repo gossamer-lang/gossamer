@@ -95,31 +95,33 @@ impl GosDyn {
 }
 
 /// The node a handle names, or `Nil` for a null handle.
+///
+/// # Safety
+/// `v` is null or a handle live for `'a`.
 unsafe fn node_of<'a>(v: *const GosDyn) -> &'a DynNode {
     static NIL: DynNode = DynNode::Nil;
     if v.is_null() {
         return &NIL;
     }
+    // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live handle
+    // for `'a`.
     unsafe { &(*v).node }
 }
 
 /// Reads a `Vec<DynValue>` argument as the nodes its handles name.
+///
+/// # Safety
+/// `items` is null or a live `Vec<DynValue>`.
 unsafe fn children_of(items: *const GosVec) -> Vec<Arc<DynNode>> {
-    if items.is_null() {
+    // SAFETY: this `unsafe fn`'s caller passes `items` null or a live `Vec<DynValue>`.
+    let Some(items) = (unsafe { crate::c_abi::vec::VecView::of(items) }) else {
         return Vec::new();
-    }
-    let header = unsafe { &*items };
-    let len = usize::try_from(header.len.max(0)).unwrap_or(0);
-    let data = header.ptr.as_ptr();
-    if len == 0 || data.is_null() {
-        return Vec::new();
-    }
-    let words = unsafe { std::slice::from_raw_parts(data.cast::<i64>(), len) };
-    words
-        .iter()
-        .map(|word| {
-            let handle: *const GosDyn = std::ptr::with_exposed_provenance(*word as usize);
-            Arc::new(unsafe { node_of(handle) }.clone())
+    };
+    (0..items.len())
+        .map(|i| {
+            // SAFETY: each element of a `Vec<DynValue>` is null or a live handle (C-ABI
+            // contract), which `node_of` accepts.
+            Arc::new(unsafe { node_of(items.pointer_at::<GosDyn>(i)) }.clone())
         })
         .collect()
 }
@@ -239,6 +241,7 @@ pub extern "C" fn gos_rt_dyn_char(value: i32) -> *mut GosDyn {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_string(text: *const c_char) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(text) };
         GosDyn::into_raw(DynNode::Str(String::from_utf8_lossy(bytes).into_owned()))
     })
@@ -248,20 +251,9 @@ pub unsafe extern "C" fn gos_rt_dyn_string(text: *const c_char) -> *mut GosDyn {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_bytes(items: *const GosVec) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
-        let mut out: Vec<u8> = Vec::new();
-        if !items.is_null() {
-            let header = unsafe { &*items };
-            let len = usize::try_from(header.len.max(0)).unwrap_or(0);
-            let data = header.ptr.as_ptr();
-            if len > 0 && !data.is_null() {
-                if header.elem_bytes == 1 {
-                    out.extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
-                } else {
-                    let words = unsafe { std::slice::from_raw_parts(data.cast::<i64>(), len) };
-                    out.extend(words.iter().map(|w| (*w & 0xff) as u8));
-                }
-            }
-        }
+        // SAFETY: `items` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let out = unsafe { crate::c_abi::vec::vec_bytes(items) };
         GosDyn::into_raw(DynNode::Bytes(out))
     })
 }
@@ -270,6 +262,8 @@ pub unsafe extern "C" fn gos_rt_dyn_bytes(items: *const GosVec) -> *mut GosDyn {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_list(items: *const GosVec) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `items` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `children_of` accepts.
         GosDyn::into_raw(DynNode::List(unsafe { children_of(items) }))
     })
 }
@@ -278,7 +272,11 @@ pub unsafe extern "C" fn gos_rt_dyn_list(items: *const GosVec) -> *mut GosDyn {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_map(keys: *const GosVec, values: *const GosVec) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `keys` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `children_of` accepts.
         let ks = unsafe { children_of(keys) };
+        // SAFETY: `values` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `children_of` accepts.
         let vs = unsafe { children_of(values) };
         let entries = ks.into_iter().zip(vs).collect();
         GosDyn::into_raw(DynNode::Map(entries))
@@ -292,9 +290,12 @@ pub unsafe extern "C" fn gos_rt_dyn_tagged(
     payload: *const GosVec,
 ) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(name) };
         GosDyn::into_raw(DynNode::Tagged {
             name: String::from_utf8_lossy(bytes).into_owned(),
+            // SAFETY: `payload` is this shim's argument, live for the call (C-ABI contract) or
+            // null, which `children_of` accepts.
             payload: unsafe { children_of(payload) },
         })
     })
@@ -306,6 +307,8 @@ pub unsafe extern "C" fn gos_rt_dyn_tagged(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_kind(v: *const GosDyn) -> i64 {
     ffi_entry!(dyn_kind::NIL, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Nil => dyn_kind::NIL,
             DynNode::Bool(_) => dyn_kind::BOOL,
@@ -326,6 +329,8 @@ pub unsafe extern "C" fn gos_rt_dyn_kind(v: *const GosDyn) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_kind_name(v: *const GosDyn) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         let name: &[u8] = match unsafe { node_of(v) } {
             DynNode::Nil => b"nil",
             DynNode::Bool(_) => b"bool",
@@ -346,6 +351,8 @@ pub unsafe extern "C" fn gos_rt_dyn_kind_name(v: *const GosDyn) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_name(v: *const GosDyn) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Tagged { name, .. } => alloc_cstring(name.as_bytes()),
             _ => alloc_cstring(b""),
@@ -358,6 +365,8 @@ pub unsafe extern "C" fn gos_rt_dyn_name(v: *const GosDyn) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_len(v: *const GosDyn) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         let len = match unsafe { node_of(v) } {
             // Text counts its own scalars, the same length a `String`
             // reports; every other shape counts the values it holds.
@@ -378,6 +387,8 @@ pub unsafe extern "C" fn gos_rt_dyn_len(v: *const GosDyn) -> i64 {
 pub unsafe extern "C" fn gos_rt_dyn_at(v: *const GosDyn, index: i64) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
         let index = usize::try_from(index).unwrap_or(usize::MAX);
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         let child = match unsafe { node_of(v) } {
             DynNode::List(items) => items.get(index),
             DynNode::Tagged { payload, .. } => payload.get(index),
@@ -399,6 +410,8 @@ pub unsafe extern "C" fn gos_rt_dyn_at(v: *const GosDyn, index: i64) -> *mut Gos
 pub unsafe extern "C" fn gos_rt_dyn_key_at(v: *const GosDyn, index: i64) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
         let index = usize::try_from(index).unwrap_or(usize::MAX);
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Map(entries) => entries.get(index).map_or_else(
                 || GosDyn::into_raw(DynNode::Nil),
@@ -413,6 +426,8 @@ pub unsafe extern "C" fn gos_rt_dyn_key_at(v: *const GosDyn, index: i64) -> *mut
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_as_i64(v: *const GosDyn) -> i128 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Int(n) => crate::c_abi::gos_rt_result_new(0, *n),
             _ => crate::c_abi::gos_rt_result_new(1, 0),
@@ -424,6 +439,8 @@ pub unsafe extern "C" fn gos_rt_dyn_as_i64(v: *const GosDyn) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_as_f64(v: *const GosDyn) -> i128 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Float(f) => crate::c_abi::gos_rt_result_new_f64(0, *f),
             _ => crate::c_abi::gos_rt_result_new_f64(1, 0.0),
@@ -435,6 +452,8 @@ pub unsafe extern "C" fn gos_rt_dyn_as_f64(v: *const GosDyn) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_as_bool(v: *const GosDyn) -> i128 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Bool(b) => crate::c_abi::gos_rt_result_new(0, i64::from(*b)),
             _ => crate::c_abi::gos_rt_result_new(1, 0),
@@ -446,6 +465,8 @@ pub unsafe extern "C" fn gos_rt_dyn_as_bool(v: *const GosDyn) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_as_char(v: *const GosDyn) -> i128 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Char(c) => crate::c_abi::gos_rt_result_new(0, i64::from(*c as u32)),
             _ => crate::c_abi::gos_rt_result_new(1, 0),
@@ -457,6 +478,8 @@ pub unsafe extern "C" fn gos_rt_dyn_as_char(v: *const GosDyn) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_as_str(v: *const GosDyn) -> i128 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Str(s) => {
                 crate::c_abi::gos_rt_result_new(0, alloc_cstring(s.as_bytes()) as i64)
@@ -471,13 +494,13 @@ pub unsafe extern "C" fn gos_rt_dyn_as_str(v: *const GosDyn) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_as_bytes(v: *const GosDyn) -> *mut GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let out = unsafe { crate::c_abi::vec::gos_rt_vec_new(8) };
-        if let DynNode::Bytes(bytes) = unsafe { node_of(v) } {
-            for byte in bytes {
-                unsafe { crate::c_abi::vec::gos_rt_vec_push_i64(out, i64::from(*byte)) };
-            }
-        }
-        out
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
+        let bytes: &[u8] = match unsafe { node_of(v) } {
+            DynNode::Bytes(bytes) => bytes,
+            _ => &[],
+        };
+        super::encoding::bytes_to_gosvec(bytes)
     })
 }
 
@@ -490,6 +513,7 @@ pub unsafe extern "C" fn gos_rt_dyn_clone(v: *const GosDyn) -> *mut GosDyn {
         if v.is_null() {
             return GosDyn::into_raw(DynNode::Nil);
         }
+        // SAFETY: `v` is non-null (checked above) and live for the call (C-ABI contract).
         GosDyn::share(unsafe { &(*v).node })
     })
 }
@@ -501,6 +525,8 @@ pub unsafe extern "C" fn gos_rt_dyn_free(v: *mut GosDyn) {
         if v.is_null() {
             return;
         }
+        // SAFETY: `v` is non-null (checked above), a handle a constructor boxed, which this call
+        // consumes (C-ABI contract).
         drop(unsafe { Box::from_raw(v) });
     });
 }
@@ -510,6 +536,9 @@ pub unsafe extern "C" fn gos_rt_dyn_free(v: *mut GosDyn) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_eq(a: *const GosDyn, b: *const GosDyn) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `a` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts. `b` is this shim's argument, live for the call (C-ABI contract) or
+        // null, which `node_of` accepts.
         i64::from(unsafe { node_of(a) } == unsafe { node_of(b) })
     })
 }
@@ -519,6 +548,8 @@ pub unsafe extern "C" fn gos_rt_dyn_eq(a: *const GosDyn, b: *const GosDyn) -> i6
 pub unsafe extern "C" fn gos_rt_dyn_format(v: *const GosDyn) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let mut out = String::new();
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         render(unsafe { node_of(v) }, &mut out);
         alloc_cstring(out.as_bytes())
     })
@@ -531,6 +562,8 @@ pub unsafe extern "C" fn gos_rt_dyn_format(v: *const GosDyn) -> *mut c_char {
 pub unsafe extern "C" fn gos_rt_dyn_display(v: *const GosDyn) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
         let mut out = String::new();
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         match unsafe { node_of(v) } {
             DynNode::Str(s) => out.push_str(s),
             DynNode::Char(c) => out.push(*c),
@@ -550,12 +583,15 @@ pub unsafe extern "C" fn gos_rt_dyn_display(v: *const GosDyn) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_arm_index(v: *const GosDyn, names: *const c_char) -> i64 {
     ffi_entry!(-1, {
+        // SAFETY: `v` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `node_of` accepts.
         let DynNode::Tagged { name, .. } = (unsafe { node_of(v) }) else {
             return -1;
         };
         if names.is_null() {
             return -1;
         }
+        // SAFETY: `names` is a String argument from compiled code, null or a live string body for the whole call.
         let declared = unsafe { crate::c_abi::gos_str_arg_bytes(names) };
         let Ok(declared) = std::str::from_utf8(declared) else {
             return -1;
@@ -573,6 +609,8 @@ pub unsafe extern "C" fn gos_rt_dyn_arm_index(v: *const GosDyn, names: *const c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_field_i64(v: *const GosDyn, index: i64) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `v` is this shim's argument, null or a live handle for the call (C-ABI
+        // contract), which `payload_field` accepts.
         match unsafe { payload_field(v, index) } {
             Some(DynNode::Int(n)) => *n,
             Some(DynNode::Bool(b)) => i64::from(*b),
@@ -585,6 +623,8 @@ pub unsafe extern "C" fn gos_rt_dyn_field_i64(v: *const GosDyn, index: i64) -> i
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_field_f64(v: *const GosDyn, index: i64) -> f64 {
     ffi_entry!(0.0, {
+        // SAFETY: `v` is this shim's argument, null or a live handle for the call (C-ABI
+        // contract), which `payload_field` accepts.
         match unsafe { payload_field(v, index) } {
             Some(DynNode::Float(f)) => *f,
             Some(DynNode::Int(n)) => *n as f64,
@@ -596,6 +636,8 @@ pub unsafe extern "C" fn gos_rt_dyn_field_f64(v: *const GosDyn, index: i64) -> f
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_field_str(v: *const GosDyn, index: i64) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `v` is this shim's argument, null or a live handle for the call (C-ABI
+        // contract), which `payload_field` accepts.
         match unsafe { payload_field(v, index) } {
             Some(DynNode::Str(s)) => alloc_cstring(s.as_bytes()),
             _ => alloc_cstring(b""),
@@ -608,6 +650,8 @@ pub unsafe extern "C" fn gos_rt_dyn_field_str(v: *const GosDyn, index: i64) -> *
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_dyn_field_dyn(v: *const GosDyn, index: i64) -> *mut GosDyn {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `v` is this shim's argument, null or a live handle for the call (C-ABI
+        // contract), which `payload_field` accepts.
         unsafe { payload_field(v, index) }.map_or_else(
             || GosDyn::into_raw(DynNode::Nil),
             |node| GosDyn::into_raw(node.clone()),
@@ -616,7 +660,11 @@ pub unsafe extern "C" fn gos_rt_dyn_field_dyn(v: *const GosDyn, index: i64) -> *
 }
 
 /// The payload field at `index` of a tagged value.
+///
+/// # Safety
+/// `v` is null or a handle live for `'a`.
 unsafe fn payload_field<'a>(v: *const GosDyn, index: i64) -> Option<&'a DynNode> {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `node_of` accepts.
     let DynNode::Tagged { payload, .. } = (unsafe { node_of(v) }) else {
         return None;
     };

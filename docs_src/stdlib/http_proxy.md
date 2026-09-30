@@ -4,18 +4,15 @@ Status: experimental
 
 Reverse proxy on top of http::Client. Director-style request mutator + hop-by-hop strip + error handler.
 
-<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+## Items
 
-## API details and source
-
-The [implementation source](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_proxy.rs) contains the complete declarations and implementation notes. The table below lists canonical Gossamer call signatures; every item name links directly to its implementation file.
-
-| Item | Canonical signature or declaration | Description |
+| Item | Signature | Description |
 |---|---|---|
-| [`Director`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_proxy.rs) | `type Director` | Fn(&mut Request) request mutator (Rust-side). |
-| [`Proxy`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_proxy.rs) | `type Proxy` | Reverse-proxy handler (Rust-side). |
-| [`forward`](https://github.com/gossamer-lang/gossamer/blob/main/crates/gossamer-std/src/http_proxy.rs) | `fn forward(url: String, method: String, body: Vec<u8>) -> Result<http::Response, errors::Error>` | One-shot upstream forward: `(url, method, body) -> Result<Response, Error>`. Interp tier. |
+| `Proxy` | `type Proxy` | Reverse-proxy handler (Rust-side). |
+| `Director` | `type Director` | Fn(&mut Request) request mutator (Rust-side). |
+| `forward` | `fn forward(url: String, method: String, body: Vec<u8>) -> Result<http::Response, errors::Error>` | One-shot upstream forward: `(url, method, body) -> Result<Response, Error>`. Interp tier. |
 
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
 
 ## Writing a passthrough proxy in Gossamer
 

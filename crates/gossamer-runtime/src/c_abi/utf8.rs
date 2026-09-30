@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 //! C-ABI surface for `std::utf8`. Mirrors the most common helpers
@@ -34,12 +32,15 @@ unsafe fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
     if s.is_null() {
         return "";
     }
+    // SAFETY: this `unsafe fn`'s caller passes `s` live; non-null, checked above.
     unsafe { crate::c_abi::gos_str_arg_text(s) }
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf8_rune_count_in_string(s: *const c_char) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `s` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
         text.chars().count() as i64
     })
@@ -56,20 +57,22 @@ pub unsafe extern "C" fn gos_rt_utf8_rune_count_bytes(
         if vec.is_null() {
             return 0;
         }
+        // SAFETY: `vec` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes_cow(vec) };
         std::str::from_utf8(&bytes).map_or(0, |s| s.chars().count() as i64)
     })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_utf8_rune_len(c: u32) -> i64 {
+pub extern "C" fn gos_rt_utf8_rune_len(c: u32) -> i64 {
     ffi_entry!(-1, {
         char::from_u32(c).map_or(-1, |ch| ch.len_utf8() as i64)
     })
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_utf8_valid_rune(c: u32) -> i64 {
+pub extern "C" fn gos_rt_utf8_valid_rune(c: u32) -> i64 {
     ffi_entry!(0, { i64::from(char::from_u32(c).is_some()) })
 }
 
@@ -79,6 +82,7 @@ pub unsafe extern "C" fn gos_rt_utf8_valid_string(s: *const c_char) -> i64 {
         if s.is_null() {
             return 1;
         }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
         let ok = std::str::from_utf8(unsafe { crate::c_abi::gos_str_arg_bytes(s) }).is_ok();
         i64::from(ok)
     })
@@ -90,6 +94,8 @@ pub unsafe extern "C" fn gos_rt_utf8_is_valid(vec: *const crate::c_abi::vec::Gos
         if vec.is_null() {
             return 1;
         }
+        // SAFETY: `vec` is this shim's argument, live for the call (C-ABI contract); non-null,
+        // checked above.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes_cow(vec) };
         i64::from(std::str::from_utf8(&bytes).is_ok())
     })
@@ -98,6 +104,8 @@ pub unsafe extern "C" fn gos_rt_utf8_is_valid(vec: *const crate::c_abi::vec::Gos
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf8_full_rune_in_string(s: *const c_char) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `s` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr_to_str` accepts.
         let text = unsafe { cstr_to_str(s) };
         let bytes = text.as_bytes();
         if bytes.is_empty() {
@@ -125,6 +133,8 @@ pub unsafe extern "C" fn gos_rt_utf8_full_rune_in_string(s: *const c_char) -> i6
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf8_full_rune(vec: *const crate::c_abi::vec::GosVec) -> i64 {
     ffi_entry!(0, {
+        // SAFETY: `vec` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(vec) };
         let Some(&first) = bytes.first() else {
             return 0;
@@ -145,7 +155,7 @@ pub unsafe extern "C" fn gos_rt_utf8_full_rune(vec: *const crate::c_abi::vec::Go
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_utf8_rune_start(b: u32) -> i64 {
+pub extern "C" fn gos_rt_utf8_rune_start(b: u32) -> i64 {
     ffi_entry!(0, { i64::from((b as u8) & 0xC0 != 0x80) })
 }
 
@@ -158,14 +168,11 @@ pub unsafe extern "C" fn gos_rt_utf8_rune_start(b: u32) -> i64 {
 
 const RUNE_ERROR: char = '\u{FFFD}';
 
-unsafe fn vec_bytes(v: *const super::vec::GosVec) -> Vec<u8> {
-    unsafe { crate::c_abi::vec::vec_bytes(v) }
-}
-
 fn rune_pair(ch: char, n: usize) -> *mut u8 {
     let p = crate::c_abi::gos_rt_gc_alloc(16);
     if !p.is_null() {
         let slots = p.cast::<i64>();
+        // SAFETY: `p` is a fresh non-null 16-byte block (checked above), room for the two words.
         unsafe {
             *slots = i64::from(ch as u32);
             *slots.add(1) = n as i64;
@@ -202,7 +209,9 @@ fn decode_rune_bytes(p: &[u8]) -> (char, usize) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf8_decode_rune(v: *const super::vec::GosVec) -> *mut u8 {
     ffi_entry!(std::ptr::null_mut(), {
-        let (ch, n) = decode_rune_bytes(&unsafe { vec_bytes(v) });
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let (ch, n) = decode_rune_bytes(&unsafe { crate::c_abi::vec::vec_bytes(v) });
         rune_pair(ch, n)
     })
 }
@@ -211,6 +220,8 @@ pub unsafe extern "C" fn gos_rt_utf8_decode_rune(v: *const super::vec::GosVec) -
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf8_decode_rune_in_string(s: *const c_char) -> *mut u8 {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr_to_str` accepts.
         let (ch, n) = match unsafe { cstr_to_str(s) }.chars().next() {
             Some(ch) => (ch, ch.len_utf8()),
             None => (RUNE_ERROR, 0),
@@ -223,7 +234,9 @@ pub unsafe extern "C" fn gos_rt_utf8_decode_rune_in_string(s: *const c_char) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf8_decode_last_rune(v: *const super::vec::GosVec) -> *mut u8 {
     ffi_entry!(std::ptr::null_mut(), {
-        let p = unsafe { vec_bytes(v) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let p = unsafe { crate::c_abi::vec::vec_bytes(v) };
         if p.is_empty() {
             return rune_pair(RUNE_ERROR, 0);
         }
@@ -247,6 +260,8 @@ pub unsafe extern "C" fn gos_rt_utf8_decode_last_rune(v: *const super::vec::GosV
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_utf8_decode_last_rune_in_string(s: *const c_char) -> *mut u8 {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `s` is this shim's argument, null or a live string body for the call (C-ABI
+        // contract), which `cstr_to_str` accepts.
         let (ch, n) = match unsafe { cstr_to_str(s) }.chars().next_back() {
             Some(ch) => (ch, ch.len_utf8()),
             None => (RUNE_ERROR, 0),
@@ -263,7 +278,9 @@ pub unsafe extern "C" fn gos_rt_utf8_append_rune(
     r: u32,
 ) -> *mut super::vec::GosVec {
     ffi_entry!(std::ptr::null_mut(), {
-        let mut buf = unsafe { vec_bytes(v) };
+        // SAFETY: `v` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let mut buf = unsafe { crate::c_abi::vec::vec_bytes(v) };
         let ch = char::from_u32(r).unwrap_or('\0');
         let mut tmp = [0u8; 4];
         let n = ch.encode_utf8(&mut tmp).len();

@@ -70,6 +70,7 @@ Call it from Gossamer. The module is the string in `#[gos_module]`,
 and - like every other module - it has to be imported before a path
 through it resolves:
 
+<!-- fragment -->
 ```gossamer
 // src/main.gos
 use native
@@ -155,10 +156,11 @@ pub fn parse_int(s: String) -> Result<i64, GosError> {
 }
 ```
 
+<!-- fragment -->
 ```gossamer
 match native::parse_int("nope") {
-    Ok(n) => println("{}", n),
-    Err(e) => eprintln("{}", e),
+    Ok(n) => println(f"{n}"),
+    Err(e) => eprintln(f"{e}"),
 }
 ```
 
@@ -218,6 +220,7 @@ The type's name is the Gossamer-side module. A `Self`-returning
 associated function registers a new value and answers its `i64`
 handle; every method takes that handle as its first argument:
 
+<!-- fragment -->
 ```gossamer
 use Counter
 
@@ -288,12 +291,13 @@ const TYPE: Type = Type::Variant(&[
 ]);
 ```
 
+<!-- fragment -->
 ```gossamer
 enum Reply { Integer(i64), Text(String), Nothing }
 
 match conn::reply(id) {
-    Reply::Integer(n) => println("int {}", n),
-    Reply::Text(s) => println("text {}", s),
+    Reply::Integer(n) => println(f"int {n}"),
+    Reply::Text(s) => println(f"text {s}"),
     Reply::Nothing => println("nothing"),
 }
 ```
@@ -323,6 +327,7 @@ register_module!(
 );
 ```
 
+<!-- fragment -->
 ```gossamer
 use events
 
@@ -375,7 +380,7 @@ visible rather than silent.
 
 ## The `[rust-bindings]` table
 
-Each entry is keyed by the Cargo crate name. Five source forms:
+Each entry is keyed by the Cargo crate name. Four source forms:
 
 ```toml
 [rust-bindings]
@@ -391,10 +396,11 @@ segment = { version = "0.9" }
 # A single Rust source file; `deps` is a verbatim Cargo dependency
 # fragment for the crate the toolchain scaffolds around it.
 tiny    = { src = "native/tiny.rs", deps = "unic-segment = \"0.9\"" }
-
-# A pre-built static archive, with the binding ABI it was built against.
-vendored = { prebuilt = "vendor/libacme.a", abi = "2.0" }
 ```
+
+Every form names source. A binding is compiled against the toolchain that
+builds the program, so a pre-built archive has no form: its wire layout would
+be whatever an older toolchain wrote, and nothing could check it.
 
 `features` and `default-features` are accepted on the `path`, `git`,
 and `version` forms and are passed straight to Cargo.
@@ -419,11 +425,25 @@ opaque handle - cross unchanged; `Bytes`, `Map<K, V>`, tuples,
 are converted between the runtime's own shape and the wire shape at each
 boundary crossing, so the same program prints the same thing on every tier.
 
-`gossamer-binding` carries an ABI version (currently `2.0`) that the
-runtime checks at load time, so a stale binding is reported rather
-than silently corrupting memory. Minor bumps add wire shapes; a major
-bump breaks compatibility, and a binding must be rebuilt against the
-matching toolchain.
+### What stays compatible
+
+A binding crate depends on `gossamer-binding` by version, and the toolchain
+building the program supplies its own copy of that crate through Cargo's
+`[patch]`. The binding is therefore always compiled against the toolchain in
+use, and the wire shapes between it and the runtime are the toolchain's own.
+Two consequences:
+
+- **The Rust source API is the contract.** `#[gos_module]`, `#[gos_opaque]`,
+  `#[gos_blocking]`, `#[derive(GosStruct)]`, the `BindingAbi` trait, and the
+  wire types it names (`Bytes`, `DynValue`, callbacks, `Map`) follow the
+  [compatibility policy](compatibility.md): a minor release only adds to them,
+  and a removal goes through a deprecation period. A binding that builds
+  against one release builds against the next.
+- **The binary layout is not a contract.** The wire structs, the
+  `gos_binding_*` symbol scheme, and the ABI version `gossamer-binding`
+  records (currently `2.0`) may change in any release, because no binary built
+  by one toolchain is ever linked by another. There is no pre-built binding
+  archive to keep compatible.
 
 `crates/gossamer-binding/ABI_0_4.md` in the repository documents each
 wire shape's layout, ownership, and reclamation rules - read it before

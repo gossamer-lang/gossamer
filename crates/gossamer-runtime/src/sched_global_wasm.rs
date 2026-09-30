@@ -238,7 +238,12 @@ impl Task for GoroutineTask {
     }
 }
 
+/// The marker [`syscall_enter`] answers; it holds nothing to release.
+pub struct SyscallGuard;
+
 /// Marks the caller as inside a blocking system call. A wasm build runs one
 /// thread with no workers to hand off to, so there is nothing to mark.
 #[must_use]
-pub fn syscall_enter() {}
+pub fn syscall_enter() -> SyscallGuard {
+    SyscallGuard
+}

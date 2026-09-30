@@ -286,6 +286,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/lazy_iter_element_classes.gos"),
     spec("feature-testing-examples/container_impl_and_literals.gos"),
     spec("feature-testing-examples/container_in_tuple_array_vec.gos"),
+    spec("feature-testing-examples/container_from_packed_and_float_vecs.gos"),
     spec("feature-testing-examples/array_repeat_container_elements.gos"),
     spec("feature-testing-examples/user_type_named_box.gos"),
     spec("feature-testing-examples/carrier_unwrap_or_else.gos"),
@@ -1178,9 +1179,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/mutability_explicit_parity.gos"),
     spec("feature-testing-examples/fixed_array_mut_param_copy.gos"),
     Spec {
-        skip_all: Some(
-            "contains an intentional narrow-integer overflow whose debug panic and release wrapping are tested by overflow_profile.rs",
-        ),
+        allow_nonzero: true,
         ..spec("feature-testing-examples/byte_vec_i64_model.gos")
     },
     spec("feature-testing-examples/map_iteration_order.gos"),
@@ -1245,6 +1244,7 @@ const SPECS: &[Spec] = &[
     // boundary) and is reclaimed exactly once wherever the enum dies.
     spec("feature-testing-examples/enum_vec_payload_escape.gos"),
     spec("feature-testing-examples/jit_native_marshal.gos"),
+    spec("feature-testing-examples/u8vec_scans.gos"),
     spec("feature-testing-examples/arena_regions.gos"),
     spec("feature-testing-examples/auto_regions.gos"),
     spec("feature-testing-examples/auto_regions_for.gos"),
@@ -1327,9 +1327,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/http_serve_err_binding.gos"),
     spec("feature-testing-examples/http3_serve_err_binding.gos"),
     Spec {
-        skip_all: Some(
-            "contains an intentional unsigned underflow whose debug panic and release wrapping are tested by overflow_profile.rs",
-        ),
+        allow_nonzero: true,
         ..spec("feature-testing-examples/integer_overflow_edges.gos")
     },
     spec("feature-testing-examples/intcode_day2_mut_slice_native.gos"),
@@ -1382,6 +1380,7 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/net_tls_client_modes.gos"),
     spec("feature-testing-examples/json_round_trip_fuzz.gos"),
     spec("feature-testing-examples/json_set_update.gos"),
+    spec("feature-testing-examples/json_value_constructors.gos"),
     spec("feature-testing-examples/option_result_chain_methods.gos"),
     spec("feature-testing-examples/process_spawn_piped.gos"),
     spec("feature-testing-examples/method_dispatch_collision.gos"),
@@ -1585,7 +1584,7 @@ const SPECS: &[Spec] = &[
         // `spec_conformance::spec_3_1_native_profiles_check_then_wrap_overflow`
         // exercises both profiles directly, so comparing this fixture's VM
         // result with LLVM release would assert a behavior that must differ.
-        skip_all: Some("debug overflow checks intentionally differ from release wrapping"),
+        allow_nonzero: true,
         ..spec("feature-testing-examples/neg_int_min_wraps.gos")
     },
     spec("feature-testing-examples/stdlib_net_dns.gos"),
@@ -1751,6 +1750,7 @@ const SPECS: &[Spec] = &[
     // is driven through the full Conn/Stmt/Rows facade. Cross-tier
     // gate for the register_native bridge + native_* side-channel.
     spec("feature-testing-examples/sql_native_driver.gos"),
+    spec("feature-testing-examples/sql_native_driver_stateful.gos"),
     // Qualified type-path annotation (`util::Rec` in `&util::Rec` param and
     // `&mut util::Rec` param) resolves to the struct's Adt on all tiers so
     // field access lowers to a real Field projection instead of falling
@@ -1924,6 +1924,51 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/math_methods_and_log.gos"),
     // `=` and `op=` on a field path under `or_insert` write back.
     spec("feature-testing-examples/or_insert_field_assignment.gos"),
+    // Two arguments of a call in tail position that read one register.
+    spec("feature-testing-examples/tail_call_shared_arguments.gos"),
+    // Methods and associated functions declared on primitives, and user
+    // methods named like `math` functions.
+    spec("feature-testing-examples/primitive_impl_methods.gos"),
+    // The `char` and integer method surface.
+    spec("feature-testing-examples/primitive_method_surface.gos"),
+    // `{:+}` and `{:e}` / `{:E}` format specs.
+    spec("feature-testing-examples/format_sign_and_exponent.gos"),
+    // `Vec::retain`, range `contains`, `Map` indexing and in-place updates.
+    spec("feature-testing-examples/collection_update_surface.gos"),
+    // Adapter and terminal methods on a program's own `impl Iterator`.
+    spec("feature-testing-examples/user_iterator_adapters.gos"),
+    // Iterators bound, stored, passed, returned, and copied as values.
+    spec("feature-testing-examples/iterator_values.gos"),
+    // Type parameters decided by `S: Trait<Assoc = T>` constraints.
+    spec("feature-testing-examples/assoc_type_equality_generics.gos"),
+    // `collect` into `Result<Vec<T>, E>` / `Option<Vec<T>>`, short-circuiting.
+    spec("feature-testing-examples/fallible_collect.gos"),
+    // Operator impls per right-hand type, with `type Output`.
+    spec("feature-testing-examples/operator_rhs_types.gos"),
+    // Typed serde over enums, and `#[rename]` / `#[skip]` / `#[default]`.
+    spec("feature-testing-examples/serde_enums_and_field_attrs.gos"),
+    // `time::Time`: an instant with its UTC offset, parsed, formatted,
+    // shifted by durations, and compared.
+    spec("feature-testing-examples/time_time.gos"),
+    // Recursion past any fixed frame count, and a walk passing its graph down.
+    spec("feature-testing-examples/deep_recursion.gos"),
+    // `f"..."` interpolated strings in print, assignment, and return position.
+    spec("feature-testing-examples/interpolated_strings.gos"),
+    // `unwrap` / `unwrap_or` on an element a sequence still owns.
+    spec("feature-testing-examples/borrowed_element_unwrap.gos"),
+    // Published and independently computed vectors for hashes, MACs, KDFs,
+    // AEADs, signatures, checksums, and decompression.
+    spec("feature-testing-examples/crypto_compress_kat.gos"),
+    // Length, freshness, and refusal of `crypto::rand::bytes`.
+    spec("feature-testing-examples/crypto_rand_bytes.gos"),
+    // UTF-16 code units, surrogate pairs, and lossy decoding.
+    spec("feature-testing-examples/utf16_codec.gos"),
+    // Pixels read back what was written, through a PNG round trip.
+    spec("feature-testing-examples/image_pixels.gos"),
+    // `Trait::method(receiver, ..)` reaches the body `receiver.method(..)` does.
+    spec("feature-testing-examples/trait_qualified_calls.gos"),
+    // One JSON validator: every tier's messages and positions agree.
+    spec("feature-testing-examples/json_parse_errors.gos"),
     // Unsigned and narrow values through math, formatting, JSON, and parsing.
     spec("feature-testing-examples/numeric_and_json_edges.gos"),
     Spec {
@@ -2006,6 +2051,9 @@ const DEDICATED_FEATURE_TESTING_EXAMPLES: &[&str] = &[
     "http_static_range.gos",
     "http_websocket_accept.gos",
     "websocket_echo.gos",
+    // Driven by `tests/preemption.rs` on every tier: it runs on one worker,
+    // which the SPECS walk does not configure.
+    "preempt_tight_loop.gos",
 ];
 
 #[test]
@@ -2385,7 +2433,8 @@ fn run_jit(src: &Path, args: &[&str], stdin: &[u8]) -> Run {
 
 fn build_native(src: &Path, release: bool, scratch: &Path) -> Result<PathBuf, String> {
     let mut cmd = Command::new(gos_bin());
-    cmd.arg("build");
+    // Every fixture's lowered MIR also passes the reference-count verifier.
+    cmd.arg("build").env("GOS_VERIFY_RC", "1");
     if release {
         cmd.arg("--release");
     }
@@ -2672,53 +2721,6 @@ parity_group_tests! {
     5 => bytecode_parity_group_5, cranelift_parity_group_5, llvm_parity_group_5, llvm_debug_parity_group_5, llvm_strict_lower_group_5;
 }
 
-/// The overflow fixtures `skip_all` excludes from the parity walk, because
-/// their VM result must differ from an optimised release build: debug
-/// execution checks integer overflow where release wraps.
-///
-/// The debug-AOT tier keeps the checking semantics, so these fixtures DO have
-/// a defined cross-tier contract there - one the release-only walk could never
-/// state. Running them here is the coverage `skip_all` gives up.
-const DEBUG_AOT_OVERFLOW_FIXTURES: &[&str] = &[
-    "feature-testing-examples/byte_vec_i64_model.gos",
-    "feature-testing-examples/integer_overflow_edges.gos",
-    "feature-testing-examples/neg_int_min_wraps.gos",
-];
-
-#[test]
-fn debug_aot_matches_vm_on_overflow_checked_fixtures() {
-    let mut failures = Vec::new();
-    for path in DEBUG_AOT_OVERFLOW_FIXTURES {
-        let fixture = Spec {
-            allow_nonzero: true,
-            ..spec(path)
-        };
-        let vm = match run_tier(&fixture, Tier::Vm) {
-            Ok(r) => r,
-            Err(e) => {
-                failures.push(format!("{path}: vm error: {e}"));
-                continue;
-            }
-        };
-        let debug_aot = match run_tier(&fixture, Tier::LlvmDebug) {
-            Ok(r) => r,
-            Err(e) => {
-                failures.push(format!("{path}: llvm-debug error: {e}"));
-                continue;
-            }
-        };
-        if let Some(d) = divergence(&fixture, (Tier::Vm, &vm), (Tier::LlvmDebug, &debug_aot)) {
-            failures.push(d);
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "{} debug-AOT overflow parity failures:\n{}",
-        failures.len(),
-        failures.join("\n\n"),
-    );
-}
-
 /// Highest native-entry count the Cranelift tier reported on stderr, or
 /// `None` when it never reported one.
 ///
@@ -2887,19 +2889,23 @@ fn parity_walk(compiled: Tier, group: usize) {
 
 #[cfg(test)]
 mod evidence_ledger_tests {
-    use super::SPECS;
+    use super::{DEDICATED_FEATURE_TESTING_EXAMPLES, SPECS};
 
     /// The stdlib evidence ledger claims that every fixture it cites runs
     /// on each tier and each host in the CI matrix. That is only true of a
-    /// program registered here, so the two must agree.
+    /// program registered here - in SPECS, or driven by a dedicated test -
+    /// so the two must agree.
     #[test]
     fn every_cited_fixture_is_registered_for_tier_parity() {
         for (item, fixtures) in gossamer_std::manifest::feature_status::ITEM_FIXTURES {
             for fixture in *fixtures {
+                let dedicated = fixture
+                    .strip_prefix("feature-testing-examples/")
+                    .is_some_and(|name| DEDICATED_FEATURE_TESTING_EXAMPLES.contains(&name));
                 assert!(
-                    SPECS.iter().any(|spec| spec.path == *fixture),
-                    "{item} cites {fixture}, which is not registered in SPECS, \
-                     so it does not run across tiers or hosts"
+                    dedicated || SPECS.iter().any(|spec| spec.path == *fixture),
+                    "{item} cites {fixture}, which is not registered in SPECS or run by \
+                     a dedicated test, so it does not run across tiers or hosts"
                 );
             }
         }

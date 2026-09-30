@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::doc_markdown)]
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use parking_lot::{Condvar, Mutex, Once};
@@ -50,7 +48,7 @@ pub struct GosBarrier {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_barrier_new(n: i64) -> *mut GosBarrier {
+pub extern "C" fn gos_rt_barrier_new(n: i64) -> *mut GosBarrier {
     ffi_entry!(std::ptr::null_mut(), {
         // A zero or negative count would never release; clamp to a
         // single participant so `wait()` returns immediately rather
@@ -73,6 +71,7 @@ pub unsafe extern "C" fn gos_rt_barrier_wait(b: *mut GosBarrier) {
         if b.is_null() {
             return;
         }
+        // SAFETY: `b` is a handle from compiled code, checked non-null above and live for the whole call.
         let b = unsafe { &*b };
         let mut state = b.state.lock();
         let captured_gen = state.generation;
@@ -107,7 +106,12 @@ pub unsafe extern "C" fn gos_rt_barrier_wait(b: *mut GosBarrier) {
 type ThunkValFn = unsafe extern "C" fn(env: *const u8) -> i64;
 
 /// Callable address stored at `env[0]`, or `None` for a null/zero env.
-fn env_fn_addr(env: *const u8) -> Option<*const ()> {
+///
+/// # Safety
+///
+/// `env` is null or a live closure environment, whose first word is the
+/// closure's entry address.
+unsafe fn env_fn_addr(env: *const u8) -> Option<*const ()> {
     if env.is_null() {
         return None;
     }
@@ -133,7 +137,7 @@ pub struct GosOnce {
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_once_new() -> *mut GosOnce {
+pub extern "C" fn gos_rt_once_new() -> *mut GosOnce {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(GosOnce {
             inner: Once::new(),
@@ -151,15 +155,19 @@ pub unsafe extern "C" fn gos_rt_once_call(o: *mut GosOnce, env: *const u8) -> i6
         if o.is_null() {
             return 0;
         }
+        // SAFETY: `o` is a handle from compiled code, checked non-null above and live for the whole call.
         let o = unsafe { &*o };
         let mut ran = 0i64;
         o.inner.call_once(|| {
             ran = 1;
-            if let Some(addr) = env_fn_addr(env) {
+            // SAFETY: `env` is this shim's argument, as `env_fn_addr` requires (C-ABI contract).
+            if let Some(addr) = unsafe { env_fn_addr(env) } {
                 // SAFETY: addr is the callable stored by the closure
                 // lowering; the nullary-unit closure lowers to the
                 // `fn(env) -> i64` value-thunk shape.
                 let f: ThunkValFn = unsafe { std::mem::transmute(addr) };
+                // SAFETY: `f` is the callable `addr` names, whose environment `env` is live for
+                // the call (C-ABI contract).
                 unsafe {
                     f(env);
                 }
@@ -182,11 +190,19 @@ mod tests {
     #[test]
     fn once_records_the_goroutine_that_published_its_body() {
         crate::race::set_current_gid(703);
-        let once = unsafe { gos_rt_once_new() };
+        let once = gos_rt_once_new();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { gos_rt_once_call(once, std::ptr::null()) }, 1);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { &*once }.completed_by.load(Ordering::Acquire), 703);
         crate::race::set_current_gid(704);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { gos_rt_once_call(once, std::ptr::null()) }, 0);
+        // SAFETY: the pointer is a box this test's constructor call answered, reclaimed once here
+        // and not used again.
         unsafe { drop(Box::from_raw(once)) };
     }
 }

@@ -9,7 +9,7 @@ parenthesised list of its element types, so `(1, "two", 3.0)` has type
 
 ```gossamer
 let entry = (1, "two", 3.0)
-println("{} {} {}", entry.0, entry.1, entry.2)
+println(f"{entry.0} {entry.1} {entry.2}")
 ```
 
 Unlike a `Vec<T>`, a tuple's length is part of its type and its elements do not
@@ -35,7 +35,7 @@ tuples:
 
 ```gossamer
 let nested = ((1, 2), "outer")
-println("{}", nested.0.1)   // 2
+println(f"{nested.0.1}")   // 2
 ```
 
 A `mut` binding assigns positionally, including through a nested tuple:
@@ -52,6 +52,7 @@ grid.0.1 = 42
 A tuple pattern binds every element at once, in `let`, in `for`, in `match`, and
 in a function's parameter list:
 
+<!-- fragment -->
 ```gossamer
 let id, name, weight = (1, "two", 3.0)
 
@@ -123,6 +124,7 @@ Every target follows the rules a scalar assignment follows: it must be a
 writable place, so a binding, a field, an index, a tuple position, or a
 dereference. Targets may nest, and `_` discards the element opposite it:
 
+<!-- fragment -->
 ```gossamer
 let mut point = Point { x: 0, y: 0 }
 let mut cells = #[0, 0]

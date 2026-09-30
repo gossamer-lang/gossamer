@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GP0064]: `vec![...]` was written. Gossamer has no macros to build a Vec: the - here
+--- framed ---
+error[GP0064]: `vec![...]` was written. Gossamer has no macros to build a Vec: the
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

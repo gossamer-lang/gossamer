@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -65,6 +63,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_new(name: *const c_char) -> *mut GosFla
         let n = if name.is_null() {
             String::new()
         } else {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(name) }
         };
         Box::into_raw(Box::new(GosFlagSet {
@@ -75,7 +74,11 @@ pub unsafe extern "C" fn gos_rt_flag_set_new(name: *const c_char) -> *mut GosFla
     })
 }
 
-fn read_cstr(p: *const c_char) -> String {
+/// # Safety
+///
+/// `p` is null or a live string body.
+unsafe fn read_cstr(p: *const c_char) -> String {
+    // SAFETY: this function's contract is the one the reader states for `p`.
     unsafe { crate::c_abi::gos_str_arg_string(p) }
 }
 
@@ -90,15 +93,19 @@ pub unsafe extern "C" fn gos_rt_flag_set_string(
         if set.is_null() {
             return std::ptr::null_mut();
         }
-        let n = read_cstr(name);
-        let h = read_cstr(help);
+        // SAFETY: `name` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let n = unsafe { read_cstr(name) };
+        // SAFETY: `help` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let h = unsafe { read_cstr(help) };
         let dv = if default_v.is_null() {
             alloc_cstring(b"")
         } else {
+            // SAFETY: `default_v` is a String argument from compiled code, null or a live string body for the whole call.
             let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(default_v) }.to_vec();
             alloc_cstring(&bytes)
         };
         let cell = Box::into_raw(Box::new(dv));
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         set.specs.push(FlagSpec {
             long_name: n,
@@ -122,9 +129,12 @@ pub unsafe extern "C" fn gos_rt_flag_set_int(
         if set.is_null() {
             return std::ptr::null_mut();
         }
-        let n = read_cstr(name);
-        let h = read_cstr(help);
+        // SAFETY: `name` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let n = unsafe { read_cstr(name) };
+        // SAFETY: `help` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let h = unsafe { read_cstr(help) };
         let cell = Box::into_raw(Box::new(default_v));
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         set.specs.push(FlagSpec {
             long_name: n,
@@ -148,9 +158,12 @@ pub unsafe extern "C" fn gos_rt_flag_set_uint(
         if set.is_null() {
             return std::ptr::null_mut();
         }
-        let n = read_cstr(name);
-        let h = read_cstr(help);
+        // SAFETY: `name` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let n = unsafe { read_cstr(name) };
+        // SAFETY: `help` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let h = unsafe { read_cstr(help) };
         let cell = Box::into_raw(Box::new(default_v));
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         set.specs.push(FlagSpec {
             long_name: n,
@@ -174,9 +187,12 @@ pub unsafe extern "C" fn gos_rt_flag_set_float(
         if set.is_null() {
             return std::ptr::null_mut();
         }
-        let n = read_cstr(name);
-        let h = read_cstr(help);
+        // SAFETY: `name` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let n = unsafe { read_cstr(name) };
+        // SAFETY: `help` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let h = unsafe { read_cstr(help) };
         let cell = Box::into_raw(Box::new(default_v));
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         set.specs.push(FlagSpec {
             long_name: n,
@@ -200,9 +216,12 @@ pub unsafe extern "C" fn gos_rt_flag_set_bool(
         if set.is_null() {
             return std::ptr::null_mut();
         }
-        let n = read_cstr(name);
-        let h = read_cstr(help);
+        // SAFETY: `name` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let n = unsafe { read_cstr(name) };
+        // SAFETY: `help` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let h = unsafe { read_cstr(help) };
         let cell = Box::into_raw(Box::new(default_v));
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         set.specs.push(FlagSpec {
             long_name: n,
@@ -228,9 +247,12 @@ pub unsafe extern "C" fn gos_rt_flag_set_duration(
         if set.is_null() {
             return std::ptr::null_mut();
         }
-        let n = read_cstr(name);
-        let h = read_cstr(help);
+        // SAFETY: `name` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let n = unsafe { read_cstr(name) };
+        // SAFETY: `help` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let h = unsafe { read_cstr(help) };
         let cell = Box::into_raw(Box::new(default_ms));
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         set.specs.push(FlagSpec {
             long_name: n,
@@ -253,10 +275,13 @@ pub unsafe extern "C" fn gos_rt_flag_set_string_list(
         if set.is_null() {
             return std::ptr::null_mut();
         }
-        let n = read_cstr(name);
-        let h = read_cstr(help);
-        let backing = unsafe { gos_rt_vec_new(8) };
+        // SAFETY: `name` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let n = unsafe { read_cstr(name) };
+        // SAFETY: `help` is this shim's argument, as `read_cstr` requires (C-ABI contract).
+        let h = unsafe { read_cstr(help) };
+        let backing = gos_rt_vec_new(8);
         let cell = Box::into_raw(Box::new(backing));
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         set.specs.push(FlagSpec {
             long_name: n,
@@ -279,6 +304,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_short(set: *mut GosFlagSet, letter: i64
         if set.is_null() {
             return;
         }
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &mut *set };
         let Some(ch) = u32::try_from(letter).ok().and_then(char::from_u32) else {
             return;
@@ -297,6 +323,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_usage(set: *const GosFlagSet) -> *mut c
         if set.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `set` is a handle from compiled code, checked non-null above and live for the whole call.
         let set = unsafe { &*set };
         let bytes = render_flag_usage(set).into_bytes();
         alloc_cstring(&bytes)
@@ -359,6 +386,8 @@ fn apply_flag_value(
 ) -> i64 {
     // Bool with no explicit value is a "set true" form.
     if matches!(spec.kind, FlagKind::Bool) && explicit.is_none() {
+        // SAFETY: a spec's `cell` is the box its registration made for the kind it names, which
+        // lives for the program, here a `bool`.
         unsafe {
             *(spec.cell.cast::<bool>()) = true;
         }
@@ -374,6 +403,7 @@ fn apply_flag_value(
         if p.is_null() {
             return 1;
         }
+        // SAFETY: `p` is a non-null argument word (checked above), a live string body.
         let s = unsafe { crate::c_abi::gos_str_arg_string(p) };
         (s, 2)
     };
@@ -381,12 +411,16 @@ fn apply_flag_value(
         FlagKind::String => {
             let bytes = raw.as_bytes().to_vec();
             let leaked = alloc_cstring(&bytes);
+            // SAFETY: a spec's `cell` is the box its registration made for the kind it names,
+            // which lives for the program, here a `String` slot.
             unsafe {
                 *(spec.cell.cast::<*mut c_char>()) = leaked;
             }
         }
         FlagKind::Int => {
             if let Ok(n) = raw.parse::<i64>() {
+                // SAFETY: a spec's `cell` is the box its registration made for the kind it names,
+                // which lives for the program, here an `i64`.
                 unsafe {
                     *(spec.cell.cast::<i64>()) = n;
                 }
@@ -394,6 +428,8 @@ fn apply_flag_value(
         }
         FlagKind::Uint => {
             if let Ok(n) = raw.parse::<u64>() {
+                // SAFETY: a spec's `cell` is the box its registration made for the kind it names,
+                // which lives for the program, here a `u64`.
                 unsafe {
                     *(spec.cell.cast::<u64>()) = n;
                 }
@@ -401,6 +437,8 @@ fn apply_flag_value(
         }
         FlagKind::Float => {
             if let Ok(x) = raw.parse::<f64>() {
+                // SAFETY: a spec's `cell` is the box its registration made for the kind it names,
+                // which lives for the program, here an `f64`.
                 unsafe {
                     *(spec.cell.cast::<f64>()) = x;
                 }
@@ -408,6 +446,8 @@ fn apply_flag_value(
         }
         FlagKind::Bool => {
             if let Some(b) = parse_bool_text(&raw) {
+                // SAFETY: a spec's `cell` is the box its registration made for the kind it names,
+                // which lives for the program, here a `bool`.
                 unsafe {
                     *(spec.cell.cast::<bool>()) = b;
                 }
@@ -415,6 +455,8 @@ fn apply_flag_value(
         }
         FlagKind::Duration => {
             if let Some(ms) = parse_duration_text(&raw) {
+                // SAFETY: a spec's `cell` is the box its registration made for the kind it names,
+                // which lives for the program, here an `i64` of milliseconds.
                 unsafe {
                     *(spec.cell.cast::<i64>()) = ms;
                 }
@@ -424,8 +466,12 @@ fn apply_flag_value(
             let bytes = raw.as_bytes().to_vec();
             let cstr = alloc_cstring(&bytes);
             let ptr_val = cstr as i64;
+            // SAFETY: a spec's `cell` is the box its registration made for the kind it names,
+            // which lives for the program, here a `Vec<String>` slot.
             let backing = unsafe { *(spec.cell.cast::<*mut GosVec>()) };
             if !backing.is_null() {
+                // SAFETY: `backing` is the list's non-null vec (checked above), and `ptr_val` is
+                // one 8-byte element.
                 unsafe {
                     gos_rt_vec_push(backing, std::ptr::addr_of!(ptr_val).cast::<u8>());
                 }
@@ -441,26 +487,25 @@ fn apply_flag_value(
 /// `Result<Vec<String>, Error>` containing the leftover positional arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *const GosVec) -> i128 {
-    ffi_entry!(unsafe { crate::c_abi::vec::gos_rt_result_new(1, 0) }, {
+    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
         if set.is_null() {
-            let out = unsafe { gos_rt_vec_new(8) };
-            return unsafe { crate::c_abi::vec::gos_rt_result_new(0, out as i64) };
+            let out = gos_rt_vec_new(8);
+            return crate::c_abi::vec::gos_rt_result_new(0, out as i64);
         }
+        // SAFETY: `set` is non-null (checked above) and live for the call (C-ABI contract).
         let set = unsafe { &mut *set };
         set.positional.clear();
         if args.is_null() {
-            let out = unsafe { gos_rt_vec_new(8) };
-            return unsafe { crate::c_abi::vec::gos_rt_result_new(0, out as i64) };
+            let out = gos_rt_vec_new(8);
+            return crate::c_abi::vec::gos_rt_result_new(0, out as i64);
         }
         // Two callers reach this function: the runner-build path
         // passes a real `*mut GosVec` of c-string pointers; the
         // compiled path passes the `os::args()` sentinel - a raw
         // `argv + 1` pointer with `argc - 1` length stashed in the
-        // process-global ARGS_PTR / ARGS_LEN. Detect the sentinel by
-        // pointer-equality and route to a separate iteration path
-        // that walks `argv` directly. Without this branch the code
-        // tries to read a GosVec header out of an argv pointer and
-        // segfaults on the first positional arg.
+        // process-global ARGS_PTR / ARGS_LEN. An argv pointer has no
+        // `GosVec` header, so the sentinel is recognised by pointer
+        // equality and walked as `argv` directly.
         let sentinel_ptr = ARGS_PTR.load(Ordering::SeqCst);
         let is_sentinel = sentinel_ptr != 0 && (args as usize) == sentinel_ptr;
         let (argc, start_i, get_arg_ptr): (i64, i64, Box<dyn Fn(i64) -> *const c_char>) =
@@ -468,11 +513,17 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
                 let argv = sentinel_ptr as *const *const c_char;
                 let len = ARGS_LEN.load(Ordering::SeqCst);
                 let getter: Box<dyn Fn(i64) -> *const c_char> =
+                    // SAFETY: `argv` is the program's argument array of `len` entries recorded at
+                    // startup, and the parse asks only for `i` below `len`.
                     Box::new(move |i: i64| unsafe { *argv.add(i as usize) });
                 (len, 0, getter)
             } else {
                 let v = args;
+                // SAFETY: `v` is this shim's non-null argument vec, live for the call (C-ABI
+                // contract).
                 let len = unsafe { gos_rt_vec_len(v) };
+                // SAFETY: `v` is live for the call, and `gos_rt_vec_get_ptr` answers null for an
+                // index outside it or a slot of a `Vec<String>`.
                 let getter: Box<dyn Fn(i64) -> *const c_char> = Box::new(move |i: i64| unsafe {
                     let p = gos_rt_vec_get_ptr(v, i);
                     if p.is_null() {
@@ -491,6 +542,8 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
             let arg = if arg_ptr.is_null() {
                 String::new()
             } else {
+                // SAFETY: `arg_ptr` is a non-null argument word (checked above), a live string
+                // body.
                 unsafe { crate::c_abi::gos_str_arg_string(arg_ptr) }
             };
             if arg == "--" {
@@ -498,6 +551,8 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
                 while i < argc {
                     let p = get_arg_ptr(i);
                     if !p.is_null() {
+                        // SAFETY: `p` is a non-null argument word (checked above), a live string
+                        // body.
                         let s = unsafe { crate::c_abi::gos_str_arg_string(p) };
                         set.positional.push(s);
                     }
@@ -510,7 +565,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
                 // Route through `gos_rt_exit` so the stdout cache is
                 // flushed and the audited-exit list (Fix C3) stays
                 // empty outside the two legitimate paths.
-                unsafe { gos_rt_exit(0) };
+                gos_rt_exit(0);
             }
             if let Some(rest) = arg.strip_prefix("--") {
                 let (name, explicit) = match rest.split_once('=') {
@@ -549,7 +604,7 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
             i += 1;
         }
         // STRING-typed: the rest vec owns its fresh positional strings.
-        let out = unsafe {
+        let out = {
             crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                 8,
                 set.positional.len() as i64,
@@ -560,10 +615,12 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
             let bytes = s.as_bytes();
             let cstr = alloc_cstring(bytes);
             let ptr_val = cstr as i64;
+            // SAFETY: `out` is the fresh vec made above, or null, which `gos_rt_vec_push`
+            // accepts, and `ptr_val` is one 8-byte element.
             unsafe {
                 gos_rt_vec_push(out, std::ptr::addr_of!(ptr_val).cast::<u8>());
             }
         }
-        unsafe { crate::c_abi::vec::gos_rt_result_new(0, out as i64) }
+        crate::c_abi::vec::gos_rt_result_new(0, out as i64)
     })
 }

@@ -61,6 +61,7 @@ nav:
   - Home: index.md
   - Install: install.md
   - Running: running.md
+  - Debugging: debugging.md
   - Supported targets: supported_targets.md
   - WebAssembly: wasm.md
   - Syntax: syntax.md
@@ -74,6 +75,7 @@ nav:
       - Comptime: language/comptime.md
       - Keyword arguments: language/keyword_arguments.md
       - Opaque nominal aliases: language/opaque_nominal_alias.md
+      - Interpolated strings: language/interpolated_string.md
       - Triple-quoted strings: language/triple_quoted_string.md
       - Tuples: language/tuples.md
   - Memory model: memory.md
@@ -106,8 +108,11 @@ nav:
   - Design notes:
       - Sequence and reference safety: design/sequence_reference_safety.md
       - Diagnostics style: design/diagnostics.md
+      - Standard library API: design/stdlib_api.md
       - Incremental front end: design/incremental.md
+      - Package format: design/packages.md
       - Lazy iterators: design/lazy_iterators.md
+      - Where semantics live: design/tiers.md
       - Runtime internals: design/runtime.md
       - JIT native-memory ownership: design/jit_native_memory_ownership.md
       - Memory model: design/memory_model.md
@@ -134,6 +139,7 @@ not_in_nav: |
   !/language/comptime.md
   !/language/keyword_arguments.md
   !/language/opaque_nominal_alias.md
+  !/language/interpolated_string.md
   !/language/triple_quoted_string.md
   !/language/tuples.md
 

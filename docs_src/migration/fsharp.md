@@ -17,11 +17,12 @@ absence of F# metaprogramming features.
 | `match x with | A -> ...` | `match x { A => ... }` | Exhaustive. |
 | record | `struct` | Construct with braces. |
 | discriminated union | `enum` | Tuple variants use parentheses. |
-| `async { ... }` | `spawn(|| { ... })` | Goroutine. |
-| `Task` result | channel receive or direct `Result` | Blocking calls are acceptable. |
-| `printfn "%d" n` | `println("{n}")` | Format strings are Rust-like. |
+| `async { ... }` | `spawn(|| { ... })` | Goroutine, inside a `cohort { }` outside `main`. |
+| `Task` result | `spawn(..).join()`, a channel, or a direct `Result` | Blocking calls are acceptable. |
+| `printfn "%d" n` | `println(f"{n}")` | See Formatting below. |
+| `$"{name} is {age}"` | `f"{name} is {age}"` | Placeholders name values; they do not compute. |
 
-## Gossamer 0.47 Syntax At A Glance
+## Syntax At A Glance
 
 F# uses indentation and separates list elements with semicolons. Gossamer uses
 semicolons only between same-line statements. Inside delimiters, commas are
@@ -73,10 +74,11 @@ let enabled = snd pair
 let cached = Map.tryFind "Ada" byName
 ```
 
+<!-- fragment -->
 ```gos
 let users = #[user, rename(user, "Grace")]
 let first = users[0]              // Vec/array index; traps if out of bounds
-let initial = first.name[0]       // String index is a UTF-8 byte as i64
+let initial = first.name[0]       // String index is a char; byte_at(i) is the byte
 let pair = (first.name, first.active)
 let enabled = pair.1
 let mut by_name: Map<String, User> = Map::new()
@@ -93,6 +95,22 @@ Gossamer collection literals cover the common F# collection shapes:
 `Map<K, V>`, and `#{a, b}` for `Set<T>` or an expected `BTreeSet<T>`.
 `Queue<i64>`, `Stack<i64>`, `Deque<i64>`, `MaxHeap<i64>`, and `MinHeap<i64>`
 are built through their type with `new()` or `from([...])`.
+
+## Formatting And Interpolated Strings
+
+An F# interpolated string `$"..."` becomes an `f"..."` string, and `sprintf`
+becomes `format`, whose `{}` placeholders fill in order. A placeholder in an
+`f"..."` string holds any expression, with an optional spec after a `:`.
+
+| F# | Gossamer |
+| --- | --- |
+| `$"{name} is {age}"` | `f"{name} is {age}"` |
+| `$"{List.length xs} items"` | `f"{xs.len()} items"` |
+| `sprintf "%s %d" s n` | `format("{} {}", s, n)` or `f"{s} {n}"` |
+| `%A` | `{:?}` |
+| `$"{price:F2}"`, `%.2f`, `%5d`, `%x` | `f"{price:.2}"`, `{:.2}`, `{:5}`, `{:x}` |
+
+`{}` renders any value, records and unions included, as `%A` does.
 
 ## Pipe Operator
 
@@ -199,6 +217,7 @@ Both languages share the same vocabulary:
 let parsed = input |> Option.bind tryParse |> Option.defaultValue 0
 ```
 
+<!-- fragment -->
 ```gos
 use std::option
 
@@ -209,6 +228,7 @@ let parsed = input
 
 For fallible work, `?` is usually clearer than a pipeline:
 
+<!-- fragment -->
 ```gos
 fn load(path: String) -> Result<Config, errors::Error> {
     let text = fs::read_to_string(path)?
@@ -219,8 +239,28 @@ fn load(path: String) -> Result<Config, errors::Error> {
 ## Concurrency
 
 Gossamer has stackful goroutines and channels instead of computation
-expressions:
+expressions. A `cohort { }` joins every goroutine spawned in it on every
+exit and answers the first failure, which covers `Async.Parallel`; outside
+`main`, a `spawn` sits inside one (GT0086). `async` is a declined keyword
+(GP0061).
 
+```gos
+use std::{errors, http}
+
+fn fetch_both(a: String, b: String) -> Result<(), errors::Error> {
+    cohort {
+        let first = spawn(|| http::get(a, #[]))
+        let second = spawn(|| http::get(b, #[]))
+        let _ = first.join()
+        let _ = second.join()
+    }
+}
+```
+
+For fan-in over a channel, a `sync::WaitGroup` closes the channel once every
+sender is done:
+
+<!-- fragment -->
 ```gos
 let wg = sync::WaitGroup::new()
 let tx, rx = channel()
@@ -231,13 +271,13 @@ for url in urls {
     spawn(|| {
         defer wg.done()
         tx.send(http::get(url, #[]))
-    }()
+    })
 }
 
 spawn(|| {
     wg.wait()
     tx.close()
-}()
+})
 
 while let Some(result) = rx.recv() {
     process(result)
@@ -262,7 +302,9 @@ impl Area for Circle {
 ```
 
 Generic bounds use `T: Area`. For a closed set of cases, prefer an
-`enum` and exhaustive `match`.
+`enum` and exhaustive `match`. A type with `impl Iterator for T` works like a
+`seq`: `for` walks it, and it gains `map`, `filter`, `take`, `fold`, and
+`collect`.
 
 ## Missing F# Features
 
@@ -278,16 +320,17 @@ let add5 = |y: i64| add(5, y)
 ## Integer Overflow And Wrapping Arithmetic
 
 F# arithmetic is unchecked by default and wraps on overflow, unless a scope
-opens `Checked`. Gossamer's plain `+`, `-`, and `*` behave like `Checked`
-under `gos run`, the JIT, and `gos build` - an overflow panics - and wrap
-only under `gos build --release`. Code that relies on wrapping (hashes,
-checksums, pseudo-random generators) ports to the wrapping operators, which
-wrap at the declared width on every tier and in every profile.
+opens `Checked`. Gossamer's plain `+`, `-`, and `*` behave like `Checked` on
+every tier and in every profile, release builds included: an overflow
+panics. Code that relies on wrapping (hashes, checksums, pseudo-random
+generators) ports to the wrapping operators, which wrap at the declared
+width everywhere. There is no switch that restores F#'s unchecked default:
+wrapping is written where it is intended.
 
 | F# | Gossamer |
 | --- | --- |
 | `a + b`, `a - b`, `a * b` (unchecked) | `a +% b`, `a -% b`, `a *% b` |
-| `Checked.(+)` / `open Checked` | `a + b` (panics on overflow outside release builds) |
+| `Checked.(+)` / `open Checked` | `a + b` (panics on overflow) |
 | `hash <- hash * 16777619u` | `hash *%= 16777619` |
 | `^^^`, `<<<`, `>>>` | `^`, `<<`, `>>` |
 | `uint32 b`, `2166136261u` | `b as u32`, a `u32` binding |
@@ -371,15 +414,17 @@ they appear.
 | `Environment.GetEnvironmentVariable` | `env::var(name)` |
 | `Environment.GetCommandLineArgs` | `env::args()` |
 | `Console.WriteLine` | `println(...)` |
-| `sprintf "%s %d" s n` | `format("{s} {n}")` |
-| `List.map f xs` | `xs |> |v| iter::map(v, f)` |
-| `List.filter f xs` | `xs |> |v| iter::filter(v, f)` |
-| `List.fold f init xs` | `xs |> |v| iter::fold(v, init, f)` |
+| `sprintf "%s %d" s n` | `f"{s} {n}"` |
+| `List.map f xs` | `xs.map(f)`, or `xs |> |v| iter::map(v, f)` |
+| `List.filter f xs` | `xs.filter(f)`, or `xs |> |v| iter::filter(v, f)` |
+| `List.fold f init xs` | `xs.iter().fold(init, f)`, or `xs |> |v| iter::fold(v, init, f)` |
 | `Map.find k m` | `m.get(k)` |
 | `Set.contains x s` | `s.contains(x)` |
-| `String.trim s` | `strings::trim(s)` |
-| `int.Parse s` | `strconv::parse_i64(s)` |
+| `String.trim s` | `s.trim()` |
+| `Int32.TryParse s` | `s.to_i64()`, an `Option<i64>` |
 | `Task.Run` | `spawn(|| { ... })` |
 | `Thread.Sleep(ms)` | `time::sleep(ms)` |
 | `HttpClient.GetAsync(url)` | `http::get(url, [])` |
-| `Regex(pattern)` | `regex::compile(pattern)` |
+| `Regex(pattern)` | `regex::compile("literal")`, or `regex::new(pattern)?` for a pattern built at run time |
+| `JsonSerializer.Serialize(v)` / `Deserialize` | `json::to_json::<T>(v)?` / `json::from_json::<T>(text)?` |
+| `[<JsonPropertyName("key")>]` / `[<JsonIgnore>]` | `#[rename("key")]` / `#[skip]` |

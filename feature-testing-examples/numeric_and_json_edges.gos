@@ -7,7 +7,7 @@ use std::encoding::json
 
 fn edges() {
     let u = "9".to_i64().unwrap_or(0) as u64
-    println("{} {} {}", u.pow(3.0), u.sqrt(), u.abs())
+    println("{} {} {}", u.pow(3), u.sqrt(), u.abs())
     let big = u64::MAX
     println("[{:>22}] [{:<21}|] [{:03}]", big, big, big)
     let doc = json::parse("{\"i\":12345678901234567890}").unwrap()

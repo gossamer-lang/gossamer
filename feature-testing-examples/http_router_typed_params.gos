@@ -27,7 +27,7 @@ fn show(r: http::Request) -> http::Response {
 
 fn serve_router() {
     let r = router::Router::new().get("/p/{id}/{amt}", show)
-    if let Err(e) = http::serve("127.0.0.1:23884", r) {
+    if let Err(e) = http::serve("127.0.0.1:23880", r) {
         eprintln("serve failed: {e}")
     }
 }
@@ -45,12 +45,12 @@ fn await_ready(url: String) {
 
 fn main() {
     spawn(|| serve_router())
-    await_ready("http://127.0.0.1:23884/p/1/1.0")
-    match http::get("http://127.0.0.1:23884/p/42/3.5", Vec::from([])) {
+    await_ready("http://127.0.0.1:23880/p/1/1.0")
+    match http::get("http://127.0.0.1:23880/p/42/3.5", Vec::from([])) {
         Ok(r) => println("A {}", r.body)
         Err(e) => println("A error: {}", e)
     }
-    match http::get("http://127.0.0.1:23884/p/notnum/x", Vec::from([])) {
+    match http::get("http://127.0.0.1:23880/p/notnum/x", Vec::from([])) {
         Ok(r) => println("B {}", r.body)
         Err(e) => println("B error: {}", e)
     }

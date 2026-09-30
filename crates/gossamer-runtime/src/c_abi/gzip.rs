@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -29,6 +27,7 @@ pub unsafe extern "C" fn gos_rt_gzip_encode(data: *const c_char) -> *mut c_char 
         if data.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `data` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(data) };
         use std::io::Write;
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -46,6 +45,7 @@ pub unsafe extern "C" fn gos_rt_gzip_decode(data: *const c_char) -> *mut c_char 
         if data.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `data` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(data) };
         use std::io::Read;
         let mut dec = flate2::read::GzDecoder::new(bytes);
@@ -64,20 +64,15 @@ pub unsafe extern "C" fn gos_rt_gzip_decode(data: *const c_char) -> *mut c_char 
 // GosVec payload, disc 1 Err with a gos error handle).
 // ---------------------------------------------------------------
 
-/// Reads a Gossamer `Vec<u8>` into owned bytes.
-unsafe fn gosvec_u8_to_vec(v: *const super::vec::GosVec) -> Vec<u8> {
-    unsafe { super::encoding::gosvec_u8(v) }
-}
-
 /// Wraps `bytes` in an `Ok(Vec<u8>)` `GosResult`.
 fn ok_bytes_result(bytes: &[u8]) -> i128 {
     let v = super::encoding::bytes_to_gosvec(bytes);
-    unsafe { super::vec::gos_rt_result_new(0, v as i64) }
+    super::vec::gos_rt_result_new(0, v as i64)
 }
 
 fn err_bytes_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { super::vec::gos_rt_result_new(1, err as i64) }
+    super::vec::gos_rt_result_new(1, err as i64)
 }
 
 /// `compress::gzip::encode(data, level) -> Result<[u8], Error>`.
@@ -89,7 +84,9 @@ pub unsafe extern "C" fn gos_rt_compress_gzip_encode(
     level: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let lvl = level.clamp(0, 9) as u32;
         use std::io::Write;
         let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::new(lvl));
@@ -107,7 +104,9 @@ pub unsafe extern "C" fn gos_rt_compress_gzip_encode(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_compress_gzip_decode(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         use std::io::Read;
         let mut dec = flate2::read::GzDecoder::new(&input[..]);
         let mut out = Vec::new();
@@ -125,7 +124,9 @@ pub unsafe extern "C" fn gos_rt_compress_flate_compress(
     level: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let lvl = level.clamp(0, 9) as u32;
         use std::io::Write;
         let mut enc = flate2::write::DeflateEncoder::new(
@@ -146,7 +147,9 @@ pub unsafe extern "C" fn gos_rt_compress_flate_compress(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_compress_flate_decompress(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         use std::io::Read;
         let mut dec = flate2::read::DeflateDecoder::new(&input[..]);
         let mut out = Vec::new();
@@ -164,7 +167,9 @@ pub unsafe extern "C" fn gos_rt_compress_zlib_compress(
     level: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let lvl = level.clamp(0, 9) as u32;
         use std::io::Write;
         let mut enc = flate2::write::ZlibEncoder::new(
@@ -185,7 +190,9 @@ pub unsafe extern "C" fn gos_rt_compress_zlib_compress(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_compress_zlib_decompress(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         use std::io::Read;
         let mut dec = flate2::read::ZlibDecoder::new(&input[..]);
         let mut out = Vec::new();
@@ -201,7 +208,9 @@ pub unsafe extern "C" fn gos_rt_compress_zlib_decompress(data: *const super::vec
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_compress_zstd_encode(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         match zstd::stream::encode_all(&input[..], 3) {
             Ok(out) => ok_bytes_result(&out),
             Err(e) => err_bytes_result(&format!("zstd: {e}")),
@@ -222,7 +231,9 @@ pub unsafe extern "C" fn gos_rt_compress_zstd_encode_level(
                 "zstd level out of range (expected 1..=22): {level}"
             ));
         }
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         match zstd::stream::encode_all(&input[..], level as i32) {
             Ok(out) => ok_bytes_result(&out),
             Err(e) => err_bytes_result(&format!("zstd: {e}")),
@@ -234,7 +245,9 @@ pub unsafe extern "C" fn gos_rt_compress_zstd_encode_level(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_compress_zstd_decode(data: *const super::vec::GosVec) -> i128 {
     ffi_entry!(0i128, {
-        let input = unsafe { gosvec_u8_to_vec(data) };
+        // SAFETY: `data` is this shim's argument, null or a live `Vec` for the call (C-ABI
+        // contract), which `vec_bytes` accepts.
+        let input = unsafe { crate::c_abi::vec::vec_bytes(data) };
         match zstd::stream::decode_all(&input[..]) {
             Ok(out) => ok_bytes_result(&out),
             Err(e) => err_bytes_result(&format!("zstd: {e}")),

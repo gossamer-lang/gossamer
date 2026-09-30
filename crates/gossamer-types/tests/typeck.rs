@@ -4956,3 +4956,36 @@ fn a_wrapping_method_with_a_prefixed_operand_is_rewritten() {
         );
     }
 }
+
+#[test]
+fn a_member_a_stdlib_type_does_not_answer_is_rejected() {
+    for (call, member) in [
+        ("regex::Pattern::compile(\"a+\")", "compile"),
+        ("regex::Pattern::bogus(1)", "bogus"),
+    ] {
+        let checked = run(&format!("use std::regex\nfn main() {{ let _ = {call} }}\n"));
+        assert!(
+            checked.diagnostics.iter().any(|d| matches!(
+                &d.error,
+                TypeError::UnknownAssocItem { base, name, declared }
+                    if base == "regex::Pattern" && name == member
+                        && declared.iter().any(|m| m == "new")
+            )),
+            "{call}: {:?}",
+            checked.diagnostics
+        );
+    }
+}
+
+#[test]
+fn a_method_written_qualified_on_a_stdlib_type_is_accepted() {
+    let checked = run("use std::regex\nuse std::sync\n\
+         fn main() {\n\
+         let p = regex::Pattern::new(\"a+\").unwrap()\n\
+         let _ = regex::Pattern::is_match(p, \"aa\")\n\
+         let wg = sync::WaitGroup::new()\n\
+         sync::WaitGroup::add(wg, 1)\n\
+         sync::WaitGroup::done(wg)\n\
+         }\n");
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+}

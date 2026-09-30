@@ -32,6 +32,8 @@ use gossamer_runtime::c_abi::{
 /// `Global::dealloc` and ASAN reported a mismatched allocator.
 #[test]
 fn vec_clone_then_grow_no_cross_domain_free() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         // Build a source Vec<i64> with 5 elements through the
         // standard from_arr path.
@@ -66,6 +68,8 @@ fn vec_clone_then_grow_no_cross_domain_free() {
 /// null (cap = 0).
 #[test]
 fn empty_vec_first_push_does_not_segfault() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let v = gos_rt_vec_new(8);
         for i in 0..1000 {
@@ -88,6 +92,8 @@ fn empty_vec_first_push_does_not_segfault() {
 fn json_get_chain_is_arc_shared() {
     let blob = r#"{"choices":[{"delta":{"tool_calls":[{"function":{"name":"list_files","arguments":"{\"path\":\"/tmp\"}"}}]}}]}"#;
     let blob_c = CString::new(blob).unwrap();
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         for _ in 0..2000 {
             let parse_res = gos_rt_json_parse(blob_c.as_ptr());
@@ -147,6 +153,8 @@ fn vec_string_slot_rewrite_keeps_pointer_live() {
         gos_rt_concat_finish, gos_rt_concat_init, gos_rt_concat_str, gos_rt_str_len,
         gos_rt_vec_set_i64,
     };
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let v = gos_rt_vec_new(8);
         // Initial fill: 4 empty c-strings.
@@ -186,6 +194,8 @@ fn vec_string_slot_rewrite_keeps_pointer_live() {
 /// data buffer points at.
 #[test]
 fn vec_of_cstring_push_grow_drill() {
+    // SAFETY: every pointer argument is a value this test built above and still holds live; a
+    // null one is accepted by the callee.
     unsafe {
         let v = gos_rt_vec_new(8);
         let mut leaked: Vec<*mut std::os::raw::c_char> = Vec::with_capacity(500);

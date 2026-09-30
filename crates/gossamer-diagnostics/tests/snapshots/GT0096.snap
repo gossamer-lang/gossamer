@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0096]: Two `impl` blocks define a method of the same name on one type: two - here
+--- framed ---
+error[GT0096]: Two `impl` blocks define a method of the same name on one type: two
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

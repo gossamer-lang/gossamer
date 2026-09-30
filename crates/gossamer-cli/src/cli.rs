@@ -336,6 +336,18 @@ enum Command {
         #[arg(long)]
         registry: String,
     },
+    /// Create the Ed25519 key `gos publish` signs a project's packages with,
+    /// and print the public key consumers pin under `[trusted-publishers]`.
+    Keygen {
+        /// Project id the key signs for (e.g. `example.com/widget`).
+        id: String,
+    },
+    /// Run a package registry.
+    Registry {
+        /// What to do with the registry.
+        #[command(subcommand)]
+        action: RegistryAction,
+    },
     /// Manage owners (publisher ACL) of a published project.
     Owner {
         /// Operation: `add`, `remove`, or `list`.
@@ -1203,6 +1215,10 @@ fn dispatch(
         Some(Command::Login { registry }) => cmd::pkg::login(registry),
         Some(Command::Logout { registry }) => cmd::pkg::logout(registry),
         Some(Command::Owner { op, id, user }) => cmd::pkg::owner(&op, &id, user),
+        Some(Command::Keygen { id }) => cmd::pkg::keygen(&id),
+        Some(Command::Registry {
+            action: RegistryAction::Serve { root, addr },
+        }) => cmd::pkg::registry_serve(&root, &addr),
         Some(Command::Fmt { file, check }) => cmd::fmt_cmd::dispatch(file, check),
         Some(Command::Bindgen {
             input,
@@ -1447,6 +1463,22 @@ fn dispatch_feature_status(
 
 /// Codegen optimisation level. Both modes go through the LLVM
 /// backend; the difference is the MIR and LLVM optimization profile.
+/// Actions `gos registry` performs.
+#[derive(Debug, Subcommand)]
+enum RegistryAction {
+    /// Serve a registry from a directory, speaking the protocol `gos publish`
+    /// and `gos fetch` use. Without a `tokens.toml` in the root it is open to
+    /// anyone who can reach it, so it binds loopback unless told otherwise.
+    Serve {
+        /// Directory holding the index, archives, owners, and tokens.
+        #[arg(long, default_value = "registry", value_hint = ValueHint::DirPath)]
+        root: PathBuf,
+        /// Address to listen on; port 0 picks a free one.
+        #[arg(long, default_value = "127.0.0.1:8787")]
+        addr: String,
+    },
+}
+
 /// `Debug` uses the lightweight pipeline plus minimal `opt` and `llc -O0`;
 /// `Release` runs the full mid-level pipeline plus Clang `-O3`. The Cranelift
 /// backend is reserved for the in-process JIT and is not a `gos

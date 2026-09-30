@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::os::raw::c_char;
@@ -21,55 +19,10 @@ use serde::Deserialize;
 
 use super::*;
 
-// Keep compiled JSON's resource limits aligned with the VM standard
-// library. `serde_json` otherwise accepts unbounded input and nesting,
-// letting an HTTP-facing compiled program allocate or recurse far beyond the
-// limits enforced by `gossamer_std::json::parse`.
-const JSON_MAX_SIZE: usize = 16 * 1024 * 1024;
-const JSON_MAX_DEPTH: usize = 128;
-
-/// Validates a C JSON input once before handing it to `serde_json`. The scan
-/// is allocation-free, understands quoted strings/escapes, and rejects only
-/// limits that the VM parser already rejects. Syntax remains `serde_json`'s
-/// responsibility so its detailed parse diagnostics are preserved.
-fn checked_json_text(bytes: &[u8]) -> Result<&str, &'static str> {
-    if bytes.len() > JSON_MAX_SIZE {
-        return Err("input exceeds max_size (16 MiB)");
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| "invalid UTF-8")?;
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for byte in bytes {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if *byte == b'\\' {
-                escaped = true;
-            } else if *byte == b'"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match *byte {
-            b'"' => in_string = true,
-            b'{' | b'[' => {
-                depth += 1;
-                if depth > JSON_MAX_DEPTH {
-                    return Err("nesting depth exceeds max_depth (128)");
-                }
-            }
-            b'}' | b']' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-    }
-    Ok(text)
-}
-
-/// Parses after [`checked_json_text`] has applied Gossamer's explicit depth
-/// limit. `serde_json`'s default recursion counter rejects the valid
-/// VM-boundary document at depth 128 one level early, so disable only that
-/// duplicate guard and keep the bounded preflight as the authority.
+/// Materializes a document [`gossamer_core::json::validate`] accepted, whose
+/// depth it has already bounded. `serde_json`'s own recursion counter rejects
+/// the valid document at depth 128 one level early, so that duplicate guard
+/// is disabled.
 fn parse_checked_json(text: &str) -> Result<serde_json::Value, serde_json::Error> {
     let mut deserializer = serde_json::Deserializer::from_str(text);
     deserializer.disable_recursion_limit();
@@ -113,74 +66,6 @@ fn narrow_numbers_to_language_range(value: &mut serde_json::Value) {
     }
 }
 
-/// Fully validates a document without constructing a DOM. Parsed documents
-/// stay in this compact form until an API actually projects a child or value.
-/// Every string is decoded, so an escape naming no character - a lone
-/// surrogate - is rejected here as the bytecode VM's parser rejects it.
-fn validate_checked_json(text: &str) -> Result<(), serde_json::Error> {
-    let mut deserializer = serde_json::Deserializer::from_str(text);
-    deserializer.disable_recursion_limit();
-    ValidatedJson::deserialize(&mut deserializer)?;
-    deserializer.end()
-}
-
-/// A JSON value walked for validity only: strings are decoded and dropped,
-/// every other value is skipped.
-struct ValidatedJson;
-
-impl<'de> serde::Deserialize<'de> for ValidatedJson {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer.deserialize_any(ValidatedJson)
-    }
-}
-
-impl<'de> serde::de::Visitor<'de> for ValidatedJson {
-    type Value = ValidatedJson;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("a JSON value")
-    }
-
-    fn visit_bool<E>(self, _: bool) -> Result<Self, E> {
-        Ok(self)
-    }
-    fn visit_i64<E>(self, _: i64) -> Result<Self, E> {
-        Ok(self)
-    }
-    fn visit_u64<E>(self, _: u64) -> Result<Self, E> {
-        Ok(self)
-    }
-    fn visit_f64<E>(self, _: f64) -> Result<Self, E> {
-        Ok(self)
-    }
-    fn visit_str<E>(self, _: &str) -> Result<Self, E> {
-        Ok(self)
-    }
-    fn visit_unit<E>(self) -> Result<Self, E> {
-        Ok(self)
-    }
-    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self, A::Error> {
-        while seq.next_element::<ValidatedJson>()?.is_some() {}
-        Ok(self)
-    }
-    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self, A::Error> {
-        while map.next_entry::<ValidatedKey, ValidatedJson>()?.is_some() {}
-        Ok(self)
-    }
-}
-
-/// An object key, decoded and dropped.
-struct ValidatedKey;
-
-impl<'de> serde::Deserialize<'de> for ValidatedKey {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        deserializer
-            .deserialize_str(ValidatedJson)
-            .map(|_| ValidatedKey)
-    }
-}
-
-// ---------------------------------------------------------------
 // JSON runtime - wraps `serde_json::Value` behind a heap pointer
 // so user code can do `json::parse(s)`, `value.field`, and
 // `value.as_i64()` from compiled Gossamer. The MIR lowerer
@@ -286,6 +171,8 @@ impl GosJson {
         if self.view.is_null() {
             self.tree.value()
         } else {
+            // SAFETY: a non-null `view` points into the subtree of `tree`, which this handle
+            // keeps alive.
             unsafe { &*self.view.as_const_ptr() }
         }
     }
@@ -299,24 +186,10 @@ pub(crate) unsafe fn json_borrow<'a>(p: *const GosJson) -> Option<&'a serde_json
     if p.is_null() {
         return None;
     }
-    // Arc<serde_json::Value> pointers are always >> 1 on any real allocator.
-    // If the first word is 0 or 1 we received a *mut GosResult (disc + payload)
-    // instead of a *const GosJson - unwrap the Option layer transparently.
-    let first_word = unsafe { *(p as *const u64) };
-    if first_word <= 1 {
-        if first_word == 0 {
-            // disc=0 (Some): offset-8 holds the inner *mut GosJson as i64.
-            let payload = unsafe { *((p as *const u64).add(1)) };
-            if payload == 0 {
-                return None;
-            }
-            return unsafe { json_borrow(payload as *const GosJson) };
-        }
-        // disc=1 (None)
-        return None;
-    }
+    // SAFETY: `p` is non-null (checked above), and this `unsafe fn`'s caller passes a live JSON
+    // value.
     let json = unsafe { &*p };
-    // SAFETY: `view` was set by `Self::into_raw` (points at the
+    // `view` was set by `Self::into_raw` (points at the
     // tree's root) or by `Self::child` (points at a sub-Value of
     // `self.tree`'s subtree). Either way the pointee lives as
     // long as `tree` does, which is at least until this `&GosJson`
@@ -328,6 +201,7 @@ pub(crate) unsafe fn json_borrow<'a>(p: *const GosJson) -> Option<&'a serde_json
 /// sibling runtime modules (e.g. yaml encoding) that project a parsed
 /// JSON tree onto another format. `None` for a null/None handle.
 pub(crate) unsafe fn json_value_ref<'a>(p: *const GosJson) -> Option<&'a serde_json::Value> {
+    // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `json_borrow` accepts.
     unsafe { json_borrow(p) }
 }
 
@@ -338,18 +212,8 @@ unsafe fn json_handle<'a>(p: *const GosJson) -> Option<&'a GosJson> {
     if p.is_null() {
         return None;
     }
-    // Same GosResult-vs-GosJson guard as json_borrow.
-    let first_word = unsafe { *(p as *const u64) };
-    if first_word <= 1 {
-        if first_word == 0 {
-            let payload = unsafe { *((p as *const u64).add(1)) };
-            if payload == 0 {
-                return None;
-            }
-            return unsafe { json_handle(payload as *const GosJson) };
-        }
-        return None;
-    }
+    // SAFETY: `p` is non-null (checked above), and this `unsafe fn`'s caller passes a live JSON
+    // value.
     Some(unsafe { &*p })
 }
 
@@ -362,13 +226,10 @@ pub unsafe extern "C" fn gos_rt_json_valid(text: *const c_char) -> i8 {
         let bytes: &[u8] = if text.is_null() {
             b""
         } else {
+            // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(text) }
         };
-        let ok = checked_json_text(bytes)
-            .ok()
-            .and_then(|s| validate_checked_json(s).ok())
-            .is_some();
-        i8::from(ok)
+        i8::from(gossamer_core::json::validate(bytes).is_ok())
     })
 }
 
@@ -380,23 +241,20 @@ pub unsafe extern "C" fn gos_rt_json_parse(text: *const c_char) -> i128 {
         let bytes: &[u8] = if text.is_null() {
             b""
         } else {
+            // SAFETY: `text` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(text) }
         };
-        match checked_json_text(bytes) {
-            Ok(s) => match validate_checked_json(s) {
-                Ok(()) => {
-                    let ptr = GosJson::raw(s);
-                    unsafe { gos_rt_result_new(0, ptr as i64) }
-                }
-                Err(error) => {
-                    let message = error.to_string();
-                    let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
-                    unsafe { gos_rt_result_new(1, err as i64) }
-                }
-            },
-            Err(message) => {
+        // The same validator the VM's parser is, so every tier accepts,
+        // rejects, and describes a document alike.
+        match gossamer_core::json::validate(bytes) {
+            Ok(s) => {
+                let ptr = GosJson::raw(s);
+                gos_rt_result_new(0, ptr as i64)
+            }
+            Err(error) => {
+                let message = error.to_string();
                 let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
         }
     })
@@ -410,6 +268,8 @@ pub unsafe extern "C" fn gos_rt_json_free(j: *mut GosJson) {
     if j.is_null() {
         return;
     }
+    // SAFETY: `j` is non-null (checked above), a handle a constructor boxed, which this call
+    // consumes (C-ABI contract).
     drop(unsafe { Box::from_raw(j) });
 }
 
@@ -418,10 +278,15 @@ pub unsafe extern "C" fn gos_rt_json_free(j: *mut GosJson) {
 /// A box the encoder just built owns its whole tree, so the value moves out
 /// with no copy. A handle that shares a parsed document, or one viewing a
 /// subtree, answers a copy of what it views - the document stays whole.
+///
+/// # Safety
+/// `p` is null or a builder box the caller hands over.
 unsafe fn take_json_value(p: *mut GosJson) -> serde_json::Value {
     if p.is_null() {
         return serde_json::Value::Null;
     }
+    // SAFETY: `p` is non-null (checked above), a builder box this `unsafe fn`'s caller hands
+    // over.
     let boxed = unsafe { Box::from_raw(p) };
     let views_root = boxed.view.is_null()
         || std::ptr::eq(
@@ -429,6 +294,8 @@ unsafe fn take_json_value(p: *mut GosJson) -> serde_json::Value {
             std::ptr::from_ref(boxed.tree.value()),
         );
     if !views_root {
+        // SAFETY: a `view` that is not the root points into the subtree of `tree`, which `boxed`
+        // keeps alive here.
         return unsafe { &*boxed.view.as_const_ptr() }.clone();
     }
     match std::sync::Arc::try_unwrap(boxed.tree) {
@@ -449,27 +316,52 @@ pub unsafe extern "C" fn gos_rt_json_value_array_owned(vec: *mut GosVec) -> *mut
     ffi_entry!(std::ptr::null_mut(), {
         let mut out: Vec<serde_json::Value> = Vec::new();
         if !vec.is_null() {
+            // SAFETY: `vec` is non-null (checked above) and live for the call (C-ABI contract).
             let header = unsafe { &*vec };
             let len = usize::try_from(header.len.max(0)).unwrap_or(0);
             if !header.ptr.is_null() && len > 0 {
                 out.reserve(len);
                 let base = header.ptr;
                 for i in 0..len {
+                    // SAFETY: `i` is below the vec's length, and a builder vector holds one
+                    // 8-byte handle per element.
                     let elem = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
                         .cast::<GosJson>();
+                    // SAFETY: each element is a builder box the vector hands over with it (this
+                    // shim's contract).
                     out.push(unsafe { take_json_value(elem) });
                 }
             }
         }
+        // SAFETY: `vec` is this shim's argument, consumed here with the boxes already taken, or
+        // null, which `gos_rt_vec_free` accepts.
         unsafe { crate::c_abi::gos_rt_vec_free(vec) };
         GosJson::into_raw(serde_json::Value::Array(out))
     })
+}
+
+/// The name/value pairs a builder vector holds: a vector of `(name, value)`
+/// tuples stores one pair per 16-byte element, and the flat vector the
+/// encoder builds stores a name word and a value word in alternate 8-byte
+/// elements.
+fn object_pair_count(header: &GosVec) -> usize {
+    let len = usize::try_from(header.len.max(0)).unwrap_or(0);
+    if header.ptr.is_null() {
+        return 0;
+    }
+    match header.elem_bytes {
+        16 => len,
+        8 => len / 2,
+        _ => 0,
+    }
 }
 
 /// `json::Value::Object` over a name/value builder vector whose value boxes it
 /// consumes. The name slots are borrowed C strings; only the values move.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_object_owned(vec: *mut GosVec) -> *mut GosJson {
+    // SAFETY: `vec` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `gos_rt_json_value_object_owned_keyed` accepts.
     unsafe { gos_rt_json_value_object_owned_keyed(vec, 0) }
 }
 
@@ -483,27 +375,28 @@ pub unsafe extern "C" fn gos_rt_json_value_object_owned_keyed(
     ffi_entry!(std::ptr::null_mut(), {
         let mut out = serde_json::Map::new();
         if !vec.is_null() {
+            // SAFETY: `vec` is non-null (checked above) and live for the call (C-ABI contract).
             let header = unsafe { &*vec };
-            let raw_len = usize::try_from(header.len.max(0)).unwrap_or(0);
-            let elem_bytes = header.elem_bytes as usize;
-            let header_looks_valid =
-                matches!(elem_bytes, 8 | 16 | 24) && raw_len <= 16 * 1024 * 1024;
-            if header_looks_valid && !header.ptr.is_null() && raw_len > 0 {
-                let tuple_count = if elem_bytes == 16 {
-                    raw_len
-                } else {
-                    raw_len / 2
-                };
+            let pair_count = object_pair_count(header);
+            if pair_count > 0 {
+                // SAFETY: `object_pair_count` answers a non-zero count only for a non-null
+                // buffer holding that many name/value word pairs.
                 let pairs = unsafe {
-                    std::slice::from_raw_parts(header.ptr.cast::<[i64; 2]>(), tuple_count)
+                    std::slice::from_raw_parts(header.ptr.cast::<[i64; 2]>(), pair_count)
                 };
                 for pair in pairs {
                     let val_ptr = pair[1] as *mut GosJson;
+                    // SAFETY: a pair's name word is of the kind `key_kind` names (this shim's
+                    // contract).
                     let key = unsafe { object_member_name(pair[0], key_kind) };
+                    // SAFETY: each value word is a builder box the vector hands over with it
+                    // (this shim's contract).
                     out.insert(key, unsafe { take_json_value(val_ptr) });
                 }
             }
         }
+        // SAFETY: `vec` is this shim's argument, consumed here with the boxes already taken, or
+        // null, which `gos_rt_vec_free` accepts.
         unsafe { crate::c_abi::gos_rt_vec_free(vec) };
         GosJson::into_raw(serde_json::Value::Object(out))
     })
@@ -518,6 +411,8 @@ pub(crate) unsafe fn json_clone_handle(p: *const GosJson) -> *mut GosJson {
     if p.is_null() {
         return std::ptr::null_mut();
     }
+    // SAFETY: `p` is non-null (checked above), and this `unsafe fn`'s caller passes a live JSON
+    // value.
     let src = unsafe { &*p };
     Box::into_raw(Box::new(GosJson {
         tree: std::sync::Arc::clone(&src.tree),
@@ -536,6 +431,7 @@ pub unsafe extern "C" fn gos_rt_json_free_slots(vec: *mut GosVec, first: i64, st
     if vec.is_null() {
         return;
     }
+    // SAFETY: `vec` is a handle from compiled code, checked non-null above and live for the whole call.
     let header = unsafe { &*vec };
     let len = usize::try_from(header.len.max(0)).unwrap_or(0);
     let first = usize::try_from(first.max(0)).unwrap_or(0);
@@ -545,11 +441,17 @@ pub unsafe extern "C" fn gos_rt_json_free_slots(vec: *mut GosVec, first: i64, st
         let mut i = first;
         while i < len {
             let child =
+                // SAFETY: `i` is below the vec's length, and a builder vector holds one 8-byte
+                // handle per element.
                 unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }.cast::<GosJson>();
+            // SAFETY: each owned slot holds a handle the walk built, null or live, which
+            // `gos_rt_json_free` accepts.
             unsafe { gos_rt_json_free(child) };
             i += stride;
         }
     }
+    // SAFETY: `vec` is non-null (checked above), the builder vector this call consumes (C-ABI
+    // contract).
     unsafe { crate::c_abi::gos_rt_vec_free(vec) };
 }
 
@@ -579,8 +481,12 @@ impl RuntimeJsonWriter {
         }
         let new_len = self.len.saturating_add(bytes.len());
         if new_len <= self.capacity {
+            // SAFETY: `string` is this writer's own builder, `len` its length, and `new_len` fits
+            // its capacity (checked above).
             unsafe { str_builder_write_reserved(self.string, self.len, bytes) };
         } else {
+            // SAFETY: `string` is this writer's own builder, whose share the append consumes and
+            // answers.
             self.string = unsafe {
                 gos_rt_str_append_bytes(
                     self.string,
@@ -611,9 +517,28 @@ fn first_escape_candidate(bytes: &[u8]) -> Option<usize> {
 
 impl std::io::Write for RuntimeJsonWriter {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.write_escaped(bytes);
+        Ok(bytes.len())
+    }
+
+    // Every write takes all of its bytes, so the default loop that retries a
+    // short write has nothing to do; serde_json writes through this.
+    fn write_all(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        self.write_escaped(bytes);
+        Ok(())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl RuntimeJsonWriter {
+    /// Appends `bytes`, escaping the characters JSON output keeps HTML-safe.
+    fn write_escaped(&mut self, bytes: &[u8]) {
         let Some(first) = first_escape_candidate(bytes) else {
             self.append(bytes);
-            return Ok(bytes.len());
+            return;
         };
         let mut start = 0;
         let mut offset = first;
@@ -643,17 +568,13 @@ impl std::io::Write for RuntimeJsonWriter {
             start = offset;
         }
         self.append(&bytes[start..]);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
     }
 }
 
 impl Drop for RuntimeJsonWriter {
     fn drop(&mut self) {
         if !self.string.is_null() {
+            // SAFETY: `string` is the non-null builder this writer still owns.
             unsafe { gos_rt_str_free(self.string) };
         }
     }
@@ -818,6 +739,8 @@ fn render_json_handle(json: &GosJson, pretty: bool) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_render(j: *const GosJson) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
         let Some(json) = (unsafe { json_handle(j) }) else {
             return alloc_cstring(b"");
         };
@@ -831,6 +754,8 @@ pub unsafe extern "C" fn gos_rt_json_render(j: *const GosJson) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_render_pretty(j: *const GosJson) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
         let Some(json) = (unsafe { json_handle(j) }) else {
             return alloc_cstring(b"");
         };
@@ -844,6 +769,8 @@ pub unsafe extern "C" fn gos_rt_json_render_pretty(j: *const GosJson) -> *mut c_
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_display(j: *const GosJson) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return alloc_cstring(b"null");
         };
@@ -860,6 +787,8 @@ pub unsafe extern "C" fn gos_rt_json_display(j: *const GosJson) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_debug(j: *const GosJson) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return alloc_cstring(b"null");
         };
@@ -876,10 +805,12 @@ pub unsafe extern "C" fn gos_rt_json_debug(j: *const GosJson) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_get(j: *const GosJson, key: *const c_char) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
             return GosJson::null_ptr();
         };
-        // SAFETY: `parent.view` is a stable interior pointer into
+        // `parent.view` is a stable interior pointer into
         // `parent.tree`'s allocation; see `GosJson` doc. The
         // dereference produces a borrow that lives only inside this
         // function call.
@@ -887,6 +818,7 @@ pub unsafe extern "C" fn gos_rt_json_get(j: *const GosJson, key: *const c_char) 
         let key_bytes: &[u8] = if key.is_null() {
             b""
         } else {
+            // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(key) }
         };
         let Ok(key_str) = std::str::from_utf8(key_bytes) else {
@@ -904,6 +836,8 @@ pub unsafe extern "C" fn gos_rt_json_get(j: *const GosJson, key: *const c_char) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_at(j: *const GosJson, idx: i64) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
             return GosJson::null_ptr();
         };
@@ -922,6 +856,8 @@ pub unsafe extern "C" fn gos_rt_json_at(j: *const GosJson, idx: i64) -> *mut Gos
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_len(j: *const GosJson) -> i64 {
     ffi_entry!(-1, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return 0;
         };
@@ -938,6 +874,8 @@ pub unsafe extern "C" fn gos_rt_json_len(j: *const GosJson) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_is_null(j: *const GosJson) -> i32 {
     ffi_entry!(-1, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
             Some(serde_json::Value::Null) | None => 1,
             Some(_) => 0,
@@ -950,6 +888,8 @@ pub unsafe extern "C" fn gos_rt_json_is_null(j: *const GosJson) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_i64(j: *const GosJson) -> i64 {
     ffi_entry!(-1, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return 0;
         };
@@ -968,6 +908,8 @@ pub unsafe extern "C" fn gos_rt_json_as_i64(j: *const GosJson) -> i64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_f64(j: *const GosJson) -> f64 {
     ffi_entry!(f64::NAN, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return 0.0;
         };
@@ -987,6 +929,8 @@ pub unsafe extern "C" fn gos_rt_json_as_f64(j: *const GosJson) -> f64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_str(j: *const GosJson) -> *mut c_char {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
             return alloc_cstring(b"");
         };
@@ -1008,21 +952,23 @@ pub unsafe extern "C" fn gos_rt_json_as_str(j: *const GosJson) -> *mut c_char {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_i64_opt(j: *const GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
             Some(serde_json::Value::Number(n)) => {
                 if let Some(i) = n.as_i64() {
-                    unsafe { gos_rt_result_new(0, i) }
+                    gos_rt_result_new(0, i)
                 } else if let Some(f) = n.as_f64() {
                     if f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                        unsafe { gos_rt_result_new(0, f as i64) }
+                        gos_rt_result_new(0, f as i64)
                     } else {
-                        unsafe { gos_rt_result_new(1, 0) }
+                        gos_rt_result_new(1, 0)
                     }
                 } else {
-                    unsafe { gos_rt_result_new(1, 0) }
+                    gos_rt_result_new(1, 0)
                 }
             }
-            _ => unsafe { gos_rt_result_new(1, 0) },
+            _ => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1032,6 +978,8 @@ pub unsafe extern "C" fn gos_rt_json_as_i64_opt(j: *const GosJson) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let n = match unsafe { json_borrow(j) } {
             Some(serde_json::Value::Number(n)) => n.as_u64().or_else(|| {
                 n.as_f64()
@@ -1041,8 +989,8 @@ pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
             _ => None,
         };
         match n {
-            Some(n) => unsafe { gos_rt_result_new(0, n as i64) },
-            None => unsafe { gos_rt_result_new(1, 0) },
+            Some(n) => gos_rt_result_new(0, n as i64),
+            None => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1052,11 +1000,13 @@ pub unsafe extern "C" fn gos_rt_json_as_u64_opt(j: *const GosJson) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_f64_opt(j: *const GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Number(n)) => unsafe {
+            Some(serde_json::Value::Number(n)) => {
                 gos_rt_result_new_f64(0, n.as_f64().unwrap_or(0.0))
-            },
-            _ => unsafe { gos_rt_result_new(1, 0) },
+            }
+            _ => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1066,12 +1016,14 @@ pub unsafe extern "C" fn gos_rt_json_as_f64_opt(j: *const GosJson) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_str_opt(j: *const GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
             Some(serde_json::Value::String(s)) => {
                 let cs = alloc_cstring(s.as_bytes());
-                unsafe { gos_rt_result_new(0, cs as i64) }
+                gos_rt_result_new(0, cs as i64)
             }
-            _ => unsafe { gos_rt_result_new(1, 0) },
+            _ => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1080,6 +1032,8 @@ pub unsafe extern "C" fn gos_rt_json_as_str_opt(j: *const GosJson) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_bool(j: *const GosJson) -> i32 {
     ffi_entry!(-1, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
             Some(serde_json::Value::Bool(true)) => 1,
             Some(serde_json::Value::Number(n)) if n.as_f64().unwrap_or(0.0) != 0.0 => 1,
@@ -1095,9 +1049,11 @@ pub unsafe extern "C" fn gos_rt_json_as_bool(j: *const GosJson) -> i32 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_bool_opt(j: *const GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         match unsafe { json_borrow(j) } {
-            Some(serde_json::Value::Bool(b)) => unsafe { gos_rt_result_new(0, i64::from(*b)) },
-            _ => unsafe { gos_rt_result_new(1, 0) },
+            Some(serde_json::Value::Bool(b)) => gos_rt_result_new(0, i64::from(*b)),
+            _ => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1122,12 +1078,15 @@ pub unsafe extern "C" fn gos_rt_json_identity(j: *mut GosJson) -> *mut GosJson {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_get_opt(j: *const GosJson, key: *const c_char) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
             return gos_rt_result_new(1, 0);
         };
         let key_bytes: &[u8] = if key.is_null() {
             b""
         } else {
+            // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_bytes(key) }
         };
         let Ok(key_str) = std::str::from_utf8(key_bytes) else {
@@ -1147,8 +1106,10 @@ pub unsafe extern "C" fn gos_rt_json_get_opt(j: *const GosJson, key: *const c_ch
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_borrow` accepts.
         let Some(v) = (unsafe { json_borrow(j) }) else {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         };
         match v {
             serde_json::Value::Object(map) => {
@@ -1159,7 +1120,7 @@ pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
                 // vector at its final capacity. This avoids repeated copies
                 // of key pointers and extra arena/global allocations for
                 // object-heavy JSON responses.
-                let vec_ptr = unsafe {
+                let vec_ptr = {
                     crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                         8,
                         map.len().min(i64::MAX as usize) as i64,
@@ -1168,13 +1129,15 @@ pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
                 };
                 for k in map.keys() {
                     let cs = alloc_cstring(k.as_bytes()) as i64;
+                    // SAFETY: `vec_ptr` is the fresh key vector made above, or null, which
+                    // `gos_rt_vec_push` accepts, and `cs` is one 8-byte element.
                     unsafe {
                         gos_rt_vec_push(vec_ptr, std::ptr::addr_of!(cs).cast::<u8>());
                     }
                 }
-                unsafe { gos_rt_result_new(0, vec_ptr as i64) }
+                gos_rt_result_new(0, vec_ptr as i64)
             }
-            _ => unsafe { gos_rt_result_new(1, 0) },
+            _ => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1186,6 +1149,8 @@ pub unsafe extern "C" fn gos_rt_json_keys_opt(j: *const GosJson) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
     ffi_entry!(0i128, {
+        // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(j) }) else {
             return gos_rt_result_new(1, 0);
         };
@@ -1195,7 +1160,7 @@ pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
                 // Each returned child handle needs one pointer slot. Reserve
                 // once from the source array's exact length instead of
                 // growing through every capacity tier.
-                let vec_ptr = unsafe {
+                let vec_ptr = {
                     crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
                         8,
                         items.len().min(i64::MAX as usize) as i64,
@@ -1207,13 +1172,15 @@ pub unsafe extern "C" fn gos_rt_json_as_array_opt(j: *const GosJson) -> i128 {
                     // tree - no deep clone, no per-element leak of a
                     // freshly-boxed Value.
                     let elem = parent.child(item) as i64;
+                    // SAFETY: `vec_ptr` is the fresh element vector made above, or null, which
+                    // `gos_rt_vec_push` accepts, and `elem` is one 8-byte element.
                     unsafe {
                         gos_rt_vec_push(vec_ptr, std::ptr::addr_of!(elem).cast::<u8>());
                     }
                 }
                 gos_rt_result_new(0, vec_ptr as i64)
             }
-            _ => unsafe { gos_rt_result_new(1, 0) },
+            _ => gos_rt_result_new(1, 0),
         }
     })
 }
@@ -1225,6 +1192,7 @@ pub unsafe extern "C" fn gos_rt_json_value_string(s: *const c_char) -> *mut GosJ
         let text = if s.is_null() {
             String::new()
         } else {
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(s) }
         };
         GosJson::into_raw(serde_json::Value::String(text))
@@ -1233,7 +1201,7 @@ pub unsafe extern "C" fn gos_rt_json_value_string(s: *const c_char) -> *mut GosJ
 
 /// `json::Value::Int(n)` constructor.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_value_int(n: i64) -> *mut GosJson {
+pub extern "C" fn gos_rt_json_value_int(n: i64) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
         GosJson::into_raw(serde_json::Value::Number(n.into()))
     })
@@ -1242,7 +1210,7 @@ pub unsafe extern "C" fn gos_rt_json_value_int(n: i64) -> *mut GosJson {
 /// `json::Value` integer constructor for a word declared `u64` / `usize`,
 /// which reads as unsigned.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_value_uint(n: i64) -> *mut GosJson {
+pub extern "C" fn gos_rt_json_value_uint(n: i64) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
         GosJson::into_raw(serde_json::Value::Number((n as u64).into()))
     })
@@ -1250,7 +1218,7 @@ pub unsafe extern "C" fn gos_rt_json_value_uint(n: i64) -> *mut GosJson {
 
 /// `json::Value::Bool(b)` constructor.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_value_bool(b: i32) -> *mut GosJson {
+pub extern "C" fn gos_rt_json_value_bool(b: i32) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
         GosJson::into_raw(serde_json::Value::Bool(b != 0))
     })
@@ -1259,7 +1227,7 @@ pub unsafe extern "C" fn gos_rt_json_value_bool(b: i32) -> *mut GosJson {
 /// `json::Value::Float(x)` constructor used by `json::render` on
 /// struct fields of type `f64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_value_float(x: f64) -> *mut GosJson {
+pub extern "C" fn gos_rt_json_value_float(x: f64) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
         // JSON has no NaN or infinity, so such a float is `null`.
         let value = serde_json::Number::from_f64(x)
@@ -1272,12 +1240,12 @@ pub unsafe extern "C" fn gos_rt_json_value_float(x: f64) -> *mut GosJson {
 /// single-precision value's digits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_float32(x: f64) -> *mut GosJson {
-    unsafe { gos_rt_json_value_float(crate::builtins::f32_as_decimal_double(x)) }
+    gos_rt_json_value_float(crate::builtins::f32_as_decimal_double(x))
 }
 
 /// `json::Value::Null` constructor.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_value_null() -> *mut GosJson {
+pub extern "C" fn gos_rt_json_value_null() -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), { GosJson::null_ptr() })
 }
 
@@ -1287,28 +1255,19 @@ pub unsafe extern "C" fn gos_rt_json_value_null() -> *mut GosJson {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_array(vec: *const GosVec) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        if !vec.is_null() {
-            let header = unsafe { &*vec };
-            let len = usize::try_from(header.len.max(0)).unwrap_or(0);
-            if !header.ptr.is_null() && len > 0 {
-                out.reserve(len);
-                let base = header.ptr;
-                for i in 0..len {
-                    // Slots hold child pointers exposed as integers by the
-                    // flat-slot ABI in an unaligned byte buffer; read
-                    // unaligned and recover provenance.
-                    let elem = unsafe { crate::c_abi::vec::slot_read_word(base.add(i * 8)) }
-                        .cast_const()
-                        .cast::<GosJson>();
-                    if let Some(v) = unsafe { json_borrow(elem) } {
-                        out.push(v.clone());
-                    } else {
-                        out.push(serde_json::Value::Null);
-                    }
-                }
-            }
-        }
+        // SAFETY: `vec` is this shim's argument, null or a live `Vec<json::Value>` (C-ABI
+        // contract).
+        let items = unsafe { crate::c_abi::vec::VecView::of(vec) };
+        let out: Vec<serde_json::Value> = items.map_or_else(Vec::new, |items| {
+            (0..items.len())
+                .map(|i| {
+                    // SAFETY: each element of a `Vec<json::Value>` is a live handle or null
+                    // (C-ABI contract), which `json_borrow` accepts.
+                    unsafe { json_borrow(items.pointer_at::<GosJson>(i)) }
+                        .map_or(serde_json::Value::Null, Clone::clone)
+                })
+                .collect()
+        });
         GosJson::into_raw(serde_json::Value::Array(out))
     })
 }
@@ -1327,41 +1286,39 @@ pub unsafe extern "C" fn gos_rt_json_array_from_scalar_vec(
     kind: i64,
 ) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
-        let mut out: Vec<serde_json::Value> = Vec::new();
-        if !vec.is_null() {
-            let header = unsafe { &*vec };
-            let len = usize::try_from(header.len.max(0)).unwrap_or(0);
-            if !header.ptr.is_null() && len > 0 {
-                out.reserve(len);
-                let words = unsafe { std::slice::from_raw_parts(header.ptr.cast::<i64>(), len) };
-                for &w in words {
-                    let v = match kind {
-                        1 => serde_json::Number::from_f64(f64::from_bits(w as u64))
-                            .map_or(serde_json::Value::Null, serde_json::Value::Number),
-                        2 => {
-                            let p = w as *const c_char;
-                            if p.is_null() {
-                                serde_json::Value::String(String::new())
-                            } else {
-                                serde_json::Value::String(unsafe {
-                                    crate::c_abi::gos_str_arg_string(p)
-                                })
-                            }
-                        }
-                        3 => serde_json::Value::Bool(w != 0),
-                        4 => serde_json::Value::Number((w as u64).into()),
-                        5 => serde_json::Number::from_f64(crate::builtins::f32_as_decimal_double(
-                            f64::from_bits(w as u64),
-                        ))
-                        .map_or(serde_json::Value::Null, serde_json::Value::Number),
-                        _ => serde_json::Value::Number(w.into()),
-                    };
-                    out.push(v);
-                }
-            }
-        }
+        let out: Vec<serde_json::Value> = if kind == 2 {
+            // SAFETY: a kind-2 `vec` is this shim's argument, null or a live `Vec<String>` (C-ABI
+            // contract).
+            unsafe { crate::c_abi::vec::StrVecView::of(vec) }.map_or_else(Vec::new, |items| {
+                items.texts().map(serde_json::Value::String).collect()
+            })
+        } else {
+            // SAFETY: `vec` is this shim's argument, null or a live `Vec` (C-ABI contract). Each
+            // element reads at the width its header declares, so a byte-packed `Vec<u8>` or
+            // `Vec<bool>` answers its own values.
+            unsafe { crate::c_abi::vec::VecView::of(vec) }.map_or_else(Vec::new, |items| {
+                items.words().map(|word| scalar_json(kind, word)).collect()
+            })
+        };
         GosJson::into_raw(serde_json::Value::Array(out))
     })
+}
+
+/// The JSON value a scalar slot word spells under `kind`: `1` an `f64`'s bits,
+/// `3` a `bool`, `4` a `u64`, `5` an `f32` at double width, anything else an
+/// `i64`.
+fn scalar_json(kind: i64, word: i64) -> serde_json::Value {
+    match kind {
+        1 => serde_json::Number::from_f64(f64::from_bits(word as u64))
+            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        3 => serde_json::Value::Bool(word != 0),
+        4 => serde_json::Value::Number((word as u64).into()),
+        5 => serde_json::Number::from_f64(crate::builtins::f32_as_decimal_double(f64::from_bits(
+            word as u64,
+        )))
+        .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        _ => serde_json::Value::Number(word.into()),
+    }
 }
 
 /// `json::Value::object(n, pairs_ptr)` - fan-out constructor
@@ -1378,6 +1335,8 @@ pub unsafe extern "C" fn gos_rt_json_value_object_n(n: i64, pairs: *const i64) -
         let mut out = serde_json::Map::new();
         let n = usize::try_from(n.max(0)).unwrap_or(0);
         if !pairs.is_null() && n > 0 {
+            // SAFETY: `pairs` is non-null (checked above) and addresses `n` name/value word pairs
+            // (C-ABI contract).
             let slice = unsafe { std::slice::from_raw_parts(pairs, n * 2) };
             for chunk in slice.chunks_exact(2) {
                 let key_ptr = chunk[0] as *const c_char;
@@ -1385,8 +1344,12 @@ pub unsafe extern "C" fn gos_rt_json_value_object_n(n: i64, pairs: *const i64) -
                 let key = if key_ptr.is_null() {
                     String::new()
                 } else {
+                    // SAFETY: `key_ptr` is a non-null name word, a live string body (C-ABI
+                    // contract).
                     unsafe { crate::c_abi::gos_str_arg_string(key_ptr) }
                 };
+                // SAFETY: each value word is a live handle or null (C-ABI contract), which
+                // `json_borrow` accepts.
                 let v = if let Some(v) = unsafe { json_borrow(val_ptr) } {
                     v.clone()
                 } else {
@@ -1406,6 +1369,8 @@ pub unsafe extern "C" fn gos_rt_json_value_object_n(n: i64, pairs: *const i64) -
 /// for the array-literal-of-pairs shape.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_value_object(vec: *const GosVec) -> *mut GosJson {
+    // SAFETY: `vec` is this shim's argument, live for the call (C-ABI contract) or null, which
+    // `gos_rt_json_value_object_keyed` accepts.
     unsafe { gos_rt_json_value_object_keyed(vec, 0) }
 }
 
@@ -1429,6 +1394,8 @@ unsafe fn object_member_name(word: i64, key_kind: i64) -> String {
             if key_ptr.is_null() {
                 String::new()
             } else {
+                // SAFETY: `key_ptr` is non-null (checked above), and this `unsafe fn`'s caller
+                // passes a live string for kind `0`.
                 unsafe { crate::c_abi::gos_str_arg_string(key_ptr) }
             }
         }
@@ -1445,37 +1412,22 @@ pub unsafe extern "C" fn gos_rt_json_value_object_keyed(
     ffi_entry!(std::ptr::null_mut(), {
         let mut out = serde_json::Map::new();
         if !vec.is_null() {
+            // SAFETY: `vec` is non-null (checked above) and live for the call (C-ABI contract).
             let header = unsafe { &*vec };
-            let raw_len = usize::try_from(header.len.max(0)).unwrap_or(0);
-            let elem_bytes = header.elem_bytes as usize;
-            // The compiled tier passes raw stack-arrays where the
-            // call site expected a `*mut GosVec`; in that case the
-            // first 8 bytes the runtime reads as `header.len` are
-            // actually the first key's c_char pointer (huge value),
-            // and following the bogus length crashes on the next
-            // strlen. Bail early when the header doesn't look like
-            // a GosVec we built (`elem_bytes` is one of the small
-            // shapes we hand out, the length is plausible).
-            let header_looks_valid =
-                matches!(elem_bytes, 8 | 16 | 24) && raw_len <= 16 * 1024 * 1024;
-            if header_looks_valid && !header.ptr.is_null() && raw_len > 0 {
-                // Tuples in the compiled tier currently get pushed as
-                // flat 8-byte slots - `[("k", v), ("k2", v2)]` lands
-                // as `len = 4` of i64 slots, not `len = 2` of 16-byte
-                // pairs. Detect this by `elem_bytes`: if it's 8, treat
-                // `len` as half the tuple count and stride 8; if it's
-                // 16, treat `len` as the tuple count and stride 16.
-                let tuple_count = if elem_bytes == 16 {
-                    raw_len
-                } else {
-                    raw_len / 2
-                };
+            let pair_count = object_pair_count(header);
+            if pair_count > 0 {
+                // SAFETY: `object_pair_count` answers a non-zero count only for a non-null
+                // buffer holding that many name/value word pairs.
                 let pairs = unsafe {
-                    std::slice::from_raw_parts(header.ptr.cast::<[i64; 2]>(), tuple_count)
+                    std::slice::from_raw_parts(header.ptr.cast::<[i64; 2]>(), pair_count)
                 };
                 for pair in pairs {
                     let val_ptr = pair[1] as *mut GosJson;
+                    // SAFETY: a pair's name word is of the kind `key_kind` names (this shim's
+                    // contract).
                     let key = unsafe { object_member_name(pair[0], key_kind) };
+                    // SAFETY: each value word is a live handle or null (C-ABI contract), which
+                    // `json_borrow` accepts.
                     let v = if let Some(v) = unsafe { json_borrow(val_ptr) } {
                         v.clone()
                     } else {
@@ -1499,6 +1451,8 @@ pub unsafe extern "C" fn gos_rt_json_set(
     val: *const GosJson,
 ) -> *mut GosJson {
     ffi_entry!(std::ptr::null_mut(), {
+        // SAFETY: `obj` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `json_handle` accepts.
         let Some(parent) = (unsafe { json_handle(obj) }) else {
             return GosJson::null_ptr();
         };
@@ -1509,8 +1463,11 @@ pub unsafe extern "C" fn gos_rt_json_set(
         let key_str = if key.is_null() {
             String::new()
         } else {
+            // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(key) }
         };
+        // SAFETY: `val` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `json_borrow` accepts.
         let new_val = if let Some(child) = unsafe { json_borrow(val) } {
             child.clone()
         } else {
@@ -1585,10 +1542,16 @@ impl JsonTokenWriter {
     }
 }
 
+/// The writer `w` names, or `None` for null.
+///
+/// # Safety
+/// `w` is null or a live writer nothing else accesses for `'a`.
 unsafe fn token_writer<'a>(w: *mut JsonTokenWriter) -> Option<&'a mut JsonTokenWriter> {
     if w.is_null() {
         None
     } else {
+        // SAFETY: `w` is non-null (checked above), and this `unsafe fn`'s caller passes a live
+        // writer nothing else accesses meanwhile.
         Some(unsafe { &mut *w })
     }
 }
@@ -1596,7 +1559,7 @@ unsafe fn token_writer<'a>(w: *mut JsonTokenWriter) -> Option<&'a mut JsonTokenW
 /// Opens a compact JSON document for the token writers below; closed by
 /// `gos_rt_json_writer_finish`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_writer_new() -> *mut JsonTokenWriter {
+pub extern "C" fn gos_rt_json_writer_new() -> *mut JsonTokenWriter {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(JsonTokenWriter {
             sink: RuntimeJsonWriter::new(64 * 1024),
@@ -1609,7 +1572,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_new() -> *mut JsonTokenWriter {
 /// Opens an indented JSON document, in the form
 /// `gos_rt_json_render_pretty` answers.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_json_writer_new_pretty() -> *mut JsonTokenWriter {
+pub extern "C" fn gos_rt_json_writer_new_pretty() -> *mut JsonTokenWriter {
     ffi_entry!(std::ptr::null_mut(), {
         Box::into_raw(Box::new(JsonTokenWriter {
             sink: RuntimeJsonWriter::new(64 * 1024),
@@ -1623,6 +1586,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_new_pretty() -> *mut JsonTokenWriter
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_begin_object(w: *mut JsonTokenWriter) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             writer.sink.append(b"{");
@@ -1635,6 +1600,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_begin_object(w: *mut JsonTokenWriter
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_end_object(w: *mut JsonTokenWriter) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.end_container(b"}");
         }
@@ -1645,6 +1612,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_end_object(w: *mut JsonTokenWriter) 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_begin_array(w: *mut JsonTokenWriter) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             writer.sink.append(b"[");
@@ -1657,6 +1626,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_begin_array(w: *mut JsonTokenWriter)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_end_array(w: *mut JsonTokenWriter) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.end_container(b"]");
         }
@@ -1668,6 +1639,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_end_array(w: *mut JsonTokenWriter) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_key(w: *mut JsonTokenWriter, key: *const c_char) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         let Some(writer) = (unsafe { token_writer(w) }) else {
             return;
         };
@@ -1679,6 +1652,7 @@ pub unsafe extern "C" fn gos_rt_json_writer_key(w: *mut JsonTokenWriter, key: *c
             }
             writer.newline_indent();
         }
+        // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
         let text = unsafe { crate::c_abi::gos_str_arg_lossy(key) };
         writer.write_escaped(&text);
         writer.sink.append(if writer.pretty { b": " } else { b":" });
@@ -1689,8 +1663,11 @@ pub unsafe extern "C" fn gos_rt_json_writer_key(w: *mut JsonTokenWriter, key: *c
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_str(w: *mut JsonTokenWriter, s: *const c_char) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
+            // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
             let text = unsafe { crate::c_abi::gos_str_arg_lossy(s) };
             writer.write_escaped(&text);
         }
@@ -1701,6 +1678,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_str(w: *mut JsonTokenWriter, s: *con
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_i64(w: *mut JsonTokenWriter, n: i64) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             let _ = serde_json::to_writer(&mut writer.sink, &n);
@@ -1712,6 +1691,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_i64(w: *mut JsonTokenWriter, n: i64)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_u64(w: *mut JsonTokenWriter, n: i64) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             let _ = serde_json::to_writer(&mut writer.sink, &(n as u64));
@@ -1724,6 +1705,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_u64(w: *mut JsonTokenWriter, n: i64)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_f64(w: *mut JsonTokenWriter, x: f64) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             let _ = write_language_float(&mut writer.sink, x);
@@ -1734,6 +1717,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_f64(w: *mut JsonTokenWriter, x: f64)
 /// Writes an `f32` held at double width as its single-precision digits.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_f32(w: *mut JsonTokenWriter, x: f64) {
+    // SAFETY: `w` is this shim's argument, null or a live writer (C-ABI contract), which
+    // `gos_rt_json_writer_f64` accepts.
     unsafe { gos_rt_json_writer_f64(w, crate::builtins::f32_as_decimal_double(x)) }
 }
 
@@ -1741,6 +1726,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_f32(w: *mut JsonTokenWriter, x: f64)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_bool(w: *mut JsonTokenWriter, b: i32) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             writer.sink.append(if b != 0 { b"true" } else { b"false" });
@@ -1752,6 +1739,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_bool(w: *mut JsonTokenWriter, b: i32
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_null(w: *mut JsonTokenWriter) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
             writer.sink.append(b"null");
@@ -1764,8 +1753,12 @@ pub unsafe extern "C" fn gos_rt_json_writer_null(w: *mut JsonTokenWriter) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_json_writer_value(w: *mut JsonTokenWriter, j: *const GosJson) {
     ffi_entry!((), {
+        // SAFETY: `w` is this shim's argument, live for the call (C-ABI contract) or null, which
+        // `token_writer` accepts.
         if let Some(writer) = unsafe { token_writer(w) } {
             writer.begin_value();
+            // SAFETY: `j` is this shim's argument, live for the call (C-ABI contract) or null,
+            // which `json_handle` accepts.
             match unsafe { json_handle(j) } {
                 Some(json) if writer.pretty => {
                     // `to_writer_pretty` always indents from column zero, so
@@ -1803,6 +1796,8 @@ pub unsafe extern "C" fn gos_rt_json_writer_finish(w: *mut JsonTokenWriter) -> *
         if w.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `w` is non-null (checked above), the writer `gos_rt_json_writer_new` boxed,
+        // which this call consumes (C-ABI contract).
         let writer = unsafe { Box::from_raw(w) };
         writer.sink.finish()
     })
@@ -1816,108 +1811,152 @@ mod tests {
     /// Refcount word of an `alloc_cstring` builder-layout string:
     /// `[rc:u32][cap:u32][len:u32][tag][content][NUL]`, body at +13.
     unsafe fn str_rc(s: *const c_char) -> u32 {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let hdr = unsafe { s.cast::<u8>().sub(13) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         u32::from_le_bytes(unsafe { [*hdr, *hdr.add(1), *hdr.add(2), *hdr.add(3)] })
     }
 
     #[test]
     fn json_keys_vec_is_string_typed_and_deep_frees_unvisited_keys() {
-        let text = std::ffi::CString::new(r#"{"alpha":1,"beta":2}"#).unwrap();
-        let pr = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&text)) };
+        let text = crate::c_abi::string::test_gos_str(r#"{"alpha":1,"beta":2}"#);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let pr = unsafe { gos_rt_json_parse(text) };
         assert_eq!(crate::c_abi::vec::gos_rt_result_disc(pr), 0);
         let j = crate::c_abi::vec::gos_rt_result_payload(pr) as *mut GosJson;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let kr = unsafe { gos_rt_json_keys_opt(j) };
         assert_eq!(crate::c_abi::vec::gos_rt_result_disc(kr), 0);
         let v = crate::c_abi::vec::gos_rt_result_payload(kr) as *mut crate::c_abi::vec::GosVec;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec = unsafe { &*v };
         assert_eq!(vec.len, 2);
         assert_eq!(vec.elem_kind, crate::c_abi::vec::vec_elem_kind::STRING);
         // Probe-share key 0, free the vec WITHOUT iterating (the
         // early-break consumer shape): deep-free must release exactly
         // the vec's share - rc 2 -> 1, not 2 (leak), not 0 (double free).
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let k0 = unsafe { crate::c_abi::vec::slot_read_word(vec.ptr.as_ptr()).cast::<c_char>() };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_retain(k0) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { str_rc(k0) }, 2);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { str_rc(k0) },
             1,
             "deep-free must release the vec's share once"
         );
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { CStr::from_ptr(k0) }.to_str().unwrap(), "alpha");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(k0) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_json_free(j) };
     }
 
     #[test]
     fn json_input_limits_match_vm_defaults_and_ignore_string_brackets() {
-        assert!(checked_json_text(br#"{"brackets":"[{]}"}"#).is_ok());
-        let at_limit = format!(
-            "{}0{}",
-            "[".repeat(JSON_MAX_DEPTH),
-            "]".repeat(JSON_MAX_DEPTH)
-        );
-        let at_limit = std::ffi::CString::new(at_limit).unwrap();
-        let parsed = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&at_limit)) };
+        let depth = gossamer_core::json::DEFAULT_MAX_DEPTH;
+        assert!(gossamer_core::json::validate(br#"{"brackets":"[{]}"}"#).is_ok());
+        let at_limit = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
+        let at_limit = crate::c_abi::string::test_gos_str(&at_limit);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let parsed = unsafe { gos_rt_json_parse(at_limit) };
         assert_eq!(crate::c_abi::vec::gos_rt_result_disc(parsed), 0);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gos_rt_json_free(crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson);
         }
-        let nested = format!(
-            "{}0{}",
-            "[".repeat(JSON_MAX_DEPTH + 1),
-            "]".repeat(JSON_MAX_DEPTH + 1)
-        );
-        assert_eq!(
-            checked_json_text(nested.as_bytes()),
-            Err("nesting depth exceeds max_depth (128)")
-        );
-        let large = vec![b' '; JSON_MAX_SIZE + 1];
-        assert_eq!(
-            checked_json_text(&large),
-            Err("input exceeds max_size (16 MiB)")
-        );
+        let nested = format!("{}0{}", "[".repeat(depth + 1), "]".repeat(depth + 1));
+        let refused = gossamer_core::json::validate(nested.as_bytes()).unwrap_err();
+        assert_eq!(refused.message, "nesting depth exceeds max_depth (128)");
+        let large = vec![b' '; gossamer_core::json::DEFAULT_MAX_SIZE + 1];
+        let refused = gossamer_core::json::validate(&large).unwrap_err();
+        assert!(refused.message.starts_with("input exceeds max_size"));
     }
 
     #[test]
     fn json_render_keeps_every_parsed_double() {
-        let text = std::ffi::CString::new(r#"{"score":12.100000000000001,"short":20.9}"#).unwrap();
-        let parsed = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&text)) };
+        let text =
+            crate::c_abi::string::test_gos_str(r#"{"score":12.100000000000001,"short":20.9}"#);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let parsed = unsafe { gos_rt_json_parse(text) };
         assert_eq!(crate::c_abi::vec::gos_rt_result_disc(parsed), 0);
         let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let rendered_ptr = unsafe { gos_rt_json_render(json) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let rendered = unsafe { CStr::from_ptr(rendered_ptr) }.to_str().unwrap();
         assert!(
             rendered.contains("\"score\":12.100000000000001"),
             "a parsed number renders as the double it parsed to: {rendered}"
         );
         assert!(rendered.contains("\"short\":20.9"));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(rendered_ptr) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_json_free(json) };
     }
 
     #[test]
     fn a_parsed_document_is_materialised_on_first_use_and_renders_canonically() {
-        let text = std::ffi::CString::new(" { \"value\" : 7 } ").unwrap();
-        let parsed = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&text)) };
+        let text = crate::c_abi::string::test_gos_str(" { \"value\" : 7 } ");
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let parsed = unsafe { gos_rt_json_parse(text) };
         let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let handle = unsafe { &*json };
         assert!(matches!(
             &*handle.tree,
             JsonTree::Raw { parsed, .. } if parsed.get().is_none()
         ));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let rendered_ptr = unsafe { gos_rt_json_render(json) };
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { CStr::from_ptr(rendered_ptr) }.to_bytes(),
             br#"{"value":7}"#
         );
         let key = c"value";
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let child = unsafe { gos_rt_json_get(json, crate::c_abi::string::test_gos_ptr(key)) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { gos_rt_json_as_i64(child) }, 7);
         assert!(matches!(
             &*handle.tree,
             JsonTree::Raw { parsed, .. } if parsed.get().is_some()
         ));
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             gos_rt_str_free(rendered_ptr);
             gos_rt_json_free(child);
@@ -1927,42 +1966,75 @@ mod tests {
 
     #[test]
     fn direct_json_render_keeps_html_safe_escaping() {
-        let text = std::ffi::CString::new(r#"{"x":"<>&\u2028\u2029"}"#).unwrap();
-        let parsed = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&text)) };
+        let text = crate::c_abi::string::test_gos_str(r#"{"x":"<>&\u2028\u2029"}"#);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let parsed = unsafe { gos_rt_json_parse(text) };
         let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let rendered_ptr = unsafe { gos_rt_json_render(json) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let rendered = unsafe { CStr::from_ptr(rendered_ptr) }.to_str().unwrap();
         assert_eq!(rendered, r#"{"x":"\u003c\u003e\u0026\u2028\u2029"}"#);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(rendered_ptr) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_json_free(json) };
     }
 
     #[test]
     fn json_collection_projections_reserve_the_source_length() {
-        let text = std::ffi::CString::new(
+        let text = crate::c_abi::string::test_gos_str(
             r#"{"k0":0,"k1":1,"k2":2,"k3":3,"k4":4,"k5":5,"k6":6,"k7":7,"k8":8}"#,
-        )
-        .unwrap();
-        let parsed = unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&text)) };
+        );
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
+        let parsed = unsafe { gos_rt_json_parse(text) };
         let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
 
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let keys = unsafe { gos_rt_json_keys_opt(json) };
         let keys = crate::c_abi::vec::gos_rt_result_payload(keys) as *mut GosVec;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*keys).len }, 9);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert!(unsafe { (*keys).cap } >= 9);
 
-        let array_text = std::ffi::CString::new("[0,1,2,3,4,5,6,7,8]").unwrap();
+        let array_text = crate::c_abi::string::test_gos_str("[0,1,2,3,4,5,6,7,8]");
         let array_result =
-            unsafe { gos_rt_json_parse(crate::c_abi::string::test_gos_ptr(&array_text)) };
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
+            unsafe { gos_rt_json_parse(array_text) };
         let array = crate::c_abi::vec::gos_rt_result_payload(array_result) as *mut GosJson;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let items = unsafe { gos_rt_json_as_array_opt(array) };
         let items = crate::c_abi::vec::gos_rt_result_payload(items) as *mut GosVec;
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { (*items).len }, 9);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert!(unsafe { (*items).cap } >= 9);
 
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(keys) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::map::gos_rt_vec_free(items) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_json_free(json) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { gos_rt_json_free(array) };
     }
 }

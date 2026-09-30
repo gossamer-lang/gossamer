@@ -47,12 +47,17 @@ float_cmp = "allow"
 unreadable_literal = "allow"
 format_push_string = "allow"
 collapsible_if = "allow"
+# Every `unsafe` block states why it holds, against the C-ABI contract the
+# `c_abi` module documents.
+undocumented_unsafe_blocks = "deny"
+unnecessary_safety_comment = "deny"
 
 # Pure-Rust dependencies that build for wasm32-unknown-unknown
 # unchanged. The wasm playground links only the bytecode VM, but these
 # crates compile cleanly there even when their consuming compiled-tier
 # shim is gated out, so they stay in the unconditional table.
 [dependencies]
+gossamer-core = { workspace = true }
 itoa = "1"
 zmij = "1"
 num-bigint = "0.4"
@@ -119,7 +124,7 @@ web-time = "1"
 
 # Native-only dependencies. These either link C (mimalloc, zstd,
 # bzip2, ring via rustls), require an OS RNG/signals/sockets/dynamic
-# loader (getrandom, uuid, signal-hook, mio, libloading), or drive the
+# (getrandom, uuid, signal-hook, mio), or drive the
 # native HTTP/QUIC stack (ureq, h2, tokio, gossamer-http3) - none of
 # which build for wasm32-unknown-unknown. The compiled-tier shims that
 # use them are gated out of the wasm VM build (see lib.rs / c_abi.rs);
@@ -163,7 +168,6 @@ p256 = { version = "0.13", default-features = false, features = ["ecdsa", "std",
 # the compiled tier gains no key-generation surface.
 ring = "0.17"
 signal-hook = { workspace = true }
-libloading = "0.8"
 crossbeam-deque = { workspace = true }
 mio = { workspace = true }
 # `listen(2)` with the system's full accept queue, which `std::net` does

@@ -1,0 +1,33 @@
+// Every tier accepts, rejects, and describes a JSON document with one
+// validator: the same message and position for each malformed document, and
+// the same reading of a number too large for an integer.
+
+use std::encoding::json
+
+fn main() {
+    let documents = #[
+        "{"
+        "[1,2"
+        "{\"a\": tru}"
+        "\"\\ud800\""
+        "\"\\udc00\""
+        "[1] 2"
+        "01"
+        "1."
+        "1e999"
+        "\"tab\there\""
+        "{\"k\" 1}"
+        "12345678901234567890123"
+        "18446744073709551615"
+        "-0"
+    ]
+    let mut all = documents
+    all.push("[".repeat(128) + "1" + "]".repeat(128))
+    all.push("[".repeat(129) + "1" + "]".repeat(129))
+    for text in all {
+        match json::parse(text) {
+            Ok(value) => println("ok {}", json::encode(value))
+            Err(e) => println("err {}", e)
+        }
+    }
+}

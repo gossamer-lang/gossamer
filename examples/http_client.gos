@@ -21,7 +21,7 @@ fn main() -> Result<(), errors::Error> {
         .get("http://127.0.0.1:8080/health")
         .send()
         .map_err(|e| errors::wrap(e, "GET /health"))?
-    println("/health: {} ({} bytes)", health.status, health.body.len())
+    println(f"/health: {health.status} ({health.body.len()} bytes)")
 
     // POST /echo - JSON body round-tripped in the response.
     let payload = "{\"hello\":\"world\"}"
@@ -31,6 +31,6 @@ fn main() -> Result<(), errors::Error> {
         .body(payload)
         .send()
         .map_err(|e| errors::wrap(e, "POST /echo"))?
-    println("/echo status={} body={}", echo.status, echo.body)
+    println(f"/echo status={echo.status} body={echo.body}")
     Ok(())
 }

@@ -61,6 +61,8 @@ pub mod manifest;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod publish;
 #[cfg(not(target_arch = "wasm32"))]
+pub mod registry_server;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod resolver;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod scaffold;
@@ -82,7 +84,7 @@ pub use edit::{add_registry, pin_to_resolved, remove, tidy};
 #[cfg(not(target_arch = "wasm32"))]
 pub use entry::{EntryError, enclosing_project_entry, resolve_project_entry};
 #[cfg(not(target_arch = "wasm32"))]
-pub use fetch::{DEFAULT_REGISTRY_URL, FetchOptions, Fetcher, vendor};
+pub use fetch::{FetchOptions, Fetcher, vendor};
 #[cfg(not(target_arch = "wasm32"))]
 pub use id::{ProjectId, ProjectIdError};
 #[cfg(not(target_arch = "wasm32"))]

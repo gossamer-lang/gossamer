@@ -37,6 +37,11 @@ pub enum TokenKind {
     /// A triple-quoted string literal `"""..."""`, whose body has the
     /// indentation it shares with its closing delimiter removed.
     TripleStringLit,
+    /// An interpolated string `f"..."`, whose `{expr}` / `{expr:spec}`
+    /// placeholders render the expressions they hold.
+    FStringLit,
+    /// An interpolated triple-quoted string `f"""..."""`.
+    FTripleStringLit,
     /// A raw string literal `r"..."` with `hashes` surrounding `#` characters.
     RawStringLit {
         /// Number of `#` characters flanking the raw string delimiters.

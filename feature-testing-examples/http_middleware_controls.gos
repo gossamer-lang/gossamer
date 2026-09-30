@@ -27,7 +27,7 @@ fn secret(_r: http::Request) -> Result<http::Response, errors::Error> {
 
 fn serve_capped() {
     let app = middleware::body_limit(echo, 16)
-    if let Err(e) = http::serve("127.0.0.1:23892", app) {
+    if let Err(e) = http::serve("127.0.0.1:23888", app) {
         eprintln("serve failed: {e}")
     }
 }
@@ -70,15 +70,15 @@ fn main() {
     spawn(|| serve_capped())
     spawn(|| serve_guarded())
     spawn(|| serve_limited())
-    await_ready("http://127.0.0.1:23892/x")
+    await_ready("http://127.0.0.1:23888/x")
     await_ready("http://127.0.0.1:23893/x")
     await_ready("http://127.0.0.1:23894/x")
 
-    match http::post("http://127.0.0.1:23892/x", "tiny", "text/plain") {
+    match http::post("http://127.0.0.1:23888/x", "tiny", "text/plain") {
         Ok(r) => println("under status={} body={}", r.status, r.body)
         Err(e) => println("under error: {}", e)
     }
-    match http::post("http://127.0.0.1:23892/x", strings::repeat("x", 64), "text/plain") {
+    match http::post("http://127.0.0.1:23888/x", strings::repeat("x", 64), "text/plain") {
         Ok(r) => println("over status={}", r.status)
         Err(e) => println("over error: {}", e)
     }

@@ -8,6 +8,7 @@
 mod comment;
 mod cursor;
 mod diagnostic;
+mod interpolation;
 mod lexer;
 mod number;
 mod punct;
@@ -18,6 +19,7 @@ mod symbol;
 mod token;
 
 pub use diagnostic::LexError;
+pub use interpolation::{InterpolationPiece, Placeholder, interpolation_pieces, scan_placeholder};
 pub use lexer::{Lexer, tokenize};
 pub use source_map::{OriginSpan, SourceMap};
 pub use span::{FileId, LineCol, Span};

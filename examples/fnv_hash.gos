@@ -18,7 +18,7 @@ fn fnv1a(bytes: [u8]) -> u64 {
 
 for s in ["", "a", "abc", "the quick brown fox", "the quick brown box"] {
     let h = fnv1a(s.as_bytes())
-    println("fnv1a({}) = {}", s, h)
+    println(f"fnv1a({s}) = {h}")
 }
 
 // Determinism: same input twice yields the same hash.

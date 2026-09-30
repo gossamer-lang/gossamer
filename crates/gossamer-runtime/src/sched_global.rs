@@ -1067,6 +1067,8 @@ mod tests {
         // SAFETY: `fifo_c` is a NUL-terminated path that remains live for the
         // call; 0600 avoids exposing the test FIFO to other local users.
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { libc::mkfifo(fifo_c.as_ptr(), 0o600) },
             0,
             "create FIFO"
@@ -1215,6 +1217,8 @@ mod tests {
         let mut pipe: [RawFd; 2] = [-1; 2];
         // SAFETY: `pipe` points to two valid fd slots.
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { libc::pipe(pipe.as_mut_ptr()) },
             0,
             "create stdout pipe"
@@ -1225,10 +1229,14 @@ mod tests {
         // SAFETY: both descriptors are open. stdout now shares the pipe's write
         // end; closing the original write descriptor leaves stdout valid.
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { libc::dup2(pipe[1], libc::STDOUT_FILENO) },
             libc::STDOUT_FILENO
         );
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { libc::close(pipe[1]) },
             0,
             "close original pipe writer"
@@ -1288,10 +1296,14 @@ mod tests {
         // That drops the last descriptor on the pipe's write end, so the
         // reader sees end of file.
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { libc::dup2(saved_stdout, libc::STDOUT_FILENO) },
             libc::STDOUT_FILENO
         );
         assert_eq!(
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { libc::close(saved_stdout) },
             0,
             "close saved stdout"

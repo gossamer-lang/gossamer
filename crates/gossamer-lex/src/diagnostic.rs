@@ -92,4 +92,27 @@ impl LexError {
             | Self::EmptyNumericLiteral { span } => span,
         }
     }
+
+    /// The same error with its span moved `offset` bytes later, for text
+    /// lexed out of a range of a larger source.
+    #[must_use]
+    pub const fn shifted(self, offset: u32) -> Self {
+        let mut shifted = self;
+        match &mut shifted {
+            Self::UnexpectedChar { span }
+            | Self::UnterminatedBlockComment { span }
+            | Self::UnterminatedString { span }
+            | Self::UnterminatedTripleString { span }
+            | Self::UnterminatedRawString { span }
+            | Self::UnterminatedChar { span }
+            | Self::BadCharLiteralLength { span }
+            | Self::BadEscape { span }
+            | Self::BadUnicodeEscape { span }
+            | Self::BadNumericDigit { span }
+            | Self::EmptyNumericLiteral { span } => {
+                *span = Span::new(span.file, span.start + offset, span.end + offset);
+            }
+        }
+        shifted
+    }
 }

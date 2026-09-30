@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -309,6 +307,8 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve(
         let addr_s = if addr.is_null() {
             "0.0.0.0:8080".to_string()
         } else {
+            // SAFETY: `addr` is this shim's argument, live for the call (C-ABI contract) or null,
+            // which `gos_str_arg_string` accepts.
             unsafe { crate::c_abi::gos_str_arg_string(addr) }
         };
         let listener = match crate::listen::bind_tcp(&addr_s) {
@@ -337,7 +337,9 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve(
             ) else {
                 return;
             };
-            handle_http_conn_from(&mut conn, env_addr, fn_addr, &peer);
+            // SAFETY: the caller keeps the handler environment live while the
+            // server runs, and `handler_fn` is its compiled method.
+            unsafe { handle_http_conn_from(&mut conn, env_addr, fn_addr, &peer) };
         });
     }
     // The accept loop exited: graceful shutdown request or a fatal
@@ -662,7 +664,12 @@ impl Drop for InFlightRequest<'_> {
 
 /// Serves one accepted connection under `limits`, on the goroutine
 /// [`accept_serve_with`] started for it.
-pub(crate) fn serve_one_connection(
+///
+/// # Safety
+///
+/// `env_addr` is a live handler environment and `fn_addr` the entry address of
+/// its compiled handler method.
+pub(crate) unsafe fn serve_one_connection(
     stream: TcpStream,
     peer: String,
     limits: &ServerLimits,
@@ -678,7 +685,8 @@ pub(crate) fn serve_one_connection(
     let Ok(mut conn) = GoroutineTcpConn::new(stream, read_ms, limits.write_timeout_ms) else {
         return;
     };
-    handle_http_conn_limited(&mut conn, env_addr, fn_addr, &peer, limits, Some(gate));
+    // SAFETY: this function's contract is the one the callee states.
+    unsafe { handle_http_conn_limited(&mut conn, env_addr, fn_addr, &peer, limits, Some(gate)) };
 }
 
 struct HttpWakeAddrGuard(SocketAddr);
@@ -757,16 +765,22 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve_tls(
         let addr_s = if addr.is_null() {
             "0.0.0.0:8443".to_string()
         } else {
+            // SAFETY: `addr` is this shim's argument, live for the call (C-ABI contract) or null,
+            // which `gos_str_arg_string` accepts.
             unsafe { crate::c_abi::gos_str_arg_string(addr) }
         };
         let cert = if cert_pem.is_null() {
             String::new()
         } else {
+            // SAFETY: `cert_pem` is this shim's argument, live for the call (C-ABI contract) or
+            // null, which `gos_str_arg_string` accepts.
             unsafe { crate::c_abi::gos_str_arg_string(cert_pem) }
         };
         let key = if key_pem.is_null() {
             String::new()
         } else {
+            // SAFETY: `key_pem` is this shim's argument, live for the call (C-ABI contract) or
+            // null, which `gos_str_arg_string` accepts.
             unsafe { crate::c_abi::gos_str_arg_string(key_pem) }
         };
         let server_config = match build_server_config_from_pem(cert.as_bytes(), key.as_bytes()) {
@@ -780,7 +794,9 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve_tls(
         let env_addr = handler_env as usize;
         let fn_addr = handler_fn as usize;
         accept_serve(listener, ConnHome::Goroutine, move |stream| {
-            serve_tls_conn(stream, env_addr, fn_addr, server_config.clone());
+            // SAFETY: the caller keeps the handler environment live while the
+            // server runs, and `handler_fn` is its compiled method.
+            unsafe { serve_tls_conn(stream, env_addr, fn_addr, server_config.clone()) };
         });
     }
     super::vec::pack_result(0, 0)
@@ -805,7 +821,12 @@ impl HttpIo for TlsServerConn {
 /// Wraps an accepted socket in a rustls server session and serves it
 /// through the shared request/response core. A handshake that never
 /// completes is dropped when the connection thread's read loop returns.
-fn serve_tls_conn(
+///
+/// # Safety
+///
+/// `env_addr` is a live handler environment and `fn_addr` the entry address of
+/// its compiled handler method.
+unsafe fn serve_tls_conn(
     stream: TcpStream,
     env_addr: usize,
     fn_addr: usize,
@@ -827,7 +848,8 @@ fn serve_tls_conn(
     let mut tls = TlsServerConn {
         inner: rustls::StreamOwned::new(conn, transport),
     };
-    handle_http_conn_from(&mut tls, env_addr, fn_addr, &peer);
+    // SAFETY: this function's contract is the one the callee states.
+    unsafe { handle_http_conn_from(&mut tls, env_addr, fn_addr, &peer) };
 }
 
 /// Builds a rustls `ServerConfig` from a PEM certificate chain and
@@ -873,6 +895,7 @@ pub unsafe extern "C" fn gos_rt_http2_bind_and_run_h2c(
     let addr_s = if addr.is_null() {
         "0.0.0.0:8080".to_string()
     } else {
+        // SAFETY: `addr` is a String argument from compiled code, null or a live string body for the whole call.
         unsafe { crate::c_abi::gos_str_arg_string(addr) }
     };
     let env_addr = handler_env as usize;
@@ -1074,26 +1097,49 @@ fn read_more<C: HttpIo>(conn: &mut C, accum: &mut Vec<u8>, buf: &mut [u8]) -> bo
     }
 }
 
+/// # Safety
+///
+/// `env_addr` is a live handler environment and `fn_addr` the entry address
+/// of its compiled handler method.
 #[cfg(test)]
-fn handle_http_conn<C: HttpIo>(conn: &mut C, env_addr: usize, fn_addr: usize) {
-    handle_http_conn_from(conn, env_addr, fn_addr, "");
+unsafe fn handle_http_conn<C: HttpIo>(conn: &mut C, env_addr: usize, fn_addr: usize) {
+    // SAFETY: this function's contract is the one the callee states.
+    unsafe { handle_http_conn_from(conn, env_addr, fn_addr, "") };
 }
 
 /// [`handle_http_conn_limited`] under the default server limits, with
 /// the peer address every request on this connection is stamped with.
-fn handle_http_conn_from<C: HttpIo>(conn: &mut C, env_addr: usize, fn_addr: usize, peer: &str) {
-    handle_http_conn_limited(
-        conn,
-        env_addr,
-        fn_addr,
-        peer,
-        &ServerLimits::default(),
-        None,
-    );
+///
+/// # Safety
+///
+/// `env_addr` is a live handler environment and `fn_addr` the entry address of
+/// its compiled handler method.
+unsafe fn handle_http_conn_from<C: HttpIo>(
+    conn: &mut C,
+    env_addr: usize,
+    fn_addr: usize,
+    peer: &str,
+) {
+    // SAFETY: this function's contract is the one the callee states.
+    unsafe {
+        handle_http_conn_limited(
+            conn,
+            env_addr,
+            fn_addr,
+            peer,
+            &ServerLimits::default(),
+            None,
+        );
+    }
 }
 
 /// [`handle_http_conn_from`] under one server's own limits.
-fn handle_http_conn_limited<C: HttpIo>(
+///
+/// # Safety
+///
+/// `env_addr` is a live handler environment and `fn_addr` the entry address of
+/// its compiled handler method.
+unsafe fn handle_http_conn_limited<C: HttpIo>(
     conn: &mut C,
     env_addr: usize,
     fn_addr: usize,
@@ -1285,6 +1331,9 @@ fn handle_http_conn_limited<C: HttpIo>(
             // client gets a 500 and the operator gets the record naming the
             // request, exactly as the bytecode VM reports it.
             let result_ptr =
+                // SAFETY: `handler` is the compiled handler at `fn_addr`, whose environment
+                // `env_addr` is live (this `unsafe fn`'s contract), and `req_ptr` is this
+                // connection's own request.
                 match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
                     handler(env_ptr, req_ptr)
                 })) {
@@ -1293,7 +1342,7 @@ fn handle_http_conn_limited<C: HttpIo>(
                         report_request_panic(&payload, &scratch.request);
                         end_request_context(&mut scratch.request, &watch_ctx);
                         scratch.response_buf.extend_from_slice(RESPONSE_500_BYTES);
-                        unsafe { gos_rt_gc_reset() };
+                        gos_rt_gc_reset();
                         if conn.write_all(&scratch.response_buf).is_err() {
                             return;
                         }
@@ -1302,14 +1351,18 @@ fn handle_http_conn_limited<C: HttpIo>(
                         continue;
                     }
                 };
-            if let Some(handle) = streamed_ok_handle(result_ptr) {
+            // SAFETY: the compiled handler answered `result_ptr`, a `Result<http::Response, _>` carrier.
+            if let Some(handle) = unsafe { streamed_ok_handle(result_ptr) } {
                 end_request_context(&mut scratch.request, &watch_ctx);
                 // Streamed response (`Response::stream`): write the
                 // head, then drain the upstream reader straight to
                 // the connection in chunked frames - no buffering.
-                extract_stream_head_into(result_ptr, &mut scratch.response_buf);
+                // SAFETY: the compiled handler answered `result_ptr`, a `Result<http::Response, _>` carrier.
+                unsafe { extract_stream_head_into(result_ptr, &mut scratch.response_buf) };
+                // SAFETY: the compiled handler answered `result_ptr`, whose `Ok` payload is a
+                // live response nothing reads after this.
                 unsafe { drop_handler_result(result_ptr) };
-                unsafe { gos_rt_gc_reset() };
+                gos_rt_gc_reset();
                 if conn.write_all(&scratch.response_buf).is_err() {
                     return;
                 }
@@ -1327,19 +1380,26 @@ fn handle_http_conn_limited<C: HttpIo>(
                 continue_sent = false;
                 continue;
             }
-            if !extract_response_into(
-                result_ptr,
-                &mut scratch.response_buf,
-                &mut keep_alive,
-                http_1_0,
-            ) {
-                report_request_error(result_ptr, &scratch.request);
+            // SAFETY: the compiled handler answered `result_ptr`, a `Result<http::Response, _>` carrier.
+            if !unsafe {
+                extract_response_into(
+                    result_ptr,
+                    &mut scratch.response_buf,
+                    &mut keep_alive,
+                    http_1_0,
+                )
+            } {
+                // SAFETY: the compiled handler answered `result_ptr`, a `Result<http::Response, _>`
+                // carrier whose `Err` payload is a live error.
+                unsafe { report_request_error(result_ptr, &scratch.request) };
                 scratch.response_buf.extend_from_slice(if keep_alive {
                     RESPONSE_500_BYTES
                 } else {
                     RESPONSE_500_CLOSE_BYTES
                 });
             }
+            // SAFETY: the compiled handler answered `result_ptr`, whose `Ok` payload is null or a
+            // live response nothing reads after this.
             unsafe { drop_handler_result(result_ptr) };
             end_request_context(&mut scratch.request, &watch_ctx);
 
@@ -1347,7 +1407,7 @@ fn handle_http_conn_limited<C: HttpIo>(
             // cleanup and deliberately remains live until the response has
             // been written, so a suspended handler can never have its live
             // region reset by a later request on this connection.
-            unsafe { gos_rt_gc_reset() };
+            gos_rt_gc_reset();
         }
         if conn.write_all(&scratch.response_buf).is_err() {
             return;
@@ -1367,13 +1427,18 @@ fn handle_http_conn_limited<C: HttpIo>(
 /// not a response, in the `slog` record shape every tier's server path
 /// uses. The error's own message reaches the operator; the client still
 /// gets the bare 500 that leaks nothing about the fault.
-fn report_request_error(result: i128, req: &GosHttpRequest) {
+///
+/// # Safety
+/// `result` is a handler's `Result` carrier, whose `Err` payload is a live
+/// error.
+unsafe fn report_request_error(result: i128, req: &GosHttpRequest) {
     let message = if crate::c_abi::vec::gos_rt_result_disc(result) == 0 {
         "handler did not return http::Response".to_string()
     } else {
         let err = crate::c_abi::vec::gos_rt_result_payload(result)
             as *const crate::c_abi::errors::GosError;
-        crate::c_abi::errors::error_chain_text(err)
+        // SAFETY: an `Err` payload is a live error (this `unsafe fn`'s contract).
+        unsafe { crate::c_abi::errors::error_chain_text(err) }
     };
     crate::c_abi::slog::emit_json_line(
         "ERROR",
@@ -1820,9 +1885,16 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 /// `gos_rt_str_free`, then `Box::from_raw` drops the struct,
 /// structurally freeing `headers`, `body_bytes`, and
 /// `content_type`. A null pointer or an `Err` result is a no-op.
+///
+/// # Safety
+///
+/// The `Ok` payload of `result` is null or a live `http::Response` handle this
+/// call reclaims.
 pub(crate) unsafe fn drop_handler_result(result: i128) {
     if super::vec::gos_rt_result_disc(result) == 0 {
         let response_ptr = super::vec::gos_rt_result_payload(result) as *mut GosHttpResponse;
+        // SAFETY: `response_ptr` is the `Ok` payload, null or a live response this call reclaims
+        // (this `unsafe fn`'s contract).
         unsafe { crate::c_abi::http_client::gos_rt_http_response_free(response_ptr) };
     }
     // Result is now a 2-word by-value `i128` (no heap box), so there is
@@ -2228,7 +2300,10 @@ pub(crate) fn request_is_http_1_0(request_line: &[u8]) -> bool {
         .any(|w| w.eq_ignore_ascii_case(b"HTTP/1.0"))
 }
 
-pub(crate) fn extract_response_into(
+/// # Safety
+///
+/// The `Ok` payload of `result` is null or a live `http::Response` handle.
+pub(crate) unsafe fn extract_response_into(
     result: i128,
     out: &mut Vec<u8>,
     keep_alive: &mut bool,
@@ -2241,6 +2316,8 @@ pub(crate) fn extract_response_into(
     if response_ptr.is_null() {
         return false;
     }
+    // SAFETY: `response_ptr` is non-null (checked above), a live response per this `unsafe fn`'s
+    // contract.
     let response = unsafe { &*response_ptr };
     // Streamed responses are handled by the h1 server's chunked
     // drain before this function is reached. Callers that buffer
@@ -2259,6 +2336,7 @@ pub(crate) fn extract_response_into(
     let body_bytes: &[u8] = match &response.body_bytes {
         Some(bytes) => bytes.as_slice(),
         None if response.body.is_null() => b"",
+        // SAFETY: a live response's non-null `body` is the string it owns.
         None => unsafe { crate::c_abi::gos_str_arg_bytes(response.body.as_ptr()) },
     };
     out.extend_from_slice(b"HTTP/1.1 ");
@@ -2362,7 +2440,11 @@ pub(crate) type StructuredResponse = (u16, Vec<(String, String)>, Vec<u8>);
 /// defaulted identically so the body the handler returned is served
 /// byte-for-byte across tiers. Returns `None` when `result` is an
 /// `Err` or carries a null response.
-pub(crate) fn extract_response_struct(result: i128) -> Option<StructuredResponse> {
+///
+/// # Safety
+///
+/// The `Ok` payload of `result` is null or a live `http::Response` handle.
+pub(crate) unsafe fn extract_response_struct(result: i128) -> Option<StructuredResponse> {
     if super::vec::gos_rt_result_disc(result) != 0 {
         return None;
     }
@@ -2370,6 +2452,8 @@ pub(crate) fn extract_response_struct(result: i128) -> Option<StructuredResponse
     if response_ptr.is_null() {
         return None;
     }
+    // SAFETY: `response_ptr` is non-null (checked above), a live response per this `unsafe fn`'s
+    // contract.
     let response = unsafe { &*response_ptr };
     // A streamed response cannot be framed by the buffered h3 path;
     // release the pending reader so the upstream connection closes
@@ -2383,6 +2467,7 @@ pub(crate) fn extract_response_struct(result: i128) -> Option<StructuredResponse
     let body: Vec<u8> = match &response.body_bytes {
         Some(bytes) => bytes.clone(),
         None if response.body.is_null() => Vec::new(),
+        // SAFETY: a live response's non-null `body` is the string it owns.
         None => unsafe { crate::c_abi::gos_str_arg_bytes(response.body.as_ptr()) }.to_vec(),
     };
     let mut headers: Vec<(String, String)> = Vec::with_capacity(response.headers.len() + 1);
@@ -2410,7 +2495,11 @@ pub(crate) fn extract_response_struct(result: i128) -> Option<StructuredResponse
 /// Returns the stream-registry handle when `result` is an Ok
 /// response built by `gos_rt_http_response_stream_new`
 /// (`stream_handle >= 0`); `None` for buffered responses and errors.
-fn streamed_ok_handle(result: i128) -> Option<i64> {
+///
+/// # Safety
+///
+/// The `Ok` payload of `result` is null or a live `http::Response` handle.
+unsafe fn streamed_ok_handle(result: i128) -> Option<i64> {
     if super::vec::gos_rt_result_disc(result) != 0 {
         return None;
     }
@@ -2418,6 +2507,8 @@ fn streamed_ok_handle(result: i128) -> Option<i64> {
     if response_ptr.is_null() {
         return None;
     }
+    // SAFETY: `response_ptr` is non-null (checked above), a live response per this `unsafe fn`'s
+    // contract.
     let handle = unsafe { (*response_ptr).stream_handle };
     (handle >= 0).then_some(handle)
 }
@@ -2428,9 +2519,16 @@ fn streamed_ok_handle(result: i128) -> Option<i64> {
 /// `extract_response_into`; any handler-set `Content-Length` or
 /// `Transfer-Encoding` is dropped - chunked framing is unconditional
 /// and RFC 7230 §3.3.3 forbids carrying both.
-fn extract_stream_head_into(result: i128, out: &mut Vec<u8>) {
+///
+/// # Safety
+///
+/// The `Ok` payload of `result` is null or a live `http::Response` handle.
+unsafe fn extract_stream_head_into(result: i128, out: &mut Vec<u8>) {
     let response_ptr = super::vec::gos_rt_result_payload(result) as *const GosHttpResponse;
-    let response = unsafe { &*response_ptr };
+    // SAFETY: the `Ok` payload is null or a live response (this `unsafe fn`'s contract).
+    let Some(response) = (unsafe { response_ptr.as_ref() }) else {
+        return;
+    };
     out.extend_from_slice(b"HTTP/1.1 ");
     let mut buf = itoa::Buffer::new();
     out.extend_from_slice(buf.format(response.status).as_bytes());
@@ -2583,6 +2681,8 @@ mod tests {
         let ptr = crate::c_abi::gc::gos_rt_gc_alloc(64);
         assert!(ptr.is_null() || crate::c_abi::rc::in_region_arena(ptr));
         let response =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
         super::super::vec::pack_result(0, response as i64)
     }
@@ -2591,6 +2691,8 @@ mod tests {
         env: *mut u8,
         _req: *mut GosHttpRequest,
     ) -> i128 {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resumed = unsafe { &*(env.cast::<std::sync::atomic::AtomicUsize>()) };
         crate::c_abi::rc::gos_rt_arena_push();
         let ptr = crate::c_abi::gc::gos_rt_gc_alloc(64);
@@ -2606,6 +2708,8 @@ mod tests {
             Ordering::Release,
         );
         let response =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
         super::super::vec::pack_result(0, response as i64)
     }
@@ -2616,11 +2720,15 @@ mod tests {
         let mut conn = DisconnectingConn {
             input: std::io::Cursor::new(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()),
         };
-        handle_http_conn(
-            &mut conn,
-            0,
-            (unbalanced_arena_handler as HandlerFn) as usize,
-        );
+        // SAFETY: the handler is a Rust fn of the handler signature and
+        // reads no environment.
+        unsafe {
+            handle_http_conn(
+                &mut conn,
+                0,
+                (unbalanced_arena_handler as HandlerFn) as usize,
+            );
+        }
         assert!(
             !crate::c_abi::rc::region_is_active(),
             "connection shutdown must release a handler-owned arena"
@@ -2643,11 +2751,15 @@ mod tests {
                     input: std::io::Cursor::new(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()),
                     written: Vec::new(),
                 };
-                handle_http_conn(
-                    &mut conn,
-                    env,
-                    (suspended_arena_handler as HandlerFn) as usize,
-                );
+                // SAFETY: the handler is a Rust fn of the handler signature,
+                // and `env` is the live environment made for it above.
+                unsafe {
+                    handle_http_conn(
+                        &mut conn,
+                        env,
+                        (suspended_arena_handler as HandlerFn) as usize,
+                    );
+                }
                 done_tx.send(()).expect("test receiver remains live");
             }))
             .is_some()
@@ -2674,7 +2786,9 @@ mod tests {
             input: std::io::Cursor::new(raw),
             written: Vec::new(),
         };
-        handle_http_conn(&mut conn, 0, 0);
+        // SAFETY: the oversized header is refused before dispatch, so no
+        // handler is reached.
+        unsafe { handle_http_conn(&mut conn, 0, 0) };
         let resp = String::from_utf8_lossy(&conn.written);
         assert!(
             resp.starts_with("HTTP/1.1 431"),
@@ -2684,7 +2798,10 @@ mod tests {
 
     fn rendered(result: i128) -> String {
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true, false));
+        // SAFETY: every caller passes a carrier around a live response.
+        assert!(unsafe { extract_response_into(result, &mut out, &mut true, false) });
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { drop_handler_result(result) };
         String::from_utf8_lossy(&out).to_ascii_lowercase()
     }
@@ -2692,6 +2809,8 @@ mod tests {
     #[test]
     fn text_response_renders_text_plain_content_type() {
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
         let result = super::super::vec::pack_result(0, resp as i64);
         let bytes = rendered(result);
@@ -2708,11 +2827,18 @@ mod tests {
         // serve `body_bytes` in full instead of the c-string mirror
         // (which stops at the first NUL).
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("A")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { (*resp).body_bytes = Some(vec![0x41, 0x00, 0x42, 0x00, 0x43]) };
         let result = super::super::vec::pack_result(0, resp as i64);
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true, false));
+        // SAFETY: `result` carries the live response built above.
+        assert!(unsafe { extract_response_into(result, &mut out, &mut true, false) });
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { drop_handler_result(result) };
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(
@@ -2730,7 +2856,11 @@ mod tests {
         // Wire casing is canonical-lowercase on every tier; a
         // handler-supplied mixed-case name must normalize.
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             (*resp)
                 .headers
@@ -2738,7 +2868,10 @@ mod tests {
         }
         let result = super::super::vec::pack_result(0, resp as i64);
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true, false));
+        // SAFETY: `result` carries the live response built above.
+        assert!(unsafe { extract_response_into(result, &mut out, &mut true, false) });
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { drop_handler_result(result) };
         let text = String::from_utf8_lossy(&out).into_owned();
         assert!(
@@ -2754,6 +2887,8 @@ mod tests {
     #[test]
     fn json_response_renders_application_json_content_type() {
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_json_new(200, crate::c_abi::string::test_gos_str("{}")) };
         let result = super::super::vec::pack_result(0, resp as i64);
         let bytes = rendered(result);
@@ -2765,9 +2900,13 @@ mod tests {
 
     #[test]
     fn explicit_content_type_header_wins_over_constructor_default() {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp = unsafe {
             gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("<p>hi</p>"))
         };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             (*resp)
                 .headers
@@ -2788,7 +2927,11 @@ mod tests {
     #[test]
     fn empty_content_type_falls_back_to_text_plain() {
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { (*resp).content_type = std::borrow::Cow::Borrowed("") };
         let result = super::super::vec::pack_result(0, resp as i64);
         let bytes = rendered(result);
@@ -2845,19 +2988,33 @@ mod tests {
         assert_eq!(request.method, "POST");
         assert_eq!(request.url, "/upload");
 
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let v = unsafe { gos_rt_http_request_raw_body(std::ptr::from_ref(&request)) };
         assert!(!v.is_null());
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let vec_ref = unsafe { &*v };
         assert_eq!(vec_ref.len, 4);
         assert_eq!(vec_ref.elem_bytes, 1);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let got = unsafe { std::slice::from_raw_parts(vec_ref.ptr.as_ptr(), 4) };
         assert_eq!(got, &[0x68, 0xFF, 0x00, 0x69]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { super::super::map::gos_rt_vec_free(v) };
 
         // The lossy `body` accessor resolves the same region: its
         // c-string keeps the bytes up to the embedded NUL.
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let s = unsafe { gos_rt_http_request_body_str(std::ptr::from_ref(&request)) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         assert_eq!(unsafe { CStr::from_ptr(s) }.to_bytes(), &[0x68, 0xFF]);
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { crate::c_abi::string::gos_rt_str_free(s) };
     }
 
@@ -2926,6 +3083,8 @@ mod tests {
         let handle = super::http_client::stream_registry_register(reader);
         let blob = [handle, 200i64, 0i64];
         let ct = std::ffi::CString::new("application/octet-stream").unwrap();
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp = unsafe {
             gos_rt_http_response_stream_new(
                 201,
@@ -2934,10 +3093,14 @@ mod tests {
             )
         };
         let result = super::super::vec::pack_result(0, resp as i64);
-        assert_eq!(streamed_ok_handle(result), Some(handle));
+        // SAFETY: `result` carries the live response built above.
+        assert_eq!(unsafe { streamed_ok_handle(result) }, Some(handle));
 
         let mut head = Vec::new();
-        extract_stream_head_into(result, &mut head);
+        // SAFETY: `result` carries the live response built above.
+        unsafe { extract_stream_head_into(result, &mut head) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { drop_handler_result(result) };
         let head_text = String::from_utf8_lossy(&head).to_ascii_lowercase();
         assert!(head_text.starts_with("http/1.1 201"), "head: {head_text}");
@@ -3244,6 +3407,8 @@ mod tests {
     /// length, the body text, and the `X-Trailer` header value so
     /// assertions can see exactly what the handler observed.
     unsafe extern "C-unwind" fn echo_handler(_env: *mut u8, req: *mut GosHttpRequest) -> i128 {
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let request = unsafe { &*req };
         let body = &request.body[request.body_offset.min(request.body.len())..];
         let trailer = request
@@ -3259,6 +3424,8 @@ mod tests {
         );
         let c = std::ffi::CString::new(text).unwrap();
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_ptr(&c)) };
         super::super::vec::pack_result(0, resp as i64)
     }
@@ -3326,7 +3493,9 @@ mod tests {
     fn roundtrip_raw_bytes(client_bytes: &[u8], fn_addr: usize) -> Vec<u8> {
         let _faults = crate::c_abi::panic::IsolatedFaults::enter();
         let mut conn = MemoryConn::new(client_bytes);
-        handle_http_conn(&mut conn, 0, fn_addr);
+        // SAFETY: every caller passes a Rust fn of the handler signature
+        // that reads no environment.
+        unsafe { handle_http_conn(&mut conn, 0, fn_addr) };
         conn.written
     }
 
@@ -3360,7 +3529,9 @@ mod tests {
         assert!(
             crate::sched_global::try_spawn(Box::new(move || {
                 let mut conn = HttpConn::wrap(stream).expect("wrap non-blocking socket");
-                handle_http_conn(&mut conn, 0, fn_addr);
+                // SAFETY: `echo_handler` is a Rust fn of the handler signature
+                // that reads no environment.
+                unsafe { handle_http_conn(&mut conn, 0, fn_addr) };
                 done_tx.send(()).unwrap();
             }))
             .is_some()
@@ -3504,7 +3675,11 @@ mod tests {
     #[test]
     fn handler_header_names_write_lowercase_on_the_wire() {
         let resp =
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             super::http_client::gos_rt_http_response_set_header(
                 resp,
@@ -3514,7 +3689,10 @@ mod tests {
         }
         let result = super::super::vec::pack_result(0, resp as i64);
         let mut out = Vec::new();
-        assert!(extract_response_into(result, &mut out, &mut true, false));
+        // SAFETY: `result` carries the live response built above.
+        assert!(unsafe { extract_response_into(result, &mut out, &mut true, false) });
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { drop_handler_result(result) };
         // Raw bytes - no case folding before the assertions.
         let text = String::from_utf8_lossy(&out).into_owned();
@@ -3531,13 +3709,18 @@ mod tests {
     #[test]
     fn a_response_announces_only_what_the_request_version_does_not_imply() {
         let head_for = |keep_alive: bool, http_1_0: bool| {
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             let resp = unsafe {
                 gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok"))
             };
             let result = super::super::vec::pack_result(0, resp as i64);
             let mut out = Vec::new();
             let mut keep = keep_alive;
-            assert!(extract_response_into(result, &mut out, &mut keep, http_1_0));
+            // SAFETY: `result` carries the live response built above.
+            assert!(unsafe { extract_response_into(result, &mut out, &mut keep, http_1_0) });
+            // SAFETY: every pointer argument is a value this test built above and still holds
+            // live; a null one is accepted by the callee.
             unsafe { drop_handler_result(result) };
             String::from_utf8_lossy(&out).into_owned()
         };
@@ -3555,6 +3738,8 @@ mod tests {
             as Box<dyn std::io::Read + Send + Sync>);
         let handle = super::http_client::stream_registry_register(reader);
         let blob = [handle, 200i64, 0i64];
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         let resp = unsafe {
             gos_rt_http_response_stream_new(
                 200,
@@ -3562,6 +3747,8 @@ mod tests {
                 blob.as_ptr(),
             )
         };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe {
             super::http_client::gos_rt_http_response_set_header(
                 resp,
@@ -3571,7 +3758,10 @@ mod tests {
         }
         let result = super::super::vec::pack_result(0, resp as i64);
         let mut head = Vec::new();
-        extract_stream_head_into(result, &mut head);
+        // SAFETY: `result` carries the live response built above.
+        unsafe { extract_stream_head_into(result, &mut head) };
+        // SAFETY: every pointer argument is a value this test built above and still holds live; a
+        // null one is accepted by the callee.
         unsafe { drop_handler_result(result) };
         drop(super::http_client::stream_take_for_serve(handle));
         let text = String::from_utf8_lossy(&head).into_owned();

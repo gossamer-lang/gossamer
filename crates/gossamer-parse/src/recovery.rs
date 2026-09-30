@@ -91,6 +91,15 @@ pub(crate) fn is_item_start(parser: &Parser<'_>) -> bool {
     let token = parser.peek();
     match token.kind {
         TokenKind::Punct(Punct::Hash) => hash_prefixed_item_start(parser),
+        TokenKind::Keyword(Keyword::Async) => {
+            matches!(parser.peek_nth(1).kind, TokenKind::Keyword(Keyword::Fn))
+        }
+        // `unsafe { .. }` is a block expression; only an item after the word
+        // makes it an item start.
+        TokenKind::Keyword(Keyword::Unsafe) => matches!(
+            parser.peek_nth(1).kind,
+            TokenKind::Keyword(Keyword::Fn | Keyword::Extern | Keyword::Impl | Keyword::Trait)
+        ),
         TokenKind::Keyword(keyword) => matches!(
             keyword,
             Keyword::Pub
@@ -104,7 +113,6 @@ pub(crate) fn is_item_start(parser: &Parser<'_>) -> bool {
                 | Keyword::Static
                 | Keyword::Mod
                 | Keyword::Use
-                | Keyword::Unsafe
                 | Keyword::Extern
         ),
         // Contextual item words: only what follows makes each an item.
@@ -112,6 +120,16 @@ pub(crate) fn is_item_start(parser: &Parser<'_>) -> bool {
         // name on its own, so a function declaration has to follow.
         TokenKind::Ident => match parser.slice(token.span) {
             "newtype" => matches!(parser.peek_nth(1).kind, TokenKind::Ident),
+            // Declined item forms, which the item parser reports.
+            "union" | "class" => {
+                matches!(parser.peek_nth(1).kind, TokenKind::Ident)
+                    && matches!(
+                        parser.peek_nth(2).kind,
+                        TokenKind::Punct(Punct::LBrace | Punct::Lt)
+                    )
+            }
+            "gen" => matches!(parser.peek_nth(1).kind, TokenKind::Keyword(Keyword::Fn)),
+            "macro_rules" => matches!(parser.peek_nth(1).kind, TokenKind::Punct(Punct::Bang)),
             "packed" => matches!(parser.peek_nth(1).kind, TokenKind::Keyword(Keyword::Enum)),
             "comptime" => matches!(
                 parser.peek_nth(1).kind,

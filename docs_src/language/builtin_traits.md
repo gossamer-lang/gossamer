@@ -60,10 +60,12 @@ Declared by `std::fmt`.
 
 How a value renders through `{}`. Every type renders without one; an `impl` replaces that rendering everywhere the value is shown, including inside a `Vec`, `Map`, tuple, `Option`, or struct field, and `x.to_string()` reaches it.
 
+<!-- fragment -->
 ```gossamer
 impl Display for Type { fn fmt(&self) -> String }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Display for Point { fn fmt(&self) -> String { format("({}, {})", self.x, self.y) } }
 ```
@@ -76,10 +78,12 @@ Declared by `std::fmt`.
 
 How a value renders through `{:?}`. Independent of `Display`: a type that implements one keeps the synthesized rendering on the other channel.
 
+<!-- fragment -->
 ```gossamer
 impl Debug for Type { fn fmt(&self) -> String }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Debug for Point { fn fmt(&self) -> String { format("Point[{}]", self.x) } }
 ```
@@ -90,10 +94,12 @@ A bound naming `Debug` licenses `fmt`, `to_string` on a type parameter.
 
 What `==` and `!=` answer. Structs, enums, tuples, and sequences compare field by field with no `impl`; one written here replaces that comparison.
 
+<!-- fragment -->
 ```gossamer
 impl PartialEq for Type { fn eq(&self, other: Self) -> bool }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl PartialEq for Point { fn eq(&self, other: Point) -> bool { self.x == other.x } }
 ```
@@ -104,10 +110,12 @@ A bound naming `PartialEq` licenses `eq`, `ne` on a type parameter.
 
 The `PartialEq` contract under its total-equality spelling; both names reach the same `eq`. Usable as a bound where a key or an element has to compare.
 
+<!-- fragment -->
 ```gossamer
 impl Eq for Type { fn eq(&self, other: Self) -> bool }
 ```
 
+<!-- fragment -->
 ```gossamer
 fn first_of<T: Eq>(xs: Vec<T>, needle: T) -> Option<i64> { xs.position(|v| v == needle) }
 ```
@@ -118,10 +126,12 @@ A bound naming `Eq` licenses `eq`, `ne` on a type parameter.
 
 What `<`, `<=`, `>`, and `>=` answer: negative when the receiver orders first, zero when the two tie, positive otherwise. Values compare lexicographically by declaration order with no `impl`.
 
+<!-- fragment -->
 ```gossamer
 impl PartialOrd for Type { fn cmp(&self, other: Self) -> i64 }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl PartialOrd for Point { fn cmp(&self, other: Point) -> i64 { self.x - other.x } }
 ```
@@ -132,10 +142,12 @@ A bound naming `PartialOrd` licenses `cmp`, `partial_cmp` on a type parameter.
 
 The `PartialOrd` contract under its total-order spelling; both names reach the same `cmp`, and a sequence's `sort`, `min`, `max`, and sorted-sequence searches all read it, and a `BTreeSet` or `BTreeMap` seats its entries by it. A heap orders as it stores, with no comparator to call, so it declines such an element (GT0085).
 
+<!-- fragment -->
 ```gossamer
 impl Ord for Type { fn cmp(&self, other: Self) -> i64 }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Ord for Point { fn cmp(&self, other: Point) -> i64 { self.x - other.x } }
 ```
@@ -146,10 +158,12 @@ A bound naming `Ord` licenses `cmp`, `partial_cmp` on a type parameter.
 
 What `x.clone()` answers. Every value already clones field by field; an `impl` replaces that copy for the type.
 
+<!-- fragment -->
 ```gossamer
 impl Clone for Type { fn clone(&self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Clone for Point { fn clone(&self) -> Point { Point { x: self.x, y: self.y } } }
 ```
@@ -160,10 +174,12 @@ A bound naming `Clone` licenses `clone` on a type parameter.
 
 The value `T::default()` answers. `#[derive(Default)]` synthesizes one from the fields' own defaults, with `#[default]` picking an enum's variant; an `impl` writes it directly.
 
+<!-- fragment -->
 ```gossamer
 impl Default for Type { fn default() -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Default for Point { fn default() -> Point { Point { x: 0, y: 0 } } }
 ```
@@ -174,10 +190,12 @@ A bound naming `Default` licenses `default` on a type parameter.
 
 Makes a type walkable: `for v in value` drives `next` until it answers `None`. Any type with that method works in a `for`, and a bound naming `Iterator` licenses the adapter surface.
 
+<!-- fragment -->
 ```gossamer
 impl Iterator for Type { fn next(&mut self) -> Option<T> }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Iterator for Countdown { fn next(&mut self) -> Option<i64> { if self.n == 0 { None } else { self.n -= 1; Some(self.n) } } }
 ```
@@ -188,10 +206,12 @@ A bound naming `Iterator` licenses `next`, `take`, `skip`, `step_by`, `enumerate
 
 How a value of another type becomes this one. `x.into()` reads the `From` impl on the type the use site expects, and `?` converts an error through it.
 
+<!-- fragment -->
 ```gossamer
 impl From for Type { fn from(value: T) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl From<i64> for Point { fn from(v: i64) -> Point { Point { x: v, y: 0 } } }
 ```
@@ -202,10 +222,12 @@ A bound naming `From` licenses `from` on a type parameter.
 
 The fallible conversion into this type. `x.try_into()` reads the `TryFrom` impl on the `Ok` payload the use site expects.
 
+<!-- fragment -->
 ```gossamer
 impl TryFrom for Type { fn try_from(value: T) -> Result<Self, E> }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl TryFrom<i64> for Even { fn try_from(v: i64) -> Result<Even, String> { if v % 2 == 0 { Ok(Even { v }) } else { Err("odd") } } }
 ```
@@ -220,10 +242,12 @@ The operator has no meaning for a user type until an `impl` supplies one. Each b
 
 What `a + b` answers for this type. Without an `impl` the operator is rejected: a struct carries no arithmetic of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Add for Type { fn add(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Add for Point { fn add(&self, other: Point) -> Point { Point { x: self.x + other.x, y: self.y + other.y } } }
 ```
@@ -234,10 +258,12 @@ A bound naming `Add` licenses `add` on a type parameter.
 
 What `a - b` answers for this type. Without an `impl` the operator is rejected: a struct carries no arithmetic of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Sub for Type { fn sub(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Sub for Point { fn sub(&self, other: Point) -> Point { Point { x: self.x - other.x, y: self.y - other.y } } }
 ```
@@ -248,10 +274,12 @@ A bound naming `Sub` licenses `sub` on a type parameter.
 
 What `a * b` answers for this type. Without an `impl` the operator is rejected: a struct carries no arithmetic of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Mul for Type { fn mul(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Mul for Point { fn mul(&self, other: Point) -> Point { Point { x: self.x * other.x, y: self.y * other.y } } }
 ```
@@ -262,10 +290,12 @@ A bound naming `Mul` licenses `mul` on a type parameter.
 
 What `a / b` answers for this type. Without an `impl` the operator is rejected: a struct carries no arithmetic of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Div for Type { fn div(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Div for Point { fn div(&self, other: Point) -> Point { Point { x: self.x / other.x, y: self.y / other.y } } }
 ```
@@ -276,10 +306,12 @@ A bound naming `Div` licenses `div` on a type parameter.
 
 What `a % b` answers for this type. Without an `impl` the operator is rejected: a struct carries no arithmetic of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Rem for Type { fn rem(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Rem for Point { fn rem(&self, other: Point) -> Point { Point { x: self.x % other.x, y: self.y % other.y } } }
 ```
@@ -290,10 +322,12 @@ A bound naming `Rem` licenses `rem` on a type parameter.
 
 What unary `-value` answers for this type. Without an `impl` the operator is rejected: a struct has no arithmetic of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Neg for Type { fn neg(&self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Neg for Point { fn neg(&self) -> Point { Point { x: -self.x, y: -self.y } } }
 ```
@@ -304,12 +338,14 @@ A bound naming `Neg` licenses `neg` on a type parameter.
 
 What unary `!value` answers for this type. Without an `impl` the operator is rejected: a struct has no negation of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Not for Type { fn not(&self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
-impl Not for Mask { fn not(&self) -> Mask { Mask { bits: !self.bits } } }
+impl Not for Flags { fn not(&self) -> Flags { Flags { bits: !self.bits } } }
 ```
 
 A bound naming `Not` licenses `not` on a type parameter.
@@ -318,12 +354,14 @@ A bound naming `Not` licenses `not` on a type parameter.
 
 What `a & b` answers for this type. Without an `impl` the operator is rejected: a struct carries no bitwise meaning of its own.
 
+<!-- fragment -->
 ```gossamer
 impl BitAnd for Type { fn bitand(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
-impl BitAnd for Mask { fn bitand(&self, other: Mask) -> Mask { Mask { bits: self.bits & other.bits } } }
+impl BitAnd for Flags { fn bitand(&self, other: Flags) -> Flags { Flags { bits: self.bits & other.bits } } }
 ```
 
 A bound naming `BitAnd` licenses `bitand` on a type parameter.
@@ -332,12 +370,14 @@ A bound naming `BitAnd` licenses `bitand` on a type parameter.
 
 What `a | b` answers for this type. Without an `impl` the operator is rejected: a struct carries no bitwise meaning of its own.
 
+<!-- fragment -->
 ```gossamer
 impl BitOr for Type { fn bitor(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
-impl BitOr for Mask { fn bitor(&self, other: Mask) -> Mask { Mask { bits: self.bits | other.bits } } }
+impl BitOr for Flags { fn bitor(&self, other: Flags) -> Flags { Flags { bits: self.bits | other.bits } } }
 ```
 
 A bound naming `BitOr` licenses `bitor` on a type parameter.
@@ -346,12 +386,14 @@ A bound naming `BitOr` licenses `bitor` on a type parameter.
 
 What `a ^ b` answers for this type. Without an `impl` the operator is rejected: a struct carries no bitwise meaning of its own.
 
+<!-- fragment -->
 ```gossamer
 impl BitXor for Type { fn bitxor(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
-impl BitXor for Mask { fn bitxor(&self, other: Mask) -> Mask { Mask { bits: self.bits ^ other.bits } } }
+impl BitXor for Flags { fn bitxor(&self, other: Flags) -> Flags { Flags { bits: self.bits ^ other.bits } } }
 ```
 
 A bound naming `BitXor` licenses `bitxor` on a type parameter.
@@ -360,12 +402,14 @@ A bound naming `BitXor` licenses `bitxor` on a type parameter.
 
 What `a << b` answers for this type. Without an `impl` the operator is rejected: a struct carries no shift of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Shl for Type { fn shl(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
-impl Shl for Mask { fn shl(&self, other: Mask) -> Mask { Mask { bits: self.bits << other.bits } } }
+impl Shl for Flags { fn shl(&self, other: Flags) -> Flags { Flags { bits: self.bits << other.bits } } }
 ```
 
 A bound naming `Shl` licenses `shl` on a type parameter.
@@ -374,12 +418,14 @@ A bound naming `Shl` licenses `shl` on a type parameter.
 
 What `a >> b` answers for this type. Without an `impl` the operator is rejected: a struct carries no shift of its own.
 
+<!-- fragment -->
 ```gossamer
 impl Shr for Type { fn shr(&self, other: Self) -> Self }
 ```
 
+<!-- fragment -->
 ```gossamer
-impl Shr for Mask { fn shr(&self, other: Mask) -> Mask { Mask { bits: self.bits >> other.bits } } }
+impl Shr for Flags { fn shr(&self, other: Flags) -> Flags { Flags { bits: self.bits >> other.bits } } }
 ```
 
 A bound naming `Shr` licenses `shr` on a type parameter.
@@ -388,10 +434,12 @@ A bound naming `Shr` licenses `shr` on a type parameter.
 
 What `value[i]` answers for this type. The index may be any type the method takes, and the result is whatever it returns.
 
+<!-- fragment -->
 ```gossamer
 impl Index for Type { fn index(&self, index: I) -> T }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl Index for Grid { fn index(&self, i: i64) -> i64 { self.cells[i] } }
 ```
@@ -402,10 +450,12 @@ A bound naming `Index` licenses `index` on a type parameter.
 
 The `Index` contract under its writable spelling; both names reach the same `index`.
 
+<!-- fragment -->
 ```gossamer
 impl IndexMut for Type { fn index(&self, index: I) -> T }
 ```
 
+<!-- fragment -->
 ```gossamer
 impl IndexMut for Grid { fn index(&self, i: i64) -> i64 { self.cells[i] } }
 ```
@@ -422,6 +472,7 @@ Hashing is structural and automatic: any hashable value keys a `Map` or a `Set`,
 
 Instead: Remove the block; to key on part of a value, build the key yourself and store the value beside it.
 
+<!-- fragment -->
 ```gossamer
 let m = {Point { x: 1, y: 2 }: "origin-ish"}
 ```
@@ -434,6 +485,7 @@ An older spelling of `Hash`. Hashing is structural and automatic.
 
 Instead: Remove the block.
 
+<!-- fragment -->
 ```gossamer
 let s = #{Point { x: 1, y: 2 }}
 ```
@@ -446,6 +498,7 @@ Every value is passed, assigned, and captured by value already, and no parameter
 
 Instead: Remove the block.
 
+<!-- fragment -->
 ```gossamer
 let b = a
 ```
@@ -456,6 +509,7 @@ Every type has a known size; there is no unsized value to bound against.
 
 Instead: Remove the block.
 
+<!-- fragment -->
 ```gossamer
 fn f<T>(value: T) { }
 ```
@@ -466,6 +520,7 @@ Every value crosses a `spawn` and a channel already: memory is reference-counted
 
 Instead: Remove the block.
 
+<!-- fragment -->
 ```gossamer
 cohort { spawn(|| work(value)) }
 ```
@@ -476,6 +531,7 @@ Shared access is the runtime's business, not a marker's: reach for `sync::Mutex`
 
 Instead: Remove the block.
 
+<!-- fragment -->
 ```gossamer
 let guard = sync::Mutex::new()
 ```
@@ -486,6 +542,7 @@ Values are released deterministically by reference counting, with no destructor 
 
 Instead: Write `defer expr`, which runs when control leaves the enclosing block by any edge the compiler sees.
 
+<!-- fragment -->
 ```gossamer
 defer file.close()
 ```
@@ -498,6 +555,7 @@ A bound naming `Drop` licenses `drop` on a type parameter.
 
 Instead: Write `impl From<Source> for Target { fn from(value: Source) -> Target }`.
 
+<!-- fragment -->
 ```gossamer
 let p: Point = 5.into()
 ```
@@ -510,6 +568,7 @@ A bound naming `Into` licenses `into` on a type parameter.
 
 Instead: Write `impl TryFrom<Source> for Target { fn try_from(value: Source) -> Result<Target, E> }`.
 
+<!-- fragment -->
 ```gossamer
 let p: Result<Even, String> = 5.try_into()
 ```
@@ -522,6 +581,7 @@ A bound naming `TryInto` licenses `try_into` on a type parameter.
 
 Instead: Write `impl Iterator for Type { fn next(&mut self) -> Option<T> }`.
 
+<!-- fragment -->
 ```gossamer
 for v in countdown { println("{}", v) }
 ```
@@ -534,6 +594,7 @@ A bound naming `IntoIterator` licenses `into_iter` on a type parameter.
 
 Instead: Write `impl From<Vec<T>> for Type`, or a plain `Type::from_values(xs)`.
 
+<!-- fragment -->
 ```gossamer
 let xs = (1..5).map(|i| i * i).collect()
 ```
@@ -546,6 +607,7 @@ A parameter is `T` or `&mut T` and nothing else, so there is no shared-reference
 
 Instead: Write an inherent method on the type: `impl Type { fn as_slice(&self) -> [T] }`.
 
+<!-- fragment -->
 ```gossamer
 fn total(xs: [i64]) -> i64 { xs.iter().sum() }
 ```
@@ -558,6 +620,7 @@ A callee writes through a `&mut T` parameter spelled at the call site, so there 
 
 Instead: Write `fn extend(xs: &mut Vec<i64>)`, called as `extend(&mut items)`.
 
+<!-- fragment -->
 ```gossamer
 extend(&mut items)
 ```
@@ -570,6 +633,7 @@ Byte input is the standard library's `io::Reader` contract, which a type impleme
 
 Instead: Write `use std::io` then `impl Reader for Type`.
 
+<!-- fragment -->
 ```gossamer
 let text = io::read_to_string(source)?
 ```
@@ -582,6 +646,7 @@ Byte output is the standard library's `io::Writer` contract, which a type implem
 
 Instead: Write `use std::io` then `impl Writer for Type`.
 
+<!-- fragment -->
 ```gossamer
 writer.write(bytes)?
 ```
@@ -594,6 +659,7 @@ A bound naming `Write` licenses `write` on a type parameter.
 
 Instead: Use `errors::new(msg)` / `errors::wrap(cause, msg)`, or an error type of your own with `impl From<Yours> for errors::Error`.
 
+<!-- fragment -->
 ```gossamer
 fn load(p: String) -> Result<String, errors::Error> { fs::read_to_string(p) }
 ```
@@ -604,6 +670,7 @@ There is no `async` / `await`: concurrency is goroutines under a `cohort { }`, a
 
 Instead: Write `cohort { let h = spawn(|| work()) }` then `h.join()`.
 
+<!-- fragment -->
 ```gossamer
 cohort { let h = spawn(|| fetch(url)); println("{}", h.join()??) }
 ```
@@ -614,6 +681,7 @@ The type of a closure or a function passed as a value, written with its paramete
 
 Instead: Write `Fn(A) -> B` in the parameter's type, as in `fn each(xs: Vec<i64>, f: Fn(i64) -> ())`.
 
+<!-- fragment -->
 ```gossamer
 fn each(xs: Vec<i64>, f: Fn(i64) -> ()) { for v in xs { f(v) } }
 ```
@@ -624,6 +692,7 @@ The type of a closure or a function passed as a value, written with its paramete
 
 Instead: Write `Fn(A) -> B` in the parameter's type, as in `fn each(xs: Vec<i64>, f: Fn(i64) -> ())`.
 
+<!-- fragment -->
 ```gossamer
 fn each(xs: Vec<i64>, f: Fn(i64) -> ()) { for v in xs { f(v) } }
 ```
@@ -634,6 +703,7 @@ The type of a closure or a function passed as a value, written with its paramete
 
 Instead: Write `Fn(A) -> B` in the parameter's type, as in `fn each(xs: Vec<i64>, f: Fn(i64) -> ())`.
 
+<!-- fragment -->
 ```gossamer
 fn each(xs: Vec<i64>, f: Fn(i64) -> ()) { for v in xs { f(v) } }
 ```
@@ -656,13 +726,14 @@ struct Point { x: i64, y: i64 }
 
 // Without this, `{}` already prints `Point { x: 1, y: 2 }`.
 impl Display for Point {
-    fn fmt(&self) -> String { format("({}, {})", self.x, self.y) }
+    fn fmt(&self) -> String { f"({self.x}, {self.y})" }
 }
 ```
 
 **Operator** traits name behaviour a user type does *not* have until you write
 it. `a + b` on two `Point`s is an error until `impl Add for Point` exists.
 
+<!-- fragment -->
 ```gossamer
 impl Add for Point {
     fn add(&self, other: Point) -> Point {
@@ -683,9 +754,10 @@ Both contracts declare one method that answers a `String`, and both are written
 `Display`'s and `{:?}` only `Debug`'s. A type implementing one keeps the
 synthesized rendering on the other.
 
+<!-- fragment -->
 ```gossamer
-impl Display for Point { fn fmt(&self) -> String { format("({}, {})", self.x, self.y) } }
-impl Debug for Point { fn fmt(&self) -> String { format("Point[{}]", self.x) } }
+impl Display for Point { fn fmt(&self) -> String { f"({self.x}, {self.y})" } }
+impl Debug for Point { fn fmt(&self) -> String { f"Point[{self.x}]" } }
 ```
 
 Writing `fn to_string` inside an `impl Display` block is rejected (`GP0053`):
@@ -701,6 +773,7 @@ Rust, not because the language distinguishes partial from total.
 `cmp` answers an `i64`: negative when the receiver orders first, zero when the
 two tie, positive otherwise.
 
+<!-- fragment -->
 ```gossamer
 impl Ord for Point {
     fn cmp(&self, other: Point) -> i64 { self.x - other.x }
@@ -729,6 +802,7 @@ inherent `impl Type { .. }` block instead.
 A trait names behaviour, never a value's type. There is no `dyn`, so a bare
 trait in a parameter or a field has no value shape to stand for:
 
+<!-- fragment -->
 ```gossamer
 fn f(x: Display) -> String { x.to_string() }        // GT0071
 fn f<T: Display>(x: T) -> String { x.to_string() }  // write this instead

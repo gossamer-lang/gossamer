@@ -35,17 +35,40 @@ pub(crate) fn run() {
         Err(_) => "<unreadable>".to_string(),
     };
 
-    let pairs: &[(&str, &str)] = &[
+    let llvm: Vec<(String, String)> = gossamer_codegen_llvm::llvm_toolchain_status()
+        .into_iter()
+        .map(|status| {
+            (
+                format!("llvm_{}", status.tool),
+                llvm_tool_line(status.resolved),
+            )
+        })
+        .collect();
+    let mut pairs: Vec<(&str, &str)> = vec![
         ("gos_version", env!("CARGO_PKG_VERSION")),
         ("runtime_lib", &runtime),
         ("cc", &cc),
-        ("host", &host),
-        ("target_dir", &target_dir),
-        ("project", &project),
-        ("cwd", &cwd),
     ];
+    pairs.extend(llvm.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    pairs.extend([
+        ("host", host.as_str()),
+        ("target_dir", target_dir.as_str()),
+        ("project", project.as_str()),
+        ("cwd", cwd.as_str()),
+    ]);
     let width = pairs.iter().map(|(k, _)| k.len()).max().unwrap_or(0);
     for (k, v) in pairs {
         outln!("{k:<width$}  {v}");
+    }
+}
+
+/// One LLVM tool's line: its path and major, or why a native build cannot
+/// use it. Only the first line of a failure is shown; `gos build` prints the
+/// install instructions in full.
+fn llvm_tool_line(resolved: Result<(std::path::PathBuf, Option<u32>), String>) -> String {
+    match resolved {
+        Ok((path, Some(major))) => format!("{} (LLVM {major})", path.display()),
+        Ok((path, None)) => format!("{} (version unknown)", path.display()),
+        Err(reason) => format!("<{}>", reason.lines().next().unwrap_or_default()),
     }
 }

@@ -1,7 +1,6 @@
 #![allow(clippy::missing_safety_doc)]
 #![allow(missing_docs)]
 #![allow(clippy::too_many_lines)]
-#![allow(clippy::not_unsafe_ptr_arg_deref)]
 #![allow(clippy::must_use_candidate)]
 #![allow(clippy::similar_names)]
 #![allow(clippy::many_single_char_names)]
@@ -12,7 +11,6 @@
 #![allow(clippy::cast_ptr_alignment)]
 #![allow(clippy::ptr_as_ptr)]
 #![allow(static_mut_refs)]
-#![allow(unused_unsafe)]
 #![allow(clippy::wildcard_imports)]
 
 use std::collections::HashMap;
@@ -117,7 +115,7 @@ fn apply_open_options(opts: &GosOpenOptions) -> std::fs::OpenOptions {
 
 fn fs_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
 fn fs_io_err(err: &std::io::Error, context: &str) -> i128 {
@@ -125,10 +123,14 @@ fn fs_io_err(err: &std::io::Error, context: &str) -> i128 {
     fs_err(&msg)
 }
 
-fn temp_prefix(prefix: *const c_char, operation: &str) -> Result<String, i128> {
+/// # Safety
+///
+/// `prefix` is null or a live string body.
+unsafe fn temp_prefix(prefix: *const c_char, operation: &str) -> Result<String, i128> {
     if prefix.is_null() {
         return Err(fs_err(&format!("{operation}: null prefix")));
     }
+    // SAFETY: this `unsafe fn`'s caller passes `prefix` live; non-null, checked above.
     let prefix = unsafe { crate::c_abi::gos_str_arg_string(prefix) };
     if prefix.contains(['/', '\\', '\0']) || matches!(prefix.as_str(), "." | "..") {
         return Err(fs_err(
@@ -165,6 +167,7 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string(path: *const c_char) -> *mut c
         if path.is_null() {
             return alloc_cstring(b"");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         match crate::sched_global::run_blocking("fs-read-string", move || {
             std::fs::read_to_string(p)
@@ -187,8 +190,9 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string_result(path: *const c_char) ->
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("read_to_string: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-read-string", move || {
@@ -196,12 +200,12 @@ pub unsafe extern "C" fn gos_rt_fs_read_to_string_result(path: *const c_char) ->
         }) {
             Ok(Ok(text)) => {
                 let s = alloc_cstring(text.as_bytes());
-                unsafe { gos_rt_result_new(0, s as i64) }
+                gos_rt_result_new(0, s as i64)
             }
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -214,7 +218,9 @@ pub unsafe extern "C" fn gos_rt_fs_write(path: *const c_char, contents: *const c
         if path.is_null() || contents.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
+        // SAFETY: `contents` is a String argument from compiled code, null or a live string body for the whole call.
         let c = unsafe { crate::c_abi::gos_str_arg_bytes(contents) }.to_vec();
         i64::from(
             crate::sched_global::run_blocking("fs-write", move || std::fs::write(p, c))
@@ -229,6 +235,7 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir_all(path: *const c_char) -> i64 {
         if path.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         i64::from(
             crate::sched_global::run_blocking("fs-mkdir-all", move || std::fs::create_dir_all(p))
@@ -247,6 +254,7 @@ pub unsafe extern "C" fn gos_rt_os_remove_file(path: *const c_char) -> i64 {
         if path.is_null() {
             return 0;
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_text(path) };
         i64::from(
             crate::sched_global::run_blocking("fs-remove-file", move || std::fs::remove_file(p))
@@ -280,10 +288,11 @@ pub unsafe extern "C" fn gos_rt_fs_file_open(path: *const c_char) -> i128 {
         if path.is_null() {
             return fs_err("File::open: null path");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-open", move || std::fs::File::open(p)) {
-            Ok(Ok(file)) => unsafe { gos_rt_result_new(0, insert_file(file)) },
+            Ok(Ok(file)) => gos_rt_result_new(0, insert_file(file)),
             Ok(Err(e)) => fs_io_err(&e, &context),
             Err(e) => fs_err(&e),
         }
@@ -297,10 +306,11 @@ pub unsafe extern "C" fn gos_rt_fs_file_create(path: *const c_char) -> i128 {
         if path.is_null() {
             return fs_err("File::create: null path");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-create", move || std::fs::File::create(p)) {
-            Ok(Ok(file)) => unsafe { gos_rt_result_new(0, insert_file(file)) },
+            Ok(Ok(file)) => gos_rt_result_new(0, insert_file(file)),
             Ok(Err(e)) => fs_io_err(&e, &context),
             Err(e) => fs_err(&e),
         }
@@ -311,7 +321,8 @@ pub unsafe extern "C" fn gos_rt_fs_file_create(path: *const c_char) -> i128 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_temp_dir(prefix: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let prefix = match temp_prefix(prefix, "fs::temp_dir") {
+        // SAFETY: `prefix` is this shim's argument, null or a live string body (C-ABI contract).
+        let prefix = match unsafe { temp_prefix(prefix, "fs::temp_dir") } {
             Ok(prefix) => prefix,
             Err(error) => return error,
         };
@@ -320,7 +331,7 @@ pub unsafe extern "C" fn gos_rt_fs_temp_dir(prefix: *const c_char) -> i128 {
         match crate::sched_global::run_blocking("fs-temp-dir", move || std::fs::create_dir(&path)) {
             Ok(Ok(())) => {
                 let path = alloc_cstring(context.as_bytes());
-                unsafe { gos_rt_result_new(0, path as i64) }
+                gos_rt_result_new(0, path as i64)
             }
             Ok(Err(error)) => fs_io_err(&error, &context),
             Err(error) => fs_err(&error),
@@ -342,7 +353,8 @@ static TEMP_FILE_PAIR_META: [i64; 5] = [
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_temp_file(prefix: *const c_char) -> i128 {
     ffi_entry!(0i128, {
-        let prefix = match temp_prefix(prefix, "fs::temp_file") {
+        // SAFETY: `prefix` is this shim's argument, null or a live string body (C-ABI contract).
+        let prefix = match unsafe { temp_prefix(prefix, "fs::temp_file") } {
             Ok(prefix) => prefix,
             Err(error) => return error,
         };
@@ -361,7 +373,7 @@ pub unsafe extern "C" fn gos_rt_fs_temp_file(prefix: *const c_char) -> i128 {
                 if pair.is_null() {
                     return fs_err("fs::temp_file: allocation failed");
                 }
-                unsafe { gos_rt_result_new(0, pair as i64) }
+                gos_rt_result_new(0, pair as i64)
             }
             Ok(Err(error)) => fs_io_err(&error, &context),
             Err(error) => fs_err(&error),
@@ -406,11 +418,12 @@ pub unsafe extern "C" fn gos_rt_fs_open_options_open(h: i64, path: *const c_char
         let Some(opts) = open_options_clone(h) else {
             return fs_err("OpenOptions::open: stale handle");
         };
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let open = apply_open_options(&opts.lock());
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-open-options", move || open.open(p)) {
-            Ok(Ok(file)) => unsafe { gos_rt_result_new(0, insert_file(file)) },
+            Ok(Ok(file)) => gos_rt_result_new(0, insert_file(file)),
             Ok(Err(e)) => fs_io_err(&e, &context),
             Err(e) => fs_err(&e),
         }
@@ -419,7 +432,7 @@ pub unsafe extern "C" fn gos_rt_fs_open_options_open(h: i64, path: *const c_char
 
 /// `fs::File::read(max) -> Result<Vec<u8>, Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_read(h: i64, max: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_read(h: i64, max: i64) -> i128 {
     ffi_entry!(0i128, {
         let cap = max.clamp(1, 1 << 24) as usize;
         match with_file_cursor(h, "File::read", move |file| {
@@ -429,9 +442,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_read(h: i64, max: i64) -> i128 {
                 buf
             })
         }) {
-            Ok(Ok(buf)) => unsafe {
-                gos_rt_result_new(0, super::encoding::bytes_to_gosvec(&buf) as i64)
-            },
+            Ok(Ok(buf)) => gos_rt_result_new(0, super::encoding::bytes_to_gosvec(&buf) as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::read"),
             Err(packed) => packed,
         }
@@ -440,13 +451,13 @@ pub unsafe extern "C" fn gos_rt_fs_file_read(h: i64, max: i64) -> i128 {
 
 /// `fs::File::read_to_string() -> Result<String, Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_read_to_string(h: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_read_to_string(h: i64) -> i128 {
     ffi_entry!(0i128, {
         match with_file_cursor(h, "File::read_to_string", |file| {
             let mut text = String::new();
             file.read_to_string(&mut text).map(|_| text)
         }) {
-            Ok(Ok(text)) => unsafe { gos_rt_result_new(0, alloc_cstring(text.as_bytes()) as i64) },
+            Ok(Ok(text)) => gos_rt_result_new(0, alloc_cstring(text.as_bytes()) as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::read_to_string"),
             Err(packed) => packed,
         }
@@ -461,10 +472,11 @@ pub unsafe extern "C" fn gos_rt_fs_file_write(h: i64, data: *const c_char) -> i1
         if data.is_null() {
             return fs_err("File::write: null data");
         }
+        // SAFETY: `data` is a String argument from compiled code, null or a live string body for the whole call.
         let bytes = unsafe { crate::c_abi::gos_str_arg_string(data) }.into_bytes();
         let len = bytes.len();
         match with_file_cursor(h, "File::write", move |file| file.write_all(&bytes)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, len as i64) },
+            Ok(Ok(())) => gos_rt_result_new(0, len as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::write"),
             Err(packed) => packed,
         }
@@ -473,10 +485,10 @@ pub unsafe extern "C" fn gos_rt_fs_file_write(h: i64, data: *const c_char) -> i1
 
 /// `fs::File::flush() -> Result<(), Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_flush(h: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_flush(h: i64) -> i128 {
     ffi_entry!(0i128, {
         match with_file_cursor(h, "File::flush", |file| std::io::Write::flush(file)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::flush"),
             Err(packed) => packed,
         }
@@ -485,7 +497,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_flush(h: i64) -> i128 {
 
 /// `fs::File::close()`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_close(h: i64) {
+pub extern "C" fn gos_rt_fs_file_close(h: i64) {
     ffi_entry!((), {
         if let Some(files) = FILE_HANDLES.write().as_mut() {
             files.remove(&h);
@@ -509,17 +521,19 @@ pub unsafe extern "C" fn gos_rt_os_write_file_result(
     ffi_entry!(0i128, {
         if path.is_null() || contents.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("write_file: null arg".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
+        // SAFETY: `contents` is a String argument from compiled code, null or a live string body for the whole call.
         let c = unsafe { crate::c_abi::gos_str_arg_bytes(contents) }.to_vec();
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-write-file", move || std::fs::write(p, c)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -539,41 +553,20 @@ pub unsafe extern "C" fn gos_rt_os_write_file_bytes_result(
     ffi_entry!(0i128, {
         if path.is_null() || contents.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("write_file: null arg".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
-        let v = unsafe { &*contents };
-        // Width-aware payload extraction: an i64-stride Vec carrying
-        // u8 values needs the low byte of each slot, not a flat
-        // memcpy. `elem_bytes == 1` is the proper Vec<u8> case.
-        let bytes_buf: Vec<u8>;
-        let bytes: &[u8] = if v.ptr.is_null() || v.len == 0 {
-            &[]
-        } else if v.elem_bytes == 1 {
-            unsafe { std::slice::from_raw_parts(v.ptr.as_ptr(), v.len as usize) }
-        } else if v.elem_bytes == 8 {
-            let count = v.len as usize;
-            bytes_buf = (0..count)
-                .map(|i| {
-                    let slot_ptr = unsafe { v.ptr.add(i * 8) };
-                    unsafe { *slot_ptr }
-                })
-                .collect();
-            &bytes_buf
-        } else {
-            unsafe {
-                std::slice::from_raw_parts(v.ptr.as_ptr(), v.len as usize * v.elem_bytes as usize)
-            }
-        };
         let context = p.clone();
-        let bytes = bytes.to_vec();
+        // SAFETY: `contents` is non-null (checked above) and live for the call (C-ABI contract).
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes_cow(contents) }.into_owned();
         match crate::sched_global::run_blocking("fs-write-bytes", move || std::fs::write(p, bytes))
         {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -591,16 +584,17 @@ pub unsafe extern "C" fn gos_rt_fs_read_bytes_result(path: *const c_char) -> i12
     ffi_entry!(0i128, {
         if path.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("read_file: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match read_file_into_vec(p) {
-            Ok(Ok(v)) => unsafe { gos_rt_result_new(0, v as i64) },
+            Ok(Ok(v)) => gos_rt_result_new(0, v as i64),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -624,7 +618,7 @@ fn read_file_into_vec(p: String) -> Result<std::io::Result<*mut GosVec>, String>
         Err(e) => return Ok(Err(e)),
     };
     let cap = i64::try_from(len).unwrap_or(i64::MAX);
-    let v = unsafe { crate::c_abi::vec::gos_rt_vec_with_capacity(1, cap) };
+    let v = crate::c_abi::vec::gos_rt_vec_with_capacity(1, cap);
     // SAFETY: `gos_rt_vec_with_capacity` answers a live header.
     let buf = SyncRawPtr::new(unsafe { (*v).ptr.as_ptr() });
     let room = if buf.as_ptr().is_null() {
@@ -662,10 +656,12 @@ fn read_file_into_vec(p: String) -> Result<std::io::Result<*mut GosVec>, String>
     let (filled, tail) = match read {
         Ok(Ok(read)) => read,
         Ok(Err(e)) => {
+            // SAFETY: `v` is the fresh vec made above, owned here alone and not read again.
             unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
             return Ok(Err(e));
         }
         Err(e) => {
+            // SAFETY: `v` is the fresh vec made above, owned here alone and not read again.
             unsafe { crate::c_abi::map::gos_rt_vec_free(v) };
             return Err(e);
         }
@@ -675,9 +671,12 @@ fn read_file_into_vec(p: String) -> Result<std::io::Result<*mut GosVec>, String>
     unsafe { (*v).len = filled_len };
     if !tail.is_empty() {
         let total = filled_len + i64::try_from(tail.len()).unwrap_or(0);
+        // SAFETY: `v` is the fresh vec made above, owned here alone.
         unsafe { crate::c_abi::vec::gos_rt_vec_reserve_exact(v, total) };
         // SAFETY: the reserve left room for `tail` past `len`.
         let vref = unsafe { &mut *v };
+        // SAFETY: the reserve left room for `tail` past the `filled` bytes, and `tail` is this
+        // function's own buffer.
         unsafe {
             std::ptr::copy_nonoverlapping(tail.as_ptr(), vref.ptr.as_ptr().add(filled), tail.len());
         }
@@ -693,17 +692,18 @@ pub unsafe extern "C" fn gos_rt_os_mkdir_all_result(path: *const c_char) -> i128
     ffi_entry!(0i128, {
         if path.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("mkdir_all: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-mkdir-all", move || std::fs::create_dir_all(p))
         {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -717,18 +717,19 @@ pub unsafe extern "C" fn gos_rt_os_remove_dir_all_result(path: *const c_char) ->
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("remove_all: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-remove-dir-all", move || {
             std::fs::remove_dir_all(p)
         }) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -745,16 +746,17 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir(path: *const c_char) -> i128 {
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("create_dir: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-create-dir", move || std::fs::create_dir(p)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -772,16 +774,17 @@ pub unsafe extern "C" fn gos_rt_fs_remove_dir(path: *const c_char) -> i128 {
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("remove_dir: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-remove-dir", move || std::fs::remove_dir(p)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -795,16 +798,17 @@ pub unsafe extern "C" fn gos_rt_os_remove_file_result(path: *const c_char) -> i1
         if path.is_null() {
             let err =
                 crate::c_abi::errors::error_new_from_bytes("remove_file: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-remove-file", move || std::fs::remove_file(p)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -817,17 +821,19 @@ pub unsafe extern "C" fn gos_rt_fs_rename(from: *const c_char, to: *const c_char
     ffi_entry!(0i128, {
         if from.is_null() || to.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes("rename: null path".as_bytes());
-            return unsafe { gos_rt_result_new(1, err as i64) };
+            return gos_rt_result_new(1, err as i64);
         }
+        // SAFETY: `from` is a String argument from compiled code, null or a live string body for the whole call.
         let f = unsafe { crate::c_abi::gos_str_arg_string(from) };
+        // SAFETY: `to` is a String argument from compiled code, null or a live string body for the whole call.
         let t = unsafe { crate::c_abi::gos_str_arg_string(to) };
         let context = f.clone();
         match crate::sched_global::run_blocking("fs-rename", move || std::fs::rename(f, t)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -841,17 +847,18 @@ pub unsafe extern "C" fn gos_rt_env_set_current_dir(path: *const c_char) -> i128
         let p = if path.is_null() {
             String::new()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         let context = p.clone();
         match crate::sched_global::run_blocking("env-set-current-dir", move || {
             std::env::set_current_dir(p)
         }) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -876,11 +883,13 @@ pub unsafe extern "C" fn gos_rt_path_join(a: *const c_char, b: *const c_char) ->
         let a = if a.is_null() {
             ""
         } else {
+            // SAFETY: `a` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(a) }
         };
         let b = if b.is_null() {
             ""
         } else {
+            // SAFETY: `b` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(b) }
         };
         alloc_cstring(path_join(a, b).as_bytes())
@@ -915,6 +924,7 @@ pub unsafe extern "C" fn gos_rt_path_base(p: *const c_char) -> *mut c_char {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let basename: &str = match path_last_separator_on(s, cfg!(windows)) {
@@ -933,6 +943,7 @@ pub unsafe extern "C" fn gos_rt_path_dir(p: *const c_char) -> *mut c_char {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let dirname: &str = match path_last_separator_on(s, cfg!(windows)) {
@@ -956,6 +967,7 @@ pub unsafe extern "C" fn gos_rt_path_split(p: *const c_char) -> *mut i64 {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let (dir, file): (&str, &str) = match path_last_separator_on(s, cfg!(windows)) {
@@ -983,6 +995,7 @@ pub unsafe extern "C" fn gos_rt_path_components(p: *const c_char) -> *mut GosVec
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         alloc_plain_str_vec(&path_components(s))
@@ -996,6 +1009,7 @@ pub unsafe extern "C" fn gos_rt_path_prefixes(p: *const c_char) -> *mut GosVec {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         alloc_plain_str_vec(&path_prefixes(s))
@@ -1010,6 +1024,7 @@ pub unsafe extern "C" fn gos_rt_path_unique_prefixes(p: *const c_char) -> *mut G
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         alloc_plain_str_vec(&path_unique_prefixes(s))
@@ -1026,6 +1041,7 @@ pub unsafe extern "C" fn gos_rt_path_ext(p: *const c_char) -> i128 {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let basename: &str = match path_last_separator_on(s, cfg!(windows)) {
@@ -1037,10 +1053,10 @@ pub unsafe extern "C" fn gos_rt_path_ext(p: *const c_char) -> i128 {
             Some(idx) => &basename[idx..],
         };
         if ext_str.is_empty() {
-            unsafe { gos_rt_result_new(1, 0) }
+            gos_rt_result_new(1, 0)
         } else {
             let cstr = alloc_cstring(ext_str.as_bytes()) as i64;
-            unsafe { gos_rt_result_new(0, cstr) }
+            gos_rt_result_new(0, cstr)
         }
     })
 }
@@ -1054,18 +1070,19 @@ pub unsafe extern "C" fn gos_rt_path_parent(p: *const c_char) -> i128 {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let trimmed = s.trim_end_matches(path_is_separator);
         match path_last_separator_on(trimmed, cfg!(windows)) {
-            None => unsafe { gos_rt_result_new(1, 0) },
+            None => gos_rt_result_new(1, 0),
             Some(0) => {
                 let cstr = alloc_cstring(b"/") as i64;
-                unsafe { gos_rt_result_new(0, cstr) }
+                gos_rt_result_new(0, cstr)
             }
             Some(idx) => {
                 let cstr = alloc_cstring(&trimmed.as_bytes()[..idx]) as i64;
-                unsafe { gos_rt_result_new(0, cstr) }
+                gos_rt_result_new(0, cstr)
             }
         }
     })
@@ -1079,6 +1096,7 @@ pub unsafe extern "C" fn gos_rt_path_stem(p: *const c_char) -> i128 {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let basename = match path_last_separator_on(s, cfg!(windows)) {
@@ -1086,14 +1104,14 @@ pub unsafe extern "C" fn gos_rt_path_stem(p: *const c_char) -> i128 {
             Some(idx) => &s[idx + 1..],
         };
         if basename.is_empty() {
-            return unsafe { gos_rt_result_new(1, 0) };
+            return gos_rt_result_new(1, 0);
         }
         let stem = match basename.rfind('.') {
             None | Some(0) => basename,
             Some(idx) => &basename[..idx],
         };
         let cstr = alloc_cstring(stem.as_bytes()) as i64;
-        unsafe { gos_rt_result_new(0, cstr) }
+        gos_rt_result_new(0, cstr)
     })
 }
 
@@ -1105,6 +1123,7 @@ pub unsafe extern "C" fn gos_rt_path_file_name(p: *const c_char) -> i128 {
         let s = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         let basename = match path_last_separator_on(s, cfg!(windows)) {
@@ -1112,10 +1131,10 @@ pub unsafe extern "C" fn gos_rt_path_file_name(p: *const c_char) -> i128 {
             Some(idx) => &s[idx + 1..],
         };
         if basename.is_empty() {
-            unsafe { gos_rt_result_new(1, 0) }
+            gos_rt_result_new(1, 0)
         } else {
             let cstr = alloc_cstring(basename.as_bytes()) as i64;
-            unsafe { gos_rt_result_new(0, cstr) }
+            gos_rt_result_new(0, cstr)
         }
     })
 }
@@ -1129,6 +1148,7 @@ pub unsafe extern "C" fn gos_rt_path_clean(p: *const c_char) -> *mut c_char {
         let path = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         alloc_cstring(path_clean(path).as_bytes())
@@ -1142,6 +1162,7 @@ pub unsafe extern "C" fn gos_rt_path_is_absolute(p: *const c_char) -> i32 {
         let path = if p.is_null() {
             ""
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(p) }
         };
         i32::from(path.starts_with(path_is_separator))
@@ -1155,11 +1176,13 @@ pub unsafe extern "C" fn gos_rt_path_has_prefix(p: *const c_char, prefix: *const
         let path = if p.is_null() {
             String::new()
         } else {
+            // SAFETY: `p` is a String argument from compiled code, null or a live string body for the whole call.
             path_clean(unsafe { crate::c_abi::gos_str_arg_text(p) })
         };
         let prefix = if prefix.is_null() {
             String::new()
         } else {
+            // SAFETY: `prefix` is a String argument from compiled code, null or a live string body for the whole call.
             path_clean(unsafe { crate::c_abi::gos_str_arg_text(prefix) })
         };
         if path == prefix {
@@ -1184,20 +1207,22 @@ pub unsafe extern "C" fn gos_rt_fs_copy(src: *const c_char, dst: *const c_char) 
         let src = if src.is_null() {
             String::new()
         } else {
+            // SAFETY: `src` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(src) }
         };
         let dst = if dst.is_null() {
             String::new()
         } else {
+            // SAFETY: `dst` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(dst) }
         };
         let context = format!("{src} -> {dst}");
         match crate::sched_global::run_blocking("fs-copy", move || std::fs::copy(src, dst)) {
-            Ok(Ok(n)) => unsafe { gos_rt_result_new(0, i64::try_from(n).unwrap_or(i64::MAX)) },
+            Ok(Ok(n)) => gos_rt_result_new(0, i64::try_from(n).unwrap_or(i64::MAX)),
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -1211,6 +1236,7 @@ pub unsafe extern "C" fn gos_rt_fs_canonicalize(path: *const c_char) -> i128 {
         let p = if path.is_null() {
             String::new()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         let context = p.clone();
@@ -1219,12 +1245,12 @@ pub unsafe extern "C" fn gos_rt_fs_canonicalize(path: *const c_char) -> i128 {
             Ok(Ok(abs)) => {
                 let s = abs.to_string_lossy().into_owned();
                 let ptr = alloc_cstring(s.as_bytes()) as i64;
-                unsafe { gos_rt_result_new(0, ptr) }
+                gos_rt_result_new(0, ptr)
             }
             Ok(Err(e)) => {
                 let msg = classify_io_error(&e, &context);
                 let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-                unsafe { gos_rt_result_new(1, err as i64) }
+                gos_rt_result_new(1, err as i64)
             }
             Err(e) => fs_err(&e),
         }
@@ -1236,11 +1262,11 @@ pub unsafe extern "C" fn gos_rt_fs_canonicalize(path: *const c_char) -> i128 {
 /// deep-frees them.
 fn ok_str_vec(parts: &[String]) -> i128 {
     let vec = alloc_plain_str_vec(parts);
-    unsafe { gos_rt_result_new(0, vec as i64) }
+    gos_rt_result_new(0, vec as i64)
 }
 
 fn alloc_plain_str_vec(parts: &[String]) -> *mut GosVec {
-    let vec = unsafe {
+    let vec = {
         crate::c_abi::vec::gos_rt_vec_with_capacity_typed(
             8,
             parts.len() as i64,
@@ -1249,6 +1275,8 @@ fn alloc_plain_str_vec(parts: &[String]) -> *mut GosVec {
     };
     for p in parts {
         let pv = alloc_cstring(p.as_bytes()) as i64;
+        // SAFETY: `vec` is the fresh vec made above, or null, which `gos_rt_vec_push` accepts,
+        // and `pv` is one 8-byte element.
         unsafe { gos_rt_vec_push(vec, std::ptr::addr_of!(pv).cast::<u8>()) };
     }
     vec
@@ -1256,7 +1284,7 @@ fn alloc_plain_str_vec(parts: &[String]) -> *mut GosVec {
 
 fn err_io(e: &std::io::Error) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(format!("{e}").as_bytes());
-    unsafe { gos_rt_result_new(1, err as i64) }
+    gos_rt_result_new(1, err as i64)
 }
 
 /// `bufio::read_to_string(path) -> Result<String, Error>`.
@@ -1266,12 +1294,13 @@ pub unsafe extern "C" fn gos_rt_bufio_read_to_string(path: *const c_char) -> i12
         let p = if path.is_null() {
             String::new()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         match crate::sched_global::run_blocking("bufio-read-string", move || {
             std::fs::read_to_string(p)
         }) {
-            Ok(Ok(text)) => unsafe { gos_rt_result_new(0, alloc_cstring(text.as_bytes()) as i64) },
+            Ok(Ok(text)) => gos_rt_result_new(0, alloc_cstring(text.as_bytes()) as i64),
             Ok(Err(e)) => err_io(&e),
             Err(e) => fs_err(&e),
         }
@@ -1285,6 +1314,7 @@ pub unsafe extern "C" fn gos_rt_bufio_read_lines_of(path: *const c_char) -> i128
         let p = if path.is_null() {
             String::new()
         } else {
+            // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_string(path) }
         };
         match crate::sched_global::run_blocking("bufio-read-lines", move || {
@@ -1309,6 +1339,7 @@ pub unsafe extern "C" fn gos_rt_net_resolve(host: *const c_char) -> i128 {
         let h = if host.is_null() {
             String::new()
         } else {
+            // SAFETY: `host` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(host) }.to_string()
         };
         let needle = if h.contains(':') { h } else { format!("{h}:0") };
@@ -1663,11 +1694,13 @@ pub unsafe extern "C" fn gos_rt_path_matches(pattern: *const c_char, name: *cons
         let pat = if pattern.is_null() {
             ""
         } else {
+            // SAFETY: `pattern` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(pattern) }
         };
         let n = if name.is_null() {
             ""
         } else {
+            // SAFETY: `name` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(name) }
         };
         i64::from(path_glob_matches(pat.as_bytes(), n.as_bytes()))
@@ -1678,10 +1711,11 @@ pub unsafe extern "C" fn gos_rt_path_matches(pattern: *const c_char, name: *cons
 /// matching paths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_path_glob(pattern: *const c_char) -> i128 {
-    ffi_entry!(unsafe { gos_rt_result_new(1, 0) }, {
+    ffi_entry!(gos_rt_result_new(1, 0), {
         let pat = if pattern.is_null() {
             ""
         } else {
+            // SAFETY: `pattern` is a String argument from compiled code, null or a live string body for the whole call.
             unsafe { crate::c_abi::gos_str_arg_text(pattern) }
         };
         match path_glob_expand(pat) {
@@ -1748,17 +1782,20 @@ pub unsafe extern "C" fn gos_rt_fs_file_read_at(h: i64, len: i64, offset: i64) -
         }
         let cap = len.min(1 << 24) as usize;
         let offset = offset as u64;
-        let out = unsafe { super::vec::gos_rt_vec_with_capacity(1, cap as i64) };
+        let out = super::vec::gos_rt_vec_with_capacity(1, cap as i64);
+        // SAFETY: `out` is the fresh byte vec made above, which nothing else reads.
         let read = with_file_positional(h, "File::read_at", |file| unsafe {
             read_at_into_vec(file, out, cap, offset)
         });
         match read {
-            Ok(Ok(_)) => unsafe { gos_rt_result_new(0, out as i64) },
+            Ok(Ok(_)) => gos_rt_result_new(0, out as i64),
             Ok(Err(e)) => {
+                // SAFETY: `out` is the fresh vec made above, owned here alone and not read again.
                 unsafe { super::map::gos_rt_vec_free(out) };
                 fs_io_err(&e, "File::read_at")
             }
             Err(packed) => {
+                // SAFETY: `out` is the fresh vec made above, owned here alone and not read again.
                 unsafe { super::map::gos_rt_vec_free(out) };
                 packed
             }
@@ -1781,16 +1818,20 @@ pub unsafe extern "C" fn gos_rt_fs_file_read_at_into(
         if len < 0 || offset < 0 {
             return fs_err("File::read_at_into: length and offset must be non-negative");
         }
+        // SAFETY: `buf` is non-null on this side of the `||` and live for the call (C-ABI
+        // contract).
         if buf.is_null() || unsafe { (*buf).elem_bytes } != 1 {
             return fs_err("File::read_at_into: the buffer must be a Vec<u8>");
         }
         let cap = len.min(1 << 24) as usize;
         let offset = offset as u64;
+        // SAFETY: `buf` is this shim's non-null byte vec (checked above), live for the call and
+        // read by nothing else (C-ABI contract).
         let read = with_file_positional(h, "File::read_at_into", |file| unsafe {
             read_at_into_vec(file, buf, cap, offset)
         });
         match read {
-            Ok(Ok(n)) => unsafe { gos_rt_result_new(0, n as i64) },
+            Ok(Ok(n)) => gos_rt_result_new(0, n as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::read_at_into"),
             Err(packed) => packed,
         }
@@ -1809,7 +1850,10 @@ unsafe fn read_at_into_vec(
     len: usize,
     offset: u64,
 ) -> std::io::Result<usize> {
+    // SAFETY: this `unsafe fn`'s caller passes `v` live or null, which `gos_rt_vec_reserve_exact`
+    // accepts.
     unsafe { super::vec::gos_rt_vec_reserve_exact(v, len as i64) };
+    // SAFETY: this `unsafe fn`'s caller passes `v` as a live `GosVec` nothing else reads.
     let vec = unsafe { &mut *v };
     vec.len = 0;
     if len == 0 {
@@ -1837,6 +1881,7 @@ unsafe fn read_at_into_vec(
     let read = {
         // SAFETY: `dst` addresses `len` writable bytes of `v`'s capacity.
         unsafe { std::ptr::write_bytes(dst, 0, len) };
+        // SAFETY: `dst` addresses `len` writable bytes of `v`'s capacity, zeroed just above.
         let slice = unsafe { std::slice::from_raw_parts_mut(dst, len) };
         read_at_offset(file, slice, offset)?
     };
@@ -1857,13 +1902,15 @@ pub unsafe extern "C" fn gos_rt_fs_file_write_at(
         if offset < 0 {
             return fs_err("File::write_at: offset must be non-negative");
         }
-        let bytes = unsafe { super::encoding::gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let at = offset as u64;
         let written = with_file_positional(h, "File::write_at", move |file| {
             write_at_offset(file, &bytes, at)
         });
         match written {
-            Ok(Ok(n)) => unsafe { gos_rt_result_new(0, n as i64) },
+            Ok(Ok(n)) => gos_rt_result_new(0, n as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::write_at"),
             Err(packed) => packed,
         }
@@ -1878,10 +1925,12 @@ pub unsafe extern "C" fn gos_rt_fs_file_write_bytes(
     data: *const crate::c_abi::vec::GosVec,
 ) -> i128 {
     ffi_entry!(0i128, {
-        let bytes = unsafe { super::encoding::gosvec_u8(data) };
+        // SAFETY: `data` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let written = with_file_cursor(h, "File::write_bytes", move |f| f.write(&bytes));
         match written {
-            Ok(Ok(n)) => unsafe { gos_rt_result_new(0, n as i64) },
+            Ok(Ok(n)) => gos_rt_result_new(0, n as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::write_bytes"),
             Err(packed) => packed,
         }
@@ -1892,7 +1941,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_write_bytes(
 /// new absolute position. `whence` is one of `fs::SEEK_SET`,
 /// `fs::SEEK_CUR`, `fs::SEEK_END`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_seek(h: i64, offset: i64, whence: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_seek(h: i64, offset: i64, whence: i64) -> i128 {
     ffi_entry!(0i128, {
         let from = match whence {
             0 => std::io::SeekFrom::Start(offset.max(0) as u64),
@@ -1901,7 +1950,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_seek(h: i64, offset: i64, whence: i64) -
             _ => return fs_err("File::seek: whence must be SEEK_SET, SEEK_CUR, or SEEK_END"),
         };
         match with_file_cursor(h, "File::seek", move |file| std::io::Seek::seek(file, from)) {
-            Ok(Ok(pos)) => unsafe { gos_rt_result_new(0, pos as i64) },
+            Ok(Ok(pos)) => gos_rt_result_new(0, pos as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::seek"),
             Err(packed) => packed,
         }
@@ -1910,14 +1959,14 @@ pub unsafe extern "C" fn gos_rt_fs_file_seek(h: i64, offset: i64, whence: i64) -
 
 /// `fs::File::set_len(len) -> Result<(), Error>`: truncate or extend.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_set_len(h: i64, len: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_set_len(h: i64, len: i64) -> i128 {
     ffi_entry!(0i128, {
         if len < 0 {
             return fs_err("File::set_len: length must be non-negative");
         }
         let len = len as u64;
         match with_file_cursor(h, "File::set_len", move |file| file.set_len(len)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::set_len"),
             Err(packed) => packed,
         }
@@ -1926,10 +1975,10 @@ pub unsafe extern "C" fn gos_rt_fs_file_set_len(h: i64, len: i64) -> i128 {
 
 /// `fs::File::len() -> Result<i64, Error>`: the open file's current size.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_len(h: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_len(h: i64) -> i128 {
     ffi_entry!(0i128, {
         match with_file_cursor(h, "File::len", |file| file.metadata().map(|m| m.len())) {
-            Ok(Ok(len)) => unsafe { gos_rt_result_new(0, len as i64) },
+            Ok(Ok(len)) => gos_rt_result_new(0, len as i64),
             Ok(Err(e)) => fs_io_err(&e, "File::len"),
             Err(packed) => packed,
         }
@@ -1939,10 +1988,10 @@ pub unsafe extern "C" fn gos_rt_fs_file_len(h: i64) -> i128 {
 /// `fs::File::sync_all() -> Result<(), Error>`: flush the file's data and
 /// metadata to the storage device.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_sync_all(h: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_sync_all(h: i64) -> i128 {
     ffi_entry!(0i128, {
         match with_file_cursor(h, "File::sync_all", |file| file.sync_all()) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::sync_all"),
             Err(packed) => packed,
         }
@@ -1952,10 +2001,10 @@ pub unsafe extern "C" fn gos_rt_fs_file_sync_all(h: i64) -> i128 {
 /// `fs::File::sync_data() -> Result<(), Error>`: flush the file's data,
 /// leaving metadata the platform considers inessential unwritten.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_sync_data(h: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_sync_data(h: i64) -> i128 {
     ffi_entry!(0i128, {
         match with_file_cursor(h, "File::sync_data", |file| file.sync_data()) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::sync_data"),
             Err(packed) => packed,
         }
@@ -1971,10 +2020,11 @@ pub unsafe extern "C" fn gos_rt_fs_sync_dir(path: *const c_char) -> i128 {
         if path.is_null() {
             return fs_err("fs::sync_dir: null path");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-sync-dir", move || sync_directory(&p)) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, &context),
             Err(e) => fs_err(&e),
         }
@@ -1985,7 +2035,7 @@ pub unsafe extern "C" fn gos_rt_fs_sync_dir(path: *const c_char) -> i128 {
 /// `len` of 0 covers the range from `start` to end of file, however the
 /// file later grows.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_try_lock_range(
+pub extern "C" fn gos_rt_fs_file_try_lock_range(
     h: i64,
     start: i64,
     len: i64,
@@ -2003,7 +2053,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_try_lock_range(
                 if acquired {
                     record_held_range(h, start as u64, len as u64);
                 }
-                unsafe { gos_rt_result_new(0, i64::from(acquired)) }
+                gos_rt_result_new(0, i64::from(acquired))
             }
             Ok(Err(e)) => fs_io_err(&e, "File::try_lock_range"),
             Err(packed) => packed,
@@ -2013,7 +2063,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_try_lock_range(
 
 /// `fs::File::unlock_range(start, len) -> Result<(), Error>`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_unlock_range(h: i64, start: i64, len: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_unlock_range(h: i64, start: i64, len: i64) -> i128 {
     ffi_entry!(0i128, {
         if start < 0 || len < 0 {
             return fs_err("File::unlock_range: start and len must be non-negative");
@@ -2023,7 +2073,7 @@ pub unsafe extern "C" fn gos_rt_fs_file_unlock_range(h: i64, start: i64, len: i6
         }) {
             Ok(Ok(())) => {
                 forget_held_range(h, start as u64, len as u64);
-                unsafe { gos_rt_result_new(0, 0) }
+                gos_rt_result_new(0, 0)
             }
             Ok(Err(e)) => fs_io_err(&e, "File::unlock_range"),
             Err(packed) => packed,
@@ -2035,20 +2085,20 @@ pub unsafe extern "C" fn gos_rt_fs_file_unlock_range(h: i64, start: i64, len: i6
 /// one shared range.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_try_lock_shared(h: i64) -> i128 {
-    unsafe { gos_rt_fs_file_try_lock_range(h, 0, 0, 0) }
+    gos_rt_fs_file_try_lock_range(h, 0, 0, 0)
 }
 
 /// `fs::File::try_lock_exclusive() -> Result<bool, Error>`: the whole file
 /// as one exclusive range.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_file_try_lock_exclusive(h: i64) -> i128 {
-    unsafe { gos_rt_fs_file_try_lock_range(h, 0, 0, 1) }
+    gos_rt_fs_file_try_lock_range(h, 0, 0, 1)
 }
 
 /// `fs::File::unlock() -> Result<(), Error>`: release every range this
 /// handle holds, whole-file or otherwise.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn gos_rt_fs_file_unlock(h: i64) -> i128 {
+pub extern "C" fn gos_rt_fs_file_unlock(h: i64) -> i128 {
     ffi_entry!(0i128, {
         let held = HELD_LOCKS
             .lock()
@@ -2056,13 +2106,13 @@ pub unsafe extern "C" fn gos_rt_fs_file_unlock(h: i64) -> i128 {
             .and_then(|locks| locks.remove(&h))
             .unwrap_or_default();
         if held.is_empty() {
-            return unsafe { gos_rt_result_new(0, 0) };
+            return gos_rt_result_new(0, 0);
         }
         match with_file_cursor(h, "File::unlock", move |file| {
             held.into_iter()
                 .try_for_each(|(start, len)| unlock_range_on(file, start, len))
         }) {
-            Ok(Ok(())) => unsafe { gos_rt_result_new(0, 0) },
+            Ok(Ok(())) => gos_rt_result_new(0, 0),
             Ok(Err(e)) => fs_io_err(&e, "File::unlock"),
             Err(packed) => packed,
         }
@@ -2208,6 +2258,7 @@ pub fn try_lock_range_on(
     exclusive: bool,
 ) -> std::io::Result<bool> {
     let fd = std::os::unix::io::AsRawFd::as_raw_fd(file);
+    // SAFETY: `flock` is a plain C struct whose all-zero value is valid.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
     lock.l_type = if exclusive {
         libc::F_WRLCK as libc::c_short
@@ -2233,6 +2284,7 @@ pub fn try_lock_range_on(
 #[cfg(unix)]
 pub fn unlock_range_on(file: &std::fs::File, start: u64, len: u64) -> std::io::Result<()> {
     let fd = std::os::unix::io::AsRawFd::as_raw_fd(file);
+    // SAFETY: `flock` is a plain C struct whose all-zero value is valid.
     let mut lock: libc::flock = unsafe { std::mem::zeroed() };
     lock.l_type = libc::F_UNLCK as libc::c_short;
     lock.l_whence = libc::SEEK_SET as libc::c_short;
@@ -2266,6 +2318,7 @@ pub fn try_lock_range_on(
 
     let handle = std::os::windows::io::AsRawHandle::as_raw_handle(file) as HANDLE;
     let span = if len == 0 { u64::MAX } else { len };
+    // SAFETY: `OVERLAPPED` is a plain C struct whose all-zero value is valid.
     let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
     overlapped.Anonymous.Anonymous.Offset = start as u32;
     overlapped.Anonymous.Anonymous.OffsetHigh = (start >> 32) as u32;
@@ -2304,6 +2357,7 @@ pub fn unlock_range_on(file: &std::fs::File, start: u64, len: u64) -> std::io::R
 
     let handle = std::os::windows::io::AsRawHandle::as_raw_handle(file) as HANDLE;
     let span = if len == 0 { u64::MAX } else { len };
+    // SAFETY: `OVERLAPPED` is a plain C struct whose all-zero value is valid.
     let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
     overlapped.Anonymous.Anonymous.Offset = start as u32;
     overlapped.Anonymous.Anonymous.OffsetHigh = (start >> 32) as u32;
@@ -2327,7 +2381,7 @@ pub fn unlock_range_on(file: &std::fs::File, start: u64, len: u64) -> std::io::R
 /// operation over `context`.
 fn fs_unit_result(outcome: std::io::Result<()>, context: &str) -> i128 {
     match outcome {
-        Ok(()) => unsafe { gos_rt_result_new(0, 0) },
+        Ok(()) => gos_rt_result_new(0, 0),
         Err(e) => fs_io_err(&e, context),
     }
 }
@@ -2340,12 +2394,13 @@ pub unsafe extern "C" fn gos_rt_fs_permissions(path: *const c_char) -> i128 {
         if path.is_null() {
             return fs_err("permissions: null path");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         match crate::sched_global::run_blocking("fs-permissions", move || {
             crate::fs_mode::read(std::path::Path::new(&p))
         }) {
-            Ok(Ok(mode)) => unsafe { gos_rt_result_new(0, i64::from(mode)) },
+            Ok(Ok(mode)) => gos_rt_result_new(0, i64::from(mode)),
             Ok(Err(e)) => fs_io_err(&e, &context),
             Err(e) => fs_err(&e),
         }
@@ -2361,6 +2416,7 @@ pub unsafe extern "C" fn gos_rt_fs_set_permissions(path: *const c_char, mode: i6
         if path.is_null() {
             return fs_err("set_permissions: null path");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         let bits = crate::fs_mode::bits(mode);
@@ -2382,6 +2438,7 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir_mode(path: *const c_char, mode: i6
         if path.is_null() {
             return fs_err("create_dir_mode: null path");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         let bits = crate::fs_mode::bits(mode);
@@ -2403,6 +2460,7 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir_all_mode(path: *const c_char, mode
         if path.is_null() {
             return fs_err("create_dir_all_mode: null path");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
         let context = p.clone();
         let bits = crate::fs_mode::bits(mode);
@@ -2421,15 +2479,18 @@ pub unsafe extern "C" fn gos_rt_fs_create_dir_all_mode(path: *const c_char, mode
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_fs_write_mode(
     path: *const c_char,
-    contents: *const c_char,
+    contents: *const super::vec::GosVec,
     mode: i64,
 ) -> i128 {
     ffi_entry!(0i128, {
-        if path.is_null() || contents.is_null() {
+        if path.is_null() {
             return fs_err("write_mode: null argument");
         }
+        // SAFETY: `path` is a String argument from compiled code, null or a live string body for the whole call.
         let p = unsafe { crate::c_abi::gos_str_arg_string(path) };
-        let bytes = unsafe { crate::c_abi::gos_str_arg_bytes(contents) }.to_vec();
+        // SAFETY: `contents` is this shim's argument, live for the call (C-ABI contract) or null,
+        // which `vec_bytes` accepts.
+        let bytes = unsafe { crate::c_abi::vec::vec_bytes(contents) };
         let context = p.clone();
         let bits = crate::fs_mode::bits(mode);
         let outcome = crate::sched_global::run_blocking("fs-write-mode", move || {
