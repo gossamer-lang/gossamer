@@ -25,6 +25,7 @@
 - Compiled loops preempt: a long-running loop that calls nothing yields to other goroutines.
 - `gos build -g` emits variable locations for parameters and named locals.
 - VM recursion is bounded by frame memory instead of 4096 frames.
+- A native Windows program reserves a 16 MiB main-thread stack, so it recurses as deep as on Linux and macOS instead of overflowing the 1 MiB PE default.
 - `GOS_VERIFY_RC=1` checks the reference-count operations of every compiled function (use after release, double release); debug builds always run it.
 - `gos registry serve` serves a package registry from a directory, `gos keygen` creates a publish key, and `gos publish` refuses to upload unsigned. Fetched packages reach the build, and signed packages verify. Credentials and keys are written owner-only from creation.
 - Packages stay source at 1.0; diagnostics and traces name each module's own file and line, `gos test` included.

@@ -109,6 +109,25 @@ fn macos_link_optimisation_flag(opts: LinkOptions) -> &'static str {
     if opts.release { "-Wl,-O1" } else { "-Wl,-O0" }
 }
 
+/// Main-thread stack a Windows executable reserves. A PE's default reserve is
+/// 1 MiB against the 8 MiB main-thread stack Linux and macOS give a process,
+/// and a Win64 frame is larger than its System V counterpart (32 bytes of
+/// shadow space per call, more callee-saved registers), so the reserve is
+/// doubled again to reach the same recursion depth. The OS commits the pages
+/// only as the stack grows into them.
+const WINDOWS_MAIN_STACK_RESERVE: u64 = 16 * 1024 * 1024;
+
+/// The mingw `cc` spelling of [`WINDOWS_MAIN_STACK_RESERVE`].
+fn mingw_stack_reserve_flag() -> String {
+    format!("-Wl,--stack,{WINDOWS_MAIN_STACK_RESERVE}")
+}
+
+/// The lld-link spelling of [`WINDOWS_MAIN_STACK_RESERVE`].
+#[cfg(any(windows, test))]
+fn windows_stack_reserve_flag() -> String {
+    format!("/STACK:{WINDOWS_MAIN_STACK_RESERVE}")
+}
+
 /// Explicit MSVC/lld-link optimization settings for a profile. Keeping these
 /// out of the `#[cfg(windows)]` function prevents Windows-only policy drift.
 #[cfg(any(windows, test))]
@@ -1566,6 +1585,7 @@ fn link_posix(
         cmd.args(mingw_reproducible_link_flags(
             gossamer_codegen_llvm::reproducible_enabled(),
         ));
+        cmd.arg(mingw_stack_reserve_flag());
     }
     if !extra_archives.is_empty() {
         // The rust-bindings staticlib pulls in `gossamer-runtime`
@@ -1885,6 +1905,7 @@ fn link_windows_msvc(
     cmd.args(windows_reproducible_link_flags(
         gossamer_codegen_llvm::reproducible_enabled(),
     ));
+    cmd.arg(windows_stack_reserve_flag());
     let mut out_arg = std::ffi::OsString::from("/OUT:");
     out_arg.push(out_path);
     cmd.arg(out_arg);
@@ -2321,5 +2342,11 @@ mod tests {
             ["-Wl,--no-insert-timestamp"]
         );
         assert!(super::mingw_reproducible_link_flags(false).is_empty());
+    }
+
+    #[test]
+    fn a_windows_link_reserves_the_main_thread_stack() {
+        assert_eq!(super::windows_stack_reserve_flag(), "/STACK:16777216");
+        assert_eq!(super::mingw_stack_reserve_flag(), "-Wl,--stack,16777216");
     }
 }
