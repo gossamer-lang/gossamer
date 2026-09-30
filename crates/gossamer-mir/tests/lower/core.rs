@@ -2310,3 +2310,36 @@ fn main() { println(probe(#[1, 2], 1)) }
     );
     assert_eq!(checked(&body, BinOp::Add), 2, "`i + 1` may overflow after `get` answers None");
 }
+
+#[test]
+fn a_versioned_loop_guard_never_traps() {
+    let body = optimised_fn(
+        r"
+fn total(xs: Vec<i64>, n: i64) -> i64 {
+    let mut s = 0
+    for i in 0..n { s += xs[i] }
+    s
+}
+fn main() { println(total(#[1, 2], 2)) }
+",
+        "total",
+    );
+    let (unchecked, _) = access_split(&body);
+    assert_eq!(unchecked, 1, "the loop is versioned");
+    assert_eq!(checked(&body, BinOp::Sub), 0, "an empty loop must not panic in its guard");
+}
+
+#[test]
+fn a_proven_affine_index_is_computed_wrapping_in_the_unchecked_clone() {
+    let body = optimised_fn(
+        r"
+fn f(a: [i64], b: &mut Vec<i64>, base: i64, m: i64) {
+    for c in 0..m { let i = base + c; b[i] = a[i] }
+}
+fn main() { let mut w: Vec<i64> = #[0, 0]; f(#[1, 2], &mut w, 0, 2); println(w[0]) }
+",
+        "f",
+    );
+    assert_eq!(checked(&body, BinOp::Add), 1, "only the checked original computes `base + c` checked");
+    assert!(checked(&body, BinOp::WrappingAdd) >= 1, "the clone computes it wrapping");
+}

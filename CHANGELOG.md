@@ -4,6 +4,8 @@
 
 - Release builds prove more `+`, `-`, and `*` cannot overflow and drop their checks: a value read from an integer `Vec` the function fills itself lies within what it stored, an index an element access accepted lies within the length, a remainder by a positive divisor keeps its dividend's sign, and a completed `x * x` bounds `x`. Element-wise loops over such vectors vectorize again.
 - A release build keeps the overflow check on `i + 1` after `xs.get(i)` answers `None`; it wrapped where the VM panics.
+- A counted loop that runs zero times no longer panics with `attempt to subtract with overflow` in a native build (`for i in 0..n` with `n == i64::MIN`); the check that proves its indices in range never traps.
+- In a loop whose indices are proven in range, the index arithmetic (`xs[row + j]`) drops its overflow check, and indices written with `+%` or `-%` are proven too, so such loops vectorize.
 - `json::render` and `json::encode_pretty` of a parsed document stream from its text instead of building the value tree first, so rendering a large document takes a fraction of the time and memory, with the same output.
 - The ten largest compiler and runtime source files are split into modules by responsibility (`checker`, `value`, `compile_expr`, HIR `lower`, `stdlib_free`, LLVM `emit`, and the runtime's `string`, `vec`, `map`, and `rc`), with no change in behavior.
 

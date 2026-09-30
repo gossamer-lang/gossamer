@@ -874,6 +874,11 @@ impl InvExpr {
     }
 }
 
+/// Largest magnitude of a counter, bound, or index base the preheader
+/// admits. Sums and differences of two such values fit in `i64`, so the
+/// guard's wrapping arithmetic computes them exactly.
+const GUARD_MAGNITUDE: i128 = 1 << 62;
+
 /// Depth bound on a rebuilt invariant expression. An index nested deeper than
 /// this is left checked rather than growing the preheader without limit.
 const INV_EXPR_MAX_DEPTH: usize = 4;
@@ -881,8 +886,15 @@ const INV_EXPR_MAX_DEPTH: usize = 4;
 /// Wrapping integer operations, the only ones an invariant expression may
 /// rebuild: division and remainder panic on a zero divisor, so hoisting one
 /// ahead of the guard that made it reachable would change behaviour.
-fn is_wrapping_arith(op: BinOp) -> bool {
-    matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+/// The wrapping form of `+`, `-`, or `*`, checked or already wrapping, for
+/// rebuilding an invariant in the preheader; `None` for any other operator.
+fn wrapping_form(op: BinOp) -> Option<BinOp> {
+    match op {
+        BinOp::Add | BinOp::WrappingAdd => Some(BinOp::WrappingAdd),
+        BinOp::Sub | BinOp::WrappingSub => Some(BinOp::WrappingSub),
+        BinOp::Mul | BinOp::WrappingMul => Some(BinOp::WrappingMul),
+        _ => None,
+    }
 }
 
 /// Returns the single `Assign` rvalue defining `local` as a bare place,
@@ -976,11 +988,11 @@ fn invariant_expr(
     }
     match unique_def_rvalue(body, p.local)? {
         Rvalue::Use(op) => invariant_expr(body, header, region, counter, op, depth - 1),
-        Rvalue::BinaryOp { op, lhs, rhs } if is_wrapping_arith(*op) => {
+        Rvalue::BinaryOp { op, lhs, rhs } if wrapping_form(*op).is_some() => {
             let l = invariant_expr(body, header, region, counter, lhs, depth - 1)?;
             let r = invariant_expr(body, header, region, counter, rhs, depth - 1)?;
             Some(InvExpr::Bin {
-                op: *op,
+                op: wrapping_form(*op)?,
                 lhs: Box::new(l),
                 rhs: Box::new(r),
             })
@@ -1037,7 +1049,7 @@ fn affine_base(
         Rvalue::Use(op) if is_counter(op) => Some(InvExpr::constant(0)),
         Rvalue::Use(op) => affine(op),
         Rvalue::BinaryOp {
-            op: BinOp::Add,
+            op: BinOp::Add | BinOp::WrappingAdd,
             lhs,
             rhs,
         } => {
@@ -1046,23 +1058,23 @@ fn affine_base(
             } else if is_counter(rhs) {
                 invariant(lhs)
             } else if let (Some(base), Some(by)) = (affine(lhs), invariant(rhs)) {
-                Some(shift(BinOp::Add, base, by))
+                Some(shift(BinOp::WrappingAdd, base, by))
             } else if let (Some(base), Some(by)) = (affine(rhs), invariant(lhs)) {
-                Some(shift(BinOp::Add, base, by))
+                Some(shift(BinOp::WrappingAdd, base, by))
             } else {
                 None
             }
         }
         Rvalue::BinaryOp {
-            op: BinOp::Sub,
+            op: BinOp::Sub | BinOp::WrappingSub,
             lhs,
             rhs,
         } => {
             let by = invariant(rhs)?;
             if is_counter(lhs) {
-                Some(shift(BinOp::Sub, InvExpr::constant(0), by))
+                Some(shift(BinOp::WrappingSub, InvExpr::constant(0), by))
             } else {
-                Some(shift(BinOp::Sub, affine(lhs)?, by))
+                Some(shift(BinOp::WrappingSub, affine(lhs)?, by))
             }
         }
         _ => None,
@@ -1099,7 +1111,7 @@ fn descending_base(
     match unique_def_rvalue(body, p.local)? {
         Rvalue::Use(op) => descending_base(body, header, region, counter, op, depth - 1),
         Rvalue::BinaryOp {
-            op: BinOp::Sub,
+            op: BinOp::Sub | BinOp::WrappingSub,
             lhs,
             rhs,
         } if index_is_counter(body, region, counter, rhs) => {
@@ -1441,6 +1453,22 @@ fn try_version_loop(
     emit_loop_version(body, h, VersionLoopLocals { counter, bound, inclusive }, &loop_blocks, &cands);
 }
 
+/// The argument positions holding element indices in a versionable scalar
+/// vec access. A swap reads and writes two elements, so the loop runs
+/// unchecked only when the preheader proves both of its indices.
+fn index_argument_positions(name: &str) -> &'static [usize] {
+    match name {
+        "gos_rt_vec_get_i64" | "gos_rt_vec_set_i64" => &[1],
+        "gos_rt_vec_swap_safe" => &[1, 2],
+        _ => &[],
+    }
+}
+
+/// The argument count of a versionable scalar vec access.
+fn index_call_arity(name: &str) -> usize {
+    if name == "gos_rt_vec_get_i64" { 2 } else { 3 }
+}
+
 /// Collects every scalar vec access `xs[base + counter]` in the loop with a
 /// loop-invariant `base` and a receiver that is provably unmodified and of
 /// an unchecked-scalar element type.
@@ -1463,14 +1491,10 @@ fn collect_affine_candidates(
         else {
             continue;
         };
-        // A swap reads and writes two elements, so the loop runs unchecked
-        // only when the preheader proves both of its indices.
-        let idx_args: &[usize] = match name.as_str() {
-            "gos_rt_vec_get_i64" if args.len() == 2 => &[1],
-            "gos_rt_vec_set_i64" if args.len() == 3 => &[1],
-            "gos_rt_vec_swap_safe" if args.len() == 3 => &[1, 2],
-            _ => continue,
-        };
+        let idx_args = index_argument_positions(name);
+        if idx_args.is_empty() || args.len() != index_call_arity(name) {
+            continue;
+        }
         let Operand::Copy(recv) = &args[0] else {
             continue;
         };
@@ -1535,6 +1559,88 @@ fn clone_loop_unchecked(
     clones
 }
 
+/// The in-loop statements computing a proven index directly as
+/// `invariant + counter`, `counter + invariant`, `counter - invariant`, or
+/// `invariant - counter`, with the wrapping operator each takes in the
+/// unchecked clone. The preheader proves every such index in `[0, len)`
+/// over the whole loop, so the operation cannot overflow there.
+fn proven_index_arithmetic(
+    body: &Body,
+    h: usize,
+    counter: Local,
+    loop_blocks: &[usize],
+    cands: &[VersionedAccess],
+) -> Vec<(usize, usize, BinOp)> {
+    let region: Vec<usize> = loop_blocks.iter().copied().filter(|&b| b != h).collect();
+    let is_counter = |op: &Operand| index_is_counter(body, &region, counter, op);
+    let invariant = |op: &Operand| invariant_expr(body, h, &region, counter, op, 0).is_some();
+    let mut out = Vec::new();
+    for cand in cands {
+        if matches!(cand.index, VersionedIndex::Invariant { .. }) {
+            continue;
+        }
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            ..
+        } = &body.blocks[cand.block].terminator
+        else {
+            continue;
+        };
+        for arg in index_argument_positions(name).iter().filter_map(|&i| args.get(i)) {
+            let Operand::Copy(index) = arg else { continue };
+            if !index.projection.is_empty() {
+                continue;
+            }
+            // Follow `let` copies to the arithmetic that computes the index.
+            let mut local = index.local;
+            for _ in 0..INV_EXPR_MAX_DEPTH {
+                let Some((block, stmt, rvalue)) = loop_def(body, loop_blocks, local) else {
+                    break;
+                };
+                match rvalue {
+                    Rvalue::Use(Operand::Copy(source)) if source.projection.is_empty() => {
+                        local = source.local;
+                    }
+                    Rvalue::BinaryOp { op, lhs, rhs }
+                        if (is_counter(lhs) && invariant(rhs))
+                            || (is_counter(rhs) && invariant(lhs)) =>
+                    {
+                        match op {
+                            BinOp::Add => out.push((block, stmt, BinOp::WrappingAdd)),
+                            BinOp::Sub => out.push((block, stmt, BinOp::WrappingSub)),
+                            _ => {}
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The block, statement index, and rvalue of `local`'s only definition,
+/// when that definition is an assignment inside `loop_blocks`.
+fn loop_def<'b>(
+    body: &'b Body,
+    loop_blocks: &[usize],
+    local: Local,
+) -> Option<(usize, usize, &'b Rvalue)> {
+    let rvalue = unique_def_rvalue(body, local)?;
+    loop_blocks.iter().find_map(|&b| {
+        body.blocks[b].stmts.iter().enumerate().find_map(|(i, stmt)| match &stmt.kind {
+            StatementKind::Assign { place, .. }
+                if place.local == local && place.projection.is_empty() =>
+            {
+                Some((b, i, rvalue))
+            }
+            _ => None,
+        })
+    })
+}
+
 /// Allocates a fresh, immutable, non-region local of type `ty`.
 fn fresh_local(body: &mut Body, ty: Ty) -> Local {
     let l = Local(u32::try_from(body.locals.len()).expect("local overflow"));
@@ -1565,8 +1671,11 @@ struct RangeCheck {
 }
 
 /// Builds one preheader comparison block at index `idx`: computes
-/// `tmp = arith_lhs - arith_rhs`, then `c = base <cmp> tmp`, and branches to
-/// the checked loop when `c` is false or to `next` otherwise.
+/// `tmp = arith_lhs -% arith_rhs`, then `c = base <cmp> tmp`, and branches to
+/// the checked loop when `c` is false or to `next` otherwise. The preheader
+/// runs even when the loop would not, so it never traps; the magnitude
+/// checks keep every operand within `GUARD_MAGNITUDE`, where the wrapping
+/// difference is the exact one.
 fn range_check_block(
     body: &mut Body,
     ctx: &PreheaderCtx,
@@ -1583,7 +1692,7 @@ fn range_check_block(
                 kind: StatementKind::Assign {
                     place: Place::local(tmp),
                     rvalue: Rvalue::BinaryOp {
-                        op: BinOp::Sub,
+                        op: BinOp::WrappingSub,
                         lhs: check.arith_lhs,
                         rhs: check.arith_rhs,
                     },
@@ -1694,20 +1803,24 @@ fn collect_version_checks(cands: &[VersionedAccess]) -> (Vec<(Local, VersionedIn
 }
 
 fn version_preheader_len(checks: &[(Local, VersionedIndex)], xs_count: usize) -> usize {
+    // One length block per vec, the counter's and the bound's magnitude
+    // checks, and per index its comparisons, its base's magnitude check, and
+    // any block rebuilding an expression.
     xs_count
+        + 2
         + checks
             .iter()
             .map(|(_, index)| match index {
                 VersionedIndex::AffineCounter { base } => {
-                    2 + usize::from(invariant_index_needs_block(base))
+                    3 + usize::from(invariant_index_needs_block(base))
                 }
                 // The highest index `base - lo` is rebuilt in a block of its
                 // own, beside the two comparisons and the base itself.
                 VersionedIndex::DescendingCounter { base } => {
-                    3 + usize::from(invariant_index_needs_block(base))
+                    4 + usize::from(invariant_index_needs_block(base))
                 }
                 VersionedIndex::Invariant { expr } => {
-                    2 + usize::from(invariant_index_needs_block(expr))
+                    3 + usize::from(invariant_index_needs_block(expr))
                 }
             })
             .sum::<usize>()
@@ -1794,6 +1907,21 @@ impl VersionPreheader<'_> {
         ));
     }
 
+    /// Requires `value` to lie in `[-GUARD_MAGNITUDE, GUARD_MAGNITUDE)`:
+    /// `value -% (-GUARD_MAGNITUDE)` is non-negative exactly there.
+    fn push_magnitude(&mut self, p: &mut usize, value: Operand) {
+        self.push_range(
+            *p,
+            RangeCheck {
+                arith_lhs: value,
+                arith_rhs: Operand::Const(ConstValue::Int(-GUARD_MAGNITUDE)),
+                base: Operand::Const(ConstValue::Int(0)),
+                cmp: BinOp::Le,
+            },
+        );
+        *p += 1;
+    }
+
     /// Materialises `expr` into an operand, consuming one preheader block
     /// when the expression is more than a bare operand.
     fn materialise(&mut self, p: &mut usize, expr: &InvExpr) -> Operand {
@@ -1820,6 +1948,7 @@ impl VersionPreheader<'_> {
         locals: VersionLoopLocals,
     ) {
         let base = &self.materialise(p, base_expr);
+        self.push_magnitude(p, base.clone());
         self.push_range(
             *p,
             RangeCheck {
@@ -1856,7 +1985,7 @@ impl VersionPreheader<'_> {
         locals: VersionLoopLocals,
     ) {
         let highest = InvExpr::Bin {
-            op: BinOp::Sub,
+            op: BinOp::WrappingSub,
             lhs: Box::new(base_expr.clone()),
             rhs: Box::new(InvExpr::Operand(Operand::Copy(Place::local(locals.counter)))),
         };
@@ -1873,6 +2002,7 @@ impl VersionPreheader<'_> {
         *p += 1;
 
         let base = self.materialise(p, base_expr);
+        self.push_magnitude(p, base.clone());
         self.push_range(
             *p,
             RangeCheck {
@@ -1887,6 +2017,7 @@ impl VersionPreheader<'_> {
 
     fn push_invariant(&mut self, p: &mut usize, x: Local, expr: &InvExpr) {
         let index_op = self.materialise(p, expr);
+        self.push_magnitude(p, index_op.clone());
 
         self.push_range(
             *p,
@@ -1942,6 +2073,8 @@ fn emit_version_preheader(
         pre: &mut pre,
     };
     let mut p = xs_list.len();
+    emit.push_magnitude(&mut p, Operand::Copy(Place::local(locals.counter)));
+    emit.push_magnitude(&mut p, Operand::Copy(Place::local(locals.bound)));
     for (x, index) in checks {
         match index {
             VersionedIndex::AffineCounter { base } => {
@@ -1983,7 +2116,17 @@ fn emit_loop_version(
 
     let n0 = body.blocks.len();
     let cand_blocks: std::collections::HashSet<usize> = cands.iter().map(|c| c.block).collect();
-    let clone_blocks = clone_loop_unchecked(body, loop_blocks, n0, &cand_blocks);
+    let mut clone_blocks = clone_loop_unchecked(body, loop_blocks, n0, &cand_blocks);
+    for (block, stmt, op) in proven_index_arithmetic(body, h, counter, loop_blocks, cands) {
+        if let Some(pos) = loop_blocks.iter().position(|&b| b == block)
+            && let StatementKind::Assign {
+                rvalue: Rvalue::BinaryOp { op: slot, .. },
+                ..
+            } = &mut clone_blocks[pos].stmts[stmt].kind
+        {
+            *slot = op;
+        }
+    }
     let pbase = n0 + clone_blocks.len();
     let unchecked_header = BlockId(n0 as u32);
     let pre = emit_version_preheader(

@@ -53,23 +53,23 @@ println(f"pi is about {pi:.2}, tau about {pi * 2.0:.2}")
     // \`for\` walks a range or a collection - no \`.iter()\`, no \`as usize\`.
     let mut total = 0
     for n in 1..=5 { total += n }
-    println("1..=5 sums to {total}")
+    println(f"1..=5 sums to {total}")
 
     for (i, name) in #["ada", "grace", "alan"].iter().enumerate() {
-        println("{i}: {name}")
+        println(f"{i}: {name}")
     }
 
     // \`while\` for a condition, \`while let\` to drain an Option-yielding call.
     let mut countdown = 3
     while countdown > 0 {
-        print("{countdown}.. ")
+        print(f"{countdown}.. ")
         countdown -= 1
     }
     println("liftoff")
 
     let mut stack = #[1, 2, 3]
     while let Some(top) = stack.pop() {
-        print("{top} ")
+        print(f"{top} ")
     }
     println("")
 
@@ -79,11 +79,11 @@ println(f"pi is about {pi:.2}, tau about {pi * 2.0:.2}")
         n *= 2
         if n > 100 { break n }
     }
-    println("first power of two past 100 = {doubled_past_100}")
+    println(f"first power of two past 100 = {doubled_past_100}")
 
     // \`if\` and \`match\` are expressions too - bind their result.
     let size = if doubled_past_100 > 64 { "big" } else { "small" }
-    println("that is {size}")
+    println(f"that is {size}")
 
     // A labeled loop breaks the outer level from inside the inner one.
     let mut found = (0, 0)
@@ -95,7 +95,7 @@ println(f"pi is about {pi:.2}, tau about {pi * 2.0:.2}")
             }
         }
     }
-    println("first pair with product 6 = {:?}", found)
+    println(f"first pair with product 6 = {found:?}")
 
     // \`continue\` skips the rest of one iteration.
     let mut odds = #[]
@@ -103,7 +103,7 @@ println(f"pi is about {pi:.2}, tau about {pi * 2.0:.2}")
         if n % 2 == 0 { continue }
         odds.push(n)
     }
-    println("odds = {:?}", odds)
+    println(f"odds = {odds:?}")
 }
 `,
   },
@@ -136,7 +136,7 @@ fn area(shape: Shape) -> f64 {
 
 let shapes = [Shape::Circle(2.0), Shape::Rect { w: 3.0, h: 4.0 }, Shape::Line]
 for s in shapes {
-    println("area = {}", area(s))
+    println(f"area = {area(s)}")
 }
 `,
   },
@@ -161,12 +161,12 @@ fn inc(y: i64) -> i64 { y + 1 }
 
 let scale = 10
 let scaled = |y: i64| scale * y       // captures \`scale\`
-println("scaled(5) = {}", apply(scaled, 5))
-println("inc(41)   = {}", apply(inc, 41))   // bare fn coerces
+println(f"scaled(5) = {apply(scaled, 5)}")
+println(f"inc(41)   = {apply(inc, 41)}")   // bare fn coerces
 
 // Closures power the sequence combinators, one per step.
 let total = (1..=6).filter(|n| n % 2 == 0).map(|n| n * n).sum()
-println("sum of squares of evens in 1..=6 = {total}")
+println(f"sum of squares of evens in 1..=6 = {total}")
 `,
   },
   {
@@ -202,18 +202,18 @@ impl Box {
     fn area(self, scale: i64 = 1) -> i64 { self.w * self.h * scale }
 }
 
-println("{}", greet("world"))
-println("{}", greet("world", "hi"))
+println(greet("world"))
+println(greet("world", "hi"))
 
 // Name an argument with \`:\` to skip over a default in between.
-println("{}", greet("world", excited: true))
+println(greet("world", excited: true))
 
 // Names may come in any order once positional arguments are done.
-println("{}", greet(greeting: "hey", name: "Gossamer", excited: true))
+println(greet(greeting: "hey", name: "Gossamer", excited: true))
 
 let b = Box::new(3)
-println("area = {}", b.area())
-println("scaled = {}", b.area(scale: 10))
+println(f"area = {b.area()}")
+println(f"scaled = {(b.area(scale: 10))}")
 `,
   },
   {
@@ -235,15 +235,15 @@ fn add(a: i64, b: i64) -> i64 { a + b }
 
 // \`x |> f\` is \`f(x)\`; a closure step names the slot: \`f(a, x)\`.
 let n = 3 |> double |> |v| add(10, v)
-println("3 |> double |> |v| add(10, v) = {n}")
+println(f"3 |> double |> |v| add(10, v) = {n}")
 
 // A method already chains, and the chain can feed a pipe.
 let shout = "  hi there  ".trim().to_uppercase()
-println("shout = {shout}")
+println(f"shout = {shout}")
 
 // Ranges are values and combinators are methods - chain them directly.
 let total = (1..=5).filter(|n| n % 2 == 1).sum()
-println("sum of odds in 1..=5 = {total}")
+println(f"sum of odds in 1..=5 = {total}")
 `,
   },
   {
@@ -259,26 +259,26 @@ println("sum of odds in 1..=5 = {total}")
     queue.push(16)
     let fixed = [1, 2, 3]
 
-    println("vec   = {:?} (len {})", queue, queue.len())
-    println("array = {:?} (len {})", fixed, fixed.len())
+    println(f"vec   = {queue:?} (len {queue.len()})")
+    println(f"array = {fixed:?} (len {fixed.len()})")
 
     // Indices are plain i64 - no casts. Reads and writes are bounds-checked.
-    println("queue[0] = {}, last = {:?}", queue[0], queue.last())
+    println(f"queue[0] = {queue[0]}, last = {queue.last():?}")
 
     // A \`[T]\` parameter takes an array, a Vec, or another view.
-    println("sum through a slice view = {}", total(queue))
+    println(f"sum through a slice view = {total(queue)}")
 
     // Vec owns the resizing surface: insert, remove, truncate.
     let _ = queue.insert(0, 1)
     let _ = queue.remove(1)
-    println("after insert/remove = {:?}", queue)
+    println(f"after insert/remove = {queue:?}")
 
     // Tuples group values of different types; read them positionally or
     // destructure them.
     let entry = ("gossamer", 2026, true)
     let name, year, _ = entry
-    println("{name} ({year}), tuple len = {}", entry.len())
-    println("field access: {}", entry.0)
+    println(f"{name} ({year}), tuple len = {entry.len()}")
+    println(f"field access: {entry.0}")
 }
 
 fn total(xs: [i64]) -> i64 {
@@ -303,29 +303,29 @@ stock.insert("figs", 7)
 
 // \`inc\` is the counter idiom, \`get_or\` the fallback read.
 stock.inc("apples", 5)
-println("apples = {}", stock.get_or("apples", 0))
-println("kiwis  = {}", stock.get_or("kiwis", 0))
-println("has figs = {}", stock.contains_key("figs"))
+println(f"apples = {stock.get_or("apples", 0)}")
+println(f"kiwis  = {stock.get_or("kiwis", 0)}")
+println(f"has figs = {stock.contains_key("figs")}")
 
 for (name, count) in stock.iter() {
-    if count > 6 { println("plenty of {name}: {count}") }
+    if count > 6 { println(f"plenty of {name}: {count}") }
 }
 
 // Sets carry the algebra, not just membership.
 let planted = #{"apples", "pears", "plums"}
 let sold = #{"pears", "figs"}
-println("both      = {:?}", planted.intersection(sold).to_vec())
-println("unsold    = {:?}", planted.difference(sold).to_vec())
-println("every one = {:?}", planted.union(sold).to_vec())
+println(f"both      = {planted.intersection(sold).to_vec():?}")
+println(f"unsold    = {planted.difference(sold).to_vec():?}")
+println(f"every one = {planted.union(sold).to_vec():?}")
 
 // The BTree pair keeps keys in sorted order.
 let mut ordered: BTreeMap<String, i64> = BTreeMap::new()
 ordered.insert("zebra", 1)
 ordered.insert("ant", 2)
-println("sorted keys = {:?}", ordered.keys())
+println(f"sorted keys = {ordered.keys():?}")
 
 let tags: BTreeSet<String> = #{"gamma", "alpha", "beta"}
-println("sorted tags = {:?}", tags.to_vec())
+println(f"sorted tags = {tags.to_vec():?}")
 `,
   },
   {
@@ -339,23 +339,23 @@ println("sorted tags = {:?}", tags.to_vec())
 
 let mut q = Queue::from([1, 2, 3])
 q.push(4)
-println("queue front = {:?}, len = {}", q.pop(), q.len())
+println(f"queue front = {q.pop():?}, len = {q.len()}")
 
 let mut st = Stack::from([1, 2, 3])
 st.push(4)
-println("stack top = {:?}", st.pop())
+println(f"stack top = {st.pop():?}")
 
 let mut dq = Deque::from([2, 3])
 dq.push_front(1)
 dq.push_back(4)
-println("deque ends = {:?} {:?}", dq.pop_front(), dq.pop_back())
+println(f"deque ends = {dq.pop_front():?} {dq.pop_back():?}")
 
 let mut hi = MaxHeap::from([3, 9, 4])
 hi.push(11)
-println("max = {:?}", hi.pop())
+println(f"max = {hi.pop():?}")
 
 let mut lo = MinHeap::from([3, 9, 4])
-println("min = {:?}", lo.pop())
+println(f"min = {lo.pop():?}")
 `,
   },
   {
@@ -369,31 +369,31 @@ println("min = {:?}", lo.pop())
     let readings = #[12, 7, 30, 4, 18, 25]
 
     // Transform, select, and reduce - each combinator is a method.
-    println("doubled  = {:?}", readings.map(|n| n * 2))
-    println("over ten = {:?}", readings.filter(|n| n > 10))
-    println("sum      = {}", readings.sum())
-    println("count    = {}", readings.count(|n| n % 2 == 0))
-    println("fold     = {}", readings.fold(0, |acc, n| acc + n * n))
+    println(f"doubled  = {readings.map(|n| n * 2):?}")
+    println(f"over ten = {readings.filter(|n| n > 10):?}")
+    println(f"sum      = {readings.sum()}")
+    println(f"count    = {readings.count(|n| n % 2 == 0)}")
+    println(f"fold     = {readings.fold(0, |acc, n| acc + n * n)}")
 
     // Questions about a sequence answer directly.
-    println("any over 25 = {}", readings.any(|n| n > 25))
-    println("all positive = {}", readings.all(|n| n > 0))
-    println("first over 15 = {:?}", readings.find(|n| n > 15))
-    println("its index = {:?}", readings.position(|n| n > 15))
-    println("largest = {:?}", readings.max())
-    println("closest to 20 = {:?}", readings.min_by_key(|n| if n > 20 { n - 20 } else { 20 - n }))
+    println(f"any over 25 = {readings.any(|n| n > 25)}")
+    println(f"all positive = {readings.all(|n| n > 0)}")
+    println(f"first over 15 = {readings.find(|n| n > 15):?}")
+    println(f"its index = {readings.position(|n| n > 15):?}")
+    println(f"largest = {readings.max():?}")
+    println(f"closest to 20 = {(readings.min_by_key(|n| if n > 20 { n - 20 } else { 20 - n })):?}")
 
     // Ranges carry the same surface, and the pipeline reads left to right.
     let squares = (1..=6).filter(|n| n % 2 == 1).map(|n| n * n).collect()
-    println("odd squares = {:?}", squares)
-    println("reversed    = {:?}", (1..=5).rev().collect())
-    println("every other = {:?}", (0..10).step_by(3).collect())
-    println("first three = {:?}", readings.iter().take(3).collect())
+    println(f"odd squares = {squares:?}")
+    println(f"reversed    = {(1..=5).rev().collect():?}")
+    println(f"every other = {(0..10).step_by(3).collect():?}")
+    println(f"first three = {readings.iter().take(3).collect():?}")
 
     // Sorting takes the key you care about; \`join\` renders the result.
     let mut names = #["Ada", "Grace", "Alan", "Barbara"]
     names.sort_by_key(|n| n.len())
-    println("by length = {}", names.join(", "))
+    println(f"by length = {names.join(", ")}")
 }
 `,
   },
@@ -410,9 +410,9 @@ let mut scores = #[42, 7, 19, 7, 88, 3]
 
 // \`sort\` orders in place; \`sort_by_key\` takes the key you care about.
 scores.sort()
-println("sorted     = {:?}", scores)
-println("descending = {:?}", scores.rev())
-println("no repeats = {:?}", scores.dedup())
+println(f"sorted     = {scores:?}")
+println(f"descending = {scores.rev():?}")
+println(f"no repeats = {scores.dedup():?}")
 
 // Structs and tuples compare structurally, field by field, with no
 // derive - so a sequence of them sorts as it reads.
@@ -423,16 +423,16 @@ let mut board = #[
 ]
 board.sort_by_key(|p| 0 - p.score)
 for p in board {
-    println("  {:>6} {:>3}", p.name, p.score)
+    println(f"  {p.name:>6} {p.score:>3}")
 }
 
 // Binary search over the sorted sequence: halve the window each step.
-println("19 lives at index {:?}", index_of_sorted(scores, 19))
-println("20 is absent: {:?}", index_of_sorted(scores, 20))
+println(f"19 lives at index {index_of_sorted(scores, 19):?}")
+println(f"20 is absent: {index_of_sorted(scores, 20):?}")
 
 // The linear searches read the same either way.
-println("first over 40 = {:?}", scores.find(|n| n > 40))
-println("its position  = {:?}", scores.position(|n| n > 40))
+println(f"first over 40 = {scores.find(|n| n > 40):?}")
+println(f"its position  = {scores.position(|n| n > 40):?}")
 
 fn index_of_sorted(xs: [i64], needle: i64) -> Option<i64> {
     let mut lo = 0
@@ -462,20 +462,20 @@ fn index_of_sorted(xs: [i64], needle: i64) -> Option<i64> {
 
     // Methods chain directly; strings are plain values.
     let clean = title.trim().to_title()
-    println("[{clean}]")
+    println(f"[{clean}]")
 
     // \`+=\` appends; \`+\` concatenates with no separator.
     let mut line = "items:"
     for part in ["alpha", "beta", "gamma"] {
         line += " " + part
     }
-    println("{line}")
+    println(f"{line}")
 
     // Format specs follow Rust's {:spec} grammar.
-    println("[{:>8}]", 42)
-    println("[{:08x}]", 255)
-    println("[{:^7}]", "hi")
-    println("[{:.2}]", 3.14159)
+    println(f"[{42:>8}]")
+    println(f"[{255:08x}]")
+    println(f"[{"hi":^7}]")
+    println(f"[{3.14159:.2}]")
 }
 `,
   },
@@ -512,9 +512,9 @@ fn farther<T: Distance>(a: T, b: T) -> bool {
 
 let a = Point { x: 3, y: 4 }
 let b = Point { x: 1, y: 2 }
-println("a = {:?}", a)
-println("a == a.clone(): {}", a == a.clone())
-println("a farther than b: {}", farther(a, b))
+println(f"a = {a:?}")
+println(f"a == a.clone(): {a == a.clone()}")
+println(f"a farther than b: {farther(a, b)}")
 `,
   },
   {
@@ -541,7 +541,7 @@ impl Add for Vec2 {
 let a = Vec2 { x: 1.0, y: 2.0 }
 let b = Vec2 { x: 3.0, y: 4.0 }
 let c = a + b
-println("sum = ({}, {})", c.x, c.y)
+println(f"sum = ({c.x}, {c.y})")
 `,
   },
   {
@@ -575,7 +575,7 @@ fn eval(e: Expr) -> i64 {
 
 // (2 + 3) * 4
 let tree = Expr::Mul(Expr::Add(Expr::Num(2), Expr::Num(3)), Expr::Num(4))
-println("(2 + 3) * 4 = {}", eval(tree))
+println(f"(2 + 3) * 4 = {eval(tree)}")
 `,
   },
   {
@@ -606,11 +606,11 @@ fn half_of_first_even(xs: [i64]) -> Option<i64> {
 }
 
 if let Some(n) = first_even([3, 5, 8, 9]) {
-    println("first even = {n}")
+    println(f"first even = {n}")
 }
 
-println("half = {:?}", half_of_first_even([3, 5, 8, 9]))
-println("half = {:?}", half_of_first_even([1, 3, 5]))
+println(f"half = {half_of_first_even([3, 5, 8, 9]):?}")
+println(f"half = {half_of_first_even([1, 3, 5]):?}")
 `,
   },
   {
@@ -633,21 +633,21 @@ println("half = {:?}", half_of_first_even([1, 3, 5]))
 fn parse_port(text: String) -> Result<i64, errors::Error> {
     let n: i64 = match text.to_i64() {
         Some(n) => n,
-        None => return Err(errors::new(format("not a number: {text}"))),
+        None => return Err(errors::new(f"not a number: {text}")),
     }
-    if n <= 0 { return Err(errors::new(format("must be positive: {n}"))) }
+    if n <= 0 { return Err(errors::new(f"must be positive: {n}")) }
     Ok(n)
 }
 
 // Match the Ok value; handle the Err in-line.
 match parse_port("8080") {
-    Ok(n) => println("port = {n}"),
-    Err(e) => eprintln("error: {}", e.message()),
+    Ok(n) => println(f"port = {n}"),
+    Err(e) => eprintln(f"error: {e.message()}"),
 }
 
 // \`wrap\` adds context; printing shows the colon-joined cause chain.
 let bad = parse_port("oops").map_err(|e| errors::wrap(e, "loading config"))
-if let Err(e) = bad { println("{e}") }
+if let Err(e) = bad { println(f"{e}") }
 `,
   },
   {
@@ -679,7 +679,7 @@ spawn(|| produce(tx))
 // \`recv\` yields \`Some\` until the channel is closed and drained.
 let mut total = 0
 while let Some(v) = rx.recv() { total += v }
-println("sum of squares 1..=5 = {total}")
+println(f"sum of squares 1..=5 = {total}")
 `,
   },
   {
@@ -715,7 +715,7 @@ for _ in 0..5 {
         v = rx_lo.recv() => total += v,
     }
 }
-println("merged total = {total}")
+println(f"merged total = {total}")
 `,
   },
   {
@@ -750,7 +750,7 @@ for i in 1..=4 {
 }
 wg.wait()      // block until every worker has called \`done\`
 
-println("sum of squares 1..=4 = {}", sync::AtomicI64::load(total))
+println(f"sum of squares 1..=4 = {(sync::AtomicI64::load(total))}")
 `,
   },
   {
@@ -767,9 +767,9 @@ println("sum of squares 1..=4 = {}", sync::AtomicI64::load(total))
       pattern Go uses: open, <code>defer</code> the close, then use - and
       the close is guaranteed to happen.</p>`,
     code: `fn use_resource(name: String) {
-    println("  open {name}")
-    defer println("  close {name}")     // runs on every exit path
-    println("  use {name}")
+    println(f"  open {name}")
+    defer println(f"  close {name}")     // runs on every exit path
+    println(f"  use {name}")
 }
 
 // \`defer\` runs when control leaves the block, in LIFO order.
@@ -810,7 +810,7 @@ use_resource("file")
             grand_total += sum      // a scalar survives; the Vec does not
         }
     }
-    println("grand total = {grand_total}")
+    println(f"grand total = {grand_total}")
 }
 `,
   },
@@ -837,7 +837,7 @@ comptime fn factorial(n: i64) -> i64 {
 
 const FACT_10: i64 = comptime { factorial(10) }
 
-println("10! folded at compile time = {FACT_10}")
+println(f"10! folded at compile time = {FACT_10}")
 
 // A \`comptime\` block can fold an inline computation to a literal too.
 let triangular = comptime {
@@ -845,7 +845,7 @@ let triangular = comptime {
     for i in 1..=100 { acc += i }
     acc
 }
-println("sum 1..=100 = {triangular}")
+println(f"sum 1..=100 = {triangular}")
 `,
   },
   {
@@ -860,20 +860,20 @@ println("sum 1..=100 = {triangular}")
 // RFC 3339 text in, milliseconds since the epoch out.
 let launch = time::parse_rfc3339("2026-08-06T09:30:00Z").unwrap_or(0)
 let landing = time::parse_rfc3339("2026-08-07T11:00:00Z").unwrap_or(0)
-println("launch ms = {launch}")
+println(f"launch ms = {launch}")
 
 // Durations are values: build them, add them, read them back.
 let day = time::Duration::from_secs(86400)
 let hold = time::Duration::from_secs(5400)
 let expected = launch + day.as_millis() + hold.as_millis()
-println("expected  = {}", time::format_rfc3339(expected).unwrap_or("?"))
+println(f"expected  = {(time::format_rfc3339(expected).unwrap_or("?"))}")
 
 // A span between two instants is a duration over the difference.
 let flight = time::Duration::from_millis(landing - launch)
-println("flight    = {} h {} m", flight.as_secs() / 3600, (flight.as_secs() % 3600) / 60)
+println(f"flight    = {flight.as_secs() / 3600} h {(flight.as_secs() % 3600) / 60} m")
 
 // Comparison and ordering are plain integer work.
-println("on time   = {}", landing <= expected)
+println(f"on time   = {landing <= expected}")
 
 // A schedule is just a sequence of instants - sort and render it.
 let mut stops = #[
@@ -883,13 +883,13 @@ let mut stops = #[
 ]
 stops.sort()
 for at in stops {
-    println("  {}", time::format_rfc3339(at).unwrap_or("?"))
+    println(f"  {(time::format_rfc3339(at).unwrap_or("?"))}")
 }
 
 // Bad input is a \`Result\`, never a silent zero.
 match time::parse_rfc3339("not a timestamp") {
-    Ok(ms) => println("parsed {ms}"),
-    Err(e) => println("rejected: {e}"),
+    Ok(ms) => println(f"parsed {ms}"),
+    Err(e) => println(f"rejected: {e}"),
 }
 `,
   },
@@ -915,13 +915,13 @@ let cfg = Server { host: "localhost", port: 8080, tls: true }
 
 // Encode the struct to JSON text...
 let text = to_json::<Server>(cfg)?
-println("encoded = {text}")
+println(f"encoded = {text}")
 
 // ...then decode it straight back into a typed struct, validating
 // each field against its declared type.
 let back: Server = from_json::<Server>(text)?
-println("decoded = {:?}", back)
-println("address = {}:{}", back.host, back.port)
+println(f"decoded = {back:?}")
+println(f"address = {back.host}:{back.port}")
 `,
   },
   {
@@ -937,22 +937,22 @@ use std::errors
 // Base64 and hex round-trip bytes through text.
 let secret = "gossamer".as_bytes()
 let encoded = base64::encode(secret)
-println("base64 = {encoded}")
+println(f"base64 = {encoded}")
 let raw = base64::decode(encoded)?
-println("back   = {} bytes, first = {}", raw.len(), raw[0] as char)
-println("hex    = {}", hex::encode(secret))
+println(f"back   = {raw.len()} bytes, first = {raw[0] as char}")
+println(f"hex    = {(hex::encode(secret))}")
 
 // A delimited record splits with the string surface.
 let sheet = "name,role\\nada,analyst\\ngrace,admiral\\n"
 for line in sheet.lines() {
     if let Some((name, role)) = line.split_once(",") {
-        println("  {name} | {role}")
+        println(f"  {name} | {role}")
     }
 }
 
 // Hex decodes back to the same bytes it encoded.
 let round = hex::decode(hex::encode(secret))?
-println("hex round-trips = {}", round.len() == secret.len())
+println(f"hex round-trips = {round.len() == secret.len()}")
 `,
   },
   {
@@ -1029,17 +1029,17 @@ println("router ready")
 // The browser sandbox has no sockets, so the responses below are built
 // exactly as the handlers build them.
 let ok = http::Response::text(200, "ok")
-println("GET /health   -> {} {}", ok.status, ok.body)
+println(f"GET /health   -> {ok.status} {ok.body}")
 
 let note = http::Response::json(200, note_json(42)?)
-println("GET /notes/42 -> {} {}", note.status, note.body)
+println(f"GET /notes/42 -> {note.status} {note.body}")
 
 let created = http::Response::json(201, note_json(43)?)
     .with_header("location", "/notes/43")
-println("POST /notes   -> {} ({} header)", created.status, created.headers.len())
+println(f"POST /notes   -> {created.status} ({created.headers.len()} header)")
 
 let missing = http::Response::text(404, "no such note")
-println("miss          -> {} {}", missing.status, missing.body)
+println(f"miss          -> {missing.status} {missing.body}")
 `,
   },
   {
@@ -1063,16 +1063,16 @@ let body = "{\\"name\\":\\"gossamer\\",\\"stars\\":420}"
 
 // Typed decode: fields land in a struct, unknown keys are ignored.
 let repo = from_json::<Repo>(body)?
-println("{} has {} stars", repo.name, repo.stars)
+println(f"{repo.name} has {repo.stars} stars")
 
 // Dynamic decode for a shape you only partly know: query the document
 // itself rather than describing it with a struct.
 let doc = json::parse(body)?
-println("keys       = {:?}", doc.keys())
+println(f"keys       = {doc.keys():?}")
 if let Some(name) = doc.get("name") {
-    println("name field = {:?}", name.as_str())
+    println(f"name field = {name.as_str():?}")
 }
-println("re-encoded = {}", to_json::<Repo>(repo)?)
+println(f"re-encoded = {(to_json::<Repo>(repo)?)}")
 
 // Streaming: a server-sent-event feed arrives as lines, not as one
 // document, so each chunk is handled as it lands.
@@ -1084,7 +1084,7 @@ for line in feed.lines() {
             println("stream closed")
         } else {
             ticks += 1
-            println("chunk {ticks}: {payload}")
+            println(f"chunk {ticks}: {payload}")
         }
     }
 }
@@ -1092,8 +1092,8 @@ for line in feed.lines() {
 // A failed request is a \`Result\`, so the error path is written once.
 let bad = from_json::<Repo>("{\\"name\\":42}")
 match bad {
-    Ok(r) => println("decoded {}", r.name),
-    Err(e) => println("decode failed: {e}"),
+    Ok(r) => println(f"decoded {r.name}"),
+    Err(e) => println(f"decode failed: {e}"),
 }
 `,
   },
@@ -1170,7 +1170,7 @@ for (word, count) in counts.iter() {
 rows.sort_by_key(|r| Reverse(r.count))
 
 for r in rows {
-    println("{:>9} x {}", r.word, r.count)
+    println(f"{r.word:>9} x {r.count}")
 }
 `,
   },

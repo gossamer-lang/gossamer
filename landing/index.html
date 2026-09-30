@@ -185,7 +185,7 @@ fn clamp(lo: i64, hi: i64, x: i64) -&gt; i64 {
 }
 
 let n = 3 |&gt; double |&gt; |v| add(10, v) |&gt; |v| clamp(0, 100, v)
-println("answer: {}", n)
+println(f"answer: {n}")
 </code></pre>
         </div>
 
@@ -205,7 +205,7 @@ for (method, path) in requests {
         Some(_) =&gt; "200 ok",
         None    =&gt; "404 not found",
     }
-    println("{} {} -&gt; {}", method, path, status)
+    println(f"{method} {path} -&gt; {status}")
 }</code></pre>
         </div>
 
@@ -218,8 +218,8 @@ fn main() {
     // spawn runs fib on a goroutine; join collects its result.
     let h = spawn(|| fib(30))
     match h.join() {
-        Ok(v)  =&gt; println("fib(30) on a goroutine = {}", v),
-        Err(e) =&gt; eprintln("worker failed: {}", e),
+        Ok(v)  =&gt; println(f"fib(30) on a goroutine = {v}"),
+        Err(e) =&gt; eprintln(f"worker failed: {e}"),
     }
 }</code></pre>
         </div>
@@ -242,7 +242,7 @@ fn area(s: Shape) -&gt; f64 {
 // Top-level statements - no fn main() needed
 let shapes = #[Shape::Circle(3.0), Shape::Rect { w: 4.0, h: 5.0 }, Shape::Triangle(6.0, 2.0)]
 for s in shapes {
-    println("area = {:.2}", area(s))
+    println(f"area = {area(s):.2}")
 }</code></pre>
         </div>
 
@@ -253,64 +253,61 @@ let mut nums = #[]
 nums.push(10)
 nums.push(20)
 let dropped = nums.remove(0).unwrap_or(-1)
-println("#[] Vec: len={} removed={} first={}", nums.len(), dropped, nums[0])
+println(f"#[] Vec: len={nums.len()} removed={dropped} first={nums[0]}")
 
 let fixed = [1, 2, 3]
-println("[] fixed array: len={}", fixed.len())
+println(f"[] fixed array: len={fixed.len()}")
 
 let mut scores: Map&lt;String, i64&gt; = {}
 scores.insert("ada", 100)
 scores.insert("grace", 95)
 let old_score = scores.remove("ada").unwrap_or(0)
-println("{} Map: len={} removed={} has_grace={}",
-    "{}", scores.len(), old_score, scores.contains_key("grace"))
+println(f"{{}} Map: len={scores.len()} removed={old_score} has_grace={scores.contains_key("grace")}")
 
 let mut seen = #{}
 seen.insert(3)
 seen.insert(5)
 let removed_seen = seen.remove(3)
-println("#{} Set: len={} removed={} has5={}",
-    "{}", seen.len(), removed_seen, seen.contains(5))
+println(f"#{{}} Set: len={seen.len()} removed={removed_seen} has5={seen.contains(5)}")
 
 let mut ordered: BTreeSet&lt;i64&gt; = #{}
 ordered.insert(4)
 ordered.insert(1)
 let removed_ordered = ordered.remove(4)
-println("#{} BTreeSet: len={} removed={} values={}",
-    "{}", ordered.len(), removed_ordered, ordered.to_vec().join(","))
+println(f"#{{}} BTreeSet: len={ordered.len()} removed={removed_ordered} values={ordered.to_vec().join(",")}")
 
 let mut max_heap = MaxHeap::new()
 max_heap.push(5)
 max_heap.push(9)
 let largest = max_heap.pop().unwrap_or(0)
-println("MaxHeap: len={} removed={}", max_heap.len(), largest)
+println(f"MaxHeap: len={max_heap.len()} removed={largest}")
 
 let mut min_heap = MinHeap::new()
 min_heap.push(5)
 min_heap.push(2)
 let smallest = min_heap.pop().unwrap_or(0)
-println("MinHeap: len={} removed={}", min_heap.len(), smallest)
+println(f"MinHeap: len={min_heap.len()} removed={smallest}")
 
 let mut deque = Deque::new()
 deque.push_front(2)
 deque.push_back(3)
 let front = deque.pop_front().unwrap_or(0)
 let back = deque.pop_back().unwrap_or(0)
-println("Deque: front={} back={} len={}", front, back, deque.len())
+println(f"Deque: front={front} back={back} len={deque.len()}")
 
 let mut queue = Queue::from([7, 8])
 queue.push(9)
 let next = queue.pop().unwrap_or(0)
-println("Queue: next={} len={}", next, queue.len())
+println(f"Queue: next={next} len={queue.len()}")
 
 let mut stack = Stack::from([7, 8])
 stack.push(9)
 let top = stack.pop().unwrap_or(0)
-println("Stack: top={} len={}", top, stack.len())
+println(f"Stack: top={top} len={stack.len()}")
 
 let entry = (1, "widgets", 2.5)
 let id, name, unit_price = entry
-println("Tuple: {} {} {:.2} (first={})", id, name, unit_price, entry.0)</code></pre>
+println(f"Tuple: {id} {name} {unit_price:.2} (first={entry.0})")</code></pre>
         </div>
       </div>
     </section>
