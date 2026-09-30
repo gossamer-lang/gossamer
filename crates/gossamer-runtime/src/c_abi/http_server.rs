@@ -278,7 +278,7 @@ const RESPONSE_503_BYTES: &[u8] =
 /// `Result<(), http::Error>` match.
 fn http_serve_err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::pack_result(1, err as i64)
+    super::result::pack_result(1, err as i64)
 }
 
 /// Starts an HTTP listener and dispatches each request to
@@ -345,7 +345,7 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve(
     // The accept loop exited: graceful shutdown request or a fatal
     // listener error. Either way the server ran - report `Ok(())`,
     // matching the interp's `bind_and_run` return shape.
-    super::vec::pack_result(0, 0)
+    super::result::pack_result(0, 0)
 }
 
 /// Where an accepted connection runs.
@@ -799,7 +799,7 @@ pub unsafe extern "C-unwind" fn gos_rt_http_serve_tls(
             unsafe { serve_tls_conn(stream, env_addr, fn_addr, server_config.clone()) };
         });
     }
-    super::vec::pack_result(0, 0)
+    super::result::pack_result(0, 0)
 }
 
 /// rustls-terminated server connection. The accepted socket has the same
@@ -901,7 +901,7 @@ pub unsafe extern "C" fn gos_rt_http2_bind_and_run_h2c(
     let env_addr = handler_env as usize;
     let fn_addr = handler_fn as usize;
     match crate::http2_server::serve_h2c_with_handler(&addr_s, env_addr, fn_addr) {
-        Ok(()) => super::vec::pack_result(0, 0),
+        Ok(()) => super::result::pack_result(0, 0),
         Err(e) => http_serve_err_result(&format!("http::serve_h2c: {e}")),
     }
 }
@@ -1432,10 +1432,10 @@ unsafe fn handle_http_conn_limited<C: HttpIo>(
 /// `result` is a handler's `Result` carrier, whose `Err` payload is a live
 /// error.
 unsafe fn report_request_error(result: i128, req: &GosHttpRequest) {
-    let message = if crate::c_abi::vec::gos_rt_result_disc(result) == 0 {
+    let message = if crate::c_abi::result::gos_rt_result_disc(result) == 0 {
         "handler did not return http::Response".to_string()
     } else {
-        let err = crate::c_abi::vec::gos_rt_result_payload(result)
+        let err = crate::c_abi::result::gos_rt_result_payload(result)
             as *const crate::c_abi::errors::GosError;
         // SAFETY: an `Err` payload is a live error (this `unsafe fn`'s contract).
         unsafe { crate::c_abi::errors::error_chain_text(err) }
@@ -1891,8 +1891,8 @@ fn find_header_end(buf: &[u8]) -> Option<usize> {
 /// The `Ok` payload of `result` is null or a live `http::Response` handle this
 /// call reclaims.
 pub(crate) unsafe fn drop_handler_result(result: i128) {
-    if super::vec::gos_rt_result_disc(result) == 0 {
-        let response_ptr = super::vec::gos_rt_result_payload(result) as *mut GosHttpResponse;
+    if super::result::gos_rt_result_disc(result) == 0 {
+        let response_ptr = super::result::gos_rt_result_payload(result) as *mut GosHttpResponse;
         // SAFETY: `response_ptr` is the `Ok` payload, null or a live response this call reclaims
         // (this `unsafe fn`'s contract).
         unsafe { crate::c_abi::http_client::gos_rt_http_response_free(response_ptr) };
@@ -2309,10 +2309,10 @@ pub(crate) unsafe fn extract_response_into(
     keep_alive: &mut bool,
     http_1_0: bool,
 ) -> bool {
-    if super::vec::gos_rt_result_disc(result) != 0 {
+    if super::result::gos_rt_result_disc(result) != 0 {
         return false;
     }
-    let response_ptr = super::vec::gos_rt_result_payload(result) as *const GosHttpResponse;
+    let response_ptr = super::result::gos_rt_result_payload(result) as *const GosHttpResponse;
     if response_ptr.is_null() {
         return false;
     }
@@ -2445,10 +2445,10 @@ pub(crate) type StructuredResponse = (u16, Vec<(String, String)>, Vec<u8>);
 ///
 /// The `Ok` payload of `result` is null or a live `http::Response` handle.
 pub(crate) unsafe fn extract_response_struct(result: i128) -> Option<StructuredResponse> {
-    if super::vec::gos_rt_result_disc(result) != 0 {
+    if super::result::gos_rt_result_disc(result) != 0 {
         return None;
     }
-    let response_ptr = super::vec::gos_rt_result_payload(result) as *const GosHttpResponse;
+    let response_ptr = super::result::gos_rt_result_payload(result) as *const GosHttpResponse;
     if response_ptr.is_null() {
         return None;
     }
@@ -2500,10 +2500,10 @@ pub(crate) unsafe fn extract_response_struct(result: i128) -> Option<StructuredR
 ///
 /// The `Ok` payload of `result` is null or a live `http::Response` handle.
 unsafe fn streamed_ok_handle(result: i128) -> Option<i64> {
-    if super::vec::gos_rt_result_disc(result) != 0 {
+    if super::result::gos_rt_result_disc(result) != 0 {
         return None;
     }
-    let response_ptr = super::vec::gos_rt_result_payload(result) as *const GosHttpResponse;
+    let response_ptr = super::result::gos_rt_result_payload(result) as *const GosHttpResponse;
     if response_ptr.is_null() {
         return None;
     }
@@ -2524,7 +2524,7 @@ unsafe fn streamed_ok_handle(result: i128) -> Option<i64> {
 ///
 /// The `Ok` payload of `result` is null or a live `http::Response` handle.
 unsafe fn extract_stream_head_into(result: i128, out: &mut Vec<u8>) {
-    let response_ptr = super::vec::gos_rt_result_payload(result) as *const GosHttpResponse;
+    let response_ptr = super::result::gos_rt_result_payload(result) as *const GosHttpResponse;
     // SAFETY: the `Ok` payload is null or a live response (this `unsafe fn`'s contract).
     let Some(response) = (unsafe { response_ptr.as_ref() }) else {
         return;
@@ -2684,7 +2684,7 @@ mod tests {
             // SAFETY: every pointer argument is a value this test built above and still holds
             // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
-        super::super::vec::pack_result(0, response as i64)
+        super::super::result::pack_result(0, response as i64)
     }
 
     unsafe extern "C-unwind" fn suspended_arena_handler(
@@ -2711,7 +2711,7 @@ mod tests {
             // SAFETY: every pointer argument is a value this test built above and still holds
             // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
-        super::super::vec::pack_result(0, response as i64)
+        super::super::result::pack_result(0, response as i64)
     }
 
     #[test]
@@ -2812,7 +2812,7 @@ mod tests {
             // SAFETY: every pointer argument is a value this test built above and still holds
             // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok")) };
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let bytes = rendered(result);
         assert!(
             bytes.contains("content-type: text/plain; charset=utf-8"),
@@ -2833,7 +2833,7 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         unsafe { (*resp).body_bytes = Some(vec![0x41, 0x00, 0x42, 0x00, 0x43]) };
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let mut out = Vec::new();
         // SAFETY: `result` carries the live response built above.
         assert!(unsafe { extract_response_into(result, &mut out, &mut true, false) });
@@ -2866,7 +2866,7 @@ mod tests {
                 .headers
                 .push(("X-Mixed-Case".to_string(), "Value-Kept".to_string()));
         }
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let mut out = Vec::new();
         // SAFETY: `result` carries the live response built above.
         assert!(unsafe { extract_response_into(result, &mut out, &mut true, false) });
@@ -2890,7 +2890,7 @@ mod tests {
             // SAFETY: every pointer argument is a value this test built above and still holds
             // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_json_new(200, crate::c_abi::string::test_gos_str("{}")) };
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let bytes = rendered(result);
         assert!(
             bytes.contains("content-type: application/json"),
@@ -2912,7 +2912,7 @@ mod tests {
                 .headers
                 .push(("Content-Type".to_string(), "text/html".to_string()));
         }
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let bytes = rendered(result);
         assert!(
             bytes.contains("content-type: text/html"),
@@ -2933,7 +2933,7 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         unsafe { (*resp).content_type = std::borrow::Cow::Borrowed("") };
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let bytes = rendered(result);
         assert!(
             bytes.contains("content-type: text/plain; charset=utf-8"),
@@ -3092,7 +3092,7 @@ mod tests {
                 blob.as_ptr(),
             )
         };
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         // SAFETY: `result` carries the live response built above.
         assert_eq!(unsafe { streamed_ok_handle(result) }, Some(handle));
 
@@ -3427,7 +3427,7 @@ mod tests {
             // SAFETY: every pointer argument is a value this test built above and still holds
             // live; a null one is accepted by the callee.
             unsafe { gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_ptr(&c)) };
-        super::super::vec::pack_result(0, resp as i64)
+        super::super::result::pack_result(0, resp as i64)
     }
 
     /// Handler that raises the fault a Gossamer `panic!` raises, so the
@@ -3687,7 +3687,7 @@ mod tests {
                 crate::c_abi::string::test_gos_str("v"),
             );
         }
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let mut out = Vec::new();
         // SAFETY: `result` carries the live response built above.
         assert!(unsafe { extract_response_into(result, &mut out, &mut true, false) });
@@ -3714,7 +3714,7 @@ mod tests {
             let resp = unsafe {
                 gos_rt_http_response_text_new(200, crate::c_abi::string::test_gos_str("ok"))
             };
-            let result = super::super::vec::pack_result(0, resp as i64);
+            let result = super::super::result::pack_result(0, resp as i64);
             let mut out = Vec::new();
             let mut keep = keep_alive;
             // SAFETY: `result` carries the live response built above.
@@ -3756,7 +3756,7 @@ mod tests {
                 crate::c_abi::string::test_gos_str("v"),
             );
         }
-        let result = super::super::vec::pack_result(0, resp as i64);
+        let result = super::super::result::pack_result(0, resp as i64);
         let mut head = Vec::new();
         // SAFETY: `result` carries the live response built above.
         unsafe { extract_stream_head_into(result, &mut head) };

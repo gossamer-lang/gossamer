@@ -241,9 +241,9 @@ pub unsafe extern "C" fn gos_rt_router_lookup(
     method: *const c_char,
     path: *const c_char,
 ) -> i128 {
-    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
+    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
         if router.is_null() {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
         // SAFETY: `router` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &*router };
@@ -263,10 +263,10 @@ pub unsafe extern "C" fn gos_rt_router_lookup(
             if (route.method.is_empty() || route.method == m)
                 && route_segments_match(&route.segments, &p).is_some()
             {
-                return crate::c_abi::vec::gos_rt_result_new(0, i as i64);
+                return crate::c_abi::result::gos_rt_result_new(0, i as i64);
             }
         }
-        crate::c_abi::vec::gos_rt_result_new(1, 0)
+        crate::c_abi::result::gos_rt_result_new(1, 0)
     })
 }
 
@@ -624,7 +624,7 @@ fn router_404_result() -> i128 {
         content_type: "text/plain; charset=utf-8".into(),
         stream_handle: -1,
     }));
-    crate::c_abi::vec::pack_result(0, resp as i64)
+    crate::c_abi::result::pack_result(0, resp as i64)
 }
 
 // ---------------------------------------------------------------
@@ -907,7 +907,7 @@ pub unsafe extern "C" fn gos_rt_file_server_serve(
         ) {
             StaticResolution::File(p) => p,
             StaticResolution::Forbidden => {
-                return crate::c_abi::vec::pack_result(
+                return crate::c_abi::result::pack_result(
                     0,
                     Box::into_raw(Box::new(GosHttpResponse {
                         status: 403,
@@ -920,7 +920,7 @@ pub unsafe extern "C" fn gos_rt_file_server_serve(
                 );
             }
             StaticResolution::Redirect => {
-                return crate::c_abi::vec::pack_result(
+                return crate::c_abi::result::pack_result(
                     0,
                     Box::into_raw(Box::new(GosHttpResponse {
                         status: 301,
@@ -984,7 +984,7 @@ pub unsafe extern "C" fn gos_rt_file_server_serve(
                     };
                 headers.insert(0, ("content-type".to_string(), content_type.clone()));
                 let body_cstr = alloc_cstring(&body);
-                crate::c_abi::vec::pack_result(
+                crate::c_abi::result::pack_result(
                     0,
                     Box::into_raw(Box::new(GosHttpResponse {
                         status,
@@ -1019,7 +1019,7 @@ pub unsafe extern "C" fn gos_rt_static_serve_file(path: *const c_char) -> i128 {
             Ok(bytes) => {
                 let mime = mime_for_path_str(&path_s);
                 let body_cstr = alloc_cstring(&bytes);
-                crate::c_abi::vec::pack_result(
+                crate::c_abi::result::pack_result(
                     0,
                     Box::into_raw(Box::new(GosHttpResponse {
                         status: 200,
@@ -1033,7 +1033,7 @@ pub unsafe extern "C" fn gos_rt_static_serve_file(path: *const c_char) -> i128 {
             }
             Err(e) => {
                 let err = crate::c_abi::errors::error_new_from_bytes(format!("{e}").as_bytes());
-                crate::c_abi::vec::pack_result(1, err as i64)
+                crate::c_abi::result::pack_result(1, err as i64)
             }
         }
     })

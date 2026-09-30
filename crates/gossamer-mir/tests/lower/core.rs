@@ -2227,3 +2227,86 @@ fn main() {
         "rows of structs read and written in place come from the table: {names:?}"
     );
 }
+
+/// Checked operations `op` left in `body`.
+fn checked(body: &gossamer_mir::Body, op: BinOp) -> usize {
+    body.blocks
+        .iter()
+        .flat_map(|b| &b.stmts)
+        .filter(|s| {
+            matches!(&s.kind, StatementKind::Assign {
+                rvalue: Rvalue::BinaryOp { op: found, .. },
+                ..
+            } if *found == op)
+        })
+        .count()
+}
+
+#[test]
+fn masked_element_writes_bound_later_reads_of_the_same_vec() {
+    let body = optimised_fn(
+        r"
+fn bump(n: i64) -> i64 {
+    let mut a: Vec<i64> = Vec::with_capacity(8)
+    for _ in 0..n { a.push(0) }
+    for i in 0..n { a[i] = (a[i] + i) & 0xFFFFFF }
+    a[0]
+}
+fn main() { println(bump(4)) }
+",
+        "bump",
+    );
+    assert_eq!(checked(&body, BinOp::Add), 0, "every element sum is proven in range");
+}
+
+#[test]
+fn a_vec_lent_to_another_function_keeps_its_reads_checked() {
+    let body = optimised_fn(
+        r"
+fn fill(xs: &mut Vec<i64>) { xs.push(i64::MAX) }
+fn bump(n: i64) -> i64 {
+    let mut a: Vec<i64> = Vec::with_capacity(8)
+    a.push(0)
+    fill(&mut a)
+    for i in 0..n { a[i] = (a[i] + i) & 0xFFFFFF }
+    a[0]
+}
+fn main() { println(bump(2)) }
+",
+        "bump",
+    );
+    assert_eq!(checked(&body, BinOp::Add), 2, "a callee may store any value, so both loop versions check");
+}
+
+#[test]
+fn a_completed_square_bounds_its_operand() {
+    let body = optimised_fn(
+        r"
+fn f(n: i64) -> i64 {
+    let cells = n * n
+    let side = n + 1
+    cells - side
+}
+fn main() { println(f(4)) }
+",
+        "f",
+    );
+    assert_eq!(checked(&body, BinOp::Mul), 1, "the square itself stays checked");
+    assert_eq!(checked(&body, BinOp::Add) + checked(&body, BinOp::Sub), 0);
+}
+
+#[test]
+fn an_index_get_rejected_proves_nothing_about_it() {
+    let body = optimised_fn(
+        r"
+fn probe(xs: Vec<i64>, i: i64) -> i64 {
+    let got = xs.get(i)
+    let next = i + 1
+    match got { Some(v) => v + next, None => next }
+}
+fn main() { println(probe(#[1, 2], 1)) }
+",
+        "probe",
+    );
+    assert_eq!(checked(&body, BinOp::Add), 2, "`i + 1` may overflow after `get` answers None");
+}

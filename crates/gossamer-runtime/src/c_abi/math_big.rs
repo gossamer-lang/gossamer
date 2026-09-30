@@ -17,8 +17,8 @@ use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{One, Pow, Signed, ToPrimitive, Zero};
 
+use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
-use super::vec::gos_rt_result_new;
 
 fn err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());

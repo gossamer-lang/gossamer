@@ -120,6 +120,14 @@ impl JsonTree {
                 .get_or_init(|| parse_checked_json(text).expect("validated JSON must reparse")),
         }
     }
+
+    /// The validated text of a document no read has materialized yet.
+    fn raw_text(&self) -> Option<&str> {
+        match self {
+            Self::Raw { text, parsed } if parsed.get().is_none() => Some(text),
+            _ => None,
+        }
+    }
 }
 
 pub struct GosJson {
@@ -536,39 +544,45 @@ impl std::io::Write for RuntimeJsonWriter {
 impl RuntimeJsonWriter {
     /// Appends `bytes`, escaping the characters JSON output keeps HTML-safe.
     fn write_escaped(&mut self, bytes: &[u8]) {
-        let Some(first) = first_escape_candidate(bytes) else {
-            self.append(bytes);
-            return;
-        };
-        let mut start = 0;
-        let mut offset = first;
-        while offset < bytes.len() {
-            let (source_len, replacement): (usize, Option<&[u8]>) = match bytes[offset] {
-                b'<' => (1, Some(b"\\u003c")),
-                b'>' => (1, Some(b"\\u003e")),
-                b'&' => (1, Some(b"\\u0026")),
-                0xe2 if bytes.get(offset + 1) == Some(&0x80) => match bytes.get(offset + 2) {
-                    Some(0xa8) => (3, Some(b"\\u2028")),
-                    Some(0xa9) => (3, Some(b"\\u2029")),
-                    _ => (1, None),
-                },
-                _ => (1, None),
-            };
-            let Some(replacement) = replacement else {
-                let rest = offset + source_len;
-                offset = match first_escape_candidate(&bytes[rest..]) {
-                    Some(next) => rest + next,
-                    None => bytes.len(),
-                };
-                continue;
-            };
-            self.append(&bytes[start..offset]);
-            self.append(replacement);
-            offset += source_len;
-            start = offset;
-        }
-        self.append(&bytes[start..]);
+        write_html_safe(bytes, |part| self.append(part));
     }
+}
+
+/// Hands `bytes` to `append` in pieces, with the characters JSON output keeps
+/// HTML-safe (`<`, `>`, `&`, U+2028, U+2029) replaced by their `\u` escapes.
+fn write_html_safe(bytes: &[u8], mut append: impl FnMut(&[u8])) {
+    let Some(first) = first_escape_candidate(bytes) else {
+        append(bytes);
+        return;
+    };
+    let mut start = 0;
+    let mut offset = first;
+    while offset < bytes.len() {
+        let (source_len, replacement): (usize, Option<&[u8]>) = match bytes[offset] {
+            b'<' => (1, Some(b"\\u003c")),
+            b'>' => (1, Some(b"\\u003e")),
+            b'&' => (1, Some(b"\\u0026")),
+            0xe2 if bytes.get(offset + 1) == Some(&0x80) => match bytes.get(offset + 2) {
+                Some(0xa8) => (3, Some(b"\\u2028")),
+                Some(0xa9) => (3, Some(b"\\u2029")),
+                _ => (1, None),
+            },
+            _ => (1, None),
+        };
+        let Some(replacement) = replacement else {
+            let rest = offset + source_len;
+            offset = match first_escape_candidate(&bytes[rest..]) {
+                Some(next) => rest + next,
+                None => bytes.len(),
+            };
+            continue;
+        };
+        append(&bytes[start..offset]);
+        append(replacement);
+        offset += source_len;
+        start = offset;
+    }
+    append(&bytes[start..]);
 }
 
 impl Drop for RuntimeJsonWriter {
@@ -731,7 +745,247 @@ fn render_json_direct(value: &serde_json::Value, pretty: bool) -> *mut c_char {
 /// numbers and strings as `json::encode` writes them - whatever text it was
 /// parsed from, so every tier renders a parsed document identically.
 fn render_json_handle(json: &GosJson, pretty: bool) -> *mut c_char {
+    if json.view.is_null()
+        && let Some(text) = json.tree.raw_text()
+    {
+        let rendered = if pretty {
+            transcode_canonical(
+                text,
+                LanguageFloatsPretty(serde_json::ser::PrettyFormatter::new()),
+            )
+        } else {
+            transcode_canonical(text, LanguageFloatsCompact)
+        };
+        return match rendered {
+            Ok(bytes) => alloc_cstring(&bytes),
+            Err(_) => alloc_cstring(b""),
+        };
+    }
     render_json_direct(json.value(), pretty)
+}
+
+/// Renders validated JSON `text` in the form serializing its
+/// `serde_json::Value` writes - keys sorted with the last duplicate kept,
+/// numbers and strings as that value holds them - streaming from the text
+/// instead of building the tree, so rendering costs the output, not a tree
+/// several times the document's size.
+fn transcode_canonical<F: serde_json::ser::Formatter>(
+    text: &str,
+    formatter: F,
+) -> Result<Vec<u8>, serde_json::Error> {
+    use serde::de::DeserializeSeed as _;
+
+    let mut sink = CanonicalSink {
+        out: Vec::with_capacity(text.len()),
+        formatter,
+    };
+    let mut deserializer = serde_json::Deserializer::from_str(text);
+    deserializer.disable_recursion_limit();
+    Transcode(&mut sink).deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(sink.out)
+}
+
+/// Output of [`transcode_canonical`] and the formatter whose state (the
+/// pretty form's indentation) spans the whole document.
+struct CanonicalSink<F> {
+    out: Vec<u8>,
+    formatter: F,
+}
+
+/// `io::Write` over the output that keeps it HTML-safe, as
+/// [`RuntimeJsonWriter`] does for a tree's rendering.
+struct HtmlSafeVec<'a>(&'a mut Vec<u8>);
+
+impl std::io::Write for HtmlSafeVec<'_> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        write_html_safe(bytes, |part| self.0.extend_from_slice(part));
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<F: serde_json::ser::Formatter> CanonicalSink<F> {
+    /// Applies one formatter step to the output.
+    fn emit(
+        &mut self,
+        step: impl FnOnce(&mut F, &mut HtmlSafeVec<'_>) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        step(&mut self.formatter, &mut HtmlSafeVec(&mut self.out))
+    }
+
+    /// Writes `value` as a JSON string. Every formatter here escapes strings
+    /// with serde_json's defaults, which a compact serializer applies.
+    fn string(&mut self, value: &str) -> Result<(), serde_json::Error> {
+        use serde::Serializer as _;
+        (&mut serde_json::Serializer::new(HtmlSafeVec(&mut self.out))).serialize_str(value)
+    }
+}
+
+/// One object member already written: its key, and the byte range of its
+/// `key: value` text in the output.
+struct Member<'de> {
+    key: std::borrow::Cow<'de, str>,
+    start: usize,
+    end: usize,
+}
+
+/// Rewrites the members of the object whose text ends the output in key
+/// order, keeping the last of equal keys, as a `serde_json::Map` holds them.
+fn sort_members(out: &mut Vec<u8>, mut members: Vec<Member<'_>>) {
+    let in_order = members.windows(2).all(|pair| pair[0].key < pair[1].key);
+    if in_order {
+        return;
+    }
+    let base = members[0].start;
+    let separator = out[members[0].end..members[1].start].to_vec();
+    let region = out.split_off(base);
+    members.sort_by(|a, b| a.key.cmp(&b.key));
+    let last_of_each = members
+        .iter()
+        .enumerate()
+        .filter(|&(i, m)| members.get(i + 1).is_none_or(|next| next.key != m.key))
+        .map(|(_, m)| m);
+    for (i, member) in last_of_each.enumerate() {
+        if i > 0 {
+            out.extend_from_slice(&separator);
+        }
+        out.extend_from_slice(&region[member.start - base..member.end - base]);
+    }
+}
+
+/// Deserializes one value from the text and writes it to the sink.
+struct Transcode<'s, F>(&'s mut CanonicalSink<F>);
+
+impl<'de, F: serde_json::ser::Formatter> serde::de::DeserializeSeed<'de> for Transcode<'_, F> {
+    type Value = ();
+
+    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
+        deserializer.deserialize_any(self)
+    }
+}
+
+/// An object key, borrowed from the text unless it holds an escape.
+struct KeySeed;
+
+impl<'de> serde::de::DeserializeSeed<'de> for KeySeed {
+    type Value = std::borrow::Cow<'de, str>;
+
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_str(self)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for KeySeed {
+    type Value = std::borrow::Cow<'de, str>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an object key")
+    }
+
+    fn visit_borrowed_str<E>(self, v: &'de str) -> Result<Self::Value, E> {
+        Ok(std::borrow::Cow::Borrowed(v))
+    }
+
+    fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+        Ok(std::borrow::Cow::Owned(v.to_owned()))
+    }
+}
+
+impl<'de, F: serde_json::ser::Formatter> serde::de::Visitor<'de> for Transcode<'_, F> {
+    type Value = ();
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a JSON value")
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<(), E> {
+        self.0.emit(|f, w| f.write_null(w)).map_err(E::custom)
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<(), E> {
+        self.0.emit(|f, w| f.write_bool(w, v)).map_err(E::custom)
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<(), E> {
+        self.0.emit(|f, w| f.write_i64(w, v)).map_err(E::custom)
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<(), E> {
+        self.0.emit(|f, w| f.write_u64(w, v)).map_err(E::custom)
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<(), E> {
+        self.0.emit(|f, w| f.write_f64(w, v)).map_err(E::custom)
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<(), E> {
+        self.0.string(v).map_err(E::custom)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<(), A::Error> {
+        use serde::de::Error as _;
+        let sink = self.0;
+        sink.emit(|f, w| f.begin_array(w))
+            .map_err(A::Error::custom)?;
+        let mut first = true;
+        loop {
+            // The separator goes out before the element is known to exist;
+            // formatters keep no state for it, so an end takes it back.
+            let separator_at = sink.out.len();
+            sink.emit(|f, w| f.begin_array_value(w, first))
+                .map_err(A::Error::custom)?;
+            if seq.next_element_seed(Transcode(&mut *sink))?.is_none() {
+                sink.out.truncate(separator_at);
+                break;
+            }
+            sink.emit(|f, w| f.end_array_value(w))
+                .map_err(A::Error::custom)?;
+            first = false;
+        }
+        sink.emit(|f, w| f.end_array(w)).map_err(A::Error::custom)
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        use serde::de::Error as _;
+        let sink = self.0;
+        sink.emit(|f, w| f.begin_object(w))
+            .map_err(A::Error::custom)?;
+        let mut members = Vec::new();
+        loop {
+            let separator_at = sink.out.len();
+            sink.emit(|f, w| f.begin_object_key(w, members.is_empty()))
+                .map_err(A::Error::custom)?;
+            let start = sink.out.len();
+            let Some(key) = map.next_key_seed(KeySeed)? else {
+                sink.out.truncate(separator_at);
+                break;
+            };
+            sink.string(&key).map_err(A::Error::custom)?;
+            sink.emit(|f, w| f.end_object_key(w))
+                .map_err(A::Error::custom)?;
+            sink.emit(|f, w| f.begin_object_value(w))
+                .map_err(A::Error::custom)?;
+            map.next_value_seed(Transcode(&mut *sink))?;
+            sink.emit(|f, w| f.end_object_value(w))
+                .map_err(A::Error::custom)?;
+            members.push(Member {
+                key,
+                start,
+                end: sink.out.len(),
+            });
+        }
+        if members.len() > 1 {
+            sort_members(&mut sink.out, members);
+        }
+        sink.emit(|f, w| f.end_object(w)).map_err(A::Error::custom)
+    }
 }
 
 /// `json::render(value) -> String`. Always returns a non-null
@@ -1537,7 +1791,7 @@ impl JsonTokenWriter {
 
     fn write_escaped(&mut self, text: &str) {
         self.sink.append(b"\"");
-        crate::c_abi::string::json_escape_with(text.as_bytes(), |run| self.sink.append(run));
+        crate::c_abi::json_escape::json_escape_with(text.as_bytes(), |run| self.sink.append(run));
         self.sink.append(b"\"");
     }
 }
@@ -1825,13 +2079,13 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let pr = unsafe { gos_rt_json_parse(text) };
-        assert_eq!(crate::c_abi::vec::gos_rt_result_disc(pr), 0);
-        let j = crate::c_abi::vec::gos_rt_result_payload(pr) as *mut GosJson;
+        assert_eq!(crate::c_abi::result::gos_rt_result_disc(pr), 0);
+        let j = crate::c_abi::result::gos_rt_result_payload(pr) as *mut GosJson;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let kr = unsafe { gos_rt_json_keys_opt(j) };
-        assert_eq!(crate::c_abi::vec::gos_rt_result_disc(kr), 0);
-        let v = crate::c_abi::vec::gos_rt_result_payload(kr) as *mut crate::c_abi::vec::GosVec;
+        assert_eq!(crate::c_abi::result::gos_rt_result_disc(kr), 0);
+        let v = crate::c_abi::result::gos_rt_result_payload(kr) as *mut crate::c_abi::vec::GosVec;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let vec = unsafe { &*v };
@@ -1879,11 +2133,11 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let parsed = unsafe { gos_rt_json_parse(at_limit) };
-        assert_eq!(crate::c_abi::vec::gos_rt_result_disc(parsed), 0);
+        assert_eq!(crate::c_abi::result::gos_rt_result_disc(parsed), 0);
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         unsafe {
-            gos_rt_json_free(crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson);
+            gos_rt_json_free(crate::c_abi::result::gos_rt_result_payload(parsed) as *mut GosJson);
         }
         let nested = format!("{}0{}", "[".repeat(depth + 1), "]".repeat(depth + 1));
         let refused = gossamer_core::json::validate(nested.as_bytes()).unwrap_err();
@@ -1894,14 +2148,54 @@ mod tests {
     }
 
     #[test]
+    fn streamed_render_matches_the_tree_render() {
+        let documents = [
+            r#"{"b":1,"a":[true,null,{"z":"<&>","y":{}}],"c":[]}"#,
+            r#"{"k":1,"k":2,"a":0,"k":3}"#,
+            r#"{"a\"b":"x\u2028y","a":"\u00e9\n","\u0041":1.50,"n":-0}"#,
+            r"[1e3,18446744073709551615,-9223372036854775808,99999999999999999999,0.1]",
+            r#"  { "nested" : { "b" : [ { "d":1, "c":2 } ], "a" : [ ] } }  "#,
+            r#""top""#,
+            "{}",
+        ];
+        for text in documents {
+            let tree = parse_checked_json(text).unwrap();
+            let expected_compact = {
+                let mut out = Vec::new();
+                serialize_language_json(HtmlSafeVec(&mut out), &tree, false).unwrap();
+                out
+            };
+            let expected_pretty = {
+                let mut out = Vec::new();
+                serialize_language_json(HtmlSafeVec(&mut out), &tree, true).unwrap();
+                out
+            };
+            let compact = transcode_canonical(text, LanguageFloatsCompact).unwrap();
+            let pretty = transcode_canonical(
+                text,
+                LanguageFloatsPretty(serde_json::ser::PrettyFormatter::new()),
+            )
+            .unwrap();
+            assert_eq!(
+                String::from_utf8(compact).unwrap(),
+                String::from_utf8(expected_compact).unwrap()
+            );
+            assert_eq!(
+                String::from_utf8(pretty).unwrap(),
+                String::from_utf8(expected_pretty).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn json_render_keeps_every_parsed_double() {
         let text =
             crate::c_abi::string::test_gos_str(r#"{"score":12.100000000000001,"short":20.9}"#);
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let parsed = unsafe { gos_rt_json_parse(text) };
-        assert_eq!(crate::c_abi::vec::gos_rt_result_disc(parsed), 0);
-        let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
+        assert_eq!(crate::c_abi::result::gos_rt_result_disc(parsed), 0);
+        let json = crate::c_abi::result::gos_rt_result_payload(parsed) as *mut GosJson;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let rendered_ptr = unsafe { gos_rt_json_render(json) };
@@ -1927,7 +2221,7 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let parsed = unsafe { gos_rt_json_parse(text) };
-        let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
+        let json = crate::c_abi::result::gos_rt_result_payload(parsed) as *mut GosJson;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let handle = unsafe { &*json };
@@ -1970,7 +2264,7 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let parsed = unsafe { gos_rt_json_parse(text) };
-        let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
+        let json = crate::c_abi::result::gos_rt_result_payload(parsed) as *mut GosJson;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let rendered_ptr = unsafe { gos_rt_json_render(json) };
@@ -1994,12 +2288,12 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let parsed = unsafe { gos_rt_json_parse(text) };
-        let json = crate::c_abi::vec::gos_rt_result_payload(parsed) as *mut GosJson;
+        let json = crate::c_abi::result::gos_rt_result_payload(parsed) as *mut GosJson;
 
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let keys = unsafe { gos_rt_json_keys_opt(json) };
-        let keys = crate::c_abi::vec::gos_rt_result_payload(keys) as *mut GosVec;
+        let keys = crate::c_abi::result::gos_rt_result_payload(keys) as *mut GosVec;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         assert_eq!(unsafe { (*keys).len }, 9);
@@ -2012,11 +2306,11 @@ mod tests {
             // SAFETY: every pointer argument is a value this test built above and still holds
             // live; a null one is accepted by the callee.
             unsafe { gos_rt_json_parse(array_text) };
-        let array = crate::c_abi::vec::gos_rt_result_payload(array_result) as *mut GosJson;
+        let array = crate::c_abi::result::gos_rt_result_payload(array_result) as *mut GosJson;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let items = unsafe { gos_rt_json_as_array_opt(array) };
-        let items = crate::c_abi::vec::gos_rt_result_payload(items) as *mut GosVec;
+        let items = crate::c_abi::result::gos_rt_result_payload(items) as *mut GosVec;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         assert_eq!(unsafe { (*items).len }, 9);

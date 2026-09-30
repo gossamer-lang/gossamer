@@ -662,7 +662,7 @@ pub unsafe extern "C" fn gos_rt_set_format_tagged(
                 // SAFETY: `tag` names the scalar element type (`bool`, `char`, or `f64`), so the
                 // word renders as a value and is never read as a handle.
                 unsafe {
-                    crate::c_abi::map::render_tagged_word(&mut out, *key, tag as u8);
+                    crate::c_abi::desc_format::render_tagged_word(&mut out, *key, tag as u8);
                 }
             }
         }
@@ -687,7 +687,7 @@ pub unsafe extern "C" fn gos_rt_set_format_desc(
         if !s.is_null() && !tags.is_null() {
             // SAFETY: `tags` is non-null (checked above) and addresses the element descriptor
             // (this shim's contract).
-            let tags = unsafe { crate::c_abi::map::DescStream::new(tags) };
+            let tags = unsafe { crate::c_abi::desc_format::DescStream::new(tags) };
             // SAFETY: `s` is non-null (checked above) and live for the call (C-ABI contract).
             let set = unsafe { &*s };
             let entries: Vec<&Box<[u8]>> = set
@@ -703,7 +703,7 @@ pub unsafe extern "C" fn gos_rt_set_format_desc(
                 // SAFETY: `slots` is a stored element laid out as `tags` describes, which
                 // `render_desc_value` walks.
                 unsafe {
-                    crate::c_abi::map::render_desc_value(
+                    crate::c_abi::desc_format::render_desc_value(
                         &mut out,
                         slots.as_ptr(),
                         tags,
@@ -754,7 +754,7 @@ pub unsafe extern "C" fn gos_rt_set_format_string(s: *const GosSet, _ordered: i3
                 if index > 0 {
                     out.push_str(", ");
                 }
-                crate::c_abi::map::push_quoted_str(&mut out, key);
+                crate::c_abi::desc_format::push_quoted_str(&mut out, key);
             }
         }
         out.push('}');
@@ -1474,7 +1474,7 @@ pub unsafe extern "C" fn gos_rt_set_format_ekey(
         if !s.is_null() && !tags.is_null() {
             // SAFETY: `tags` is non-null (checked above) and addresses the element descriptor
             // (this shim's contract).
-            let tags = unsafe { crate::c_abi::map::DescStream::new(tags) };
+            let tags = unsafe { crate::c_abi::desc_format::DescStream::new(tags) };
             // SAFETY: `s` is non-null (checked above) and live for the call (C-ABI contract).
             let set = unsafe { &*s };
             let mut entries: Vec<_> = set.struct_inner.iter().collect();
@@ -1487,12 +1487,12 @@ pub unsafe extern "C" fn gos_rt_set_format_ekey(
                 // SAFETY: `slots` is a stored element laid out as `tags` describes, which
                 // `render_desc_value` walks.
                 unsafe {
-                    crate::c_abi::map::render_desc_storage(
+                    crate::c_abi::desc_format::render_desc_storage(
                         &mut out,
                         slots.as_ptr(),
                         tags,
                         &mut cursor,
-                        crate::c_abi::map::Storage::ByWord,
+                        crate::c_abi::desc_format::Storage::ByWord,
                     );
                 }
             }

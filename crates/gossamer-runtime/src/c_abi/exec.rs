@@ -14,8 +14,9 @@ use std::os::raw::c_char;
 #[cfg(unix)]
 use std::time::Duration;
 
+use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
-use super::vec::{GosVec, gos_rt_result_new};
+use super::vec::GosVec;
 
 // ---------------------------------------------------------------
 // Pipeline, streaming, signal, wait-with-timeout, kill-group.

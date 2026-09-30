@@ -238,14 +238,14 @@ pub unsafe extern "C" fn gos_rt_bheap_max_push_i64(v: *mut GosVec, value: i64) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_pop_i64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if v.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         let buf = vec.ptr.cast::<i64>();
         // SAFETY: `vec` is non-null with `len > 0` (checked above), so the buffer holds its root
@@ -262,24 +262,24 @@ pub unsafe extern "C" fn gos_rt_bheap_max_pop_i64(v: *mut GosVec) -> i128 {
             // SAFETY: `buf` holds `new_len` words.
             unsafe { max_heap_sift_down_i64(buf, new_len, 0) };
         }
-        super::vec::pack_result(0, root)
+        super::result::pack_result(0, root)
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_peek_i64(v: *const GosVec) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if v.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if vec.len <= 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `vec` is non-null with `len > 0` (checked above), so its buffer holds the root
         // word.
-        super::vec::pack_result(0, unsafe { *vec.ptr.cast::<i64>() })
+        super::result::pack_result(0, unsafe { *vec.ptr.cast::<i64>() })
     })
 }
 
@@ -328,14 +328,14 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_i64(v: *mut GosVec, value: i64) {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_pop_i64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if v.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         let buf = vec.ptr.cast::<i64>();
         // SAFETY: `vec` is non-null with `len > 0` (checked above), so the buffer holds its root
@@ -352,24 +352,24 @@ pub unsafe extern "C" fn gos_rt_bheap_min_pop_i64(v: *mut GosVec) -> i128 {
             // SAFETY: `buf` holds `new_len` words.
             unsafe { heap_sift_down_i64(buf, new_len, 0) };
         }
-        super::vec::pack_result(0, root)
+        super::result::pack_result(0, root)
     })
 }
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_peek_i64(v: *const GosVec) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if v.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if vec.len <= 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `vec` is non-null with `len > 0` (checked above), so its buffer holds the root
         // word.
-        super::vec::pack_result(0, unsafe { *vec.ptr.cast::<i64>() })
+        super::result::pack_result(0, unsafe { *vec.ptr.cast::<i64>() })
     })
 }
 
@@ -607,14 +607,14 @@ pub unsafe extern "C" fn gos_rt_bheap_max_push_f64(v: *mut GosVec, value: f64) {
 /// an i128 (disc=0 `Some`, disc=1 `None`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_pop_f64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if v.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         let buf = vec.ptr.cast::<i64>();
         // SAFETY: `vec` is non-null with `len > 0` (checked above), so the buffer holds its root
@@ -631,7 +631,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_pop_f64(v: *mut GosVec) -> i128 {
             // SAFETY: `buf` holds `new_len` words.
             unsafe { max_heap_sift_down_f64(buf, new_len, 0) };
         }
-        super::vec::pack_result(0, root)
+        super::result::pack_result(0, root)
     })
 }
 
@@ -684,14 +684,14 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_f64(v: *mut GosVec, value: f64) {
 /// i128 (disc=0 `Some`, disc=1 `None`).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_pop_f64(v: *mut GosVec) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if v.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &mut *v };
         if vec.len <= 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         let buf = vec.ptr.cast::<i64>();
         // SAFETY: `vec` is non-null with `len > 0` (checked above), so the buffer holds its root
@@ -708,7 +708,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_pop_f64(v: *mut GosVec) -> i128 {
             // SAFETY: `buf` holds `new_len` words.
             unsafe { heap_sift_down_f64(buf, new_len, 0) };
         }
-        super::vec::pack_result(0, root)
+        super::result::pack_result(0, root)
     })
 }
 
@@ -1118,13 +1118,13 @@ unsafe fn bheap_push_desc(v: *mut GosVec, elem: *const u8, tags: *const u8, max:
 
 unsafe fn bheap_pop_desc(v: *mut GosVec, tags: *const u8, max: bool) -> i128 {
     if v.is_null() || tags.is_null() {
-        return super::vec::pack_result(1, 0);
+        return super::result::pack_result(1, 0);
     }
     // SAFETY: `v` is non-null (checked above), and this `unsafe fn`'s caller passes a live `Vec`
     // not otherwise accessed during the call.
     let vec = unsafe { &mut *v };
     if vec.len <= 0 {
-        return super::vec::pack_result(1, 0);
+        return super::result::pack_result(1, 0);
     }
     let last = (vec.len - 1) as usize;
     // The root leaves through the slot just past the new end, which the
@@ -1140,7 +1140,7 @@ unsafe fn bheap_pop_desc(v: *mut GosVec, tags: *const u8, max: bool) -> i128 {
     }
     // SAFETY: `last` is the slot just past the new length, which still holds the popped element.
     let word = unsafe { crate::c_abi::vec::vec_elem_owned_payload_word(vec, last as i64) };
-    super::vec::pack_result(0, word)
+    super::result::pack_result(0, word)
 }
 
 /// The heap pop whose element the caller already owns storage for: the root
@@ -1223,7 +1223,7 @@ pub unsafe extern "C" fn gos_rt_bheap_min_push_desc(
 /// Remove and return the greatest element as `Option<T>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, true) }
@@ -1233,7 +1233,7 @@ pub unsafe extern "C" fn gos_rt_bheap_max_pop_desc(v: *mut GosVec, tags: *const 
 /// Remove and return the least element as `Option<T>`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_min_pop_desc(v: *mut GosVec, tags: *const u8) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         // SAFETY: `v`, `tags` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `bheap_pop_desc` accepts.
         unsafe { bheap_pop_desc(v, tags, false) }
@@ -1270,18 +1270,18 @@ pub unsafe extern "C" fn gos_rt_bheap_min_pop_desc_into(
 /// multi-slot element is the address of its slots.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_bheap_peek_elem(v: *const GosVec) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if v.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
         let vec = unsafe { &*v };
         if vec.len <= 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: `vec` is non-null with `len > 0` (checked above).
         let word = unsafe { crate::c_abi::vec::vec_elem_shared_payload_word(vec, 0) };
-        super::vec::pack_result(0, word)
+        super::result::pack_result(0, word)
     })
 }
 
@@ -1318,7 +1318,7 @@ unsafe fn bheap_format_desc(v: *const GosVec, owner: &str, tags: *const u8) -> *
         return crate::c_abi::string::alloc_cstring(format!("{owner} []").as_bytes());
     }
     // SAFETY: this `unsafe fn`'s caller passes `tags` live; non-null, checked above.
-    let stream = unsafe { crate::c_abi::map::DescStream::new(tags) };
+    let stream = unsafe { crate::c_abi::desc_format::DescStream::new(tags) };
     // SAFETY: `v` is live or null (this `unsafe fn`'s caller), and `stream` walks the element
     // descriptor.
     let text = unsafe { bheap_format_at(v, owner, stream, 0) };
@@ -1333,7 +1333,7 @@ unsafe fn bheap_format_desc(v: *const GosVec, owner: &str, tags: *const u8) -> *
 pub(crate) unsafe fn bheap_format_at(
     v: *const GosVec,
     owner: &str,
-    tags: crate::c_abi::map::DescStream,
+    tags: crate::c_abi::desc_format::DescStream,
     elem_desc: usize,
 ) -> String {
     let mut out = String::from(owner);
@@ -1350,7 +1350,9 @@ pub(crate) unsafe fn bheap_format_at(
             let slot = unsafe { heap_elem(vec, i as usize) };
             let mut cursor = elem_desc;
             // SAFETY: `slot` is one element, laid out as the descriptor at `elem_desc` describes.
-            unsafe { crate::c_abi::map::render_desc_value(&mut out, slot, tags, &mut cursor) };
+            unsafe {
+                crate::c_abi::desc_format::render_desc_value(&mut out, slot, tags, &mut cursor);
+            }
         }
     }
     out.push(']');

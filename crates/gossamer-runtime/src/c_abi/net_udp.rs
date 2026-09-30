@@ -49,7 +49,7 @@ unsafe fn cstr_to_str(p: *const c_char) -> String {
 
 fn udp_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// The text a datagram failure reads as, matching the interp tier's
@@ -75,7 +75,7 @@ pub unsafe extern "C" fn gos_rt_udp_bind(addr: *const c_char) -> i128 {
                     .lock()
                     .get_or_insert_with(HashMap::new)
                     .insert(h, Arc::new(s));
-                super::vec::gos_rt_result_new(0, h)
+                super::result::gos_rt_result_new(0, h)
             }
             Err(e) => udp_err(&socket_error(&e, &a)),
         }
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn gos_rt_udp_send_to(
         // SAFETY: `addr` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let target = unsafe { cstr_to_str(addr) };
         match sock.send_to(&bytes, &target) {
-            Ok(n) => super::vec::gos_rt_result_new(0, n as i64),
+            Ok(n) => super::result::gos_rt_result_new(0, n as i64),
             Err(e) => udp_err(&socket_error(&e, &target)),
         }
     })
@@ -136,7 +136,7 @@ pub extern "C" fn gos_rt_udp_recv_from(h: i64, max: i64) -> i128 {
                     bytes: bytes_vec as i64,
                     addr: addr_cs as i64,
                 }));
-                super::vec::gos_rt_result_new(0, pair as i64)
+                super::result::gos_rt_result_new(0, pair as i64)
             }
             Ok(Err(e)) => udp_err(&socket_error(&e, "UdpSocket::recv_from")),
             Err(e) => udp_err(&e),
@@ -152,7 +152,7 @@ pub extern "C" fn gos_rt_udp_local_addr(h: i64) -> i128 {
             return udp_err("UdpSocket::local_addr: stale handle");
         };
         match sock.local_addr() {
-            Ok(a) => super::vec::gos_rt_result_new(
+            Ok(a) => super::result::gos_rt_result_new(
                 0,
                 super::string::alloc_cstring(a.to_string().as_bytes()) as i64,
             ),

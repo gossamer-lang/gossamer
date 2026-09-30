@@ -28,12 +28,12 @@ use bzip2::read::{BzDecoder, BzEncoder};
 /// Wraps `bytes` in an `Ok(Vec<u8>)` `GosResult`.
 fn ok_bytes_result(bytes: &[u8]) -> i128 {
     let v = super::encoding::bytes_to_gosvec(bytes);
-    super::vec::gos_rt_result_new(0, v as i64)
+    super::result::gos_rt_result_new(0, v as i64)
 }
 
 fn err_bytes_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// `compress::bzip2::compress(data, level) -> Result<[u8], Error>` -

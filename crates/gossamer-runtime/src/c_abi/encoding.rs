@@ -15,7 +15,7 @@ use super::string::alloc_cstring;
 
 fn err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// # Safety
@@ -169,7 +169,7 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_decode(s: *const c_char) -> i128
         // owned here alone.
         let vref = unsafe { &mut *v };
         if vref.ptr.is_null() {
-            return super::vec::gos_rt_result_new(0, v as i64);
+            return super::result::gos_rt_result_new(0, v as i64);
         }
         let bound = base64_decoded_bound(text.len());
         // SAFETY: the vec was just built with room for the decoded bound, and its buffer is live
@@ -181,7 +181,7 @@ pub unsafe extern "C" fn gos_rt_encoding_base64_decode(s: *const c_char) -> i128
         match base64_decode_into(text, out) {
             Ok(written) => {
                 vref.len = written as i64;
-                super::vec::gos_rt_result_new(0, v as i64)
+                super::result::gos_rt_result_new(0, v as i64)
             }
             Err(e) => {
                 // SAFETY: `v` is the fresh vec made above, owned here alone and not read again.
@@ -201,7 +201,7 @@ pub unsafe extern "C" fn gos_rt_encoding_hex_decode(s: *const c_char) -> i128 {
         match hex_decode(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                super::vec::gos_rt_result_new(0, v as i64)
+                super::result::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -241,7 +241,7 @@ pub unsafe extern "C" fn gos_rt_html_template_render_json(
         match gossamer_template::html::render_json(source, json_data) {
             Ok(text) => {
                 let p = alloc_cstring(text.as_bytes());
-                super::vec::gos_rt_result_new(0, p as i64)
+                super::result::gos_rt_result_new(0, p as i64)
             }
             Err(e) => err_result(&format!("{e}")),
         }
@@ -577,7 +577,7 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_decode_string(s: *const c_char) 
             Ok(bytes) => match String::from_utf8(bytes) {
                 Ok(text) => {
                     let p = alloc_cstring(text.as_bytes());
-                    super::vec::gos_rt_result_new(0, p as i64)
+                    super::result::gos_rt_result_new(0, p as i64)
                 }
                 Err(e) => err_result(&format!("base32: {e}")),
             },
@@ -595,7 +595,7 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_decode(s: *const c_char) -> i128
         match base32_decode(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                super::vec::gos_rt_result_new(0, v as i64)
+                super::result::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -611,7 +611,7 @@ pub unsafe extern "C" fn gos_rt_encoding_base32_decode_hex(s: *const c_char) -> 
         match base32_decode_hex(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                super::vec::gos_rt_result_new(0, v as i64)
+                super::result::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -724,7 +724,7 @@ pub unsafe extern "C" fn gos_rt_encoding_ascii85_decode(s: *const c_char) -> i12
         match ascii85_decode(unsafe { cstr_to_str(s) }) {
             Ok(bytes) => {
                 let v = bytes_to_gosvec(&bytes);
-                super::vec::gos_rt_result_new(0, v as i64)
+                super::result::gos_rt_result_new(0, v as i64)
             }
             Err(e) => err_result(&e),
         }
@@ -774,7 +774,7 @@ macro_rules! get_fixed {
                 let mut arr = [0u8; $n];
                 arr.copy_from_slice(&bytes[..$n]);
                 let v = <$ty>::$from(arr);
-                super::vec::gos_rt_result_new(0, i64::from(v))
+                super::result::gos_rt_result_new(0, i64::from(v))
             })
         }
     };
@@ -801,7 +801,7 @@ macro_rules! get_u64 {
                 let mut arr = [0u8; 8];
                 arr.copy_from_slice(&bytes[..8]);
                 let v = u64::$from(arr);
-                super::vec::gos_rt_result_new(0, v as i64)
+                super::result::gos_rt_result_new(0, v as i64)
             })
         }
     };
@@ -921,7 +921,7 @@ macro_rules! get_fixed_at {
                 if let Err(packed) = unsafe { read_window(data, offset, &mut arr) } {
                     return packed;
                 }
-                super::vec::gos_rt_result_new(0, <$ty>::$from(arr) as i64)
+                super::result::gos_rt_result_new(0, <$ty>::$from(arr) as i64)
             })
         }
     };
@@ -950,7 +950,7 @@ macro_rules! put_fixed_at {
                 // SAFETY: `buf` is this shim's argument, null or a live `Vec` nothing else
                 // accesses during the call (C-ABI contract), which `write_window` accepts.
                 match unsafe { write_window(buf, offset, &bytes) } {
-                    Ok(()) => super::vec::gos_rt_result_new(0, 0),
+                    Ok(()) => super::result::gos_rt_result_new(0, 0),
                     Err(packed) => packed,
                 }
             })
@@ -988,7 +988,7 @@ fn uvarint_decode(buf: &[u8]) -> Result<(u64, usize), String> {
 /// laid out by `meta`, which owns whatever children the words name.
 fn ok_pair(a: i64, b: i64, meta: &'static [i64]) -> i128 {
     let blob = crate::c_abi::rc::counted_words(&[a, b], meta);
-    super::vec::gos_rt_result_new(0, blob as i64)
+    super::result::gos_rt_result_new(0, blob as i64)
 }
 
 /// Layout of the `(String, [u8])` pem pair: the label string and the body
@@ -1182,7 +1182,7 @@ pub unsafe extern "C" fn gos_rt_pem_decode_all_raw(s: *const c_char) -> i128 {
         }
         // SAFETY: `out` is the live vec built above.
         unsafe { super::vec::vec_set_slot_children(out, &PEM_SLOT_CHILDREN) };
-        super::vec::gos_rt_result_new(0, out as i64)
+        super::result::gos_rt_result_new(0, out as i64)
     })
 }
 

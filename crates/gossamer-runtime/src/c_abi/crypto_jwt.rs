@@ -48,7 +48,8 @@ use std::time::UNIX_EPOCH;
 
 use sha2::Digest;
 
-use super::vec::{GosVec, gos_rt_result_new};
+use super::result::gos_rt_result_new;
+use super::vec::GosVec;
 
 /// Packs an `Ok(String)` result (disc 0, payload = runtime c-string).
 fn ok_string(s: &str) -> i128 {

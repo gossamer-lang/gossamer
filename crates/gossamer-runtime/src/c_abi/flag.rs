@@ -13,6 +13,7 @@
 #![allow(static_mut_refs)]
 #![allow(clippy::wildcard_imports)]
 
+use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::sync::atomic::Ordering;
 
@@ -487,17 +488,17 @@ fn apply_flag_value(
 /// `Result<Vec<String>, Error>` containing the leftover positional arguments.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *const GosVec) -> i128 {
-    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
+    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
         if set.is_null() {
             let out = gos_rt_vec_new(8);
-            return crate::c_abi::vec::gos_rt_result_new(0, out as i64);
+            return crate::c_abi::result::gos_rt_result_new(0, out as i64);
         }
         // SAFETY: `set` is non-null (checked above) and live for the call (C-ABI contract).
         let set = unsafe { &mut *set };
         set.positional.clear();
         if args.is_null() {
             let out = gos_rt_vec_new(8);
-            return crate::c_abi::vec::gos_rt_result_new(0, out as i64);
+            return crate::c_abi::result::gos_rt_result_new(0, out as i64);
         }
         // Two callers reach this function: the runner-build path
         // passes a real `*mut GosVec` of c-string pointers; the
@@ -621,6 +622,322 @@ pub unsafe extern "C" fn gos_rt_flag_set_parse(set: *mut GosFlagSet, args: *cons
                 gos_rt_vec_push(out, std::ptr::addr_of!(ptr_val).cast::<u8>());
             }
         }
-        crate::c_abi::vec::gos_rt_result_new(0, out as i64)
+        crate::c_abi::result::gos_rt_result_new(0, out as i64)
+    })
+}
+
+/// `*cell` for `flag::Set::string` cells.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_flag_cell_load_str(cell: *const *const c_char) -> *const c_char {
+    ffi_entry!(std::ptr::null(), {
+        if cell.is_null() {
+            return std::ptr::null();
+        }
+        // SAFETY: `cell` is this shim's string body argument, non-null (checked above), live for
+        // the call (C-ABI contract).
+        unsafe { *cell }
+    })
+}
+
+/// `*cell` for `flag::Set::uint` cells.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_flag_cell_load_i64(cell: *const i64) -> i64 {
+    ffi_entry!(-1, {
+        if cell.is_null() {
+            return 0;
+        }
+        // SAFETY: `cell` is this shim's `i64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
+        unsafe { *cell }
+    })
+}
+
+/// `*cell` for `flag::Set::bool` cells, widened to i64.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_flag_cell_load_bool(cell: *const bool) -> i64 {
+    ffi_entry!(-1, {
+        if cell.is_null() {
+            return 0;
+        }
+        // SAFETY: `cell` is this shim's `bool` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
+        i64::from(unsafe { *cell })
+    })
+}
+
+// `flag::parse([decls])` declarative parser - takes an array of
+// `FlagDecl`-shaped blobs and returns a `FlagMap` handle.
+// Layout per blob: `[name_cs, short_char, kind_tag, int_val,
+// str_cs]` (5 * 8 = 40 bytes). `kind_tag` is 0=Int, 1=Str, 2=Bool.
+// Mirrors the interpreter's `builtin_flag_parse`.
+
+#[derive(Debug, Clone)]
+struct GosFlagMapEntry {
+    name: String,
+    short: Option<char>,
+    kind: FlagKind,
+    str_val: Option<Vec<u8>>,
+    int_val: i64,
+}
+
+pub struct GosFlagMap {
+    entries: Vec<GosFlagMapEntry>,
+    positional: Vec<String>,
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_flag_parse(decls: *mut GosVec) -> *mut GosFlagMap {
+    ffi_entry!(std::ptr::null_mut(), {
+        let mut entries: Vec<GosFlagMapEntry> = Vec::new();
+        if !decls.is_null() {
+            // SAFETY: `decls` is this shim's argument, live for the call (C-ABI contract) or
+            // null, which `gos_rt_vec_len` accepts.
+            let len = unsafe { gos_rt_vec_len(decls) };
+            for i in 0..len {
+                // SAFETY: `i` is below `decls`'s length.
+                let raw = unsafe { gos_rt_vec_get_i64(decls, i) };
+                if raw == 0 {
+                    continue;
+                }
+                let blob = raw as *const i64;
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
+                let name_cs = unsafe { *blob.add(0) } as *const c_char;
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
+                let short_raw = unsafe { *blob.add(1) };
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
+                let kind_tag = unsafe { *blob.add(2) };
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
+                let int_val = unsafe { *blob.add(3) };
+                // SAFETY: a non-zero declaration word addresses a five-word flag declaration.
+                let str_cs = unsafe { *blob.add(4) } as *const c_char;
+                let name = if name_cs.is_null() {
+                    String::new()
+                } else {
+                    // SAFETY: `name_cs` is non-null (checked above), the declaration's live name
+                    // string.
+                    unsafe { gos_str_arg_string(name_cs) }
+                };
+                let short = u32::try_from(short_raw).ok().and_then(char::from_u32);
+                let kind = match kind_tag {
+                    0 => FlagKind::Int,
+                    1 => FlagKind::String,
+                    2 => FlagKind::Bool,
+                    _ => FlagKind::String,
+                };
+                let str_val = if matches!(kind, FlagKind::String) && !str_cs.is_null() {
+                    // SAFETY: `str_cs` is non-null (checked above), the declaration's live
+                    // default string.
+                    Some(unsafe { gos_str_arg_bytes(str_cs) }.to_vec())
+                } else {
+                    None
+                };
+                entries.push(GosFlagMapEntry {
+                    name,
+                    short,
+                    kind,
+                    str_val,
+                    int_val,
+                });
+            }
+        }
+        // SAFETY: `ARGS_PTR` / `ARGS_LEN` hold the process's argument vector,
+        // recorded at startup and live for the whole process.
+        let positional = unsafe {
+            parse_argv_flag_values(
+                &mut entries,
+                ARGS_PTR.load(Ordering::SeqCst),
+                ARGS_LEN.load(Ordering::SeqCst),
+            )
+        };
+        Box::into_raw(Box::new(GosFlagMap {
+            entries,
+            positional,
+        }))
+    })
+}
+
+/// Parse `argv`/`argc` into positional strings, applying flag values
+/// to `entries` in place.
+/// HOST-CSTRING: every read below is of a libc-owned `argv` entry.
+///
+/// # Safety
+///
+/// `argv` addresses `argc` readable pointers to NUL-terminated strings that
+/// outlive the call.
+unsafe fn parse_argv_flag_values(
+    entries: &mut [GosFlagMapEntry],
+    argv: usize,
+    argc: i64,
+) -> Vec<String> {
+    let argv = argv as *const *const c_char;
+    let mut idx: i64 = 0;
+    let mut positional: Vec<String> = Vec::new();
+    while idx < argc {
+        // SAFETY: `idx` is below `argc`, so the entry is one of `argv`'s `argc` pointers (this
+        // `unsafe fn`'s contract).
+        let p = unsafe { *argv.offset(idx as isize) };
+        if p.is_null() {
+            idx += 1;
+            continue;
+        }
+        // SAFETY: `p` is non-null (checked above), a NUL-terminated argument string (this `unsafe
+        // fn`'s contract).
+        let arg = unsafe { CStr::from_ptr(p).to_string_lossy().into_owned() };
+        if arg == "--" {
+            idx += 1;
+            while idx < argc {
+                // SAFETY: `idx` is below `argc`, so the entry is one of `argv`'s `argc` pointers.
+                let q = unsafe { *argv.offset(idx as isize) };
+                if !q.is_null() {
+                    // SAFETY: `q` is non-null (checked above), a NUL-terminated argument string.
+                    let s = unsafe { CStr::from_ptr(q).to_string_lossy().into_owned() };
+                    positional.push(s);
+                }
+                idx += 1;
+            }
+            break;
+        }
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, explicit) = match rest.split_once('=') {
+                Some((n, v)) => (n.to_string(), Some(v.to_string())),
+                None => (rest.to_string(), None),
+            };
+            if let Some(entry) = entries.iter_mut().find(|e| e.name == name) {
+                let value = if let Some(v) = explicit {
+                    v
+                } else if matches!(entry.kind, FlagKind::Bool) {
+                    "true".to_string()
+                } else if idx + 1 < argc {
+                    idx += 1;
+                    // SAFETY: `idx` is below `argc` (checked above), so the entry is one of
+                    // `argv`'s `argc` pointers.
+                    let q = unsafe { *argv.offset(idx as isize) };
+                    if q.is_null() {
+                        String::new()
+                    } else {
+                        // SAFETY: `q` is non-null (checked above), a NUL-terminated argument
+                        // string.
+                        unsafe { CStr::from_ptr(q).to_string_lossy().into_owned() }
+                    }
+                } else {
+                    String::new()
+                };
+                apply_decl_value(entry, &value);
+                idx += 1;
+                continue;
+            }
+            positional.push(arg);
+            idx += 1;
+            continue;
+        }
+        if let Some(rest) = arg.strip_prefix('-')
+            && !rest.is_empty()
+        {
+            let mut chars = rest.chars();
+            let first = chars.next().unwrap();
+            let remainder: String = chars.collect();
+            if let Some(entry) = entries.iter_mut().find(|e| e.short == Some(first)) {
+                let value = if !remainder.is_empty() {
+                    remainder
+                } else if matches!(entry.kind, FlagKind::Bool) {
+                    "true".to_string()
+                } else if idx + 1 < argc {
+                    idx += 1;
+                    // SAFETY: `idx` is below `argc` (checked above), so the entry is one of
+                    // `argv`'s `argc` pointers.
+                    let q = unsafe { *argv.offset(idx as isize) };
+                    if q.is_null() {
+                        String::new()
+                    } else {
+                        // SAFETY: `q` is non-null (checked above), a NUL-terminated argument
+                        // string.
+                        unsafe { CStr::from_ptr(q).to_string_lossy().into_owned() }
+                    }
+                } else {
+                    String::new()
+                };
+                apply_decl_value(entry, &value);
+                idx += 1;
+                continue;
+            }
+        }
+        positional.push(arg);
+        idx += 1;
+    }
+    positional
+}
+
+fn apply_decl_value(entry: &mut GosFlagMapEntry, raw: &str) {
+    match entry.kind {
+        FlagKind::Int | FlagKind::Uint | FlagKind::Duration => {
+            entry.int_val = raw.parse::<i64>().unwrap_or(entry.int_val);
+        }
+        FlagKind::Float => {
+            entry.int_val = raw.parse::<f64>().unwrap_or(0.0).to_bits() as i64;
+        }
+        FlagKind::Bool => {
+            entry.int_val = i64::from(matches!(raw, "true" | "1" | "yes" | "on"));
+        }
+        FlagKind::String | FlagKind::StringList => {
+            entry.str_val = Some(raw.as_bytes().to_vec());
+        }
+    }
+}
+
+/// `FlagMap::get(map, key) -> Option<i64-or-string>`. Returns
+/// `Result<int_or_str_ptr, ()>` (Result-as-Option in the
+/// compiled tier) carrying either the i64 slot for numeric /
+/// bool flags or the c-string pointer for string flags.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_flag_map_get(map: *const GosFlagMap, key: *const c_char) -> i128 {
+    ffi_entry!(0i128, {
+        if map.is_null() || key.is_null() {
+            return gos_rt_result_new(1, 0);
+        }
+        // SAFETY: `map` is a handle from compiled code, checked non-null above and live for the whole call.
+        let m = unsafe { &*map };
+        // SAFETY: `key` is a String argument from compiled code, null or a live string body for the whole call.
+        let k = unsafe { gos_str_arg_string(key) };
+        if let Some(entry) = m.entries.iter().find(|e| e.name == k) {
+            let payload = match entry.kind {
+                FlagKind::String | FlagKind::StringList => {
+                    let bytes = entry.str_val.as_deref().unwrap_or(&[]);
+                    alloc_cstring(bytes) as i64
+                }
+                _ => entry.int_val,
+            };
+            return gos_rt_result_new(0, payload);
+        }
+        // Suppress unused-field warning on positional (kept for
+        // future surface - `flag::parse(...)?.positional`).
+        let _ = &m.positional;
+        gos_rt_result_new(1, 0)
+    })
+}
+
+/// `*cell` for `flag::Set::float` cells.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_flag_cell_load_f64(cell: *const f64) -> f64 {
+    ffi_entry!(f64::NAN, {
+        if cell.is_null() {
+            return 0.0;
+        }
+        // SAFETY: `cell` is this shim's `f64` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
+        unsafe { *cell }
+    })
+}
+
+/// `*cell` for `flag::Set::string_list` cells. The cell stores a
+/// `*mut GosVec` that the runtime owns; reads return a borrow.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_flag_cell_load_vec(cell: *const *mut GosVec) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        if cell.is_null() {
+            return std::ptr::null_mut();
+        }
+        // SAFETY: `cell` is this shim's `Vec` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
+        unsafe { *cell }
     })
 }

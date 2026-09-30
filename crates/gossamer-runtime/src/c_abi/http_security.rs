@@ -35,10 +35,11 @@
 
 use std::os::raw::c_char;
 
+use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
 use super::vec::{
-    GosVec, VecSlotChild, gos_rt_result_new, gos_rt_vec_push, gos_rt_vec_with_capacity,
-    vec_elem_kind, vec_set_slot_children,
+    GosVec, VecSlotChild, gos_rt_vec_push, gos_rt_vec_with_capacity, vec_elem_kind,
+    vec_set_slot_children,
 };
 
 // -- base64url (RFC 4648 §5, no padding) ---------------------------------

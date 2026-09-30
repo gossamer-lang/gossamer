@@ -756,12 +756,12 @@ pub unsafe extern "C" fn gos_rt_http_request_path_int(
     req: *const GosHttpRequest,
     name: *const c_char,
 ) -> i128 {
-    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
+    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
         // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) }.and_then(|s| s.trim().parse::<i64>().ok()) {
-            Some(n) => crate::c_abi::vec::gos_rt_result_new(0, n),
-            None => crate::c_abi::vec::gos_rt_result_new(1, 0),
+            Some(n) => crate::c_abi::result::gos_rt_result_new(0, n),
+            None => crate::c_abi::result::gos_rt_result_new(1, 0),
         }
     })
 }
@@ -773,12 +773,12 @@ pub unsafe extern "C" fn gos_rt_http_request_path_float(
     req: *const GosHttpRequest,
     name: *const c_char,
 ) -> i128 {
-    ffi_entry!(crate::c_abi::vec::gos_rt_result_new_f64(1, 0.0), {
+    ffi_entry!(crate::c_abi::result::gos_rt_result_new_f64(1, 0.0), {
         // SAFETY: `req`, `name` are this shim's arguments, live for the call (C-ABI contract) or
         // null, which `path_param_lookup` accepts.
         match unsafe { path_param_lookup(req, name) }.and_then(|s| s.trim().parse::<f64>().ok()) {
-            Some(n) => crate::c_abi::vec::gos_rt_result_new_f64(0, n),
-            None => crate::c_abi::vec::gos_rt_result_new_f64(1, 0.0),
+            Some(n) => crate::c_abi::result::gos_rt_result_new_f64(0, n),
+            None => crate::c_abi::result::gos_rt_result_new_f64(1, 0.0),
         }
     })
 }

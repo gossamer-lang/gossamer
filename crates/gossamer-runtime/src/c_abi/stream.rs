@@ -17,7 +17,7 @@ use std::io::{BufRead, Read};
 use std::os::raw::c_char;
 
 use super::*;
-use crate::c_abi::vec::gos_rt_result_new;
+use crate::c_abi::result::gos_rt_result_new;
 
 // ---------------------------------------------------------------
 // Streams - io::stdout / io::stderr / io::stdin

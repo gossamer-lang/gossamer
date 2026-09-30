@@ -30,7 +30,8 @@ use std::os::raw::c_char;
 use p256::elliptic_curve::rand_core::{CryptoRng, RngCore};
 
 use super::encoding::bytes_to_gosvec;
-use super::vec::{GosVec, gos_rt_result_new};
+use super::result::gos_rt_result_new;
+use super::vec::GosVec;
 
 /// OS-CSPRNG adapter for `p256::ecdsa::SigningKey::random`. Mirrors
 /// `gossamer_std::crypto::rand::OsRng` - backed by `getrandom`. On the

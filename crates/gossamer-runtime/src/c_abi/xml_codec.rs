@@ -58,7 +58,7 @@ unsafe fn cstr_to_str<'a>(s: *const c_char) -> &'a str {
 
 fn err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// Parses an XML document into a tree, returning the root element.
@@ -292,7 +292,7 @@ pub unsafe extern "C" fn gos_rt_xml_parse(s: *const c_char) -> i128 {
         match parse(unsafe { cstr_to_str(s) }) {
             Ok(node) => {
                 let handle = super::json::GosJson::into_raw(node_to_json(&node));
-                super::vec::gos_rt_result_new(0, handle as i64)
+                super::result::gos_rt_result_new(0, handle as i64)
             }
             Err(e) => err_result(&e),
         }

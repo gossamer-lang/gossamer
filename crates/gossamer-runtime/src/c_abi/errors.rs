@@ -319,9 +319,9 @@ pub unsafe extern "C" fn gos_rt_error_with_field(
 /// under `key` on this error, ignoring the cause chain.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_error_field(err: *const GosError, key: *const c_char) -> i128 {
-    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
+    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
         if err.is_null() {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
         // SAFETY: `key` is this shim's argument, live for the call (C-ABI contract) or null,
         // which `cstr_owned` accepts.
@@ -332,9 +332,9 @@ pub unsafe extern "C" fn gos_rt_error_field(err: *const GosError, key: *const c_
             .find(|(n, _)| *n == key)
         {
             Some((_, value)) => {
-                crate::c_abi::vec::gos_rt_result_new(0, alloc_cstring(value.as_bytes()) as i64)
+                crate::c_abi::result::gos_rt_result_new(0, alloc_cstring(value.as_bytes()) as i64)
             }
-            None => crate::c_abi::vec::gos_rt_result_new(1, 0),
+            None => crate::c_abi::result::gos_rt_result_new(1, 0),
         }
     })
 }

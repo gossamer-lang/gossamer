@@ -65,7 +65,7 @@ unsafe fn cstr_to_str(p: *const c_char) -> String {
 /// Packs `Err(errors::Error)` as the runtime's `i128` Result.
 fn ws_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 fn conn_clone(h: i64) -> Option<WsConn> {
@@ -146,7 +146,7 @@ pub unsafe extern "C-unwind" fn gos_rt_ws_serve(
             },
         );
     }
-    super::vec::gos_rt_result_new(0, 0)
+    super::result::gos_rt_result_new(0, 0)
 }
 
 /// `websocket::connect(url) -> Result<i64, Error>`. Connects to a
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn gos_rt_ws_serve_connect(url: *const c_char) -> i128 {
         // SAFETY: `url` is this shim's argument, as `cstr_to_str` requires (C-ABI contract).
         let url = unsafe { cstr_to_str(url) };
         match ws_client_connect(&url) {
-            Ok(handle) => super::vec::gos_rt_result_new(0, handle),
+            Ok(handle) => super::result::gos_rt_result_new(0, handle),
             Err(e) => ws_err(&format!("websocket::connect: {e}")),
         }
     })
@@ -185,7 +185,7 @@ pub unsafe extern "C" fn gos_rt_ws_send_text(h: i64, s: *const c_char) -> i128 {
         let text = unsafe { cstr_to_str(s) };
         let mut ws = conn.lock();
         match ws.send_text(&text) {
-            Ok(()) => super::vec::gos_rt_result_new(0, 0),
+            Ok(()) => super::result::gos_rt_result_new(0, 0),
             Err(e) => ws_err(&format!("{e}")),
         }
     })
@@ -203,7 +203,7 @@ pub unsafe extern "C" fn gos_rt_ws_send_binary(h: i64, data: *const super::vec::
         let bytes = unsafe { crate::c_abi::vec::vec_bytes(data) };
         let mut ws = conn.lock();
         match ws.send_binary(&bytes) {
-            Ok(()) => super::vec::gos_rt_result_new(0, 0),
+            Ok(()) => super::result::gos_rt_result_new(0, 0),
             Err(e) => ws_err(&format!("{e}")),
         }
     })
@@ -223,14 +223,14 @@ pub extern "C" fn gos_rt_ws_recv(h: i64) -> i128 {
         loop {
             match ws.receive() {
                 Ok(Message::Text(s)) => {
-                    return super::vec::gos_rt_result_new(
+                    return super::result::gos_rt_result_new(
                         0,
                         super::string::alloc_cstring(s.as_bytes()) as i64,
                     );
                 }
                 Ok(Message::Binary(b)) => {
                     let s = String::from_utf8_lossy(&b);
-                    return super::vec::gos_rt_result_new(
+                    return super::result::gos_rt_result_new(
                         0,
                         super::string::alloc_cstring(s.as_bytes()) as i64,
                     );
@@ -256,6 +256,6 @@ pub extern "C" fn gos_rt_ws_close(h: i64) -> i128 {
         if let Some(m) = WS_CONNS.lock().as_mut() {
             m.remove(&h);
         }
-        super::vec::gos_rt_result_new(0, 0)
+        super::result::gos_rt_result_new(0, 0)
     })
 }

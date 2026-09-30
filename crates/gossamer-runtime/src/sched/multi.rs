@@ -272,6 +272,7 @@ struct WorkerSlot {
     /// it. Without this the watchdog re-sends on every pass for as long as
     /// the loop runs, which is a kernel round trip per worker per pass on
     /// both sides and interrupts the very work it is waiting for.
+    #[cfg(not(miri))]
     last_signal_micros: AtomicU64,
     /// Monotonic micros-since-process-start at which this worker entered a
     /// blocking system call, or zero outside one. Written lock-free by the
@@ -923,6 +924,7 @@ impl MultiScheduler {
             retired: AtomicBool::new(false),
             thread_handle: AtomicU64::new(0),
             last_yield_micros: AtomicU64::new(now_micros_since_start()),
+            #[cfg(not(miri))]
             last_signal_micros: AtomicU64::new(0),
             syscall_since_micros: AtomicU64::new(0),
             handed_off: AtomicBool::new(false),
@@ -949,6 +951,7 @@ impl MultiScheduler {
                         retired: AtomicBool::new(true),
                         thread_handle: AtomicU64::new(0),
                         last_yield_micros: AtomicU64::new(now_micros_since_start()),
+                        #[cfg(not(miri))]
                         last_signal_micros: AtomicU64::new(0),
                         syscall_since_micros: AtomicU64::new(0),
                         handed_off: AtomicBool::new(false),
@@ -1357,6 +1360,7 @@ fn start_workers_for_blocked_syscalls(shared: &Arc<Shared>, now_micros: u64) {
     }
 }
 
+#[cfg(not(miri))]
 /// Takes a non-blocking pass over the poller of every worker index no live
 /// worker occupies: a worker that retired leaves its sockets and timers
 /// registered there, and their goroutines move to other workers when woken.
@@ -1375,6 +1379,7 @@ fn drive_vacant_pollers(shared: &Arc<Shared>) {
     crate::netpoll::unpark_all(&mut woken);
 }
 
+#[cfg(not(miri))]
 fn watchdog_loop(shared: Arc<Shared>) {
     let preempt_threshold = Duration::from_millis(10);
     let kill_threshold = Duration::from_millis(100);
@@ -1733,6 +1738,7 @@ mod tests {
             retired: AtomicBool::new(false),
             thread_handle: AtomicU64::new(0),
             last_yield_micros: AtomicU64::new(0),
+            #[cfg(not(miri))]
             last_signal_micros: AtomicU64::new(0),
             syscall_since_micros: AtomicU64::new(0),
             handed_off: AtomicBool::new(false),

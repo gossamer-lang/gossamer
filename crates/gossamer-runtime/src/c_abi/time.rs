@@ -173,7 +173,7 @@ use chrono::{
 use chrono_tz::Tz;
 use std::os::raw::c_char;
 
-use crate::c_abi::gos_rt_result_new;
+use crate::c_abi::{alloc_cstring, gos_rt_result_new, gos_str_arg_text};
 
 enum CivilLocation {
     Iana(Tz),
@@ -509,4 +509,204 @@ pub unsafe extern "C" fn gos_rt_time_add_date_raw(
             Err(error) => time_error(&error),
         }
     })
+}
+
+/// `time::format_rfc3339(unix_ms) -> Result<String, errors::Error>`.
+/// Renders a UTC RFC 3339 timestamp from a unix-milliseconds
+/// instant. Mirrors the interpreter builtin.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_time_format_rfc3339(unix_ms: i64) -> i128 {
+    ffi_entry!(0i128, {
+        let secs = unix_ms.div_euclid(1_000);
+        let nanos = (unix_ms.rem_euclid(1_000) * 1_000_000) as u32;
+        let _ = nanos;
+        let mut y: i64 = 1970;
+        let mut remain = secs.div_euclid(86_400);
+        let is_leap = |yr: i64| (yr % 4 == 0 && yr % 100 != 0) || yr % 400 == 0;
+        let dy = |yr: i64| if is_leap(yr) { 366 } else { 365 };
+        if remain < 0 {
+            while remain < 0 {
+                y -= 1;
+                remain += dy(y);
+            }
+        } else {
+            while remain >= dy(y) {
+                remain -= dy(y);
+                y += 1;
+            }
+        }
+        let dim = |m: i64, yr: i64| -> i64 {
+            match m {
+                1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+                4 | 6 | 9 | 11 => 30,
+                2 => {
+                    if is_leap(yr) {
+                        29
+                    } else {
+                        28
+                    }
+                }
+                _ => 30,
+            }
+        };
+        let mut m = 1_i64;
+        while remain >= dim(m, y) {
+            remain -= dim(m, y);
+            m += 1;
+        }
+        let day = remain + 1;
+        let s = secs.rem_euclid(86_400);
+        let h = s / 3600;
+        let mi = (s % 3600) / 60;
+        let se = s % 60;
+        let s_str = format!("{y:04}-{m:02}-{day:02}T{h:02}:{mi:02}:{se:02}Z");
+        let cs = alloc_cstring(s_str.as_bytes());
+        gos_rt_result_new(0, cs as i64)
+    })
+}
+
+/// `time::parse_rfc3339(s) -> Result<i64, errors::Error>`.
+/// Parses an RFC 3339 timestamp and returns unix milliseconds.
+/// Accepts `T` or space as the date/time separator; accepts `Z`,
+/// `+HH:MM`, `-HH:MM`, or no suffix (assumes UTC); sub-second
+/// fractions are accepted and dropped. A faithful port of
+/// `gossamer_std::time::parse_rfc3339` so the compiled tier matches
+/// the VM bit-for-bit (timezone offsets, day-of-month validation,
+/// and pre-1970 negative results all included).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_time_parse_rfc3339(s: *const c_char) -> i128 {
+    ffi_entry!(0i128, {
+        let err = || -> i128 {
+            let cs = alloc_cstring(b"time::parse: bad input");
+            gos_rt_result_new(1, cs as i64)
+        };
+        if s.is_null() {
+            return err();
+        }
+        // SAFETY: `s` is a String argument from compiled code, null or a live string body for the whole call.
+        let text = unsafe { gos_str_arg_text(s) };
+        match parse_rfc3339_ms(text) {
+            Some(ms) => gos_rt_result_new(0, ms),
+            None => err(),
+        }
+    })
+}
+
+/// Parses one zero-padded unsigned field, mirroring `parse_unsigned`
+/// in `gossamer_std::time` (rejects signs, spaces, and non-digits).
+fn parse_rfc3339_uint(bytes: &[u8]) -> Option<i64> {
+    std::str::from_utf8(bytes)
+        .ok()?
+        .parse::<u32>()
+        .ok()
+        .map(i64::from)
+}
+
+const fn is_leap_year(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
+
+const fn days_in_month(year: i64, month: i64) -> i64 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
+        _ => 0,
+    }
+}
+
+/// Howard Hinnant's `days_from_civil`, matching the i32/u32 version
+/// in `gossamer_std::time` over the representable Gregorian range.
+fn civil_to_days(y: i64, m: i64, d: i64) -> i64 {
+    let y_adj = y - i64::from(m <= 2);
+    let era = if y_adj >= 0 {
+        y_adj / 400
+    } else {
+        (y_adj - 399) / 400
+    };
+    let yoe = y_adj - era * 400;
+    let m_eff = if m > 2 { m - 3 } else { m + 9 };
+    let doy = (153 * m_eff + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
+}
+
+/// Faithful port of `gossamer_std::time::parse_rfc3339` returning
+/// unix milliseconds, or `None` for any malformed/out-of-range input.
+fn parse_rfc3339_ms(s: &str) -> Option<i64> {
+    let bytes = s.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+    let year: i64 = std::str::from_utf8(&bytes[0..4])
+        .ok()?
+        .parse::<i32>()
+        .ok()? as i64;
+    if bytes[4] != b'-' {
+        return None;
+    }
+    let month = parse_rfc3339_uint(&bytes[5..7])?;
+    if bytes[7] != b'-' {
+        return None;
+    }
+    let day = parse_rfc3339_uint(&bytes[8..10])?;
+    if !matches!(bytes[10], b'T' | b' ') {
+        return None;
+    }
+    let hour = parse_rfc3339_uint(&bytes[11..13])?;
+    if bytes[13] != b':' {
+        return None;
+    }
+    let minute = parse_rfc3339_uint(&bytes[14..16])?;
+    if bytes[16] != b':' {
+        return None;
+    }
+    let second = parse_rfc3339_uint(&bytes[17..19])?;
+    let mut cursor = 19;
+    if bytes.get(cursor) == Some(&b'.') {
+        cursor += 1;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_digit() {
+            cursor += 1;
+        }
+    }
+    let mut offset_seconds: i64 = 0;
+    if cursor < bytes.len() {
+        match bytes[cursor] {
+            b'Z' => cursor += 1,
+            b'+' | b'-' => {
+                if cursor + 5 >= bytes.len() {
+                    return None;
+                }
+                let sign: i64 = if bytes[cursor] == b'+' { 1 } else { -1 };
+                let oh = parse_rfc3339_uint(&bytes[cursor + 1..cursor + 3])?;
+                if bytes[cursor + 3] != b':' {
+                    return None;
+                }
+                let om = parse_rfc3339_uint(&bytes[cursor + 4..cursor + 6])?;
+                offset_seconds = sign * (oh * 3600 + om * 60);
+                cursor += 6;
+            }
+            _ => return None,
+        }
+    }
+    if cursor != bytes.len() {
+        return None;
+    }
+    if !(1..=12).contains(&month)
+        || !(1..=days_in_month(year, month)).contains(&day)
+        || hour >= 24
+        || minute >= 60
+        || second >= 60
+    {
+        return None;
+    }
+    let unix_secs = civil_to_days(year, month, day) * 86_400 + hour * 3600 + minute * 60 + second
+        - offset_seconds;
+    unix_secs.checked_mul(1_000)
 }

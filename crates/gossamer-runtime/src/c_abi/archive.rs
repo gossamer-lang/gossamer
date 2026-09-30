@@ -15,8 +15,9 @@
 use std::io::{Cursor, Read, Write};
 use std::os::raw::c_char;
 
+use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
-use super::vec::{GosVec, gos_rt_result_new, gos_rt_vec_push, gos_rt_vec_with_capacity};
+use super::vec::{GosVec, gos_rt_vec_push, gos_rt_vec_with_capacity};
 
 fn byte_vec(bytes: &[u8]) -> *mut GosVec {
     super::encoding::bytes_to_gosvec(bytes)

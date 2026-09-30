@@ -66,7 +66,7 @@ fn server_at(handle: i64) -> Option<Arc<GosHttpServer>> {
 
 fn err_result(message: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
-    crate::c_abi::vec::pack_result(1, err as i64)
+    crate::c_abi::result::pack_result(1, err as i64)
 }
 
 /// `http::Server::new() -> Server` - a server carrying every default.
@@ -218,7 +218,7 @@ pub unsafe extern "C" fn gos_rt_http_server_listen(handle: i64, addr: *const c_c
             .map_or_else(|_| addr_s.clone(), |a| a.to_string());
         *server.bound_addr.lock() = bound;
         *server.listener.lock() = Some(listener);
-        crate::c_abi::vec::pack_result(0, 0)
+        crate::c_abi::result::pack_result(0, 0)
     })
 }
 
@@ -272,7 +272,7 @@ pub unsafe extern "C" fn gos_rt_http_server_serve(
         if !served {
             return err_result("http::Server::serve: the listener stopped accepting");
         }
-        crate::c_abi::vec::pack_result(0, 0)
+        crate::c_abi::result::pack_result(0, 0)
     })
 }
 

@@ -11,8 +11,9 @@
 
 use std::os::raw::c_char;
 
+use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
-use super::vec::{GosVec, gos_rt_result_new, gos_rt_vec_push};
+use super::vec::{GosVec, gos_rt_vec_push};
 
 /// Reads a `GosVec<String>` (elements are c-string pointers) into
 /// owned strings.
@@ -254,8 +255,8 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let r = unsafe { gos_rt_csv_read(input) };
-        assert_eq!(crate::c_abi::vec::gos_rt_result_disc(r), 0);
-        let outer = crate::c_abi::vec::gos_rt_result_payload(r) as *mut GosVec;
+        assert_eq!(crate::c_abi::result::gos_rt_result_disc(r), 0);
+        let outer = crate::c_abi::result::gos_rt_result_payload(r) as *mut GosVec;
         assert!(!outer.is_null());
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
@@ -308,8 +309,8 @@ mod tests {
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let r = unsafe { gos_rt_csv_read(input) };
-        assert_eq!(crate::c_abi::vec::gos_rt_result_disc(r), 0);
-        let outer = crate::c_abi::vec::gos_rt_result_payload(r) as *mut GosVec;
+        assert_eq!(crate::c_abi::result::gos_rt_result_disc(r), 0);
+        let outer = crate::c_abi::result::gos_rt_result_payload(r) as *mut GosVec;
         // SAFETY: every pointer argument is a value this test built above and still holds live; a
         // null one is accepted by the callee.
         let o = unsafe { &*outer };

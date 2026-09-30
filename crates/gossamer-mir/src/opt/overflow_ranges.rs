@@ -18,7 +18,17 @@
 // changing after `FALLBACK_ROUNDS` widens every local, which bounds the
 // iteration whatever the control flow. A local that settles in a few rounds,
 // like a bit position reset at eight, keeps its exact bounds. A runtime call
-// answering a length lies in `[0, LENGTH_LIMIT]`.
+// answering a length lies in `[0, LENGTH_LIMIT]`, and the index of an element
+// access that returned lies in `[0, LENGTH_LIMIT)`.
+//
+// An integer `Vec` the body builds empty and touches only through element
+// reads, writes, pushes, lengths, frees, and copies to other such locals holds
+// only values the body stored, so a read from it lies in the join of the
+// stored values' intervals. That join is computed from the type's range
+// downward: every round recomputes it from the stores with reads taken from
+// the previous round, and each round's join still holds every value a store
+// can write, because each stored value is computed from values read inside
+// the previous join.
 
 /// Visits of a loop header after which a moving bound of a local the loop
 /// writes widens to its type's limit.
@@ -26,6 +36,9 @@ const RANGE_ROUNDS: u32 = 24;
 
 /// Visits of one block after which every moving bound widens there.
 const FALLBACK_ROUNDS: u32 = 4 * RANGE_ROUNDS;
+
+/// Rounds that narrow the element intervals of the `Vec`s the pass reads.
+const ELEMENT_ROUNDS: usize = 3;
 
 /// A closed interval of integer values.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -83,6 +96,8 @@ struct RangeAnalysis<'a> {
     slot: HashMap<Local, usize>,
     /// Each tracked local's type range.
     ranges: Vec<Interval>,
+    /// The interval every element of a whole-seen `Vec` local lies in.
+    elements: HashMap<Local, Interval>,
 }
 
 impl RangeAnalysis<'_> {
@@ -117,6 +132,26 @@ impl RangeAnalysis<'_> {
         if !place.projection.is_empty() {
             return;
         }
+        // A checked `x * x` that completes leaves `x` within the square root
+        // of its type's largest value.
+        if let Rvalue::BinaryOp {
+            op: BinOp::Mul,
+            lhs: Operand::Copy(a),
+            rhs: Operand::Copy(b),
+        } = rvalue
+            && a == b
+            && a.projection.is_empty()
+            && a.local != place.local
+            && let Some(&x) = self.slot.get(&a.local)
+        {
+            let root = i128::try_from(self.ranges[x].hi.max(0).cast_unsigned().isqrt())
+                .unwrap_or(i128::MAX);
+            let bound = Interval {
+                lo: -root,
+                hi: root,
+            };
+            state[x] = state[x].map(|cur| cur.meet(bound).unwrap_or(cur));
+        }
         if let Some(&s) = self.slot.get(&place.local) {
             let range = self.ranges[s];
             // A value outside the destination's range wraps or truncates
@@ -127,6 +162,59 @@ impl RangeAnalysis<'_> {
                     .unwrap_or(range),
             );
         }
+    }
+
+    /// Applies a block's terminator to `state`: a call's destination takes
+    /// the interval the callee answers, and an element access that returned
+    /// leaves its index in bounds.
+    fn call(&self, state: &mut RangeState, terminator: &Terminator) {
+        let Terminator::Call {
+            callee: Operand::Const(ConstValue::Str(name)),
+            args,
+            destination,
+            ..
+        } = terminator
+        else {
+            if let Terminator::Call { destination, .. } = terminator
+                && destination.projection.is_empty()
+                && let Some(&s) = self.slot.get(&destination.local)
+            {
+                state[s] = Some(self.ranges[s]);
+            }
+            return;
+        };
+        if is_element_access(name)
+            && let Some(Operand::Copy(index)) = args.get(1)
+            && index.projection.is_empty()
+            && let Some(&s) = self.slot.get(&index.local)
+        {
+            let in_bounds = Interval {
+                lo: 0,
+                hi: LENGTH_LIMIT - 1,
+            };
+            state[s] = state[s].map(|cur| cur.meet(in_bounds).unwrap_or(cur));
+        }
+        if !destination.projection.is_empty() {
+            return;
+        }
+        let Some(&s) = self.slot.get(&destination.local) else {
+            return;
+        };
+        let answered = if is_length_call(name) {
+            Some(Interval {
+                lo: 0,
+                hi: LENGTH_LIMIT,
+            })
+        } else if is_element_read(name)
+            && let Some(Operand::Copy(vec)) = args.first()
+            && vec.projection.is_empty()
+        {
+            self.elements.get(&vec.local).copied()
+        } else {
+            None
+        };
+        let range = self.ranges[s];
+        state[s] = Some(answered.and_then(|i| i.meet(range)).unwrap_or(range));
     }
 
     /// Narrows `state` along the edge from `block` to `target`, where
@@ -287,9 +375,11 @@ fn binary_interval(op: BinOp, a: Interval, b: Interval) -> Option<Interval> {
             };
             Some(Interval { lo: 0, hi })
         }
-        BinOp::Rem if b.lo > 0 && a.lo >= 0 => Some(Interval {
-            lo: 0,
-            hi: a.hi.min(b.hi - 1),
+        // A truncating remainder by a positive divisor keeps the dividend's
+        // sign and a magnitude below the divisor's.
+        BinOp::Rem if b.lo > 0 => Some(Interval {
+            lo: if a.lo >= 0 { 0 } else { a.lo.max(1 - b.hi) },
+            hi: if a.hi <= 0 { 0 } else { a.hi.min(b.hi - 1) },
         }),
         BinOp::Shr if a.lo >= 0 && b.lo >= 0 && b.hi < 64 => Some(Interval {
             lo: a.lo >> b.hi,
@@ -306,10 +396,17 @@ pub(crate) fn elide_overflow_checks_by_ranges(body: &mut Body, tcx: &TyCtxt) {
     if n == 0 {
         return;
     }
-    let Some(analysis) = range_analysis(body, tcx) else {
+    let Some(mut analysis) = range_analysis(body, tcx) else {
         return;
     };
-    let entry = analysis_fixpoint(&analysis);
+    let mut entry = analysis_fixpoint(&analysis);
+    let vecs = whole_seen_vecs(body, tcx);
+    if !vecs.is_empty() {
+        for _ in 0..ELEMENT_ROUNDS {
+            analysis.elements = stored_element_ranges(&analysis, &entry, &vecs);
+            entry = analysis_fixpoint(&analysis);
+        }
+    }
     let mut rewrites: Vec<(usize, usize, BinOp)> = Vec::new();
     for (b, block) in body.blocks.iter().enumerate() {
         let Some(mut state) = entry[b].clone() else {
@@ -379,6 +476,14 @@ fn range_analysis<'a>(body: &'a Body, tcx: &TyCtxt) -> Option<RangeAnalysis<'a>>
     if wanted.is_empty() {
         return None;
     }
+    // A stored element's interval bounds later reads of its `Vec`.
+    for block in &body.blocks {
+        if let Some((_, Operand::Copy(value))) = element_store(&block.terminator)
+            && value.projection.is_empty()
+        {
+            wanted.push(value.local);
+        }
+    }
     // Close over the sources of every tracked local and the operands of
     // comparisons against it.
     let mut tracked: HashSet<Local> = HashSet::new();
@@ -440,6 +545,7 @@ fn range_analysis<'a>(body: &'a Body, tcx: &TyCtxt) -> Option<RangeAnalysis<'a>>
         body,
         slot,
         ranges,
+        elements: HashMap::new(),
     })
 }
 
@@ -497,23 +603,7 @@ fn analysis_fixpoint(analysis: &RangeAnalysis<'_>) -> Vec<Option<RangeState>> {
         for stmt in &block.stmts {
             analysis.step(&mut state, stmt);
         }
-        if let Terminator::Call {
-            callee, destination, ..
-        } = &block.terminator
-            && destination.projection.is_empty()
-            && let Some(&s) = analysis.slot.get(&destination.local)
-        {
-            let length = Interval {
-                lo: 0,
-                hi: LENGTH_LIMIT,
-            };
-            state[s] = Some(match callee {
-                Operand::Const(ConstValue::Str(name)) if is_length_call(name) => {
-                    length.meet(analysis.ranges[s]).unwrap_or(analysis.ranges[s])
-                }
-                _ => analysis.ranges[s],
-            });
-        }
+        analysis.call(&mut state, &block.terminator);
         for target in successor_indices(&block.terminator) {
             if target >= n {
                 continue;
@@ -565,4 +655,237 @@ fn analysis_fixpoint(analysis: &RangeAnalysis<'_>) -> Vec<Option<RangeState>> {
         }
     }
     entry
+}
+
+/// Whether `name` is a runtime element read or write whose index argument
+/// (position 1) lies in `[0, len)` once it returns: the checked forms panic
+/// otherwise, and the `_unchecked` forms run only where the index is proven.
+fn is_element_access(name: &str) -> bool {
+    matches!(
+        name,
+        "gos_rt_vec_get_i64"
+            | "gos_rt_vec_get_i64_unchecked"
+            | "gos_rt_vec_set_i64"
+            | "gos_rt_vec_set_i64_unchecked"
+    )
+}
+
+/// Whether `name` reads one element of the `Vec` in its first argument.
+fn is_element_read(name: &str) -> bool {
+    matches!(name, "gos_rt_vec_get_i64" | "gos_rt_vec_get_i64_unchecked")
+}
+
+/// The `Vec` operand and the stored value of an element write or push.
+fn element_store(terminator: &Terminator) -> Option<(&Operand, &Operand)> {
+    let Terminator::Call {
+        callee: Operand::Const(ConstValue::Str(name)),
+        args,
+        ..
+    } = terminator
+    else {
+        return None;
+    };
+    match (name.as_str(), args.as_slice()) {
+        ("gos_rt_vec_set_i64" | "gos_rt_vec_set_i64_unchecked", [vec, _, value])
+        | ("gos_rt_vec_push", [vec, value]) => Some((vec, value)),
+        _ => None,
+    }
+}
+
+/// Integer `Vec` locals whose every element the body stores itself, grouped
+/// by the copies between them; each group maps its members to one id. A
+/// local qualifies when it is not a parameter, every value it holds comes
+/// from an empty constructor or another member, and every other use reads,
+/// writes, pushes, measures, frees, or drops it - nothing else can reach its
+/// elements.
+fn whole_seen_vecs(body: &Body, tcx: &TyCtxt) -> HashMap<Local, usize> {
+    let candidates: Vec<Local> = (0..body.locals.len())
+        .map(|i| Local(i as u32))
+        .filter(|&l| {
+            matches!(tcx.kind_of(body.local_ty(l)), TyKind::Vec(elem)
+                if int_range(tcx, *elem).is_some())
+        })
+        .collect();
+    if candidates.is_empty() {
+        return HashMap::new();
+    }
+    let index: HashMap<Local, usize> =
+        candidates.iter().enumerate().map(|(i, &l)| (l, i)).collect();
+    let mut groups = VecGroups {
+        parent: (0..candidates.len()).collect(),
+    };
+    let mut poisoned: Vec<bool> = candidates
+        .iter()
+        .map(|l| l.0 >= 1 && l.0 <= body.arity)
+        .collect();
+    for block in &body.blocks {
+        for stmt in &block.stmts {
+            let allowed = match vec_statement_use(stmt, &index) {
+                VecStatementUse::Join(a, b) => {
+                    groups.join(index[&a], index[&b]);
+                    continue;
+                }
+                VecStatementUse::Allows(allowed) => allowed,
+            };
+            for &l in &candidates {
+                if !allowed.contains(&l) && stmt_mentions_local(stmt, l) {
+                    poisoned[index[&l]] = true;
+                }
+            }
+        }
+        let allowed = vec_terminator_use(&block.terminator);
+        for &l in &candidates {
+            if !allowed.contains(&l) && term_mentions_local(&block.terminator, l) {
+                poisoned[index[&l]] = true;
+            }
+        }
+    }
+    for i in 0..candidates.len() {
+        if poisoned[i] {
+            let root = groups.find(i);
+            poisoned[root] = true;
+        }
+    }
+    candidates
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &l)| {
+            let root = groups.find(i);
+            (!poisoned[root]).then_some((l, root))
+        })
+        .collect()
+}
+
+/// Union-find over candidate indices joined by copies.
+struct VecGroups {
+    parent: Vec<usize>,
+}
+
+impl VecGroups {
+    fn find(&mut self, mut i: usize) -> usize {
+        while self.parent[i] != i {
+            self.parent[i] = self.parent[self.parent[i]];
+            i = self.parent[i];
+        }
+        i
+    }
+
+    fn join(&mut self, a: usize, b: usize) {
+        let (ra, rb) = (self.find(a), self.find(b));
+        self.parent[ra] = rb;
+    }
+}
+
+/// How a statement touches the candidate `Vec` locals.
+enum VecStatementUse {
+    /// `a = b` between two candidates: one group from here on.
+    Join(Local, Local),
+    /// The candidates the statement may mention without reaching elements.
+    Allows(Vec<Local>),
+}
+
+/// The local a bare `Copy` operand names.
+fn bare_local(op: &Operand) -> Option<Local> {
+    match op {
+        Operand::Copy(p) if p.projection.is_empty() => Some(p.local),
+        _ => None,
+    }
+}
+
+fn vec_statement_use(stmt: &Statement, index: &HashMap<Local, usize>) -> VecStatementUse {
+    match &stmt.kind {
+        StatementKind::Assign {
+            place,
+            rvalue: Rvalue::Use(op),
+        } if place.projection.is_empty() && index.contains_key(&place.local) => {
+            match bare_local(op) {
+                Some(source) if index.contains_key(&source) => {
+                    VecStatementUse::Join(place.local, source)
+                }
+                // A null handle holds no elements.
+                None if matches!(op, Operand::Const(ConstValue::Int(0))) => {
+                    VecStatementUse::Allows(vec![place.local])
+                }
+                _ => VecStatementUse::Allows(Vec::new()),
+            }
+        }
+        StatementKind::Assign {
+            place,
+            rvalue: Rvalue::CallIntrinsic { name, args },
+        } if *name == "gos_rt_vec_free" && !index.contains_key(&place.local) => {
+            VecStatementUse::Allows(args.iter().filter_map(bare_local).collect())
+        }
+        StatementKind::StorageLive(l) | StatementKind::StorageDead(l) => {
+            VecStatementUse::Allows(vec![*l])
+        }
+        _ => VecStatementUse::Allows(Vec::new()),
+    }
+}
+
+/// The candidates a block's terminator may mention without reaching their
+/// elements other than through a read, write, push, or length: the receiver
+/// of those calls, or the destination of an empty constructor.
+fn vec_terminator_use(terminator: &Terminator) -> Vec<Local> {
+    let Terminator::Call {
+        callee: Operand::Const(ConstValue::Str(name)),
+        args,
+        destination,
+        ..
+    } = terminator
+    else {
+        return Vec::new();
+    };
+    let receiver = args.first().and_then(bare_local);
+    let accessor = matches!(name.as_str(), "gos_rt_vec_len" | "gos_rt_vec_push")
+        || is_element_access(name);
+    let receiver_only = receiver.is_some_and(|v| {
+        !args[1..].iter().any(|a| operand_mentions_local(a, v))
+            && !place_mentions_local(destination, v)
+    });
+    if accessor && receiver_only {
+        return receiver.into_iter().collect();
+    }
+    let empty_constructor = matches!(name.as_str(), "gos_rt_vec_with_capacity" | "gos_rt_vec_new")
+        && destination.projection.is_empty();
+    if empty_constructor {
+        vec![destination.local]
+    } else {
+        Vec::new()
+    }
+}
+
+/// The interval each whole-seen `Vec` group's elements lie in, joined over
+/// every store into the group at the states in `entry`, keyed by member.
+fn stored_element_ranges(
+    analysis: &RangeAnalysis<'_>,
+    entry: &[Option<RangeState>],
+    vecs: &HashMap<Local, usize>,
+) -> HashMap<Local, Interval> {
+    let body = analysis.body;
+    let mut joined: HashMap<usize, Interval> = HashMap::new();
+    for (b, block) in body.blocks.iter().enumerate() {
+        let Some((Operand::Copy(vec), value)) = element_store(&block.terminator) else {
+            continue;
+        };
+        let Some(&group) = vecs.get(&vec.local) else {
+            continue;
+        };
+        let Some(mut state) = entry[b].clone() else {
+            continue;
+        };
+        for stmt in &block.stmts {
+            analysis.step(&mut state, stmt);
+        }
+        let stored = analysis.operand(&state, value).unwrap_or(Interval {
+            lo: i64::MIN.into(),
+            hi: u64::MAX.into(),
+        });
+        joined
+            .entry(group)
+            .and_modify(|i| *i = i.join(stored))
+            .or_insert(stored);
+    }
+    vecs.iter()
+        .filter_map(|(&local, group)| joined.get(group).map(|&i| (local, i)))
+        .collect()
 }

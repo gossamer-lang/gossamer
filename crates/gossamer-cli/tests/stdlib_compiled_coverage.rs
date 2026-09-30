@@ -28,6 +28,7 @@ use std::path::PathBuf;
 /// enumerable set of compiled-lowerable free-function paths.
 const DISPATCH_SOURCES: &[&str] = &[
     "crates/gossamer-mir/src/lower/builder/stdlib_free.rs",
+    "crates/gossamer-mir/src/lower/builder/stdlib_free",
     "crates/gossamer-mir/src/lower/builder/intrinsic.rs",
     "crates/gossamer-mir/src/lower/builder/intrinsic",
     "crates/gossamer-mir/src/lower/builder/expr_call.rs",

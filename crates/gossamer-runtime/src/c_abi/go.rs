@@ -372,8 +372,8 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
                 // SAFETY: `env` is the callable's environment blob, which `_env_ref`
                 // keeps live until the goroutine leaves.
                 let wide = unsafe { f(env) };
-                let disc = super::vec::result_disc_of(wide);
-                let payload = super::vec::result_payload_of(wide);
+                let disc = super::result::result_disc_of(wide);
+                let payload = super::result::result_payload_of(wide);
                 if disc == 1 && err_kind != SPAWN_ERR_KIND_NONE {
                     // SAFETY: `err_kind` is the callable's static `Err` type, so
                     // the child's `Err` payload has that shape.
@@ -422,15 +422,15 @@ pub unsafe extern "C" fn gos_rt_spawn_ex(
 /// into the 2-word Result aggregate.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_join(ch: *mut super::chan::GosChan) -> i128 {
-    ffi_entry!(super::vec::pack_result(1, 0), {
+    ffi_entry!(super::result::pack_result(1, 0), {
         if ch.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         let mut buf = [0u8; 8];
         // SAFETY: `buf` is an 8-byte sink matching the channel width.
         let ok = unsafe { super::chan::gos_rt_chan_recv(ch, buf.as_mut_ptr()) };
         if ok == 0 {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // Joining is how a child's outcome reaches the program, so a
         // failure read here is not one the root cohort reports as
@@ -439,12 +439,12 @@ pub unsafe extern "C" fn gos_rt_join(ch: *mut super::chan::GosChan) -> i128 {
         super::cohort::mark_handle_observed(ch as usize);
         let outcome_ptr = i64::from_ne_bytes(buf) as *mut SpawnOutcome;
         if outcome_ptr.is_null() {
-            return super::vec::pack_result(1, 0);
+            return super::result::pack_result(1, 0);
         }
         // SAFETY: the pointer was produced by `Box::into_raw` in the
         // spawn body; reclaim ownership and free it here.
         let outcome = unsafe { Box::from_raw(outcome_ptr) };
-        super::vec::pack_result(outcome.disc, outcome.payload)
+        super::result::pack_result(outcome.disc, outcome.payload)
     })
 }
 

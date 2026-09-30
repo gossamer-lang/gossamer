@@ -656,12 +656,12 @@ pub extern "C" fn gos_rt_cohort_push(
 /// answers `Result<(), errors::Error>`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_cohort_join() -> i128 {
-    ffi_entry!(super::vec::pack_result(0, 0), {
+    ffi_entry!(super::result::pack_result(0, 0), {
         match join_current() {
-            None => super::vec::pack_result(0, 0),
+            None => super::result::pack_result(0, 0),
             Some(message) => {
                 let err = super::errors::error_new_from_bytes(message.as_bytes());
-                super::vec::pack_result(1, err as i64)
+                super::result::pack_result(1, err as i64)
             }
         }
     })

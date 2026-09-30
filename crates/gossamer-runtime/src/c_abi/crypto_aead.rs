@@ -47,7 +47,7 @@ const NONCE_LEN: usize = 12;
 /// ed25519 shims (disc `1`, payload = a fresh `errors::Error`).
 fn aead_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// Layout of the ed25519 `([u8], [u8])` keypair: both byte vectors are owned by
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn gos_rt_crypto_aes256gcm_seal(
                 aad: &aad,
             },
         ) {
-            Ok(ct) => super::vec::gos_rt_result_new(0, bytes_to_gosvec(&ct) as i64),
+            Ok(ct) => super::result::gos_rt_result_new(0, bytes_to_gosvec(&ct) as i64),
             Err(e) => aead_err(&format!("aes-256-gcm: seal: {e}")),
         }
     })
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn gos_rt_crypto_aes256gcm_open(
                 aad: &aad,
             },
         ) {
-            Ok(pt) => super::vec::gos_rt_result_new(0, bytes_to_gosvec(&pt) as i64),
+            Ok(pt) => super::result::gos_rt_result_new(0, bytes_to_gosvec(&pt) as i64),
             Err(e) => aead_err(&format!("aes-256-gcm: open: {e}")),
         }
     })
@@ -200,7 +200,7 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_seal(
                 aad: &aad,
             },
         ) {
-            Ok(ct) => super::vec::gos_rt_result_new(0, bytes_to_gosvec(&ct) as i64),
+            Ok(ct) => super::result::gos_rt_result_new(0, bytes_to_gosvec(&ct) as i64),
             Err(e) => aead_err(&format!("chacha20-poly1305: seal: {e}")),
         }
     })
@@ -249,7 +249,7 @@ pub unsafe extern "C" fn gos_rt_crypto_chacha20poly1305_open(
                 aad: &aad,
             },
         ) {
-            Ok(pt) => super::vec::gos_rt_result_new(0, bytes_to_gosvec(&pt) as i64),
+            Ok(pt) => super::result::gos_rt_result_new(0, bytes_to_gosvec(&pt) as i64),
             Err(e) => aead_err(&format!("chacha20-poly1305: open: {e}")),
         }
     })
@@ -270,7 +270,7 @@ pub extern "C" fn gos_rt_crypto_ed25519_keypair() -> i128 {
         let secret_vec = bytes_to_gosvec(&signing.to_bytes()) as i64;
         let public_vec = bytes_to_gosvec(&public.to_bytes()) as i64;
         let pair = crate::c_abi::rc::counted_words(&[secret_vec, public_vec], &KEYPAIR_VECS_META);
-        super::vec::gos_rt_result_new(0, pair as i64)
+        super::result::gos_rt_result_new(0, pair as i64)
     })
 }
 
@@ -295,7 +295,7 @@ pub unsafe extern "C" fn gos_rt_crypto_ed25519_sign(
         };
         let signing = SigningKey::from_bytes(&secret);
         let sig = signing.sign(&msg).to_bytes();
-        super::vec::gos_rt_result_new(0, bytes_to_gosvec(&sig) as i64)
+        super::result::gos_rt_result_new(0, bytes_to_gosvec(&sig) as i64)
     })
 }
 
@@ -332,7 +332,7 @@ pub unsafe extern "C" fn gos_rt_crypto_ed25519_verify(
             Err(e) => return aead_err(&format!("ed25519: public key: {e}")),
         };
         match key.verify(&msg, &Signature::from_bytes(&sig)) {
-            Ok(()) => super::vec::gos_rt_result_new(0, 0),
+            Ok(()) => super::result::gos_rt_result_new(0, 0),
             Err(e) => aead_err(&format!("ed25519: verify: {e}")),
         }
     })

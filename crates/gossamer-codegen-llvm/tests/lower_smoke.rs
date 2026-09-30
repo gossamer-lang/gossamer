@@ -542,11 +542,15 @@ fn llvm_build_error_displays_internal_lowering_bug() {
 fn llvm_backend_does_not_expose_unsupported_lowering_contract() {
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest_dir.parent().unwrap().parent().unwrap();
-    let files = [
+    let mut files = vec![
         workspace.join("crates/gossamer-codegen-llvm/src/emit.rs"),
         workspace.join("crates/gossamer-codegen-llvm/src/lib.rs"),
         workspace.join("crates/gossamer-cli/src/cmd/build.rs"),
     ];
+    let emit_dir = workspace.join("crates/gossamer-codegen-llvm/src/emit");
+    for entry in std::fs::read_dir(&emit_dir).expect("read emit module directory") {
+        files.push(entry.expect("emit module entry").path());
+    }
     for file in files {
         let text = std::fs::read_to_string(&file).expect("read source file");
         assert!(

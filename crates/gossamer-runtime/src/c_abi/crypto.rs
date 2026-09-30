@@ -180,7 +180,7 @@ fn nibble_char(n: u8) -> char {
 
 fn crypto_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// `crypto::rand::bytes(n) -> Result<Vec<u8>, errors::Error>`.
@@ -192,7 +192,7 @@ pub unsafe extern "C" fn gos_rt_crypto_rand_bytes(n: i64) -> i128 {
     let len = n;
     let v = super::vec::gos_rt_vec_with_capacity(1, len);
     if len == 0 {
-        return super::vec::gos_rt_result_new(0, v as i64);
+        return super::result::gos_rt_result_new(0, v as i64);
     }
     // The fresh buffer is filled with OS randomness and `len` pinned so
     // `b.len()` reads `n`.
@@ -211,7 +211,7 @@ pub unsafe extern "C" fn gos_rt_crypto_rand_bytes(n: i64) -> i128 {
         }
     }
     vref.len = len;
-    super::vec::gos_rt_result_new(0, v as i64)
+    super::result::gos_rt_result_new(0, v as i64)
 }
 
 /// Packs an `Err(errors::Error)` for the `crypto::password` Result-
@@ -245,7 +245,7 @@ pub unsafe extern "C" fn gos_rt_crypto_password_hash(plaintext: *const c_char) -
         };
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default());
         match argon.hash_password(&pw, &salt) {
-            Ok(h) => super::vec::gos_rt_result_new(
+            Ok(h) => super::result::gos_rt_result_new(
                 0,
                 super::string::alloc_cstring(h.to_string().as_bytes()) as i64,
             ),
@@ -282,7 +282,7 @@ pub unsafe extern "C" fn gos_rt_crypto_password_verify(
             Err(e) => return password_err(&format!("crypto::password: {e}")),
         };
         let ok = Argon2::default().verify_password(&pw, &parsed).is_ok();
-        super::vec::gos_rt_result_new(0, i64::from(ok))
+        super::result::gos_rt_result_new(0, i64::from(ok))
     })
 }
 

@@ -88,7 +88,7 @@ unsafe fn cstr_to_str(p: *const c_char) -> String {
 /// Packs `Err(errors::Error)` as the runtime's `i128` Result.
 fn tcp_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// The text a socket failure reads as, matching the interp tier's
@@ -393,7 +393,7 @@ unsafe fn start_tls_with(h: i64, host: *const c_char, config: Arc<rustls::Client
         .lock()
         .get_or_insert_with(HashMap::new)
         .insert(nh, Arc::new(Mutex::new(StreamOwned::new(conn, sock))));
-    super::vec::gos_rt_result_new(0, nh)
+    super::result::gos_rt_result_new(0, nh)
 }
 
 /// Client config that accepts any server certificate (PostgreSQL
@@ -496,7 +496,7 @@ pub unsafe extern "C" fn gos_rt_tcp_listener_bind(addr: *const c_char) -> i128 {
                     .lock()
                     .get_or_insert_with(HashMap::new)
                     .insert(h, Arc::new(l));
-                super::vec::gos_rt_result_new(0, h)
+                super::result::gos_rt_result_new(0, h)
             }
             Err(e) => tcp_err(&socket_error(&e, &a)),
         }
@@ -532,7 +532,7 @@ pub extern "C" fn gos_rt_tcp_listener_accept(h: i64) -> i128 {
                     stream: sh,
                     addr: addr_cs as i64,
                 }));
-                super::vec::gos_rt_result_new(0, pair as i64)
+                super::result::gos_rt_result_new(0, pair as i64)
             }
             Err(e) => tcp_err(&socket_error(&e, "accept")),
         }
@@ -547,7 +547,7 @@ pub extern "C" fn gos_rt_tcp_listener_local_addr(h: i64) -> i128 {
             return tcp_err("TcpListener::local_addr: stale handle");
         };
         match listener.local_addr() {
-            Ok(a) => super::vec::gos_rt_result_new(
+            Ok(a) => super::result::gos_rt_result_new(
                 0,
                 super::string::alloc_cstring(a.to_string().as_bytes()) as i64,
             ),
@@ -578,7 +578,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_connect(addr: *const c_char) -> i128 
                 // Nagle off by default, matching an accepted stream and Go's
                 // own `TCPConn`; see `gos_rt_tcp_listener_accept`.
                 let _ = s.set_nodelay(true);
-                super::vec::gos_rt_result_new(0, insert_stream(s))
+                super::result::gos_rt_result_new(0, insert_stream(s))
             }
             Ok(Err(e)) => tcp_err(&socket_error(&e, &dialed)),
             Err(e) => tcp_err(&e),
@@ -617,7 +617,7 @@ pub extern "C" fn gos_rt_tcp_stream_read(h: i64, max: i64) -> i128 {
         } else {
             return tcp_err("TcpStream::read: stale handle");
         };
-        super::vec::gos_rt_result_new(0, super::encoding::bytes_to_gosvec(&buf) as i64)
+        super::result::gos_rt_result_new(0, super::encoding::bytes_to_gosvec(&buf) as i64)
     })
 }
 
@@ -691,7 +691,7 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_read_into(h: i64, buf: *mut GosVec, m
         };
         // SAFETY: `buf` is a handle from compiled code, checked non-null above and live for the whole call.
         unsafe { (*buf).len = read as i64 };
-        super::vec::gos_rt_result_new(0, read as i64)
+        super::result::gos_rt_result_new(0, read as i64)
     })
 }
 
@@ -733,7 +733,7 @@ pub extern "C" fn gos_rt_tcp_stream_read_to_string(h: i64) -> i128 {
             return tcp_err("TcpStream::read_to_string: stale handle");
         }
         let s = String::from_utf8_lossy(&out);
-        super::vec::gos_rt_result_new(0, super::string::alloc_cstring(s.as_bytes()) as i64)
+        super::result::gos_rt_result_new(0, super::string::alloc_cstring(s.as_bytes()) as i64)
     })
 }
 
@@ -762,13 +762,13 @@ pub unsafe extern "C" fn gos_rt_tcp_stream_write(h: i64, data: *const super::vec
                             .map_err(|e| socket_error(&e, "TlsStream::flush"))
                     })
             }) {
-                Ok(Ok(())) => super::vec::gos_rt_result_new(0, bytes_len),
+                Ok(Ok(())) => super::result::gos_rt_result_new(0, bytes_len),
                 Ok(Err(msg)) => tcp_err(&msg),
                 Err(e) => tcp_err(&e),
             }
         } else if let Some(stream) = stream_clone(h) {
             match write_stream(stream, bytes) {
-                Ok(()) => super::vec::gos_rt_result_new(0, bytes_len),
+                Ok(()) => super::result::gos_rt_result_new(0, bytes_len),
                 Err(e) => tcp_err(&transfer_error(
                     &e,
                     "TcpStream::write_all",
@@ -796,12 +796,12 @@ pub extern "C" fn gos_rt_tcp_stream_set_read_timeout_ms(h: i64, ms: i64) -> i128
         let timeout = timeout_duration(ms);
         if let Some(tls) = tls_clone(h) {
             match tls.lock().sock.set_read_timeout(timeout) {
-                Ok(()) => super::vec::gos_rt_result_new(0, 0),
+                Ok(()) => super::result::gos_rt_result_new(0, 0),
                 Err(e) => tcp_err(&socket_error(&e, "TlsStream::set_read_timeout")),
             }
         } else if let Some(stream) = stream_clone(h) {
             match stream.set_read_timeout(timeout) {
-                Ok(()) => super::vec::gos_rt_result_new(0, 0),
+                Ok(()) => super::result::gos_rt_result_new(0, 0),
                 Err(e) => tcp_err(&socket_error(&e, "TcpStream::set_read_timeout")),
             }
         } else {
@@ -817,12 +817,12 @@ pub extern "C" fn gos_rt_tcp_stream_set_write_timeout_ms(h: i64, ms: i64) -> i12
         let timeout = timeout_duration(ms);
         if let Some(tls) = tls_clone(h) {
             match tls.lock().sock.set_write_timeout(timeout) {
-                Ok(()) => super::vec::gos_rt_result_new(0, 0),
+                Ok(()) => super::result::gos_rt_result_new(0, 0),
                 Err(e) => tcp_err(&socket_error(&e, "TlsStream::set_write_timeout")),
             }
         } else if let Some(stream) = stream_clone(h) {
             match stream.set_write_timeout(timeout) {
-                Ok(()) => super::vec::gos_rt_result_new(0, 0),
+                Ok(()) => super::result::gos_rt_result_new(0, 0),
                 Err(e) => tcp_err(&socket_error(&e, "TcpStream::set_write_timeout")),
             }
         } else {
@@ -842,12 +842,12 @@ pub extern "C" fn gos_rt_tcp_stream_set_nodelay(h: i64, on: i64) -> i128 {
         let on = on != 0;
         if let Some(tls) = tls_clone(h) {
             match tls.lock().sock.set_nodelay(on) {
-                Ok(()) => super::vec::gos_rt_result_new(0, 0),
+                Ok(()) => super::result::gos_rt_result_new(0, 0),
                 Err(e) => tcp_err(&socket_error(&e, "TlsStream::set_nodelay")),
             }
         } else if let Some(stream) = stream_clone(h) {
             match stream.set_nodelay(on) {
-                Ok(()) => super::vec::gos_rt_result_new(0, 0),
+                Ok(()) => super::result::gos_rt_result_new(0, 0),
                 Err(e) => tcp_err(&socket_error(&e, "TcpStream::set_nodelay")),
             }
         } else {
@@ -972,10 +972,10 @@ unsafe fn smtp_send(
         .as_ref()
         .map(|(username, password)| crate::smtp::Credentials { username, password });
     match crate::smtp::send(&addr, &message, credentials.as_ref()) {
-        Ok(()) => crate::c_abi::vec::pack_result(0, 0),
+        Ok(()) => crate::c_abi::result::pack_result(0, 0),
         Err(message) => {
             let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
-            crate::c_abi::vec::pack_result(1, err as i64)
+            crate::c_abi::result::pack_result(1, err as i64)
         }
     }
 }

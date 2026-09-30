@@ -662,7 +662,7 @@ fn build_variant_to_native_enum_inner(
 /// Marshals a VM `Value::Array` of heap-enum children into a native
 /// `Vec<E>` field (a `*mut GosVec` of 8-byte `PRIMITIVE` slots, each a
 /// native enum pointer - the compiled-tier `Vec<Enum>` byte layout
-/// [`crate::value::native_vec_enum_to_array`] reads and
+/// `value::native::native_vec_enum_to_array` reads and
 /// [`free_native_vec_enum`] frees). Returns the vec pointer as `i64`, or
 /// `None` (freeing any partial state) if an element isn't a marshallable
 /// enum.
@@ -706,7 +706,7 @@ fn marshal_vec_enum(elems: &[Value], eidx: u32) -> Option<i64> {
 /// Marshals a VM `Value::Array` of `(String, E)` 2-tuples into a native
 /// `Vec<(String, E)>` field (a `*mut GosVec` of 16-byte `PRIMITIVE` slots
 /// laid out `[*c_char @ +0][native-enum ptr @ +8]` - the compiled-tier
-/// `Vec<(String, Enum)>` byte layout [`crate::value::native_vec_str_enum_to_array`]
+/// `Vec<(String, Enum)>` byte layout `value::native::native_vec_str_enum_to_array`
 /// reads and [`free_native_vec_str_enum`] frees). Returns the vec pointer as
 /// `i64`, or `None` (freeing any partial state) if an element isn't a
 /// marshallable `(String, enum)` pair.

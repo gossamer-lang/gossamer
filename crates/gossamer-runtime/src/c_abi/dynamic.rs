@@ -142,11 +142,13 @@ fn render(node: &DynNode, out: &mut String) {
         DynNode::Float(f) => {
             let _ = write!(out, "{}", crate::builtins::format_float_debug(*f));
         }
-        DynNode::Char(c) => crate::c_abi::map::push_quoted_char(out, i64::from(u32::from(*c))),
+        DynNode::Char(c) => {
+            crate::c_abi::desc_format::push_quoted_char(out, i64::from(u32::from(*c)));
+        }
         // The VM's Debug channel quotes strings (the spelling that
         // builds them), so every tier's `{:?}` of a `DynValue` quotes
         // its string payloads.
-        DynNode::Str(s) => crate::c_abi::map::push_quoted_str(out, s),
+        DynNode::Str(s) => crate::c_abi::desc_format::push_quoted_str(out, s),
         DynNode::Bytes(bytes) => {
             out.push('[');
             for (index, byte) in bytes.iter().enumerate() {

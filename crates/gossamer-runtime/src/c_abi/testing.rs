@@ -170,7 +170,7 @@ pub unsafe extern "C" fn gos_rt_httptest_record(
         if handler_fn == 0 {
             let err =
                 crate::c_abi::errors::error_new_from_bytes(b"httptest::record: handler is null");
-            return crate::c_abi::vec::pack_result(1, err as i64);
+            return crate::c_abi::result::pack_result(1, err as i64);
         }
         let text = |p: *const std::os::raw::c_char| {
             if p.is_null() {

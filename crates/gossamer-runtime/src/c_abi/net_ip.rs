@@ -41,7 +41,7 @@ unsafe fn cstr_to_str(p: *const c_char) -> String {
 /// shims, matching the `gos_rt_result_new(1, error_ptr)` convention.
 fn ip_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// `net::ip::parse(s) -> Result<Ip, errors::Error>` - the compiled-tier
@@ -55,7 +55,7 @@ pub unsafe extern "C" fn gos_rt_net_ip_parse(s: *const c_char) -> i128 {
         match text.parse::<IpAddr>() {
             Ok(ip) => {
                 let canon = super::string::alloc_cstring(ip.to_string().as_bytes());
-                super::vec::gos_rt_result_new(0, canon as i64)
+                super::result::gos_rt_result_new(0, canon as i64)
             }
             Err(e) => ip_err(&format!("net::ip: {e}")),
         }

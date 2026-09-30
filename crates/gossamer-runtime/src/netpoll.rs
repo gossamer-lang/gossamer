@@ -351,6 +351,7 @@ pub(crate) fn worker_poller(index: usize) -> Option<&'static Arc<Poller>> {
     worker_pollers().get(index)?.get()?.as_ref().ok()
 }
 
+#[cfg(not(miri))]
 /// Every worker index that has a poller, for the watchdog's pass over the
 /// ones no worker occupies.
 pub(crate) fn worker_poller_indices() -> impl Iterator<Item = (usize, &'static Arc<Poller>)> {

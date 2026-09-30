@@ -164,7 +164,7 @@ pub unsafe extern "C" fn gos_rt_error_cause(err: *const GosError) -> i128 {
         } else {
             (0, cause as i64)
         };
-        crate::c_abi::vec::pack_result(disc, payload)
+        crate::c_abi::result::pack_result(disc, payload)
     })
 }
 
@@ -223,7 +223,7 @@ unsafe fn error_message_of(err: *const GosError) -> Option<String> {
 /// there is nothing to join.
 fn joined_error(parts: &[String]) -> i128 {
     if parts.is_empty() {
-        return crate::c_abi::vec::pack_result(1, 0);
+        return crate::c_abi::result::pack_result(1, 0);
     }
     let combined = parts.join("; ");
     // SAFETY: the message is a fresh string and there is no cause.
@@ -234,7 +234,7 @@ fn joined_error(parts: &[String]) -> i128 {
             Vec::new(),
         )
     };
-    crate::c_abi::vec::pack_result(0, err as i64)
+    crate::c_abi::result::pack_result(0, err as i64)
 }
 
 /// Joins every error message in the `len` errors at `ptr` with "; " and

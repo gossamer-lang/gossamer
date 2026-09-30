@@ -40,7 +40,7 @@ fn header_lookup(req: &GosHttpRequest, name: &str) -> Option<String> {
 /// matching the interp tier's handshake error strings.
 fn handshake_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    crate::c_abi::vec::pack_result(1, err as i64)
+    crate::c_abi::result::pack_result(1, err as i64)
 }
 
 /// `http::websocket::is_websocket_upgrade(request) -> bool`. True when
@@ -141,6 +141,6 @@ pub unsafe extern "C" fn gos_rt_ws_accept(req: *const GosHttpRequest) -> i128 {
             content_type: std::borrow::Cow::Borrowed(""),
             stream_handle: -1,
         }));
-        crate::c_abi::vec::pack_result(0, resp as i64)
+        crate::c_abi::result::pack_result(0, resp as i64)
     })
 }

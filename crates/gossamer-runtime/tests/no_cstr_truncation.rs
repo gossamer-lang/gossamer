@@ -41,12 +41,12 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
         "the strlen fallback that typed_str_len uses for header-less pointers",
     ),
     (
-        "string.rs",
+        "flag.rs",
         "parse_argv_flag_values",
         "the flag parser walks libc's argv directly",
     ),
     (
-        "vec.rs",
+        "result.rs",
         "gos_rt_binding_variant_to_result",
         "a native Rust binding publishes its string payload as a plain C string",
     ),

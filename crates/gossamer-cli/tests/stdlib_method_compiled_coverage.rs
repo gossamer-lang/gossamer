@@ -37,6 +37,7 @@ const DISPATCH_SOURCES: &[&str] = &[
     "crates/gossamer-mir/src/lower/builder/stdlib.rs",
     "crates/gossamer-mir/src/lower/builder/stdlib_binding.rs",
     "crates/gossamer-mir/src/lower/builder/stdlib_free.rs",
+    "crates/gossamer-mir/src/lower/builder/stdlib_free",
 ];
 
 /// `Type::method` pairs the compiled tiers reach through a mechanism other

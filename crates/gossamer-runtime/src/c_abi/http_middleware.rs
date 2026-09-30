@@ -684,7 +684,7 @@ fn shed_response(parts: &ResponseParts) -> i128 {
         content_type: "text/plain; charset=utf-8".into(),
         stream_handle: -1,
     }));
-    crate::c_abi::vec::pack_result(0, resp as i64)
+    crate::c_abi::result::pack_result(0, resp as i64)
 }
 
 /// Reports a handler panic the `recoverer` middleware absorbed, in the
@@ -718,7 +718,7 @@ pub unsafe extern "C-unwind" fn gos_rt_middleware_serve(
     ffi_entry_passthrough!(0i128, {
         if mw.is_null() {
             let err = crate::c_abi::errors::error_new_from_bytes(b"middleware: null handle");
-            return crate::c_abi::vec::pack_result(1, err as i64);
+            return crate::c_abi::result::pack_result(1, err as i64);
         }
         // SAFETY: `mw` is non-null (checked above), the middleware handle this shim serves, live
         // for the call (C-ABI contract).
@@ -726,7 +726,7 @@ pub unsafe extern "C-unwind" fn gos_rt_middleware_serve(
         if m.inner_serve_addr == 0 {
             let err =
                 crate::c_abi::errors::error_new_from_bytes(b"middleware: missing inner handler");
-            return crate::c_abi::vec::pack_result(1, err as i64);
+            return crate::c_abi::result::pack_result(1, err as i64);
         }
         // Request phase: a control that sheds load, rejects an oversized
         // body, or demands a credential answers here, before the inner
@@ -772,11 +772,11 @@ pub unsafe extern "C-unwind" fn gos_rt_middleware_serve(
             }
             Err(payload) => std::panic::resume_unwind(payload),
         };
-        if crate::c_abi::vec::gos_rt_result_disc(inner_result) != 0 {
+        if crate::c_abi::result::gos_rt_result_disc(inner_result) != 0 {
             return inner_result;
         }
         let resp_ptr =
-            crate::c_abi::vec::gos_rt_result_payload(inner_result) as *mut GosHttpResponse;
+            crate::c_abi::result::gos_rt_result_payload(inner_result) as *mut GosHttpResponse;
         if resp_ptr.is_null() {
             return inner_result;
         }
@@ -812,21 +812,21 @@ pub unsafe extern "C-unwind" fn gos_rt_middleware_serve(
 /// `builtin_mw_decode_basic_auth`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_mw_decode_basic_auth(header: *const std::os::raw::c_char) -> i128 {
-    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
+    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
         if header.is_null() {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
         // SAFETY: `header` is a String argument from compiled code, null or a live string body for the whole call.
         let header_str = unsafe { crate::c_abi::gos_str_arg_string(header) };
         let token = header_str.strip_prefix("Basic ").unwrap_or(&header_str);
         let Ok(decoded) = crate::c_abi::encoding::base64_decode(token.trim()) else {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         };
         let Ok(decoded) = String::from_utf8(decoded) else {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         };
         let Some((user, pass)) = decoded.split_once(':') else {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         };
         #[repr(C)]
         struct Pair {
@@ -837,7 +837,7 @@ pub unsafe extern "C" fn gos_rt_mw_decode_basic_auth(header: *const std::os::raw
             a: alloc_cstring(user.as_bytes()) as i64,
             b: alloc_cstring(pass.as_bytes()) as i64,
         }));
-        crate::c_abi::vec::gos_rt_result_new(0, pair as i64)
+        crate::c_abi::result::gos_rt_result_new(0, pair as i64)
     })
 }
 

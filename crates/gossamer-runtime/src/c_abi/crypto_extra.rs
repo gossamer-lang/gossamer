@@ -60,7 +60,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Packs an `Err(errors::Error)` for the Result-returning `kdf` shims.
 fn kdf_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 /// `crypto::insecure::md5_hex(data) -> String` - lowercase-hex MD5
@@ -166,7 +166,7 @@ pub unsafe extern "C" fn gos_rt_crypto_scrypt_interactive(
         if let Err(e) = scrypt(&pw, &salt, &params, &mut out) {
             return kdf_err(&format!("scrypt: derive: {e}"));
         }
-        super::vec::gos_rt_result_new(0, bytes_to_gosvec(&out) as i64)
+        super::result::gos_rt_result_new(0, bytes_to_gosvec(&out) as i64)
     })
 }
 
@@ -190,7 +190,7 @@ pub unsafe extern "C" fn gos_rt_crypto_argon2id_hash(password: *const GosVec) ->
         };
         let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default());
         match argon.hash_password(&pw, &salt) {
-            Ok(h) => super::vec::gos_rt_result_new(
+            Ok(h) => super::result::gos_rt_result_new(
                 0,
                 super::string::alloc_cstring(h.to_string().as_bytes()) as i64,
             ),
@@ -224,6 +224,6 @@ pub unsafe extern "C" fn gos_rt_crypto_argon2id_verify(
             Err(e) => return kdf_err(&format!("argon2: parse phc: {e}")),
         };
         let ok = Argon2::default().verify_password(&pw, &parsed).is_ok();
-        super::vec::gos_rt_result_new(0, i64::from(ok))
+        super::result::gos_rt_result_new(0, i64::from(ok))
     })
 }

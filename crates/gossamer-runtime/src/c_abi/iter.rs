@@ -1798,8 +1798,8 @@ unsafe fn lazy_filter_map_word(
         upstream.filter_map(move |x| unsafe {
             let answer = f(share.ptr(), x);
             release_pulled(in_class, x);
-            (super::vec::gos_rt_result_disc(answer) == 0)
-                .then(|| super::vec::gos_rt_result_payload(answer))
+            (super::result::gos_rt_result_disc(answer) == 0)
+                .then(|| super::result::gos_rt_result_payload(answer))
         }),
     )
 }
@@ -1915,8 +1915,8 @@ pub unsafe extern "C" fn gos_rt_lazy_iter_map_carrier(
                 let answer = f(share.ptr(), x);
                 release_pulled(in_class, x);
                 let words = [
-                    super::vec::gos_rt_result_disc(answer),
-                    super::vec::gos_rt_result_payload(answer),
+                    super::result::gos_rt_result_disc(answer),
+                    super::result::gos_rt_result_payload(answer),
                 ];
                 let meta: *const i64 = std::ptr::with_exposed_provenance(meta_addr);
                 // SAFETY: `words` is the 16-byte carrier the callback handed
@@ -4061,23 +4061,23 @@ pub unsafe extern "C" fn gos_rt_iter_any_ptr(env: *const u8, v: *const GosVec) -
 /// Some, 1 = None per `lower_result_ctor`).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_option_is_some(opt: i128) -> i64 {
-    i64::from(super::vec::gos_rt_result_disc(opt) == 0)
+    i64::from(super::result::gos_rt_result_disc(opt) == 0)
 }
 
 /// `option::is_none(opt)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_option_is_none(opt: i128) -> i64 {
-    i64::from(super::vec::gos_rt_result_disc(opt) != 0)
+    i64::from(super::result::gos_rt_result_disc(opt) != 0)
 }
 
 /// `option::default(v, opt) -> v if opt is None else inner`. Specialised
 /// for i64 payloads (the dominant case in arithmetic pipelines).
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_option_default_i64(fallback: i64, opt: i128) -> i64 {
-    if super::vec::gos_rt_result_disc(opt) != 0 {
+    if super::result::gos_rt_result_disc(opt) != 0 {
         fallback
     } else {
-        super::vec::gos_rt_result_payload(opt)
+        super::result::gos_rt_result_payload(opt)
     }
 }
 
@@ -4086,10 +4086,10 @@ pub extern "C" fn gos_rt_option_default_i64(fallback: i64, opt: i128) -> i64 {
 /// fallback rides the float register directly.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_option_default_f64(fallback: f64, opt: i128) -> f64 {
-    if super::vec::gos_rt_result_disc(opt) != 0 {
+    if super::result::gos_rt_result_disc(opt) != 0 {
         fallback
     } else {
-        f64::from_bits(super::vec::gos_rt_result_payload(opt) as u64)
+        f64::from_bits(super::result::gos_rt_result_payload(opt) as u64)
     }
 }
 
@@ -4105,10 +4105,10 @@ pub unsafe extern "C" fn gos_rt_option_map_i64(env: *const u8, opt: i128) -> i12
         if env.is_null() {
             return gos_rt_result_new(1, 0);
         }
-        if super::vec::gos_rt_result_disc(opt) != 0 {
+        if super::result::gos_rt_result_disc(opt) != 0 {
             return gos_rt_result_new(1, 0);
         }
-        let payload = super::vec::gos_rt_result_payload(opt);
+        let payload = super::result::gos_rt_result_payload(opt);
         type CallFn = unsafe extern "C" fn(env: *const u8, x: i64) -> i64;
         // SAFETY: `env` is non-null (checked above) and this shim's closure environment, whose
         // first word is its entry address (C-ABI contract).
@@ -4133,8 +4133,8 @@ pub unsafe extern "C" fn gos_rt_result_map_i64(env: *const u8, res: i128) -> i12
         if env.is_null() {
             return gos_rt_result_new(1, 0);
         }
-        let disc = super::vec::gos_rt_result_disc(res);
-        let payload = super::vec::gos_rt_result_payload(res);
+        let disc = super::result::gos_rt_result_disc(res);
+        let payload = super::result::gos_rt_result_payload(res);
         if disc != 0 {
             // Err - pass through.
             return gos_rt_result_new(disc, payload);

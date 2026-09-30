@@ -29,14 +29,15 @@ use gossamer_runtime::c_abi::regex::{
     gos_rt_regex_captures, gos_rt_regex_captures_all, gos_rt_regex_compile, gos_rt_regex_find_all,
     gos_rt_regex_split,
 };
+use gossamer_runtime::c_abi::result::{gos_rt_result_disc, gos_rt_result_payload};
 use gossamer_runtime::c_abi::signal::gos_rt_vec_slice;
 use gossamer_runtime::c_abi::string::{
     alloc_cstring, gos_rt_str_free, gos_rt_str_lines, gos_rt_str_split, gos_rt_vec_clone,
 };
 use gossamer_runtime::c_abi::vec::{
-    GosVec, VecSlotChild, gos_rt_result_disc, gos_rt_result_payload, gos_rt_vec_push,
-    gos_rt_vec_retain, gos_rt_vec_with_capacity, gos_rt_vec_with_capacity_typed, vec_elem_kind,
-    vec_is_region, vec_set_slot_children, vec_slot_children,
+    GosVec, VecSlotChild, gos_rt_vec_push, gos_rt_vec_retain, gos_rt_vec_with_capacity,
+    gos_rt_vec_with_capacity_typed, vec_elem_kind, vec_is_region, vec_set_slot_children,
+    vec_slot_children,
 };
 
 static LEDGER_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());

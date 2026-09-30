@@ -320,7 +320,7 @@ fn ord_code(ordering: Ordering) -> i64 {
 }
 
 /// The discriminant of an enum node reached by word, laid out the way
-/// [`crate::c_abi::map::gos_rt_enum_struct_eq`] reads it: tagged into the
+/// [`crate::c_abi::desc_format::gos_rt_enum_struct_eq`] reads it: tagged into the
 /// pointer's low bits for a small enum, in the header byte otherwise.
 unsafe fn node_disc(raw: usize, base: *const u8) -> i64 {
     let tag = raw & 7;

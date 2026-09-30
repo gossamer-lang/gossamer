@@ -556,7 +556,7 @@ pub unsafe extern "C" fn gos_rt_chan_recv_option(c: *mut GosChan) -> i128 {
         let status = unsafe { gos_rt_chan_recv(c, std::ptr::addr_of_mut!(out).cast::<u8>()) };
         let disc = 1 - i64::from(status);
         let payload = if status == 1 { out } else { 0 };
-        crate::c_abi::vec::pack_result(disc, payload)
+        crate::c_abi::result::pack_result(disc, payload)
     })
 }
 
@@ -572,7 +572,7 @@ pub unsafe extern "C" fn gos_rt_chan_try_recv_option(c: *mut GosChan) -> i128 {
         let status = unsafe { gos_rt_chan_try_recv(c, std::ptr::addr_of_mut!(out).cast::<u8>()) };
         let disc = 1 - i64::from(status);
         let payload = if status == 1 { out } else { 0 };
-        crate::c_abi::vec::pack_result(disc, payload)
+        crate::c_abi::result::pack_result(disc, payload)
     })
 }
 
@@ -668,7 +668,7 @@ pub unsafe extern "C" fn gos_rt_chan_recv_ctx_option(
         // SAFETY: `c` and `ctx_handle` are this shim's arguments, each null or live for the call
         // (C-ABI contract), which `chan_recv_ctx_core` accepts.
         let (disc, payload) = unsafe { chan_recv_ctx_core(c, ctx_handle) };
-        crate::c_abi::vec::pack_result(disc, payload)
+        crate::c_abi::result::pack_result(disc, payload)
     })
 }
 

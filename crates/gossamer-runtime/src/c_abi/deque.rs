@@ -557,7 +557,7 @@ unsafe fn deque_format_with(d: *mut GosDeque, owner: &str, tags: *const u8) -> *
     } else {
         // SAFETY: `tags` is non-null (checked above) and, per this `unsafe fn`'s caller, the
         // deque's element descriptor.
-        let stream = unsafe { crate::c_abi::map::DescStream::new(tags) };
+        let stream = unsafe { crate::c_abi::desc_format::DescStream::new(tags) };
         // SAFETY: this `unsafe fn`'s caller passes `d` null or live and `tags` its element
         // descriptor, which `deque_format_at` reads from index zero.
         unsafe { deque_format_at(d, owner, stream, 0) }
@@ -598,7 +598,7 @@ unsafe fn deque_format_words(d: *mut GosDeque, owner: &str) -> String {
 pub(crate) unsafe fn deque_format_at(
     d: *mut GosDeque,
     owner: &str,
-    tags: crate::c_abi::map::DescStream,
+    tags: crate::c_abi::desc_format::DescStream,
     elem_desc: usize,
 ) -> String {
     let mut out = String::from(owner);
@@ -620,7 +620,7 @@ pub(crate) unsafe fn deque_format_at(
             // SAFETY: `slot` addresses an element laid out as the descriptor at `elem_desc` names
             // (this `unsafe fn`'s contract).
             unsafe {
-                crate::c_abi::map::render_desc_value(&mut out, slot, tags, &mut cursor);
+                crate::c_abi::desc_format::render_desc_value(&mut out, slot, tags, &mut cursor);
             };
         }
     }

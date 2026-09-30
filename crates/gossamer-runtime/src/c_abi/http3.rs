@@ -119,7 +119,7 @@ unsafe fn dispatch(env_addr: usize, fn_addr: usize, req: H3Request) -> H3Respons
 /// caller's `Result<(), http::Error>` match.
 fn http3_serve_err_result(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::pack_result(1, err as i64)
+    super::result::pack_result(1, err as i64)
 }
 
 /// Binds a QUIC + HTTP/3 endpoint on `addr` with the TLS keypair at
@@ -153,7 +153,7 @@ pub unsafe extern "C-unwind" fn gos_rt_http3_serve(
         // server runs, and `handler_fn` is its compiled method.
         unsafe { dispatch(env_addr, fn_addr, req) }
     }) {
-        Ok(()) => super::vec::pack_result(0, 0),
+        Ok(()) => super::result::pack_result(0, 0),
         Err(e) => http3_serve_err_result(&format!("http_h3::serve: {e}")),
     }
 }

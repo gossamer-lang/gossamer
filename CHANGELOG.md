@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.65.1 - Performance regressions & splitting large compiler/runtime files
+
+- Release builds prove more `+`, `-`, and `*` cannot overflow and drop their checks: a value read from an integer `Vec` the function fills itself lies within what it stored, an index an element access accepted lies within the length, a remainder by a positive divisor keeps its dividend's sign, and a completed `x * x` bounds `x`. Element-wise loops over such vectors vectorize again.
+- A release build keeps the overflow check on `i + 1` after `xs.get(i)` answers `None`; it wrapped where the VM panics.
+- `json::render` and `json::encode_pretty` of a parsed document stream from its text instead of building the value tree first, so rendering a large document takes a fraction of the time and memory, with the same output.
+- The ten largest compiler and runtime source files are split into modules by responsibility (`checker`, `value`, `compile_expr`, HIR `lower`, `stdlib_free`, LLVM `emit`, and the runtime's `string`, `vec`, `map`, and `rc`), with no change in behavior.
+
 ## 0.65.0 - Language surface, soundness, and tooling
 
 - `f"..."` and `f"""..."""` interpolated strings hold any expression in a placeholder (`{xs.len()}`, `{m["k"]}`, `{a + b:>8}`), with `format`'s specs after the first top-level `:`; an empty placeholder is GP0063 and an unmatched brace is GP0065, each pointed at inside the string.

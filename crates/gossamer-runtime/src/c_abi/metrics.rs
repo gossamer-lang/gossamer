@@ -350,7 +350,7 @@ unsafe extern "C" fn metrics_handler(env: *mut u8, req: *mut GosHttpRequest) -> 
             content_type: "text/plain; version=0.0.4; charset=utf-8".into(),
             stream_handle: -1,
         }));
-        super::vec::pack_result(0, resp as i64)
+        super::result::pack_result(0, resp as i64)
     })
 }
 
@@ -365,7 +365,7 @@ fn metrics_not_found() -> i128 {
         content_type: "text/plain; charset=utf-8".into(),
         stream_handle: -1,
     }));
-    super::vec::pack_result(0, resp as i64)
+    super::result::pack_result(0, resp as i64)
 }
 
 /// `metrics::serve_metrics(addr, registry)` - serves the registry's

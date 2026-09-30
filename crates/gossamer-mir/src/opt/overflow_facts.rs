@@ -19,10 +19,14 @@ enum OverflowFact {
 }
 
 /// Runtime accessors that return only when their index argument lies in
-/// `[0, len)`, with the argument's position.
+/// `[0, len)`, with the argument's position. `get_opt` and `get_ptr` answer
+/// `None` or null for any other index, so they prove nothing.
 fn checked_index_argument(name: &str) -> Option<usize> {
-    let access = name.starts_with("gos_rt_vec_get") || name.starts_with("gos_rt_vec_set");
-    (access && !name.ends_with("_unchecked")).then_some(1)
+    matches!(
+        name,
+        "gos_rt_vec_get_i64" | "gos_rt_vec_set_i64" | "gos_rt_vec_get_i128" | "gos_rt_vec_set_i128"
+    )
+    .then_some(1)
 }
 
 /// Rewrites every checked `x + 1` / `x - 1` a dominating fact proves.

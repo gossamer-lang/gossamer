@@ -37,7 +37,7 @@ unsafe fn cstr_to_str(p: *const c_char) -> String {
 /// Packs `Err(errors::Error)` as the runtime's `i128` Result.
 fn unix_err(msg: &str) -> i128 {
     let err = crate::c_abi::errors::error_new_from_bytes(msg.as_bytes());
-    super::vec::gos_rt_result_new(1, err as i64)
+    super::result::gos_rt_result_new(1, err as i64)
 }
 
 #[cfg(unix)]
@@ -107,7 +107,7 @@ mod imp {
                     .lock()
                     .get_or_insert_with(HashMap::new)
                     .insert(h, Arc::new(l));
-                super::super::vec::gos_rt_result_new(0, h)
+                super::super::result::gos_rt_result_new(0, h)
             }
             Err(e) => super::unix_err(&format!("{e}")),
         }
@@ -134,7 +134,7 @@ mod imp {
                     stream: sh,
                     addr: addr_cs as i64,
                 }));
-                super::super::vec::gos_rt_result_new(0, pair as i64)
+                super::super::result::gos_rt_result_new(0, pair as i64)
             }
             Err(e) => super::unix_err(&format!("{e}")),
         }
@@ -150,7 +150,7 @@ mod imp {
         // SAFETY: this function's contract covers `path`, as `cstr_to_str` requires.
         let p = unsafe { cstr_to_str(path) };
         match UnixStream::connect(&p) {
-            Ok(s) => super::super::vec::gos_rt_result_new(0, insert_stream(s)),
+            Ok(s) => super::super::result::gos_rt_result_new(0, insert_stream(s)),
             Err(e) => super::unix_err(&format!("{e}")),
         }
     }
@@ -168,7 +168,7 @@ mod imp {
             })
         });
         match read {
-            Ok(buf) => super::super::vec::gos_rt_result_new(
+            Ok(buf) => super::super::result::gos_rt_result_new(
                 0,
                 super::super::encoding::bytes_to_gosvec(&buf) as i64,
             ),
@@ -189,7 +189,7 @@ mod imp {
             Err(e) => return super::unix_err(&format!("{e}")),
         };
         let s = String::from_utf8_lossy(&out);
-        super::super::vec::gos_rt_result_new(
+        super::super::result::gos_rt_result_new(
             0,
             super::super::string::alloc_cstring(s.as_bytes()) as i64,
         )
@@ -204,7 +204,7 @@ mod imp {
         };
         let len = bytes.len() as i64;
         match off_worker("unix-stream-write", move || (&*stream).write_all(&bytes)) {
-            Ok(()) => super::super::vec::gos_rt_result_new(0, len),
+            Ok(()) => super::super::result::gos_rt_result_new(0, len),
             Err(e) => super::unix_err(&format!("{e}")),
         }
     }

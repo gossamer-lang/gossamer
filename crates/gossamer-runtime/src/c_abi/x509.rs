@@ -19,8 +19,9 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, CertificateRevocationListDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 
+use super::result::gos_rt_result_new;
 use super::string::alloc_cstring;
-use super::vec::{GosVec, gos_rt_result_new, gos_rt_vec_push};
+use super::vec::{GosVec, gos_rt_vec_push};
 
 unsafe fn cstr<'a>(p: *const c_char) -> &'a str {
     // SAFETY: this `unsafe fn`'s caller passes `p` live or null, which `gos_str_arg_text`

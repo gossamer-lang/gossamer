@@ -719,10 +719,10 @@ pub unsafe extern "C" fn gos_rt_fs_walk_dir_raw(path: *const c_char, env: *const
             // SAFETY: `blob` holds the share `counted_words` minted, which the visitor did not
             // keep.
             unsafe { crate::c_abi::rc::gos_rt_rc_release(blob) };
-            if super::vec::result_disc_of(r) == 0 {
+            if super::result::result_disc_of(r) == 0 {
                 Ok(())
             } else {
-                Err(super::vec::result_payload_of(r))
+                Err(super::result::result_payload_of(r))
             }
         });
         match result {

@@ -44,8 +44,8 @@ pub extern "C" fn gos_rt_utf16_decode_surrogate_pair(high: i64, low: i64) -> i12
             None
         };
         match ch {
-            Some(c) => super::vec::gos_rt_result_new(0, i64::from(c as u32)),
-            None => super::vec::gos_rt_result_new(1, 0),
+            Some(c) => super::result::gos_rt_result_new(0, i64::from(c as u32)),
+            None => super::result::gos_rt_result_new(1, 0),
         }
     })
 }

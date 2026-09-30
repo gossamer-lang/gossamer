@@ -99,7 +99,7 @@ fn write_strings(vec: Option<crate::c_abi::vec::StrVecView<'_>>, bare: i32, out:
             out.push_str(", ");
         }
         if !vec.is_null(i) {
-            crate::c_abi::map::push_quoted_str(out, &vec.text(i));
+            crate::c_abi::desc_format::push_quoted_str(out, &vec.text(i));
         }
     }
     out.push(']');
@@ -164,7 +164,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_char(v: *const GosVec, bare: i32) -> 
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         unsafe {
             format_elems(v, bare, |vec, i, out| {
-                crate::c_abi::map::push_quoted_char(out, vec.word(i));
+                crate::c_abi::desc_format::push_quoted_char(out, vec.word(i));
             })
         }
     })
@@ -197,7 +197,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_adt(
             };
             // SAFETY: `fmt` is non-null (checked above) and the compiled formatter of the element
             // type, and `arg` is the element in the form `by_ref` names (C-ABI contract).
-            out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
+            out.push_str(&unsafe { crate::c_abi::result::adt_fmt_string(arg, fmt) });
         });
         alloc_cstring(out.as_bytes())
     })
@@ -221,7 +221,7 @@ pub unsafe extern "C" fn gos_rt_vec_format_desc(
         }
         // SAFETY: `tags` is this shim's argument, live for the call (C-ABI contract); non-null,
         // checked above.
-        let tags = unsafe { crate::c_abi::map::DescStream::new(tags) };
+        let tags = unsafe { crate::c_abi::desc_format::DescStream::new(tags) };
         // SAFETY: `v` is this shim's argument, null or a live `Vec` (C-ABI contract).
         let elems = unsafe { crate::c_abi::vec::VecView::of(v) };
         let mut out = String::new();
@@ -229,15 +229,15 @@ pub unsafe extern "C" fn gos_rt_vec_format_desc(
             // An aggregate element is stored inline whatever its width; a one-word element that
             // is not one is the value itself or the handle addressing it.
             let storage = if crate::c_abi::vec::vec_elem_is_inline_aggregate(elems.header()) {
-                crate::c_abi::map::Storage::Inline
+                crate::c_abi::desc_format::Storage::Inline
             } else {
-                crate::c_abi::map::Storage::ByWord
+                crate::c_abi::desc_format::Storage::ByWord
             };
             let mut cursor = desc as usize;
             // SAFETY: the element is stored as `storage` names and laid out as the descriptor at
             // `desc` describes (C-ABI contract).
             unsafe {
-                crate::c_abi::map::render_desc_storage(
+                crate::c_abi::desc_format::render_desc_storage(
                     out,
                     elems.elem(i).as_ptr(),
                     tags,
@@ -304,10 +304,10 @@ pub unsafe extern "C" fn gos_rt_vec_format_tuple(
             // SAFETY: the element is a tuple of `n` fields laid out as `tags` describes (C-ABI
             // contract).
             unsafe {
-                crate::c_abi::map::render_tuple_elements(
+                crate::c_abi::desc_format::render_tuple_elements(
                     out,
                     elems.elem(i).as_ptr().cast::<i64>(),
-                    crate::c_abi::map::DescStream::bare(tags),
+                    crate::c_abi::desc_format::DescStream::bare(tags),
                     n as usize,
                     &mut slot_cursor,
                     &mut tag_cursor,
@@ -529,7 +529,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_char(p: *const i64, len: i64) -> *mut
             // SAFETY: `p` is non-null (checked above) and addresses `len` words (C-ABI contract),
             // and `i` is below `len`.
             let raw = unsafe { p.add(i).read_unaligned() };
-            crate::c_abi::map::push_quoted_char(&mut out, raw);
+            crate::c_abi::desc_format::push_quoted_char(&mut out, raw);
         }
         out.push(']');
         alloc_cstring(out.as_bytes())
@@ -570,7 +570,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_adt(
             };
             // SAFETY: `fmt` is non-null (checked above) and the compiled formatter of the element
             // type, and `arg` is the element in the form `by_ref` names (C-ABI contract).
-            out.push_str(&unsafe { crate::c_abi::vec::adt_fmt_string(arg, fmt) });
+            out.push_str(&unsafe { crate::c_abi::result::adt_fmt_string(arg, fmt) });
         }
         out.push(']');
         alloc_cstring(out.as_bytes())
@@ -601,7 +601,7 @@ pub unsafe extern "C" fn gos_rt_arr_format_string(
             if !s_ptr.is_null() {
                 // SAFETY: `s_ptr` is a non-null slot of a `String` array, a live string body
                 // (C-ABI contract).
-                crate::c_abi::map::push_quoted_str(&mut out, &unsafe {
+                crate::c_abi::desc_format::push_quoted_str(&mut out, &unsafe {
                     crate::c_abi::gos_str_arg_lossy(s_ptr)
                 });
             }

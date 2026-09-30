@@ -353,6 +353,170 @@ pub unsafe extern "C" fn gos_rt_iter_unzip_i64(v: *const GosVec) -> *mut u8 {
     })
 }
 
+/// `result.map_err(closure)`. If Err, calls closure and rebuilds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_result_map_err(result: i128, closure: *const u8) -> i128 {
+    ffi_entry!(0i128, {
+        if gos_rt_result_disc(result) != 1 || closure.is_null() {
+            return result;
+        }
+        // SAFETY: `closure` is a heap blob whose first word is the
+        // lifted function's address (codegen invariant).
+        let fn_addr = unsafe { *closure.cast::<i64>() };
+        if fn_addr == 0 {
+            return result;
+        }
+        // The lifted function address is stored as a 64-bit word but a
+        // function pointer is target-pointer-width (32-bit on wasm32),
+        // so narrow through `usize` before reinterpreting. Identity on
+        // 64-bit native.
+        // SAFETY: a non-zero entry word is the address of the compiled closure, of the signature
+        // this shim calls it through (C-ABI contract).
+        let f: extern "C" fn(i64, i64) -> i64 =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr as usize)) };
+        let new_payload = f(closure as i64, gos_rt_result_payload(result));
+        gos_rt_result_new(1, new_payload)
+    })
+}
+
+/// `result.map(closure)` for **capturing** closures whose lifted
+/// function follows the env-first ABI `extern "C" fn(env, payload)
+/// -> i64`. Non-capturing closures must dispatch through
+/// [`gos_rt_result_map_bare`] instead - they have no env slot, so
+/// passing one would shadow the payload arg and the closure would
+/// transform the env pointer instead of the payload (the askq
+/// round-2 corruption pre-fix).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_result_map(result: i128, closure: *const u8) -> i128 {
+    ffi_entry!(0i128, {
+        if gos_rt_result_disc(result) != 0 || closure.is_null() {
+            return result;
+        }
+        // SAFETY: `closure` is this shim's `u8` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
+        let fn_addr = unsafe { *closure.cast::<i64>() };
+        if fn_addr == 0 {
+            return result;
+        }
+        // The lifted function address is stored as a 64-bit word but a
+        // function pointer is target-pointer-width (32-bit on wasm32),
+        // so narrow through `usize` before reinterpreting. Identity on
+        // 64-bit native.
+        // SAFETY: a non-zero entry word is the address of the compiled closure, of the signature
+        // this shim calls it through (C-ABI contract).
+        let f: extern "C" fn(i64, i64) -> i64 =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr as usize)) };
+        let new_payload = f(closure as i64, gos_rt_result_payload(result));
+        gos_rt_result_new(0, new_payload)
+    })
+}
+
+/// `result::default_with(closure, result)` - returns the `Ok` value
+/// unchanged, or calls `closure` on the `Err` payload and returns its
+/// result. The returned `i64` is the unwrapped `T` (a scalar value or
+/// a pointer, depending on `T`). Mirrors `gos_rt_result_map`'s closure
+/// invocation convention.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_result_default_with(result: i128, closure: *const u8) -> i64 {
+    ffi_entry!(0, {
+        if gos_rt_result_disc(result) == 0 {
+            return gos_rt_result_payload(result);
+        }
+        if closure.is_null() {
+            return 0;
+        }
+        // SAFETY: `closure` is this shim's `u8` argument, non-null (checked above), live for the
+        // call (C-ABI contract).
+        let fn_addr = unsafe { *closure.cast::<i64>() };
+        if fn_addr == 0 {
+            return 0;
+        }
+        // The lifted function address is stored as a 64-bit word but a
+        // function pointer is target-pointer-width (32-bit on wasm32),
+        // so narrow through `usize` before reinterpreting. Identity on
+        // 64-bit native.
+        // SAFETY: a non-zero entry word is the address of the compiled closure, of the signature
+        // this shim calls it through (C-ABI contract).
+        let f: extern "C" fn(i64, i64) -> i64 =
+            unsafe { std::mem::transmute(crate::c_abi::code_address(fn_addr as usize)) };
+        f(closure as i64, gos_rt_result_payload(result))
+    })
+}
+
+/// `result::default(fallback, result)` - returns the `Ok` payload,
+/// or `fallback` when the Result is `Err`. The returned `i64` is the
+/// unwrapped `T` (a scalar value or a pointer, depending on `T`).
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_result_default(fallback: i64, result: i128) -> i64 {
+    ffi_entry!(0, {
+        if gos_rt_result_disc(result) == 0 {
+            gos_rt_result_payload(result)
+        } else {
+            fallback
+        }
+    })
+}
+
+/// `result::default(fallback, result)` specialised for f64 payloads:
+/// the stored payload word is reinterpreted as its IEEE-754 bit
+/// pattern, and the fallback rides the float register directly.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_result_default_f64(fallback: f64, result: i128) -> f64 {
+    ffi_entry!(0.0, {
+        if gos_rt_result_disc(result) == 0 {
+            f64::from_bits(gos_rt_result_payload(result) as u64)
+        } else {
+            fallback
+        }
+    })
+}
+
+/// `result.map(closure)` for **non-capturing** closures whose
+/// lifted function follows the bare ABI `extern "C" fn(payload) ->
+/// i64` (no env slot - this is what `gossamer-hir::lift_closed`
+/// produces). The MIR call-site dispatch picks this entry point
+/// when the closure arg has a recorded `local_fn_name` (i.e. is
+/// a direct path to a lifted function rather than a heap-allocated
+/// env+code blob).
+///
+/// # Safety
+///
+/// A non-zero `fn_addr` is the entry address of a compiled `extern "C" fn(i64)
+/// -> i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_result_map_bare(result: i128, fn_addr: i64) -> i128 {
+    ffi_entry!(0i128, {
+        if gos_rt_result_disc(result) != 0 || fn_addr == 0 {
+            return result;
+        }
+        // SAFETY: this shim's contract makes a non-zero `fn_addr` a compiled `extern "C" fn(i64)
+        // -> i64`.
+        let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(fn_addr as *const ()) };
+        let new_payload = f(gos_rt_result_payload(result));
+        gos_rt_result_new(0, new_payload)
+    })
+}
+
+/// `result.map_err(closure)` for **non-capturing** closures.
+///
+/// # Safety
+///
+/// A non-zero `fn_addr` is the entry address of a compiled `extern "C" fn(i64)
+/// -> i64`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_result_map_err_bare(result: i128, fn_addr: i64) -> i128 {
+    ffi_entry!(0i128, {
+        if gos_rt_result_disc(result) == 0 || fn_addr == 0 {
+            return result;
+        }
+        // SAFETY: this shim's contract makes a non-zero `fn_addr` a compiled `extern "C" fn(i64)
+        // -> i64`.
+        let f: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(fn_addr as *const ()) };
+        let new_payload = f(gos_rt_result_payload(result));
+        gos_rt_result_new(1, new_payload)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

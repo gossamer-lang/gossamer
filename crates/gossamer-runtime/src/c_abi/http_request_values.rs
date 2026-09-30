@@ -136,9 +136,9 @@ pub unsafe extern "C" fn gos_rt_http_request_form_value(
 /// `(String, String)` pair pointer), mirroring `gos_rt_str_split_once`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpRequest) -> i128 {
-    ffi_entry!(crate::c_abi::vec::gos_rt_result_new(1, 0), {
+    ffi_entry!(crate::c_abi::result::gos_rt_result_new(1, 0), {
         if req.is_null() {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         }
         // SAFETY: `req` is a handle from compiled code, checked non-null above and live for the whole call.
         let r = unsafe { &*req };
@@ -148,7 +148,7 @@ pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpReque
             .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
             .map_or("", |(_, v)| v.as_str());
         let Some((user, pass)) = decode_basic_credentials(header) else {
-            return crate::c_abi::vec::gos_rt_result_new(1, 0);
+            return crate::c_abi::result::gos_rt_result_new(1, 0);
         };
         #[repr(C)]
         struct Pair {
@@ -159,7 +159,7 @@ pub unsafe extern "C" fn gos_rt_http_request_basic_auth(req: *const GosHttpReque
             a: alloc_cstring(user.as_bytes()) as i64,
             b: alloc_cstring(pass.as_bytes()) as i64,
         }));
-        crate::c_abi::vec::gos_rt_result_new(0, pair as i64)
+        crate::c_abi::result::gos_rt_result_new(0, pair as i64)
     })
 }
 
