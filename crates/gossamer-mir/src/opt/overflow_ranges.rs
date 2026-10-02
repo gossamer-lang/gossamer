@@ -399,13 +399,17 @@ pub(crate) fn elide_overflow_checks_by_ranges(body: &mut Body, tcx: &TyCtxt) {
     let Some(mut analysis) = range_analysis(body, tcx) else {
         return;
     };
-    let mut entry = analysis_fixpoint(&analysis);
+    let mut entry = analysis_fixpoint(&analysis, &[]);
     let vecs = whole_seen_vecs(body, tcx);
     if !vecs.is_empty() {
         for _ in 0..ELEMENT_ROUNDS {
             analysis.elements = stored_element_ranges(&analysis, &entry, &vecs);
-            entry = analysis_fixpoint(&analysis);
+            entry = analysis_fixpoint(&analysis, &[]);
         }
+    }
+    let facts = accumulation_facts(&analysis, &entry);
+    if !facts.is_empty() {
+        entry = analysis_fixpoint(&analysis, &facts);
     }
     let mut rewrites: Vec<(usize, usize, BinOp)> = Vec::new();
     for (b, block) in body.blocks.iter().enumerate() {
@@ -579,8 +583,12 @@ fn loop_writes(analysis: &RangeAnalysis<'_>) -> Vec<HashSet<usize>> {
     writes
 }
 
-/// Each block's entry state at the fixpoint.
-fn analysis_fixpoint(analysis: &RangeAnalysis<'_>) -> Vec<Option<RangeState>> {
+/// Each block's entry state at the fixpoint, with each of `facts` met with
+/// its loop header's state.
+fn analysis_fixpoint(
+    analysis: &RangeAnalysis<'_>,
+    facts: &[HeaderFact],
+) -> Vec<Option<RangeState>> {
     let body = analysis.body;
     let n = body.blocks.len();
     let width = analysis.ranges.len();
@@ -610,7 +618,7 @@ fn analysis_fixpoint(analysis: &RangeAnalysis<'_>) -> Vec<Option<RangeState>> {
             }
             let mut out = state.clone();
             analysis.refine(&mut out, block, target);
-            let merged: RangeState = match &entry[target] {
+            let mut merged: RangeState = match &entry[target] {
                 None => out,
                 Some(prev) => (0..width)
                     .map(|s| match (prev[s], out[s]) {
@@ -619,6 +627,7 @@ fn analysis_fixpoint(analysis: &RangeAnalysis<'_>) -> Vec<Option<RangeState>> {
                     })
                     .collect(),
             };
+            apply_header_facts(&mut merged, facts, target);
             if entry[target].as_ref() == Some(&merged) {
                 continue;
             }
@@ -647,6 +656,8 @@ fn analysis_fixpoint(analysis: &RangeAnalysis<'_>) -> Vec<Option<RangeState>> {
             } else {
                 merged
             };
+            let mut merged = merged;
+            apply_header_facts(&mut merged, facts, target);
             entry[target] = Some(merged);
             if !queued[target] {
                 queued[target] = true;
@@ -655,6 +666,16 @@ fn analysis_fixpoint(analysis: &RangeAnalysis<'_>) -> Vec<Option<RangeState>> {
         }
     }
     entry
+}
+
+/// Meets each fact proven for `header` with the state entering it.
+fn apply_header_facts(state: &mut RangeState, facts: &[HeaderFact], header: usize) {
+    for fact in facts.iter().filter(|fact| fact.header == header) {
+        state[fact.slot] = Some(match state[fact.slot] {
+            Some(cur) => cur.meet(fact.bound).unwrap_or(fact.bound),
+            None => fact.bound,
+        });
+    }
 }
 
 /// Whether `name` is a runtime element read or write whose index argument

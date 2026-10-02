@@ -1,0 +1,76 @@
+// Running sums in counted loops: the trip count bounds each sum, so a release
+// build proves the additions cannot overflow and drops their checks. The
+// answers are the same on every tier.
+
+fn squares_minus(n: i64) -> i64 {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + i * i - i
+        i = i + 1
+    }
+    acc
+}
+
+fn counted_down(n: i64) -> i64 {
+    let mut acc = 0
+    let mut i = n
+    while i >= 1 {
+        acc -= i * 3
+        i -= 1
+    }
+    acc
+}
+
+fn stepped(limit: i64) -> i64 {
+    let mut acc = 7
+    let mut i = 0
+    while i <= limit {
+        acc += i % 13
+        i += 2
+    }
+    acc
+}
+
+fn nested(rows: i64, cols: i64) -> i64 {
+    let mut total = 0
+    for r in 0..rows {
+        let mut row = 0
+        for c in 0..cols {
+            row += r * c
+        }
+        total += row % 1000003
+    }
+    total
+}
+
+fn skips(n: i64) -> i64 {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        i += 1
+        if i % 3 == 0 {
+            continue
+        }
+        acc += i
+    }
+    acc
+}
+
+fn twice_per_pass(n: i64) -> i64 {
+    let mut acc = 0
+    for i in 0..n {
+        acc += i
+        acc += 1
+    }
+    acc
+}
+
+fn main() {
+    println(f"squares_minus {squares_minus(2000)}")
+    println(f"counted_down {counted_down(1000)}")
+    println(f"stepped {stepped(999)}")
+    println(f"nested {nested(40, 300)}")
+    println(f"skips {skips(500)}")
+    println(f"twice {twice_per_pass(100)}")
+}

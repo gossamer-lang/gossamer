@@ -11,6 +11,7 @@ include!("opt/loop_versioning.rs");
 include!("opt/overflow_versioning.rs");
 include!("opt/overflow_facts.rs");
 include!("opt/overflow_ranges.rs");
+include!("opt/overflow_accumulators.rs");
 include!("opt/row_tables.rs");
 include!("opt/payload_views.rs");
 include!("opt/byte_append_loops.rs");

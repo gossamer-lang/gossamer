@@ -297,7 +297,7 @@ pub(crate) fn natural_loops(body: &Body) -> Vec<NaturalLoop> {
 
 /// The natural loops of `body` and each reachable block's immediate
 /// dominator.
-fn loops_and_dominators(body: &Body) -> (Vec<NaturalLoop>, Vec<Option<usize>>) {
+pub(crate) fn loops_and_dominators(body: &Body) -> (Vec<NaturalLoop>, Vec<Option<usize>>) {
     let n = body.blocks.len();
     if n == 0 {
         return (Vec::new(), Vec::new());
@@ -334,7 +334,7 @@ fn loops_and_dominators(body: &Body) -> (Vec<NaturalLoop>, Vec<Option<usize>>) {
 }
 
 /// Whether block `a` dominates block `b`.
-fn dominates(dominators: &[Option<usize>], a: usize, mut b: usize) -> bool {
+pub(crate) fn dominates(dominators: &[Option<usize>], a: usize, mut b: usize) -> bool {
     loop {
         if a == b {
             return true;

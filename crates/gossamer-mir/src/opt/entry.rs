@@ -3,7 +3,7 @@
 // copy propagation, and dead-store elimination. Each pass is
 // idempotent so callers can run them in any order.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
 use gossamer_lex::Span;
 use gossamer_types::{TyCtxt, TyKind};

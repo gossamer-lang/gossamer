@@ -403,6 +403,13 @@ const SPECS: &[Spec] = &[
     // `par_chunks_mut` hands disjoint chunk windows to a callback on the
     // pool's workers.
     spec("feature-testing-examples/par_chunks_mut.gos"),
+    // Running sums in counted loops, which release builds prove in range by
+    // the loop's trip count, and one whose terms overflow it.
+    spec("feature-testing-examples/bounded_sums.gos"),
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/bounded_sum_overflow.gos")
+    },
     spec("feature-testing-examples/nested_row_tables.gos"),
     Spec {
         allow_nonzero: true,

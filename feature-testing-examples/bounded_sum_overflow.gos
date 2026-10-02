@@ -1,0 +1,18 @@
+// A running sum whose loop is counted but whose terms can carry it past
+// `i64::MAX` keeps its overflow check: the panic is the same on every tier
+// and in every profile.
+
+fn cubes(n: i64) -> i64 {
+    let mut acc = 0
+    let mut i = 0
+    while i < n {
+        acc = acc + i * i * i
+        i = i + 1
+    }
+    acc
+}
+
+fn main() {
+    println(f"small {cubes(1000)}")
+    println(f"large {cubes(3000000)}")
+}

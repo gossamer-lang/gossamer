@@ -2,7 +2,7 @@
 //! bytecode VM, the JIT, a debug build, and a release build all raise the
 //! language's overflow panic, and the wrapping operators wrap on all of them.
 //! An integer `sum` or `product` overflows exactly where the `+` or `*` it
-//! folds with would.
+//! folds with would, and so does a running sum in a counted loop.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -39,6 +39,23 @@ fn main() {
         for v in (9_223_372_036_854_775_806..).take(2) {
             println("{}", v)
         }
+    } else if case == "counted_sum" {
+        let n = 3_000_000
+        let mut acc = 0
+        let mut i = 0
+        while i < n {
+            acc = acc + i * i * i
+            i = i + 1
+        }
+        println("{}", acc)
+    } else if case == "counted_down_sum" {
+        let mut acc = 0
+        let mut i = 4_000_000
+        while i > 0 {
+            acc -= i * i
+            i -= 1
+        }
+        println("{}", acc)
     } else if case == "wrapping_add" {
         let x = 9_223_372_036_854_775_807
         println("{}", x +% 1)
@@ -60,6 +77,9 @@ const CASES: &[(&str, &str)] = &[
         "open_range_take",
         "attempt to add with overflow in open integer range",
     ),
+    // A counted loop bounds a running sum only when its terms keep it in range.
+    ("counted_sum", "attempt to add with overflow"),
+    ("counted_down_sum", "attempt to subtract with overflow"),
 ];
 
 /// Each wrapping-operator case with the value every tier prints.
