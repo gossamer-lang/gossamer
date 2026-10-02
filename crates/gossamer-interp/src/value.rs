@@ -1851,6 +1851,7 @@ pub(crate) fn builtin_writes_through_mut_ref(name: &str) -> bool {
             | "put_u32_le_at"
             | "put_u64_be_at"
             | "put_u64_le_at"
+            | "__gos_par_chunks"
     )
 }
 

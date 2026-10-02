@@ -386,6 +386,7 @@ pub fn core_type_declares_method(owner: &str, name: &str) -> bool {
 /// The parallel twins of the eager walks, on every sequence and on an
 /// integer range.
 pub(super) const PARALLEL_ADAPTER_METHODS: &[&str] = &[
+    "par_chunks_mut",
     "par_filter",
     "par_map",
     "par_max",

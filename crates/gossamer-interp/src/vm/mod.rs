@@ -1290,15 +1290,9 @@ fn index_get(base: &Value, idx: &Value) -> RuntimeResult<Value> {
     }
 }
 
-fn index_range_get(
-    base: &Value,
-    start: i64,
-    end: i64,
-    inclusive: bool,
-    start_open: bool,
-    end_open: bool,
-) -> RuntimeResult<Value> {
-    let len = match base {
+/// Element count of a range-indexable base, or `None` for any other value.
+pub(crate) fn range_indexable_len(base: &Value) -> Option<usize> {
+    Some(match base {
         Value::Array(items) => items.len(),
         Value::Tuple(items) => items.len(),
         Value::IntArray(d) => d.len(),
@@ -1309,12 +1303,16 @@ fn index_range_get(
         Value::String(s) => s.len(),
         Value::FloatArray(fa) if fa.stride > 0 => fa.data.len() / fa.stride as usize,
         Value::FloatArray(_) => 0,
-        _ => {
-            return Err(RuntimeError::Type(format!(
-                "value of kind `{base}` does not support range indexing"
-            )));
-        }
-    };
+        _ => return None,
+    })
+}
+
+/// The `[lo, hi)` a range names over `len` elements, clamped to the sequence
+/// as the compiled tiers' `gos_rt_vec_slice` and `gos_rt_vec_window` clamp.
+fn clamped_range(
+    len: usize,
+    (start, end, inclusive, start_open, end_open): (i64, i64, bool, bool, bool),
+) -> (usize, usize) {
     let len_i64 = i64::try_from(len).unwrap_or(i64::MAX);
     let lo_raw = if start_open { 0 } else { start };
     let hi_raw = if end_open {
@@ -1326,6 +1324,31 @@ fn index_range_get(
     };
     let lo = lo_raw.max(0).min(len_i64) as usize;
     let hi = hi_raw.max(lo as i64).min(len_i64) as usize;
+    (lo, hi)
+}
+
+/// Bounds of a range index value, or `None` when `idx` is not a range.
+fn range_index_bounds(idx: &Value) -> Option<(i64, i64, bool, bool, bool)> {
+    let Value::LazyIter(id) = idx else {
+        return None;
+    };
+    crate::stdlib_builtins::iter::lazy_range_bounds(id.id())
+}
+
+pub(crate) fn index_range_get(
+    base: &Value,
+    start: i64,
+    end: i64,
+    inclusive: bool,
+    start_open: bool,
+    end_open: bool,
+) -> RuntimeResult<Value> {
+    let Some(len) = range_indexable_len(base) else {
+        return Err(RuntimeError::Type(format!(
+            "value of kind `{base}` does not support range indexing"
+        )));
+    };
+    let (lo, hi) = clamped_range(len, (start, end, inclusive, start_open, end_open));
     match base {
         Value::Array(items) => Ok(Value::Array(Arc::new(items[lo..hi].to_vec()))),
         Value::Tuple(items) => Ok(Value::Array(Arc::new(items[lo..hi].to_vec()))),
@@ -1349,6 +1372,39 @@ fn index_range_get(
         }
         _ => unreachable!("len computed above for this variant"),
     }
+}
+
+/// Writes the elements of `src` over `base[range]`: the write-back of a
+/// mutable window `&mut base[lo..hi]`. A window never changes length, so
+/// `src` holds exactly the elements the clamped range names.
+fn index_range_set(base: &mut Value, range: &Value, src: &Value) -> RuntimeResult<()> {
+    let Some(bounds) = range_index_bounds(range) else {
+        return Err(RuntimeError::Type(
+            "index range is no longer valid".to_string(),
+        ));
+    };
+    let Some(len) = range_indexable_len(base) else {
+        return Err(RuntimeError::Type(format!(
+            "value of kind `{base}` does not support range indexing"
+        )));
+    };
+    let (lo, hi) = clamped_range(len, bounds);
+    overwrite_range(base, lo, hi, src)
+}
+
+/// Writes the first `hi - lo` elements of `src` over `base[lo..hi]`.
+pub(crate) fn overwrite_range(
+    base: &mut Value,
+    lo: usize,
+    hi: usize,
+    src: &Value,
+) -> RuntimeResult<()> {
+    for offset in lo..hi {
+        let elem = index_get(src, &Value::Int((offset - lo) as i64))?;
+        crate::stdlib_builtins::iter::note_vec_element_replacement(base, offset as i64, &elem);
+        run::index_set_value(base, offset as i64, elem)?;
+    }
+    Ok(())
 }
 
 /// Element read that drains a uniquely-owned `Array` / `Tuple` slot,

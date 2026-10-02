@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.65.2 - Mutable windows, parallel chunks, and reference soundness
+
+- `&mut xs[lo..hi]` over a `Vec`, fixed array, or slice is a mutable window: a `&mut [T]` whose writes land in `xs`, passed to a `&mut [T]` parameter, narrowed again inside a callee, or named for a scope with `let w = &mut xs[lo..hi]`, on every tier. Its bounds clamp as a range read's do, and it cannot resize.
+- One call may pass several windows of the same place, as a merge or a split does (`merge(&mut xs[..mid], &mut xs[mid..])`); their bounds are evaluated once, and windows that overlap panic before the call runs, with the same report on every tier.
+- `seq.par_chunks_mut(size, f)` writes a `Vec`, fixed array, `&mut [T]`, or window in place on every core, handing each disjoint `size`-element chunk to `f(index, chunk)`. The callback may write its chunk and is otherwise held to the purity rule (GT0090), may not capture `seq` (GT0043), and the lowest-indexed chunk's panic is the one raised.
+- A range passed to a parameter that only reads it (`total(xs[lo..hi])`) reaches the callee as a window over `xs` in native builds instead of a copy of the range.
+- A mutating method on a range receiver (`xs[1..4].sort()`, `sort_by`, `sort_by_key`, `reverse`, `swap`, `fill`) acts on that part of `xs`; it sorted a temporary copy and left `xs` unchanged. A resizing method on a range receiver (`xs[0..2].push(v)`) is GT0050.
+- `&xs[lo..hi]`, and `&mut s[lo..hi]` on a `String`, remain GT0075, whose message now says they would reference a copy and names the window form.
+- A named reference to an element (`let r = &mut xs[i]`, `&mut grid[i][j]`, `&mut items[k].count`) writes through on the bytecode VM as it does in native builds, where the VM lost the write. Its indexes are taken where the reference is named.
+- A call passing `&mut x` beside a closure that captures `x`, or beside a by-value argument reading storage under `x`, is GT0043; the VM and native builds disagreed about what the closure or the value observed.
+- `{}` of a `&mut Vec` renders `#[..]` on the VM as in native builds, where it rendered `[..]`.
+
 ## 0.65.1 - Performance regressions & splitting large compiler/runtime files
 
 - Release builds prove more `+`, `-`, and `*` cannot overflow and drop their checks: a value read from an integer `Vec` the function fills itself lies within what it stored, an index an element access accepted lies within the length, a remainder by a positive divisor keeps its dividend's sign, and a completed `x * x` bounds `x`. Element-wise loops over such vectors vectorize again.

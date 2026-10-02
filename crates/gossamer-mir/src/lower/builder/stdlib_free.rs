@@ -1176,6 +1176,16 @@ impl<'a> Builder<'a> {
         if !callee_def_some && args.len() == 3 && joined == "__gos_par_run" {
             return ControlFlow::Break(self.try_lower_par_run(args, span));
         }
+        // `par_chunks_mut`'s runner: the callback reaches the runtime as an
+        // environment every worker calls with a chunk's window.
+        if !callee_def_some && args.len() == 3 && joined == "__gos_par_chunks" {
+            return ControlFlow::Break(self.try_lower_par_chunks(args, span));
+        }
+        // The overlap check a call passing several windows of one sequence
+        // runs first; every argument is an integer.
+        if !callee_def_some && args.len() == 7 && joined == "__gos_windows_disjoint" {
+            return ControlFlow::Break(self.lower_windows_disjoint(args, span));
+        }
         // A resolver-bound type-qualified call (`UserStruct::method`, so
         // `callee_def` is some) is a user item and must never be hijacked
         // by a stdlib bare-type alias like `Counter::new` / `Builder::new`

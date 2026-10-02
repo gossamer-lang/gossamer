@@ -1170,10 +1170,11 @@ impl TypeChecker<'_> {
             }
             Mutbl::Not
         };
-        self.tcx.intern(TyKind::Ref {
-            mutability,
-            inner: operand_ty,
-        })
+        let inner = match self.mutable_window_elem(operand) {
+            Some(elem) if mutability == Mutbl::Mut => self.tcx.intern(TyKind::Slice(elem)),
+            _ => operand_ty,
+        };
+        self.tcx.intern(TyKind::Ref { mutability, inner })
     }
 
     /// If `expr` is a tuple-variant constructor call (`E::B(1)`), the `Adt`
@@ -1749,8 +1750,14 @@ impl TypeChecker<'_> {
         }
     }
 
+    /// Rejects a call whose arguments reach one referent twice while a
+    /// `&mut` argument holds it: a second `&mut` of the same root, or a
+    /// closure that captures the root. The callee would observe the referent
+    /// through an alias the `&mut` does not account for.
     pub(super) fn check_overlapping_mutable_call_args(&mut self, args: &[Expr]) {
         let mut roots = HashSet::new();
+        let mut windows: std::collections::HashMap<String, Option<String>> =
+            std::collections::HashMap::new();
         for arg in args {
             let ExprKind::Unary {
                 op: UnaryOp::RefMut,
@@ -1762,7 +1769,14 @@ impl TypeChecker<'_> {
             let Some(root) = Self::place_root_name(operand) else {
                 continue;
             };
-            if !roots.insert(root.clone()) {
+            // Windows of one place may share a call: their ranges are checked
+            // disjoint before it runs.
+            let window = window_place_key(operand);
+            let first_window = windows
+                .entry(root.clone())
+                .or_insert_with(|| window.clone());
+            let joins_windows = window.is_some() && *first_window == window;
+            if !roots.insert(root.clone()) && !joins_windows {
                 self.emit(
                     TypeError::MutableReferenceConflict {
                         root,
@@ -1772,6 +1786,112 @@ impl TypeChecker<'_> {
                 );
             }
         }
+        for arg in args {
+            if let Some((root, borrower)) = self.closure_alias_of(arg, &roots) {
+                self.emit(
+                    TypeError::MutableReferenceConflict { root, borrower },
+                    arg.span,
+                );
+            }
+        }
+    }
+
+    /// Rejects a by-value argument that reads storage under the root of a
+    /// `&mut` argument of the same call: the callee would read the caller's
+    /// storage through that value while it writes the same storage through
+    /// the reference. Runs once the arguments carry their types.
+    pub(super) fn check_by_value_argument_aliases(&mut self, args: &[Expr]) {
+        let roots: HashSet<String> = args
+            .iter()
+            .filter_map(|arg| match &arg.kind {
+                ExprKind::Unary {
+                    op: UnaryOp::RefMut,
+                    operand,
+                } => Self::place_root_name(operand),
+                _ => None,
+            })
+            .collect();
+        if roots.is_empty() {
+            return;
+        }
+        for arg in args {
+            if !matches!(
+                arg.kind,
+                ExprKind::Path(_) | ExprKind::FieldAccess { .. } | ExprKind::Index { .. }
+            ) || self.closure_alias_of(arg, &roots).is_some()
+            {
+                continue;
+            }
+            if let Some((root, borrower)) = self.by_value_storage_alias(arg, &roots) {
+                self.emit(
+                    TypeError::MutableReferenceConflict { root, borrower },
+                    arg.span,
+                );
+            }
+        }
+    }
+
+    /// The `&mut` root among `roots` that a closure argument captures - a
+    /// closure literal, or a local bound to one - with how it reaches it.
+    pub(super) fn closure_alias_of(
+        &self,
+        arg: &Expr,
+        roots: &HashSet<String>,
+    ) -> Option<(String, String)> {
+        match &arg.kind {
+            ExprKind::Closure { params, body, .. } => {
+                let captured = super::closure_outer_names(params, body);
+                let root = roots.iter().find(|root| captured.contains(*root))?;
+                Some((
+                    root.clone(),
+                    "a closure argument that captures it".to_string(),
+                ))
+            }
+            ExprKind::Path(path) if path.segments.len() == 1 => {
+                let name = path.segments[0].name.name.as_str();
+                let captured = self.closure_binding_captures(name)?;
+                let root = roots.iter().find(|root| captured.contains(*root))?;
+                Some((
+                    root.clone(),
+                    format!("the closure `{name}` that captures it"),
+                ))
+            }
+            _ => None,
+        }
+    }
+
+    /// A by-value place argument rooted at one of `roots` whose type holds
+    /// storage the callee would read through the caller's handle.
+    fn by_value_storage_alias(
+        &mut self,
+        arg: &Expr,
+        roots: &HashSet<String>,
+    ) -> Option<(String, String)> {
+        let root = Self::place_root_name(arg)?;
+        if !roots.contains(&root) {
+            return None;
+        }
+        let recorded = self.table.get(arg.id)?;
+        let ty = self.peel_refs(recorded);
+        let scalar = matches!(
+            self.tcx.kind(ty),
+            Some(
+                TyKind::Bool
+                    | TyKind::Char
+                    | TyKind::Int(_)
+                    | TyKind::Float(_)
+                    | TyKind::String
+                    | TyKind::Unit
+                    | TyKind::Error
+                    | TyKind::Var(_)
+            )
+        );
+        (!scalar).then(|| {
+            (
+                root,
+                "a by-value argument reading the same storage".to_string(),
+            )
+        })
     }
 
     /// Whether an assignment place is writable: writable when rooted at a
@@ -1861,12 +1981,30 @@ impl TypeChecker<'_> {
         self.auto_deref_place_mutability(base)
     }
 
-    /// Leftmost path-segment name of a place, naming the root binding in
-    /// the immutability diagnostic.
-    /// Rejects `&xs[a..b]` / `&mut xs[a..b]`. The index answers a fresh copy
-    /// of the range, so borrowing it hands out a reference to a temporary
-    /// nothing owns - which the tiers disagree about at run time rather than
-    /// diagnosing. A window into part of a sequence has no value shape yet.
+    /// Element type of `&mut seq[a..b]` when `operand` is a range index over
+    /// a Vec, array, or slice: the borrow is a mutable window `&mut [T]`.
+    pub(super) fn mutable_window_elem(&mut self, operand: &Expr) -> Option<Ty> {
+        let ExprKind::Index { base, index } = &operand.kind else {
+            return None;
+        };
+        if !matches!(index.kind, ExprKind::Range { .. }) {
+            return None;
+        }
+        let recorded = self.table.get(base.id)?;
+        let base_ty = self.infer.resolve(self.tcx, recorded);
+        let base_ty = self.peel_refs(base_ty);
+        match self.tcx.kind(base_ty) {
+            Some(TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. }) => {
+                Some(*elem)
+            }
+            _ => None,
+        }
+    }
+
+    /// Rejects `&xs[a..b]` over a sequence and `&mut s[a..b]` over a
+    /// `String`. Both indexes answer a fresh copy of the range, so the borrow
+    /// would reference a temporary nothing owns; only `&mut seq[a..b]` is a
+    /// window.
     pub(super) fn reject_range_borrow(&mut self, op: UnaryOp, operand: &Expr) -> bool {
         let ExprKind::Index { base, index } = &operand.kind else {
             return false;
@@ -1879,10 +2017,14 @@ impl TypeChecker<'_> {
         };
         let base_ty = self.infer.resolve(self.tcx, recorded);
         let base_ty = self.peel_refs(base_ty);
-        if !matches!(
-            self.tcx.kind(base_ty),
-            Some(TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Array { .. })
-        ) {
+        let rejected = match self.tcx.kind(base_ty) {
+            Some(TyKind::Vec(_) | TyKind::Slice(_) | TyKind::Array { .. }) => {
+                op == UnaryOp::RefShared
+            }
+            Some(TyKind::String) => op == UnaryOp::RefMut,
+            _ => false,
+        };
+        if !rejected {
             return false;
         }
         let base_text = Self::place_root_name(base).unwrap_or_else(|| "xs".to_string());
@@ -1897,6 +2039,8 @@ impl TypeChecker<'_> {
         true
     }
 
+    /// Leftmost path-segment name of a place, naming the root binding in
+    /// the immutability diagnostic.
     pub(super) fn place_root_name(place: &Expr) -> Option<String> {
         match &place.kind {
             ExprKind::Path(path) => path.segments.first().map(|s| s.name.name.clone()),
@@ -2608,5 +2752,48 @@ impl TypeChecker<'_> {
                 arm.pattern.span,
             );
         }
+    }
+}
+
+/// The place a `base[lo..hi]` window names, as a key two windows of one place
+/// share: a binding reached through fields and indexes that are bindings or
+/// literals, which evaluating again names the same place.
+fn window_place_key(operand: &Expr) -> Option<String> {
+    let ExprKind::Index { base, index } = &operand.kind else {
+        return None;
+    };
+    if !matches!(index.kind, ExprKind::Range { .. }) {
+        return None;
+    }
+    place_key(base)
+}
+
+fn place_key(expr: &Expr) -> Option<String> {
+    match &expr.kind {
+        ExprKind::Path(path) if path.segments.len() == 1 => {
+            Some(path.segments[0].name.name.clone())
+        }
+        ExprKind::FieldAccess { receiver, field } => {
+            let field = match field {
+                gossamer_ast::FieldSelector::Named(name) => name.name.clone(),
+                gossamer_ast::FieldSelector::Index(index) => index.to_string(),
+            };
+            Some(format!("{}.{field}", place_key(receiver)?))
+        }
+        ExprKind::Index { base, index } => {
+            let index = match &index.kind {
+                ExprKind::Path(path) if path.segments.len() == 1 => {
+                    path.segments[0].name.name.clone()
+                }
+                ExprKind::Literal(gossamer_ast::Literal::Int(text)) => text.clone(),
+                _ => return None,
+            };
+            Some(format!("{}[{index}]", place_key(base)?))
+        }
+        ExprKind::Unary {
+            op: UnaryOp::Deref,
+            operand,
+        } => Some(format!("*{}", place_key(operand)?)),
+        _ => None,
     }
 }

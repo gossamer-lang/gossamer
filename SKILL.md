@@ -209,7 +209,9 @@ extend(&mut items)     // items is now #[1, 2, 1]
   `MinHeap` instead of negated keys). One name each: `HashMap`, `VecDeque`,
   `BinaryHeap` are rejected.
 - A parameter `[T]` takes an array, a `Vec`, or a view; `&mut [T]` writes
-  through. Only `Vec` resizes; `insert` / `remove` answer a `Result`.
+  through. `&mut xs[lo..hi]` is a window of `xs` (`fill(&mut px[2..6], 0)`),
+  and `xs[1..4].sort()` sorts that part in place; a bare `xs[lo..hi]` is a
+  copy. Only `Vec` resizes; `insert` / `remove` answer a `Result`.
 - `for x in xs` over any collection - no `.iter()`, no `*x`. A `Result` or
   `Option` is not iterable: take the value first.
 - Eager and lazy: `xs.map(f)` / `filter` on a sequence answers a `Vec`;
@@ -232,7 +234,8 @@ extend(&mut items)     // items is now #[1, 2, 1]
   descend), `sort_by` with a comparator answering a sign.
 - Parallel twins of the eager walks: `par_map`, `par_filter`, `par_sum`,
   `par_reduce(identity, combine)`, with pure callbacks (GT0090 otherwise);
-  answers do not depend on the machine.
+  answers do not depend on the machine. `img.par_chunks_mut(w, |row, px| ..)`
+  writes disjoint chunks in place on every core.
 - Callback shorthand: a std function names itself (`xs.map(math::abs)`);
   anything else is a closure (`people.map(|p| p.name)`).
 - `DynValue` holds data whose shape arrives at run time (`kind()`,

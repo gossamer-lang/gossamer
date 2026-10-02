@@ -390,6 +390,19 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/chan_struct_owned_fields.gos"),
     spec("feature-testing-examples/hoisted_field_reads.gos"),
     spec("feature-testing-examples/field_reference_writes.gos"),
+    // `&mut seq[lo..hi]` windows as arguments, receivers, and named bindings
+    // over a Vec, a fixed array, an array field, and a nested row, plus named
+    // element places whose indexes are taken where they are named.
+    spec("feature-testing-examples/mutable_windows.gos"),
+    // Two windows of one sequence in one call that overlap panic with the
+    // same report before the call runs.
+    Spec {
+        allow_nonzero: true,
+        ..spec("feature-testing-examples/mutable_windows_overlap.gos")
+    },
+    // `par_chunks_mut` hands disjoint chunk windows to a callback on the
+    // pool's workers.
+    spec("feature-testing-examples/par_chunks_mut.gos"),
     spec("feature-testing-examples/nested_row_tables.gos"),
     Spec {
         allow_nonzero: true,

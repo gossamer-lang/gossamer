@@ -1104,7 +1104,17 @@ impl<'a> Builder<'a> {
             // Detect an explicit `&mut <bare local>` of a writeback type;
             // the matching `Rvalue::Ref` emission lives in `lower_unary`.
             let reload_target = self.mut_ref_reload_target(arg);
-            let local = self.lower_expr(arg)?;
+            let read_window = self.lower_read_only_window_arg(
+                args,
+                idx,
+                callee_param_shareable.as_deref(),
+                callee_param_tys.as_deref(),
+                span,
+            );
+            let local = match read_window {
+                Some(window) => window,
+                None => self.lower_expr(arg)?,
+            };
             if let Some(place_local) = reload_target {
                 mut_ref_reloads.push((place_local, local));
             }
@@ -1658,5 +1668,85 @@ impl<'a> Builder<'a> {
         let writeback =
             self.mut_ref_takes_slot_address(operand.ty, self.locals[local.0 as usize].ty);
         writeback.then_some(local)
+    }
+}
+
+impl Builder<'_> {
+    /// A by-value `seq[lo..hi]` argument the callee only reads, lowered as a
+    /// window over `seq` instead of a copy of the range. The callee neither
+    /// writes the parameter nor lets it outlive the call, and no other
+    /// argument carries a callable that could reach `seq` while it runs, so
+    /// the window and the copy read the same elements.
+    fn lower_read_only_window_arg(
+        &mut self,
+        args: &[HirExpr],
+        idx: usize,
+        shareable: Option<&[bool]>,
+        param_tys: Option<&[Ty]>,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let arg = &args[idx];
+        let HirExprKind::Index { base, index } = &arg.kind else {
+            return None;
+        };
+        if !matches!(index.kind, HirExprKind::Range { .. }) {
+            return None;
+        }
+        // A shared `[T]` view parameter is read-only and cannot outlive the
+        // call; a by-value sequence parameter qualifies when the callee only
+        // reads it.
+        let reads_only = match self.tcx.kind_of(*param_tys?.get(idx)?) {
+            TyKind::Ref {
+                mutability: gossamer_types::Mutbl::Not,
+                inner,
+            } => matches!(self.tcx.kind_of(*inner), TyKind::Slice(_) | TyKind::Vec(_)),
+            TyKind::Slice(_) | TyKind::Vec(_) => {
+                shareable.and_then(|flags| flags.get(idx).copied()) == Some(true)
+            }
+            _ => false,
+        };
+        if !reads_only {
+            return None;
+        }
+        let other_reaches_code = args
+            .iter()
+            .enumerate()
+            .any(|(other, a)| other != idx && ty_carries_callable(self.tcx, a.ty, 0));
+        if other_reaches_code {
+            return None;
+        }
+        self.lower_mutable_window(base, index, span)
+    }
+}
+
+/// Whether a value of `ty` can hold a callable, whose body could reach the
+/// caller's sequences while a call runs.
+fn ty_carries_callable(tcx: &gossamer_types::TyCtxt, ty: Ty, depth: u8) -> bool {
+    use gossamer_types::TyKind;
+    if depth > 8 {
+        return true;
+    }
+    match tcx.kind_of(ty) {
+        TyKind::FnPtr(_)
+        | TyKind::FnTrait(_)
+        | TyKind::FnDef { .. }
+        | TyKind::Closure { .. }
+        | TyKind::Param { .. }
+        | TyKind::Var(_)
+        | TyKind::Dyn(_) => true,
+        TyKind::Ref { inner, .. }
+        | TyKind::Vec(inner)
+        | TyKind::Slice(inner)
+        | TyKind::Array { elem: inner, .. }
+        | TyKind::Iterator(inner) => ty_carries_callable(tcx, *inner, depth + 1),
+        TyKind::Tuple(parts) => parts
+            .iter()
+            .any(|p| ty_carries_callable(tcx, *p, depth + 1)),
+        TyKind::HashMap { key, value, .. } => {
+            ty_carries_callable(tcx, *key, depth + 1) || ty_carries_callable(tcx, *value, depth + 1)
+        }
+        TyKind::Adt { .. } | TyKind::Alias { .. } | TyKind::Nominal { .. } => true,
+        _ => false,
     }
 }

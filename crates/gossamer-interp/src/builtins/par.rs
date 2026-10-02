@@ -117,3 +117,72 @@ fn concat_par_parts(parts: Vec<Value>) -> Value {
         }
     }
 }
+
+/// `__gos_windows_disjoint(len, a_lo, a_hi, a_inclusive, b_lo, b_hi,
+/// b_inclusive)`: panics when two mutable windows of one sequence passed to
+/// one call overlap, with the text the compiled tiers raise.
+fn builtin_windows_disjoint(args: &[Value]) -> RuntimeResult<Value> {
+    let ints: Vec<i64> = args
+        .iter()
+        .map(crate::vm::index_value)
+        .collect::<RuntimeResult<_>>()?;
+    let [len, a_lo, a_hi, a_inclusive, b_lo, b_hi, b_inclusive] = ints[..] else {
+        return Err(RuntimeError::Arity {
+            expected: 7,
+            found: args.len(),
+        });
+    };
+    match gossamer_runtime::c_abi::vec::window_overlap_message(
+        len,
+        (a_lo, a_hi, a_inclusive),
+        (b_lo, b_hi, b_inclusive),
+    ) {
+        Some(message) => Err(RuntimeError::Panic(message)),
+        None => Ok(Value::Unit),
+    }
+}
+
+/// `__gos_par_chunks(window, size, f)`: hands each `size`-element chunk of the
+/// window to `f` with its index, in index order, and writes each chunk back.
+/// The callback is pure apart from its chunk, so running the chunks in order
+/// answers what the compiled tiers' pool does, and the first chunk to fault
+/// is the lowest-indexed one, which is the fault they raise.
+fn native_par_chunks(dispatch: &mut dyn NativeDispatch, args: &[Value]) -> RuntimeResult<Value> {
+    let [window, size, callback] = args else {
+        return Err(RuntimeError::Arity {
+            expected: 3,
+            found: args.len(),
+        });
+    };
+    let Value::MutCell(window) = window else {
+        return Err(RuntimeError::Type(
+            "par_chunks_mut: the sequence must be passed by `&mut`".to_string(),
+        ));
+    };
+    let size = crate::vm::index_value(size)?;
+    if size <= 0 {
+        return Err(RuntimeError::Panic(format!(
+            "par_chunks_mut: chunk size must be positive, got {size}"
+        )));
+    }
+    let mut whole = window.lock().clone();
+    let Some(len) = crate::vm::range_indexable_len(&whole) else {
+        return Err(RuntimeError::Type(format!(
+            "par_chunks_mut: value of kind `{whole}` is not a sequence"
+        )));
+    };
+    let size = usize::try_from(size).unwrap_or(usize::MAX);
+    for (index, lo) in (0..len).step_by(size).enumerate() {
+        let hi = lo.saturating_add(size).min(len);
+        let chunk = crate::vm::index_range_get(&whole, lo as i64, hi as i64, false, false, false)?;
+        let cell = Arc::new(crate::value::ThreadConfinedCell::new(chunk));
+        dispatch.call_value(
+            callback,
+            vec![Value::Int(index as i64), Value::MutCell(Arc::clone(&cell))],
+        )?;
+        let written = cell.lock().clone();
+        crate::vm::overwrite_range(&mut whole, lo, hi, &written)?;
+    }
+    *window.lock() = whole;
+    Ok(Value::Unit)
+}

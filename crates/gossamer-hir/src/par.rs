@@ -26,6 +26,10 @@ use crate::tree::{
 /// The runtime entry every adapter lowers to: `__gos_par_run(len, mode, leaf)`.
 pub const PAR_RUN: &str = "__gos_par_run";
 
+/// The runtime entry `par_chunks_mut` lowers to:
+/// `__gos_par_chunks(window, size, f)`.
+const PAR_CHUNKS: &str = "__gos_par_chunks";
+
 /// Mode code for an elementwise adapter, whose leaf width may follow the pool.
 const MODE_ELEMENTWISE: i64 = 0;
 /// Mode code for a reduction, whose leaves are fixed-width.
@@ -252,6 +256,9 @@ impl Desugarer<'_> {
         else {
             return None;
         };
+        if let ("par_chunks_mut", [size, f]) = (name.name.as_str(), args.as_slice()) {
+            return self.chunks_call(receiver, size, f, expr.span);
+        }
         let adapter = match (name.name.as_str(), args.as_slice()) {
             ("par_map", [f]) => Adapter::Map(f.clone()),
             ("par_filter", [f]) => Adapter::Filter(f.clone()),
@@ -299,6 +306,75 @@ impl Desugarer<'_> {
             }
             _ => None,
         }
+    }
+
+    /// `seq.par_chunks_mut(size, f)` is `__gos_par_chunks(&mut seq[..], size,
+    /// f)`: the runtime hands each chunk of the window to `f` with its index.
+    /// A receiver that is already a window is passed as it is.
+    fn chunks_call(
+        &mut self,
+        receiver: &HirExpr,
+        size: &HirExpr,
+        f: &HirExpr,
+        span: Span,
+    ) -> Option<HirExpr> {
+        let elem = self.source_elem_ty(receiver.ty)?;
+        let slice = self.tcx.intern(TyKind::Slice(elem));
+        let window_ty = self.tcx.intern(TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner: slice,
+        });
+        let window = if matches!(
+            receiver.kind,
+            HirExprKind::Unary {
+                op: crate::tree::HirUnaryOp::RefMut,
+                ..
+            }
+        ) {
+            receiver.clone()
+        } else {
+            let i64_ty = self.tcx.int_ty(IntTy::I64);
+            let range_ty = self.tcx.iterator_ty(i64_ty);
+            let whole = self.expr(
+                range_ty,
+                span,
+                HirExprKind::Range {
+                    start: None,
+                    end: None,
+                    inclusive: false,
+                },
+            );
+            let range_index = self.expr(
+                receiver.ty,
+                span,
+                HirExprKind::Index {
+                    base: Box::new(receiver.clone()),
+                    index: Box::new(whole),
+                },
+            );
+            self.expr(
+                window_ty,
+                span,
+                HirExprKind::Unary {
+                    op: crate::tree::HirUnaryOp::RefMut,
+                    operand: Box::new(range_index),
+                },
+            )
+        };
+        let unit = self.tcx.unit();
+        let callee_ty = self.tcx.intern(TyKind::FnPtr(FnSig {
+            inputs: vec![window_ty, size.ty, f.ty],
+            output: unit,
+        }));
+        let callee = self.path(PAR_CHUNKS, callee_ty, span);
+        Some(self.expr(
+            unit,
+            span,
+            HirExprKind::Call {
+                callee: Box::new(callee),
+                args: vec![window, size.clone(), f.clone()],
+            },
+        ))
     }
 
     // ----- construction -----

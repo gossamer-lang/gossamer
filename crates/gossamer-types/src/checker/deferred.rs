@@ -1287,6 +1287,7 @@ impl TypeChecker<'_> {
             None => self.check_call_args(callee, callee_ty, args, arg_expectations.as_deref()),
         };
         self.check_mutating_qualified_call(callee, args);
+        self.check_by_value_argument_aliases(args);
         self.record_qualified_method_const_generic_args(callee, &arg_tys);
         self.check_exponent_placeholder(callee, args);
         self.check_call_inner(callee, args, callee_ty, &arg_tys, expected)

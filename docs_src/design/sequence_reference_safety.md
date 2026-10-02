@@ -19,7 +19,10 @@ reasoning.
 `#[a, b]` creates a Vec, and `[a, b]` creates a fixed `[T; N]` array whose
 length is part of its type.
 `.slice(start, end)` is a checked copy and returns `Result<Vec<T>,
-errors::Error>`; it is not a borrowed sub-slice.
+errors::Error>`; it is not a borrowed sub-slice. The borrowed sub-slice is the
+mutable window `&mut xs[lo..hi]`: a `&mut [T]` over those elements of `xs`
+that borrows `xs`'s root exclusively for its lexical scope, exactly as
+`&mut xs` does. A mutating method on `xs[lo..hi]` acts on that window.
 
 Owned Vec assignment and by-value calls produce independent writable storage.
 Nested Vec elements are cloned recursively. Named Vec values sent to a
@@ -110,7 +113,12 @@ load and mutation to participate. Runtime borrow flags alone were also
 rejected because uninstrumented inline backend accesses could bypass them.
 
 The current restriction model is smaller and enforceable with the existing
-ABI. It intentionally omits escaping and borrowed sub-slices.
+ABI. It intentionally omits escaping sub-slices. The mutable window
+`&mut xs[lo..hi]` is a pointer-and-length header, and it is sound for the
+reason a general one is not: it is a `&mut` borrow of `xs`'s root, so nothing
+else reads, writes, grows, or frees that root while the window lives, and
+GT0052 keeps it from outliving its lexical scope. The window owns its header
+alone; the elements stay the sequence's.
 
 ## Remaining proof boundary
 

@@ -29,6 +29,9 @@ impl<'tcx> FnBuilder<'tcx> {
         if let Some(reg) = self.try_compile_mut_self_method(receiver, name, args)? {
             return Ok(reg);
         }
+        if let Some(reg) = self.try_compile_window_method(receiver, name, args, owner)? {
+            return Ok(reg);
+        }
         // `xs.join(sep)` renders each element the way `{}` does, so an
         // element type that supplies its own rendering answers through that
         // method rather than the synthesized shape.
@@ -1139,5 +1142,61 @@ impl<'tcx> FnBuilder<'tcx> {
             self.compile_place_store(arg_place, taken)?;
         }
         Ok(Some(dst))
+    }
+}
+
+impl FnBuilder<'_> {
+    /// A mutating method on a window receiver `(&mut base[lo..hi]).m(..)`.
+    /// The window's elements are bound to a hidden local, the method runs
+    /// against that local through the ordinary local write-back, and the
+    /// result is spliced into the range the base and bounds named when the
+    /// call began.
+    fn try_compile_window_method(
+        &mut self,
+        receiver: &HirExpr,
+        name: &Ident,
+        args: &[HirExpr],
+        owner: Option<&Ident>,
+    ) -> RuntimeResult<Option<Reg>> {
+        let HirExprKind::Unary {
+            op: HirUnaryOp::RefMut,
+            operand,
+        } = &receiver.kind
+        else {
+            return Ok(None);
+        };
+        if !Self::is_mutating_method_name(name.name.as_str()) {
+            return Ok(None);
+        }
+        let window_ty = match self.tcx.kind(receiver.ty) {
+            Some(TyKind::Ref { inner, .. }) => *inner,
+            _ => return Ok(None),
+        };
+        let Some((base, range, window)) = self.compile_window_parts(operand)? else {
+            return Ok(None);
+        };
+        let local_name = format!("__window_{}", receiver.id.0);
+        self.push_scope();
+        self.bind_local(
+            &local_name,
+            TypedReg {
+                reg: window,
+                kind: RegKind::Value,
+            },
+        );
+        let local = HirExpr {
+            id: receiver.id,
+            span: receiver.span,
+            ty: window_ty,
+            kind: HirExprKind::Path {
+                segments: vec![Ident::new(local_name)],
+                def: None,
+            },
+        };
+        let result = self.compile_method_call(&local, name, args, owner);
+        self.pop_scope();
+        let result = result?;
+        self.splice_window(&base, &range, window)?;
+        Ok(Some(result))
     }
 }

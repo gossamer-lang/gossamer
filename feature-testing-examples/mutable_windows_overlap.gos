@@ -1,0 +1,19 @@
+// Two windows of one sequence passed to one call are checked disjoint before
+// the call runs; overlapping ones panic with the same report on every tier.
+
+fn swap_halves(a: &mut [i64], b: &mut [i64]) {
+    for i in 0..a.len() {
+        let t = a[i]
+        a[i] = b[i]
+        b[i] = t
+    }
+}
+
+fn main() {
+    let mut xs = #[1, 2, 3, 4]
+    swap_halves(&mut xs[..2], &mut xs[2..])
+    println(f"disjoint {xs}")
+    let lo = 1
+    swap_halves(&mut xs[0..2], &mut xs[lo..3])
+    println("not reached")
+}

@@ -485,6 +485,110 @@ unsafe fn par_run(env: *const u8, len: i64, mode: i64) -> *mut GosVec {
     }
 }
 
+/// A `par_chunks_mut` callback: the chunk's index and a window over it.
+type ChunkFn = unsafe extern "C-unwind" fn(env: *const u8, index: i64, chunk: *mut GosVec);
+
+/// A chunk's window, released however its callback leaves.
+struct ChunkWindow(*mut GosVec);
+
+impl Drop for ChunkWindow {
+    fn drop(&mut self) {
+        // SAFETY: the window `gos_rt_vec_window` made for this chunk, released once here.
+        unsafe { super::map::gos_rt_vec_free(self.0) };
+    }
+}
+
+/// `seq.par_chunks_mut(size, f)`: hands each `size`-element chunk of `seq`,
+/// the last possibly shorter, to the callback in `env` as a window with its
+/// index, on the pool's workers. The chunks are disjoint, so the workers'
+/// writes never meet. The lowest-indexed chunk's fault is the one raised.
+///
+/// # Safety
+///
+/// `env` must be a live closure environment whose first word is a callback of
+/// the [`ChunkFn`] shape, and `seq` a live `Vec` nothing else reaches while
+/// the call runs.
+#[unsafe(no_mangle)]
+pub unsafe extern "C-unwind" fn gos_rt_par_chunks(env: *const u8, seq: *mut GosVec, size: i64) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        // SAFETY: as this shim's contract states.
+        unsafe { par_chunks(env, seq, size) }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // SAFETY: as this shim's contract states.
+        ffi_entry_passthrough!((), { unsafe { par_chunks(env, seq, size) } });
+    }
+}
+
+/// Runs the chunk callback in `env` over `seq` in chunks of `size`.
+///
+/// # Safety
+/// As [`gos_rt_par_chunks`].
+unsafe fn par_chunks(env: *const u8, seq: *mut GosVec, size: i64) {
+    if size <= 0 {
+        super::panic::panic_text(&format!(
+            "par_chunks_mut: chunk size must be positive, got {size}"
+        ));
+    }
+    if env.is_null() || seq.is_null() {
+        return;
+    }
+    // SAFETY: `seq` is live for the call (contract).
+    let len = unsafe { (*seq).len };
+    let count = len.div_euclid(size) + i64::from(len.rem_euclid(size) != 0);
+    if count == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees `env`'s first word is the callback.
+    let code = unsafe { (env as *const usize).read() };
+    // SAFETY: as above, the word is a callback of the `ChunkFn` shape.
+    let chunk_fn: ChunkFn =
+        unsafe { std::mem::transmute::<*const (), ChunkFn>(crate::c_abi::code_address(code)) };
+    let (env_addr, seq_addr) = (env as usize, seq as usize);
+    let run_chunks = move |lo: i64, hi: i64| {
+        for index in lo..hi {
+            let start = index * size;
+            // SAFETY: `seq` is live for the call, and `start..start + size`
+            // clamps to it.
+            let window = ChunkWindow(unsafe {
+                super::vec::gos_rt_vec_window(seq_addr as *mut GosVec, start, start + size)
+            });
+            // SAFETY: the callback and environment the caller handed over, and
+            // a live window over this chunk alone.
+            unsafe { chunk_fn(env_addr as *const u8, index, window.0) };
+        }
+    };
+    let workers = compiled_workers();
+    let leaves = Leaves::new(count, Mode::Elementwise, workers);
+    if leaves.count() == 1 {
+        run_chunks(0, count);
+        return;
+    }
+    let helpers = leaves.helpers(workers);
+    if helpers > 0 {
+        // Workers adjust counts reachable from the captures and from the
+        // elements they overwrite, which other chunks may share.
+        // SAFETY: a closure environment is an RC allocation, and `seq` a live `Vec`.
+        unsafe {
+            super::rc::gos_rt_rc_mark_shared(env.cast_mut());
+            super::vec::gos_rt_vec_mark_shared(seq);
+        }
+    }
+    let job = Job::<(), DeferredFault>::new(leaves);
+    let run_leaf = move |lo: i64, hi: i64| run_deferred(|| run_chunks(lo, hi));
+    for _ in 0..helpers {
+        let job = Arc::clone(&job);
+        if crate::sched_global::try_spawn(Box::new(move || job.help(run_leaf))).is_some() {
+            note_submitted(1);
+        }
+    }
+    if let Err((fault, _)) = job.run(run_leaf) {
+        super::panic::reraise_deferred_fault(&fault)
+    }
+}
+
 /// Moves every element of `parts` into the first non-empty one, in order,
 /// and answers it. Each part is uniquely owned, so its elements move with
 /// their shares and the emptied part is reclaimed without touching them. A

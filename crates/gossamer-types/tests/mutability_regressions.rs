@@ -20,6 +20,8 @@ enum ExpectedError {
     ReferenceEscape,
     BorrowedPlaceConflict,
     ConcurrentInlineAggregate,
+    RangeBorrow,
+    SequenceResize,
 }
 
 impl ExpectedError {
@@ -47,6 +49,10 @@ impl ExpectedError {
             Self::ConcurrentInlineAggregate => {
                 matches!(error, TypeError::ConcurrentAggregateUnsupported { .. })
             }
+            Self::RangeBorrow => matches!(error, TypeError::RangeBorrow { .. }),
+            Self::SequenceResize => {
+                matches!(error, TypeError::SequenceResizeRequiresVec { .. })
+            }
         }
     }
 
@@ -60,6 +66,8 @@ impl ExpectedError {
             Self::ReferenceEscape => "GT0052",
             Self::BorrowedPlaceConflict => "GT0053",
             Self::ConcurrentInlineAggregate => "GT0055",
+            Self::RangeBorrow => "GT0075",
+            Self::SequenceResize => "GT0050",
         }
     }
 }
@@ -253,6 +261,118 @@ fn mutable_call_arguments_reject_obvious_overlapping_aliases() {
     for (name, source) in cases {
         assert_rejected(name, source, ExpectedError::MutableReferenceConflict);
     }
+}
+
+#[test]
+fn mutable_call_arguments_reject_aliases_through_captures_and_values() {
+    let cases = [
+        (
+            "closure argument captures the mutable root",
+            "fn poke(xs: &mut [i64], peek: Fn() -> i64) -> i64 { xs[0] = 1\n peek() }\nfn main() { let mut xs = #[0]\n let _ = poke(&mut xs, || xs[0]) }",
+        ),
+        (
+            "let-bound closure captures the mutable root",
+            "fn run(xs: &mut Vec<i64>, f: Fn()) { xs[0] = 1\n f() }\nfn main() { let mut xs = #[0]\n let grow = || xs.push(2)\n run(&mut xs, grow) }",
+        ),
+        (
+            "by-value container argument reads the mutable root",
+            "fn both(xs: &mut Vec<i64>, ys: Vec<i64>) -> i64 { xs[0] = 1\n ys[0] }\nfn main() { let mut xs = #[0]\n let _ = both(&mut xs, xs) }",
+        ),
+        (
+            "window argument with a closure over its root",
+            "fn poke(xs: &mut [i64], peek: Fn() -> i64) -> i64 { xs[0] = 1\n peek() }\nfn main() { let mut xs = #[0, 0]\n let _ = poke(&mut xs[0..1], || xs[1]) }",
+        ),
+        (
+            "window receiver with a comparator over its root",
+            "fn main() { let mut xs = #[3, 1, 2]\n xs[0..2].sort_by(|a, b| a - b + xs[2]) }",
+        ),
+    ];
+    for (name, source) in cases {
+        assert_rejected(name, source, ExpectedError::MutableReferenceConflict);
+    }
+
+    assert_accepted(
+        "scalar and string reads beside a mutable argument",
+        "fn set(xs: &mut Vec<i64>, n: i64) { xs[0] = n }\nfn label(s: &mut String, t: String) { *s = t }\nfn main() { let mut xs = #[0]\n set(&mut xs, xs.len())\n let mut s = \"a\"\n label(&mut s, s) }",
+    );
+    assert_accepted(
+        "a closure that shadows the root does not capture it",
+        "fn poke(xs: &mut [i64], f: Fn(i64) -> i64) { xs[0] = f(1) }\nfn main() { let mut xs = #[0]\n poke(&mut xs, |xs| xs + 1) }",
+    );
+}
+
+#[test]
+fn mutable_windows_borrow_part_of_a_sequence() {
+    assert_accepted(
+        "window arguments, nested windows, receivers, and named windows",
+        "fn fill(xs: &mut [i64], v: i64) { for i in 0..xs.len() { xs[i] = v } }\n\
+         fn inner(xs: &mut [i64]) { fill(&mut xs[1..], 0) }\n\
+         fn main() { let mut v = #[1, 2, 3, 4]\n let mut a = [1, 2, 3]\n\
+         fill(&mut v[1..3], 9)\n fill(&mut a[..2], 8)\n inner(&mut v)\n\
+         v[0..3].sort()\n v[1..].reverse()\n\
+         if true { let w = &mut v[0..2]\n w[0] = 5 }\n println(\"{} {}\", v, a) }",
+    );
+    assert_rejected(
+        "shared borrow of a range",
+        "fn main() { let v = #[1, 2]\n let view = &v[0..1]\n println(\"{}\", view) }",
+        ExpectedError::RangeBorrow,
+    );
+    assert_rejected(
+        "mutable borrow of a string range",
+        "fn edit(s: &mut String) { *s = \"x\" }\nfn main() { let mut s = \"abc\"\n edit(&mut s[0..1]) }",
+        ExpectedError::RangeBorrow,
+    );
+    assert_rejected(
+        "resizing a window receiver",
+        "fn main() { let mut v = #[1, 2, 3]\n v[0..2].push(4) }",
+        ExpectedError::SequenceResize,
+    );
+    assert_rejected(
+        "named window blocks reads of its root",
+        "fn main() { let mut v = #[1, 2, 3]\n let w = &mut v[0..2]\n println(\"{}\", v[2])\n w[0] = 9 }",
+        ExpectedError::BorrowedPlaceConflict,
+    );
+    assert_rejected(
+        "window of an immutable binding",
+        "fn fill(xs: &mut [i64]) { xs[0] = 1 }\nfn main() { let v = #[1, 2]\n fill(&mut v[0..1]) }",
+        ExpectedError::MutableReferenceToImmutable,
+    );
+}
+
+#[test]
+fn windows_of_one_place_share_a_call_and_chunks_write_in_parallel() {
+    assert_accepted(
+        "two windows of one place in one call, and parallel chunks",
+        "fn merge(a: &mut [i64], b: &mut [i64]) { a[0] = b[0] }\n\
+         fn row(i: i64, px: &mut [i64]) { px[0] = i }\n\
+         fn main() { let mut v = #[1, 2, 3, 4]\n let mid = 2\n\
+         merge(&mut v[..mid], &mut v[mid..])\n\
+         v.par_chunks_mut(2, row)\n\
+         v.par_chunks_mut(2, |i, c| c.fill(i))\n println(\"{}\", v) }",
+    );
+    for (name, source) in [
+        (
+            "windows of two different places under one root",
+            "struct G { a: Vec<i64>, b: Vec<i64> }\nfn merge(a: &mut [i64], b: &mut [i64]) {}\n\
+             fn main() { let mut g = G { a: #[1], b: #[2] }\n merge(&mut g.a[0..1], &mut g.b[0..1]) }",
+        ),
+        (
+            "a window beside the whole sequence",
+            "fn both(a: &mut [i64], b: &mut Vec<i64>) {}\n\
+             fn main() { let mut v = #[1, 2]\n both(&mut v[0..1], &mut v) }",
+        ),
+        (
+            "a chunk callback that captures the sequence",
+            "fn main() { let mut v = #[1, 2, 3, 4]\n v.par_chunks_mut(2, |i, c| c[0] = v[3]) }",
+        ),
+    ] {
+        assert_rejected(name, source, ExpectedError::MutableReferenceConflict);
+    }
+    assert_rejected(
+        "parallel chunks of an immutable binding",
+        "fn main() { let v = #[1, 2]\n v.par_chunks_mut(1, |i, c| c[0] = i) }",
+        ExpectedError::ImmutableBinding,
+    );
 }
 
 fn check(source: &str) -> Vec<TypeDiagnostic> {

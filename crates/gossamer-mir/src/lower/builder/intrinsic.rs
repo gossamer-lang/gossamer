@@ -935,6 +935,41 @@ impl<'a> Builder<'a> {
         Some(dest)
     }
 
+    /// `__gos_par_chunks(window, size, f)`: hands each `size`-element chunk
+    /// of the window to `f` with its index, on the pool.
+    pub(crate) fn try_lower_par_chunks(&mut self, args: &[HirExpr], span: Span) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let [window_arg, size_arg, callback_arg] = args else {
+            return None;
+        };
+        // The callback is handed a chunk's index and its window and answers
+        // nothing, whatever form the argument was written in.
+        let unit = self.tcx.unit();
+        let sig = gossamer_types::FnSig {
+            inputs: vec![self.tcx.int_ty(gossamer_types::IntTy::I64), window_arg.ty],
+            output: unit,
+        };
+        let window_local = self.lower_expr(window_arg)?;
+        let size_local = self.lower_expr(size_arg)?;
+        let raw_callback = self.lower_expr(callback_arg)?;
+        let callback_ty = self.tcx.intern(TyKind::FnTrait(sig));
+        let callback_local = self.coerce_to_fn_trait_if_needed(raw_callback, callback_ty, span);
+        let dest = self.fresh(unit);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_par_chunks".to_string())),
+            args: vec![
+                Operand::Copy(Place::local(callback_local)),
+                Operand::Copy(Place::local(window_local)),
+                Operand::Copy(Place::local(size_local)),
+            ],
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        Some(dest)
+    }
+
     pub(crate) fn try_lower_array_swap(
         &mut self,
         receiver: &HirExpr,

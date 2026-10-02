@@ -2515,7 +2515,10 @@ reasoning.</p>
 <p><code>#[a, b]</code> creates a Vec, and <code>[a, b]</code> creates a fixed <code>[T; N]</code> array whose
 length is part of its type.
 <code>.slice(start, end)</code> is a checked copy and returns <code>Result&lt;Vec&lt;T&gt;,
-errors::Error&gt;</code>; it is not a borrowed sub-slice.</p>
+errors::Error&gt;</code>; it is not a borrowed sub-slice. The borrowed sub-slice is the
+mutable window <code>&amp;mut xs[lo..hi]</code>: a <code>&amp;mut [T]</code> over those elements of <code>xs</code>
+that borrows <code>xs</code>'s root exclusively for its lexical scope, exactly as
+<code>&amp;mut xs</code> does. A mutating method on <code>xs[lo..hi]</code> acts on that window.</p>
 <p>Owned Vec assignment and by-value calls produce independent writable storage.
 Nested Vec elements are cloned recursively. Named Vec values sent to a
 goroutine or channel are cloned before publication, and every reachable
@@ -2630,7 +2633,12 @@ possible, but it would require a new versioned ABI and every inline backend
 load and mutation to participate. Runtime borrow flags alone were also
 rejected because uninstrumented inline backend accesses could bypass them.</p>
 <p>The current restriction model is smaller and enforceable with the existing
-ABI. It intentionally omits escaping and borrowed sub-slices.</p>
+ABI. It intentionally omits escaping sub-slices. The mutable window
+<code>&amp;mut xs[lo..hi]</code> is a pointer-and-length header, and it is sound for the
+reason a general one is not: it is a <code>&amp;mut</code> borrow of <code>xs</code>'s root, so nothing
+else reads, writes, grows, or frees that root while the window lives, and
+GT0052 keeps it from outliving its lexical scope. The window owns its header
+alone; the elements stay the sequence's.</p>
 <h2 id="remaining-proof-boundary">Remaining proof boundary<a class="headerlink" href="#remaining-proof-boundary" title="Permanent link">&para;</a></h2>
 <p>The rules above cover source-language references and the sequence operations
 that create them. They do not prove the safety of arbitrary foreign code, an

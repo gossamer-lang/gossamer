@@ -852,6 +852,13 @@ impl<'a> Builder<'a> {
             return Some(dest);
         }
         if matches!(op, HirUnaryOp::RefMut)
+            && let HirExprKind::Index { base, index } = &operand.kind
+            && matches!(index.kind, HirExprKind::Range { .. })
+            && let Some(window) = self.lower_mutable_window(base, index, span)
+        {
+            return Some(window);
+        }
+        if matches!(op, HirUnaryOp::RefMut)
             && let Some(place) = self.lower_place_expr(operand)
             && place.projection.is_empty()
             && matches!(
@@ -4021,6 +4028,201 @@ impl<'a> Builder<'a> {
         self.set_current(ok);
     }
 
+    /// `&mut base[lo..hi]`: a window header aliasing that range of `base`'s
+    /// elements, typed `[T]` and freed (header only) at the local's drop.
+    /// An array base is first viewed in place, through its own storage.
+    pub(crate) fn lower_mutable_window(
+        &mut self,
+        base: &HirExpr,
+        index: &HirExpr,
+        span: Span,
+    ) -> Option<Local> {
+        use gossamer_types::TyKind;
+        let HirExprKind::Range {
+            start,
+            end,
+            inclusive,
+        } = &index.kind
+        else {
+            return None;
+        };
+        let mut base_kind = base.ty;
+        while let TyKind::Ref { inner, .. } = self.tcx.kind_of(base_kind) {
+            base_kind = *inner;
+        }
+        let (elem, array_len) = match self.tcx.kind_of(base_kind).clone() {
+            TyKind::Vec(elem) | TyKind::Slice(elem) => (elem, None),
+            TyKind::Array { elem, len } => (elem, Some(len)),
+            _ => return None,
+        };
+        let base_local = match array_len {
+            Some(_) => self.array_storage_operand(base, span)?,
+            None => self.lower_expr(base)?,
+        };
+        let (lo, hi) = self.lower_range_bounds(
+            base_local,
+            base_kind,
+            start.as_deref(),
+            end.as_deref(),
+            *inclusive,
+            span,
+        )?;
+        let vec_local = match array_len {
+            Some(len) => self.coerce_borrow_array_to_vec(base_local, elem, len, span),
+            None => base_local,
+        };
+        let window_ty = self.tcx.intern(TyKind::Slice(elem));
+        let dest = self.fresh(window_ty);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_vec_window".to_string())),
+            args: vec![
+                Operand::Copy(Place::local(vec_local)),
+                Operand::Copy(Place::local(lo)),
+                Operand::Copy(Place::local(hi)),
+            ],
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        Some(dest)
+    }
+
+    /// `__gos_windows_disjoint(len, lo, hi, inclusive, lo, hi, inclusive)`:
+    /// panics when the two windows overlap.
+    pub(crate) fn lower_windows_disjoint(&mut self, args: &[HirExpr], span: Span) -> Option<Local> {
+        let mut operands = Vec::with_capacity(args.len());
+        for arg in args {
+            let local = self.lower_expr(arg)?;
+            operands.push(Operand::Copy(Place::local(local)));
+        }
+        let unit = self.tcx.unit();
+        let dest = self.fresh(unit);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_vec_windows_disjoint".to_string())),
+            args: operands,
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        Some(dest)
+    }
+
+    /// The array a window over `base` must alias: the local itself for a
+    /// bare array binding, or a reference to the projected storage, so the
+    /// window never lands on a copy of the slots.
+    fn array_storage_operand(&mut self, base: &HirExpr, span: Span) -> Option<Local> {
+        let place = self.lower_place_expr(base)?;
+        if place.projection.is_empty()
+            && !matches!(
+                self.tcx.kind_of(self.locals[place.local.0 as usize].ty),
+                gossamer_types::TyKind::Ref { .. }
+            )
+        {
+            return Some(place.local);
+        }
+        let ref_ty = self.tcx.intern(gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner: base.ty,
+        });
+        let dest = self.fresh(ref_ty);
+        self.emit_assign(
+            Place::local(dest),
+            Rvalue::Ref {
+                mutable: true,
+                place,
+            },
+            span,
+        );
+        Some(dest)
+    }
+
+    /// `[lo, hi)` locals for a range index over `base_local`, whose peeled
+    /// type is `base_kind`: an open start is `0`, an open end the length, and
+    /// an inclusive end is bumped by one.
+    pub(crate) fn lower_range_bounds(
+        &mut self,
+        base_local: Local,
+        base_kind: Ty,
+        start: Option<&HirExpr>,
+        end: Option<&HirExpr>,
+        inclusive: bool,
+        span: Span,
+    ) -> Option<(Local, Local)> {
+        use gossamer_types::TyKind;
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let base_is_string = matches!(self.tcx.kind_of(base_kind), TyKind::String);
+        let base_array = match self.tcx.kind_of(base_kind).clone() {
+            TyKind::Array { elem, len } => Some((elem, len)),
+            _ => None,
+        };
+        let lo_local = if let Some(s) = start {
+            self.lower_expr(s)?
+        } else {
+            let l = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(l),
+                Rvalue::Use(Operand::Const(ConstValue::Int(0))),
+                span,
+            );
+            l
+        };
+        let hi_local = if let Some(e) = end {
+            self.lower_expr(e)?
+        } else {
+            // `arr[lo..]` / `s[lo..]` - substitute `.len()` as
+            // the upper bound. Fixed arrays carry a static length;
+            // strings need their c-string helper; Vecs and slices use
+            // the len-prefixed sequence helper.
+            let l = self.fresh(i64_ty);
+            if let Some((_, len)) = base_array {
+                self.emit_assign(
+                    Place::local(l),
+                    Rvalue::Use(Operand::Const(ConstValue::Int(len.to_usize() as i128))),
+                    span,
+                );
+            } else {
+                let next = self.new_block(span);
+                let len_callee = if base_is_string {
+                    "gos_rt_str_len"
+                } else {
+                    "gos_rt_len"
+                };
+                self.terminate(Terminator::Call {
+                    callee: Operand::Const(ConstValue::Str(len_callee.to_string())),
+                    args: vec![Operand::Copy(Place::local(base_local))],
+                    destination: Place::local(l),
+                    target: Some(next),
+                });
+                self.set_current(next);
+            }
+            l
+        };
+        let hi_local = if inclusive {
+            let one = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(one),
+                Rvalue::Use(Operand::Const(ConstValue::Int(1))),
+                span,
+            );
+            let bumped = self.fresh(i64_ty);
+            self.emit_assign(
+                Place::local(bumped),
+                Rvalue::BinaryOp {
+                    op: BinOp::Add,
+                    lhs: Operand::Copy(Place::local(hi_local)),
+                    rhs: Operand::Copy(Place::local(one)),
+                },
+                span,
+            );
+            bumped
+        } else {
+            hi_local
+        };
+        Some((lo_local, hi_local))
+    }
+
     pub(crate) fn lower_index_access(
         &mut self,
         base: &HirExpr,
@@ -4063,7 +4265,6 @@ impl<'a> Builder<'a> {
             inclusive,
         } = &index.kind
         {
-            let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
             let mut base_local = self.lower_expr(base)?;
             let mut base_kind = self.locals[base_local.0 as usize].ty;
             while let TyKind::Ref { inner, .. } = self.tcx.kind_of(base_kind) {
@@ -4074,69 +4275,14 @@ impl<'a> Builder<'a> {
                 TyKind::Array { elem, len } => Some((elem, len)),
                 _ => None,
             };
-            let lo_local = if let Some(s) = start {
-                self.lower_expr(s)?
-            } else {
-                let l = self.fresh(i64_ty);
-                self.emit_assign(
-                    Place::local(l),
-                    Rvalue::Use(Operand::Const(ConstValue::Int(0))),
-                    span,
-                );
-                l
-            };
-            let hi_local = if let Some(e) = end {
-                self.lower_expr(e)?
-            } else {
-                // `arr[lo..]` / `s[lo..]` - substitute `.len()` as
-                // the upper bound. Fixed arrays carry a static length;
-                // strings need their c-string helper; Vecs and slices use
-                // the len-prefixed sequence helper.
-                let l = self.fresh(i64_ty);
-                if let Some((_, len)) = base_array {
-                    self.emit_assign(
-                        Place::local(l),
-                        Rvalue::Use(Operand::Const(ConstValue::Int(len.to_usize() as i128))),
-                        span,
-                    );
-                } else {
-                    let next = self.new_block(span);
-                    let len_callee = if base_is_string {
-                        "gos_rt_str_len"
-                    } else {
-                        "gos_rt_len"
-                    };
-                    self.terminate(Terminator::Call {
-                        callee: Operand::Const(ConstValue::Str(len_callee.to_string())),
-                        args: vec![Operand::Copy(Place::local(base_local))],
-                        destination: Place::local(l),
-                        target: Some(next),
-                    });
-                    self.set_current(next);
-                }
-                l
-            };
-            let hi_local = if *inclusive {
-                let one = self.fresh(i64_ty);
-                self.emit_assign(
-                    Place::local(one),
-                    Rvalue::Use(Operand::Const(ConstValue::Int(1))),
-                    span,
-                );
-                let bumped = self.fresh(i64_ty);
-                self.emit_assign(
-                    Place::local(bumped),
-                    Rvalue::BinaryOp {
-                        op: BinOp::Add,
-                        lhs: Operand::Copy(Place::local(hi_local)),
-                        rhs: Operand::Copy(Place::local(one)),
-                    },
-                    span,
-                );
-                bumped
-            } else {
-                hi_local
-            };
+            let (lo_local, hi_local) = self.lower_range_bounds(
+                base_local,
+                base_kind,
+                start.as_deref(),
+                end.as_deref(),
+                *inclusive,
+                span,
+            )?;
             if let Some((elem, len)) = base_array {
                 base_local = self.coerce_array_to_vec(base_local, elem, len, span);
             }

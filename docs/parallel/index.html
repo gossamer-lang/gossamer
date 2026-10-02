@@ -941,6 +941,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#writing-in-place-par_chunks_mut" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Writing in place: par_chunks_mut
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#which-callbacks-an-adapter-takes" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2369,6 +2380,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#writing-in-place-par_chunks_mut" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Writing in place: par_chunks_mut
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#which-callbacks-an-adapter-takes" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -2481,6 +2503,25 @@ adapter answers exactly what its sequential twin answers, in the same order.</p>
 </tr>
 </tbody>
 </table>
+<h2 id="writing-in-place-par_chunks_mut">Writing in place: <code>par_chunks_mut</code><a class="headerlink" href="#writing-in-place-par_chunks_mut" title="Permanent link">&para;</a></h2>
+<p><code>seq.par_chunks_mut(size, f)</code> cuts a writable sequence into <code>size</code>-element
+chunks, the last possibly shorter, and calls <code>f(index, chunk)</code> for each on
+the pool, where <code>chunk</code> is a <code>&amp;mut [T]</code> window over those elements of <code>seq</code>
+itself. Nothing is copied, and because the chunks are disjoint every worker
+writes its own part:</p>
+<!-- fragment -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">fn</span> <span class="nf">shade</span><span class="p">(</span><span class="n">row</span>: <span class="kt">i64</span><span class="p">,</span><span class="w"> </span><span class="n">px</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="kt">u8</span><span class="p">])</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">    </span><span class="k">for</span><span class="w"> </span><span class="n">i</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="mi">0</span><span class="o">..</span><span class="n">px</span><span class="p">.</span><span class="n">len</span><span class="p">()</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">px</span><span class="p">[</span><span class="n">i</span><span class="p">]</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="p">((</span><span class="n">row</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">i</span><span class="p">)</span><span class="w"> </span><span class="o">%</span><span class="w"> </span><span class="mi">256</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="kt">u8</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="p">}</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">img</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">#[0u8; width * height]</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="n">img</span><span class="p">.</span><span class="n">par_chunks_mut</span><span class="p">(</span><span class="n">width</span><span class="p">,</span><span class="w"> </span><span class="n">shade</span><span class="p">)</span><span class="w">       </span><span class="c1">// one row per call, on every core</span>
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="n">img</span><span class="p">[</span><span class="mi">0</span><span class="o">..</span><span class="n">width</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">8</span><span class="p">].</span><span class="n">par_chunks_mut</span><span class="p">(</span><span class="n">width</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">row</span><span class="p">,</span><span class="w"> </span><span class="n">px</span><span class="o">|</span><span class="w"> </span><span class="n">px</span><span class="p">.</span><span class="n">reverse</span><span class="p">())</span>
+</code></pre></div>
+<p><code>f</code> may write its chunk, through its <code>&amp;mut</code> parameter, and is otherwise held
+to the same purity rule as every other callback; it may not capture <code>seq</code>.
+The answer does not depend on the worker count, and when several chunks
+panic, the lowest-indexed one's panic is raised.</p>
 <p>The receiver is a <code>Vec&lt;T&gt;</code>, a fixed array <code>[T; N]</code>, a slice <code>[T]</code>, or an
 integer range. A range answers a <code>Vec</code> from <code>par_map</code>, where its sequential
 <code>map</code> answers a lazy iterator. The lazy <code>iter()</code> surface keeps its sequential
@@ -2496,8 +2537,8 @@ function</strong>. Either must be pure: it performs no I/O, reads no mutable glo
 starts no goroutine, writes nothing its caller can see, and calls only pure
 functions. Purity is decided over the whole call graph, so a callback that
 calls <code>mid</code>, which calls <code>log</code>, which prints, is refused with that path:</p>
-<div class="language-text highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>error[GT0090]: the callback passed to `par_map` is not pure
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>  this callback calls `mid`, which calls `log`, which prints (`println`)
+<div class="language-text highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>error[GT0090]: the callback passed to `par_map` is not pure
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>  this callback calls `mid`, which calls `log`, which prints (`println`)
 </code></pre></div>
 <p>Mutating locals is pure: a callback may build a <code>Vec</code>, loop, and push onto it,
 because that storage belongs to the call.</p>
@@ -2543,8 +2584,8 @@ associative: <code>combine(combine(a, b), c)</code> and <code>combine(a, combine
 agree. The compiler cannot check that, and does not pretend to.</p>
 <p><code>combine</code> does <strong>not</strong> need to be commutative. Leaves combine in index order,
 so string concatenation and matrix multiplication are correct:</p>
-<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kd">let</span><span class="w"> </span><span class="n">words</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">#[</span><span class="s">&quot;a&quot;</span><span class="cp">, </span><span class="s">&quot;b&quot;</span><span class="cp">, </span><span class="s">&quot;c&quot;</span><span class="cp">, </span><span class="s">&quot;d&quot;</span><span class="cp">, </span><span class="s">&quot;e&quot;</span><span class="cp">]</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">println</span><span class="p">(</span><span class="s">&quot;{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">words</span><span class="p">.</span><span class="n">par_reduce</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="o">|</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span><span class="p">))</span><span class="w">    </span><span class="c1">// abcde</span>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="kd">let</span><span class="w"> </span><span class="n">words</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">#[</span><span class="s">&quot;a&quot;</span><span class="cp">, </span><span class="s">&quot;b&quot;</span><span class="cp">, </span><span class="s">&quot;c&quot;</span><span class="cp">, </span><span class="s">&quot;d&quot;</span><span class="cp">, </span><span class="s">&quot;e&quot;</span><span class="cp">]</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="n">println</span><span class="p">(</span><span class="s">&quot;{}&quot;</span><span class="p">,</span><span class="w"> </span><span class="n">words</span><span class="p">.</span><span class="n">par_reduce</span><span class="p">(</span><span class="s">&quot;&quot;</span><span class="p">,</span><span class="w"> </span><span class="o">|</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="o">|</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span><span class="p">))</span><span class="w">    </span><span class="c1">// abcde</span>
 </code></pre></div>
 <p><code>identity</code> is used only when the input is empty; it is not folded into every
 leaf, so an identity that is not really one does not multiply.</p>

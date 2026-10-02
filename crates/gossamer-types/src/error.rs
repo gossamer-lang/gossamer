@@ -625,10 +625,10 @@ pub enum TypeError {
         /// Type the body's answer has, for the suggested `-> T`.
         found: String,
     },
-    /// A `&` / `&mut` applied to a range index. A window into part of a
-    /// sequence is not a value this release can produce, and the copy the
-    /// index would otherwise make is not the alias the borrow asks for.
-    #[error("`&{mutability}{base}[{range}]` would borrow a window into part of a sequence")]
+    /// A shared `&` applied to a range index, or `&mut` applied to a range
+    /// of a `String`. Only `&mut seq[a..b]` over a sequence is a window; any
+    /// other borrow of a range would reference the copy the index makes.
+    #[error("`&{mutability}{base}[{range}]` would borrow a copy of the range, not a window")]
     RangeBorrow {
         /// `mut ` for a mutable borrow, empty otherwise.
         mutability: &'static str,
@@ -1889,12 +1889,12 @@ impl TypeDiagnostic {
             TypeError::RangeBorrow { base, range, .. } => {
                 out = out
                     .with_note(
-                        "a sequence's elements live in its own buffer; a borrow of part of \
-                         one would have to alias that buffer, which no value shape carries yet",
+                        "a mutable window `&mut seq[a..b]` aliases part of a sequence; a \
+                         shared borrow or a string range would reference a fresh copy",
                     )
                     .with_help(format!(
-                        "read a copy with `{base}[{range}]` or `{base}.slice(..)`, or edit in \
-                         place with `copy_within` / `copy_from_slice` / an indexed write"
+                        "pass the copy `{base}[{range}]` to read it, or `&mut {base}[{range}]` \
+                         to a `&mut [T]` parameter to write through it"
                     ));
             }
             TypeError::UndeclaredReturnValue { name, found } => {

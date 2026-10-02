@@ -109,3 +109,28 @@ fn an_adapter_on_a_lazy_iterator_is_not_part_of_its_surface() {
         common::stderr(&out)
     );
 }
+
+#[test]
+fn a_chunk_callback_may_write_its_own_chunk() {
+    // The chunk is the window the worker was handed, so writing it is the
+    // callback's own business, whether a closure or a named function does it.
+    let out = common::gos_check_str(
+        "fn row(i: i64, px: &mut [i64]) { px[0] = i }\n\
+         fn main() { let mut xs = #[1, 2, 3, 4]\n xs.par_chunks_mut(2, row)\n \
+         xs.par_chunks_mut(2, |i, c| c.fill(i))\n println(\"{}\", xs) }",
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", common::stderr(&out));
+}
+
+#[test]
+fn a_chunk_callback_with_another_effect_reports_gt0090() {
+    let out = common::gos_check_str(
+        "fn noisy(i: i64, px: &mut [i64]) { println(\"{}\", i)\n px[0] = i }\n\
+         fn main() { let mut xs = #[1, 2]\n xs.par_chunks_mut(1, noisy) }",
+    );
+    assert!(
+        common::stderr(&out).contains("GT0090"),
+        "{}",
+        common::stderr(&out)
+    );
+}

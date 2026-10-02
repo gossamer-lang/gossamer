@@ -491,6 +491,7 @@ impl TypeChecker<'_> {
         self.bind_pattern(pattern, binding_ty);
         if let Some(init) = init {
             self.register_named_mutable_borrow(pattern, init);
+            self.record_closure_captures(pattern, init);
         }
     }
 

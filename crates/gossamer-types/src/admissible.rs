@@ -7,6 +7,8 @@
 //! through a binding is not decidable at the call site and is refused with the
 //! spelling that works. `par_min` and `par_max` run the element type's own
 //! `cmp` on every worker, so a user ordering obeys the same rule.
+//! `par_chunks_mut` hands each callback a disjoint chunk, so its callback may
+//! write through its own `&mut` parameters and is held to the rule otherwise.
 
 #![forbid(unsafe_code)]
 
@@ -159,7 +161,7 @@ fn is_adapter_call(expr: &Expr) -> bool {
         ExprKind::MethodCall { name, .. }
             if matches!(
                 name.name.as_str(),
-                "par_map" | "par_filter" | "par_reduce" | "par_min" | "par_max"
+                "par_map" | "par_filter" | "par_reduce" | "par_min" | "par_max" | "par_chunks_mut"
             )
     )
 }
@@ -205,6 +207,17 @@ impl Checker<'_> {
                     reason,
                     span: callback.span,
                 }),
+            // A chunk callback writes the chunk it is handed and nothing
+            // else, so writes through its own `&mut` parameters are its
+            // business; every other effect is refused as for the others.
+            ("par_chunks_mut", [_, callback]) => {
+                self.chunk_callback(callback)
+                    .map(|reason| AdmissibilityDiagnostic {
+                        method,
+                        reason,
+                        span: callback.span,
+                    })
+            }
             ("par_min" | "par_max", []) => {
                 let (TyKind::Adt { def, .. } | TyKind::Nominal { def, .. }) =
                     self.tcx.kind_of(elem)
@@ -237,6 +250,21 @@ impl Checker<'_> {
             | TyKind::Range(elem) => Some(*elem),
             _ => None,
         }
+    }
+
+    fn chunk_callback(&self, callback: &Expr) -> Option<Inadmissible> {
+        if let ExprKind::Path(_) = &callback.kind
+            && let Some(Resolution::Def {
+                def,
+                kind: DefKind::Fn,
+            }) = self.resolutions.get(callback.id)
+        {
+            return self
+                .facts
+                .impurity_beyond_params(def)
+                .map(Inadmissible::Impure);
+        }
+        self.callback(callback)
     }
 
     fn callback(&self, callback: &Expr) -> Option<Inadmissible> {

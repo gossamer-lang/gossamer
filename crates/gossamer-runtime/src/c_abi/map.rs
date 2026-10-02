@@ -3623,6 +3623,15 @@ pub unsafe extern "C" fn gos_rt_vec_free(v: *mut GosVec) {
         }
         std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
         crate::c_abi::ledger::vec_dec();
+        // A window owns its header alone: the elements, buffer, and owner
+        // metadata belong to the vec it aliases.
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the whole call.
+        if crate::c_abi::vec::vec_is_window(unsafe { &*v }) {
+            // SAFETY: a window header is the compact `Box<GosVec>` `gos_rt_vec_window` made,
+            // freed only here.
+            drop(unsafe { Box::from_raw(v) });
+            return;
+        }
         // Non-region headers are a single `Box<InlineVec>` (header + inline
         // element buffer). The header's `ptr` for an inline vec aliases this
         // same allocation's buffer, so the deep-free walk below reads through

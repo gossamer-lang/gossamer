@@ -531,8 +531,9 @@ mod comptime_gate_tests {
         // A `__gos_` leaf is the native half of a source-level wrapper, so it
         // needs the capability of the call it implements. These families
         // compute over values they are handed (rendering included), the zone database the `time`
-        // leaves read is compiled in, and a parallel adapter's leaf is a
-        // callback GT0090 has already proven pure.
+        // leaves read is compiled in, a parallel adapter's leaf is a
+        // callback GT0090 has already proven pure, and a window check compares
+        // the bounds it is handed.
         let pure_prefixes: &[&str] = &[
             "__gos_codegen",
             "__gos_debug_quote",
@@ -543,6 +544,7 @@ mod comptime_gate_tests {
             "__gos_strconv_",
             "__gos_tar_",
             "__gos_time_",
+            "__gos_windows_",
             "__gos_wrapping_",
             "__gos_x509_",
             "__gos_zip_",

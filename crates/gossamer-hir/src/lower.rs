@@ -85,7 +85,12 @@ pub fn lower_source_file(
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     // After the desugars above, so the arithmetic they generate rounds too.
     crate::f32_round::round_f32_values(&mut program, lowerer.tcx, &mut lowerer.ids);
-    crate::place_refs::inline_place_references(&mut program);
+    crate::disjoint_windows::guard_disjoint_windows(
+        &mut program,
+        &mut *lowerer.tcx,
+        &mut lowerer.ids,
+    );
+    crate::place_refs::inline_place_references(&mut program, &mut lowerer.ids);
     program
 }
 
@@ -1343,7 +1348,7 @@ impl Lowerer<'_> {
                     && let Some((symbol, elem)) =
                         self.element_comparator(receiver.id, USER_COMPARATOR_PREFIX)
                 {
-                    let lowered_receiver = self.lower_expr(receiver);
+                    let lowered_receiver = self.lower_method_receiver(receiver, by);
                     let name = format!("{USER_COMPARATOR_PREFIX}{symbol}");
                     let cmp = self.comparator_path(&name, elem, expr.span);
                     return HirExprKind::MethodCall {
@@ -1362,7 +1367,7 @@ impl Lowerer<'_> {
                 }
                 self.append_const_generic_args(expr.id, &mut args, expr.span);
                 HirExprKind::MethodCall {
-                    receiver: Box::new(self.lower_expr(receiver)),
+                    receiver: Box::new(self.lower_method_receiver(receiver, name.name.as_str())),
                     name: name.clone(),
                     args,
                     owner,
@@ -1650,7 +1655,7 @@ impl Lowerer<'_> {
                 self.append_const_generic_args(rhs.id, &mut new_args, rhs.span);
                 let owner = self.method_owner_of(rhs.id);
                 HirExprKind::MethodCall {
-                    receiver: Box::new(self.lower_expr(receiver)),
+                    receiver: Box::new(self.lower_method_receiver(receiver, name.name.as_str())),
                     name: name.clone(),
                     args: new_args,
                     owner,
@@ -2627,6 +2632,45 @@ impl Lowerer<'_> {
 
     /// One `let` of the entry desugars (`let [mut] name: ty = init`).
     /// Whether `ty` is a `Map` or `BTreeMap` once references are peeled.
+    /// Lowers a method receiver. A mutating method on `seq[a..b]` acts on the
+    /// window the range names, so the receiver becomes `&mut seq[a..b]`.
+    fn lower_method_receiver(&mut self, receiver: &AstExpr, method: &str) -> HirExpr {
+        let lowered = self.lower_expr(receiver);
+        if !gossamer_types::is_mutating_method_name(method) {
+            return lowered;
+        }
+        let AstExprKind::Index { base, index } = &receiver.kind else {
+            return lowered;
+        };
+        if !matches!(index.kind, AstExprKind::Range { .. }) {
+            return lowered;
+        }
+        let mut base_ty = self.ty_of(base.id);
+        while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(base_ty) {
+            base_ty = *inner;
+        }
+        let elem = match self.tcx.kind_of(base_ty) {
+            gossamer_types::TyKind::Vec(elem)
+            | gossamer_types::TyKind::Slice(elem)
+            | gossamer_types::TyKind::Array { elem, .. } => *elem,
+            _ => return lowered,
+        };
+        let slice = self.tcx.intern(gossamer_types::TyKind::Slice(elem));
+        let ty = self.tcx.intern(gossamer_types::TyKind::Ref {
+            mutability: gossamer_types::Mutbl::Mut,
+            inner: slice,
+        });
+        HirExpr {
+            id: self.fresh(),
+            span: receiver.span,
+            ty,
+            kind: HirExprKind::Unary {
+                op: HirUnaryOp::RefMut,
+                operand: Box::new(lowered),
+            },
+        }
+    }
+
     fn is_map_ty(&self, ty: gossamer_types::Ty) -> bool {
         let mut ty = ty;
         while let gossamer_types::TyKind::Ref { inner, .. } = self.tcx.kind_of(ty) {

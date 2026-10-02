@@ -2054,15 +2054,20 @@ impl Vm {
                     registers[dst as usize] = index_get_checked(b, i)?;
                 }
                 Op::IndexSet { base, index, value } => {
-                    let new_value = registers[value as usize].clone();
-                    let i = &registers[index as usize];
-                    let raw = super::index_value(i)?;
-                    crate::stdlib_builtins::iter::note_vec_element_replacement(
-                        &registers[base as usize],
-                        raw,
-                        &new_value,
-                    );
-                    index_set_value(&mut registers[base as usize], raw, new_value)?;
+                    if super::range_index_bounds(&registers[index as usize]).is_some() {
+                        let range = registers[index as usize].clone();
+                        let src = registers[value as usize].clone();
+                        super::index_range_set(&mut registers[base as usize], &range, &src)?;
+                    } else {
+                        let new_value = registers[value as usize].clone();
+                        let raw = super::index_value(&registers[index as usize])?;
+                        crate::stdlib_builtins::iter::note_vec_element_replacement(
+                            &registers[base as usize],
+                            raw,
+                            &new_value,
+                        );
+                        index_set_value(&mut registers[base as usize], raw, new_value)?;
+                    }
                 }
                 Op::FieldGet {
                     dst,

@@ -3115,7 +3115,7 @@ The literal spelling of each container is in
 </tr>
 <tr>
 <td><code>&amp;mut [T; N]</code>, <code>&amp;mut [T]</code></td>
-<td>Shared methods plus in-place <code>sort</code>, <code>sort_by</code>, <code>sort_by_key</code>, <code>reverse</code>, <code>swap</code>, and <code>fill</code></td>
+<td>Shared methods plus in-place <code>sort</code>, <code>sort_by</code>, <code>sort_by_key</code>, <code>reverse</code>, <code>swap</code>, and <code>fill</code>; the same methods on a range receiver (<code>xs[1..4].sort()</code>) act on that window of <code>xs</code></td>
 </tr>
 <tr>
 <td><code>Vec&lt;T&gt;</code>, <code>&amp;Vec&lt;T&gt;</code>, <code>&amp;mut Vec&lt;T&gt;</code></td>
@@ -3251,6 +3251,11 @@ The literal spelling of each container is in
 <td><code>v.par_sum()</code> / <code>v.par_min()</code> / <code>v.par_max()</code></td>
 <td><code>T</code> / <code>Option&lt;T&gt;</code> / <code>Option&lt;T&gt;</code></td>
 <td>Parallel twins of <code>sum</code> / <code>min</code> / <code>max</code>; a float sum answers the same bits at any worker count.</td>
+</tr>
+<tr>
+<td><code>v.par_chunks_mut(size, f)</code></td>
+<td><code>()</code></td>
+<td>Calls <code>f(index, chunk)</code> with each disjoint <code>size</code>-element chunk as a <code>&amp;mut [T]</code> window, on every core; <code>f</code> may write its chunk and nothing else. Also on arrays, <code>&amp;mut [T]</code>, and windows.</td>
 </tr>
 <tr>
 <td><code>v.max_by_key(f)</code> / <code>v.min_by_key(f)</code></td>

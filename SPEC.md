@@ -531,8 +531,9 @@ existing elements and use non-resizing mutable methods such as `swap`, `sort`,
 `sort_by`, `sort_by_key`, `reverse`, and `fill`.
 
 `.slice(start, end)` is a checked copying operation that returns
-`Result<Vec<T>, errors::Error>`. It is not a borrowed sub-slice. Gossamer does
-not currently expose an escaping sub-slice value. Sequence iteration yields
+`Result<Vec<T>, errors::Error>`. It is not a borrowed sub-slice; the borrowed
+form is the mutable window of §3.3b, which never escapes its lexical scope.
+Sequence iteration yields
 managed element values rather than element references; the iterator retains
 its source state and detects structural mutation.
 
@@ -561,6 +562,44 @@ range has exactly one - the part that overlaps. It is also the rule
 `substring`, `byte_at`, and `as_bytes` use, and snaps outward to codepoint
 boundaries so the result is always valid text. `s.len()` and `s[i]` count
 Unicode scalars, so do not mix the two spellings on non-ASCII text.
+
+### 3.3b Mutable windows
+
+`&mut xs[lo..hi]` over a `Vec`, a fixed array, or a slice is a **mutable
+window**: a `&mut [T]` naming those elements of `xs` itself rather than a
+copy. Writes through it land in `xs`; it cannot resize, so it takes no
+length- or capacity-changing method (GT0050). Its bounds clamp as a range
+read's do.
+
+```
+fn fill(xs: &mut [u8], v: u8) { for i in 0..xs.len() { xs[i] = v } }
+
+let mut px = #[0u8; 8]
+fill(&mut px[2..6], 255)   // px is #[0, 0, 255, 255, 255, 255, 0, 0]
+px[0..4].sort()            // a mutating method on a range acts on the window
+let row = &mut px[4..]     // a named window, exclusive for its scope
+row[0] = 7
+```
+
+- A window is a `&mut` borrow of its sequence's root: while it lives, the
+  root is not otherwise read or written (GT0043, GT0053). A call may not pass
+  a window beside a closure that captures its root or a by-value argument
+  reading storage under it.
+- One call may pass several windows of the same place - a binding reached
+  through fields and through indexes that are bindings or literals - as a
+  merge or a split does: `merge(&mut xs[..mid], &mut xs[mid..])`. Their
+  bounds are evaluated once, and the call panics before it runs when two of
+  them overlap.
+- A range passed where the callee only reads the sequence
+  (`total(xs[lo..hi])`) is the same window, read-only, rather than a copy.
+- A mutating method on `xs[lo..hi]` (`sort`, `sort_by`, `sort_by_key`,
+  `reverse`, `swap`, `fill`) acts on the window; any other method reads the
+  copy the range index makes.
+- A window of a window narrows the same storage.
+- A named window takes its bounds, and every index on the way to its
+  sequence, where it is named.
+- Only the mutable form is a window. `&xs[lo..hi]` and `&mut s[lo..hi]` on a
+  `String` would reference a copy, and are GT0075.
 
 ### 3.4 Pointers and references
 
@@ -2614,8 +2653,16 @@ combined in index order; `combine` must be associative and need not be
 commutative. A `combine` that is not associative answers a result that is the
 same on every run.
 
+**In-place chunks.** `seq.par_chunks_mut(size, f)` on a writable `Vec<T>`,
+`[T; N]`, `&mut [T]`, or window hands each `size`-element chunk of `seq`, the
+last possibly shorter, to `f(index, chunk)` as a `&mut [T]` window, on several
+workers at once, and answers `()`. The chunks are disjoint, so `f` may write
+its own chunk: writes through its `&mut` parameters are admitted, and every
+other effect is refused as for the other adapters. `f` may not capture `seq`
+(GT0043). A `size` that is not positive panics.
+
 **Failure.** When callbacks panic on several workers, the panic raised is the
-one at the lowest element index. An adapter owns no goroutine and publishes
+one at the lowest element index, or the lowest chunk index. An adapter owns no goroutine and publishes
 nothing: it is not a cohort child, has no handle, and has nothing to cancel.
 Work that performs effects belongs in a `cohort { }` with `spawn` (§8.6).
 
@@ -2899,8 +2946,9 @@ transformation when the chain doesn't return from the enclosing fn.
   are rejected with `GR0006`.
 - Parallel adapters on `Vec<T>`, `[T; N]`, `[T]`, and an integer range:
   `par_map(f) -> Vec<U>`, `par_filter(f) -> Vec<T>`,
-  `par_reduce(identity, combine) -> T`, `par_sum() -> T` over numbers, and
-  `par_min()` / `par_max() -> Option<T>`. The rules they obey are §8.8's.
+  `par_reduce(identity, combine) -> T`, `par_sum() -> T` over numbers,
+  `par_min()` / `par_max() -> Option<T>`, and, on a writable sequence,
+  `par_chunks_mut(size, f)`. The rules they obey are §8.8's.
 
 ### 10.8 `std::sync`
 

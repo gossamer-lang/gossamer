@@ -1379,12 +1379,12 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GT0075",
-        "A `&` or `&mut` applied to a range index. The index answers a fresh\n\
-            copy of that range, so borrowing it would hand out a reference to\n\
-            a temporary nothing owns; a window aliasing part of a sequence's\n\
-            buffer has no value shape yet. Read a copy through the bare index\n\
-            or `slice`, or edit in place with `copy_within`,\n\
-            `copy_from_slice`, or an indexed write.",
+        "A shared `&` applied to a range index, or `&mut` applied to a range\n\
+            of a `String`. `&mut seq[a..b]` over a Vec, array, or slice is a\n\
+            mutable window of type `&mut [T]`: writes through it land in the\n\
+            sequence. Any other borrow of a range would reference the fresh\n\
+            copy the index makes. Pass the copy `seq[a..b]` to read it, or\n\
+            `&mut seq[a..b]` to a `&mut [T]` parameter to write through it.",
     ),
     (
         "GT0076",
@@ -1515,7 +1515,8 @@ pub const REGISTRY: &[(&str, &str)] = &[
             writes a container it captured is rejected for a stronger reason: the\n\
             capture is by managed reference, so every worker would write the same\n\
             container. Collect the results instead and combine them afterwards, or\n\
-            use `cohort { }` with `spawn` for work that must perform effects.",
+            use `cohort { }` with `spawn` for work that must perform effects. A\n\
+            `par_chunks_mut` callback may also write the chunk it is handed.",
     ),
     (
         "GT0091",

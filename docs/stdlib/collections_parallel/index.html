@@ -2288,7 +2288,8 @@
 array, a slice, or an integer range. Each answers what its sequential twin
 answers, on every tier; the callback is a closure literal or a named function
 the compiler proves pure, and a reduction's answer does not depend on the
-worker count.</p>
+worker count. <code>par_chunks_mut(size, f)</code> writes a sequence in place, handing
+each disjoint chunk to <code>f</code> with its index.</p>
 <p>The full reference is <a href="../../parallel/">Parallel collection adapters</a>.</p>
 
 

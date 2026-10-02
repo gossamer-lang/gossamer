@@ -114,6 +114,7 @@ pub fn is_mutating_method_name(name: &str) -> bool {
             | "split_off"
             | "drain"
             | "shrink_to_fit"
+            | "par_chunks_mut"
     )
 }
 

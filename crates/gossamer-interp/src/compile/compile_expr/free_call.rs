@@ -379,6 +379,7 @@ impl<'tcx> FnBuilder<'tcx> {
         // temp and re-stores it through the place (`place_takes`).
         let mut cell_takes: Vec<(Reg, Reg)> = Vec::new();
         let mut place_takes: Vec<(&HirExpr, Reg)> = Vec::new();
+        let mut window_takes: Vec<WindowTake> = Vec::new();
         let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len());
         // Renderer calls need unsigned-64 arguments boxed as `Value::Uint` so
         // values above `i64::MAX` render as large positive decimals. This
@@ -401,7 +402,11 @@ impl<'tcx> FnBuilder<'tcx> {
                 .as_ref()
                 .and_then(|params| params.get(i))
                 .copied();
-            if let Some(home) = self.mut_ref_arg_home(arg, expected_ty) {
+            // A renderer or encoder reads its arguments and never writes one
+            // back, so a reference argument reaches it as the value it names,
+            // described like any other rendered value.
+            let reads_only = unsigned_leaves_call;
+            if !reads_only && let Some(home) = self.mut_ref_arg_home(arg, expected_ty) {
                 // `&mut <local Vec>`: move the local into the cell when no
                 // sibling argument reads it, giving the callee unique
                 // ownership so its first mutation grows in place instead of
@@ -424,7 +429,15 @@ impl<'tcx> FnBuilder<'tcx> {
                 }
                 cell_takes.push((home, cell));
                 arg_regs.push(cell);
-            } else if let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, expected_ty) {
+            } else if !reads_only
+                && let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, expected_ty)
+                && let Some(take) = self.compile_window_take(place)?
+            {
+                arg_regs.push(take.cell);
+                window_takes.push(take);
+            } else if !reads_only
+                && let Some(place) = Self::mut_ref_writeback_place(self.tcx, arg, expected_ty)
+            {
                 let place_reg = self.compile_expr(place)?;
                 let cell = self.alloc_reg();
                 // A bare-local place (`&mut s` for a `String` / scalar /
@@ -586,7 +599,89 @@ impl<'tcx> FnBuilder<'tcx> {
             self.emit(Op::CellTake { dst: tmp, cell });
             self.compile_place_store(place, tmp)?;
         }
+        for take in window_takes {
+            self.finish_window_take(take)?;
+        }
         Ok(dst)
+    }
+
+    /// Passes a mutable window `&mut base[lo..hi]` as a write-back cell
+    /// holding the range's elements. Each index on the way to the base, and
+    /// the range, is evaluated once, here; the write-back splices into the
+    /// range they named.
+    pub(super) fn compile_window_take(
+        &mut self,
+        place: &HirExpr,
+    ) -> RuntimeResult<Option<WindowTake>> {
+        let Some((base, range, window)) = self.compile_window_parts(place)? else {
+            return Ok(None);
+        };
+        let cell = self.alloc_reg();
+        self.emit(Op::CellNewMove {
+            dst: cell,
+            src: window,
+        });
+        Ok(Some(WindowTake { base, range, cell }))
+    }
+
+    /// Evaluates the indices and range of `base[lo..hi]` once into hidden
+    /// locals and reads the window's elements: `(base, range, window_reg)`,
+    /// with `base` and `range` rewritten to name those locals.
+    pub(super) fn compile_window_parts(
+        &mut self,
+        place: &HirExpr,
+    ) -> RuntimeResult<Option<(HirExpr, HirExpr, Reg)>> {
+        let HirExprKind::Index { base, index } = &place.kind else {
+            return Ok(None);
+        };
+        if !matches!(index.kind, HirExprKind::Range { .. }) || !Self::is_hoistable_place(base) {
+            return Ok(None);
+        }
+        let mut hidden = 0;
+        let base = self.hoist_place_indices(base, place.id.0, &mut hidden)?;
+        let range = self.bind_hidden_value(index, place.id.0, &mut hidden)?;
+        let base_reg = self.compile_expr(&base)?;
+        let range_reg = self.compile_expr(&range)?;
+        let window = self.alloc_reg();
+        self.emit(Op::IndexGet {
+            dst: window,
+            base: base_reg,
+            index: range_reg,
+        });
+        Ok(Some((base, range, window)))
+    }
+
+    /// Splices `elems` over `base[range]`, reading the base as it stands now
+    /// so windows spliced before this one are kept, and stores the base back
+    /// through its own place.
+    pub(super) fn splice_window(
+        &mut self,
+        base: &HirExpr,
+        range: &HirExpr,
+        elems: Reg,
+    ) -> RuntimeResult<()> {
+        let base_reg = self.compile_expr(base)?;
+        let range_reg = self.compile_expr(range)?;
+        self.emit(Op::IndexSet {
+            base: base_reg,
+            index: range_reg,
+            value: elems,
+        });
+        let base_is_home = Self::path_single_seg_name(base)
+            .and_then(|name| self.lookup_local(name))
+            .is_some_and(|home| home.kind == RegKind::Value && home.reg == base_reg);
+        if base_is_home {
+            return Ok(());
+        }
+        self.compile_place_store(base, base_reg)
+    }
+
+    /// Splices a window's final elements back into its base.
+    pub(super) fn finish_window_take(&mut self, take: WindowTake) -> RuntimeResult<()> {
+        let WindowTake { base, range, cell } = take;
+        let elems = self.alloc_reg();
+        self.emit(Op::CellTake { dst: elems, cell });
+        self.splice_window(&base, &range, elems)
     }
 
     /// Lowers common payload enum constructors directly. The generic call
@@ -1258,4 +1353,12 @@ impl<'tcx> FnBuilder<'tcx> {
         )
         .then_some(place)
     }
+}
+
+/// A mutable window argument in flight: the cell the callee writes, and the
+/// hoisted base and range its write-back splices into.
+pub(crate) struct WindowTake {
+    base: HirExpr,
+    range: HirExpr,
+    cell: Reg,
 }

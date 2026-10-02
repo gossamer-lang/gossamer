@@ -326,7 +326,8 @@ impl TypeChecker<'_> {
     }
 
     /// Types a parallel adapter call: `par_map`, `par_filter`, `par_reduce`,
-    /// `par_sum`, `par_min`, or `par_max` on a sequence or an integer range.
+    /// `par_sum`, `par_min`, or `par_max` on a sequence or an integer range,
+    /// or `par_chunks_mut` on a writable sequence.
     /// Each answers what its sequential twin answers, and a range answers a
     /// `Vec` where its lazy `map` would answer an iterator.
     pub(super) fn check_parallel_adapter(
@@ -338,7 +339,7 @@ impl TypeChecker<'_> {
     ) -> Option<Ty> {
         let arity = match method {
             "par_map" | "par_filter" => 1,
-            "par_reduce" => 2,
+            "par_reduce" | "par_chunks_mut" => 2,
             "par_sum" | "par_min" | "par_max" => 0,
             _ => return None,
         };
@@ -347,12 +348,8 @@ impl TypeChecker<'_> {
             resolved = self.infer.resolve(self.tcx, *inner);
         }
         let elem = match self.tcx.kind(resolved).cloned() {
-            Some(
-                TyKind::Vec(elem)
-                | TyKind::Slice(elem)
-                | TyKind::Array { elem, .. }
-                | TyKind::Range(elem),
-            ) => elem,
+            Some(TyKind::Range(elem)) if method != "par_chunks_mut" => elem,
+            Some(TyKind::Vec(elem) | TyKind::Slice(elem) | TyKind::Array { elem, .. }) => elem,
             Some(TyKind::Var(_)) => {
                 let elem = self.fresh();
                 let shaped = self.tcx.intern(TyKind::Vec(elem));
@@ -433,6 +430,20 @@ impl TypeChecker<'_> {
                 let kept = self.check_parallel_callback(&args[0], &[elem]);
                 self.unify(bool_ty, kept, args[0].span);
                 self.tcx.intern(TyKind::Vec(elem))
+            }
+            "par_chunks_mut" => {
+                let i64_ty = self.tcx.int_ty(IntTy::I64);
+                let size = self.check_expr_expecting(&args[0], Expectation::HasType(i64_ty));
+                self.unify(i64_ty, size, args[0].span);
+                let slice = self.tcx.intern(TyKind::Slice(elem));
+                let chunk = self.tcx.intern(TyKind::Ref {
+                    mutability: Mutbl::Mut,
+                    inner: slice,
+                });
+                let unit = self.tcx.unit();
+                let answered = self.check_parallel_callback(&args[1], &[i64_ty, chunk]);
+                self.unify(unit, answered, args[1].span);
+                unit
             }
             "par_reduce" => {
                 let init = self.check_expr_expecting(&args[0], Expectation::HasType(elem));
@@ -555,11 +566,23 @@ impl TypeChecker<'_> {
             .or_else(|| self.check_binary_heap_method(method, receiver_ty, args, receiver_span))
     }
 
+    pub(super) fn check_method_call(
+        &mut self,
+        site: MethodCallSite<'_>,
+        receiver: &Expr,
+        args: &[Expr],
+        expected: Expectation,
+    ) -> Ty {
+        let ty = self.check_method_call_inner(site, receiver, args, expected);
+        self.check_by_value_argument_aliases(args);
+        ty
+    }
+
     #[allow(
         clippy::too_many_lines,
         reason = "receiver dispatch is intentionally kept in source order"
     )]
-    pub(super) fn check_method_call(
+    fn check_method_call_inner(
         &mut self,
         site: MethodCallSite<'_>,
         receiver: &Expr,
@@ -576,6 +599,10 @@ impl TypeChecker<'_> {
         self.check_overlapping_mutable_call_args(args);
         let receiver_expected = self.method_receiver_expectation(method, receiver, expected);
         let receiver_ty = self.check_expr_expecting(receiver, receiver_expected);
+        let receiver_ty = self.window_receiver_ty(receiver, receiver_ty, method, args);
+        if method == "par_chunks_mut" {
+            self.check_chunk_receiver(receiver, receiver_ty, args);
+        }
         if let Some(ty) = self
             .check_simd_method(method, receiver_ty, args, call_span)
             .or_else(|| self.check_parallel_adapter(method, receiver_ty, args, receiver.span))
@@ -1970,6 +1997,54 @@ impl TypeChecker<'_> {
                 _ => false,
             },
             _ => false,
+        }
+    }
+
+    /// The receiver type a method on `seq[a..b]` sees. A mutating method acts
+    /// on the window `[T]` the range names, so the sequence itself changes and
+    /// a resizing method is rejected; any other method reads the copy.
+    pub(super) fn window_receiver_ty(
+        &mut self,
+        receiver: &Expr,
+        receiver_ty: Ty,
+        method: &str,
+        args: &[Expr],
+    ) -> Ty {
+        if !crate::is_mutating_method_name(method) {
+            return receiver_ty;
+        }
+        let Some(elem) = self.mutable_window_elem(receiver) else {
+            return receiver_ty;
+        };
+        if let Some(root) = Self::place_root_name(receiver) {
+            let roots = HashSet::from([root]);
+            for arg in args {
+                if let Some((root, borrower)) = self.closure_alias_of(arg, &roots) {
+                    self.emit(
+                        TypeError::MutableReferenceConflict { root, borrower },
+                        arg.span,
+                    );
+                }
+            }
+        }
+        self.tcx.intern(TyKind::Slice(elem))
+    }
+
+    /// `seq.par_chunks_mut(size, f)` writes `seq` from many workers at once:
+    /// the receiver must be writable, and no argument may reach it otherwise.
+    fn check_chunk_receiver(&mut self, receiver: &Expr, receiver_ty: Ty, args: &[Expr]) {
+        self.check_mutating_method_receiver(receiver, receiver_ty, "par_chunks_mut");
+        let Some(root) = Self::place_root_name(receiver) else {
+            return;
+        };
+        let roots = HashSet::from([root]);
+        for arg in args {
+            if let Some((root, borrower)) = self.closure_alias_of(arg, &roots) {
+                self.emit(
+                    TypeError::MutableReferenceConflict { root, borrower },
+                    arg.span,
+                );
+            }
         }
     }
 

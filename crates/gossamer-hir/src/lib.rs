@@ -10,6 +10,7 @@
 
 #![forbid(unsafe_code)]
 
+mod disjoint_windows;
 mod f32_round;
 mod fuse;
 mod ids;

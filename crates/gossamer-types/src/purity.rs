@@ -210,6 +210,14 @@ impl PurityFacts {
         self.unit_impurity(i)
     }
 
+    /// Why the function `def` is not pure apart from writes through its own
+    /// `&mut` parameters, which reach only what a caller hands it there.
+    #[must_use]
+    pub fn impurity_beyond_params(&self, def: DefId) -> Option<Impurity> {
+        let &i = self.by_def.get(&def)?;
+        self.units[i].reason.clone()
+    }
+
     /// Why the method `method` a user impl block declares for `ty` is not
     /// pure, or `None` when every such block's is, or none declares it.
     #[must_use]

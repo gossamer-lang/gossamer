@@ -441,6 +441,10 @@ pub(crate) fn insert_drops_at_returns(body: &mut Body, tcx: &gossamer_types::TyC
             // row lands in a Slice-typed local the type-based inference
             // below does not cover).
             "gos_rt_vec_clone" => Some("gos_rt_vec_free"),
+            // A mutable window is a header of its own over another vec's
+            // elements; the frame reclaims that header, and the runtime frees
+            // nothing it aliases.
+            "gos_rt_vec_window" => Some("gos_rt_vec_free"),
             // A binding taken from a container copies its storage, so the
             // copy is the frame's to reclaim exactly as a constructed one is.
             // A queue and a stack share the deque header, so they share its

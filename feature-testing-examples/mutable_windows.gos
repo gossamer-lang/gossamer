@@ -1,0 +1,210 @@
+// Mutable windows: `&mut seq[lo..hi]` is a `&mut [T]` aliasing part of a
+// Vec, fixed array, or slice, and a mutating method on `seq[lo..hi]` acts on
+// that part in place. A window or an element place can also be named for a
+// scope. Each helper runs in a loop so the JIT compiles it; the output must
+// agree byte-for-byte on every tier.
+
+struct Pixel {
+    r: i64
+    g: i64
+}
+
+struct Frame {
+    rows: [i64; 6]
+    tag: String
+}
+
+fn fill(xs: &mut [i64], v: i64) {
+    for i in 0..xs.len() {
+        xs[i] = v
+    }
+}
+
+fn fill_bytes(xs: &mut [u8], v: u8) {
+    for i in 0..xs.len() {
+        xs[i] = v
+    }
+}
+
+fn scale(xs: &mut [f64], k: f64) {
+    for i in 0..xs.len() {
+        xs[i] = xs[i] * k
+    }
+}
+
+fn shout(xs: &mut [String]) {
+    for i in 0..xs.len() {
+        xs[i] = xs[i] + "!"
+    }
+}
+
+fn redden(px: &mut [Pixel]) {
+    for i in 0..px.len() {
+        px[i] = Pixel { r: 255, g: px[i].g }
+    }
+}
+
+// A window of a window: the inner write lands in the outermost sequence.
+fn middle_to(xs: &mut [i64], v: i64) {
+    let n = xs.len()
+    fill(&mut xs[1..n - 1], v)
+}
+
+// A named window: indexes through `w` reach `xs`, including on the early
+// return.
+fn zero_first_negative(xs: &mut [i64]) -> i64 {
+    let w = &mut xs[1..]
+    for i in 0..w.len() {
+        if w[i] < 0 {
+            w[i] = 0
+            return i
+        }
+    }
+    -1
+}
+
+// The bounds and indexes of a named place are taken where it is named.
+fn named_places(round: i64) -> i64 {
+    let mut grid = #[#[1, 2, 3], #[4, 5, 6]]
+    let mut row = 1
+    let mut col = 0
+    if true {
+        let cell = &mut grid[row][col]
+        row = 0
+        col = 2
+        *cell += round
+    }
+    let mut lo = 0
+    if true {
+        let w = &mut grid[row][lo..lo + 2]
+        lo = 1
+        w.reverse()
+        fill(w, w[0] + 1)
+    }
+    checksum(grid[0]) + checksum(grid[1]) + row + col + lo
+}
+
+// Two windows of one sequence in one call, the shape a merge step takes.
+fn merge_pass(left: &mut [i64], right: &mut [i64]) {
+    for i in 0..left.len() {
+        if i < right.len() && left[i] > right[i] {
+            let t = left[i]
+            left[i] = right[i]
+            right[i] = t
+        }
+    }
+}
+
+// A read of a range the callee only reads is a window, not a copy.
+fn count_over(xs: [i64], limit: i64) -> i64 {
+    let mut n = 0
+    for x in xs {
+        if x > limit {
+            n += 1
+        }
+    }
+    n
+}
+
+fn checksum(xs: [i64]) -> i64 {
+    let mut total = 0
+    for x in xs {
+        total = total *% 31 +% x
+    }
+    total
+}
+
+fn vec_windows(round: i64) -> i64 {
+    let mut v = #[1, 2, 3, 4, 5, 6, 7, 8]
+    fill(&mut v[1..4], round)
+    fill(&mut v[6..], 9)
+    fill(&mut v[..1], 0)
+    fill(&mut v[4..=5], -1)
+    middle_to(&mut v[2..8], 7)
+    checksum(v)
+}
+
+fn clamped_windows() -> i64 {
+    let mut v = #[1, 2, 3]
+    let far = v.len() + 4
+    fill(&mut v[2..far], 5)
+    fill(&mut v[3..1], 6)
+    checksum(v)
+}
+
+fn array_windows(round: i64) -> i64 {
+    let mut a = [10, 20, 30, 40, 50]
+    fill(&mut a[1..3], round)
+    let mut f = Frame { rows: [1, 1, 1, 1, 1, 1], tag: "f" }
+    fill(&mut f.rows[2..5], round + 1)
+    checksum(a) + checksum(f.rows)
+}
+
+fn receiver_windows(round: i64) -> Vec<i64> {
+    let mut w = #[9, 3, 7, 1, 8, 2, 6, round]
+    w[1..5].sort()
+    w[5..].reverse()
+    w[0..2].swap(0, 1)
+    w[6..8].fill(0)
+    w[0..4].sort_by(|a, b| b - a)
+    w[4..8].sort_by_key(|x| -x)
+    w
+}
+
+fn main() {
+    let mut total = 0
+    for round in 0..50 {
+        total += vec_windows(round) % 1000
+        total += array_windows(round) % 1000
+        total += clamped_windows() % 1000
+        total += receiver_windows(round)[3]
+        total += named_places(round) % 1000
+        let mut ys = #[3, -1, 4, round - 25]
+        total += zero_first_negative(&mut ys) + ys[1] + ys[3]
+    }
+    println(f"total {total}")
+    println(f"receivers {receiver_windows(4)}")
+
+    let mut bytes = #[0u8; 8]
+    fill_bytes(&mut bytes[2..6], 255)
+    println(f"bytes {bytes}")
+
+    let mut fs = #[1.0, 2.0, 3.0, 4.0]
+    scale(&mut fs[1..3], 2.5)
+    println(f"floats {fs}")
+
+    let mut words = #["a", "b", "c", "d"]
+    shout(&mut words[1..3])
+    words[0..4].sort()
+    println(f"words {words}")
+
+    let mut px = #[Pixel { r: 1, g: 2 }, Pixel { r: 3, g: 4 }, Pixel { r: 5, g: 6 }]
+    redden(&mut px[1..])
+    for p in px {
+        println(f"pixel {p.r} {p.g}")
+    }
+
+    let mut grid = #[#[1, 2, 3], #[4, 5, 6]]
+    fill(&mut grid[1][0..2], 0)
+    println(f"grid {grid}")
+
+    let mut ms = #[9, 2, 7, 1, 5, 6]
+    let mid = 3
+    merge_pass(&mut ms[..mid], &mut ms[mid..])
+    println(f"merged halves {ms}")
+    let mut g = Frame { rows: [4, 3, 2, 1, 0, 0], tag: "g" }
+    merge_pass(&mut g.rows[0..2], &mut g.rows[2..=3])
+    println(f"merged field {g.rows} {g.tag}")
+    let mut reads = 0
+    for k in 0..40 {
+        reads += count_over(ms[k % 3..k % 3 + 3], 4)
+    }
+    println(f"read windows {reads}")
+
+    let mut seen = #[1, 2, 3]
+    if true {
+        let r = &mut seen
+        r[0] = 9
+        println(f"through a reference {r}")
+    }
+}

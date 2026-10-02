@@ -175,6 +175,34 @@ impl<'a> Builder<'a> {
         span: Span,
         owner: Option<&Ident>,
     ) -> Option<Local> {
+        // A mutating method on `&mut base[lo..hi]` acts on the window: the
+        // window is bound to a hidden local and the method lowers against a
+        // path to it, so every place-based in-place lowering reaches it.
+        if let HirExprKind::Unary {
+            op: HirUnaryOp::RefMut,
+            operand,
+        } = &receiver.kind
+            && let HirExprKind::Index { base, index } = &operand.kind
+            && matches!(index.kind, HirExprKind::Range { .. })
+            && gossamer_types::is_mutating_method_name(method.name.as_str())
+            && let Some(window) = self.lower_mutable_window(base, index, span)
+        {
+            let name = format!("__window_{}", receiver.id.0);
+            self.push_scope();
+            self.bind_local(&name, window);
+            let path = HirExpr {
+                id: receiver.id,
+                span: receiver.span,
+                ty: self.locals[window.0 as usize].ty,
+                kind: HirExprKind::Path {
+                    segments: vec![Ident::new(name)],
+                    def: None,
+                },
+            };
+            let result = self.lower_method_call(&path, method, args, ty, span, owner);
+            self.pop_scope();
+            return result;
+        }
         // A `&mut <scalar / String>` reference is the address of the
         // caller's slot, so a method on it dispatches on the value the slot
         // holds, exactly as `(*x).m()` does. The rebinding string methods

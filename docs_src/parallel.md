@@ -23,6 +23,30 @@ adapter answers exactly what its sequential twin answers, in the same order.
 | `xs.min()` | `xs.par_min()` | `Option<T>` |
 | `xs.max()` | `xs.par_max()` | `Option<T>` |
 
+## Writing in place: `par_chunks_mut`
+
+`seq.par_chunks_mut(size, f)` cuts a writable sequence into `size`-element
+chunks, the last possibly shorter, and calls `f(index, chunk)` for each on
+the pool, where `chunk` is a `&mut [T]` window over those elements of `seq`
+itself. Nothing is copied, and because the chunks are disjoint every worker
+writes its own part:
+
+<!-- fragment -->
+```gossamer
+fn shade(row: i64, px: &mut [u8]) {
+    for i in 0..px.len() { px[i] = ((row + i) % 256) as u8 }
+}
+
+let mut img = #[0u8; width * height]
+img.par_chunks_mut(width, shade)       // one row per call, on every core
+img[0..width * 8].par_chunks_mut(width, |row, px| px.reverse())
+```
+
+`f` may write its chunk, through its `&mut` parameter, and is otherwise held
+to the same purity rule as every other callback; it may not capture `seq`.
+The answer does not depend on the worker count, and when several chunks
+panic, the lowest-indexed one's panic is raised.
+
 The receiver is a `Vec<T>`, a fixed array `[T; N]`, a slice `[T]`, or an
 integer range. A range answers a `Vec` from `par_map`, where its sequential
 `map` answers a lazy iterator. The lazy `iter()` surface keeps its sequential

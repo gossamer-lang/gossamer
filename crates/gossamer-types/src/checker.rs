@@ -731,6 +731,10 @@ struct TypeChecker<'a> {
     /// advance through a reference yielded by pattern matching while still
     /// rejecting a rebind to storage declared in a shorter-lived scope.
     reference_origins: Vec<HashMap<Box<str>, Box<str>>>,
+    /// Outer names each `let`-bound closure mentions, keyed by the binding.
+    /// A call that hands such a closure beside a `&mut` argument aliases the
+    /// referent when the closure captures its root.
+    closure_captures: Vec<HashMap<Box<str>, HashSet<String>>>,
     /// Read checks paused for the current context.
     suppressed: SuppressedReadChecks,
     /// Owned local types that may only reveal a nested reference after
@@ -1211,6 +1215,7 @@ impl<'a> TypeChecker<'a> {
             mutable_borrows: vec![HashMap::new()],
             shared_borrows: vec![HashMap::new()],
             reference_origins: vec![HashMap::new()],
+            closure_captures: vec![HashMap::new()],
             suppressed: SuppressedReadChecks::default(),
             deferred_reference_storage: Vec::new(),
             struct_fields: checker_struct_fields,
@@ -2746,6 +2751,7 @@ impl<'a> TypeChecker<'a> {
         self.mutable_borrows.push(HashMap::new());
         self.shared_borrows.push(HashMap::new());
         self.reference_origins.push(HashMap::new());
+        self.closure_captures.push(HashMap::new());
     }
 
     fn pop_scope(&mut self) {
@@ -2755,6 +2761,7 @@ impl<'a> TypeChecker<'a> {
         self.mutable_borrows.pop();
         self.shared_borrows.pop();
         self.reference_origins.pop();
+        self.closure_captures.pop();
     }
 
     fn bind_local(&mut self, name: &str, ty: Ty) {
@@ -2907,6 +2914,33 @@ impl<'a> TypeChecker<'a> {
                 scope.insert(name.clone().into_boxed_str(), name.into_boxed_str());
             }
         }
+    }
+
+    fn record_closure_captures(&mut self, pattern: &Pattern, init: &Expr) {
+        let PatternKind::Ident { name, .. } = &pattern.kind else {
+            return;
+        };
+        let Some(scope) = self.closure_captures.last_mut() else {
+            return;
+        };
+        match &init.kind {
+            ExprKind::Closure { params, body, .. } => {
+                let names = closure_outer_names(params, body);
+                scope.insert(name.name.clone().into_boxed_str(), names);
+            }
+            _ => {
+                scope.remove(name.name.as_str());
+            }
+        }
+    }
+
+    /// Outer names the closure bound to local `name` mentions, when `name`
+    /// was bound from a closure literal.
+    fn closure_binding_captures(&self, name: &str) -> Option<&HashSet<String>> {
+        self.closure_captures
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name))
     }
 
     fn is_stable_shared_reference_alias(&mut self, expr: &Expr) -> bool {
@@ -4155,6 +4189,35 @@ fn closure_bound_names(params: &[ClosureParam]) -> HashSet<String> {
         out.extend(names);
     }
     out
+}
+
+/// Single-segment names a closure body mentions that its parameters do not
+/// bind: the outer bindings it may capture.
+fn closure_outer_names(params: &[ClosureParam], body: &Expr) -> HashSet<String> {
+    struct Collector<'a> {
+        bound: &'a HashSet<String>,
+        names: HashSet<String>,
+    }
+
+    impl gossamer_ast::visitor::Visitor for Collector<'_> {
+        fn visit_expr(&mut self, expr: &Expr) {
+            if let ExprKind::Path(path) = &expr.kind
+                && let [segment] = path.segments.as_slice()
+                && !self.bound.contains(&segment.name.name)
+            {
+                self.names.insert(segment.name.name.clone());
+            }
+            gossamer_ast::visitor::walk_expr(self, expr);
+        }
+    }
+
+    let bound = closure_bound_names(params);
+    let mut collector = Collector {
+        bound: &bound,
+        names: HashSet::new(),
+    };
+    gossamer_ast::visitor::Visitor::visit_expr(&mut collector, body);
+    collector.names
 }
 
 fn expr_mentions_any_name(expr: &Expr, names: &HashSet<String>) -> bool {

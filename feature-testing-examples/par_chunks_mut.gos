@@ -1,0 +1,58 @@
+// `seq.par_chunks_mut(size, f)` hands each `size`-element chunk of `seq` to
+// `f` with its index as a window, on the pool's workers. The chunks are
+// disjoint, so the answer is the same on every tier and every worker count.
+
+fn shade(row: i64, px: &mut [u8]) {
+    for i in 0..px.len() {
+        px[i] = ((row * 16 + i) % 256) as u8
+    }
+}
+
+fn checksum(xs: [i64]) -> i64 {
+    let mut total = 0
+    for x in xs {
+        total = total *% 31 +% x
+    }
+    total
+}
+
+fn main() {
+    let w = 64
+    let mut img = #[0u8; w * 40]
+    img.par_chunks_mut(w, shade)
+    println(f"row 5 starts {img[w * 5]} {img[w * 5 + 3]}")
+
+    let mut big = #[0; 50000]
+    big.par_chunks_mut(997, |i, chunk| {
+        for k in 0..chunk.len() {
+            chunk[k] = i * 997 + k
+        }
+    })
+    let mut in_order = true
+    for k in 0..big.len() {
+        if big[k] != k {
+            in_order = false
+        }
+    }
+    println(f"filled in order {in_order} {checksum(big)}")
+
+    let mut words = #["a", "b", "c", "d", "e"]
+    words.par_chunks_mut(2, |i, chunk| {
+        for k in 0..chunk.len() {
+            chunk[k] = chunk[k] + f"{i}"
+        }
+    })
+    println(f"words {words}")
+
+    let mut xs = #[0; 12]
+    xs[2..10].par_chunks_mut(3, |i, chunk| chunk.fill(i + 1))
+    println(f"window {xs}")
+
+    let mut arr = [1, 2, 3, 4, 5, 6, 7]
+    arr.par_chunks_mut(4, |_, chunk| chunk.reverse())
+    println(f"array {arr}")
+
+    let mut empty: Vec<i64> = #[]
+    empty.par_chunks_mut(4, |_, chunk| chunk.fill(1))
+    println(f"empty {empty}")
+}

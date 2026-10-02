@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GT0075]: A `&` or `&mut` applied to a range index. The index answers a fresh - here
+error[GT0075]: A shared `&` applied to a range index, or `&mut` applied to a range - here
 --- framed ---
-error[GT0075]: A `&` or `&mut` applied to a range index. The index answers a fresh
+error[GT0075]: A shared `&` applied to a range index, or `&mut` applied to a range
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

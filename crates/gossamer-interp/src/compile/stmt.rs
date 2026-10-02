@@ -124,6 +124,11 @@ impl<'tcx> FnBuilder<'tcx> {
                     return Ok(false);
                 }
                 if let HirPatKind::Binding { name, .. } = &pattern.kind {
+                    if let Some(init) = init
+                        && self.bind_named_window(&name.name, init)?
+                    {
+                        return Ok(false);
+                    }
                     // A direct local reference shares the source
                     // register. Disable flat-array specialisation for that
                     // register: the generic projected-store path preserves
@@ -502,7 +507,11 @@ impl<'tcx> FnBuilder<'tcx> {
                             // still-bound `TyKind::Var` for arithmetic
                             // expressions that typeck couldn't
                             // substitute in-place.
-                            if self.flat_int_locals.contains(&target.reg) {
+                            // A range index splices a window back, which
+                            // only the generic `IndexSet` does.
+                            let index_is_range =
+                                matches!(self.tcx.kind(index.ty), Some(TyKind::Iterator(_)));
+                            if self.flat_int_locals.contains(&target.reg) && !index_is_range {
                                 let idx_tr = self.compile_expr_ex(index)?;
                                 let idx_i = self.as_i64(idx_tr);
                                 let value_tr = self.compile_expr_ex(value)?;
@@ -888,6 +897,13 @@ impl<'tcx> FnBuilder<'tcx> {
                 HirExprKind::TupleIndex { index, .. } => {
                     path.push(crate::bytecode::PlaceStep::Tuple(*index));
                 }
+                // A range index names a window, which the recursive store
+                // splices; a place step indexes one element.
+                HirExprKind::Index { index, .. }
+                    if matches!(self.tcx.kind(index.ty), Some(TyKind::Iterator(_))) =>
+                {
+                    return Ok(None);
+                }
                 HirExprKind::Index { index, .. } => {
                     let reg = self.compile_expr(index)?;
                     path.push(crate::bytecode::PlaceStep::Index(reg));
@@ -896,6 +912,164 @@ impl<'tcx> FnBuilder<'tcx> {
             }
         }
         Ok(Some((root.reg, path.into_boxed_slice())))
+    }
+
+    /// `let w = &mut base[lo..hi]`: binds `w` to a copy of the window and
+    /// splices it back into the range at every exit of the enclosing block.
+    /// The borrow keeps `base`'s root unreachable by any other name for that
+    /// whole scope, so the copy and the range are indistinguishable until the
+    /// write-back. Each index on the way to the range, and the range itself,
+    /// is evaluated once, here, so the write-back reaches the range the
+    /// borrow named.
+    fn bind_named_window(&mut self, name: &str, init: &HirExpr) -> RuntimeResult<bool> {
+        let HirExprKind::Unary {
+            op: HirUnaryOp::RefMut,
+            operand,
+        } = &init.kind
+        else {
+            return Ok(false);
+        };
+        let HirExprKind::Index { base, index } = &operand.kind else {
+            return Ok(false);
+        };
+        if !matches!(index.kind, HirExprKind::Range { .. }) || !Self::is_hoistable_place(base) {
+            return Ok(false);
+        }
+        let mut hidden = 0;
+        let base = self.hoist_place_indices(base, init.id.0, &mut hidden)?;
+        let range = self.bind_hidden_value(index, init.id.0, &mut hidden)?;
+        let base_reg = self.compile_expr(&base)?;
+        let range_reg = self.compile_expr(&range)?;
+        let window = self.alloc_reg();
+        self.emit(Op::IndexGet {
+            dst: window,
+            base: base_reg,
+            index: range_reg,
+        });
+        self.reference_alias_regs.insert(window);
+        self.bind_local(
+            name,
+            TypedReg {
+                reg: window,
+                kind: RegKind::Value,
+            },
+        );
+        let write_back = HirExpr {
+            id: init.id,
+            span: init.span,
+            ty: init.ty,
+            kind: HirExprKind::Assign {
+                place: Box::new(HirExpr {
+                    id: operand.id,
+                    span: operand.span,
+                    ty: operand.ty,
+                    kind: HirExprKind::Index {
+                        base: Box::new(base),
+                        index: Box::new(range),
+                    },
+                }),
+                value: Box::new(HirExpr {
+                    id: init.id,
+                    span: init.span,
+                    ty: init.ty,
+                    kind: HirExprKind::Path {
+                        segments: vec![Ident::new(name)],
+                        def: None,
+                    },
+                }),
+            },
+        };
+        if let Some(frame) = self.defer_stack.last_mut() {
+            frame.push(write_back);
+        }
+        Ok(true)
+    }
+
+    pub(crate) fn is_hoistable_place(place: &HirExpr) -> bool {
+        match &place.kind {
+            HirExprKind::Path { segments, .. } => segments.len() == 1,
+            HirExprKind::Field { receiver, .. } | HirExprKind::TupleIndex { receiver, .. } => {
+                Self::is_hoistable_place(receiver)
+            }
+            HirExprKind::Index { base, index } => {
+                !matches!(index.kind, HirExprKind::Range { .. }) && Self::is_hoistable_place(base)
+            }
+            HirExprKind::Unary {
+                op: HirUnaryOp::Deref,
+                operand,
+            } => Self::is_hoistable_place(operand),
+            _ => false,
+        }
+    }
+
+    /// `place` with each element index replaced by a hidden local holding
+    /// the index's value now.
+    pub(crate) fn hoist_place_indices(
+        &mut self,
+        place: &HirExpr,
+        owner: u32,
+        hidden: &mut usize,
+    ) -> RuntimeResult<HirExpr> {
+        let kind = match &place.kind {
+            HirExprKind::Field { receiver, name } => HirExprKind::Field {
+                receiver: Box::new(self.hoist_place_indices(receiver, owner, hidden)?),
+                name: name.clone(),
+            },
+            HirExprKind::TupleIndex { receiver, index } => HirExprKind::TupleIndex {
+                receiver: Box::new(self.hoist_place_indices(receiver, owner, hidden)?),
+                index: *index,
+            },
+            HirExprKind::Index { base, index } => HirExprKind::Index {
+                base: Box::new(self.hoist_place_indices(base, owner, hidden)?),
+                index: Box::new(self.bind_hidden_value(index, owner, hidden)?),
+            },
+            HirExprKind::Unary {
+                op: HirUnaryOp::Deref,
+                operand,
+            } => HirExprKind::Unary {
+                op: HirUnaryOp::Deref,
+                operand: Box::new(self.hoist_place_indices(operand, owner, hidden)?),
+            },
+            other => other.clone(),
+        };
+        Ok(HirExpr {
+            id: place.id,
+            span: place.span,
+            ty: place.ty,
+            kind,
+        })
+    }
+
+    /// Evaluates `value` into a register of its own, binds it to a hidden
+    /// local, and answers a path naming that local.
+    pub(crate) fn bind_hidden_value(
+        &mut self,
+        value: &HirExpr,
+        owner: u32,
+        hidden: &mut usize,
+    ) -> RuntimeResult<HirExpr> {
+        let src = self.compile_expr(value)?;
+        let reg = self.alloc_reg();
+        self.emit(Op::Move { dst: reg, src });
+        let name = format!("__window_{owner}_{hidden}");
+        *hidden += 1;
+        self.reference_alias_regs.insert(reg);
+        self.bind_local(
+            &name,
+            TypedReg {
+                reg,
+                kind: RegKind::Value,
+            },
+        );
+        Ok(HirExpr {
+            id: value.id,
+            span: value.span,
+            ty: value.ty,
+            kind: HirExprKind::Path {
+                segments: vec![Ident::new(name)],
+                def: None,
+            },
+        })
     }
 
     pub(crate) fn compile_place_store(

@@ -320,6 +320,11 @@ const VEC_REGION_FLAG: u8 = 1;
 /// a split vec; an inline vec's buffer is freed with the header block.
 const VEC_SPLIT_FLAG: u8 = 2;
 
+/// `region_flag` bit marking a mutable window: a compact header whose `ptr`
+/// points into another vec's buffer. The window owns its header only; the
+/// elements, the buffer, and the shared `owner` metadata stay the parent's.
+const VEC_WINDOW_FLAG: u8 = 4;
+
 /// Header was allocated as `Box<GosVec>` without an unused inline buffer.
 const VEC_COMPACT_HEADER_FLAG: u8 = 8;
 
@@ -481,6 +486,105 @@ pub(crate) fn vec_is_split(v: &GosVec) -> bool {
 #[inline]
 pub(crate) fn vec_has_compact_header(v: &GosVec) -> bool {
     v.region_flag & VEC_COMPACT_HEADER_FLAG != 0
+}
+
+/// True when this header is a mutable window into another vec's buffer.
+#[inline]
+pub(crate) fn vec_is_window(v: &GosVec) -> bool {
+    v.region_flag & VEC_WINDOW_FLAG != 0
+}
+
+/// The `[lo, hi)` a range names over `len` elements, clamped as a range read
+/// clamps; `inclusive` is non-zero for `lo..=hi`.
+pub fn clamped_window(len: i64, lo: i64, hi: i64, inclusive: i64) -> (i64, i64) {
+    let hi = if inclusive != 0 {
+        hi.saturating_add(1)
+    } else {
+        hi
+    };
+    let lo = lo.max(0).min(len);
+    (lo, hi.max(lo).min(len))
+}
+
+/// The panic text for two mutable windows of one sequence that overlap, or
+/// `None` when they are disjoint. Shared by every tier so the report matches.
+pub fn window_overlap_message(len: i64, a: (i64, i64, i64), b: (i64, i64, i64)) -> Option<String> {
+    let (a_lo, a_hi) = clamped_window(len, a.0, a.1, a.2);
+    let (b_lo, b_hi) = clamped_window(len, b.0, b.1, b.2);
+    (a_lo < a_hi && b_lo < b_hi && a_lo.max(b_lo) < a_hi.min(b_hi)).then(|| {
+        format!("mutable windows [{a_lo}, {a_hi}) and [{b_lo}, {b_hi}) of one sequence overlap")
+    })
+}
+
+/// Panics when two mutable windows passed to one call overlap. `len` is the
+/// sequence's length; each window is `lo, hi, inclusive` as written.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_vec_windows_disjoint(
+    len: i64,
+    a_lo: i64,
+    a_hi: i64,
+    a_inclusive: i64,
+    b_lo: i64,
+    b_hi: i64,
+    b_inclusive: i64,
+) {
+    ffi_entry!((), {
+        if let Some(message) =
+            window_overlap_message(len, (a_lo, a_hi, a_inclusive), (b_lo, b_hi, b_inclusive))
+        {
+            crate::c_abi::panic::panic_text(&message);
+        }
+    });
+}
+
+/// `&mut v[lo..hi]` - a header aliasing the elements `[lo, hi)` of `v`, for a
+/// `&mut [T]` argument or receiver. Writes through it land in `v`'s buffer.
+/// Bounds clamp as [`gos_rt_vec_slice`](crate::c_abi::gos_rt_vec_slice)
+/// clamps a range read. The checker keeps `v` exclusively borrowed while the
+/// window lives, so `v` is neither resized nor freed under it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_vec_window(v: *mut GosVec, lo: i64, hi: i64) -> *mut GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        if v.is_null() {
+            return crate::c_abi::gos_rt_vec_new(8);
+        }
+        // SAFETY: `v` is a handle from compiled code, checked non-null above and live for the
+        // whole call.
+        let parent = unsafe { &*v };
+        let (lo, hi) = clamped_window(parent.len, lo, hi, 0);
+        let ptr = if parent.ptr.is_null() {
+            SyncRawPtr::NULL
+        } else {
+            // SAFETY: `lo` is clamped to the parent's length, so the offset stays inside (or one
+            // past) its initialised elements.
+            SyncRawPtr::new(unsafe {
+                parent
+                    .ptr
+                    .as_ptr()
+                    .add(lo as usize * parent.elem_bytes as usize)
+            })
+        };
+        crate::c_abi::ledger::vec_inc();
+        let window = Box::into_raw(Box::new(GosVec {
+            len: hi - lo,
+            cap: hi - lo,
+            elem_bytes: parent.elem_bytes,
+            elem_kind: parent.elem_kind,
+            region_flag: VEC_COMPACT_HEADER_FLAG | VEC_WINDOW_FLAG,
+            rc: std::sync::atomic::AtomicU16::new(1),
+            ptr,
+            generation: next_vec_generation(),
+            mutation_generation: 0,
+            elem_meta: parent.elem_meta,
+            owner: SyncRawPtr::new(parent.owner.as_ptr()),
+        }));
+        crate::c_abi::ledger::vec_inline_alloc(
+            std::mem::size_of::<GosVec>(),
+            // SAFETY: `window` is the block `Box::into_raw` just returned.
+            unsafe { allocator_usable_bytes(window.cast(), std::mem::size_of::<GosVec>()) },
+        );
+        window
+    })
 }
 
 pub(crate) unsafe fn consume_byte_vec<R>(v: *mut GosVec, f: impl FnOnce(&[u8]) -> R) -> R {
