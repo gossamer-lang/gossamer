@@ -503,8 +503,9 @@ impl<'a> Builder<'a> {
             }
             "gos_rt_child_write_stdin" | "gos_rt_child_kill" => self.tcx.bool_ty(),
             "gos_rt_child_close_stdin" => self.tcx.unit(),
-            "gos_rt_signal_wait" => self.tcx.unit(),
+            "gos_rt_signal_wait" => self.tcx.bool_ty(),
             "gos_rt_signal_try_wait" => self.tcx.bool_ty(),
+            "gos_rt_signal_stop" => self.tcx.unit(),
             "gos_rt_child_wait" => {
                 let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
                 let err_ty = self.tcx.dyn_error_ty();
@@ -706,6 +707,7 @@ impl<'a> Builder<'a> {
             | "gos_rt_fs_file_write_at"
             | "gos_rt_fs_file_seek"
             | "gos_rt_fs_file_len"
+            | "gos_rt_fs_file_fd"
             | "gos_rt_fs_file_flush"
             | "gos_rt_unix_stream_write"
             | "gos_rt_udp_send_to"
@@ -1207,6 +1209,7 @@ impl<'a> Builder<'a> {
             (Some("fs::File"), "seek") => Some("gos_rt_fs_file_seek"),
             (Some("fs::File"), "set_len") => Some("gos_rt_fs_file_set_len"),
             (Some("fs::File"), "len") => Some("gos_rt_fs_file_len"),
+            (Some("fs::File"), "fd") => Some("gos_rt_fs_file_fd"),
             (Some("fs::File"), "sync_all") => Some("gos_rt_fs_file_sync_all"),
             (Some("fs::File"), "sync_data") => Some("gos_rt_fs_file_sync_data"),
             (Some("fs::File"), "try_lock_range") => Some("gos_rt_fs_file_try_lock_range"),
@@ -1255,6 +1258,7 @@ impl<'a> Builder<'a> {
             (Some("io::Stream"), "read_to_string") => Some("gos_rt_stream_read_to_string"),
             (Some("signal::Notifier"), "wait") => Some("gos_rt_signal_wait"),
             (Some("signal::Notifier"), "try_wait") => Some("gos_rt_signal_try_wait"),
+            (Some("signal::Notifier"), "stop") => Some("gos_rt_signal_stop"),
             (Some("vec::Iter"), "next") => Some("gos_rt_arr_iter_next"),
             _ => None,
         }

@@ -225,7 +225,8 @@ pub enum ParseError {
          from the one before it"
     )]
     SharedReferenceArgumentJoins,
-    /// `unsafe` was written. It grants nothing the language withholds.
+    /// `unsafe fn`, `unsafe impl`, or `unsafe trait` was written. Only an
+    /// `unsafe { }` block grants anything: a call to a foreign function.
     #[error("`unsafe` grants nothing; drop it")]
     UnsafeGrantsNothing,
     /// A cohort header used the retired `context:` isolation spelling.
@@ -301,12 +302,15 @@ pub enum ParseError {
     /// Two consecutive tokens formed something the parser does not recognise.
     #[error("unexpected construct")]
     UnexpectedConstruct,
-    /// `extern "C" { ... }` or `extern "C" fn` encountered at item position.
-    ///
-    /// The `extern` keyword is reserved; FFI is expressed through
-    /// `[rust-bindings]` in `project.toml` plus the `gossamer-binding` crate.
-    #[error("extern blocks are not supported - use `[rust-bindings]` in `project.toml`")]
+    /// An `extern` form other than `unsafe extern "C" { fn ...; }`: an
+    /// extern block without `unsafe`, an exported `extern "C" fn` with a
+    /// body, or an ABI other than `"C"` / `"system"`.
+    #[error("foreign functions are declared in an `unsafe extern \"C\" {{ ... }}` block")]
     ExternReserved,
+    /// A declaration inside an `unsafe extern "C"` block that is not a
+    /// bodyless, non-generic `fn`.
+    #[error("an `unsafe extern \"C\"` block holds only `fn` signatures without bodies")]
+    ExternItemShape,
     /// An expression, type, or pattern nested past the parser's hard
     /// recursion limit. Emitted to keep adversarial inputs from
     /// blowing the C stack while still letting the parser recover.
@@ -591,6 +595,35 @@ impl ParseError {
         }
     }
 
+    /// The GP0016 report for a foreign declaration written in a form other
+    /// than a body-less `fn` in an `unsafe extern "C"` block.
+    fn foreign_report(&self) -> (&'static str, String, Option<String>) {
+        match self {
+            Self::ExternReserved => (
+                "GP0016",
+                "foreign functions are declared in an `unsafe extern \"C\" { ... }` block"
+                    .to_string(),
+                Some(
+                    "write `unsafe extern \"C\" { fn name(params) -> ret }` at module level \
+                     and call the function inside `unsafe { }`; a Gossamer function cannot be exported to \
+                     C, and only the `\"C\"` and `\"system\"` ABIs are recognised"
+                        .to_string(),
+                ),
+            ),
+            Self::ExternItemShape => (
+                "GP0016",
+                "an `unsafe extern \"C\"` block holds only `fn` signatures without bodies"
+                    .to_string(),
+                Some(
+                    "declare each foreign function as `fn name(params) -> ret`, with no body \
+                     and no generic parameters; its body is in the native library"
+                        .to_string(),
+                ),
+            ),
+            _ => unreachable!("only the foreign-declaration errors reach here"),
+        }
+    }
+
     /// Diagnostic code, title, and optional help text for this error.
     fn code_title_help(&self) -> (&'static str, String, Option<String>) {
         match self {
@@ -665,18 +698,7 @@ impl ParseError {
                 "invalid tuple index".to_string(),
                 Some("tuple indices must be plain decimal integers".to_string()),
             ),
-            ParseError::ExternReserved => (
-                "GP0016",
-                "extern blocks are not supported".to_string(),
-                Some(
-                    "FFI is expressed through the `[rust-bindings]` section of `project.toml` \
-                     plus the `gossamer-binding` crate (see \
-                     https://gossamer-lang.org/docs/libraries/). \
-                     Remove the `extern \"C\" { ... }` block or rewrite the binding as a \
-                     Rust crate consumed via `[rust-bindings]`."
-                        .to_string(),
-                ),
-            ),
+            ParseError::ExternReserved | ParseError::ExternItemShape => self.foreign_report(),
             ParseError::RecursionLimit { limit } => (
                 "GP0017",
                 format!("expression nests beyond {limit} levels"),
@@ -940,9 +962,9 @@ impl ParseError {
                 "GP0046",
                 "`unsafe` grants nothing; drop it".to_string(),
                 Some(
-                    "no operation is withheld outside an `unsafe` block or from a safe \
-                     `fn`, so the keyword marked a boundary the language does not draw. \
-                     It stays reserved for a future raw-FFI story"
+                    "an `unsafe fn`, `unsafe impl`, or `unsafe trait` withholds nothing; the \
+                     one operation `unsafe` permits, calling a foreign function, is written \
+                     inside an `unsafe { }` block"
                         .to_string(),
                 ),
             ),

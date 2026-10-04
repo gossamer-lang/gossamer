@@ -14,6 +14,7 @@
 
 pub mod binding_runner;
 pub mod cache_maintenance;
+pub mod foreign_policy;
 pub mod frontend;
 pub mod frontend_cache;
 pub mod link;
@@ -28,23 +29,26 @@ pub use binding_runner::{
     parse_signature_dump,
 };
 
+pub use foreign_policy::{foreign_policy, set_foreign_policy};
 pub use frontend::{FrontendOutcome, check_frontend};
 pub use frontend_cache::{
     CachedFrontend, FrontendCacheKey, cache_dir, cache_enabled, frontend_key, load_blob,
     load_blob_in, raw_blob_path, raw_blob_path_in, store_blob, store_blob_in, store_frontend,
     store_frontend_in, store_raw, store_raw_in, user_cache_root,
 };
+pub use gossamer_types::ForeignPolicy;
 pub use link::{
     ARTIFACT_MAGIC, Artifact, LinkerOptions, Symbol, TargetTriple, TranslationUnit, fingerprint,
     link,
 };
 pub use pipeline::{
-    CheckedFrontend, MirPhaseTimes, ReleaseBuild, ReleaseBuildPaths,
+    CheckedFrontend, ForeignLinks, MirPhaseTimes, ReleaseBuild, ReleaseBuildPaths,
     compile_at_paths_from_frontend, compile_release_at_paths_from_frontend, compile_source,
     compile_source_native, compile_source_native_from_frontend,
     compile_source_native_from_frontend_at_path, compile_source_native_release,
     compile_source_native_release_with_fallback,
-    compile_source_native_release_with_fallback_from_frontend, register_source_positions,
+    compile_source_native_release_with_fallback_from_frontend, foreign_link_libraries,
+    register_source_positions,
 };
 pub use target::{
     ObjectFormat, PrebuiltRuntime, REGISTERED_TARGETS, TargetInfo, all_targets, lookup_target,

@@ -84,6 +84,9 @@ pub enum Capability {
     Network,
     /// Mutating the process environment or working directory.
     Env,
+    /// Calling a function declared in an `unsafe extern "C"` block, whose
+    /// effects the compiler cannot see.
+    Foreign,
 }
 
 impl Capability {
@@ -96,6 +99,7 @@ impl Capability {
             Self::Exec => "process execution",
             Self::Network => "network access",
             Self::Env => "environment mutation",
+            Self::Foreign => "foreign function call",
         }
     }
 }

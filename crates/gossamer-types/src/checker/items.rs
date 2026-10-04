@@ -30,6 +30,18 @@ impl TypeChecker<'_> {
         self.collect_type_aliases(items);
         for item in items {
             self.register_must_use(item);
+            if let ItemKind::Struct(_) = &item.kind
+                && item.attrs.lists_argument("repr", "C")
+                && let Some(def) = self.resolutions.definition_of(item.id)
+            {
+                self.repr_c_structs.insert(def);
+            }
+            if let ItemKind::Struct(_) = &item.kind
+                && item.attrs.has_word(gossamer_ast::FOREIGN_TYPE_ATTR)
+                && let Some(def) = self.resolutions.definition_of(item.id)
+            {
+                self.opaque_types.insert(def);
+            }
             match &item.kind {
                 ItemKind::Fn(decl) => self.register_fn_sig(item.id, decl, item.span),
                 ItemKind::Impl(decl) => {
@@ -1304,6 +1316,9 @@ impl TypeChecker<'_> {
         self.user_fn_names.insert(decl.name.name.clone());
         let sig = self.fn_sig_of(decl);
         if let Some(def) = self.resolutions.definition_of(node) {
+            if decl.extern_abi.is_some() {
+                self.foreign_fns.insert(def, decl.name.name.clone());
+            }
             self.fn_sigs.insert(def, sig);
             // Record the generic arity and per-parameter bounds so each
             // call site can instantiate the parameters independently and
@@ -1538,6 +1553,7 @@ impl TypeChecker<'_> {
 
     pub(super) fn check_item_inner(&mut self, item: &Item) {
         match &item.kind {
+            ItemKind::Fn(decl) if decl.extern_abi.is_some() => self.check_foreign_decl(item, decl),
             ItemKind::Fn(decl) => self.check_fn(decl),
             ItemKind::Impl(decl) => self.check_impl(decl),
             ItemKind::Trait(decl) => self.check_trait(decl),
@@ -1749,6 +1765,7 @@ impl TypeChecker<'_> {
             self.check_undeclared_return(decl, body, body_ty);
             body_ty
         };
+        self.finish_ffi_checks();
         self.current_fn_ret = prev_ret;
         // A declared `-> ()` says the discard is deliberate, so a body whose
         // tail computes a value is accepted and the value dropped - the same
@@ -1763,6 +1780,276 @@ impl TypeChecker<'_> {
         if declared_ret.is_some() && !discards_tail {
             self.record_fn_item_coercion(body, ret);
             self.unify(ret, body_ty, body_value_span(body));
+        }
+    }
+}
+
+impl TypeChecker<'_> {
+    /// Checks a function declared in an `unsafe extern "C"` block: every
+    /// parameter and the return type must have a C representation, and no
+    /// effect attribute may claim anything about the native body.
+    fn check_foreign_decl(&mut self, item: &Item, decl: &FnDecl) {
+        let name = decl.name.name.clone();
+        if gossamer_resolve::cfg_target_family() == "wasm" {
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::OnWasm { name: name.clone() }),
+                item.span,
+            );
+        }
+        for attr in &item.attrs.outer {
+            let Some(word) = attr.path.segments.last().map(|s| s.name.name.clone()) else {
+                continue;
+            };
+            if matches!(
+                word.as_str(),
+                "pure" | "readonly" | "effect" | "blocking" | "nonblocking"
+            ) {
+                self.emit(
+                    TypeError::Foreign(crate::ForeignError::EffectAttribute {
+                        name: name.clone(),
+                        attr: word,
+                    }),
+                    item.span,
+                );
+            }
+        }
+        let Some(def) = self.resolutions.definition_of(item.id) else {
+            return;
+        };
+        let Some(sig) = self.fn_sigs.get(&def).cloned() else {
+            return;
+        };
+        self.check_foreign_params(item, decl, &name, &sig.inputs);
+        self.check_foreign_return(item, decl, name, sig.output);
+    }
+
+    /// GT0098, GT0104, GT0105, and GT0107 for the foreign function `name`'s
+    /// parameters.
+    fn check_foreign_params(&mut self, item: &Item, decl: &FnDecl, name: &str, inputs: &[Ty]) {
+        for (index, (param, ty)) in decl.params.iter().zip(inputs.iter()).enumerate() {
+            let span = match param {
+                gossamer_ast::FnParam::Typed { ty, .. } => ty.span,
+                gossamer_ast::FnParam::Receiver(_) => item.span,
+            };
+            if let Some(opaque) = self.foreign_opaque_by_value(*ty) {
+                self.emit(
+                    TypeError::Foreign(crate::ForeignError::OpaqueByValue {
+                        name: opaque,
+                        context: format!("parameter {} of `{name}` takes one by value", index + 1),
+                    }),
+                    span,
+                );
+                continue;
+            }
+            let peeled = self.peel_mut_ref(*ty);
+            if let Some(Err(pointee)) = self.foreign_pointer_form(peeled) {
+                self.emit(
+                    TypeError::Foreign(crate::ForeignError::PointerTarget {
+                        ty: pointee,
+                        context: format!("parameter {} of `{name}` cannot point at it", index + 1),
+                    }),
+                    span,
+                );
+                continue;
+            }
+            if let Some(why) = self.callback_problem(*ty) {
+                let callback = self.render_public_ty(*ty);
+                self.emit(
+                    TypeError::Foreign(crate::ForeignError::CallbackSignature {
+                        name: name.to_string(),
+                        ty: callback,
+                        why,
+                    }),
+                    span,
+                );
+                continue;
+            }
+            if let Some(why) = self.foreign_param_problem(*ty) {
+                let ty = self.render_public_ty(*ty);
+                self.emit(
+                    TypeError::Foreign(crate::ForeignError::SignatureType {
+                        name: name.to_string(),
+                        position: format!("parameter {}", index + 1),
+                        ty,
+                        why,
+                    }),
+                    span,
+                );
+            }
+        }
+    }
+
+    /// GT0098, GT0104, and GT0105 for the foreign function `name`'s result.
+    fn check_foreign_return(&mut self, item: &Item, decl: &FnDecl, name: String, output: Ty) {
+        let ret = self.infer.resolve(self.tcx, output);
+        let span = decl.ret.as_ref().map_or(item.span, |ty| ty.span);
+        if let Some(opaque) = self.foreign_opaque_by_value(ret) {
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::OpaqueByValue {
+                    name: opaque,
+                    context: format!("`{name}` answers one by value"),
+                }),
+                span,
+            );
+            return;
+        }
+        match self.foreign_pointer_form(ret) {
+            Some(Ok(())) => return,
+            Some(Err(ty)) => {
+                self.emit(
+                    TypeError::Foreign(crate::ForeignError::PointerTarget {
+                        ty,
+                        context: format!("`{name}` cannot answer a pointer to it"),
+                    }),
+                    span,
+                );
+                return;
+            }
+            None => {}
+        }
+        if !matches!(self.tcx.kind(ret), Some(TyKind::Unit)) && !self.foreign_scalar(ret) {
+            let ty = self.render_public_ty(ret);
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::SignatureType {
+                    name,
+                    position: "the return type".to_string(),
+                    ty,
+                    why: "a foreign function answers `()`, a scalar (an integer up to 64 \
+                          bits, `bool`, `f32`, or `f64`), an `ffi::Ptr`, or an \
+                          `Option<ffi::Ptr>`"
+                        .to_string(),
+                }),
+                span,
+            );
+        }
+    }
+
+    /// The foreign type `ty` passes by value, directly or behind `&mut`.
+    fn foreign_opaque_by_value(&mut self, ty: Ty) -> Option<String> {
+        let ty = self.infer.resolve(self.tcx, ty);
+        let inner = match self.tcx.kind(ty) {
+            Some(TyKind::Ref { inner, .. }) => *inner,
+            _ => ty,
+        };
+        let (def, name) = match self.tcx.kind(self.infer.resolve(self.tcx, inner)).cloned() {
+            Some(TyKind::Adt { def, .. }) => (def, self.tcx.def_name(def)?.to_string()),
+            _ => return None,
+        };
+        self.opaque_types
+            .contains(&def)
+            .then(|| name.rsplit("::").next().unwrap_or(&name).to_string())
+    }
+
+    /// Whether `ty` crosses the C boundary as a scalar in a register.
+    pub(super) fn foreign_scalar(&self, ty: Ty) -> bool {
+        self.tcx.c_scalar_class(ty).is_some()
+    }
+
+    /// `ty` with one `&mut` peeled.
+    fn peel_mut_ref(&mut self, ty: Ty) -> Ty {
+        let ty = self.infer.resolve(self.tcx, ty);
+        match self.tcx.kind(ty) {
+            Some(TyKind::Ref {
+                mutability: Mutbl::Mut,
+                inner,
+            }) => *inner,
+            _ => ty,
+        }
+    }
+
+    /// Why `ty` cannot be a foreign function's parameter, or `None` when it
+    /// can.
+    fn foreign_param_problem(&mut self, ty: Ty) -> Option<String> {
+        let ty = self.infer.resolve(self.tcx, ty);
+        if self.foreign_scalar(ty)
+            || self.foreign_pointer_form(ty).is_some()
+            || matches!(
+                self.tcx.kind(ty),
+                Some(TyKind::FnPtr(_) | TyKind::FnTrait(_))
+            )
+        {
+            return None;
+        }
+        // `&mut` a scalar or a pointer form is an out-parameter: `int *`,
+        // `T **`.
+        if let Some(TyKind::Ref {
+            mutability: Mutbl::Mut,
+            inner,
+        }) = self.tcx.kind(ty).cloned()
+        {
+            let inner = self.infer.resolve(self.tcx, inner);
+            if self.foreign_scalar(inner) || self.foreign_pointer_form(inner).is_some() {
+                return None;
+            }
+        }
+        // A `[T]` view parameter is carried as a shared reference.
+        let (inner, mutable) = match self.tcx.kind(ty) {
+            Some(TyKind::Ref { mutability, inner }) => (
+                self.infer.resolve(self.tcx, *inner),
+                *mutability == Mutbl::Mut,
+            ),
+            _ => (ty, false),
+        };
+        match self.tcx.kind(inner).cloned() {
+            Some(TyKind::Slice(elem)) => {
+                let elem = self.infer.resolve(self.tcx, elem);
+                if self.foreign_scalar(elem) {
+                    None
+                } else {
+                    Some(
+                        "a slice crosses the C boundary as a pointer to its first element, so \
+                         its elements are scalars: integers up to 64 bits, `bool`, `f32`, or \
+                         `f64`"
+                            .to_string(),
+                    )
+                }
+            }
+            Some(TyKind::Adt { def, .. }) if self.repr_c_structs.contains(&def) => {
+                if self.tcx.c_leaves(inner).is_some() {
+                    None
+                } else {
+                    Some(
+                        "a struct crosses the C boundary only when every field is plain data \
+                         with a C type: integers up to 64 bits, `bool`, `f32`, `f64`, fixed \
+                         arrays of those, and other such `#[repr(C)]` structs"
+                            .to_string(),
+                    )
+                }
+            }
+            Some(TyKind::Adt { .. }) => {
+                Some("declare the struct `#[repr(C)]` so its fields take the C layout".to_string())
+            }
+            _ if mutable => Some(
+                "a `&mut` parameter is `&mut` a scalar, an `ffi::Ptr`, or an \
+                 `Option<ffi::Ptr>` (an out-parameter), `&mut [T]` of scalars, or `&mut` a \
+                 `#[repr(C)]` plain-data struct"
+                    .to_string(),
+            ),
+            _ => Some(
+                "a parameter is a scalar (an integer up to 64 bits, `bool`, `f32`, `f64`), an \
+                 `ffi::Ptr` or `Option<ffi::Ptr>`, a C function type `fn(..) -> R`, a slice \
+                 `[T]` of scalars, a `#[repr(C)]` plain-data struct, or `&mut` one of these"
+                    .to_string(),
+            ),
+        }
+    }
+
+    /// Rejects a call to a foreign function outside an `unsafe { }` block.
+    pub(super) fn check_foreign_call_site(&mut self, callee: &Expr) {
+        if self.unsafe_depth > 0 {
+            return;
+        }
+        let ExprKind::Path(_) = &callee.kind else {
+            return;
+        };
+        let Some(Resolution::Def { def, .. }) = self.resolutions.get(callee.id) else {
+            return;
+        };
+        if let Some(name) = self.foreign_fns.get(&def).cloned() {
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::CallOutsideUnsafe { name }),
+                callee.span,
+            );
         }
     }
 }

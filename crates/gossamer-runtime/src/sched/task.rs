@@ -31,6 +31,16 @@ pub trait Task {
     /// to the scheduler; returning [`Step::Done`] removes the task
     /// from the run queue.
     fn step(&mut self) -> Step;
+
+    /// Whether the task has run. One that has not holds no state bound to a
+    /// worker's thread, so it may start on any worker.
+    fn started(&self) -> bool {
+        true
+    }
+
+    /// Gives up the worker placement the task was spawned with, before it
+    /// moves to another worker.
+    fn release_placement(&mut self) {}
 }
 
 impl<F> Task for F

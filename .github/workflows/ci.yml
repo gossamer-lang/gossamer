@@ -109,6 +109,12 @@ jobs:
       - uses: ./.github/actions/rust-test-setup
         with:
           cache-prefix: v3-test-native-${{ matrix.suite }}
+      # The FFI acceptance tests bind SQLite, zlib, and Expat. macOS ships
+      # them in its SDK and Windows ships SQLite as `winsqlite3`; a Linux
+      # runner needs the development packages that provide `lib*.so`.
+      - name: Install the C libraries the FFI acceptance tests bind
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev zlib1g-dev libexpat1-dev
       # `crates/gossamer-cli/build.rs` ensures the runtime
       # staticlib is emitted into `target/<profile>/` for both
       # debug and release; no explicit pre-build step needed.

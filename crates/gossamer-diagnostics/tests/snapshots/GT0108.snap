@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0108]: The argument for a C function pointer is a closure, or a function - here
+--- framed ---
+error[GT0108]: The argument for a C function pointer is a closure, or a function
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

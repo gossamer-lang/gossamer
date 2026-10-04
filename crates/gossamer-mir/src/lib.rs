@@ -31,9 +31,10 @@ pub use escape::{
 };
 pub use ir::{
     AggregateKind, AssertMessage, BasicBlock, BinOp, BlockId, Body, ConstValue, F64MathIntrinsic,
-    InlineChain, InlineFrame, IteratorAdapterKind, IteratorOwnership, IteratorSourceKind, Local,
-    LocalDecl, Operand, Place, Projection, RawIntrinsic, RawIntrinsicArity, Rvalue, Statement,
-    StatementKind, StaticRef, Terminator, UnOp, local_is_uint_cast,
+    ForeignCall, ForeignCallback, ForeignParam, InlineChain, InlineFrame, IteratorAdapterKind,
+    IteratorOwnership, IteratorSourceKind, Local, LocalDecl, Operand, Place, Projection,
+    RawIntrinsic, RawIntrinsicArity, Rvalue, Statement, StatementKind, StaticRef, Terminator, UnOp,
+    foreign_params, local_is_uint_cast,
 };
 pub use lower::helpers::escape::{ParamShare, collect_region_unsafe_fns, collect_shareable_params};
 pub use lower::{lower_program, mangle_callable_shape};

@@ -76,6 +76,30 @@ impl FrontendOutcome {
     }
 }
 
+/// Parses `source` with its derived items. Answers the tree, its parse
+/// diagnostics plus any foreign declaration the project does not allow, and
+/// whether the parse failed.
+fn parse_phase(source: &str, file_id: FileId) -> (gossamer_ast::SourceFile, Vec<Diagnostic>, bool) {
+    let (sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(source, file_id);
+    let mut diagnostics: Vec<Diagnostic> = parse_diags
+        .iter()
+        .map(gossamer_parse::ParseDiagnostic::to_diagnostic)
+        .collect();
+    // A program that does not parse is not the program the later passes
+    // see: `autoderive::augment_source` declines to synthesize from a
+    // recovered tree, so the derived `fmt` / `to_string` / serde surface a
+    // clean parse would carry is absent, and every pass would report its
+    // absence somewhere the user did not write. The parse diagnostics are
+    // the actionable report; the passes still run so the LSP keeps a type
+    // table to answer from.
+    let parse_failed = !parse_diags.is_empty();
+    diagnostics.extend(
+        crate::foreign_policy::foreign_policy()
+            .diagnostics(&sf, gossamer_parse::autoderive::program_source_end(source)),
+    );
+    (sf, diagnostics, parse_failed)
+}
+
 /// Runs the full front-end on already-augmented `source` and applies the
 /// single fatal-error policy:
 ///
@@ -100,21 +124,8 @@ pub fn check_frontend(source: &str, file_id: FileId) -> FrontendOutcome {
     }
 
     let phase_started = Instant::now();
-    let (mut sf, parse_diags) = gossamer_parse::autoderive::parse_with_autoderive(source, file_id);
+    let (mut sf, mut diagnostics, parse_failed) = parse_phase(source, file_id);
     let parse = phase_started.elapsed();
-
-    let mut diagnostics: Vec<Diagnostic> = parse_diags
-        .iter()
-        .map(gossamer_parse::ParseDiagnostic::to_diagnostic)
-        .collect();
-    // A program that does not parse is not the program the later passes
-    // see: `autoderive::augment_source` declines to synthesize from a
-    // recovered tree, so the derived `fmt` / `to_string` / serde surface a
-    // clean parse would carry is absent, and every pass below would report
-    // its absence somewhere the user did not write. The parse diagnostics
-    // are the actionable report; the passes still run so the LSP keeps a
-    // type table to answer from.
-    let parse_failed = !parse_diags.is_empty();
 
     let phase_started = Instant::now();
     let (resolutions, resolve_diags) = resolve_source_file(&sf);

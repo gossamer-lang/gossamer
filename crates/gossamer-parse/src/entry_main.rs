@@ -92,6 +92,7 @@ pub fn synthesize_entry_main(sf: &mut SourceFile) -> Vec<ParseDiagnostic> {
         ret,
         where_clause: WhereClause::default(),
         body: Some(Box::new(body)),
+        extern_abi: None,
     };
 
     sf.items.push(Item::new(

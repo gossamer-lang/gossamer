@@ -426,6 +426,18 @@ impl<'a> Builder<'a> {
         })
     }
 
+    /// `Result<i64, errors::Error>`, the sentinel-def shape the runtime's
+    /// Result aggregate takes.
+    fn result_i64_error_ty(&mut self) -> gossamer_types::Ty {
+        let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
+        let err_ty = self.tcx.dyn_error_ty();
+        let substs = gossamer_types::Substs::from_types([i64_ty, err_ty]);
+        self.tcx.intern(gossamer_types::TyKind::Adt {
+            def: gossamer_resolve::DefId::local(u32::MAX),
+            substs,
+        })
+    }
+
     pub(super) fn lower_exec_free(
         &mut self,
         joined: &str,
@@ -440,15 +452,11 @@ impl<'a> Builder<'a> {
             // downstream `?` / `match` shapes find the right field
             // layout.
             "exec::spawn" | "os::exec::spawn" | "process::spawn" => {
-                let i64_ty = self.tcx.int_ty(gossamer_types::IntTy::I64);
-                let err_ty = self.tcx.dyn_error_ty();
-                let substs = gossamer_types::Substs::from_types([i64_ty, err_ty]);
-                let result_ty = self.tcx.intern(gossamer_types::TyKind::Adt {
-                    def: gossamer_resolve::DefId::local(u32::MAX),
-                    substs,
-                });
-                ("gos_rt_exec_spawn", result_ty)
+                ("gos_rt_exec_spawn", self.result_i64_error_ty())
             }
+            // `process::run_inherit(prog, args) -> Result<i64, errors::Error>`:
+            // the child's exit code, run on this process's own stdio.
+            "process::run_inherit" => ("gos_rt_exec_run_inherit", self.result_i64_error_ty()),
             // `process::spawn_piped(prog, args) -> Result<Child, errors::Error>`.
             // The Ok payload is the opaque piped-child handle (the
             // `Child` sentinel Adt), so method dispatch on the
@@ -506,13 +514,16 @@ impl<'a> Builder<'a> {
             ),
             // `Notifier::wait(handle)` - blocks until signal fires.
             "signal_wait" | "Notifier::wait" | "signal::wait" | "os::signal::wait" => {
-                ("gos_rt_signal_wait", self.tcx.unit())
+                ("gos_rt_signal_wait", self.tcx.bool_ty())
             }
             // `Notifier::try_wait(handle) -> bool`.
             "signal_try_wait"
             | "Notifier::try_wait"
             | "signal::try_wait"
             | "os::signal::try_wait" => ("gos_rt_signal_try_wait", self.tcx.bool_ty()),
+            "signal_stop" | "Notifier::stop" | "signal::stop" | "os::signal::stop" => {
+                ("gos_rt_signal_stop", self.tcx.unit())
+            }
             "flag::Set::new" => ("gos_rt_flag_set_new", self.flag_set_ty()),
             _ => return None,
         })

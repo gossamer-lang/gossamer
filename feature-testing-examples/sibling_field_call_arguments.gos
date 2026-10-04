@@ -1,0 +1,58 @@
+// Two fields of one value are separate storage, so a call may take one by
+// value and another by `&mut`, or windows of both, at once. A mutable
+// window makes its sequence unique before writing, so two fields that
+// still share one buffer from a copy are written separately and the
+// original is untouched.
+
+struct Neuron { weight: i64 }
+
+impl Neuron {
+    fn update(&mut self, inputs: Vec<Neuron>, total: &mut i64) {
+        for input in inputs {
+            *total += input.weight
+        }
+        self.weight += 1
+    }
+}
+
+struct Net { hidden: Vec<Neuron>, output: Vec<Neuron>, total: i64 }
+
+impl Net {
+    fn train(&mut self) {
+        for i in 0..self.output.len() {
+            self.output[i].update(self.hidden, &mut self.total)
+        }
+    }
+}
+
+struct G { a: Vec<i64>, b: Vec<i64> }
+
+fn merge(a: &mut [i64], b: &mut [i64]) {
+    a[0] = 9
+    b[0] = 7
+}
+
+fn swap(x: &mut i64, y: &mut i64) {
+    let t = *x
+    *x = *y
+    *y = t
+}
+
+fn main() {
+    let mut net = Net {
+        hidden: #[Neuron { weight: 2 }, Neuron { weight: 3 }]
+        output: #[Neuron { weight: 1 }, Neuron { weight: 4 }]
+        total: 0
+    }
+    net.train()
+    println(f"total {net.total} output {net.output[0].weight} {net.output[1].weight}")
+
+    let shared = #[1, 2]
+    let mut g = G { a: shared, b: shared }
+    merge(&mut g.a[0..1], &mut g.b[0..1])
+    println(f"{g.a} {g.b} {shared}")
+
+    let mut pair = (1, 2)
+    swap(&mut pair.0, &mut pair.1)
+    println(f"{pair}")
+}

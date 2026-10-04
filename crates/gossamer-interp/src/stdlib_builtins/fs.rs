@@ -167,6 +167,7 @@ pub(crate) fn install_fs_extras(globals: &mut Vec<(&'static str, Value)>) {
         ("File::set_len", builtin_fs_file_set_len),
         ("File::len", builtin_fs_file_len),
         ("File::sync_all", builtin_fs_file_sync_all),
+        ("File::fd", builtin_fs_file_fd),
         ("File::sync_data", builtin_fs_file_sync_data),
         ("File::try_lock_range", builtin_fs_file_try_lock_range),
         ("File::unlock_range", builtin_fs_file_unlock_range),
@@ -642,6 +643,22 @@ pub(crate) fn builtin_fs_file_len(args: &[Value]) -> RuntimeResult<Value> {
     }) {
         Ok(Ok(len)) => Ok(ok_variant(Value::Int(len as i64))),
         Ok(Err(e)) => Ok(err_variant(classify_io_error(&e, "File::len"))),
+        Err(v) => Ok(v),
+    }
+}
+
+/// `fs::File::fd() -> Result<i64, Error>`.
+pub(crate) fn builtin_fs_file_fd(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(id) = args.first().and_then(handle_id) else {
+        return Ok(err_variant("File::fd: missing handle"));
+    };
+    match with_file_inline(id, "fs-file-fd", "File::fd", |file| {
+        gossamer_runtime::c_abi::fs::raw_descriptor(file)
+    }) {
+        Ok(Some(fd)) => Ok(ok_variant(Value::Int(fd))),
+        Ok(None) => Ok(err_variant(
+            "File::fd: descriptors are not available on this target",
+        )),
         Err(v) => Ok(v),
     }
 }

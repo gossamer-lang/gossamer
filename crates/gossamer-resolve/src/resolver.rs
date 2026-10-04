@@ -229,7 +229,7 @@ impl Resolver {
         self.collect_items(&source.items);
         self.bind_project_imports();
         for item in &source.items {
-            if !crate::cfg::item_is_active(&item.attrs) {
+            if !gossamer_ast::cfg::item_is_active(&item.attrs) {
                 continue;
             }
             self.resolve_item(item);
@@ -1056,7 +1056,12 @@ impl Resolver {
     }
 
     fn collect_items_in(&mut self, items: &[Item], module_path: &mut Vec<String>) {
-        for item in items {
+        // An item `#[cfg]` leaves out of this build declares nothing, so two
+        // platform variants of one name never collide.
+        for item in items
+            .iter()
+            .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
+        {
             self.collect_item(item, module_path);
         }
     }
@@ -1593,7 +1598,7 @@ impl Resolver {
                     self.scopes.push_scope(own_scope);
                     self.current_module.push(decl.name.name.clone());
                     for nested in inner {
-                        if !crate::cfg::item_is_active(&nested.attrs) {
+                        if !gossamer_ast::cfg::item_is_active(&nested.attrs) {
                             continue;
                         }
                         self.resolve_item(nested);
@@ -3079,7 +3084,7 @@ fn collect_inactive_module_paths(
             } else {
                 format!("{prefix}::{}", decl.name.name)
             };
-            if !crate::cfg::item_is_active(&item.attrs) {
+            if !gossamer_ast::cfg::item_is_active(&item.attrs) {
                 out.insert(path);
             } else if let gossamer_ast::ModBody::Inline(inner) = &decl.body {
                 walk(inner, &path, out);

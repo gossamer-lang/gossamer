@@ -511,6 +511,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
@@ -823,6 +825,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../language/unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2314,6 +2344,16 @@
 </tr>
 </thead>
 <tbody>
+<tr>
+<td><code>char_width</code></td>
+<td><code>fn char_width(r: char) -&gt; i64</code></td>
+<td>Terminal columns r occupies: 2 for wide and fullwidth characters, 0 for combining marks, zero-width, and control characters, otherwise 1.</td>
+</tr>
+<tr>
+<td><code>str_width</code></td>
+<td><code>fn str_width(s: String) -&gt; i64</code></td>
+<td>Terminal columns s occupies, reading emoji and variation sequences as the clusters a terminal draws.</td>
+</tr>
 <tr>
 <td><code>is_letter</code></td>
 <td><code>fn is_letter(rune: char) -&gt; bool</code></td>

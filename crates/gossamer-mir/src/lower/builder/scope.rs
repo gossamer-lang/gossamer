@@ -66,6 +66,9 @@ impl<'a> Builder<'a> {
         } else {
             self.env_callable_ty(ty)
         };
+        // Lowering reads a generic struct's fields through the instantiation
+        // a local holds, so that instantiation is recorded before any read.
+        crate::monomorph::register_type_instantiations(self.tcx, [ty]);
         let id = u32::try_from(self.locals.len()).expect("local overflow");
         self.locals.push(LocalDecl {
             ty,

@@ -195,6 +195,29 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// `runtime::at_exit(hook)`: hands the runtime the hook as an `Fn()`
+    /// environment, which it keeps a share of until the program ends.
+    fn lower_at_exit(&mut self, hook: &HirExpr, span: Span) -> Option<Local> {
+        let raw = self.lower_expr(hook)?;
+        let unit = self.tcx.unit();
+        let sig = gossamer_types::FnSig {
+            inputs: Vec::new(),
+            output: unit,
+        };
+        let fn_ty = self.tcx.intern(TyKind::FnTrait(sig));
+        let env = self.coerce_to_fn_trait_if_needed(raw, fn_ty, span);
+        let dest = self.fresh(unit);
+        let next = self.new_block(span);
+        self.terminate(Terminator::Call {
+            callee: Operand::Const(ConstValue::Str("gos_rt_at_exit".to_string())),
+            args: vec![Operand::Copy(Place::local(env))],
+            destination: Place::local(dest),
+            target: Some(next),
+        });
+        self.set_current(next);
+        Some(self.lower_unit(span))
+    }
+
     pub(crate) fn lower_call(
         &mut self,
         callee: &HirExpr,
@@ -202,6 +225,24 @@ impl<'a> Builder<'a> {
         ty: Ty,
         span: Span,
     ) -> Option<Local> {
+        if let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &callee.kind
+            && let [only] = segments.as_slice()
+            && only.name == gossamer_hir::FOREIGN_DISPATCHER
+        {
+            return self.lower_foreign_call(args, ty, span);
+        }
+        if let HirExprKind::Path {
+            segments,
+            def: None,
+        } = &callee.kind
+            && let [only] = segments.as_slice()
+            && let Some(intrinsic) = super::foreign::FfiIntrinsic::named(&only.name)
+        {
+            return self.lower_ffi_intrinsic(intrinsic, args, ty, span);
+        }
         // A callee the resolver bound to a program function is that
         // function, whatever its path spells: a user module may declare
         // `json::render` or `fs::read`, and the standard library's lowering
@@ -219,6 +260,15 @@ impl<'a> Builder<'a> {
                 .map(|s| s.name.as_str())
                 .collect::<Vec<_>>()
                 .join("::");
+            // `runtime::at_exit(f)` keeps the closure until the program ends,
+            // so it crosses as the `Fn()` environment the runtime calls.
+            if matches!(
+                joined.as_str(),
+                "runtime::at_exit" | "std::runtime::at_exit"
+            ) && let [hook] = args
+            {
+                return self.lower_at_exit(hook, span);
+            }
             if joined == "http::serve" && args.len() == 2 {
                 if let Some(local) = self.lower_http_serve(&args[0], &args[1], ty, span) {
                     return Some(local);

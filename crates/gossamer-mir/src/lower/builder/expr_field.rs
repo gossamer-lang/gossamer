@@ -189,7 +189,8 @@ impl<'a> Builder<'a> {
         // element[0] as the Vec pointer (misaligned-deref crash).
         let field_tys: Option<Vec<Ty>> = match self.tcx.kind_of(ty) {
             gossamer_types::TyKind::Adt { def, substs } => {
-                self.tcx.adt_field_tys(*def, substs).map(<[Ty]>::to_vec)
+                let (def, substs) = (*def, substs.clone());
+                crate::monomorph::instance_field_tys(self.tcx, def, &substs)
             }
             _ => None,
         };

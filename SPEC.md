@@ -166,7 +166,8 @@ type      unsafe    use       where     while     yield
 ```
 
 Reserved but currently unused (future extensions): `async`, `await`,
-`crate`, `yield`, `extern`, `package`.
+`crate`, `yield`, `package`. `extern` appears only in an `unsafe extern
+"C"` block (§12).
 
 Contextual, never reserved:
 
@@ -662,10 +663,10 @@ pattern does not create another alias to the referent.
 
 Raw pointers (`*const T`, `*mut T`) are **not** part of the language
 today: the type spellings do not parse (`GP0001`), and there is no safe
-or unsafe way to construct one in Gossamer source. FFI goes through the
-`gossamer-binding` ABI (§12), not raw pointers. (The `unsafe` keyword
-parses - see §8.7 - but grants no extra powers, because there is nothing
-unsafe to do.)
+or unsafe way to construct one in Gossamer source. A foreign function
+(§12) takes slices and `#[repr(C)]` structs, which cross as pointers for
+the duration of the call, and an opaque C pointer it answers crosses as a
+`usize` handle.
 
 `&T` and `&mut T` have implicit lexical lifetimes. A named reference remains
 active from its declaration through the closing brace of that scope. Gossamer
@@ -2048,9 +2049,11 @@ Required fields:
 
 Every other key is optional.
 
-Optional keys include `project.output` (binary name override) and
+Optional keys include `project.output` (binary name override),
 `project.entry` (path to the entry source, relative to the manifest
-directory), which overrides convention-based entry resolution.
+directory), which overrides convention-based entry resolution, and
+`project.ffi` (a boolean, default `false`), which lets the program call
+native code through `unsafe extern` declarations (§12).
 
 ### 6.5 Project identifiers
 
@@ -2607,19 +2610,20 @@ unsafe { ... }
 unsafe fn raw_thing() { ... }
 ```
 
-`unsafe { ... }` blocks and `unsafe fn` declarations **parse and run**,
-but `unsafe` grants no additional powers today: there are no raw
-pointers (§3.4), so there is nothing unsafe to do. An `unsafe { ... }`
-block evaluates exactly like an ordinary block expression, and calling
-an `unsafe fn` needs no `unsafe` ceremony. The keyword is accepted for
-Rust source compatibility and as a forward-compatible marker.
+An `unsafe { ... }` block evaluates like an ordinary block expression. Its
+one power is calling a function declared in an `unsafe extern "C"` block
+(§12): the compiler cannot see what native code does with its arguments,
+so the call site states that its author vouches for the call. A foreign
+call outside an `unsafe` block is `GT0097`.
 
-`unsafe` never disables automatic memory management or affects memory
-reclamation.
+`unsafe fn` declarations parse and run; calling one needs no `unsafe`
+ceremony. `unsafe` never disables automatic memory management or affects
+memory reclamation.
 
-Source-level `extern "C"` items are **not** an `unsafe` power - they
-are rejected at parse time (`GP0016`). The sole FFI surface is the
-`gossamer-binding` ABI. See §12.
+The purity analysis classifies an `unsafe` block as foreign: a callback
+passed to a parallel adapter (§8.8) may not contain one, directly or
+through a function it calls (`GT0090`), and compile-time evaluation runs
+one only at `--comptime-io=full`.
 
 ---
 
@@ -2786,19 +2790,52 @@ because not every path has one.
 directly with no shell and returns `Result<{stdout, stderr, code},
 String>`. `spawn_piped(prog, args) -> Result<Child, errors::Error>`
 drives an interactive child through `write_stdin`, `close_stdin`,
-`read_line`, `read_stdout`, `wait`, and `kill`. Also `spawn`,
-`pipeline_run`, `wait_timeout`, `kill_group`, `signal`, `id`, `exit`,
-and `abort`. There is no `Command` builder; that shape belongs to the
-Rust bindings, not to Gossamer.
+`read_line`, `read_stdout`, `wait`, and `kill`.
+`run_inherit(prog, args) -> Result<i64, errors::Error>` runs the child on
+this process's own standard streams, a terminal included, and answers its
+exit code once it ends (an editor a terminal program hands the screen
+to). Also `spawn`, `pipeline_run`, `wait_timeout`, `kill_group`,
+`signal`, `id`, `exit`, and `abort`. Every wait for a child parks the
+goroutine rather than holding a worker. There is no `Command` builder;
+that shape belongs to the Rust bindings, not to Gossamer.
 
 **`std::env`** - the process environment. `args`, `program_name`, `var`,
 `set_var`, `unset_var`, `current_dir`, `set_current_dir`, `home_dir`,
 `temp_dir`.
 
 **`std::os`** holds only what is genuinely about the host and fits none
-of the four: `family` and `arch`, plus the `std::os::signal` and
-`std::os::user` submodules. `std::os::exec` is a compatibility alias for
-`std::process` and is Deprecated; new code writes `std::process`.
+of the four: `family` and `arch`, plus the `std::os::signal`,
+`std::os::fd`, and `std::os::user` submodules. `std::os::exec` is a
+compatibility alias for `std::process` and is Deprecated; new code writes
+`std::process`.
+
+`std::os::signal` subscribes to any signal number with `on(sig)`; its
+constants spell the numbers for the target (`SIGINT`, `SIGTERM`,
+`SIGHUP`, `SIGQUIT`, `SIGUSR1`, `SIGUSR2`, `SIGWINCH`, `SIGTSTP`,
+`SIGCONT`). Subscribing to `SIGTSTP` replaces the default stop.
+`Notifier::wait()` parks the goroutine and answers `true` when the signal
+arrives, `false` when its cohort is cancelled or the notifier is stopped;
+`Notifier::stop()` ends the subscription, and a signal no notifier
+subscribes to any longer takes its default disposition again.
+`std::os::fd::wait_readable(fd, timeout_ms)` and `wait_writable` park the
+goroutine until a descriptor (on Windows, a handle) is ready, and answer
+`false` at the timeout or when the goroutine's cohort is cancelled.
+
+**`std::term`** is the terminal a program runs in, written in Gossamer
+over §12: `is_terminal(fd)`, `size(fd)` (columns, rows), `enter_raw(fd)`
+(byte-at-a-time input without echo; the original mode is restored by
+`RawMode::restore` and, through `runtime::at_exit`, on every way the
+program ends), `read_input(timeout_ms, fd)` (the bytes available, without
+holding a worker, empty when the cohort is cancelled), and `resized(fd)`.
+The descriptor defaults to the standard stream each call reads
+(`term::STDIN` for input, `term::STDOUT` for size), and may be one the
+program opened: `fs::File::fd()` of `/dev/tty`, or of `CONIN$` on
+Windows, reaches the terminal when the standard streams are redirected.
+Escape sequences, key decoding, and drawing belong to libraries.
+
+**`std::ffi`** names the C types per target and converts strings for
+foreign calls (§12): `c_char`, `c_int`, `c_long`, `size_t`, ...,
+`cstring`, `from_cstr`, and `last_errno`.
 
 Fallible operations return `Result` (§9), so a discarded call is a
 compile error rather than a silently ignored failure.
@@ -3060,6 +3097,9 @@ compatibility promise without improving fidelity.
 - `runtime::set_panic_hook` observes a panic before it unwinds. There is
   no `catch_unwind`: a panic marks an invariant violation, and `Result`
   carries the failures a caller is meant to handle (§9).
+- `runtime::at_exit(f)` runs `f` when the program ends: `main` returning,
+  `process::exit`, or a fatal panic. Hooks run last registered first,
+  before a fatal panic's report prints.
 
 ---
 
@@ -3166,60 +3206,195 @@ licensing and availability sit outside the toolchain.
 
 ## 12. FFI
 
-The source-level `extern "C" { ... }` and `#[no_mangle] extern "C" fn`
-item forms are **rejected at parse time** with diagnostic code
-`GP0016`. Gossamer has exactly one FFI surface: the `[rust-bindings]`
-section of `project.toml`, consumed by the `gossamer-binding` crate.
-The `extern` keyword remains reserved.
-
-Foreign code is brought into a Gossamer project by declaring a Rust
-crate under `[rust-bindings]` in `project.toml`. The crate registers
-its entry points with `gossamer_binding::register_module!`; the
-toolchain compiles the crate into a per-project runner and links it
-into the produced binary or interpreter. Types crossing the boundary
-use the `gossamer-binding` ABI (`Unit`, `Bool`, `I64`, `F64`, `Char`,
-`String`, `Tuple`, `Vec`, `Option`, `Result`, `Opaque`, `Any`,
-`Bytes`, `Map`, `Variant`, `Callback`).
-
-```toml
-# project.toml
-[rust-bindings]
-my-libc-wrapper = { path = "./vendor/my-libc-wrapper", version = "0.1" }
-```
-
-```rust
-// vendor/my-libc-wrapper/src/lib.rs
-use gossamer_binding::register_module;
-register_module!("libc", {
-    fn malloc(size: u64) -> u64 { /* ... */ }
-    fn free(ptr: u64) -> () { /* ... */ }
-});
-```
+A Gossamer program calls the platform C library, and any other C
+library, through functions declared in an `unsafe extern "C"` block at
+module level:
 
 ```gossamer
-// program.gos
-use libc::{malloc, free}
+use std::ffi
+
+#[repr(C)]
+struct Winsize {
+    rows: u16
+    cols: u16
+    xpixel: u16
+    ypixel: u16
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn isatty(fd: ffi::c_int) -> ffi::c_int
+    fn strlen(text: [u8]) -> ffi::size_t
+    #[link_name = "gos_rt_ffi_ioctl"]
+    fn ioctl_winsize(fd: ffi::c_int, request: u64, size: &mut Winsize) -> ffi::c_int
+}
+
+#[link(name = "z")]
+unsafe extern "C" {
+    fn zlibVersion() -> usize
+}
+
 fn main() {
-    let p = malloc(1024)
-    free(p)
+    let text = ffi::cstring("hello").unwrap()
+    println(unsafe { strlen(text) })
+    if unsafe { isatty(1) } != 1 {
+        println(f"not a terminal: errno {ffi::last_errno()}")
+    }
 }
 ```
 
-FFI rules:
+Rules:
 
-- Every type that crosses the boundary uses one of the
-  `gossamer-binding` ABI variants. Raw `*mut T` / `*const T`
-  Gossamer pointers are not part of the boundary; integer handles or
-  `Opaque<T>` carry pointers when needed.
-- A binding may panic; the binding ABI wraps each entry in
-  `std::panic::catch_unwind` and converts panics to a returned
-  `Result::Err`.
-- Calls into the runner enter a scheduler state that releases the
-  P, so long-running native calls do not block other goroutines.
+- **Refusal.** A program calls native code unless its project's
+  `project.toml` refuses it:
 
-See `docs_src/libraries.md` and `crates/gossamer-binding/ABI_0_4.md`
-for the binding ABI's full surface. A source-level `extern "C"` item
-form is not implemented and remains out of scope.
+  ```toml
+  [project]
+  ffi = false
+  ```
+
+  With `ffi = false`, every active foreign declaration the program
+  reaches, in its own sources or in a dependency's, is `GT0102`, and
+  `gos check`, `gos run`, `gos test`, and `gos build` all stop. Without
+  the key, or with `ffi = true`, native code is allowed. The
+  report has one error per library that declares any (the project, and
+  each dependency by its id, transitive ones included), naming its foreign
+  functions and pointing at each declaration in the file that holds it.
+  The root project's manifest decides for its dependencies; a
+  dependency's own `ffi` key does not. A source file
+  outside any project is not governed. The standard library's own foreign
+  declarations (`std::term`) are part of the toolchain and are never
+  refused.
+- **Declarations.** An `unsafe extern "C"` (or `"system"`) block holds
+  body-less, non-generic `fn` declarations and `type Name` foreign types.
+  `#[link(name = "lib")]` names a library beyond the platform C library
+  (and, on Windows, `kernel32`), and `#[link(name = "lib", search =
+  "dir")]` adds a directory to search for it, relative to the root of the
+  package that declares it; `#[link_name = "symbol"]` names a C symbol
+  that differs from the Gossamer name; `#[cfg(...)]` selects declarations
+  per target. Every other `extern` form, `#[no_mangle] extern "C" fn`
+  included, is `GP0016`. On Linux, a release build of a program that links
+  a library of its own links dynamically against the platform's C
+  library, since a static musl binary cannot load glibc libraries.
+- **Calls.** A foreign function is called only inside `unsafe { }`
+  (`GT0097`, §8.7) and is never a value: it cannot be stored, passed, or
+  returned (`GT0100`).
+- **Parameter types.** A scalar (an integer up to 64 bits, `bool` as a C
+  `_Bool`, `f32`, `f64`); an `ffi::Ptr<T>` (`T *`) or `Option<ffi::Ptr<T>>`
+  (a `T *` that may be NULL); `&mut` a scalar, a `Ptr`, or an
+  `Option<Ptr>` (an out-parameter: `int *`, `T **`), whose value C writes
+  back; a C function pointer, written `Fn(A..) -> R`; a slice `[T]` of
+  scalars, which crosses as a pointer to its first element, and
+  `&mut [T]`, whose writes come back, windows (`&mut buf[2..6]`) and fixed
+  arrays included; a `#[repr(C)]` struct of plain data, which crosses as a
+  pointer to a read-only C-layout copy; and `&mut` such a struct, whose
+  writes come back. Any other type is `GT0098`; a foreign type by value is
+  `GT0104`; a pointee without a C layout is `GT0105`.
+- **Return types.** A scalar, `()`, `ffi::Ptr<T>`, or `Option<ffi::Ptr<T>>`.
+  A bare `Ptr` result that is NULL raises `GX0013`. A struct result is not
+  passed; an out-parameter or C-allocated memory carries one.
+- **Foreign types.** `type Name` in an extern block declares a C type
+  whose layout stays in the library. It has no Gossamer value: it is
+  never constructed, read, or passed by value (`GT0104`), only reached as
+  `Ptr<Name>`. `ffi::c_void` is the pointee of a `void *`.
+- **Pointers.** `ffi::Ptr<T>` is a non-null address of a `T` in memory
+  Gossamer does not manage. Its pointee is a scalar, a `Ptr`, a foreign
+  type, `ffi::c_void`, or a `#[repr(C)]` plain-data struct (`GT0105`
+  otherwise); a `Ptr` field makes such a struct carry a C pointer.
+  Holding, copying, comparing, storing in any field or collection, and
+  sending a `Ptr` through a channel or into another goroutine or cohort
+  are safe: it is an address. Everything that reaches memory through it
+  is `unsafe` (`GT0103`). `p.cast::<U>()` and `p.address()` are safe;
+  `unsafe { Ptr::from_address(n) }` answers `None` for zero. A `Ptr`
+  copied out of foreign memory carries whatever address C stored there,
+  NULL included; `address() == 0` tests for it. A `Ptr` or `Handle` may not
+  be a `comptime` result or be serialized (`GT0106`): an address means
+  nothing after compilation or in another process.
+- **Foreign memory.** Inside `unsafe { }`: `ffi::read::<T>(p)` and
+  `read_at(p, i)` copy a `T` out; `write(p, v)` and `write_at(p, i, v)`
+  copy one in; `read_bytes(p, n)` and `read_cstr(p)` copy bytes or a
+  NUL-terminated string into a `Vec<u8>` or `String`; `write_bytes(p, b)`
+  copies bytes out; `alloc::<T>(n)` takes zeroed memory from the platform
+  C allocator and `free(p)` gives memory back to it; `to_c_bytes(b)` is an
+  allocated copy. `size_of::<T>()` is a `T`'s C size. Every read copies,
+  so a later free or a reused buffer never reaches a Gossamer value.
+  Gossamer memory is never addressable beyond the call it is passed to;
+  memory C keeps comes from `alloc` or the library. Nothing is freed
+  automatically: the program frees what it owns, with the library's own
+  function or `ffi::free`, and `defer` scopes it.
+- **Callbacks.** A parameter of type `Fn(A..) -> R`, whose parameters and
+  result are scalars, `Ptr`, or `Option<Ptr>` (`GT0107` otherwise), takes
+  a top-level function of exactly that signature, by name (`GT0108` for a
+  closure or another signature). Native code reaches it through a C-ABI
+  entry generated for it. A callback runs only on the thread whose foreign
+  call invokes it, during that call or during a later call that runs a
+  registered callback (an event loop); one invoked on any other thread
+  ends the program with `GX0015` without running. A panic inside a
+  callback is held, the callback answers zero, and the panic resumes when
+  the foreign call that ran it returns, so it never unwinds through C. A
+  callback may allocate, call foreign functions, and block like any
+  foreign call; it spawns only inside a `cohort` (`GT0086`). State a
+  callback needs travels through its `void *` argument as an
+  `ffi::Handle`.
+- **Handles.** `ffi::Handle::new(value)` keeps `value` alive under an
+  integer native code can hold: `h.as_ptr()` is the `void *` to hand
+  over, `unsafe { Handle::<T>::from_ptr(p) }` the handle back, and
+  `get`, `set`, `update(|v: &mut T| ..)`, `take`, and `release` read,
+  replace, change, and drop the value. A released or unknown handle
+  raises `GX0014` instead of reading freed memory. A handle does not
+  synchronize: values several goroutines change guard themselves with
+  `std::sync`.
+- **Function pointers.** `unsafe { ffi::fn_from_ptr::<Fn(A..) -> R>(p) }`
+  is a callable for the native function at `p` (a `dlsym` or
+  `GetProcAddress` result) with that C signature.
+- **Borrowing.** A slice or struct argument is valid for the call only;
+  native code may not keep the pointer.
+- **Effects.** Every foreign call is unsafe and foreign, whatever the
+  native function does. No attribute relaxes that: `#[pure]`,
+  `#[readonly]`, `#[effect]`, `#[blocking]`, and `#[nonblocking]` on a
+  foreign declaration are `GT0099`.
+- **`errno`.** Each call captures `errno` (on Windows, `GetLastError`)
+  before any other code runs, into the calling goroutine's own slot,
+  which `std::ffi::last_errno()` reads.
+- **Blocking.** Each call marks its scheduler worker as inside a system
+  call. A call that outlasts a millisecond while goroutines wait starts a
+  worker to run every goroutine that has not yet started. A goroutine
+  that has already run on the blocked worker resumes when the call
+  returns.
+- **Variadic functions** (`ioctl`, `fcntl`, `open`) are not declarable;
+  the runtime exports fixed-arity forms (`gos_rt_ffi_ioctl`,
+  `gos_rt_ffi_fcntl`, `gos_rt_ffi_open`) to declare with `#[link_name]`.
+- **Tiers.** Every tier calls the same native function: the bytecode VM
+  through a call stub generated per signature, the JIT and LLVM AOT
+  directly with the target's C calling convention. On Linux the runtime
+  links its own C math functions, and a foreign `sin` or `cbrt` reaches
+  those on every tier.
+- **wasm32** has no native library; a foreign declaration active there
+  is `GT0101`.
+
+`std::ffi` names the C types per target (`c_int`, `c_long`, `size_t`,
+...), converts strings (`cstring`, `from_cstr`), and holds `Ptr`,
+`c_void`, `Handle`, and the memory operations above. `std::term` (§10) is
+written in Gossamer over this surface.
+
+Not supported, by design: pointer arithmetic (`read_at` and `write_at`
+index arrays), a `const T *` type of its own (C does not enforce it, and
+`[T]` already expresses read-only Gossamer memory), the address of a
+Gossamer value beyond a call, closures as C function pointers, ownership
+annotations, unions and bitfields (a byte-array field with `read_at`
+models them), variadic functions (a fixed-arity C shim calls them), struct
+results by value, running Gossamer code on a thread a library starts, and
+C++.
+
+The `[rust-bindings]` section of `project.toml` remains the way to call
+Rust code. A Rust crate registers its entry points with
+`gossamer_binding::register_module!`; the toolchain compiles the crate
+into a per-project runner and links it into the produced binary or
+interpreter. Types crossing that boundary use the `gossamer-binding` ABI
+(`Unit`, `Bool`, `I64`, `F64`, `Char`, `String`, `Tuple`, `Vec`,
+`Option`, `Result`, `Opaque`, `Any`, `Bytes`, `Map`, `Variant`,
+`Callback`); see `docs_src/libraries.md` and
+`crates/gossamer-binding/ABI_0_4.md`.
 
 ---
 
@@ -3228,11 +3403,15 @@ form is not implemented and remains out of scope.
 ```
 #[derive(Debug, Default, PartialEq)]
 #[inline]
-#[no_mangle]
 #[repr(C)]
 #[cfg(target_os = "linux")]
+#[link(name = "z")]
+#[link_name = "symbol"]
 #[test]
 ```
+
+`#[cfg(...)]` is resolved for the target a build produces: `gos build
+--target` and `gos check --target` name it, and the host is the default.
 
 Only a curated set is recognized (unknown attributes warn rather than
 error for forward-compatibility).

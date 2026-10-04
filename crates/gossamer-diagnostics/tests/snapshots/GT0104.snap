@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0104]: A foreign type, declared `type Name` in an `unsafe extern` block, is - here
+--- framed ---
+error[GT0104]: A foreign type, declared `type Name` in an `unsafe extern` block, is
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

@@ -4989,3 +4989,30 @@ fn a_method_written_qualified_on_a_stdlib_type_is_accepted() {
          }\n");
     assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
 }
+
+#[test]
+fn type_arguments_on_the_type_segment_instantiate_an_associated_function() {
+    // `Cell::<String>::make(..)` answers `Cell<String>` even when no
+    // argument names `T`.
+    let source = "struct Cell<T> { id: u64 }\n\
+         impl<T> Cell<T> { fn make(id: u64) -> Cell<T> { Cell { id: id } } }\n";
+    let rejected = run(&format!(
+        "{source}fn main() {{ let c = Cell::<String>::make(4)\nlet d: Cell<i64> = c\nlet _ = d }}\n"
+    ));
+    assert!(
+        rejected
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d.error, TypeError::TypeMismatch { .. })),
+        "{:?}",
+        rejected.diagnostics
+    );
+    let accepted = run(&format!(
+        "{source}fn main() {{ let c = Cell::<String>::make(4)\nlet d: Cell<String> = c\nlet _ = d }}\n"
+    ));
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+}

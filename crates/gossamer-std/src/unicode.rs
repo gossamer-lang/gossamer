@@ -124,6 +124,21 @@ pub fn is_assigned(r: char) -> bool {
     !matches!(r.general_category(), GeneralCategory::Unassigned)
 }
 
+/// Terminal columns `r` occupies: 2 for East Asian wide and fullwidth
+/// characters, 0 for combining marks, zero-width, and control characters,
+/// otherwise 1.
+#[must_use]
+pub fn char_width(r: char) -> i64 {
+    unicode_width::UnicodeWidthChar::width(r).map_or(0, |w| w as i64)
+}
+
+/// Terminal columns `s` occupies, reading emoji and variation sequences as
+/// the clusters a terminal draws.
+#[must_use]
+pub fn str_width(s: &str) -> i64 {
+    unicode_width::UnicodeWidthStr::width(s) as i64
+}
+
 /// Returns the canonical combining class for `r` (0-254). Used by
 /// callers that implement custom normalization passes.
 #[must_use]

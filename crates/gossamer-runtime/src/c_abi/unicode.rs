@@ -416,6 +416,25 @@ pub unsafe extern "C" fn gos_rt_unicode_graphemes(s: *const c_char) -> *mut GosV
     })
 }
 
+/// `unicode::char_width(c)`: terminal columns the scalar occupies.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_unicode_char_width(c: u32) -> i64 {
+    ffi_entry!(0, {
+        unicode_width::UnicodeWidthChar::width(char_from(c)).map_or(0, |w| w as i64)
+    })
+}
+
+/// `unicode::str_width(s)`: terminal columns the string occupies.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_unicode_str_width(s: *const c_char) -> i64 {
+    ffi_entry!(0, {
+        // SAFETY: `s` is this shim's argument, null or a live string body (C-ABI contract), which
+        // `cstr_to_str` accepts.
+        let text = unsafe { cstr_to_str(s) };
+        unicode_width::UnicodeWidthStr::width(text) as i64
+    })
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_unicode_grapheme_count(s: *const c_char) -> i64 {
     ffi_entry!(0, {

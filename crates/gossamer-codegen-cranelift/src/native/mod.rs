@@ -196,4 +196,6 @@ pub use lowered_program::*;
 mod vec_elem_kind;
 pub use vec_elem_kind::*;
 
+mod foreign;
+
 mod simd_lanes;

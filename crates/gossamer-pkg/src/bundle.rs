@@ -133,6 +133,27 @@ pub fn bundle_path_dependencies_traced(
     (out, spans)
 }
 
+/// Every path dependency `entry`'s program bundles, transitively, by
+/// project id, with the directory it is rooted in: what a dependency's
+/// `#[link(search = "..")]` directory is relative to.
+#[must_use]
+pub fn path_dependency_roots(entry: &Path) -> Vec<(String, PathBuf)> {
+    let mut visited = Vec::new();
+    let mut worklist: Vec<(PathBuf, PathBuf)> = Vec::new();
+    collect_path_deps(entry, &mut visited, &mut worklist);
+    let mut roots = Vec::new();
+    let mut i = 0;
+    while i < worklist.len() {
+        let (dep_root, dep_entry) = worklist[i].clone();
+        i += 1;
+        if let Some((id, _)) = path_dep_entry(&dep_root) {
+            roots.push((id, dep_root));
+        }
+        collect_path_deps(&dep_entry, &mut visited, &mut worklist);
+    }
+    roots
+}
+
 /// Appends the (root, entry) of each not-yet-visited path dependency
 /// of `entry`'s project to `worklist`.
 ///

@@ -152,7 +152,11 @@ pub(super) fn build_offline_module(
     for &func_id in function_ids_by_name.values() {
         populate_fn(func_id);
     }
-    for &func_id in intrinsics.externs.values() {
+    for &func_id in intrinsics
+        .externs
+        .values()
+        .chain(intrinsics.foreign.values())
+    {
         populate_fn(func_id);
     }
     for &func_id in intrinsics.functions.values() {
@@ -708,6 +712,7 @@ pub(crate) fn lower_program_full(
     intrinsics.extern_fn(module, "strlen", &[ptr_ty], &[types::I64])?;
     intrinsics.extern_fn(module, "calloc", &[ptr_ty, ptr_ty], &[ptr_ty])?;
     intrinsics.extern_fn(module, "fmod", &[types::F64, types::F64], &[types::F64])?;
+    foreign::declare_foreign_calls(module, bodies, &mut intrinsics)?;
     // Helper-emitted string literals. These are produced by the
     // codegen itself (bounds-check labels, fallback placeholders,
     // common format separators) rather than appearing in any

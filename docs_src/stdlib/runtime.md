@@ -14,6 +14,7 @@ Goroutine / scheduler introspection and tuning.
 | `arena_push` | `fn arena_push() -> ()` | Opens an arena region for bump allocation. |
 | `arena_pop` | `fn arena_pop() -> ()` | Closes the innermost arena region, freeing its slabs. |
 | `set_panic_hook` | `fn set_panic_hook(hook: Fn(String) -> ()) -> ()` | Installs a hook invoked with the message on panic. |
+| `at_exit` | `fn at_exit(hook: Fn() -> ()) -> ()` | Runs a closure when the program ends: returning from `main`, `process::exit`, or an uncaught panic. Hooks run last registered first. |
 | `cohort_push` | `fn cohort_push(policy: i64, timeout_ms: i64, isolation: i64, on_error: i64, uncancellable: i64, drain_ms: i64) -> ()` | Opens a cohort on the running goroutine. Written `cohort { }` in source; the block desugars to this plus `cohort_join` and a deferred `cohort_pop`. |
 | `cohort_join` | `fn cohort_join() -> Result<(), errors::Error>` | Waits for every child of the running goroutine's cohort and answers `Result<(), errors::Error>`. |
 | `cohort_pop` | `fn cohort_pop() -> ()` | Closes the running goroutine's cohort, cancelling and joining anything still running. |

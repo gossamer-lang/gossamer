@@ -22,6 +22,7 @@
 #![deny(unsafe_code)]
 
 mod emit;
+pub mod ffi_trampoline;
 mod jit;
 mod jit_frames;
 mod jit_memory;

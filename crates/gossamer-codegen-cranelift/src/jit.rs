@@ -447,10 +447,11 @@ fn is_bare_container_handle(def_local: u32) -> bool {
     // 46 is `sync::Shared`: a pointer the body only ever hands to a
     // `gos_rt_shared_*` call, so a local holding one lowers as that pointer.
     // 26 is `regex::Pattern`, which is the same shape: the body only ever
-    // hands it to a `gos_rt_regex_*` call.
+    // hands it to a `gos_rt_regex_*` call. 17 is `signal::Notifier`, an index
+    // the body hands to the `gos_rt_signal_*` calls.
     matches!(
         u32::MAX - def_local,
-        7 | 18 | 19 | 26 | 28 | 30 | 31 | 32 | 46
+        7 | 17 | 18 | 19 | 26 | 28 | 30 | 31 | 32 | 46
     )
 }
 
@@ -1290,6 +1291,10 @@ fn compile_bodies(
     // `pub extern "C"` symbols there.
     let leaked_binding_names = register_binding_symbols(&mut builder);
     runtime_symbol_set.extend(leaked_binding_names);
+    let libraries = foreign_libraries(filtered);
+    builder.symbol_lookup_fn(Box::new(move |name| {
+        gossamer_runtime::c_abi::ffi::resolve_symbol(name, &libraries)
+    }));
     let mut module = JITModule::new(builder);
 
     // Rename the user's `main` to `gos_main` in the JIT's symbol
@@ -2572,6 +2577,9 @@ fn ty_to_kind(
         // re-wraps a returned word as `Value::Char`.
         TyKind::Char => Some(JitKind::Char),
         TyKind::Unit => Some(JitKind::Unit),
+        // `signal::Notifier` is the runtime registry's index, an `Int` on
+        // the bytecode tier.
+        TyKind::Adt { def, .. } if def.local == u32::MAX - 17 => Some(JitKind::I64),
         // Heap enums with a registered VM-side shape cross as native
         // tagged pointers; the body works on the compiled-tier
         // representation directly (zero conversion).
@@ -2734,6 +2742,29 @@ fn ty_to_tuple_elem(
 /// with no per-name arm to keep in step. Returns the registered names so the
 /// JIT-eligibility check can identify a body that calls something the
 /// runtime does not define.
+/// The libraries the foreign calls in `bodies` name with `#[link]`, which a
+/// foreign symbol is looked up in before the process's own modules.
+fn foreign_libraries(bodies: &[Body]) -> Vec<String> {
+    let mut libraries: Vec<String> = Vec::new();
+    for body in bodies {
+        for block in &body.blocks {
+            for stmt in &block.stmts {
+                if let gossamer_mir::StatementKind::Assign {
+                    rvalue: gossamer_mir::Rvalue::CallIntrinsic { name, .. },
+                    ..
+                } = &stmt.kind
+                    && let Some(call) = gossamer_mir::ForeignCall::parse(name)
+                    && !call.library.is_empty()
+                    && !libraries.iter().any(|known| known == call.library)
+                {
+                    libraries.push(call.library.to_string());
+                }
+            }
+        }
+    }
+    libraries
+}
+
 fn register_runtime_symbols(builder: &mut JITBuilder) -> std::collections::HashSet<&'static str> {
     // The one data symbol compiled code reads: the yield-request byte every
     // loop-header preemption poll tests.

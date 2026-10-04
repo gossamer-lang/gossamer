@@ -21,6 +21,8 @@ mod context;
 pub mod data_first;
 mod error;
 mod exhaustiveness;
+mod foreign_layout;
+mod foreign_policy;
 mod infer;
 mod normalize;
 pub mod printer;
@@ -51,8 +53,10 @@ pub use checker::{
     typecheck_source_file, typecheck_source_file_for_repl_inspection,
 };
 pub use context::{PackedLayout, PlainLayout, TyCtxt};
-pub use error::{NotDisplayableClass, TypeDiagnostic, TypeError};
+pub use error::{ForeignError, ForeignLibrary, NotDisplayableClass, TypeDiagnostic, TypeError};
 pub use exhaustiveness::{ExhaustivenessDiagnostic, ExhaustivenessError, check_exhaustiveness};
+pub use foreign_layout::{CLeaf, CStep, c_class_signed, c_class_width};
+pub use foreign_policy::ForeignPolicy;
 pub use infer::{InferCtxt, UnifyError};
 pub use normalize::normalize_caller_side_spellings;
 pub use printer::{public_type_name, render_public_ty, render_ty};

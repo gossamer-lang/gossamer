@@ -81,6 +81,11 @@ pub fn lower_source_file(
     // stage/terminal closures are still inline and can be spliced in.
     // Parallel adapters lower to plain index loops first, so their leaves
     // meet the fuser like any hand-written loop would.
+    crate::foreign_boundary::desugar_foreign_boundaries(
+        &mut program,
+        &mut *lowerer.tcx,
+        &mut lowerer.ids,
+    );
     crate::par::desugar_parallel_adapters(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     crate::fuse::fuse_iter_pipelines(&mut program, &mut *lowerer.tcx, &mut lowerer.ids);
     // After the desugars above, so the arithmetic they generate rounds too.

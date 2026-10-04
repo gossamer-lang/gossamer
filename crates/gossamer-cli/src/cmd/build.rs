@@ -269,6 +269,7 @@ fn run(file: &PathBuf, request: &BuildRequest<'_>) -> Result<()> {
                 ));
             }
             gossamer_codegen_llvm::set_target_triple(triple.to_string());
+            gossamer_resolve::set_cfg_target_triple(triple);
             Some(triple)
         }
         _ => None,
@@ -1132,44 +1133,23 @@ fn ensure_output_dir(out_path: &Path) -> std::result::Result<(), NativeBuildErro
     })
 }
 
-fn try_native_build(
-    unit_name: &str,
-    input_path: &PathBuf,
-    out_path: &PathBuf,
+/// The native libraries a build links beyond the runtime, and the
+/// directories it searches for them.
+struct NativeLinks {
+    libraries: Vec<String>,
+    search: Vec<PathBuf>,
+}
+
+/// The archives a native link takes beyond the runtime: the
+/// `[rust-bindings]` staticlib and, when collecting PGO profiles, the
+/// profile runtime.
+fn extra_link_archives(
+    input_path: &Path,
     opts: LinkOptions,
-    target: Option<&str>,
-    checked: gossamer_driver::CheckedFrontend,
-    timings: &mut BuildTimings,
-) -> std::result::Result<NativeBuildOutcome, NativeBuildError> {
-    let lt = resolve_link_target(target);
-    let tmp_dir =
-        std::env::temp_dir().join(format!("gos-build-{}-{}", std::process::id(), unit_name));
-    fs::create_dir_all(&tmp_dir)
-        .map_err(|err| NativeBuildError::Io(anyhow!("creating {}: {err}", tmp_dir.display())))?;
-    // Decide the final link shape before codegen. LLVM's tiny-copy policy is
-    // intentionally scoped to static musl, where it was measured; macOS,
-    // Windows, and dynamic Linux keep LLVM's normal loop idiom recognition.
-    let static_musl = lt.env == TargetEnv::Musl || opts.want_static_musl();
-    let phase_started = Instant::now();
-    let (object_paths, object_triple) = emit_native_objects(
-        unit_name,
-        &tmp_dir,
-        opts.release,
-        static_musl,
-        checked,
-        timings,
-    )?;
-    timings.codegen = phase_started.elapsed();
-    profile_rss_stage("build_backend_emitted");
-    // Static-musl is chosen for a cross musl target (musl links
-    // statically by construction) or for a host release that opted in.
-    let runtime_lib = if static_musl {
-        find_runtime_lib_for_target(musl_triple_for_arch(lt.arch))?
-    } else if lt.is_cross {
-        find_runtime_lib_for_target(&lt.triple)?
-    } else {
-        find_runtime_lib()?
-    };
+    static_musl: bool,
+    lt: &LinkTarget,
+    pgo: &PgoLinkConfig,
+) -> std::result::Result<Vec<PathBuf>, NativeBuildError> {
     // The bindings staticlib must match the main link's libc and arch:
     // a static-musl link cannot take a glibc-built archive (undefined
     // __res_init / open64 / gnu_get_libc_version), and a cross link
@@ -1194,12 +1174,64 @@ fn try_native_build(
     // in `libclang_rt.profile-x86_64.a`; without it the link fails
     // with undefined reference. We locate the archive next to the
     // LLVM toolchain and splice it into the link as an extra archive.
-    let pgo = pgo_link_config();
     if pgo.collect_path.is_some() && opts.release {
         if let Some(proflib) = find_clang_rt_profile() {
             extra_archives.push(proflib);
         }
     }
+    Ok(extra_archives)
+}
+
+fn try_native_build(
+    unit_name: &str,
+    input_path: &PathBuf,
+    out_path: &PathBuf,
+    opts: LinkOptions,
+    target: Option<&str>,
+    checked: gossamer_driver::CheckedFrontend,
+    timings: &mut BuildTimings,
+) -> std::result::Result<NativeBuildOutcome, NativeBuildError> {
+    let lt = resolve_link_target(target);
+    let links = gossamer_driver::foreign_link_libraries(&checked.sf);
+    let libraries = NativeLinks {
+        search: crate::paths::foreign_search_dirs(input_path, &links),
+        libraries: links.libraries,
+    };
+    let tmp_dir =
+        std::env::temp_dir().join(format!("gos-build-{}-{}", std::process::id(), unit_name));
+    fs::create_dir_all(&tmp_dir)
+        .map_err(|err| NativeBuildError::Io(anyhow!("creating {}: {err}", tmp_dir.display())))?;
+    // Decide the final link shape before codegen. LLVM's tiny-copy policy is
+    // intentionally scoped to static musl, where it was measured; macOS,
+    // Windows, and dynamic Linux keep LLVM's normal loop idiom recognition.
+    // The C libraries a program names are the platform's glibc shared
+    // objects, which a static musl link cannot take, so a host release that
+    // links one takes the dynamic link; a musl target asked for by name
+    // stays static.
+    let static_musl =
+        lt.env == TargetEnv::Musl || (opts.want_static_musl() && libraries.libraries.is_empty());
+    let phase_started = Instant::now();
+    let (object_paths, object_triple) = emit_native_objects(
+        unit_name,
+        &tmp_dir,
+        opts.release,
+        static_musl,
+        checked,
+        timings,
+    )?;
+    timings.codegen = phase_started.elapsed();
+    profile_rss_stage("build_backend_emitted");
+    // Static-musl is chosen for a cross musl target (musl links
+    // statically by construction) or for a host release that opted in.
+    let runtime_lib = if static_musl {
+        find_runtime_lib_for_target(musl_triple_for_arch(lt.arch))?
+    } else if lt.is_cross {
+        find_runtime_lib_for_target(&lt.triple)?
+    } else {
+        find_runtime_lib()?
+    };
+    let pgo = pgo_link_config();
+    let extra_archives = extra_link_archives(input_path, opts, static_musl, &lt, &pgo)?;
     if std::env::var_os("GOS_LINK_VERBOSE").is_some() {
         eprintln!("gos build: runtime lib: {}", runtime_lib.display());
         eprintln!("gos build: objects: {object_paths:?}");
@@ -1212,13 +1244,21 @@ fn try_native_build(
     ensure_output_dir(out_path)?;
     let phase_started = Instant::now();
     let link_result = if !lt.is_cross && cfg!(all(windows, target_env = "msvc")) {
-        link_windows_msvc(&object_paths, &runtime_lib, &extra_archives, out_path, opts)
+        link_windows_msvc(
+            &object_paths,
+            &runtime_lib,
+            &extra_archives,
+            &libraries,
+            out_path,
+            opts,
+        )
     } else if static_musl {
         link_posix_static_musl(
             &lt,
             &object_paths,
             &runtime_lib,
             &extra_archives,
+            &libraries,
             out_path,
             opts,
         )
@@ -1228,6 +1268,7 @@ fn try_native_build(
             &object_paths,
             &runtime_lib,
             &extra_archives,
+            &libraries,
             out_path,
             opts,
         )
@@ -1511,6 +1552,7 @@ fn link_posix(
     object_paths: &[PathBuf],
     runtime_lib: &Path,
     extra_archives: &[PathBuf],
+    libraries: &NativeLinks,
     out_path: &Path,
     opts: LinkOptions,
 ) -> std::result::Result<(), NativeBuildError> {
@@ -1525,6 +1567,7 @@ fn link_posix(
             object_paths,
             runtime_lib,
             extra_archives,
+            libraries,
             out_path,
             opts,
         );
@@ -1557,6 +1600,12 @@ fn link_posix(
     cmd.arg(runtime_lib);
     for archive in extra_archives {
         cmd.arg(archive);
+    }
+    for dir in &libraries.search {
+        cmd.arg(format!("-L{}", dir.display()));
+    }
+    for library in &libraries.libraries {
+        cmd.arg(format!("-l{library}"));
     }
     cmd.arg("-o").arg(out_path);
     // `-ldl` only exists on Linux (libdl). macOS folds `dl*` into
@@ -1715,6 +1764,7 @@ fn link_cross_gnu_lld(
     object_paths: &[PathBuf],
     runtime_lib: &Path,
     extra_archives: &[PathBuf],
+    libraries: &NativeLinks,
     out_path: &Path,
     opts: LinkOptions,
 ) -> std::result::Result<(), NativeBuildError> {
@@ -1746,6 +1796,12 @@ fn link_cross_gnu_lld(
     cmd.arg(runtime_lib);
     for archive in extra_archives {
         cmd.arg(archive);
+    }
+    for dir in &libraries.search {
+        cmd.arg(format!("-L{}", dir.display()));
+    }
+    for library in &libraries.libraries {
+        cmd.arg(format!("-l{library}"));
     }
     cmd.arg("-lc").arg("-lpthread").arg("-ldl").arg("-lm");
     if !extra_archives.is_empty() {
@@ -1788,6 +1844,7 @@ fn link_posix_static_musl(
     object_paths: &[PathBuf],
     runtime_lib: &Path,
     extra_archives: &[PathBuf],
+    libraries: &NativeLinks,
     out_path: &Path,
     opts: LinkOptions,
 ) -> std::result::Result<(), NativeBuildError> {
@@ -1825,6 +1882,19 @@ fn link_posix_static_musl(
     cmd.arg(runtime_lib);
     for archive in extra_archives {
         cmd.arg(archive);
+    }
+    // A static link reads `lib<name>.a`; the linker names any it cannot find.
+    // musl's `libc.a` holds what glibc splits into these libraries.
+    for dir in &libraries.search {
+        cmd.arg(format!("-L{}", dir.display()));
+    }
+    for library in &libraries.libraries {
+        if !matches!(
+            library.as_str(),
+            "c" | "m" | "pthread" | "dl" | "rt" | "util"
+        ) {
+            cmd.arg(format!("-l{library}"));
+        }
     }
     cmd.arg(self_contained.join("libc.a"))
         .arg(self_contained.join("libunwind.a"))
@@ -1893,6 +1963,7 @@ fn link_windows_msvc(
     object_paths: &[PathBuf],
     runtime_lib: &Path,
     extra_archives: &[PathBuf],
+    libraries: &NativeLinks,
     out_path: &Path,
     opts: LinkOptions,
 ) -> std::result::Result<(), NativeBuildError> {
@@ -1926,6 +1997,12 @@ fn link_windows_msvc(
         // `--allow-multiple-definition`; without it, `link.exe`
         // exits with LNK4006 ("multiply defined").
         cmd.arg("/FORCE:MULTIPLE");
+    }
+    for dir in &libraries.search {
+        cmd.arg(format!("/LIBPATH:{}", dir.display()));
+    }
+    for library in &libraries.libraries {
+        cmd.arg(format!("{library}.lib"));
     }
     for lib in [
         "advapi32.lib",
@@ -1962,6 +2039,7 @@ fn link_windows_msvc(
     _object_paths: &[PathBuf],
     _runtime_lib: &Path,
     _extra_archives: &[PathBuf],
+    _libraries: &NativeLinks,
     _out_path: &Path,
     _opts: LinkOptions,
 ) -> std::result::Result<(), NativeBuildError> {

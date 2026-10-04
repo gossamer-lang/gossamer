@@ -1,0 +1,61 @@
+// Foreign pointers, out-parameters, foreign memory, callbacks, and handles,
+// over the platform C library alone.
+
+use std::ffi
+use std::ffi::Ptr
+
+unsafe extern "C" {
+    fn frexp(x: f64, exponent: &mut ffi::c_int) -> f64
+    fn strtol(text: Ptr<u8>, end: &mut Option<Ptr<u8>>, base: ffi::c_int) -> ffi::c_long
+    fn getenv(name: [u8]) -> Option<Ptr<u8>>
+    fn qsort(base: &mut [i32], count: ffi::size_t, size: ffi::size_t, compare: Fn(Ptr<ffi::c_void>, Ptr<ffi::c_void>) -> ffi::c_int)
+}
+
+fn descending(a: Ptr<ffi::c_void>, b: Ptr<ffi::c_void>) -> ffi::c_int {
+    let x: i32 = unsafe { ffi::read(a.cast()) }
+    let y: i32 = unsafe { ffi::read(b.cast()) }
+    if x > y {
+        -1
+    } else if x < y {
+        1
+    } else {
+        0
+    }
+}
+
+struct Tally {
+    calls: i64
+}
+
+fn main() {
+    let mut exponent: ffi::c_int = 0
+    let mantissa = unsafe { frexp(40.0, &mut exponent) }
+    println(f"frexp {mantissa} {exponent}")
+
+    let text = unsafe { ffi::to_c_bytes(ffi::cstring("2048 bytes").unwrap()) }
+    let mut rest: Option<Ptr<u8>> = None
+    let value = unsafe { strtol(text, &mut rest, 10) }
+    println(f"strtol {value} rest={unsafe { ffi::read_cstr(rest.unwrap()) }.unwrap()}")
+    unsafe { ffi::free(text) }
+
+    let unset = unsafe { getenv(ffi::cstring("GOSSAMER_SURELY_UNSET_VARIABLE").unwrap()) }
+    println(f"getenv unset {unset.is_none()}")
+
+    let mut values = #[3i32, 9, 1, 7, 5]
+    unsafe { qsort(&mut values, 5, 4, descending) }
+    println(f"qsort {values}")
+
+    let words: Ptr<i64> = unsafe { ffi::alloc(3) }
+    unsafe { ffi::write(words, 10i64) }
+    unsafe { ffi::write_at(words, 2, 30i64) }
+    let first: i64 = unsafe { ffi::read(words) }
+    let middle: i64 = unsafe { ffi::read_at(words, 1) }
+    let last: i64 = unsafe { ffi::read_at(words, 2) }
+    println(f"memory {first} {middle} {last} {ffi::size_of::<i64>()}")
+    unsafe { ffi::free(words) }
+
+    let tally = ffi::Handle::new(Tally { calls: 0 })
+    tally.update(|t: &mut Tally| t.calls += 1)
+    tally.update(|t: &mut Tally| t.calls += 2)
+    println(f"handle {tally.take().calls}")
+}

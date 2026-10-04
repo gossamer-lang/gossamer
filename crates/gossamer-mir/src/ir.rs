@@ -587,6 +587,207 @@ pub enum RawIntrinsic {
     /// Internal marker used to keep bytecode-only user iterators out of native
     /// promotion.
     JitUnsupportedUserIterator,
+    /// A call to a function declared in an `unsafe extern "C"` block; the
+    /// name carries the call's [`ForeignCall`] parts.
+    Foreign,
+    /// The address of a C-ABI entry for a callback adapter
+    /// ([`ForeignCallback`]); its one operand names the adapter.
+    ForeignCallback,
+}
+
+/// How one parameter of a foreign call crosses, as the signature spells it
+/// (see `gossamer_hir::foreign_signature`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForeignParam {
+    /// A scalar of this C class.
+    Scalar(char),
+    /// A slice of scalars of class `elem`, passed as a pointer to its first
+    /// element; `writable` when the callee's writes come back.
+    Slice {
+        /// The element class.
+        elem: char,
+        /// Whether the callee's writes come back.
+        writable: bool,
+    },
+    /// A pointer to a C-layout struct copy, already packed when the call is
+    /// lowered; `writable` when the callee's writes come back.
+    Struct {
+        /// Whether the callee's writes come back.
+        writable: bool,
+    },
+}
+
+/// The parameters a foreign signature's parameter part spells, or `None`
+/// when it is malformed.
+#[must_use]
+pub fn foreign_params(spelling: &str) -> Option<Vec<ForeignParam>> {
+    let mut params = Vec::new();
+    let mut chars = spelling.chars();
+    while let Some(c) = chars.next() {
+        params.push(match c {
+            'p' | 'P' => {
+                let elem = chars.next()?;
+                gossamer_types::c_class_width(elem)?;
+                ForeignParam::Slice {
+                    elem,
+                    writable: c == 'P',
+                }
+            }
+            'r' | 'R' => ForeignParam::Struct { writable: c == 'R' },
+            class => {
+                gossamer_types::c_class_width(class)?;
+                ForeignParam::Scalar(class)
+            }
+        });
+    }
+    Some(params)
+}
+
+/// The parts of a foreign-call intrinsic name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignCall<'a> {
+    /// The C symbol called.
+    pub symbol: &'a str,
+    /// The parameter part of the signature, as `gossamer_hir::foreign_signature`
+    /// spells it; [`ForeignCall::param_list`] reads it.
+    pub params: &'a str,
+    /// The result's class character.
+    pub ret: char,
+    /// The library `#[link(name = ..)]` names, or `""`.
+    pub library: &'a str,
+}
+
+const FOREIGN_PREFIX: &str = "gos_ffi_call:";
+
+/// The symbol `gossamer_hir`'s foreign-boundary pass gives a call through an
+/// address.
+const fn gossamer_hir_indirect_symbol() -> &'static str {
+    "@"
+}
+
+/// Interned foreign-call intrinsic names: MIR stores an intrinsic's name as
+/// `&'static str`, and a program has one per foreign function it calls.
+static FOREIGN_NAMES: std::sync::Mutex<Option<std::collections::HashSet<&'static str>>> =
+    std::sync::Mutex::new(None);
+
+impl<'a> ForeignCall<'a> {
+    /// The intrinsic name for a call to `symbol` with compact `signature`
+    /// (`params>ret`) from `library`.
+    #[must_use]
+    pub fn intrinsic_name(symbol: &str, signature: &str, library: &str) -> &'static str {
+        let name = format!("{FOREIGN_PREFIX}{signature}:{library}:{symbol}");
+        let mut names = FOREIGN_NAMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let names = names.get_or_insert_with(std::collections::HashSet::new);
+        if let Some(&interned) = names.get(name.as_str()) {
+            return interned;
+        }
+        let interned: &'static str = Box::leak(name.into_boxed_str());
+        names.insert(interned);
+        interned
+    }
+
+    /// The parts of `name` when it is a foreign-call intrinsic.
+    #[must_use]
+    pub fn parse(name: &'a str) -> Option<Self> {
+        let parts = name.strip_prefix(FOREIGN_PREFIX)?;
+        let (signature, located) = parts.split_once(':')?;
+        let (library, symbol) = located.split_once(':')?;
+        let (params, ret) = signature.split_once('>')?;
+        let mut ret_chars = ret.chars();
+        let ret = ret_chars.next()?;
+        if ret_chars.next().is_some()
+            || symbol.is_empty()
+            || (ret != 'v' && gossamer_types::c_class_width(ret).is_none())
+        {
+            return None;
+        }
+        foreign_params(params)?;
+        Some(Self {
+            symbol,
+            params,
+            ret,
+            library,
+        })
+    }
+
+    /// Whether the call goes through an address, its first operand, rather
+    /// than a named symbol.
+    #[must_use]
+    pub fn is_indirect(&self) -> bool {
+        self.symbol == gossamer_hir_indirect_symbol()
+    }
+
+    /// The call's parameters.
+    #[must_use]
+    pub fn param_list(&self) -> Vec<ForeignParam> {
+        // `parse` validated the spelling.
+        foreign_params(self.params).unwrap_or_default()
+    }
+}
+
+/// The parts of a callback intrinsic: the address of a C-ABI entry that runs
+/// a generated adapter, which `gossamer_hir`'s foreign-boundary pass names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ForeignCallback<'a> {
+    /// The parameter part of the entry's C signature, one class per
+    /// parameter.
+    pub params: &'a str,
+    /// The entry's result class, or `v`.
+    pub ret: char,
+    /// The adapter body the entry runs: `fn(i64) -> i64` over the argument
+    /// words.
+    pub adapter: &'a str,
+    /// The function the program passed, for reports.
+    pub name: &'a str,
+}
+
+const CALLBACK_PREFIX: &str = "gos_ffi_callback:";
+
+impl<'a> ForeignCallback<'a> {
+    /// The intrinsic name for an entry with C signature `signature`
+    /// (`params>ret`) running `adapter`, made for the function `name`.
+    #[must_use]
+    pub fn intrinsic_name(signature: &str, adapter: &str, name: &str) -> &'static str {
+        let name = format!("{CALLBACK_PREFIX}{signature}:{adapter}:{name}");
+        let mut names = FOREIGN_NAMES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let names = names.get_or_insert_with(std::collections::HashSet::new);
+        if let Some(&interned) = names.get(name.as_str()) {
+            return interned;
+        }
+        let interned: &'static str = Box::leak(name.into_boxed_str());
+        names.insert(interned);
+        interned
+    }
+
+    /// The parts of `name` when it is a callback intrinsic.
+    #[must_use]
+    pub fn parse(name: &'a str) -> Option<Self> {
+        let encoded = name.strip_prefix(CALLBACK_PREFIX)?;
+        let (signature, labels) = encoded.split_once(':')?;
+        let (adapter, name) = labels.split_once(':')?;
+        let (params, result) = signature.split_once('>')?;
+        let mut result_chars = result.chars();
+        let ret = result_chars.next()?;
+        if result_chars.next().is_some()
+            || adapter.is_empty()
+            || (ret != 'v' && gossamer_types::c_class_width(ret).is_none())
+            || params
+                .chars()
+                .any(|c| gossamer_types::c_class_width(c).is_none())
+        {
+            return None;
+        }
+        Some(Self {
+            params,
+            ret,
+            adapter,
+            name,
+        })
+    }
 }
 
 /// Floating point math intrinsic lowered directly to LLVM.
@@ -693,6 +894,8 @@ impl RawIntrinsic {
             "f64.exp" | "exp" => Self::F64Math(F64MathIntrinsic::Exp),
             "f64.ln" | "ln" => Self::F64Math(F64MathIntrinsic::Log),
             other if gossamer_abi::lookup(other).is_some() => Self::Runtime,
+            other if ForeignCall::parse(other).is_some() => Self::Foreign,
+            other if ForeignCallback::parse(other).is_some() => Self::ForeignCallback,
             _ => return None,
         };
         Some(intrinsic)
@@ -725,6 +928,12 @@ impl RawIntrinsic {
             Self::Alloc => RawIntrinsicArity::Range { min: 0, max: 1 },
             Self::RcAlloc | Self::RcAllocTagged => RawIntrinsicArity::Range { min: 0, max: 2 },
             Self::JitUnsupportedUserIterator => RawIntrinsicArity::Exact(0),
+            Self::Foreign => {
+                RawIntrinsicArity::Exact(ForeignCall::parse(name).map_or(usize::MAX, |call| {
+                    call.param_list().len() + usize::from(call.is_indirect())
+                }))
+            }
+            Self::ForeignCallback => RawIntrinsicArity::Exact(1),
             Self::Runtime => gossamer_abi::lookup(name)
                 .map_or(RawIntrinsicArity::Exact(usize::MAX), |entry| {
                     RawIntrinsicArity::Exact(entry.sig.params.len())

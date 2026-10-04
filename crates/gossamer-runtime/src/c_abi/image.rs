@@ -278,6 +278,38 @@ pub extern "C" fn gos_rt_image_pixel(handle: i64, x: i64, y: i64) -> i64 {
     })
 }
 
+/// `image::from_rgba_bytes(width, height, bytes) -> i64`: an image over
+/// `width * height` RGBA8 pixels, or 0 when `bytes` has another length.
+///
+/// # Safety
+///
+/// `bytes` is null or a live `Vec<u8>` for the call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_image_from_rgba_bytes(
+    width: i64,
+    height: i64,
+    bytes: *const super::vec::GosVec,
+) -> i64 {
+    ffi_entry!(0, {
+        // SAFETY: `bytes` is this shim's argument, null or a live `Vec` (contract).
+        let bytes = unsafe { super::vec::vec_bytes(bytes) };
+        Image::from_rgba(dimension(width), dimension(height), bytes).map_or(0, insert)
+    })
+}
+
+/// `image::to_rgba_bytes(handle) -> Vec<u8>`: the pixels as RGBA8 bytes, row
+/// by row, empty for an invalid handle.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_image_to_rgba_bytes(handle: i64) -> *mut super::vec::GosVec {
+    ffi_entry!(std::ptr::null_mut(), {
+        let bytes = lock_images()
+            .get(&handle)
+            .map(Image::rgba)
+            .unwrap_or_default();
+        super::encoding::bytes_to_gosvec(&bytes)
+    })
+}
+
 /// `image::set_pixel(handle, x, y, rgba) -> bool`.
 #[unsafe(no_mangle)]
 pub extern "C" fn gos_rt_image_set_pixel(handle: i64, x: i64, y: i64, color: i64) -> i64 {

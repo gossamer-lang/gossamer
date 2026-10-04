@@ -15,7 +15,6 @@
 
 #![forbid(unsafe_code)]
 
-mod cfg;
 mod def_id;
 mod diagnostic;
 mod external;
@@ -26,7 +25,10 @@ mod resolver;
 mod scope;
 mod stdlib_exports;
 
-pub use cfg::{item_is_active, set_test_cfg, test_cfg_enabled, without_inactive_items};
+pub use gossamer_ast::cfg::{
+    cfg_target_family, cfg_target_key, item_is_active, set_cfg_target_triple, set_test_cfg,
+    test_cfg_enabled, without_inactive_items,
+};
 
 pub use def_id::{CrateId, DefId, DefIdGenerator, DefKind, ModId};
 pub use diagnostic::{ResolveDiagnostic, ResolveError};

@@ -23,18 +23,54 @@ use super::*;
 // ---------------------------------------------------------------
 
 struct SignalNotifier {
-    // Read only by the Windows console-control bridge; on unix
-    // delivery is owned by the per-signal relay thread.
-    #[cfg_attr(not(windows), allow(dead_code))]
+    // A target without signal delivery (wasm32) records the number but
+    // never reads it back.
+    #[cfg_attr(not(any(unix, windows)), allow(dead_code))]
     sig: i32,
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     waiter: std::sync::Arc<SignalWaiter>,
+    /// Ends the relay thread's delivery loop, which unregisters its handler.
+    #[cfg(unix)]
+    relay: Option<signal_hook::iterator::Handle>,
 }
 
+/// Where a notifier's waiters sleep: OS threads on `cv`, goroutines parked
+/// with their gids in `parked`. Both are woken under `mu`, the lock a waiter
+/// holds while it tests the flag, so a delivery between the test and the
+/// sleep still reaches it.
 #[derive(Default)]
 struct SignalWaiter {
     mu: parking_lot::Mutex<()>,
     cv: parking_lot::Condvar,
+    parked: parking_lot::Mutex<Vec<crate::sched::Gid>>,
+    /// Set by `stop`: the notifier delivers nothing more.
+    stopped: std::sync::atomic::AtomicBool,
+}
+
+impl SignalWaiter {
+    /// Wakes every waiter to re-check the flag and its cohort.
+    fn wake_all(&self) {
+        let _g = self.mu.lock();
+        self.cv.notify_all();
+        for gid in std::mem::take(&mut *self.parked.lock()) {
+            crate::sched_global::scheduler().unpark(gid);
+        }
+    }
+}
+
+/// Wakes the waiters of every notifier, so each re-checks whether the cohort
+/// it waits under was cancelled.
+pub fn wake_waiters() {
+    let waiters: Vec<std::sync::Arc<SignalWaiter>> = signal_registry()
+        .notifiers
+        .lock()
+        .iter()
+        .flatten()
+        .map(|n| std::sync::Arc::clone(&n.waiter))
+        .collect();
+    for waiter in waiters {
+        waiter.wake_all();
+    }
 }
 
 struct SignalRegistry {
@@ -50,26 +86,65 @@ fn signal_registry() -> &'static SignalRegistry {
 
 // One relay thread per watched signal: blocks in signal-hook,
 // then flips the flag and wakes the condvar for that notifier.
+/// Live notifiers per signal number. A signal with none takes its default
+/// disposition again, as it had before the first subscription.
+#[cfg(unix)]
+static SUBSCRIBERS: [std::sync::atomic::AtomicUsize; 65] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 65];
+
+#[cfg(unix)]
+fn subscribers(sig_raw: i32) -> Option<&'static std::sync::atomic::AtomicUsize> {
+    SUBSCRIBERS.get(usize::try_from(sig_raw).ok()?)
+}
+
+/// Registers, once per signal, the handler action that performs the
+/// signal's default disposition while no notifier subscribes to it. The
+/// handler signal-hook installs stays in place after the last notifier
+/// stops, so without this action the signal would be ignored instead.
+#[cfg(unix)]
+fn install_default_fallback(sig_raw: i32) {
+    static INSTALLED: std::sync::LazyLock<parking_lot::Mutex<std::collections::HashSet<i32>>> =
+        std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+    if !INSTALLED.lock().insert(sig_raw) {
+        return;
+    }
+    let Some(count) = subscribers(sig_raw) else {
+        return;
+    };
+    // SAFETY: the action only loads an atomic and calls
+    // `emulate_default_handler`, both async-signal-safe.
+    let _ = unsafe {
+        signal_hook::low_level::register(sig_raw, move || {
+            if count.load(Ordering::Acquire) == 0 {
+                let _ = signal_hook::low_level::emulate_default_handler(sig_raw);
+            }
+        })
+    };
+}
+
 #[cfg(unix)]
 fn install_signal_relay(
     sig_raw: i32,
     flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     waiter: std::sync::Arc<SignalWaiter>,
-) {
+) -> Option<signal_hook::iterator::Handle> {
     use signal_hook::iterator::Signals;
-    let Ok(mut signals) = Signals::new([sig_raw]) else {
-        return;
-    };
+    let mut signals = Signals::new([sig_raw]).ok()?;
+    let handle = signals.handle();
+    if let Some(count) = subscribers(sig_raw) {
+        count.fetch_add(1, Ordering::AcqRel);
+    }
+    install_default_fallback(sig_raw);
     std::thread::Builder::new()
         .name(format!("gos-sig-{sig_raw}"))
         .spawn(move || {
             for _ in signals.forever() {
                 flag.store(true, Ordering::Release);
-                let _g = waiter.mu.lock();
-                waiter.cv.notify_all();
+                waiter.wake_all();
             }
         })
-        .ok();
+        .ok()?;
+    Some(handle)
 }
 
 // On Windows there is no POSIX signal delivery; the console
@@ -112,8 +187,7 @@ unsafe extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
             && want.contains(&n.sig)
         {
             n.flag.store(true, Ordering::Release);
-            let _g = n.waiter.mu.lock();
-            n.waiter.cv.notify_all();
+            n.waiter.wake_all();
             handled = true;
         }
     }
@@ -128,7 +202,7 @@ pub extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
         let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let waiter = std::sync::Arc::new(SignalWaiter::default());
         #[cfg(unix)]
-        install_signal_relay(
+        let relay = install_signal_relay(
             sig_raw,
             std::sync::Arc::clone(&flag),
             std::sync::Arc::clone(&waiter),
@@ -141,6 +215,8 @@ pub extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
             sig: sig_raw,
             flag,
             waiter,
+            #[cfg(unix)]
+            relay,
         };
         let mut notifiers = signal_registry().notifiers.lock();
         notifiers.push(Some(notifier));
@@ -148,24 +224,110 @@ pub extern "C" fn gos_rt_signal_on(sig_raw: i32) -> i64 {
     })
 }
 
-/// `signal::wait(handle)` - blocks until the registered signal fires.
+/// The flag and waiter of notifier `handle`, if it is one.
+fn notifier_parts(
+    handle: i64,
+) -> Option<(
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+    std::sync::Arc<SignalWaiter>,
+)> {
+    let notifiers = signal_registry().notifiers.lock();
+    let n = notifiers.get(usize::try_from(handle).ok()?)?.as_ref()?;
+    Some((
+        std::sync::Arc::clone(&n.flag),
+        std::sync::Arc::clone(&n.waiter),
+    ))
+}
+
+/// Blocks the calling OS thread until notifier `handle` fires (`true`) or
+/// `cancelled` holds (`false`). `cancelled` is re-checked whenever
+/// [`wake_waiters`] runs.
+pub fn wait_until(handle: i64, cancelled: impl Fn() -> bool) -> bool {
+    // wasm32 delivers no signals, so a subscription there is over from the
+    // start, and the browser build cannot block a thread to wait.
+    if cfg!(target_arch = "wasm32") {
+        return false;
+    }
+    let Some((flag, waiter)) = notifier_parts(handle) else {
+        return false;
+    };
+    let mut g = waiter.mu.lock();
+    loop {
+        if flag.swap(false, Ordering::AcqRel) {
+            return true;
+        }
+        if cancelled() || waiter.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        waiter.cv.wait(&mut g);
+    }
+}
+
+/// Parks the running goroutine until notifier `handle` fires (`true`) or
+/// its cohort is cancelled (`false`), leaving its worker free meanwhile.
+fn park_until_signal(handle: i64) -> bool {
+    let Some((flag, waiter)) = notifier_parts(handle) else {
+        return false;
+    };
+    loop {
+        let guard = waiter.mu.lock();
+        if flag.swap(false, Ordering::AcqRel) {
+            return true;
+        }
+        if super::cohort::current_is_cancelled() || waiter.stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        let mut guard = Some(guard);
+        let mut parked_as = None;
+        let mut cohort_wait = 0i64;
+        crate::sched_global::park(crate::sched::ParkReason::Other, |parker| {
+            parked_as = Some(parker.gid);
+            waiter.parked.lock().push(parker.gid);
+            cohort_wait = super::cohort::register_waiter(parker.gid);
+            drop(guard.take());
+        });
+        if let Some(gid) = parked_as {
+            super::cohort::deregister_waiter(cohort_wait, gid);
+            waiter.parked.lock().retain(|parked| *parked != gid);
+        }
+    }
+}
+
+/// `signal::wait(handle) -> bool` - blocks until the registered signal fires
+/// (`true`) or the caller's cohort is cancelled (`false`).
 #[unsafe(no_mangle)]
-pub extern "C" fn gos_rt_signal_wait(handle: i64) {
+pub extern "C" fn gos_rt_signal_wait(handle: i64) -> i32 {
+    ffi_entry!(0, {
+        let fired = if gossamer_coro::in_goroutine() {
+            park_until_signal(handle)
+        } else {
+            wait_until(handle, super::cohort::caller_is_cancelled)
+        };
+        i32::from(fired)
+    })
+}
+
+/// `signal::stop(handle)` - the notifier delivers nothing more: its waits
+/// answer `false`, and a signal no notifier subscribes to any longer takes
+/// its default disposition again.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_signal_stop(handle: i64) {
     ffi_entry!((), {
-        let notifiers = signal_registry().notifiers.lock();
-        let Some(Some(n)) = notifiers.get(handle as usize) else {
+        let Some(notifier) = usize::try_from(handle)
+            .ok()
+            .and_then(|index| signal_registry().notifiers.lock().get_mut(index)?.take())
+        else {
             return;
         };
-        let flag = std::sync::Arc::clone(&n.flag);
-        let waiter = std::sync::Arc::clone(&n.waiter);
-        drop(notifiers);
-        let mut g = waiter.mu.lock();
-        loop {
-            if flag.swap(false, Ordering::AcqRel) {
-                return;
+        #[cfg(unix)]
+        if let Some(relay) = &notifier.relay {
+            relay.close();
+            if let Some(count) = subscribers(notifier.sig) {
+                count.fetch_sub(1, Ordering::AcqRel);
             }
-            waiter.cv.wait(&mut g);
         }
+        notifier.waiter.stopped.store(true, Ordering::Release);
+        notifier.waiter.wake_all();
     });
 }
 

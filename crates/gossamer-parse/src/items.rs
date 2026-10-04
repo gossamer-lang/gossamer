@@ -116,10 +116,131 @@ impl Parser<'_> {
     }
 
     /// Parses a single top-level item.
+    /// Parses the item at the cursor; an `unsafe extern "C" { ... }` block
+    /// answers one `fn` item per declaration in it.
+    pub(crate) fn parse_item_group(&mut self) -> Vec<Item> {
+        let start_span = self.peek_span();
+        let attrs = self.parse_attrs();
+        let visibility = self.parse_visibility();
+        if self.at_keyword(Keyword::Unsafe)
+            && matches!(self.peek_nth(1).kind, TokenKind::Keyword(Keyword::Extern))
+            && matches!(self.peek_nth(2).kind, TokenKind::StringLit)
+            && self.peek_nth_is_punct(3, Punct::LBrace)
+        {
+            return self.parse_extern_block(start_span, &attrs);
+        }
+        vec![self.parse_item_after(start_span, attrs, visibility)]
+    }
+
+    /// `unsafe extern "C" { fn name(params) -> ret ... }`: each declaration
+    /// becomes a bodyless `fn` item carrying the block's attributes and ABI.
+    fn parse_extern_block(
+        &mut self,
+        start_span: gossamer_lex::Span,
+        block_attrs: &Attrs,
+    ) -> Vec<Item> {
+        self.bump(); // `unsafe`
+        self.bump(); // `extern`
+        let abi_span = self.peek_span();
+        let abi = self.slice(abi_span).trim_matches('"').to_string();
+        self.bump();
+        if !matches!(abi.as_str(), "C" | "system") {
+            self.record(ParseError::ExternReserved, abi_span);
+        }
+        self.expect_punct(Punct::LBrace, "to open the extern block");
+        let mut items = Vec::new();
+        while !self.at_eof() && !self.at_punct(Punct::RBrace) {
+            let before = self.checkpoint_public();
+            let item_start = self.peek_span();
+            let mut attrs = block_attrs.clone();
+            attrs.outer.extend(self.parse_attrs().outer);
+            let visibility = self.parse_visibility();
+            if self.at_keyword(Keyword::Type) {
+                items.push(self.parse_foreign_type(item_start, attrs, visibility));
+                continue;
+            }
+            if !self.at_keyword(Keyword::Fn) {
+                self.record(ParseError::ExternItemShape, self.peek_span());
+                self.recover_to_item_start();
+                if self.checkpoint_public() == before {
+                    self.bump();
+                }
+                continue;
+            }
+            let mut decl = self.parse_fn_decl(visibility);
+            if decl.body.is_some() || !decl.generics.params.is_empty() {
+                self.record(ParseError::ExternItemShape, decl.span);
+                decl.body = None;
+            }
+            decl.attrs = attrs.clone();
+            decl.extern_abi = Some(abi.clone());
+            let span = self.join(item_start, self.last_span());
+            let id = self.alloc_id();
+            items.push(Item::new(id, span, attrs, visibility, ItemKind::Fn(decl)));
+        }
+        self.expect_punct(Punct::RBrace, "to close the extern block");
+        if items.is_empty() {
+            self.record(
+                ParseError::ExternItemShape,
+                self.join(start_span, self.last_span()),
+            );
+        }
+        items
+    }
+
+    /// `type Name` inside an extern block: a C type whose layout stays
+    /// opaque, declared as a field-less struct carrying
+    /// [`gossamer_ast::FOREIGN_TYPE_ATTR`], which the checker keeps behind
+    /// `ffi::Ptr`.
+    fn parse_foreign_type(
+        &mut self,
+        item_start: gossamer_lex::Span,
+        mut attrs: Attrs,
+        visibility: Visibility,
+    ) -> Item {
+        self.bump(); // `type`
+        let name = self.parse_ident_required("foreign type name");
+        if !self.at_punct(Punct::RBrace) && !self.at_keyword(Keyword::Fn) {
+            let generics_or_body = self.peek_span();
+            if self.eat_punct(Punct::Semi) {
+                // A trailing `;` separates items on one line.
+            } else if !self.at_attribute_start()
+                && !self.at_keyword(Keyword::Type)
+                && !self.at_keyword(Keyword::Pub)
+            {
+                self.record(ParseError::ExternItemShape, generics_or_body);
+                self.recover_to_item_start();
+            }
+        }
+        attrs.outer.push(Attribute {
+            path: gossamer_ast::PathExpr::single(gossamer_ast::FOREIGN_TYPE_ATTR),
+            tokens: None,
+        });
+        let decl = StructDecl {
+            name,
+            generics: Generics::default(),
+            where_clause: WhereClause::default(),
+            body: StructBody::Unit,
+        };
+        let span = self.join(item_start, self.last_span());
+        let id = self.alloc_id();
+        Item::new(id, span, attrs, visibility, ItemKind::Struct(decl))
+    }
+
     pub(crate) fn parse_item(&mut self) -> Item {
         let start_span = self.peek_span();
         let attrs = self.parse_attrs();
         let visibility = self.parse_visibility();
+        self.parse_item_after(start_span, attrs, visibility)
+    }
+
+    /// The item whose attributes and visibility are already parsed.
+    fn parse_item_after(
+        &mut self,
+        start_span: gossamer_lex::Span,
+        attrs: Attrs,
+        visibility: Visibility,
+    ) -> Item {
         let synthesized = attrs.has_word("gos_synthesized");
         if synthesized {
             self.synthesized_depth = self.synthesized_depth.saturating_add(1);
@@ -543,6 +664,7 @@ impl Parser<'_> {
             ret,
             where_clause,
             body,
+            extern_abi: None,
         }
     }
 
@@ -1274,7 +1396,7 @@ impl Parser<'_> {
                 self.recover_to_item_start();
                 continue;
             }
-            items.push(self.parse_item());
+            items.extend(self.parse_item_group());
             if self.checkpoint_public() == before {
                 self.bump();
             }

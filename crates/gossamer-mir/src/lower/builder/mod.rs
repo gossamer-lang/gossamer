@@ -237,6 +237,8 @@ mod types;
 
 mod expr_call;
 
+mod foreign;
+
 mod expr_field;
 
 mod expr_array;

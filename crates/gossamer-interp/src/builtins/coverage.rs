@@ -184,6 +184,13 @@ pub const VM_NATIVE_EXEMPT: &[(&str, &str)] = &[
          `Value::Float`, precision included",
     ),
     (
+        "gos_rt_ffi_*",
+        "the VM calls a foreign function through the `__gos_ffi_call` builtin, \
+         which brackets the call with the same enter and leave, packs slices and \
+         `#[repr(C)]` structs from its `Value`s, and calls the runtime's \
+         fixed-arity `ioctl` / `fcntl` / `open` exports through the symbol table",
+    ),
+    (
         "gos_rt_field_error_*",
         "the VM implements `validate::FieldError` in `stdlib_builtins/validate.rs`",
     ),

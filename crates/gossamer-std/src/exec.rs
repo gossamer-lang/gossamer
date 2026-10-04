@@ -828,51 +828,11 @@ pub fn send_group_term(pid: i64) -> bool {
     }
 }
 
-/// Polls `pid` via `waitpid(WNOHANG)` (Unix) or
-/// `WaitForSingleObject` (Windows) for up to `ms` milliseconds.
-/// Returns the child's exit code on success, `-1` on timeout, or
-/// `-2` on unknown-pid / permission-denied / OS error.
+/// The exit code of `pid` once it ends within `ms` milliseconds, `-1` on
+/// timeout, or `-2` on unknown-pid / permission-denied / OS error.
 #[must_use]
 pub fn wait_pid_timeout(pid: i64, ms: i64) -> i64 {
-    if pid <= 0 {
-        return -2;
-    }
-    #[cfg(unix)]
-    {
-        let deadline = Instant::now() + Duration::from_millis(ms.max(0) as u64);
-        loop {
-            let mut status: libc::c_int = 0;
-            // SAFETY: waitpid(WNOHANG) returns 0 if still running,
-            // the pid on reap, -1 on error.
-            let status_ptr: *mut libc::c_int = &raw mut status;
-            let rc = unsafe { libc::waitpid(pid as libc::pid_t, status_ptr, libc::WNOHANG) };
-            if rc > 0 {
-                if libc::WIFEXITED(status) {
-                    return i64::from(libc::WEXITSTATUS(status));
-                }
-                if libc::WIFSIGNALED(status) {
-                    return i64::from(128 + libc::WTERMSIG(status));
-                }
-                return 0;
-            }
-            if rc < 0 {
-                return -2;
-            }
-            if Instant::now() >= deadline {
-                return -1;
-            }
-            gossamer_runtime::platform::sleep(Duration::from_millis(25));
-        }
-    }
-    #[cfg(windows)]
-    {
-        wait_pid_timeout_windows(pid as u32, ms.max(0) as u32)
-    }
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = ms;
-        -2
-    }
+    gossamer_runtime::c_abi::exec::wait_timeout(pid, ms)
 }
 
 #[cfg(windows)]
@@ -892,44 +852,6 @@ fn terminate_pid(pid: u32) -> bool {
         let ok = TerminateProcess(handle, 1);
         let _ = CloseHandle(handle);
         ok != 0
-    }
-}
-
-#[cfg(windows)]
-fn wait_pid_timeout_windows(pid: u32, ms: u32) -> i64 {
-    // SAFETY: OpenProcess / WaitForSingleObject / GetExitCodeProcess
-    // / CloseHandle - every error path returns a sentinel.
-    unsafe {
-        unsafe extern "system" {
-            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
-            fn WaitForSingleObject(handle: isize, ms: u32) -> u32;
-            fn GetExitCodeProcess(handle: isize, exit_code: *mut u32) -> i32;
-            fn CloseHandle(object: isize) -> i32;
-        }
-        const SYNCHRONIZE: u32 = 0x0010_0000;
-        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-        const WAIT_OBJECT_0: u32 = 0;
-        const WAIT_TIMEOUT: u32 = 0x0000_0102;
-        let handle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle == 0 {
-            return -2;
-        }
-        let r = WaitForSingleObject(handle, ms);
-        if r == WAIT_TIMEOUT {
-            let _ = CloseHandle(handle);
-            return -1;
-        }
-        if r != WAIT_OBJECT_0 {
-            let _ = CloseHandle(handle);
-            return -2;
-        }
-        let mut code: u32 = 0;
-        let ok = GetExitCodeProcess(handle, &raw mut code);
-        let _ = CloseHandle(handle);
-        if ok == 0 {
-            return -2;
-        }
-        i64::from(code)
     }
 }
 

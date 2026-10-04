@@ -148,7 +148,7 @@ pub const OS_SIGNAL: StdModule = StdModule {
         StdItem {
             name: "Notifier",
             kind: StdItemKind::Type,
-            doc: "Returned by `on(sig)`; supports wait / try_wait.",
+            doc: "Returned by `on(sig)`; supports wait / try_wait / stop.",
         },
         StdItem {
             name: "on",
@@ -158,12 +158,303 @@ pub const OS_SIGNAL: StdModule = StdModule {
         StdItem {
             name: "wait",
             kind: StdItemKind::Function,
-            doc: "Blocks the calling goroutine until the subscribed signal fires.",
+            doc: "`wait() -> bool`: blocks the calling goroutine until the subscribed signal fires (`true`) or its cohort is cancelled (`false`), without holding a scheduler worker. On wasm32, which delivers no signals, it answers `false` at once.",
         },
         StdItem {
             name: "try_wait",
             kind: StdItemKind::Function,
             doc: "Non-blocking poll: returns true if the subscribed signal has fired.",
+        },
+        StdItem {
+            name: "stop",
+            kind: StdItemKind::Function,
+            doc: "`stop()`: the notifier delivers nothing more, so its waits answer `false`; once no notifier subscribes to the signal it takes its default disposition again. Go's `signal.Stop`.",
+        },
+        StdItem {
+            name: "SIGHUP",
+            kind: StdItemKind::Const,
+            doc: "Hangup: the controlling terminal closed (1).",
+        },
+        StdItem {
+            name: "SIGINT",
+            kind: StdItemKind::Const,
+            doc: "Interrupt, Ctrl-C (2).",
+        },
+        StdItem {
+            name: "SIGQUIT",
+            kind: StdItemKind::Const,
+            doc: "Quit, Ctrl-\\ (3); also renders the goroutine dump.",
+        },
+        StdItem {
+            name: "SIGTERM",
+            kind: StdItemKind::Const,
+            doc: "Termination request (15).",
+        },
+        StdItem {
+            name: "SIGUSR1",
+            kind: StdItemKind::Const,
+            doc: "User signal 1 (10 on Linux, 30 on macOS).",
+        },
+        StdItem {
+            name: "SIGUSR2",
+            kind: StdItemKind::Const,
+            doc: "User signal 2 (12 on Linux, 31 on macOS).",
+        },
+        StdItem {
+            name: "SIGWINCH",
+            kind: StdItemKind::Const,
+            doc: "The terminal window changed size (28). Never delivered on Windows.",
+        },
+        StdItem {
+            name: "SIGTSTP",
+            kind: StdItemKind::Const,
+            doc: "Terminal stop, Ctrl-Z (20 on Linux, 18 on macOS). Subscribing replaces the default stop, so the program stops itself. Never delivered on Windows.",
+        },
+        StdItem {
+            name: "SIGCONT",
+            kind: StdItemKind::Const,
+            doc: "Continue after a stop (18 on Linux, 19 on macOS). Never delivered on Windows.",
+        },
+    ],
+};
+
+pub const OS_FD: StdModule = StdModule {
+    path: "std::os::fd",
+    summary: "Waiting for a file descriptor (a handle on Windows) to be readable or writable without holding a scheduler worker.",
+    items: &[
+        StdItem {
+            name: "wait_readable",
+            kind: StdItemKind::Function,
+            doc: "`wait_readable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` has input (or reached end of input) within `timeout_ms` milliseconds; a negative timeout waits indefinitely. False at the timeout or when the goroutine's cohort is cancelled. The goroutine parks; other goroutines keep running.",
+        },
+        StdItem {
+            name: "wait_writable",
+            kind: StdItemKind::Function,
+            doc: "`wait_writable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` accepts a write within the timeout. Windows handles always do.",
+        },
+    ],
+};
+
+pub const FFI: StdModule = StdModule {
+    path: "std::ffi",
+    summary: "C type names and C strings for functions declared in `unsafe extern \"C\"` blocks, and the `errno` a foreign call left.",
+    items: &[
+        StdItem {
+            name: "c_char",
+            kind: StdItemKind::Type,
+            doc: "C `char`: `i8`, or `u8` on Linux aarch64 and riscv64.",
+        },
+        StdItem {
+            name: "c_schar",
+            kind: StdItemKind::Type,
+            doc: "C `signed char`: `i8`.",
+        },
+        StdItem {
+            name: "c_uchar",
+            kind: StdItemKind::Type,
+            doc: "C `unsigned char`: `u8`.",
+        },
+        StdItem {
+            name: "c_short",
+            kind: StdItemKind::Type,
+            doc: "C `short`: `i16`.",
+        },
+        StdItem {
+            name: "c_ushort",
+            kind: StdItemKind::Type,
+            doc: "C `unsigned short`: `u16`.",
+        },
+        StdItem {
+            name: "c_int",
+            kind: StdItemKind::Type,
+            doc: "C `int`: `i32`.",
+        },
+        StdItem {
+            name: "c_uint",
+            kind: StdItemKind::Type,
+            doc: "C `unsigned int`: `u32`.",
+        },
+        StdItem {
+            name: "c_long",
+            kind: StdItemKind::Type,
+            doc: "C `long`: `i64`, or `i32` on Windows.",
+        },
+        StdItem {
+            name: "c_ulong",
+            kind: StdItemKind::Type,
+            doc: "C `unsigned long`: `u64`, or `u32` on Windows.",
+        },
+        StdItem {
+            name: "c_longlong",
+            kind: StdItemKind::Type,
+            doc: "C `long long`: `i64`.",
+        },
+        StdItem {
+            name: "c_ulonglong",
+            kind: StdItemKind::Type,
+            doc: "C `unsigned long long`: `u64`.",
+        },
+        StdItem {
+            name: "size_t",
+            kind: StdItemKind::Type,
+            doc: "C `size_t`: `usize`.",
+        },
+        StdItem {
+            name: "ssize_t",
+            kind: StdItemKind::Type,
+            doc: "C `ssize_t`: `isize`.",
+        },
+        StdItem {
+            name: "c_float",
+            kind: StdItemKind::Type,
+            doc: "C `float`: `f32`.",
+        },
+        StdItem {
+            name: "c_double",
+            kind: StdItemKind::Type,
+            doc: "C `double`: `f64`.",
+        },
+        StdItem {
+            name: "cstring",
+            kind: StdItemKind::Function,
+            doc: "`cstring(text) -> Result<Vec<u8>, errors::Error>`: the bytes of `text` with a terminating NUL, to pass as `[u8]`; an error when `text` holds a NUL.",
+        },
+        StdItem {
+            name: "from_cstr",
+            kind: StdItemKind::Function,
+            doc: "`from_cstr(bytes) -> Result<String, errors::Error>`: the UTF-8 text before the first NUL in `bytes`.",
+        },
+        StdItem {
+            name: "last_errno",
+            kind: StdItemKind::Function,
+            doc: "`last_errno() -> i64`: the `errno` (on Windows, `GetLastError`) the goroutine's most recent foreign call left, captured before anything else could change it.",
+        },
+        StdItem {
+            name: "c_void",
+            kind: StdItemKind::Type,
+            doc: "C `void`, as the pointee of `Ptr<c_void>` (`void *`): an opaque type with no value of its own.",
+        },
+        StdItem {
+            name: "Ptr",
+            kind: StdItemKind::Type,
+            doc: "`Ptr<T>`: a non-null address of a `T` in memory Gossamer does not manage, as a foreign function takes or answers it; `Option<Ptr<T>>` is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is `unsafe`. `p.cast::<U>()`, `p.address()`, and `unsafe { Ptr::from_address(n) }` (`None` for 0).",
+        },
+        StdItem {
+            name: "Handle",
+            kind: StdItemKind::Type,
+            doc: "`Handle<T>`: a value handed to native code as `void *` context and read back in a callback. `Handle::new(value)`, `h.as_ptr()`, `unsafe { Handle::<T>::from_ptr(p) }`, `h.get()`, `h.set(value)`, `h.update(|v| ..)`, `h.take()`, `h.release()`; a released or unknown handle is GX0014, never a read of freed memory.",
+        },
+        StdItem {
+            name: "read",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { read::<T>(p) }`: a copy of the `T` at `p`, for a scalar, a `Ptr`, or a `#[repr(C)]` plain-data struct.",
+        },
+        StdItem {
+            name: "read_at",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { read_at::<T>(p, i) }`: a copy of element `i` of the array of `T` at `p`.",
+        },
+        StdItem {
+            name: "write",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { write(p, value) }`: stores `value` at `p`.",
+        },
+        StdItem {
+            name: "write_at",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { write_at(p, i, value) }`: stores `value` as element `i` of the array of `T` at `p`.",
+        },
+        StdItem {
+            name: "alloc",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { alloc::<T>(count) }`: zeroed room for `count` values of `T` from the platform C allocator, freed with `free` or by a library that takes it over.",
+        },
+        StdItem {
+            name: "size_of",
+            kind: StdItemKind::Function,
+            doc: "`size_of::<T>() -> i64`: the bytes a `T` occupies in C layout.",
+        },
+        StdItem {
+            name: "free",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { free(p) }`: frees memory the platform C allocator handed out (`alloc`, `to_c_bytes`, or a library's `malloc`).",
+        },
+        StdItem {
+            name: "read_bytes",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { read_bytes(p, len) }`: a `Vec<u8>` copy of the `len` bytes at `p`.",
+        },
+        StdItem {
+            name: "read_cstr",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { read_cstr(p) } -> Result<String, errors::Error>`: the NUL-terminated text at `p`, copied into a `String`; an error when it is not UTF-8.",
+        },
+        StdItem {
+            name: "write_bytes",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { write_bytes(p, bytes) }`: copies `bytes` to the memory at `p`.",
+        },
+        StdItem {
+            name: "to_c_bytes",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { to_c_bytes(bytes) }`: a C-allocated copy of `bytes`, for native code to keep; free it or hand it to a library that takes it over.",
+        },
+        StdItem {
+            name: "fn_from_ptr",
+            kind: StdItemKind::Function,
+            doc: "`unsafe { fn_from_ptr::<Fn(A..) -> R>(p) }`: a callable that calls the native function at `p` (a `dlsym` or `GetProcAddress` result) with that C signature.",
+        },
+    ],
+};
+
+pub const TERM: StdModule = StdModule {
+    path: "std::term",
+    summary: "The terminal a program runs in: detection, size, raw mode, and input, on the standard streams or on a descriptor the program opened (`fs::File::fd` of `/dev/tty` or `CONIN$`). Written in Gossamer over the platform C library.",
+    items: &[
+        StdItem {
+            name: "STDIN",
+            kind: StdItemKind::Const,
+            doc: "Standard input's descriptor (0), the default for `enter_raw` and `read_input`.",
+        },
+        StdItem {
+            name: "STDOUT",
+            kind: StdItemKind::Const,
+            doc: "Standard output's descriptor (1), the default for `size` and `resized`.",
+        },
+        StdItem {
+            name: "STDERR",
+            kind: StdItemKind::Const,
+            doc: "Standard error's descriptor (2).",
+        },
+        StdItem {
+            name: "RawMode",
+            kind: StdItemKind::Type,
+            doc: "Returned by `enter_raw`; `restore()` puts the terminal back. Restoration also runs when the program ends, by any path.",
+        },
+        StdItem {
+            name: "is_terminal",
+            kind: StdItemKind::Function,
+            doc: "`is_terminal(fd) -> bool`: whether the descriptor (a handle on Windows; 0, 1, and 2 name the standard streams) is a terminal.",
+        },
+        StdItem {
+            name: "size",
+            kind: StdItemKind::Function,
+            doc: "`size(fd = STDOUT) -> Result<(i64, i64), errors::Error>`: the terminal's columns and rows. A standard stream that is not a terminal falls back to the other two.",
+        },
+        StdItem {
+            name: "enter_raw",
+            kind: StdItemKind::Function,
+            doc: "`enter_raw(fd = STDIN) -> Result<RawMode, errors::Error>`: input on `fd` arrives byte by byte without echo or line editing, and output is not translated; the mode is restored when the program ends.",
+        },
+        StdItem {
+            name: "read_input",
+            kind: StdItemKind::Function,
+            doc: "`read_input(timeout_ms, fd = STDIN) -> Result<Vec<u8>, errors::Error>`: the bytes of input available on `fd` within `timeout_ms` milliseconds (negative waits indefinitely), empty at the timeout or when the goroutine's cohort is cancelled. The goroutine parks while it waits.",
+        },
+        StdItem {
+            name: "resized",
+            kind: StdItemKind::Function,
+            doc: "`resized(fd = STDOUT) -> bool`: whether the size changed since the last call; the first call answers false.",
         },
     ],
 };
@@ -257,7 +548,7 @@ pub const FS: StdModule = StdModule {
         StdItem {
             name: "File",
             kind: StdItemKind::Type,
-            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
+            doc: "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. `fd()` answers the OS descriptor (a handle on Windows) for the calls that take one, such as `std::term` on an opened `/dev/tty` or `CONIN$`.",
         },
         StdItem {
             name: "DirInfo",
@@ -664,6 +955,15 @@ pub const PROCESS: StdModule = StdModule {
                   inherits the caller's; the env pairs override the inherited \
                   environment rather than replacing it, so a caller sets the two \
                   variables it cares about without restating PATH.",
+        },
+        StdItem {
+            name: "run_inherit",
+            kind: StdItemKind::Function,
+            doc: "`run_inherit(program, args) -> Result<i64, errors::Error>`: runs the program on this \
+                  process's own standard input, output, and error - a terminal included - and \
+                  answers its exit code once it ends (128 plus the signal number for one a signal \
+                  ended on Unix). The goroutine parks meanwhile. Go's `exec.Cmd.Run` with \
+                  `os.Stdin`, `os.Stdout`, and `os.Stderr` attached.",
         },
         StdItem {
             name: "spawn",

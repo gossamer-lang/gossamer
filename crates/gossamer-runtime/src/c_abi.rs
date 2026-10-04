@@ -262,6 +262,9 @@ pub mod dynamic;
 pub mod encoding;
 pub mod errors;
 pub mod exec;
+pub mod exit_hooks;
+pub mod fd;
+pub mod ffi;
 pub mod flag;
 pub mod fn_registry;
 pub mod fs;
@@ -489,3 +492,12 @@ pub use wg::*;
 pub use x509::*;
 pub use xml_codec::*;
 pub use yaml_enc::*;
+
+/// Wakes every signal and descriptor wait so each re-checks whether the
+/// cohort it runs under was cancelled. Cohort cancellation on every tier
+/// calls this: those waits block outside the scheduler's parking, where a
+/// cohort's own waiter list cannot reach them.
+pub fn wake_cancellable_waits() {
+    signal::wake_waiters();
+    fd::wake_waits();
+}

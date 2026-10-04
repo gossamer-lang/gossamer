@@ -255,6 +255,46 @@ pub(crate) fn project_context_for_entry(entry: &Path) -> ProjectContext {
     load_project_context(entry)
 }
 
+/// Installs the foreign-function rule of the project `subject` (a source
+/// file or a directory, the working directory when `None`) belongs to:
+/// ungoverned outside a project, denied when its `project.toml` sets
+/// `ffi = false` or does not parse, allowed otherwise.
+pub(crate) fn install_foreign_policy(subject: Option<&Path>) {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let subject = subject.map_or_else(|| cwd.clone(), |path| cwd.join(path));
+    gossamer_driver::set_foreign_policy(gossamer_driver::ForeignPolicy::for_path(&subject));
+}
+
+/// The directories `links` names, each resolved against the root of the
+/// package that declares it: the project `entry` belongs to, or one of its
+/// path dependencies.
+pub(crate) fn foreign_search_dirs(
+    entry: &Path,
+    links: &gossamer_driver::ForeignLinks,
+) -> Vec<PathBuf> {
+    if links.search.is_empty() {
+        return Vec::new();
+    }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let entry = cwd.join(entry);
+    let project_root = gossamer_pkg::manifest::find_manifest(&entry)
+        .and_then(|manifest| manifest.parent().map(Path::to_path_buf))
+        .or_else(|| entry.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| cwd.clone());
+    let dependencies = gossamer_pkg::bundle::path_dependency_roots(&entry);
+    links
+        .search
+        .iter()
+        .filter_map(|(dependency, dir)| {
+            let root = match dependency {
+                None => project_root.clone(),
+                Some(id) => dependencies.iter().find(|(dep, _)| dep == id)?.1.clone(),
+            };
+            Some(root.join(dir))
+        })
+        .collect()
+}
+
 /// Whether the project asks `gos test` to fail on non-canonical
 /// formatting (`project.enforce-format`). False outside a project.
 #[must_use]

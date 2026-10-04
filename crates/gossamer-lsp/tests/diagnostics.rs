@@ -443,3 +443,48 @@ fn generated_serde_failure_is_reported_against_the_user_declaration() {
         );
     }
 }
+
+#[test]
+fn each_file_that_declares_a_foreign_function_shows_gt0102_where_it_is() {
+    // The command line reports a library once, anchored at its first
+    // declaration; the editor shows a diagnostic only in the file of its
+    // primary label, so every file has to carry its own.
+    let dir = std::env::temp_dir().join(format!("gos-lsp-ffi-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("src")).expect("create project dir");
+    std::fs::write(
+        dir.join("project.toml"),
+        "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\nffi = false\n",
+    )
+    .expect("write manifest");
+    let main = "use util\n\nunsafe extern \"C\" {\n    fn abs(x: i32) -> i32\n}\n\nfn main() {\n    println(unsafe { abs(-1) } as i64 + util::twice(1))\n}\n";
+    let util = "\nunsafe extern \"C\" {\n    fn labs(x: i64) -> i64\n}\n\npub fn twice(x: i64) -> i64 {\n    unsafe { labs(x) } * 2\n}\n";
+    std::fs::write(dir.join("src/main.gos"), main).expect("write entry");
+    std::fs::write(dir.join("src/util.gos"), util).expect("write sibling");
+
+    // Lines are compared in their JSON spelling, `2` for a zero-based 2.
+    let gt0102_lines = |path: &std::path::Path, source: &str| -> Vec<(String, String)> {
+        let uri = format!("file://{}", path.display());
+        let server = server_with(&uri, source);
+        diagnostics_from(&server.publish_diagnostics(&uri))
+            .iter()
+            .filter(|diag| diagnostic_code(diag).as_deref() == Some("GT0102"))
+            .map(|diag| {
+                let start = field(field(diag, "range"), "start");
+                let line = field_f64(start, "line")
+                    .map(|n| n.to_string())
+                    .unwrap_or_default();
+                (line, diagnostic_message(diag).unwrap_or_default())
+            })
+            .collect()
+    };
+    let in_util = gt0102_lines(&dir.join("src/util.gos"), util);
+    let in_main = gt0102_lines(&dir.join("src/main.gos"), main);
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(in_util.len(), 1, "{in_util:?}");
+    assert_eq!(in_util[0].0, "2", "anchored at `fn labs`: {in_util:?}");
+    assert!(in_util[0].1.contains("`abs`, `labs`"), "{in_util:?}");
+    assert_eq!(in_main.len(), 1, "{in_main:?}");
+    assert_eq!(in_main[0].0, "3", "anchored at `fn abs`: {in_main:?}");
+}

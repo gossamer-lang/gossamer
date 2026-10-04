@@ -83,6 +83,9 @@ const MODULE_CAPABILITIES: &[(&str, Option<Capability>)] = &[
     // Mixed modules: pure by default, members named individually.
     ("fs", None),
     ("os", None),
+    // `ffi::last_errno` reads the goroutine's saved errno; a foreign call is
+    // the `__gos_ffi_` leaf's capability.
+    ("ffi", None),
     ("env", None),
     ("path", None),
     ("metrics", None),
@@ -299,6 +302,7 @@ const NAME_CAPABILITIES: &[(&str, Capability)] = &[
     ("os::exec::spawn_piped", Capability::Exec),
     ("os::exec::wait_timeout", Capability::Exec),
     ("os::signal::on", Capability::Exec),
+    ("os::signal::stop", Capability::Exec),
     ("os::signal::try_wait", Capability::Exec),
     ("os::signal::wait", Capability::Exec),
     // env. Reading a variable is I/O the `none` level denies and the
@@ -332,6 +336,8 @@ const BARE_PREFIX_CAPABILITIES: &[(&str, Capability)] = &[
     ("__gos_sql_", Capability::Network),
     ("__gos_fs_", Capability::Read),
     ("__gos_process_", Capability::Exec),
+    ("__gos_ffi_", Capability::Foreign),
+    ("__gos_fd_", Capability::Read),
 ];
 
 /// Name-to-capability map over every registered builtin.
@@ -395,6 +401,7 @@ fn strictest(left: Capability, right: Capability) -> Capability {
             Capability::Write => 2,
             Capability::Network => 3,
             Capability::Exec => 4,
+            Capability::Foreign => 5,
         }
     }
     if rank(left) >= rank(right) {
@@ -463,6 +470,9 @@ const WRAPPER_METHOD_TYPES: &[(&str, &str, &str)] = &[
 /// other name is already the spelling a program writes.
 #[must_use]
 pub(crate) fn operation_spelling(name: &str) -> String {
+    if name == gossamer_hir::FOREIGN_DISPATCHER {
+        return "extern \"C\" fn".to_string();
+    }
     let Some(rest) = name.strip_prefix("__gos_") else {
         return name.to_string();
     };
@@ -604,6 +614,7 @@ mod comptime_gate_tests {
     fn every_mixed_module_member_is_classified() {
         let pure_members: &[&str] = &[
             "fs::File::close",
+            "fs::File::fd",
             "fs::File::flush",
             "fs::File::len",
             "fs::File::seek",

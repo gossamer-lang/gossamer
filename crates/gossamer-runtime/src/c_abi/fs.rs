@@ -1985,6 +1985,42 @@ pub extern "C" fn gos_rt_fs_file_len(h: i64) -> i128 {
     })
 }
 
+/// The OS descriptor (a handle on Windows) of an open file, as Go's
+/// `os.File.Fd` answers it: still owned by the file. `None` on a target
+/// without descriptors.
+pub fn raw_descriptor(file: &std::fs::File) -> Option<i64> {
+    #[cfg(unix)]
+    {
+        use std::os::fd::AsRawFd as _;
+        Some(i64::from(file.as_raw_fd()))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle as _;
+        Some(file.as_raw_handle() as isize as i64)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = file;
+        None
+    }
+}
+
+/// `fs::File::fd() -> Result<i64, Error>`: the file's OS descriptor (a
+/// handle on Windows), for the calls that take one.
+#[unsafe(no_mangle)]
+pub extern "C" fn gos_rt_fs_file_fd(h: i64) -> i128 {
+    ffi_entry!(0i128, {
+        let Some(entry) = file_clone(h) else {
+            return fs_err("File::fd: stale handle");
+        };
+        match raw_descriptor(&entry.file) {
+            Some(fd) => gos_rt_result_new(0, fd),
+            None => fs_err("File::fd: descriptors are not available on this target"),
+        }
+    })
+}
+
 /// `fs::File::sync_all() -> Result<(), Error>`: flush the file's data and
 /// metadata to the storage device.
 #[unsafe(no_mangle)]

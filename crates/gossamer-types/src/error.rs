@@ -591,6 +591,9 @@ pub enum TypeError {
         /// Whether the first implementation is a `#[derive(...)]`.
         derived: bool,
     },
+    /// A rule of `unsafe extern "C"` declarations and calls is broken.
+    #[error(transparent)]
+    Foreign(#[from] ForeignError),
     /// Two `impl` blocks define a method of one name on one type. A call
     /// names a method by its receiver's type and the method's name, so the
     /// second body has no call that reaches it.
@@ -1148,6 +1151,7 @@ impl TypeError {
             Self::ConflictingTraitImpl { .. } => "conflicting-trait-impl",
             Self::BlanketImpl { .. } => "blanket-impl",
             Self::DuplicateMethod { .. } => "duplicate-method",
+            Self::Foreign(foreign) => foreign.tag(),
             Self::UndeclaredReturnValue { .. } => "undeclared-return-value",
             Self::RangeBorrow { .. } => "range-borrow",
             Self::UnknownAssocItem { .. } => "unknown-assoc-item",
@@ -1230,6 +1234,7 @@ impl TypeError {
             Self::BindingCallbackUntyped { .. } => "GT0094",
             Self::BlanketImpl { .. } => "GT0095",
             Self::DuplicateMethod { .. } => "GT0096",
+            Self::Foreign(foreign) => foreign.code(),
             Self::UnresolvedMethod { .. } => "GT0002",
             Self::UnresolvedOp { .. } | Self::UnresolvedOpImpl { .. } => "GT0003",
             Self::NonExhaustiveMatch { .. } => "GT0004",
@@ -1249,8 +1254,7 @@ impl TypeError {
             Self::DuplicateStructField { .. } => "GT0036",
             Self::TooManyStructFields { .. } => "GT0037",
             Self::InvalidCast { .. } => "GT0005",
-            Self::NoConversion { .. } => "GT0066",
-            Self::ConversionTargetUnknown { .. } => "GT0066",
+            Self::NoConversion { .. } | Self::ConversionTargetUnknown { .. } => "GT0066",
             Self::UnknownField { .. } => "GT0006",
             Self::DiscardedResult => "GT0007",
             Self::DiscardedMustUse { .. } => "GT0064",
@@ -1871,6 +1875,9 @@ impl TypeDiagnostic {
                         "keep one `impl {trait_name} for {ty}` block and merge the other into it"
                     )
                 });
+            }
+            TypeError::Foreign(foreign) => {
+                out = foreign.annotate(out);
             }
             TypeError::DuplicateMethod { ty, method, first } => {
                 out = out
@@ -2710,5 +2717,251 @@ mod tests {
             mismatch_suggestion("Iterator<i64>", "Vec<i64>")
                 .is_some_and(|help| help.contains("`<expr>.iter()`"))
         );
+    }
+}
+
+/// A rule of `unsafe extern "C"` declarations, foreign memory, or callbacks
+/// broken: GT0097 through GT0108.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ForeignError {
+    /// A function declared in an `unsafe extern "C"` block is called outside
+    /// an `unsafe { }` block.
+    #[error("the foreign function `{name}` is called outside an `unsafe` block")]
+    CallOutsideUnsafe {
+        /// The foreign function's name.
+        name: String,
+    },
+    /// A parameter or return type of a foreign function that has no C
+    /// representation this release passes.
+    #[error("`{ty}` cannot cross the C boundary as {position} of `{name}`")]
+    SignatureType {
+        /// The foreign function's name.
+        name: String,
+        /// `the return type` or `parameter N`.
+        position: String,
+        /// The type as written.
+        ty: String,
+        /// What the type would need, for the help line.
+        why: String,
+    },
+    /// An effect-looking attribute on a foreign function declaration. Every
+    /// foreign call is `unsafe` and foreign; no attribute relaxes that.
+    #[error(
+        "`#[{attr}]` on the foreign function `{name}`: a foreign function carries no effect annotation"
+    )]
+    EffectAttribute {
+        /// The foreign function's name.
+        name: String,
+        /// The attribute as written.
+        attr: String,
+    },
+    /// A foreign function declaration active on a target with no native
+    /// library to call into.
+    #[error("the foreign function `{name}` is declared for wasm32, which has no native library")]
+    OnWasm {
+        /// The foreign function's name.
+        name: String,
+    },
+    /// A foreign function named anywhere but the callee of a call.
+    #[error("the foreign function `{name}` is used as a value")]
+    AsValue {
+        /// The foreign function's name.
+        name: String,
+    },
+    /// Foreign functions declared by one library of a build whose
+    /// `project.toml` refuses native code (`ffi = false`).
+    #[error(
+        "{library} declares foreign functions ({}), but `{manifest}` refuses native code",
+        code_list(.names)
+    )]
+    NotAllowed {
+        /// The project or dependency that declares them.
+        library: ForeignLibrary,
+        /// The foreign functions it declares, in source order.
+        names: Vec<String>,
+        /// The project manifest that governs the build.
+        manifest: String,
+    },
+    /// An `ffi` operation that touches or forges native memory, outside an
+    /// `unsafe { }` block.
+    #[error("{what} is outside an `unsafe` block")]
+    UnsafeOperation {
+        /// The operation, as the report names it.
+        what: String,
+        /// What the call site vouches for, for the help line.
+        why: String,
+    },
+    /// A foreign type declared `type Name` in an extern block, used where it
+    /// would need a Gossamer value.
+    #[error("the foreign type `{name}` has no Gossamer value: {context}")]
+    OpaqueByValue {
+        /// The foreign type's name.
+        name: String,
+        /// Where it was used by value.
+        context: String,
+    },
+    /// `Ptr<T>` (or an `ffi` memory operation over `T`) where `T` has no C
+    /// layout.
+    #[error("`{ty}` has no C layout, so {context}")]
+    PointerTarget {
+        /// The pointee type.
+        ty: String,
+        /// What needed the layout.
+        context: String,
+    },
+    /// A foreign pointer or handle where its address would outlive the
+    /// process that made it.
+    #[error("`{ty}` holds a native address, which means nothing {context}")]
+    NotPortable {
+        /// The offending type.
+        ty: String,
+        /// Where it was going.
+        context: String,
+    },
+    /// A C function pointer type whose signature has no C form.
+    #[error("the callback type `{ty}` in `{name}` cannot cross the C boundary")]
+    CallbackSignature {
+        /// The foreign function's name.
+        name: String,
+        /// The function type as written.
+        ty: String,
+        /// What the signature would need.
+        why: String,
+    },
+    /// An argument for a C function pointer that is not a named Gossamer
+    /// function of exactly the declared signature.
+    #[error("the callback argument of `{name}` must name a Gossamer function of type `{expected}`")]
+    CallbackArgument {
+        /// The foreign function's name.
+        name: String,
+        /// The declared callback type.
+        expected: String,
+        /// What was passed instead.
+        found: String,
+    },
+}
+
+/// The library a foreign declaration belongs to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignLibrary {
+    /// The project being built, by its id when its manifest names one.
+    Project(Option<String>),
+    /// A dependency the build bundles, by its id.
+    Dependency(String),
+}
+
+impl fmt::Display for ForeignLibrary {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Project(Some(id)) => write!(f, "the project `{id}`"),
+            Self::Project(None) => f.write_str("the project"),
+            Self::Dependency(id) => write!(f, "the dependency `{id}`"),
+        }
+    }
+}
+
+/// `names` as a comma-separated list of code spans.
+fn code_list(names: &[String]) -> String {
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+impl ForeignError {
+    /// Stable short name for the error, as `TypeError::tag` reports it.
+    #[must_use]
+    pub const fn tag(&self) -> &'static str {
+        match self {
+            Self::CallOutsideUnsafe { .. } => "foreign-call-outside-unsafe",
+            Self::SignatureType { .. } => "foreign-signature-type",
+            Self::EffectAttribute { .. } => "foreign-effect-attribute",
+            Self::OnWasm { .. } => "foreign-on-wasm",
+            Self::AsValue { .. } => "foreign-fn-as-value",
+            Self::NotAllowed { .. } => "foreign-not-allowed",
+            Self::UnsafeOperation { .. } => "foreign-unsafe-operation",
+            Self::OpaqueByValue { .. } => "foreign-opaque-by-value",
+            Self::PointerTarget { .. } => "foreign-pointer-target",
+            Self::NotPortable { .. } => "foreign-not-portable",
+            Self::CallbackSignature { .. } => "foreign-callback-signature",
+            Self::CallbackArgument { .. } => "foreign-callback-argument",
+        }
+    }
+
+    /// Stable error code used by the diagnostics framework.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::CallOutsideUnsafe { .. } => "GT0097",
+            Self::SignatureType { .. } => "GT0098",
+            Self::EffectAttribute { .. } => "GT0099",
+            Self::AsValue { .. } => "GT0100",
+            Self::OnWasm { .. } => "GT0101",
+            Self::NotAllowed { .. } => "GT0102",
+            Self::UnsafeOperation { .. } => "GT0103",
+            Self::OpaqueByValue { .. } => "GT0104",
+            Self::PointerTarget { .. } => "GT0105",
+            Self::NotPortable { .. } => "GT0106",
+            Self::CallbackSignature { .. } => "GT0107",
+            Self::CallbackArgument { .. } => "GT0108",
+        }
+    }
+
+    /// `out` with this error's help and notes.
+    fn annotate(&self, out: gossamer_diagnostics::Diagnostic) -> gossamer_diagnostics::Diagnostic {
+        match self {
+            Self::CallOutsideUnsafe { name } => out.with_help(format!(
+                "write the call as `unsafe {{ {name}(..) }}`; the compiler cannot see what a \
+                     native function does, so the call site says it vouches for it"
+            )),
+            Self::SignatureType { why, .. } => out.with_help(why.clone()),
+            Self::EffectAttribute { .. } => out
+                .with_note(
+                    "every foreign call is `unsafe` and has the foreign effect, whatever the \
+                         native function does; blocking calls are handled by the scheduler",
+                )
+                .with_help("drop the attribute"),
+            Self::OnWasm { .. } => out.with_help(
+                "gate the declaration with `#[cfg(not(target_family = \"wasm\"))]` and \
+                     give wasm32 a Gossamer implementation",
+            ),
+            Self::AsValue { name } => out.with_help(format!(
+                "call it inside `unsafe {{ }}`, or wrap it in a Gossamer function: \
+                     `fn {name}_wrapper(..) {{ unsafe {{ {name}(..) }} }}`"
+            )),
+            Self::NotAllowed { manifest, .. } => out
+                .with_note(
+                    "the root project's `project.toml` decides for every dependency it \
+                     builds, and `ffi = false` there refuses native code",
+                )
+                .with_help(format!(
+                    "after reviewing what they call, remove `ffi = false` from the \
+                     `[project]` table of `{manifest}` (or set it to `true`)"
+                )),
+            Self::UnsafeOperation { why, .. } => {
+                out.with_help(format!("write it inside `unsafe {{ }}`: {why}"))
+            }
+            Self::OpaqueByValue { .. } => out.with_help(
+                "a foreign type is reached only as `ffi::Ptr<Name>` (or `Option<ffi::Ptr<Name>>` \
+                 where the C API allows NULL); its fields and size stay in the native library",
+            ),
+            Self::PointerTarget { .. } => out.with_help(
+                "a pointee is a scalar, an `ffi::Ptr`, `ffi::c_void`, a foreign type, or a \
+                 `#[repr(C)]` struct of those",
+            ),
+            Self::NotPortable { .. } => out.with_help(
+                "keep the pointer in a variable or field at run time; store or send the data \
+                 it points at instead",
+            ),
+            Self::CallbackSignature { why, .. } => out.with_help(why.clone()),
+            Self::CallbackArgument { found, .. } => {
+                out.with_note(format!("found {found}")).with_help(
+                    "declare a top-level `fn` with exactly this signature and pass its name; \
+                     state a callback needs travels through its `void *` argument as an \
+                     `ffi::Handle`",
+                )
+            }
+        }
     }
 }

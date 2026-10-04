@@ -536,6 +536,19 @@ impl TyCtxt {
         self.struct_fields_inst.insert((def, substs), fields);
     }
 
+    /// The field types recorded for the generic struct instantiation
+    /// `(def, substs)`, or `None` when none has been recorded.
+    #[must_use]
+    pub fn struct_fields_instance(
+        &self,
+        def: gossamer_resolve::DefId,
+        substs: &crate::Substs,
+    ) -> Option<&[Ty]> {
+        self.struct_fields_inst
+            .get(&(def, substs.clone()))
+            .map(Vec::as_slice)
+    }
+
     /// Returns the field types of the ADT `(def, substs)` with the
     /// instantiation's generic arguments applied. For a non-generic
     /// struct (or an empty `substs`) this is the declared field list. For

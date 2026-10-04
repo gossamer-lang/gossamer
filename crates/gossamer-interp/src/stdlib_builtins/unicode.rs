@@ -113,6 +113,8 @@ pub(crate) fn install_unicode(globals: &mut Vec<(&'static str, Value)>) {
         "unicode",
         &[
             ("is_letter", builtin_unicode_is_letter),
+            ("char_width", builtin_unicode_char_width),
+            ("str_width", builtin_unicode_str_width),
             ("is_digit", builtin_unicode_is_digit),
             ("is_number", builtin_unicode_is_number),
             ("is_space", builtin_unicode_is_space),
@@ -154,6 +156,12 @@ pub(crate) fn install_unicode(globals: &mut Vec<(&'static str, Value)>) {
     );
 }
 
+pub(crate) fn builtin_unicode_char_width(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(unicode_std::char_width(arg_char(args, 0))))
+}
+pub(crate) fn builtin_unicode_str_width(args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(unicode_std::str_width(&arg_str(args, 0))))
+}
 pub(crate) fn builtin_unicode_is_letter(args: &[Value]) -> RuntimeResult<Value> {
     Ok(Value::Bool(unicode_std::is_letter(arg_char(args, 0))))
 }

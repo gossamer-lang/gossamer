@@ -409,6 +409,13 @@ impl<'a> Lowerer<'a> {
                 self.lower_runtime_call_intrinsic(name, args, place.local)?;
                 return Ok(());
             }
+            // A C function answering `void` is called for its effect.
+            if let Rvalue::CallIntrinsic { name, args } = rvalue
+                && gossamer_mir::ForeignCall::parse(name).is_some()
+            {
+                self.lower_foreign_call(name, args, place.local)?;
+                return Ok(());
+            }
             return Ok(());
         }
         // Aggregate constructions (`Aggregate`, `Repeat`) are

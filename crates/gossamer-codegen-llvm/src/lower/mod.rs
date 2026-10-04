@@ -614,6 +614,7 @@ pub(crate) const TBAA_DATA: &str = ", !tbaa !5";
 
 mod emit_aggregate;
 mod emit_misc;
+mod foreign;
 mod misc;
 mod operand;
 mod rvalue;

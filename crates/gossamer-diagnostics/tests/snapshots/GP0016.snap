@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GP0016]: The `extern` keyword is reserved but has no - here
+error[GP0016]: Foreign functions are declared at module level in an - here
 --- framed ---
-error[GP0016]: The `extern` keyword is reserved but has no
+error[GP0016]: Foreign functions are declared at module level in an
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

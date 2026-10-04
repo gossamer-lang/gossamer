@@ -1,0 +1,81 @@
+// Cross-tier check for `#[repr(C)]` struct parameters of foreign
+// functions: a `&mut` struct the callee fills in, and a struct passed by
+// value, both copied through their C layout on every tier.
+
+#[repr(C)]
+#[derive(Default)]
+#[cfg(unix)]
+struct Tm {
+    sec: i32
+    min: i32
+    hour: i32
+    mday: i32
+    mon: i32
+    year: i32
+    wday: i32
+    yday: i32
+    isdst: i32
+    gmtoff: i64
+    zone: usize
+}
+
+#[repr(C)]
+#[derive(Default)]
+#[cfg(windows)]
+struct Tm {
+    sec: i32
+    min: i32
+    hour: i32
+    mday: i32
+    mon: i32
+    year: i32
+    wday: i32
+    yday: i32
+    isdst: i32
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn gmtime_r(seconds: [i64], out: &mut Tm) -> usize
+    fn timegm(tm: &mut Tm) -> i64
+}
+
+#[cfg(windows)]
+unsafe extern "C" {
+    fn _gmtime64_s(out: &mut Tm, seconds: [i64]) -> i32
+    fn _mkgmtime64(tm: &mut Tm) -> i64
+}
+
+#[cfg(unix)]
+fn civil(seconds: i64) -> Tm {
+    let mut tm = Tm::default()
+    unsafe { gmtime_r(#[seconds], &mut tm) }
+    tm
+}
+
+#[cfg(windows)]
+fn civil(seconds: i64) -> Tm {
+    let mut tm = Tm::default()
+    unsafe { _gmtime64_s(&mut tm, #[seconds]) }
+    tm
+}
+
+#[cfg(unix)]
+fn seconds_of(tm: Tm) -> i64 {
+    let mut copy = tm
+    unsafe { timegm(&mut copy) }
+}
+
+#[cfg(windows)]
+fn seconds_of(tm: Tm) -> i64 {
+    let mut copy = tm
+    unsafe { _mkgmtime64(&mut copy) }
+}
+
+fn main() {
+    for days in [0, 365, 10957] {
+        let tm = civil(days * 86400 + 3723)
+        println(f"{tm.year + 1900}-{tm.mon + 1}-{tm.mday} {tm.hour}:{tm.min}:{tm.sec} wday {tm.wday} yday {tm.yday}")
+        println(f"back: {seconds_of(tm)}")
+    }
+}

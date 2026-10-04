@@ -3211,6 +3211,7 @@ pub unsafe extern "C" fn gos_rt_main_exit_code(raw: i64) -> i32 {
         // failure nothing observed, before the drain below.
         crate::c_abi::cohort::close_root();
         crate::sched_global::drain_goroutines_for_exit();
+        crate::c_abi::exit_hooks::run_exit_hooks();
         // Flush any buffered stdout that workers wrote so it
         // reaches the user before the process exits.
         gos_rt_flush_stdout();
@@ -3231,6 +3232,7 @@ pub unsafe extern "C" fn gos_rt_main_exit_code_err(disc: i64, payload: i64) -> i
         gos_rt_flush_stdout();
         crate::c_abi::cohort::close_root();
         crate::sched_global::drain_goroutines_for_exit();
+        crate::c_abi::exit_hooks::run_exit_hooks();
         gos_rt_flush_stdout();
         if disc == 0 {
             return 0;

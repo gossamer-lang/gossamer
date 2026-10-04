@@ -162,6 +162,21 @@ fn bundle_project_unit(uri: &str, source: &str) -> (String, String, u32) {
     (unit.source, name, unit.window_start)
 }
 
+/// The foreign-function rule of the project the unit named `name` (its
+/// entry's `file://` URI) belongs to, as the command line applies it.
+#[cfg(not(target_arch = "wasm32"))]
+fn unit_foreign_policy(name: &str) -> gossamer_types::ForeignPolicy {
+    uri_to_path(name).map_or(gossamer_types::ForeignPolicy::Ungoverned, |path| {
+        gossamer_types::ForeignPolicy::for_path(&path)
+    })
+}
+
+/// The browser editor has no project on disk to govern it.
+#[cfg(target_arch = "wasm32")]
+fn unit_foreign_policy(_name: &str) -> gossamer_types::ForeignPolicy {
+    gossamer_types::ForeignPolicy::Ungoverned
+}
+
 /// The wasm build has no filesystem to read sibling modules from, so a
 /// document is its own compilation unit there.
 #[cfg(target_arch = "wasm32")]
@@ -310,6 +325,10 @@ fn analyse_unit(name: &str, bundled: &str) -> UnitAnalysis {
                 .iter()
                 .map(gossamer_types::TypeDiagnostic::to_diagnostic),
         );
+        diagnostics.extend(unit_foreign_policy(name).diagnostics_per_declaration(
+            &sf,
+            gossamer_parse::autoderive::program_source_end(&augmented),
+        ));
         // The editor must run every phase the command-line gate runs, or a
         // file reads clean here and fails `gos check`. Exhaustiveness
         // (GM0001) and arena escape (GM0003) are fatal there, so they are

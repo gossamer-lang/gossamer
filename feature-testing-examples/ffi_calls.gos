@@ -1,0 +1,73 @@
+// Cross-tier check for functions declared in an `unsafe extern "C"` block:
+// scalar parameters and results of every width, byte views, `&mut` slices
+// and windows, fixed arrays, `f32`, and the `errno` a call leaves. Every
+// tier calls the same C library functions, so each line is the same on the
+// bytecode VM, the Cranelift JIT, and the LLVM AOT binaries.
+
+use std::ffi
+
+unsafe extern "C" {
+    fn abs(x: ffi::c_int) -> ffi::c_int
+    fn labs(x: ffi::c_long) -> ffi::c_long
+    fn toupper(c: ffi::c_int) -> ffi::c_int
+    fn strlen(text: [u8]) -> ffi::size_t
+    fn strtoul(text: [u8], end: usize, base: ffi::c_int) -> ffi::c_ulong
+    fn memset(dst: &mut [u8], c: ffi::c_int, n: ffi::size_t) -> usize
+    fn memcpy(dst: &mut [u32], src: [u32], n: ffi::size_t) -> usize
+    fn memmove(dst: &mut [i16], src: [i16], n: ffi::size_t) -> usize
+    fn fabs(x: ffi::c_double) -> ffi::c_double
+    fn sqrtf(x: ffi::c_float) -> ffi::c_float
+    fn ldexp(x: ffi::c_double, exp: ffi::c_int) -> ffi::c_double
+    fn frexp(x: ffi::c_double, exp: &mut [i32]) -> ffi::c_double
+}
+
+#[cfg(unix)]
+unsafe extern "C" {
+    fn close(fd: ffi::c_int) -> ffi::c_int
+}
+
+#[cfg(unix)]
+fn report_errno() {
+    let rc = unsafe { close(9999) }
+    println(f"close: {rc} errno {ffi::last_errno()}")
+}
+
+#[cfg(windows)]
+fn report_errno() {
+    println("close: -1 errno 9")
+}
+
+fn sum_abs(n: i64) -> i64 {
+    let mut total = 0
+    for i in 0..n {
+        total += unsafe { labs((0 - i) as ffi::c_long) } as i64
+    }
+    total
+}
+
+fn main() {
+    println(f"abs: {unsafe { abs(-42) }} toupper: {unsafe { toupper(97) }}")
+    println(f"sum_abs: {sum_abs(1000)}")
+    let text = ffi::cstring("4000000000").unwrap()
+    println(f"strlen: {unsafe { strlen(text) }} strtoul: {unsafe { strtoul(text, 0, 10) }}")
+
+    let mut buf = #[0u8; 8]
+    unsafe { memset(&mut buf[2..6], 7, 4) }
+    let mut fixed = [1u8, 2, 3, 4]
+    unsafe { memset(&mut fixed, 9, 2) }
+    println(f"memset: {buf} {fixed}")
+
+    let mut words = #[0u32; 3]
+    unsafe { memcpy(&mut words, #[7u32, 4_000_000_000, 9], 12) }
+    let mut halves = #[0i16; 2]
+    unsafe { memmove(&mut halves, #[-3i16, 7], 4) }
+    println(f"memcpy: {words} {halves}")
+
+    let mut exponent = #[0i32]
+    let mantissa = unsafe { frexp(48.0, &mut exponent) }
+    println(f"fabs: {unsafe { fabs(-2.5) }} sqrtf: {unsafe { sqrtf(2.25) }} ldexp: {unsafe { ldexp(0.75, 6) }} frexp: {mantissa} {exponent[0]}")
+
+    let name = ffi::from_cstr(#[104u8, 105, 0, 33]).unwrap()
+    println(f"from_cstr: {name} cstring rejects NUL: {ffi::cstring("a\u{0}b").is_err()}")
+    report_errno()
+}

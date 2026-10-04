@@ -1,0 +1,40 @@
+// Platform variants of one item under `#[cfg]`: only the variant for the
+// build's target declares the name, so the others never collide with it.
+
+#[cfg(unix)]
+fn family() -> String {
+    "a known family"
+}
+
+#[cfg(windows)]
+fn family() -> String {
+    "a known family"
+}
+
+#[cfg(target_arch = "x86_64")]
+fn word_bits() -> i64 {
+    64
+}
+
+#[cfg(target_arch = "aarch64")]
+fn word_bits() -> i64 {
+    64
+}
+
+#[cfg(target_arch = "riscv64")]
+fn word_bits() -> i64 {
+    64
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64")))]
+fn word_bits() -> i64 {
+    0
+}
+
+fn main() {
+    let mut bits = 0
+    for _ in 0..3 {
+        bits += word_bits()
+    }
+    println(f"{family()}, {bits / 3}-bit words")
+}

@@ -23,6 +23,7 @@ mod compile;
 mod comptime;
 mod comptime_gate;
 pub mod external_natives;
+mod ffi_call;
 mod flag_set_builtins;
 #[cfg(feature = "fuel")]
 pub mod fuel;
@@ -175,6 +176,40 @@ pub use vm::{CallStackFrame, JitMetrics, Vm};
 static PANIC_HOOK_VALUE: std::sync::LazyLock<parking_lot::Mutex<Option<value::Value>>> =
     std::sync::LazyLock::new(|| parking_lot::Mutex::new(None));
 
+/// `runtime::at_exit` closures registered on the interpreter tier, by the id
+/// the runtime's exit-hook list holds for each.
+static EXIT_HOOKS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<u64, value::Value>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Registers `hook` to run when the program ends, in the runtime's one list
+/// so compiled and interpreted registrations run in registration order.
+pub(crate) fn register_exit_hook(hook: value::Value) {
+    static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        gossamer_runtime::c_abi::exit_hooks::install_host_runner(run_exit_hook);
+    });
+    let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    EXIT_HOOKS.lock().insert(id, hook);
+    gossamer_runtime::c_abi::exit_hooks::push_host_hook(id);
+}
+
+/// Runs the interpreter-tier hook `id` on the VM running this thread. A
+/// hook's own failure does not stop the hooks after it.
+fn run_exit_hook(id: u64) {
+    let Some(hook) = EXIT_HOOKS.lock().remove(&id) else {
+        return;
+    };
+    let _ = vm::with_active_vm(|vm| vm.apply_value(hook, Vec::new()));
+}
+
+/// Runs every `runtime::at_exit` hook, last registered first.
+pub fn run_exit_hooks() {
+    gossamer_runtime::c_abi::exit_hooks::run_exit_hooks();
+    flush_runtime_stdout();
+}
+
 /// Store (or clear) the interpreter-tier panic hook.
 pub fn set_panic_hook_value(v: Option<value::Value>) {
     *PANIC_HOOK_VALUE.lock() = v;
@@ -242,6 +277,13 @@ pub fn err_payload_message(value: &value::Value) -> Option<String> {
 #[must_use]
 pub fn is_ok_variant(value: &value::Value) -> bool {
     matches!(value, value::Value::Variant(inner) if inner.name == "Ok")
+}
+
+/// Whether `err` is a fault at the C boundary (`GX0013`, `GX0014`), which
+/// the compiled tiers raise through the panic path and exit 101 on.
+#[must_use]
+pub fn is_foreign_fault(err: &value::RuntimeError) -> bool {
+    matches!(err, value::RuntimeError::Foreign { .. })
 }
 
 /// Whether `err` is the stack-overflow fault. Reported like a panic -

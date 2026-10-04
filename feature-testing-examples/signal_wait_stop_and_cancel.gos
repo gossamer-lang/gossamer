@@ -1,0 +1,46 @@
+// A signal wait ends three ways: the signal arrives, the cohort it waits
+// under is cancelled, or its notifier is stopped. The last two answer
+// `false`, so a forwarding loop `while n.wait() { .. }` ends when its watch
+// does and leaves its cohort free to join. The loops are plain functions
+// the compiled tiers run themselves, inside the cohorts the bytecode tier
+// opened.
+
+use std::errors
+use std::os::signal
+
+fn deliveries(n: signal::Notifier) -> i64 {
+    let mut count = 0
+    while n.wait() {
+        count += 1
+    }
+    count
+}
+
+fn stop_and_poll(n: signal::Notifier, polls: i64) -> i64 {
+    n.stop()
+    let mut seen = 0
+    for _ in 0..polls {
+        if n.try_wait() {
+            seen += 1
+        }
+    }
+    seen
+}
+
+fn cancelled_watch() -> Result<(), errors::Error> {
+    cohort(timeout: 50) {
+        spawn(|| println(f"cancelled watch saw {deliveries(signal::on(signal::SIGWINCH))}"))
+    }
+}
+
+fn main() {
+    println(f"cohort {cancelled_watch()}")
+    let n = signal::on(signal::SIGWINCH)
+    let mut polled = -1
+    let result = cohort {
+        spawn(|| println(f"stopped watch saw {deliveries(n)}"))
+        polled = stop_and_poll(n, 3)
+    }
+    println(f"cohort {result}")
+    println(f"polls after stop saw {polled}")
+}

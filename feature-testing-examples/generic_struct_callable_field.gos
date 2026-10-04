@@ -1,0 +1,53 @@
+// A closure written directly as a field of a generic struct literal is
+// stored at the instantiation's field type, so `Cmd<f64>` holds an
+// `Fn() -> f64` and a nested `Wrap<Cmd<String>>` reaches its callable
+// through both instantiations. The literal is lowered before any other
+// local names that instantiation, which is the case this covers.
+
+struct Cmd<M> { run: Fn() -> M }
+
+struct Wrap<T> { inner: T, label: String }
+
+struct Pair<A, B> { first: Fn(A) -> B, second: Fn(B) -> A }
+
+fn ticker() -> Cmd<i64> {
+    Cmd { run: || 42 }
+}
+
+fn halves() -> Cmd<f64> {
+    Cmd::<f64> { run: || 1.5 }
+}
+
+fn greeting(name: String) -> Wrap<Cmd<String>> {
+    Wrap { inner: Cmd { run: || f"hello {name}" }, label: "greet" }
+}
+
+fn batch() -> Vec<Cmd<i64>> {
+    #[Cmd { run: || 1 }, Cmd { run: || 2 }, Cmd { run: || 3 }]
+}
+
+fn main() {
+    let t = ticker()
+    let run = t.run
+    println(run())
+
+    let h = halves()
+    let run_half = h.run
+    println(run_half() * 2.0)
+
+    let w = greeting("bob")
+    let say = w.inner.run
+    println(f"{w.label}: {say()}")
+
+    let mut total = 0
+    for cmd in batch() {
+        let f = cmd.run
+        total += f()
+    }
+    println(total)
+
+    let p = Pair { first: |n: i64| n.to_string(), second: |s: String| s.len() }
+    let to_text = p.first
+    let measure = p.second
+    println(measure(to_text(12345)))
+}

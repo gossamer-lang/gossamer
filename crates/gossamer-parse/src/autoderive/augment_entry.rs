@@ -1,3 +1,32 @@
+/// The line `augment_source` writes between the program and everything it
+/// appends. Nothing the program wrote follows its last occurrence, so the
+/// code after it is the toolchain's own: see [`program_source_end`].
+pub const GENERATED_SECTION_MARKER: &str = "// gossamer: generated below\n";
+
+/// The byte offset where the program's own text ends in augmented `source`:
+/// the start of the last [`GENERATED_SECTION_MARKER`], or the whole length
+/// when nothing was appended. A program cannot place text after the marker
+/// the toolchain appends, so an item before this offset is the program's.
+#[must_use]
+pub fn program_source_end(source: &str) -> usize {
+    source.rfind(GENERATED_SECTION_MARKER).unwrap_or(source.len())
+}
+
+/// `items` without the foreign types `type Name` declares in extern blocks,
+/// at any module depth.
+fn without_foreign_types(items: &mut Vec<gossamer_ast::Item>) {
+    items.retain(|item| !item.attrs.has_word(gossamer_ast::FOREIGN_TYPE_ATTR));
+    for item in items {
+        if let gossamer_ast::ItemKind::Mod(gossamer_ast::ModDecl {
+            body: gossamer_ast::ModBody::Inline(inner),
+            ..
+        }) = &mut item.kind
+        {
+            without_foreign_types(inner);
+        }
+    }
+}
+
 /// Preprocesses a Gossamer source string by appending synthesized
 /// `from_json` / `to_json` impl blocks for every eligible struct.
 /// Returns the augmented source. Callers should put the augmented
@@ -31,6 +60,13 @@ pub fn augment_source(source: &str) -> String {
         if !probe_diags.is_empty() {
             return source.to_string();
         }
+        // An item `#[cfg]` leaves out of this build is no item at all, so
+        // nothing is synthesized for it: two cfg variants of one struct
+        // would otherwise each get the same helpers.
+        let mut parsed = gossamer_ast::cfg::without_inactive_items(&parsed).unwrap_or(parsed);
+        // A foreign type has no Gossamer value to format, compare, or
+        // serialize, so nothing is synthesized for it.
+        without_foreign_types(&mut parsed.items);
         let serde = synthesize_serde_impls(&parsed);
         let mut derives = synthesize_derive_impls(&parsed);
         derives.push_str(&synthesize_iterator_adapters(&parsed, source));
@@ -52,7 +88,15 @@ pub fn augment_source(source: &str) -> String {
         && type_info.is_empty()
         && validators.is_empty()
     {
-        return source.to_string();
+        // The marker still closes the program, so text the program writes
+        // can never be read as the toolchain's.
+        let mut closed = String::with_capacity(source.len() + GENERATED_SECTION_MARKER.len() + 2);
+        closed.push_str(source);
+        if !closed.ends_with('\n') {
+            closed.push('\n');
+        }
+        closed.push_str(GENERATED_SECTION_MARKER);
+        return closed;
     }
     if std::env::var_os("GOS_AUTODERIVE_DEBUG").is_some() {
         eprintln!(
@@ -72,6 +116,7 @@ pub fn augment_source(source: &str) -> String {
         combined.push('\n');
     }
     combined.push('\n');
+    combined.push_str(GENERATED_SECTION_MARKER);
     if !synth_is_empty(&serde) {
         combined.push_str(&serde);
     }

@@ -130,7 +130,10 @@ mod autoderive_tests {
                    \t// enum AlsoNotAType { A }\n\
                    }\n";
         assert!(!super::source_may_need_ast_synthesis(src));
-        assert_eq!(super::augment_source(src), src);
+        assert_eq!(
+            super::augment_source(src),
+            format!("{src}{}", super::GENERATED_SECTION_MARKER)
+        );
     }
 
     #[test]
@@ -146,6 +149,21 @@ mod autoderive_tests {
     #[test]
     fn a_literal_regex_needs_no_synthesized_code() {
         let src = "use std::regex\nfn main() { let _ = regex::compile(\"^[a]+$\") }\n";
-        assert_eq!(super::augment_source(src), src);
+        assert_eq!(
+            super::augment_source(src),
+            format!("{src}{}", super::GENERATED_SECTION_MARKER)
+        );
+    }
+
+    #[test]
+    fn the_program_ends_at_the_last_marker_the_toolchain_appends() {
+        // A program that writes the marker line itself still ends where the
+        // toolchain's own marker begins, after everything the program wrote.
+        let src = format!(
+            "fn main() {{}}\n{}unsafe extern \"C\" {{\n    fn abs(x: i32) -> i32\n}}\n",
+            super::GENERATED_SECTION_MARKER
+        );
+        let augmented = super::augment_source(&src);
+        assert!(super::program_source_end(&augmented) >= src.len());
     }
 }

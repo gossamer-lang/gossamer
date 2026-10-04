@@ -11,7 +11,6 @@
 #![allow(clippy::ptr_as_ptr)]
 
 use std::os::raw::c_char;
-#[cfg(unix)]
 use std::time::Duration;
 
 use super::result::gos_rt_result_new;
@@ -218,61 +217,307 @@ pub unsafe extern "C" fn gos_rt_exec_kill_group(pid: i64) -> i64 {
     })
 }
 
-/// `exec::wait_timeout(pid: i64, ms: i64) -> i64`. Polls the pid via
-/// `waitpid(WNOHANG)` on Unix until it exits or `ms` elapses.
-/// Returns the exit code on success, `-1` if the pid is still
-/// running after the timeout, `-2` on any other error (unknown pid,
-/// permission denied). Windows falls back to a best-effort
-/// `WaitForSingleObject` with the supplied timeout.
+/// `exec::wait_timeout(pid: i64, ms: i64) -> i64`: the exit code of `pid`
+/// once it ends within `ms` milliseconds, `-1` if it is still running at
+/// the timeout, `-2` on any other error (unknown pid, permission denied).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn gos_rt_exec_wait_timeout(pid: i64, ms: i64) -> i64 {
-    ffi_entry!(-2, {
-        if pid <= 0 {
-            return -2;
+    ffi_entry!(-2, { wait_timeout(pid, ms) })
+}
+
+/// [`gos_rt_exec_wait_timeout`] for the bytecode tier and the standard
+/// library: the calling goroutine parks while the wait runs on the blocking
+/// pool.
+#[must_use]
+pub fn wait_timeout(pid: i64, ms: i64) -> i64 {
+    if pid <= 0 || ms < 0 {
+        return -2;
+    }
+    let timeout = Duration::from_millis(ms.unsigned_abs());
+    match crate::sched_global::run_blocking("process::wait_timeout", move || {
+        wait_exit(pid, Some(timeout))
+    }) {
+        Ok(Ok(Some(code))) => code,
+        Ok(Ok(None)) => -1,
+        Ok(Err(_)) | Err(_) => -2,
+    }
+}
+
+/// Waits for the child `pid` to end, for at most `timeout` (forever when
+/// `None`): `Some(code)` once it ends, `None` at the timeout. A child ended
+/// by a signal reports 128 plus the signal number. The wait sleeps in the
+/// kernel - a process descriptor on Linux, `kqueue` on the BSDs and macOS, the
+/// process handle on Windows - rather than polling.
+///
+/// # Errors
+///
+/// `pid` is not a child of this process, or the platform reports a failure.
+pub fn wait_exit(pid: i64, timeout: Option<Duration>) -> Result<Option<i64>, String> {
+    exit_wait::wait(pid, timeout)
+}
+
+/// Runs `program` with `args` on the program's own standard input, output,
+/// and error, and answers its exit code once it ends; the calling goroutine
+/// parks meanwhile. A child ended by a signal reports 128 plus the signal
+/// number.
+///
+/// # Errors
+///
+/// The program cannot be started.
+pub fn run_inherit(program: &str, args: Vec<String>) -> Result<i64, String> {
+    // The child writes to the same stream, so what this program printed
+    // reaches it first.
+    super::gos_rt_flush_stdout();
+    let program = program.to_string();
+    crate::sched_global::run_blocking("process::run_inherit", move || {
+        std::process::Command::new(&program)
+            .args(&args)
+            .status()
+            .map(status_code)
+            .map_err(|e| format!("process::run_inherit({program}): {e}"))
+    })?
+}
+
+/// The exit code a finished child reports, 128 plus the signal number for
+/// one a signal ended on Unix.
+fn status_code(status: std::process::ExitStatus) -> i64 {
+    if let Some(code) = status.code() {
+        return i64::from(code);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt as _;
+        if let Some(signal) = status.signal() {
+            return 128 + i64::from(signal);
         }
-        #[cfg(unix)]
-        {
-            let deadline =
-                crate::platform::Instant::now() + Duration::from_millis(ms.max(0) as u64);
-            loop {
-                let mut status: libc::c_int = 0;
-                let status_ptr: *mut libc::c_int = &raw mut status;
-                // SAFETY: `status_ptr` addresses a live local; waitpid with
-                // WNOHANG returns 0 if still running, the child pid on reap,
-                // -1 on error.
-                let rc = unsafe { libc::waitpid(pid as libc::pid_t, status_ptr, libc::WNOHANG) };
-                if rc > 0 {
-                    if libc::WIFEXITED(status) {
-                        return i64::from(libc::WEXITSTATUS(status));
-                    }
-                    if libc::WIFSIGNALED(status) {
-                        return i64::from(128 + libc::WTERMSIG(status));
-                    }
-                    return 0;
-                }
-                if rc < 0 {
-                    let err = std::io::Error::last_os_error();
-                    if err.raw_os_error() == Some(libc::ECHILD) {
-                        return -2;
-                    }
-                    return -2;
-                }
-                if crate::platform::Instant::now() >= deadline {
-                    return -1;
-                }
-                crate::platform::sleep(Duration::from_millis(25));
+    }
+    0
+}
+
+/// `process::run_inherit(program, args) -> Result<i64, errors::Error>`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn gos_rt_exec_run_inherit(prog: *const c_char, args: *mut GosVec) -> i128 {
+    ffi_entry!(0i128, {
+        if prog.is_null() {
+            let err = crate::c_abi::errors::error_new_from_bytes(
+                b"process::run_inherit: program is null",
+            );
+            return gos_rt_result_new(1, err as i64);
+        }
+        // SAFETY: `prog` is a live String argument from compiled code.
+        let program = unsafe { crate::c_abi::gos_str_arg_string(prog) };
+        // SAFETY: `args` is null or a live `Vec<String>` for the call.
+        let argv = unsafe { argv_strings(args) };
+        match run_inherit(&program, argv) {
+            Ok(code) => gos_rt_result_new(0, code),
+            Err(message) => {
+                let err = crate::c_abi::errors::error_new_from_bytes(message.as_bytes());
+                gos_rt_result_new(1, err as i64)
             }
         }
-        #[cfg(windows)]
-        {
-            wait_timeout_windows(pid as u32, ms.max(0) as u32)
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            let _ = (pid, ms);
-            -2
-        }
     })
+}
+
+#[cfg(unix)]
+mod exit_wait {
+    use std::time::Duration;
+
+    /// The exit code `status` from `waitpid` reports.
+    fn decode(status: libc::c_int) -> i64 {
+        if libc::WIFEXITED(status) {
+            i64::from(libc::WEXITSTATUS(status))
+        } else if libc::WIFSIGNALED(status) {
+            128 + i64::from(libc::WTERMSIG(status))
+        } else {
+            0
+        }
+    }
+
+    /// Reaps `pid` when it has ended (`Some`), or answers `None` while it
+    /// runs; `block` waits for it to end.
+    fn reap(pid: libc::pid_t, block: bool) -> Result<Option<i64>, String> {
+        let flags = if block { 0 } else { libc::WNOHANG };
+        loop {
+            let mut status: libc::c_int = 0;
+            // SAFETY: `status` is a live local for the call.
+            let rc = unsafe { libc::waitpid(pid, &raw mut status, flags) };
+            if rc > 0 {
+                return Ok(Some(decode(status)));
+            }
+            if rc == 0 {
+                return Ok(None);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(format!("process::wait({pid}): {error}"));
+            }
+        }
+    }
+
+    pub(super) fn wait(pid: i64, timeout: Option<Duration>) -> Result<Option<i64>, String> {
+        let pid = libc::pid_t::try_from(pid).map_err(|_| format!("process::wait: {pid}"))?;
+        let Some(timeout) = timeout else {
+            return reap(pid, true);
+        };
+        if let Some(code) = reap(pid, false)? {
+            return Ok(Some(code));
+        }
+        if exited_within(pid, timeout)? {
+            reap(pid, true)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Whether `pid` ends within `timeout`, watched through a process
+    /// descriptor.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn exited_within(pid: libc::pid_t, timeout: Duration) -> Result<bool, String> {
+        // SAFETY: `pidfd_open` takes a pid and flags and answers a new
+        // descriptor or -1.
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        if fd < 0 {
+            return Err(format!(
+                "process::wait({pid}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        let fd = libc::c_int::try_from(fd).map_err(|_| format!("process::wait({pid})"))?;
+        let deadline = std::time::Instant::now() + timeout;
+        let result = loop {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            let ms = libc::c_int::try_from(left.as_millis()).unwrap_or(libc::c_int::MAX);
+            let mut entry = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one valid `pollfd` for the call.
+            let n = unsafe { libc::poll(&raw mut entry, 1, ms) };
+            if n >= 0 {
+                break Ok(n > 0);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                break Err(format!("process::wait({pid}): {error}"));
+            }
+        };
+        // SAFETY: `fd` is the descriptor opened above, closed once.
+        unsafe { libc::close(fd) };
+        result
+    }
+
+    /// Whether `pid` ends within `timeout`, watched through `kqueue`.
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly"
+    ))]
+    fn exited_within(pid: libc::pid_t, timeout: Duration) -> Result<bool, String> {
+        // SAFETY: `kqueue` takes no arguments and answers a descriptor or -1.
+        let kq = unsafe { libc::kqueue() };
+        if kq < 0 {
+            return Err(format!(
+                "process::wait({pid}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: an all-zero `kevent` is a valid value of the C struct.
+        let mut change: libc::kevent = unsafe { std::mem::zeroed() };
+        change.ident = pid as _;
+        change.filter = libc::EVFILT_PROC;
+        change.flags = libc::EV_ADD | libc::EV_ONESHOT;
+        change.fflags = libc::NOTE_EXIT;
+        // SAFETY: as above.
+        let mut event: libc::kevent = unsafe { std::mem::zeroed() };
+        let ts = libc::timespec {
+            tv_sec: timeout.as_secs().try_into().unwrap_or(libc::time_t::MAX),
+            tv_nsec: timeout.subsec_nanos().into(),
+        };
+        // SAFETY: one change and room for one event, both live locals.
+        let n = unsafe { libc::kevent(kq, &raw const change, 1, &raw mut event, 1, &raw const ts) };
+        let error = std::io::Error::last_os_error();
+        // SAFETY: `kq` is the queue opened above, closed once.
+        unsafe { libc::close(kq) };
+        if n >= 0 {
+            return Ok(n > 0);
+        }
+        // A child that ended before the registration cannot be watched; it
+        // is waiting to be reaped.
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            return Ok(true);
+        }
+        Err(format!("process::wait({pid}): {error}"))
+    }
+}
+
+#[cfg(windows)]
+mod exit_wait {
+    use std::time::Duration;
+
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, INFINITE, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_SYNCHRONIZE, WaitForSingleObject,
+    };
+
+    pub(super) fn wait(pid: i64, timeout: Option<Duration>) -> Result<Option<i64>, String> {
+        let pid = u32::try_from(pid).map_err(|_| format!("process::wait: {pid}"))?;
+        let ms = timeout.map_or(INFINITE, |t| {
+            u32::try_from(t.as_millis()).unwrap_or(INFINITE - 1)
+        });
+        // SAFETY: OpenProcess takes plain values and answers a handle or null.
+        let handle = unsafe {
+            OpenProcess(
+                PROCESS_SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+                0,
+                pid,
+            )
+        };
+        if handle.is_null() {
+            return Err(format!(
+                "process::wait({pid}): {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+        // SAFETY: `handle` is the process handle opened above.
+        let status = unsafe { WaitForSingleObject(handle, ms) };
+        let result = match status {
+            WAIT_OBJECT_0 => {
+                let mut code = 0u32;
+                // SAFETY: `handle` is open and `code` is a live local.
+                if unsafe { GetExitCodeProcess(handle, &raw mut code) } == 0 {
+                    Err(format!(
+                        "process::wait({pid}): {}",
+                        std::io::Error::last_os_error()
+                    ))
+                } else {
+                    Ok(Some(i64::from(code)))
+                }
+            }
+            WAIT_TIMEOUT => Ok(None),
+            _ => Err(format!(
+                "process::wait({pid}): {}",
+                std::io::Error::last_os_error()
+            )),
+        };
+        // SAFETY: closed once.
+        unsafe { CloseHandle(handle) };
+        result
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+mod exit_wait {
+    pub(super) fn wait(
+        _pid: i64,
+        _timeout: Option<std::time::Duration>,
+    ) -> Result<Option<i64>, String> {
+        Err("process::wait: processes are not available on this target".to_string())
+    }
 }
 
 #[cfg(windows)]
@@ -292,45 +537,6 @@ fn terminate_pid(pid: u32) -> i64 {
         let ok = TerminateProcess(handle, 1);
         let _ = CloseHandle(handle);
         i64::from(ok != 0)
-    }
-}
-
-#[cfg(windows)]
-fn wait_timeout_windows(pid: u32, ms: u32) -> i64 {
-    // SAFETY: OpenProcess + WaitForSingleObject + GetExitCodeProcess
-    // + CloseHandle. Each call returns a documented sentinel on
-    // failure; we never deref invalid handles.
-    unsafe {
-        unsafe extern "system" {
-            fn OpenProcess(desired_access: u32, inherit_handle: i32, process_id: u32) -> isize;
-            fn WaitForSingleObject(handle: isize, ms: u32) -> u32;
-            fn GetExitCodeProcess(handle: isize, exit_code: *mut u32) -> i32;
-            fn CloseHandle(object: isize) -> i32;
-        }
-        const SYNCHRONIZE: u32 = 0x0010_0000;
-        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-        const WAIT_OBJECT_0: u32 = 0;
-        const WAIT_TIMEOUT: u32 = 0x0000_0102;
-        let handle = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle == 0 {
-            return -2;
-        }
-        let r = WaitForSingleObject(handle, ms);
-        if r == WAIT_TIMEOUT {
-            let _ = CloseHandle(handle);
-            return -1;
-        }
-        if r != WAIT_OBJECT_0 {
-            let _ = CloseHandle(handle);
-            return -2;
-        }
-        let mut code: u32 = 0;
-        let ok = GetExitCodeProcess(handle, &raw mut code);
-        let _ = CloseHandle(handle);
-        if ok == 0 {
-            return -2;
-        }
-        code as i64
     }
 }
 

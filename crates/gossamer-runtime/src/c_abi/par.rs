@@ -349,6 +349,8 @@ fn caught_fault(payload: &(dyn std::any::Any + Send)) -> DeferredFault {
     DeferredFault {
         text,
         trace: String::new(),
+        code: "GX0005".to_string(),
+        prefix: "panic: ".to_string(),
     }
 }
 

@@ -220,6 +220,10 @@ thread_local! {
     /// happened so the re-raise can report the frames that faulted rather
     /// than the adapter's.
     static DEFERRED_TRACE: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+    /// The diagnostic code and report prefix of the deferred fault, so the
+    /// re-raise reports it as what it was.
+    static DEFERRED_KIND: std::cell::RefCell<(String, String)> =
+        const { std::cell::RefCell::new((String::new(), String::new())) };
 }
 
 /// A fault a deferred domain held: its message and the call stack it was
@@ -230,6 +234,10 @@ pub struct DeferredFault {
     pub text: String,
     /// The call stack rendered where the fault was raised.
     pub trace: String,
+    /// The fault's diagnostic code (`GX0005` for a panic).
+    pub code: String,
+    /// The report's prefix (`panic: ` for a panic).
+    pub prefix: String,
 }
 
 /// Holds this thread's faults for a caller to re-raise, for the guard's life.
@@ -255,18 +263,35 @@ impl Drop for DeferredFaults {
 pub fn take_deferred_fault(payload: &(dyn std::any::Any + Send)) -> Option<DeferredFault> {
     let text = payload.downcast_ref::<GosPanic>()?.0.clone();
     let trace = DEFERRED_TRACE.with(|t| std::mem::take(&mut *t.borrow_mut()));
-    Some(DeferredFault { text, trace })
+    let (code, prefix) = DEFERRED_KIND.with(|k| std::mem::take(&mut *k.borrow_mut()));
+    let (code, prefix) = if code.is_empty() {
+        ("GX0005".to_string(), "panic: ".to_string())
+    } else {
+        (code, prefix)
+    };
+    Some(DeferredFault {
+        text,
+        trace,
+        code,
+        prefix,
+    })
 }
 
 /// Raises a fault a deferred domain held, as though it had been raised here,
 /// reporting the call stack it was first raised with.
 pub fn reraise_deferred_fault(fault: &DeferredFault) -> ! {
     raise_with_trace(
-        "GX0005",
-        "panic: ",
+        &fault.code,
+        &fault.prefix,
         fault.text.clone(),
         Some(fault.trace.clone()),
     )
+}
+
+/// Raises `text` as a fault with the foreign-boundary diagnostic `code`
+/// (`GX0013`, `GX0014`), through the same report and isolation a panic takes.
+pub(crate) fn raise_foreign_fault(code: &str, text: String) -> ! {
+    raise(code, "", text)
 }
 
 /// Whether a fault raised on this thread ends only the work it is serving.
@@ -308,6 +333,7 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
     if DEFERRED_FAULTS.with(std::cell::Cell::get) {
         let trace = fault_trace();
         DEFERRED_TRACE.with(|t| *t.borrow_mut() = trace);
+        DEFERRED_KIND.with(|k| *k.borrow_mut() = (code.to_string(), prefix.to_string()));
         std::panic::panic_any(GosPanic(text));
     }
     let hooked = call_user_panic_hook(&text);
@@ -340,16 +366,21 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
     // Fatal main-goroutine fault: report (with the active call stack), flush
     // buffered stdout (a plain `abort` would drop it), and exit with the pinned
     // panic code 101 - matching Rust; no core is dumped for an ordinary panic.
+    // The stack is read before an exit hook runs on it. Everything the program
+    // printed belongs ahead of the report, and the exit hooks run before it,
+    // so a hook that restores the terminal does so before the report prints.
+    let trace = if hooked {
+        String::new()
+    } else {
+        trace.unwrap_or_else(fault_trace)
+    };
+    gos_rt_flush_stdout();
+    crate::c_abi::exit_hooks::run_exit_hooks();
+    gos_rt_flush_stdout();
     if !hooked {
-        // Everything the program printed before the fault belongs ahead of
-        // the report; buffered stdout would otherwise land after it and read
-        // as though the fault came first.
-        gos_rt_flush_stdout();
-
         // Match the unified diagnostic-code prefix the VM uses so both
         // execution modes tag a fault with the same code.
         eprintln!("error[{code}]: {prefix}{text}");
-        let trace = trace.unwrap_or_else(fault_trace);
         if !trace.is_empty() {
             eprint!("{trace}");
         }
@@ -365,20 +396,24 @@ fn raise_with_trace(code: &str, prefix: &str, text: String, trace: Option<String
 ///
 /// For a fault that belongs to the whole program rather than to the work
 /// the reporting thread serves, such as a deadlock a scheduler worker
-/// notices. The browser build settles every goroutine at its spawn, so no
-/// scheduler there reports one.
-#[cfg(not(target_arch = "wasm32"))]
+/// notices, or a callback native code runs on a thread outside the
+/// program's foreign calls.
 pub(crate) fn fatal_program_fault(code: &str, prefix: &str, text: &str, with_trace: bool) -> ! {
     install_silent_gos_hook();
-    if !call_user_panic_hook(text) {
+    if call_user_panic_hook(text) {
+        crate::c_abi::exit_hooks::run_exit_hooks();
+    } else {
+        let trace = if with_trace {
+            fault_trace()
+        } else {
+            String::new()
+        };
         gos_rt_flush_stdout();
-
+        crate::c_abi::exit_hooks::run_exit_hooks();
+        gos_rt_flush_stdout();
         eprintln!("error[{code}]: {prefix}{text}");
-        if with_trace {
-            let trace = fault_trace();
-            if !trace.is_empty() {
-                eprint!("{trace}");
-            }
+        if !trace.is_empty() {
+            eprint!("{trace}");
         }
     }
     gos_rt_flush_stdout();
@@ -515,6 +550,7 @@ pub extern "C" fn gos_rt_exit(code: i32) -> ! {
     // Without this, in-flight TCP send buffers were terminated by
     // RST (process death) instead of FIN (graceful close). The
     // poller checks the flag at the top of each tick (1 ms ceiling).
+    crate::c_abi::exit_hooks::run_exit_hooks();
     crate::sched_global::request_shutdown();
     // Drain the runtime's line-buffered stdout cache before
     // process exit. Without the flush, `println!("...")` followed

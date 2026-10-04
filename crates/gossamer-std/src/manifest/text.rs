@@ -543,6 +543,16 @@ pub const UNICODE: StdModule = StdModule {
     summary: "Unicode general-category predicates, casing, normalization, and segmentation.",
     items: &[
         StdItem {
+            name: "char_width",
+            kind: StdItemKind::Function,
+            doc: "Terminal columns r occupies: 2 for wide and fullwidth characters, 0 for combining marks, zero-width, and control characters, otherwise 1.",
+        },
+        StdItem {
+            name: "str_width",
+            kind: StdItemKind::Function,
+            doc: "Terminal columns s occupies, reading emoji and variation sequences as the clusters a terminal draws.",
+        },
+        StdItem {
             name: "is_letter",
             kind: StdItemKind::Function,
             doc: "True if r is in general-category group L.",

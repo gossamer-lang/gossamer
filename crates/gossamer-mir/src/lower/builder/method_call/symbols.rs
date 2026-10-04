@@ -1467,6 +1467,7 @@ impl<'a> Builder<'a> {
             (Some("fs::File"), "seek") => Some("gos_rt_fs_file_seek"),
             (Some("fs::File"), "set_len") => Some("gos_rt_fs_file_set_len"),
             (Some("fs::File"), "len") => Some("gos_rt_fs_file_len"),
+            (Some("fs::File"), "fd") => Some("gos_rt_fs_file_fd"),
             (Some("fs::File"), "sync_all") => Some("gos_rt_fs_file_sync_all"),
             (Some("fs::File"), "sync_data") => Some("gos_rt_fs_file_sync_data"),
             (Some("fs::File"), "try_lock_range") => Some("gos_rt_fs_file_try_lock_range"),
@@ -1515,6 +1516,7 @@ impl<'a> Builder<'a> {
             (Some("io::Stream"), "read_to_string") => Some("gos_rt_stream_read_to_string"),
             (Some("signal::Notifier"), "wait") => Some("gos_rt_signal_wait"),
             (Some("signal::Notifier"), "try_wait") => Some("gos_rt_signal_try_wait"),
+            (Some("signal::Notifier"), "stop") => Some("gos_rt_signal_stop"),
             _ => None,
         }
     }

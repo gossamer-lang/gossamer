@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0097]: A function declared in an `unsafe extern "C"` block is called - here
+--- framed ---
+error[GT0097]: A function declared in an `unsafe extern "C"` block is called
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

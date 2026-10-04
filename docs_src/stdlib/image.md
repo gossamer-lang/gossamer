@@ -15,6 +15,8 @@ Opaque RGBA8 image handles with PNG and JPEG codecs.
 | `height` | `fn height(image: i64) -> i64` | Returns an image height in pixels. |
 | `pixel` | `fn pixel(image: i64, x: i64, y: i64) -> i64` | Returns packed 0xRRGGBBAA, or -1 outside the image. |
 | `set_pixel` | `fn set_pixel(image: i64, x: i64, y: i64, rgba: i64) -> bool` | Sets a packed 0xRRGGBBAA pixel and reports whether it was in bounds. |
+| `from_rgba_bytes` | `fn from_rgba_bytes(width: i64, height: i64, bytes: [u8]) -> i64` | Builds an image from width * height RGBA8 pixels, row by row; returns zero when the byte count does not match. |
+| `to_rgba_bytes` | `fn to_rgba_bytes(image: i64) -> Vec<u8>` | Returns the pixels as RGBA8 bytes, row by row; empty for an invalid handle. |
 | `encode_png_base64` | `fn encode_png_base64(image: i64) -> String` | Encodes an image as lossless base64 PNG. |
 | `encode_jpeg_base64` | `fn encode_jpeg_base64(image: i64, quality: i64) -> String` | Encodes an image as base64 JPEG at quality 1 through 100. |
 

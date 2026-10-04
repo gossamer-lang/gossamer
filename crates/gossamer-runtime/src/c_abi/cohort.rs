@@ -199,7 +199,7 @@ fn set_current_cohort(id: i64) {
 
 /// Whether `id` or any enclosing cohort is cancelled. The chain is
 /// walked iteratively so nesting depth costs heap rather than frames.
-fn chain_is_cancelled(id: i64) -> bool {
+pub fn chain_is_cancelled(id: i64) -> bool {
     let mut current = id;
     while current != 0 {
         let Some(node) = cohort_at(current) else {
@@ -223,6 +223,26 @@ pub fn current_is_cancelled() -> bool {
     }
     let id = current_cohort();
     id != 0 && chain_is_cancelled(id)
+}
+
+/// The cancellation predicate of a tier that runs native code on threads of
+/// its own: the bytecode tier keeps its cohorts outside this module, and the
+/// JIT-compiled bodies it runs call the runtime's waits.
+static FOREIGN_COHORT_PROBE: std::sync::OnceLock<fn() -> bool> = std::sync::OnceLock::new();
+
+/// Registers the predicate [`caller_is_cancelled`] consults for a caller
+/// that is not a scheduler goroutine. The first registration stands.
+pub fn set_foreign_cohort_probe(probe: fn() -> bool) {
+    let _ = FOREIGN_COHORT_PROBE.set(probe);
+}
+
+/// Whether the caller's cohort is cancelled: the runtime's own, or, for a
+/// thread that is not a scheduler goroutine, the cohort of the tier that
+/// registered a probe.
+pub fn caller_is_cancelled() -> bool {
+    current_is_cancelled()
+        || (!gossamer_coro::in_goroutine()
+            && FOREIGN_COHORT_PROBE.get().is_some_and(|probe| probe()))
 }
 
 /// Registers `gid` as parked under the running goroutine's cohort, so
@@ -297,6 +317,7 @@ fn cancel(id: i64) {
         wake_joiners(&node);
         pending.extend(node.children.lock().iter().copied());
     }
+    super::wake_cancellable_waits();
 }
 
 fn wake_joiners(node: &Cohort) {

@@ -751,19 +751,52 @@ fn specialise_methods_step(
     (made, scan_end)
 }
 
+/// The field types of the struct `def` instantiated at `substs`. A concrete
+/// instantiation's substituted fields are recorded in `tcx` the first time
+/// they are asked for, so lowering reads `Cmd<i64>`'s fields as soon as it
+/// builds one rather than after the body that names it is lowered; a
+/// template's own `substs` answer the declaration.
+pub(crate) fn instance_field_tys(tcx: &mut TyCtxt, def: DefId, substs: &Substs) -> Option<Vec<Ty>> {
+    if substs.is_empty() || substs.types().iter().any(|t| ty_contains_param(tcx, *t)) {
+        return tcx.adt_field_tys(def, substs).map(<[Ty]>::to_vec);
+    }
+    if let Some(fields) = tcx.struct_fields_instance(def, substs) {
+        return Some(fields.to_vec());
+    }
+    let decl = tcx.struct_field_tys(def)?.to_vec();
+    let subst_tys: Vec<Option<Ty>> = substs
+        .as_slice()
+        .iter()
+        .map(|a| match a {
+            GenericArg::Type(t) => Some(*t),
+            GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
+        })
+        .collect();
+    let inst: Vec<Ty> = decl
+        .iter()
+        .map(|&f| subst_param_ty(tcx, f, &subst_tys))
+        .collect();
+    tcx.register_struct_fields_inst(def, substs.clone(), inst.clone());
+    Some(inst)
+}
+
 /// Walks every body's local types and registers a per-instantiation field
 /// table for each generic struct instantiation `Adt { def, substs }` whose
 /// `substs` are concrete (no rigid `Param`). Recurses through the
 /// substituted field types so a nested instantiation (`Outer<Inner<T>>`)
 /// is registered too.
 pub(crate) fn register_struct_instantiations(bodies: &[Body], tcx: &mut TyCtxt) {
-    let mut done: HashSet<(DefId, Substs)> = HashSet::new();
-    let mut stack: Vec<Ty> = Vec::new();
-    for body in bodies {
-        for local in &body.locals {
-            stack.push(local.ty);
-        }
-    }
+    let roots: Vec<Ty> = bodies
+        .iter()
+        .flat_map(|body| body.locals.iter().map(|local| local.ty))
+        .collect();
+    register_type_instantiations(tcx, roots);
+}
+
+/// Records the field types of every concrete generic struct instantiation
+/// reachable from `roots`, through type arguments and substituted fields.
+pub(crate) fn register_type_instantiations(tcx: &mut TyCtxt, roots: impl IntoIterator<Item = Ty>) {
+    let mut stack: Vec<Ty> = roots.into_iter().collect();
     while let Some(ty) = stack.pop() {
         match tcx.kind_of(ty).clone() {
             TyKind::Adt { def, substs } if !substs.is_empty() => {
@@ -773,28 +806,14 @@ pub(crate) fn register_struct_instantiations(bodies: &[Body], tcx: &mut TyCtxt) 
                 if substs.types().iter().any(|t| ty_contains_param(tcx, *t)) {
                     continue;
                 }
-                if !done.insert((def, substs.clone())) {
+                // A recorded instantiation's fields were walked when it was
+                // recorded.
+                if tcx.struct_fields_instance(def, &substs).is_some() {
                     continue;
                 }
-                let Some(decl) = tcx.struct_field_tys(def).map(<[Ty]>::to_vec) else {
-                    continue;
-                };
-                let subst_tys: Vec<Option<Ty>> = substs
-                    .as_slice()
-                    .iter()
-                    .map(|a| match a {
-                        GenericArg::Type(t) => Some(*t),
-                        GenericArg::Const(_) | GenericArg::ConstParam(_) => None,
-                    })
-                    .collect();
-                let inst: Vec<Ty> = decl
-                    .iter()
-                    .map(|&f| subst_param_ty(tcx, f, &subst_tys))
-                    .collect();
-                for f in &inst {
-                    stack.push(*f);
+                if let Some(inst) = instance_field_tys(tcx, def, &substs) {
+                    stack.extend(inst);
                 }
-                tcx.register_struct_fields_inst(def, substs, inst);
             }
             TyKind::Ref { inner, .. }
             | TyKind::Vec(inner)

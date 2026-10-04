@@ -454,6 +454,7 @@ impl TypeChecker<'_> {
             return self.record(expr.id, err);
         }
         let ty = self.check_expr_kind(expr, expected);
+        self.check_ffi_expr(expr, ty);
         self.check_expected_integer_literal_range(expr, expected, ty);
         self.leave_recursion();
         self.record(expr.id, ty)
@@ -717,7 +718,13 @@ impl TypeChecker<'_> {
                 body,
                 ..
             } => self.check_for(pattern, iter, body),
-            ExprKind::Block(block) | ExprKind::Unsafe(block) => self.check_block(block, expected),
+            ExprKind::Block(block) => self.check_block(block, expected),
+            ExprKind::Unsafe(block) => {
+                self.unsafe_depth += 1;
+                let ty = self.check_block(block, expected);
+                self.unsafe_depth -= 1;
+                ty
+            }
             ExprKind::Closure { params, ret, body } => {
                 self.check_closure(params, ret.as_ref(), body, expected)
             }
@@ -1277,6 +1284,7 @@ impl TypeChecker<'_> {
             return self.fresh();
         }
         self.check_overlapping_mutable_call_args(args);
+        self.check_foreign_call_site(callee);
         if matches!(callee.kind, ExprKind::Path(_)) {
             self.callee_path_nodes.insert(callee.id);
         }
@@ -1290,7 +1298,10 @@ impl TypeChecker<'_> {
         self.check_by_value_argument_aliases(args);
         self.record_qualified_method_const_generic_args(callee, &arg_tys);
         self.check_exponent_placeholder(callee, args);
-        self.check_call_inner(callee, args, callee_ty, &arg_tys, expected)
+        self.check_callback_arguments(callee, args, &arg_tys);
+        let ret = self.check_call_inner(callee, args, callee_ty, &arg_tys, expected);
+        self.check_ffi_operation(callee, &arg_tys, ret);
+        ret
     }
 
     /// `{:e}` renders a number in scientific notation. The placeholder

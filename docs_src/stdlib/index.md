@@ -44,6 +44,7 @@ For receiver methods on built-in types, see [`Methods by type`](../method_suppor
 | [`std::encoding::yaml`](encoding_yaml.md) | YAML 1.2 parser/emitter (serde_norway-backed). |
 | [`std::env`](env.md) | Process environment, command-line arguments, working directory. |
 | [`std::errors`](errors.md) | Error construction, wrapping, and chain traversal. |
+| [`std::ffi`](ffi.md) | C type names and C strings for functions declared in `unsafe extern "C"` blocks, and the `errno` a foreign call left. |
 | [`std::flag`](flag.md) | Batteries-included CLI argument parsing. |
 | [`std::fmt`](fmt.md) | Formatted printing and string interpolation. |
 | [`std::fs`](fs.md) | Filesystem reading, writing, and traversal (Rust std::fs shape). |
@@ -91,6 +92,7 @@ For receiver methods on built-in types, see [`Methods by type`](../method_suppor
 | [`std::option`](option.md) | Option combinators as data-first free functions for pipelines: map, filter, unwrap_or, and_then, etc. |
 | [`std::os`](os.md) | Operating-system identity. |
 | [`std::os::exec`](os_exec.md) | Deprecated compatibility facade for child processes; new code uses std::process. |
+| [`std::os::fd`](os_fd.md) | Waiting for a file descriptor (a handle on Windows) to be readable or writable without holding a scheduler worker. |
 | [`std::os::signal`](os_signal.md) | POSIX-style signal subscription (Go's os/signal shape). |
 | [`std::os::user`](os_user.md) | POSIX user / group lookup. Unix-backed by `nix`; Windows falls back to env vars. |
 | [`std::panic`](panic.md) | Goroutine-scoped panics; there is no `catch_unwind`, and `runtime::set_panic_hook` observes one. |
@@ -105,6 +107,7 @@ For receiver methods on built-in types, see [`Methods by type`](../method_suppor
 | [`std::strconv`](strconv.md) | Conversions between strings and primitive numeric types. |
 | [`std::strings`](strings.md) | String operations. |
 | [`std::sync`](sync.md) | Synchronisation primitives beyond channels. |
+| [`std::term`](term.md) | The terminal a program runs in: detection, size, raw mode, and input, on the standard streams or on a descriptor the program opened (`fs::File::fd` of `/dev/tty` or `CONIN$`). Written in Gossamer over the platform C library. |
 | [`std::testing`](testing.md) | Assertions and sub-test harness helpers. |
 | [`std::thread`](thread.md) | OS-thread scheduling hints and CPU introspection; user concurrency uses goroutines, not thread spawning. |
 | [`std::time`](time.md) | Wall-clock and monotonic time facilities. |

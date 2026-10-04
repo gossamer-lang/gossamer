@@ -515,6 +515,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
@@ -827,6 +829,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../language/unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2696,14 +2726,16 @@
 
 
 <h1 id="calling-rust">Calling Rust<a class="headerlink" href="#calling-rust" title="Permanent link">&para;</a></h1>
-<p>Gossamer has exactly one foreign-function surface: a <strong>binding crate</strong>
-- an ordinary Rust library that depends on <code>gossamer-binding</code>, marks
+<p>A <strong>binding crate</strong> brings Rust code into a Gossamer program: an ordinary
+Rust library that depends on <code>gossamer-binding</code>, marks
 the functions it wants to publish, and is named in the project's
 <code>project.toml</code> under <code>[rust-bindings]</code>. The toolchain compiles it,
 links it into the interpreter and into <code>gos build</code> binaries, and the
 functions become <code>use</code>-able from <code>.gos</code> source like any other module.</p>
-<p>There is no source-level <code>extern "C"</code> item form. Writing one reports
-<code>GP0016</code>, and <code>extern</code> stays a reserved word.</p>
+<p>C functions need no crate: declare them in an <code>unsafe extern "C"</code> block
+(<a href="../language/unsafe_extern/">Foreign functions</a>); a project refuses them
+with <code>ffi = false</code>. A <code>[rust-bindings]</code> entry is its own opt-in and the
+<code>ffi</code> key does not affect it.</p>
 <h2 id="quick-start">Quick start<a class="headerlink" href="#quick-start" title="Permanent link">&para;</a></h2>
 <p>Scaffold a project and a binding crate beside it:</p>
 <div class="language-sh highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>gos<span class="w"> </span>new<span class="w"> </span>example.com/greeter<span class="w"> </span>--path<span class="w"> </span>greeter

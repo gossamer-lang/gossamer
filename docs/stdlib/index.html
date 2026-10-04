@@ -515,6 +515,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
@@ -827,6 +829,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../language/unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2452,6 +2482,10 @@
 <td>Error construction, wrapping, and chain traversal.</td>
 </tr>
 <tr>
+<td><a href="ffi/"><code>std::ffi</code></a></td>
+<td>C type names and C strings for functions declared in <code>unsafe extern "C"</code> blocks, and the <code>errno</code> a foreign call left.</td>
+</tr>
+<tr>
 <td><a href="flag/"><code>std::flag</code></a></td>
 <td>Batteries-included CLI argument parsing.</td>
 </tr>
@@ -2640,6 +2674,10 @@
 <td>Deprecated compatibility facade for child processes; new code uses std::process.</td>
 </tr>
 <tr>
+<td><a href="os_fd/"><code>std::os::fd</code></a></td>
+<td>Waiting for a file descriptor (a handle on Windows) to be readable or writable without holding a scheduler worker.</td>
+</tr>
+<tr>
 <td><a href="os_signal/"><code>std::os::signal</code></a></td>
 <td>POSIX-style signal subscription (Go's os/signal shape).</td>
 </tr>
@@ -2694,6 +2732,10 @@
 <tr>
 <td><a href="sync/"><code>std::sync</code></a></td>
 <td>Synchronisation primitives beyond channels.</td>
+</tr>
+<tr>
+<td><a href="term/"><code>std::term</code></a></td>
+<td>The terminal a program runs in: detection, size, raw mode, and input, on the standard streams or on a descriptor the program opened (<code>fs::File::fd</code> of <code>/dev/tty</code> or <code>CONIN$</code>). Written in Gossamer over the platform C library.</td>
 </tr>
 <tr>
 <td><a href="testing/"><code>std::testing</code></a></td>

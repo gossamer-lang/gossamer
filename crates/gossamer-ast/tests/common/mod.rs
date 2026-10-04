@@ -176,6 +176,7 @@ pub(crate) fn fn_item_with_ret(name: &str, body: Expr, ret: Option<Type>) -> Ite
         ret,
         where_clause: WhereClause::default(),
         body: Some(Box::new(body)),
+        extern_abi: None,
     };
     Item::new(
         NodeId::DUMMY,

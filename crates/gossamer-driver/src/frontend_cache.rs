@@ -200,9 +200,11 @@ pub fn frontend_key(source: &str, file_id: FileId) -> FrontendCacheKey {
         sha256::hex(format!("{bindings:?}").as_bytes())
     };
     let context = format!(
-        "file={}|target={}|cfg_test={}|bindings={bindings_digest}",
+        "file={}|target={}|cfg={}|ffi={}|cfg_test={}|bindings={bindings_digest}",
         file_id.as_u32(),
         gossamer_codegen_llvm::active_target_triple(),
+        gossamer_resolve::cfg_target_key(),
+        crate::foreign_policy::foreign_policy().cache_term(),
         gossamer_resolve::test_cfg_enabled(),
     );
     FrontendCacheKey::new_with_context(source, env!("CARGO_PKG_VERSION"), &context)

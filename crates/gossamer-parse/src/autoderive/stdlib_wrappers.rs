@@ -155,6 +155,23 @@ fn synthesize_stdlib_wrappers(source: &str) -> String {
     {
         stdlib_wrappers.push_str(PROCESS_WRAPPERS);
     }
+    if (mentions_path(source, "ffi::") && from_std("ffi")) || item_imported(FFI_WRAPPERS) {
+        stdlib_wrappers.push_str(FFI_WRAPPERS);
+    }
+    let wants_term =
+        (mentions_path(source, "term::") && from_std("term")) || item_imported(TERM_WRAPPERS);
+    if wants_term || (mentions_path(source, "fd::") && from_std("fd")) || item_imported(FD_WRAPPERS)
+    {
+        stdlib_wrappers.push_str(FD_WRAPPERS);
+    }
+    if wants_term {
+        stdlib_wrappers.push_str(TERM_WRAPPERS);
+    }
+    if (mentions_path(source, "signal::SIG") && from_std("signal"))
+        || item_imported(SIGNAL_WRAPPERS)
+    {
+        stdlib_wrappers.push_str(SIGNAL_WRAPPERS);
+    }
     if (source.contains("path::Path") && from_std("path")) || item_imported(PATH_WRAPPERS) {
         stdlib_wrappers.push_str(PATH_WRAPPERS);
     }
@@ -595,6 +612,602 @@ const TIME_CIVIL_MARKERS: &[&str] = &[
 /// Spellings that reach the `fs` directory wrappers, including the older
 /// `path::walk`.
 const FS_DIR_MARKERS: &[&str] = &["fs::read_dir", "fs::walk_dir", "fs::DirInfo", "path::walk"];
+
+/// `std::ffi`: the C type names, chosen per target, and the C string
+/// conversions, written in Gossamer so every tier runs the same code.
+const FFI_WRAPPERS: &str = r#"
+#[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "riscv64")))]
+type __gos_ffi_c_char = u8
+#[cfg(not(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "riscv64"))))]
+type __gos_ffi_c_char = i8
+type __gos_ffi_c_schar = i8
+type __gos_ffi_c_uchar = u8
+type __gos_ffi_c_short = i16
+type __gos_ffi_c_ushort = u16
+type __gos_ffi_c_int = i32
+type __gos_ffi_c_uint = u32
+#[cfg(windows)]
+type __gos_ffi_c_long = i32
+#[cfg(not(windows))]
+type __gos_ffi_c_long = i64
+#[cfg(windows)]
+type __gos_ffi_c_ulong = u32
+#[cfg(not(windows))]
+type __gos_ffi_c_ulong = u64
+type __gos_ffi_c_longlong = i64
+type __gos_ffi_c_ulonglong = u64
+type __gos_ffi_size_t = usize
+type __gos_ffi_ssize_t = isize
+type __gos_ffi_c_float = f32
+type __gos_ffi_c_double = f64
+
+fn __gos_ffi_cstring(text: String) -> Result<Vec<u8>, errors::Error> {
+    let mut bytes = text.bytes()
+    for byte in bytes {
+        if byte == 0 {
+            return Err(errors::new("ffi::cstring: the string holds a NUL byte"))
+        }
+    }
+    bytes.push(0)
+    Ok(bytes)
+}
+
+fn __gos_ffi_from_cstr(bytes: [u8]) -> Result<String, errors::Error> {
+    let mut end = 0
+    while end < bytes.len() && bytes[end] != 0 {
+        end += 1
+    }
+    String::from_utf8(bytes[0..end]).map_err(|e| errors::wrap(e, "ffi::from_cstr"))
+}
+
+#[__gos_foreign_type]
+struct __gos_ffi_c_void
+
+struct __gos_ffi_Ptr<T> { __addr: u64 }
+
+impl<T> __gos_ffi_Ptr<T> {
+    fn cast<U>(self) -> __gos_ffi_Ptr<U> {
+        unsafe { __gos_ffi_Ptr { __addr: self.__addr } }
+    }
+
+    fn address(self) -> u64 {
+        self.__addr
+    }
+
+    fn from_address(addr: u64) -> Option<__gos_ffi_Ptr<T>> {
+        if addr == 0 {
+            None
+        } else {
+            Some(unsafe { __gos_ffi_Ptr { __addr: addr } })
+        }
+    }
+
+    fn fmt(&self) -> String {
+        f"Ptr(0x{self.__addr:x})"
+    }
+
+    fn to_string(&self) -> String {
+        f"Ptr(0x{self.__addr:x})"
+    }
+
+    fn eq(&self, other: __gos_ffi_Ptr<T>) -> bool {
+        self.__addr == other.__addr
+    }
+}
+
+
+unsafe extern "C" {
+    fn gos_rt_ffi_read(dst: &mut [u8], src: u64, len: u64)
+    fn gos_rt_ffi_write(dst: u64, src: [u8], len: u64)
+    fn gos_rt_ffi_strlen(src: u64) -> u64
+    fn gos_rt_ffi_free(addr: u64)
+}
+
+fn __gos_ffi_read<T>(p: __gos_ffi_Ptr<T>) -> T {
+    panic("ffi::read is lowered at its call site")
+}
+
+fn __gos_ffi_read_at<T>(p: __gos_ffi_Ptr<T>, index: i64) -> T {
+    panic("ffi::read_at is lowered at its call site")
+}
+
+fn __gos_ffi_write<T>(p: __gos_ffi_Ptr<T>, value: T) {
+    panic("ffi::write is lowered at its call site")
+}
+
+fn __gos_ffi_write_at<T>(p: __gos_ffi_Ptr<T>, index: i64, value: T) {
+    panic("ffi::write_at is lowered at its call site")
+}
+
+fn __gos_ffi_alloc<T>(count: i64) -> __gos_ffi_Ptr<T> {
+    panic("ffi::alloc is lowered at its call site")
+}
+
+fn __gos_ffi_size_of<T>() -> i64 {
+    panic("ffi::size_of is lowered at its call site")
+}
+
+fn __gos_ffi_free<T>(p: __gos_ffi_Ptr<T>) {
+    unsafe { gos_rt_ffi_free(p.__addr) }
+}
+
+fn __gos_ffi_read_bytes(p: __gos_ffi_Ptr<u8>, len: i64) -> Vec<u8> {
+    let mut out = #[0u8; len]
+    unsafe { gos_rt_ffi_read(&mut out, p.__addr, len as u64) }
+    out
+}
+
+fn __gos_ffi_read_cstr(p: __gos_ffi_Ptr<u8>) -> Result<String, errors::Error> {
+    let len = unsafe { gos_rt_ffi_strlen(p.__addr) } as i64
+    let bytes = unsafe { __gos_ffi_read_bytes(p, len) }
+    String::from_utf8(bytes).map_err(|e| errors::wrap(e, "ffi::read_cstr"))
+}
+
+fn __gos_ffi_write_bytes(p: __gos_ffi_Ptr<u8>, bytes: [u8]) {
+    unsafe { gos_rt_ffi_write(p.__addr, bytes, bytes.len() as u64) }
+}
+
+fn __gos_ffi_to_c_bytes(bytes: [u8]) -> __gos_ffi_Ptr<u8> {
+    let copy: __gos_ffi_Ptr<u8> = unsafe { __gos_ffi_alloc(bytes.len()) }
+    unsafe { __gos_ffi_write_bytes(copy, bytes) }
+    copy
+}
+
+fn __gos_ffi_fn_from_ptr<F>(p: __gos_ffi_Ptr<__gos_ffi_c_void>) -> F {
+    panic("ffi::fn_from_ptr is lowered at its call site")
+}
+
+struct __gos_ffi_Handle<T> { __id: u64 }
+
+impl<T> __gos_ffi_Handle<T> {
+    fn new(value: T) -> __gos_ffi_Handle<T> {
+        panic("ffi::Handle::new is lowered at its call site")
+    }
+
+    fn from_ptr(p: __gos_ffi_Ptr<__gos_ffi_c_void>) -> __gos_ffi_Handle<T> {
+        unsafe { __gos_ffi_Handle { __id: p.__addr } }
+    }
+
+    fn as_ptr(self) -> __gos_ffi_Ptr<__gos_ffi_c_void> {
+        unsafe { __gos_ffi_Ptr { __addr: self.__id } }
+    }
+
+    fn get(self) -> T {
+        panic("ffi::Handle::get is lowered at its call site")
+    }
+
+    fn set(self, value: T) {
+        panic("ffi::Handle::set is lowered at its call site")
+    }
+
+    fn update(self, f: Fn(&mut T)) {
+        panic("ffi::Handle::update is lowered at its call site")
+    }
+
+    fn take(self) -> T {
+        panic("ffi::Handle::take is lowered at its call site")
+    }
+
+    fn release(self) {
+        panic("ffi::Handle::release is lowered at its call site")
+    }
+
+    fn fmt(&self) -> String {
+        f"Handle({self.__id})"
+    }
+
+    fn to_string(&self) -> String {
+        f"Handle({self.__id})"
+    }
+
+    fn eq(&self, other: __gos_ffi_Handle<T>) -> bool {
+        self.__id == other.__id
+    }
+}
+"#;
+
+/// `std::os::fd`: waiting for a descriptor to be readable or writable,
+/// over the runtime's `__gos_fd_wait_raw` leaf.
+const FD_WRAPPERS: &str = r"
+fn __gos_fd_wait_readable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error> {
+    let ready = __gos_fd_wait_raw(fd, 0, timeout_ms)?
+    Ok(ready == 1)
+}
+
+fn __gos_fd_wait_writable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error> {
+    let ready = __gos_fd_wait_raw(fd, 1, timeout_ms)?
+    Ok(ready == 1)
+}
+";
+
+/// `std::os::signal` signal numbers, per target, for `signal::on`.
+const SIGNAL_WRAPPERS: &str = r#"
+const __gos_signal_SIGHUP: i64 = 1
+const __gos_signal_SIGINT: i64 = 2
+const __gos_signal_SIGQUIT: i64 = 3
+const __gos_signal_SIGTERM: i64 = 15
+#[cfg(target_os = "macos")]
+const __gos_signal_SIGUSR1: i64 = 30
+#[cfg(not(target_os = "macos"))]
+const __gos_signal_SIGUSR1: i64 = 10
+#[cfg(target_os = "macos")]
+const __gos_signal_SIGUSR2: i64 = 31
+#[cfg(not(target_os = "macos"))]
+const __gos_signal_SIGUSR2: i64 = 12
+const __gos_signal_SIGWINCH: i64 = 28
+#[cfg(target_os = "macos")]
+const __gos_signal_SIGTSTP: i64 = 18
+#[cfg(not(target_os = "macos"))]
+const __gos_signal_SIGTSTP: i64 = 20
+#[cfg(target_os = "macos")]
+const __gos_signal_SIGCONT: i64 = 19
+#[cfg(not(target_os = "macos"))]
+const __gos_signal_SIGCONT: i64 = 18
+"#;
+
+/// `std::term`: terminal detection, size, raw mode, and input, written in
+/// Gossamer over the platform C library (termios on Linux and macOS, the
+/// console API on Windows). Restoring raw mode is registered with
+/// `runtime::at_exit`, so it happens on every way the program ends.
+const TERM_WRAPPERS: &str = r#"
+const __gos_term_STDIN: i64 = 0
+const __gos_term_STDOUT: i64 = 1
+const __gos_term_STDERR: i64 = 2
+
+static mut __gos_term_LAST_COLS: i64 = -1
+static mut __gos_term_LAST_ROWS: i64 = -1
+
+fn __gos_term_os_error(operation: String) -> errors::Error {
+    errors::new(f"term::{operation}: os error {ffi::last_errno()}")
+}
+
+fn __gos_term_read_input(timeout_ms: i64, fd: i64 = 0) -> Result<Vec<u8>, errors::Error> {
+    if __gos_fd_wait_raw(__gos_term_handle(fd), 0, timeout_ms)? != 1 {
+        return Ok(#[])
+    }
+    __gos_term_read_ready(fd)
+}
+
+fn __gos_term_resized(fd: i64 = 1) -> bool {
+    let Ok(size) = __gos_term_size(fd) else {
+        return false
+    }
+    let cols, rows = size
+    let changed = __gos_term_LAST_COLS >= 0 && (cols != __gos_term_LAST_COLS || rows != __gos_term_LAST_ROWS)
+    __gos_term_LAST_COLS = cols
+    __gos_term_LAST_ROWS = rows
+    changed
+}
+
+#[cfg(target_os = "linux")]
+type __gos_term_Flag = u32
+#[cfg(target_os = "macos")]
+type __gos_term_Flag = u64
+
+#[repr(C)]
+#[cfg(target_os = "linux")]
+struct __gos_term_Termios {
+    iflag: u32
+    oflag: u32
+    cflag: u32
+    lflag: u32
+    line: u8
+    cc: [u8; 32]
+    ispeed: u32
+    ospeed: u32
+}
+
+#[cfg(target_os = "linux")]
+fn __gos_term_blank_termios() -> __gos_term_Termios {
+    __gos_term_Termios { iflag: 0, oflag: 0, cflag: 0, lflag: 0, line: 0, cc: [0u8; 32], ispeed: 0, ospeed: 0 }
+}
+
+#[repr(C)]
+#[cfg(target_os = "macos")]
+struct __gos_term_Termios {
+    iflag: u64
+    oflag: u64
+    cflag: u64
+    lflag: u64
+    cc: [u8; 20]
+    ispeed: u64
+    ospeed: u64
+}
+
+#[cfg(target_os = "macos")]
+fn __gos_term_blank_termios() -> __gos_term_Termios {
+    __gos_term_Termios { iflag: 0, oflag: 0, cflag: 0, lflag: 0, cc: [0u8; 20], ispeed: 0, ospeed: 0 }
+}
+
+#[cfg(target_os = "linux")]
+const __gos_term_INPUT_RAW_OFF: u32 = 0x5eb
+#[cfg(target_os = "linux")]
+const __gos_term_LOCAL_RAW_OFF: u32 = 0x804b
+#[cfg(target_os = "linux")]
+const __gos_term_CSIZE_PARENB: u32 = 0x130
+#[cfg(target_os = "linux")]
+const __gos_term_CS8: u32 = 0x30
+#[cfg(target_os = "linux")]
+const __gos_term_VMIN: i64 = 6
+#[cfg(target_os = "linux")]
+const __gos_term_VTIME: i64 = 5
+#[cfg(target_os = "linux")]
+const __gos_term_TIOCGWINSZ: u64 = 0x5413
+
+#[cfg(target_os = "macos")]
+const __gos_term_INPUT_RAW_OFF: u64 = 0x3eb
+#[cfg(target_os = "macos")]
+const __gos_term_LOCAL_RAW_OFF: u64 = 0x598
+#[cfg(target_os = "macos")]
+const __gos_term_CSIZE_PARENB: u64 = 0x1300
+#[cfg(target_os = "macos")]
+const __gos_term_CS8: u64 = 0x300
+#[cfg(target_os = "macos")]
+const __gos_term_VMIN: i64 = 16
+#[cfg(target_os = "macos")]
+const __gos_term_VTIME: i64 = 17
+#[cfg(target_os = "macos")]
+const __gos_term_TIOCGWINSZ: u64 = 0x40087468
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const __gos_term_OPOST: __gos_term_Flag = 1
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+const __gos_term_TCSAFLUSH: i32 = 2
+
+#[repr(C)]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct __gos_term_Winsize {
+    rows: u16
+    cols: u16
+    xpixel: u16
+    ypixel: u16
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+unsafe extern "C" {
+    #[link_name = "isatty"]
+    fn __gos_term_isatty(fd: i32) -> i32
+    #[link_name = "gos_rt_ffi_ioctl"]
+    fn __gos_term_ioctl_winsize(fd: i32, request: u64, size: &mut __gos_term_Winsize) -> i32
+    #[link_name = "read"]
+    fn __gos_term_read(fd: i32, buf: &mut [u8], count: usize) -> isize
+    #[link_name = "tcgetattr"]
+    fn __gos_term_tcgetattr(fd: i32, attrs: &mut __gos_term_Termios) -> i32
+    #[link_name = "tcsetattr"]
+    fn __gos_term_tcsetattr(fd: i32, action: i32, attrs: __gos_term_Termios) -> i32
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+struct __gos_term_RawMode {
+    fd: i32
+    saved: __gos_term_Termios
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl __gos_term_RawMode {
+    fn restore(&self) {
+        let _ = unsafe { __gos_term_tcsetattr(self.fd, __gos_term_TCSAFLUSH, self.saved) }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn __gos_term_handle(fd: i64) -> i64 {
+    fd
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn __gos_term_is_terminal(stream: i64) -> bool {
+    unsafe { __gos_term_isatty(stream as i32) } == 1
+}
+
+// A standard stream asked for its size falls back to the other two, so a
+// program whose output is redirected still reads the terminal's size.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
+    let candidates = if fd < 3 { #[fd, 1, 0, 2] } else { #[fd] }
+    for candidate in candidates {
+        let mut size = __gos_term_Winsize { rows: 0, cols: 0, xpixel: 0, ypixel: 0 }
+        if unsafe { __gos_term_ioctl_winsize(candidate as i32, __gos_term_TIOCGWINSZ, &mut size) } == 0 {
+            return Ok((size.cols as i64, size.rows as i64))
+        }
+    }
+    Err(__gos_term_os_error("size"))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error> {
+    let fd = fd as i32
+    let mut saved = __gos_term_blank_termios()
+    if unsafe { __gos_term_tcgetattr(fd, &mut saved) } != 0 {
+        return Err(__gos_term_os_error("enter_raw"))
+    }
+    let mut attrs = saved
+    attrs.iflag = attrs.iflag & !__gos_term_INPUT_RAW_OFF
+    attrs.oflag = attrs.oflag & !__gos_term_OPOST
+    attrs.lflag = attrs.lflag & !__gos_term_LOCAL_RAW_OFF
+    attrs.cflag = (attrs.cflag & !__gos_term_CSIZE_PARENB) | __gos_term_CS8
+    attrs.cc[__gos_term_VMIN] = 1
+    attrs.cc[__gos_term_VTIME] = 0
+    if unsafe { __gos_term_tcsetattr(fd, __gos_term_TCSAFLUSH, attrs) } != 0 {
+        return Err(__gos_term_os_error("enter_raw"))
+    }
+    let mode = __gos_term_RawMode { fd: fd, saved: saved }
+    runtime::at_exit(|| mode.restore())
+    Ok(mode)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
+    let mut buf = #[0u8; 4096]
+    let n = unsafe { __gos_term_read(fd as i32, &mut buf, 4096) }
+    if n < 0 {
+        return Err(__gos_term_os_error("read_input"))
+    }
+    Ok(buf[0..n as i64])
+}
+
+#[repr(C)]
+#[cfg(windows)]
+struct __gos_term_ConsoleInfo {
+    size_x: i16
+    size_y: i16
+    cursor_x: i16
+    cursor_y: i16
+    attributes: u16
+    left: i16
+    top: i16
+    right: i16
+    bottom: i16
+    max_x: i16
+    max_y: i16
+}
+
+#[cfg(windows)]
+const __gos_term_ENABLE_PROCESSED_INPUT: u32 = 0x1
+#[cfg(windows)]
+const __gos_term_ENABLE_LINE_INPUT: u32 = 0x2
+#[cfg(windows)]
+const __gos_term_ENABLE_ECHO_INPUT: u32 = 0x4
+#[cfg(windows)]
+const __gos_term_ENABLE_VIRTUAL_TERMINAL_INPUT: u32 = 0x200
+#[cfg(windows)]
+const __gos_term_ENABLE_PROCESSED_OUTPUT: u32 = 0x1
+#[cfg(windows)]
+const __gos_term_ENABLE_VIRTUAL_TERMINAL_PROCESSING: u32 = 0x4
+
+#[cfg(windows)]
+unsafe extern "C" {
+    #[link_name = "GetStdHandle"]
+    fn __gos_term_GetStdHandle(which: u32) -> usize
+    #[link_name = "GetConsoleMode"]
+    fn __gos_term_GetConsoleMode(handle: usize, mode: &mut [u32]) -> i32
+    #[link_name = "SetConsoleMode"]
+    fn __gos_term_SetConsoleMode(handle: usize, mode: u32) -> i32
+    #[link_name = "GetConsoleScreenBufferInfo"]
+    fn __gos_term_GetConsoleScreenBufferInfo(handle: usize, info: &mut __gos_term_ConsoleInfo) -> i32
+    #[link_name = "ReadFile"]
+    fn __gos_term_ReadFile(handle: usize, buf: &mut [u8], count: u32, read: &mut [u32], overlapped: usize) -> i32
+}
+
+// 0, 1, and 2 name the standard handles; any other value is a handle the
+// program opened, such as `CONIN$` (real handles are multiples of four).
+#[cfg(windows)]
+fn __gos_term_handle(fd: i64) -> i64 {
+    let which: u32 = match fd {
+        0 => 0xfffffff6,
+        1 => 0xfffffff5,
+        2 => 0xfffffff4,
+        _ => return fd,
+    }
+    unsafe { __gos_term_GetStdHandle(which) } as i64
+}
+
+#[cfg(windows)]
+struct __gos_term_RawMode {
+    input: usize
+    input_mode: u32
+    output_mode: Option<u32>
+}
+
+#[cfg(windows)]
+impl __gos_term_RawMode {
+    fn restore(&self) {
+        let _ = unsafe { __gos_term_SetConsoleMode(self.input, self.input_mode) }
+        if let Some(output_mode) = self.output_mode {
+            let _ = unsafe { __gos_term_SetConsoleMode(__gos_term_handle(1) as usize, output_mode) }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn __gos_term_is_terminal(stream: i64) -> bool {
+    let mut mode = #[0u32]
+    unsafe { __gos_term_GetConsoleMode(__gos_term_handle(stream) as usize, &mut mode) } != 0
+}
+
+#[cfg(windows)]
+fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
+    let mut info = __gos_term_ConsoleInfo { size_x: 0, size_y: 0, cursor_x: 0, cursor_y: 0, attributes: 0, left: 0, top: 0, right: 0, bottom: 0, max_x: 0, max_y: 0 }
+    if unsafe { __gos_term_GetConsoleScreenBufferInfo(__gos_term_handle(fd) as usize, &mut info) } == 0 {
+        return Err(__gos_term_os_error("size"))
+    }
+    Ok(((info.right - info.left) as i64 + 1, (info.bottom - info.top) as i64 + 1))
+}
+
+// Standard output gains virtual-terminal processing when it is a console;
+// output redirected elsewhere leaves only the input in raw mode.
+#[cfg(windows)]
+fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error> {
+    let input = __gos_term_handle(fd) as usize
+    let output = __gos_term_handle(1) as usize
+    let mut input_mode = #[0u32]
+    if unsafe { __gos_term_GetConsoleMode(input, &mut input_mode) } == 0 {
+        return Err(__gos_term_os_error("enter_raw"))
+    }
+    let raw_input = (input_mode[0] & !(__gos_term_ENABLE_PROCESSED_INPUT | __gos_term_ENABLE_LINE_INPUT | __gos_term_ENABLE_ECHO_INPUT)) | __gos_term_ENABLE_VIRTUAL_TERMINAL_INPUT
+    if unsafe { __gos_term_SetConsoleMode(input, raw_input) } == 0 {
+        return Err(__gos_term_os_error("enter_raw"))
+    }
+    let mut output_mode = #[0u32]
+    let mut saved_output: Option<u32> = None
+    if unsafe { __gos_term_GetConsoleMode(output, &mut output_mode) } != 0 {
+        let raw_output = output_mode[0] | __gos_term_ENABLE_PROCESSED_OUTPUT | __gos_term_ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        if unsafe { __gos_term_SetConsoleMode(output, raw_output) } == 0 {
+            let _ = unsafe { __gos_term_SetConsoleMode(input, input_mode[0]) }
+            return Err(__gos_term_os_error("enter_raw"))
+        }
+        saved_output = Some(output_mode[0])
+    }
+    let mode = __gos_term_RawMode { input: input, input_mode: input_mode[0], output_mode: saved_output }
+    runtime::at_exit(|| mode.restore())
+    Ok(mode)
+}
+
+#[cfg(windows)]
+fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
+    let mut buf = #[0u8; 4096]
+    let mut read = #[0u32]
+    if unsafe { __gos_term_ReadFile(__gos_term_handle(fd) as usize, &mut buf, 4096, &mut read, 0) } == 0 {
+        return Err(__gos_term_os_error("read_input"))
+    }
+    Ok(buf[0..read[0] as i64])
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+struct __gos_term_RawMode {}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+impl __gos_term_RawMode {
+    fn restore(&self) {
+        ()
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn __gos_term_is_terminal(stream: i64) -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn __gos_term_size(fd: i64 = 1) -> Result<(i64, i64), errors::Error> {
+    Err(errors::new("term::size: this target has no terminal"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn __gos_term_enter_raw(fd: i64 = 0) -> Result<__gos_term_RawMode, errors::Error> {
+    Err(errors::new("term::enter_raw: this target has no terminal"))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn __gos_term_handle(fd: i64) -> i64 {
+    fd
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+fn __gos_term_read_ready(fd: i64) -> Result<Vec<u8>, errors::Error> {
+    Err(errors::new("term::read_input: this target has no terminal"))
+}
+"#;
 
 /// Real-struct + wrapper source for `std::process::run` / `run_in`. The
 /// leaf answers `(stdout, stderr, code)` as a counted tuple that owns both

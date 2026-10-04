@@ -12,6 +12,8 @@
 
 mod disjoint_windows;
 mod f32_round;
+mod foreign;
+mod foreign_boundary;
 mod fuse;
 mod ids;
 mod lift;
@@ -20,6 +22,12 @@ mod par;
 mod place_refs;
 mod tree;
 
+pub use foreign::{FOREIGN_DISPATCHER, foreign_layouts, foreign_signature, route_foreign_calls};
+pub use foreign_boundary::{
+    CALLBACK as FFI_CALLBACK, HANDLE_CELL as FFI_HANDLE_CELL, HANDLE_PIN as FFI_HANDLE_PIN,
+    HANDLE_RELEASE as FFI_HANDLE_RELEASE, HANDLE_STORE as FFI_HANDLE_STORE,
+    INDIRECT_SYMBOL as FFI_INDIRECT_SYMBOL, NULL_RESULT as FFI_NULL_RESULT,
+};
 pub use fuse::fuse_iter_pipelines;
 pub use ids::{HirId, HirIdGenerator};
 pub use lift::{

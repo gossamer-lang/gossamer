@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod assoc;
+pub mod cfg;
 pub mod common;
 pub mod expr;
 pub mod items;
@@ -37,8 +38,8 @@ pub use gossamer_abi::format_pad::{
 };
 pub use items::{
     AssocBinding, Attribute, Attrs, BINARY_SEARCH_PREFIX, ConstDecl, EnumDecl, EnumRepr,
-    EnumVariant, FnDecl, FnParam, GenericParam, Generics, ImplDecl, ImplItem, Item, ItemKind,
-    ModBody, ModDecl, OPERATOR_METHOD_PREFIX, PARTITION_POINT_PREFIX, Receiver,
+    EnumVariant, FOREIGN_TYPE_ATTR, FnDecl, FnParam, GenericParam, Generics, ImplDecl, ImplItem,
+    Item, ItemKind, ModBody, ModDecl, OPERATOR_METHOD_PREFIX, PARTITION_POINT_PREFIX, Receiver,
     STRUCTURAL_COMPARATOR_PREFIX, StaticDecl, StructBody, StructDecl, StructField, TraitBound,
     TraitDecl, TraitItem, TupleField, TypeAliasDecl, USER_COMPARATOR_PREFIX, WhereClause,
     WherePredicate,

@@ -225,6 +225,29 @@ const MANIFEST_IMPL_VIA_REWRITE: &[&str] = &[
     // compiles to so the callable's own value is the wrapper's.
     "sync::shield",
     "sync::with_timeout",
+    // `FFI_WRAPPERS`, `FD_WRAPPERS`, and `TERM_WRAPPERS`: Gossamer source over
+    // the foreign-call surface and the runtime's `__gos_fd_wait_raw` leaf.
+    "ffi::cstring",
+    "ffi::from_cstr",
+    "ffi::read",
+    "ffi::read_at",
+    "ffi::write",
+    "ffi::write_at",
+    "ffi::alloc",
+    "ffi::size_of",
+    "ffi::free",
+    "ffi::read_bytes",
+    "ffi::read_cstr",
+    "ffi::write_bytes",
+    "ffi::to_c_bytes",
+    "ffi::fn_from_ptr",
+    "os::fd::wait_readable",
+    "os::fd::wait_writable",
+    "term::enter_raw",
+    "term::is_terminal",
+    "term::read_input",
+    "term::resized",
+    "term::size",
 ];
 
 #[test]

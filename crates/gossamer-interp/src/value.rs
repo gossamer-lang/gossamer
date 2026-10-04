@@ -1852,6 +1852,7 @@ pub(crate) fn builtin_writes_through_mut_ref(name: &str) -> bool {
             | "put_u64_be_at"
             | "put_u64_le_at"
             | "__gos_par_chunks"
+            | "__gos_ffi_call"
     )
 }
 
@@ -1920,6 +1921,15 @@ pub enum RuntimeError {
     /// the host reports in place of ending anything.
     #[error("error[GX0012]: the program exited with status {0}")]
     Exit(i32),
+    /// A fault at the C boundary: a null where `Ptr` was promised
+    /// (`GX0013`), or a handle that is not live (`GX0014`).
+    #[error("error[{code}]: {message}")]
+    Foreign {
+        /// The stable code.
+        code: &'static str,
+        /// The report.
+        message: String,
+    },
 }
 
 impl RuntimeError {
@@ -1942,6 +1952,7 @@ impl RuntimeError {
             Self::ComptimeDenied(_) => "GX0010",
             Self::WouldNeverWake(_) => "GX0011",
             Self::Exit(_) => "GX0012",
+            Self::Foreign { code, .. } => code,
         }
     }
 }

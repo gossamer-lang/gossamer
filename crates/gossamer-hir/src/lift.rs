@@ -713,6 +713,8 @@ impl Lifter {
             is_comptime: false,
             has_self: false,
             origin: FnOrigin::LiftedClosure,
+            foreign_link: None,
+            foreign_symbol: None,
         };
         self.lifted.push(HirItem {
             id: self.ids.next(),
@@ -819,6 +821,8 @@ impl Lifter {
             is_comptime: false,
             has_self: false,
             origin: FnOrigin::LiftedClosure,
+            foreign_link: None,
+            foreign_symbol: None,
         };
         self.lifted.push(HirItem {
             id: self.ids.next(),

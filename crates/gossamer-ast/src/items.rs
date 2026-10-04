@@ -127,6 +127,57 @@ impl Attrs {
             .any(|attr| attr.is_word(name))
     }
 
+    /// Returns `true` when an attribute `name(..)` lists `argument` among its
+    /// comma-separated arguments: `#[repr(C)]` lists `C` under `repr`.
+    #[must_use]
+    pub fn lists_argument(&self, name: &str, argument: &str) -> bool {
+        self.outer
+            .iter()
+            .chain(&self.inner)
+            .any(|attr| attr.lists_argument(name, argument))
+    }
+
+    /// The library a `#[link(name = "lib")]` attribute names.
+    #[must_use]
+    pub fn link_library(&self) -> Option<String> {
+        self.link_argument("name")
+    }
+
+    /// The directory a `#[link(name = "...", search = "dir")]` attribute
+    /// names for its library, as written: relative to the root of the
+    /// package that declares it.
+    #[must_use]
+    pub fn link_search(&self) -> Option<String> {
+        self.link_argument("search")
+    }
+
+    /// The value of `key` in the `#[link(key = "value", ..)]` attribute.
+    fn link_argument(&self, key: &str) -> Option<String> {
+        let tokens = self
+            .outer
+            .iter()
+            .find(|attr| attr.is_named("link"))?
+            .tokens
+            .as_deref()?;
+        tokens.split(',').find_map(|pair| {
+            let (name, value) = pair.split_once('=')?;
+            (name.trim() == key).then(|| value.trim().trim_matches('"').to_string())
+        })
+    }
+
+    /// The symbol a `#[link_name = "symbol"]` attribute names.
+    #[must_use]
+    pub fn link_name(&self) -> Option<String> {
+        let tokens = self
+            .outer
+            .iter()
+            .find(|attr| attr.is_named("link_name"))?
+            .tokens
+            .as_deref()?;
+        let value = tokens.trim().strip_prefix('=')?.trim().trim_matches('"');
+        (!value.is_empty()).then(|| value.to_string())
+    }
+
     /// Returns `true` when `#[allow(lint)]` or `#![allow(lint)]` names
     /// `lint` among its comma-separated arguments.
     #[must_use]
@@ -328,9 +379,20 @@ pub struct FnDecl {
     pub ret: Option<Type>,
     /// Optional `where` clause.
     pub where_clause: WhereClause,
-    /// Function body. `None` means the signature is a trait-item declaration.
+    /// Function body. `None` means the signature is a trait-item declaration
+    /// or a foreign function.
     pub body: Option<Box<Expr>>,
+    /// The calling convention of a function declared in an
+    /// `unsafe extern "C" { ... }` block (`"C"` or `"system"`), whose body is
+    /// in a native library; `None` for every Gossamer function.
+    #[serde(default)]
+    pub extern_abi: Option<String>,
 }
+
+/// The attribute the parser puts on a `type Name` declared inside an
+/// `unsafe extern` block: a C type with no Gossamer layout, reachable only
+/// through `ffi::Ptr`.
+pub const FOREIGN_TYPE_ATTR: &str = "__gos_foreign_type";
 
 /// A single function parameter.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

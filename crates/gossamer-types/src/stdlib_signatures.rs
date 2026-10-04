@@ -39,6 +39,126 @@ pub struct StdSignatureShape {
 /// Checker-owned source-facing signature rows for stdlib functions.
 pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     StdFunctionSignature {
+        module_path: "std::unicode",
+        name: "char_width",
+        signature: "fn char_width(r: char) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::unicode",
+        name: "str_width",
+        signature: "fn str_width(s: String) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "cstring",
+        signature: "fn cstring(text: String) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "from_cstr",
+        signature: "fn from_cstr(bytes: [u8]) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "last_errno",
+        signature: "fn last_errno() -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "read",
+        signature: "fn read<T>(p: ffi::Ptr<T>) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "read_at",
+        signature: "fn read_at<T>(p: ffi::Ptr<T>, index: i64) -> T",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "write",
+        signature: "fn write<T>(p: ffi::Ptr<T>, value: T)",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "write_at",
+        signature: "fn write_at<T>(p: ffi::Ptr<T>, index: i64, value: T)",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "alloc",
+        signature: "fn alloc<T>(count: i64) -> ffi::Ptr<T>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "size_of",
+        signature: "fn size_of<T>() -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "free",
+        signature: "fn free<T>(p: ffi::Ptr<T>)",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "read_bytes",
+        signature: "fn read_bytes(p: ffi::Ptr<u8>, len: i64) -> Vec<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "read_cstr",
+        signature: "fn read_cstr(p: ffi::Ptr<u8>) -> Result<String, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "write_bytes",
+        signature: "fn write_bytes(p: ffi::Ptr<u8>, bytes: [u8])",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "to_c_bytes",
+        signature: "fn to_c_bytes(bytes: [u8]) -> ffi::Ptr<u8>",
+    },
+    StdFunctionSignature {
+        module_path: "std::ffi",
+        name: "fn_from_ptr",
+        signature: "fn fn_from_ptr<F>(p: ffi::Ptr<ffi::c_void>) -> F",
+    },
+    StdFunctionSignature {
+        module_path: "std::os::fd",
+        name: "wait_readable",
+        signature: "fn wait_readable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::os::fd",
+        name: "wait_writable",
+        signature: "fn wait_writable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::term",
+        name: "enter_raw",
+        signature: "fn enter_raw(fd: i64 = term::STDIN) -> Result<term::RawMode, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::term",
+        name: "is_terminal",
+        signature: "fn is_terminal(fd: i64) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::term",
+        name: "read_input",
+        signature: "fn read_input(timeout_ms: i64, fd: i64 = term::STDIN) -> Result<Vec<u8>, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::term",
+        name: "resized",
+        signature: "fn resized(fd: i64 = term::STDOUT) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::term",
+        name: "size",
+        signature: "fn size(fd: i64 = term::STDOUT) -> Result<(i64, i64), errors::Error>",
+    },
+    StdFunctionSignature {
         module_path: "std::archive::tar",
         name: "read",
         signature: "fn read(data: Vec<u8>) -> Result<Vec<tar::TarEntry>, errors::Error>",
@@ -347,6 +467,16 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::image",
         name: "set_pixel",
         signature: "fn set_pixel(image: i64, x: i64, y: i64, rgba: i64) -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::image",
+        name: "from_rgba_bytes",
+        signature: "fn from_rgba_bytes(width: i64, height: i64, bytes: [u8]) -> i64",
+    },
+    StdFunctionSignature {
+        module_path: "std::image",
+        name: "to_rgba_bytes",
+        signature: "fn to_rgba_bytes(image: i64) -> Vec<u8>",
     },
     StdFunctionSignature {
         module_path: "std::image",
@@ -2395,8 +2525,13 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::os::signal",
+        name: "stop",
+        signature: "fn stop(notifier: os::signal::Notifier) -> ()",
+    },
+    StdFunctionSignature {
+        module_path: "std::os::signal",
         name: "wait",
-        signature: "fn wait(notifier: os::signal::Notifier) -> ()",
+        signature: "fn wait(notifier: os::signal::Notifier) -> bool",
     },
     StdFunctionSignature {
         module_path: "std::os::user",
@@ -2695,6 +2830,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
     },
     StdFunctionSignature {
         module_path: "std::process",
+        name: "run_inherit",
+        signature: "fn run_inherit(program: String, args: Vec<String>) -> Result<i64, errors::Error>",
+    },
+    StdFunctionSignature {
+        module_path: "std::process",
         name: "run_in",
         signature: "fn run_in(program: String, args: Vec<String>, dir: String, env: Vec<(String, String)>) -> Result<process::Output, errors::Error>",
     },
@@ -2947,6 +3087,11 @@ pub const STD_FUNCTION_SIGNATURES: &[StdFunctionSignature] = &[
         module_path: "std::runtime",
         name: "cycle_collection_supported",
         signature: "fn cycle_collection_supported() -> bool",
+    },
+    StdFunctionSignature {
+        module_path: "std::runtime",
+        name: "at_exit",
+        signature: "fn at_exit(hook: Fn() -> ()) -> ()",
     },
     StdFunctionSignature {
         module_path: "std::runtime",

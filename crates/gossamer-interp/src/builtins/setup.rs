@@ -16,7 +16,6 @@ use gossamer_std::fs as fs_std;
 use gossamer_std::http as http_std;
 use gossamer_std::json as json_std;
 use gossamer_std::os as os_std;
-use gossamer_std::signal as signal_std;
 use gossamer_std::slog as slog_std;
 use gossamer_std::time as time_std;
 

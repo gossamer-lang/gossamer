@@ -206,7 +206,27 @@ fn set_current(id: i64) {
 }
 
 /// Whether `id` or any enclosing cohort is cancelled.
-fn chain_is_cancelled(id: i64) -> bool {
+/// A cohort opened and immediately left as the current one, cancelled when
+/// `cancelled`, for tests of what reads cancellation.
+#[cfg(test)]
+pub(crate) fn cohort_for_test(cancelled: bool) -> i64 {
+    let parent = current_cohort();
+    let id = push(
+        POLICY_COLLECT_ALL,
+        0,
+        ISOLATION_SHARED,
+        ON_ERROR_PROPAGATE,
+        0,
+        0,
+    );
+    set_current(parent);
+    if cancelled {
+        cancel(id);
+    }
+    id
+}
+
+pub(crate) fn chain_is_cancelled(id: i64) -> bool {
     let mut current = id;
     while current != 0 {
         let Some(node) = node_of(current) else {
@@ -274,6 +294,9 @@ fn cancel(id: i64) {
         // channel layer answers `None` to a receiver under a cancelled
         // cohort, which is the same answer a closed channel gives.
         crate::value::wake_all_channel_waiters();
+        // Signal and descriptor waits block in the runtime, outside the
+        // channel layer, and re-check the same predicate when woken.
+        gossamer_runtime::c_abi::wake_cancellable_waits();
     }
 }
 
@@ -652,6 +675,9 @@ fn pop_current() {
 /// collect-all: it bounds lifetimes and surfaces failures without
 /// imposing fail-fast on a program that never asked for it.
 pub fn open_root() {
+    // JIT-compiled bodies call the runtime's signal and descriptor waits,
+    // which ask this tier whether the caller's cohort is cancelled.
+    gossamer_runtime::c_abi::cohort::set_foreign_cohort_probe(current_is_cancelled);
     if current_cohort() != 0 {
         return;
     }

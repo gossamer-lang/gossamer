@@ -71,6 +71,8 @@ pub(crate) fn install_image(globals: &mut Vec<(&'static str, Value)>) {
         ("height", image_height),
         ("pixel", image_pixel),
         ("set_pixel", image_set_pixel),
+        ("from_rgba_bytes", image_from_rgba_bytes),
+        ("to_rgba_bytes", image_to_rgba_bytes),
         ("encode_png_base64", image_encode_png),
         ("encode_jpeg_base64", image_encode_jpeg),
     ];
@@ -150,6 +152,20 @@ fn image_pixel(args: &[Value]) -> RuntimeResult<Value> {
             })
             .unwrap_or(-1),
     ))
+}
+fn image_from_rgba_bytes(args: &[Value]) -> RuntimeResult<Value> {
+    let width = non_negative_u32(args, 0, "image::from_rgba_bytes: width")?;
+    let height = non_negative_u32(args, 1, "image::from_rgba_bytes: height")?;
+    let bytes = args.get(2).map(Value::bytes_or_empty).unwrap_or_default();
+    Ok(image_std::Image::from_rgba8(width, height, bytes).map_or(Value::Int(0), insert))
+}
+fn image_to_rgba_bytes(args: &[Value]) -> RuntimeResult<Value> {
+    let bytes = id(args.first().unwrap_or(&Value::Unit))
+        .and_then(|id| {
+            with_images(|images| images.borrow().get(&id).map(image_std::Image::to_rgba8))
+        })
+        .unwrap_or_default();
+    Ok(Value::ByteVec(std::sync::Arc::new(bytes)))
 }
 fn image_set_pixel(args: &[Value]) -> RuntimeResult<Value> {
     let x = non_negative_u32(args, 1, "image::set_pixel: x")?;

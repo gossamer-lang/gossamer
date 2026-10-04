@@ -184,7 +184,9 @@ impl Lowerer<'_> {
             is_unsafe: decl.is_unsafe,
             is_comptime: decl.is_comptime,
             has_self,
-            origin: FnOrigin::Declared,
+            origin: FnOrigin::of(decl),
+            foreign_link: decl.attrs.link_library(),
+            foreign_symbol: decl.attrs.link_name(),
         }
     }
 

@@ -119,6 +119,11 @@ pub(crate) fn load_and_check_with_sf(
             outcome.diagnostics.len()
         ));
     }
+    let links = gossamer_driver::foreign_link_libraries(&outcome.checked.sf);
+    let entry = std::path::Path::new(map.file_name(file_id));
+    gossamer_runtime::c_abi::ffi::set_library_search_dirs(crate::paths::foreign_search_dirs(
+        entry, &links,
+    ));
     let gossamer_driver::CheckedFrontend {
         sf,
         resolutions,

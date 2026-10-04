@@ -30,12 +30,13 @@ const EMITTED_CODES: &[&str] = &[
     "GT0061", "GT0062", "GT0063", "GT0064", "GT0065", "GT0066", "GT0067", "GT0068", "GT0069",
     "GT0070", "GT0071", "GT0072", "GT0073", "GT0075", "GT0078", "GT0079", "GT0080", "GT0081",
     "GT0082", "GT0083", "GT0084", "GT0085", "GT0086", "GT0087", "GT0088", "GT0089", "GT0090",
-    "GT0091", "GT0092",
+    "GT0091", "GT0092", "GT0097", "GT0098", "GT0099", "GT0100", "GT0101", "GT0102", "GT0103",
+    "GT0104", "GT0105", "GT0106", "GT0107", "GT0108",
     "GT0055", // Match exhaustiveness (gossamer-types/src/exhaustiveness.rs).
     "GM0001", "GM0002", // Arena-escape safety (gossamer-types/src/arena_escape.rs).
     "GM0003", // Runtime (gossamer-interp/src/value.rs).
     "GX0001", "GX0002", "GX0003", "GX0004", "GX0005", "GX0006", "GX0007", "GX0008", "GX0009",
-    "GX0010", "GX0011", "GX0012",
+    "GX0010", "GX0011", "GX0012", "GX0013", "GX0014", "GX0015",
     // Lint registry (gossamer-lint/src/lib.rs::lint_code).
     "GL0001", "GL0002", "GL0003", "GL0004", "GL0005", "GL0006", "GL0007", "GL0008", "GL0009",
     "GL0010", "GL0011", "GL0012", "GL0013", "GL0014", "GL0015", "GL0016", "GL0017", "GL0018",

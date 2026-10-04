@@ -1,14 +1,16 @@
 # Calling Rust
 
-Gossamer has exactly one foreign-function surface: a **binding crate**
-- an ordinary Rust library that depends on `gossamer-binding`, marks
+A **binding crate** brings Rust code into a Gossamer program: an ordinary
+Rust library that depends on `gossamer-binding`, marks
 the functions it wants to publish, and is named in the project's
 `project.toml` under `[rust-bindings]`. The toolchain compiles it,
 links it into the interpreter and into `gos build` binaries, and the
 functions become `use`-able from `.gos` source like any other module.
 
-There is no source-level `extern "C"` item form. Writing one reports
-`GP0016`, and `extern` stays a reserved word.
+C functions need no crate: declare them in an `unsafe extern "C"` block
+([Foreign functions](language/unsafe_extern.md)); a project refuses them
+with `ffi = false`. A `[rust-bindings]` entry is its own opt-in and the
+`ffi` key does not affect it.
 
 ## Quick start
 

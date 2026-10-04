@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0107]: A C function pointer parameter, written `Fn(..) -> R` in an - here
+--- framed ---
+error[GT0107]: A C function pointer parameter, written `Fn(..) -> R` in an
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

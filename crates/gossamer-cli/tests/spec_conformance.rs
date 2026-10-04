@@ -10,10 +10,12 @@
 //!          release integer overflow wraps at that width;
 //!          `i128`/`u128` are rejected on every tier.
 //!   §7.5   reference mutability and scope-local `&mut` exclusivity are checked.
-//!   §8.6   `extern "C"` is not an `unsafe` power; it is rejected.
+//!   §8.7   a foreign function is called only inside `unsafe { }`.
 //!   §11.2  linking - musl-static is the Linux default, `--dynamic`
 //!          opts out.
-//!   §12    FFI is rust-bindings-only (GP0016 fires for `extern`).
+//!   §12    foreign functions are declared in `unsafe extern "C"` blocks;
+//!          every other `extern` form is GP0016, and the signature,
+//!          effect-attribute, and value-use rules are GT0098-GT0100.
 //!   §14    the implemented macro set is accepted; the rest are
 //!          rejected at parse time.
 
@@ -168,25 +170,22 @@ fn main() { println("hi") }
     assert!(!out.status.success());
 }
 
-// ---------- §12: FFI is rust-bindings-only ----------
+// ---------- §12: foreign functions ----------
 
 #[test]
-fn spec_12_extern_block_rejected_with_gp0016() {
+fn spec_12_bare_extern_block_rejected_with_gp0016() {
     let src = r#"
 extern "C" {
-    fn malloc(size: usize) -> *mut u8
+    fn malloc(size: usize) -> usize
 }
 fn main() { println("hi") }
 "#;
     let (ok, _stdout, stderr) = run_check("spec_12_extern_block", src);
-    assert!(!ok, "extern \"C\" {{}} must not pass `gos check`");
+    assert!(!ok, "a bare extern \"C\" block must not pass `gos check`");
+    assert!(stderr.contains("GP0016"), "expected GP0016, got: {stderr}");
     assert!(
-        stderr.contains("GP0016"),
-        "expected GP0016 in stderr, got: {stderr}",
-    );
-    assert!(
-        stderr.contains("rust-bindings") || stderr.contains("[rust-bindings]"),
-        "diagnostic must direct user to [rust-bindings]; got: {stderr}",
+        stderr.contains("unsafe extern"),
+        "diagnostic must name the `unsafe extern \"C\"` form; got: {stderr}",
     );
 }
 
@@ -201,38 +200,82 @@ extern "C" fn exported(x: i32) -> i32 { x + 1 }
     assert!(stderr.contains("GP0016"), "got: {stderr}");
 }
 
-// ---------- §8.6: extern is not an unsafe power ----------
+#[test]
+fn spec_12_unsafe_extern_block_declares_callable_functions() {
+    let src = r#"
+unsafe extern "C" {
+    fn abs(x: i32) -> i32
+    fn strlen(text: [u8]) -> usize
+}
+fn main() {
+    let text = #[104u8, 105, 0]
+    println(f"{unsafe { abs(-7) }} {unsafe { strlen(text) }}")
+}
+"#;
+    let (ok, stdout, stderr) = run_program("spec_12_unsafe_extern", src, &[]);
+    assert!(ok, "stderr: {stderr}");
+    assert_eq!(stdout.trim(), "7 2");
+}
 
 #[test]
-fn spec_8_6_extern_inside_unsafe_block_is_still_rejected() {
-    // §8.6: `extern "C"` is not an unsafe power. A bare `extern "C"`
-    // block (with or without `unsafe`) must be rejected; this test
-    // pins both. The bare form fires the specific GP0016. The
-    // `unsafe`-wrapped form fires whichever
-    // diagnostic the parser surfaces first (today: GP0001 from the
-    // `unsafe`-fn parser, after which GP0016 is reached if recovery
-    // continues). The invariant we pin is "rejected" - the specific
-    // diagnostic chain is part of the diagnostic-quality follow-up.
-    let bare = r#"
-extern "C" {
-    fn libc_malloc(n: i64) -> i64
+fn spec_12_foreign_rules_each_have_their_diagnostic() {
+    let cases = [
+        (
+            "unsafe extern \"C\" { fn abs(x: i32) -> i32 }\nfn main() { println(abs(1)) }\n",
+            "GT0097",
+        ),
+        (
+            "unsafe extern \"C\" { fn take(text: String) -> i32 }\nfn main() {}\n",
+            "GT0098",
+        ),
+        (
+            "unsafe extern \"C\" {\n    #[pure]\n    fn abs(x: i32) -> i32\n}\nfn main() {}\n",
+            "GT0099",
+        ),
+        (
+            "unsafe extern \"C\" { fn abs(x: i32) -> i32 }\nfn main() { let f = abs }\n",
+            "GT0100",
+        ),
+    ];
+    for (index, (src, code)) in cases.iter().enumerate() {
+        let (ok, _stdout, stderr) = run_check(&format!("spec_12_rule_{index}"), src);
+        assert!(!ok, "{code} case passed `gos check`");
+        assert!(stderr.contains(code), "expected {code}, got: {stderr}");
+    }
 }
-fn main() { println("hi") }
-"#;
-    let (ok_bare, _so, se_bare) = run_check("spec_8_6_bare", bare);
-    assert!(!ok_bare);
-    assert!(se_bare.contains("GP0016"), "bare extern got: {se_bare}");
 
-    let wrapped = r#"
-unsafe extern "C" {
-    fn libc_malloc(n: i64) -> i64
+#[test]
+fn spec_12_foreign_declarations_are_checked_for_the_named_target() {
+    // One source, checked for the host and then for wasm32: the cached host
+    // result must not answer for the second target, where the declaration
+    // has no library to call into.
+    let src = "unsafe extern \"C\" { fn abs(x: i32) -> i32 }\nfn main() { println(unsafe { abs(-1) }) }\n";
+    let path = write_temp_file("spec_12_target", src);
+    let check = |target: Option<&str>| {
+        let mut cmd = Command::new(gos_binary());
+        cmd.arg("check").arg(&path);
+        if let Some(triple) = target {
+            cmd.arg("--target").arg(triple);
+        }
+        run_with_timeout(cmd, Duration::from_secs(30))
+    };
+    assert!(check(None).status.success());
+    let wasm = check(Some("wasm32-unknown-unknown"));
+    assert!(!wasm.status.success());
+    assert!(String::from_utf8_lossy(&wasm.stderr).contains("GT0101"));
 }
-"#;
-    let (ok_wrapped, _so2, _se2) = run_check("spec_8_6_unsafe_extern", wrapped);
-    assert!(
-        !ok_wrapped,
-        "unsafe extern \"C\" must be rejected; got success",
-    );
+
+// ---------- §8.7: unsafe ----------
+
+#[test]
+fn spec_8_7_foreign_call_needs_an_unsafe_block() {
+    let inside = "unsafe extern \"C\" { fn abs(x: i32) -> i32 }\nfn main() { let n = unsafe { abs(-1) }\n println(n) }\n";
+    let (ok, _so, se) = run_check("spec_8_7_inside", inside);
+    assert!(ok, "a call inside `unsafe` must check: {se}");
+    let statement =
+        "unsafe extern \"C\" { fn abs(x: i32) -> i32 }\nfn main() { unsafe { abs(-1) } }\n";
+    let (ok, _so, se) = run_check("spec_8_7_statement", statement);
+    assert!(ok, "an `unsafe` block in statement position counts: {se}");
 }
 
 // ---------- §14: macro subset ----------

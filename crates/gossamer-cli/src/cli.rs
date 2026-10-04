@@ -86,6 +86,11 @@ enum Command {
         /// address the file on disk.
         #[arg(long)]
         fix: bool,
+        /// Resolve `#[cfg(...)]` for this target triple instead of the host
+        /// (`aarch64-apple-darwin`, `x86_64-pc-windows-msvc`), so code
+        /// written for another platform is checked from this one.
+        #[arg(long, value_name = "TRIPLE")]
+        target: Option<String>,
     },
     /// Execute a program by invoking its `main` function.
     ///
@@ -739,6 +744,7 @@ pub(crate) fn run() -> ExitCode {
 #[must_use]
 pub fn try_fast_run(args: &[std::ffi::OsString]) -> Option<ExitCode> {
     let parsed = parse_fast_run(args)?;
+    crate::paths::install_foreign_policy(parsed.file.as_deref());
     let result = (|| {
         crate::cmd::pkg::enforce_lockfile_if_requested(parsed.locked)?;
         if parsed.no_jit {
@@ -1080,6 +1086,23 @@ fn cli_help_width() -> usize {
     style::terminal_width(FALLBACK_COLUMNS, 24)
 }
 
+impl Command {
+    /// The source file or directory a command compiles or runs, which
+    /// decides the project whose `project.toml` governs it.
+    fn subject(&self) -> Option<&Path> {
+        match self {
+            Self::Check { file, .. }
+            | Self::Fix { file, .. }
+            | Self::Audit { file, .. }
+            | Self::Run { file, .. }
+            | Self::Watch { file, .. }
+            | Self::Build { file, .. } => file.as_deref(),
+            Self::Test { path, .. } | Self::Bench { path, .. } => path.as_deref(),
+            _ => None,
+        }
+    }
+}
+
 /// Routes the parsed [`Command`] to the matching `cmd::*` module.
 /// Kept as a flat match so each new subcommand is one line - the
 /// place to look when a flag stops landing where you expect.
@@ -1092,6 +1115,7 @@ fn dispatch(
     verbose: bool,
     execute: Option<String>,
 ) -> anyhow::Result<()> {
+    crate::paths::install_foreign_policy(command.as_ref().and_then(Command::subject));
     if let Some(source) = execute {
         return cmd::run::command(source);
     }
@@ -1103,7 +1127,13 @@ fn dispatch(
             timings,
             message_format,
             fix,
-        }) => cmd::check::dispatch(file, timings, message_format, fix),
+            target,
+        }) => {
+            if let Some(triple) = &target {
+                gossamer_resolve::set_cfg_target_triple(triple);
+            }
+            cmd::check::dispatch(file, timings, message_format, fix)
+        }
         Some(Command::Fix {
             file,
             rewriter,

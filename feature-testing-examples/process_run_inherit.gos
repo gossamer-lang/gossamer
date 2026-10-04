@@ -1,0 +1,42 @@
+// `process::run_inherit` runs a child on this process's own standard
+// streams and answers its exit code, so a terminal program can hand the
+// terminal to an editor and take it back. Lines printed before the call
+// reach the stream ahead of the child's. `wait_timeout` answers a spawned
+// child's exit code, or -2 for a pid that is not a child.
+
+use std::process
+
+#[cfg(unix)]
+const SHELL: String = "sh"
+#[cfg(unix)]
+const SCRIPT_FLAG: String = "-c"
+#[cfg(windows)]
+const SHELL: String = "cmd"
+#[cfg(windows)]
+const SCRIPT_FLAG: String = "/C"
+
+fn exit_codes(children: i64) -> String {
+    let mut codes = ""
+    for i in 0..children {
+        let code = process::run_inherit(SHELL, #[SCRIPT_FLAG, f"echo child {i}&& exit {i + 3}"])
+        codes += f"{code.unwrap()} "
+    }
+    codes
+}
+
+fn spawned_exit_codes(children: i64) -> String {
+    let mut codes = ""
+    for i in 0..children {
+        let pid = process::spawn(SHELL, #[SCRIPT_FLAG, f"exit {i + 5}"]).unwrap()
+        codes += f"{process::wait_timeout(pid, 60000)} "
+    }
+    codes
+}
+
+fn main() {
+    println("before the children")
+    println(f"exit codes {exit_codes(2)}")
+    println(f"missing program is an error: {process::run_inherit("no-such-program-for-gossamer", #[]).is_err()}")
+    println(f"spawned exit codes {spawned_exit_codes(2)}")
+    println(f"not a child {process::wait_timeout(999999999, 10)}")
+}

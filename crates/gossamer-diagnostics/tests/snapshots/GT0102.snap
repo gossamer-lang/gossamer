@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0102]: A library in the build declares functions in an `unsafe extern "C"` - here
+--- framed ---
+error[GT0102]: A library in the build declares functions in an `unsafe extern "C"`
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

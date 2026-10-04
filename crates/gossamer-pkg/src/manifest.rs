@@ -104,6 +104,11 @@ pub struct ProjectTable {
     /// more restrictive of the two, so a manifest may tighten the
     /// posture and may never loosen it.
     pub comptime_io: Option<String>,
+    /// `project.ffi` - whether the project may declare functions in
+    /// `unsafe extern "C"` blocks, in its own sources or in a dependency's.
+    /// Absent reads as `true`; `ffi = false` refuses native code the
+    /// project does not see.
+    pub ffi: bool,
 }
 
 /// One entry in `[dependencies]`.
@@ -424,6 +429,16 @@ impl Manifest {
                 });
             }
         }
+        let ffi = match project.get("ffi") {
+            None => true,
+            Some(toml::Value::Boolean(allowed)) => *allowed,
+            Some(other) => {
+                return Err(ManifestError::Malformed {
+                    line_no: 0,
+                    line: format!("project.ffi must be `true` or `false`; found `{other}`"),
+                });
+            }
+        };
         let mut deps: BTreeMap<String, DependencySpec> = BTreeMap::new();
         let mut dep_modules: BTreeMap<String, String> = BTreeMap::new();
         if let Some(table) = optional_toml_table(root, "dependencies")? {
@@ -504,6 +519,7 @@ impl Manifest {
                 entry,
                 enforce_format,
                 comptime_io,
+                ffi,
             },
             dependencies: deps,
             dependency_modules: dep_modules,
@@ -551,8 +567,11 @@ impl Manifest {
     pub fn render(&self) -> String {
         let mut out = String::new();
         out.push_str("[project]\n");
-        out.push_str(&format!("id = \"{}\"\n", self.project.id));
-        out.push_str(&format!("version = \"{}\"\n", self.project.version));
+        out.push_str(&format!("id = {}\n", quoted(self.project.id.as_str())));
+        out.push_str(&format!(
+            "version = {}\n",
+            quoted(&self.project.version.to_string())
+        ));
         if let Some(requirement) = &self.project.gossamer_version {
             // Rendered with the `v` inside the requirement's spelling,
             // so `^0.55.0` round-trips as `^v0.55.0` rather than losing
@@ -561,44 +580,53 @@ impl Manifest {
                 crate::version::VersionBound::Exact => format!("v{}", requirement.version),
                 crate::version::VersionBound::AtLeast => format!("^v{}", requirement.version),
             };
-            out.push_str(&format!("gossamer-version = \"{rendered}\"\n"));
+            out.push_str(&format!("gossamer-version = {}\n", quoted(&rendered)));
         }
         if !self.project.authors.is_empty() {
-            out.push_str("authors = [");
-            for (i, a) in self.project.authors.iter().enumerate() {
-                if i > 0 {
-                    out.push_str(", ");
-                }
-                out.push_str(&format!("\"{a}\""));
-            }
-            out.push_str("]\n");
+            out.push_str(&format!(
+                "authors = {}\n",
+                quoted_list(&self.project.authors)
+            ));
         }
         if !self.project.license.is_empty() {
-            out.push_str(&format!("license = \"{}\"\n", self.project.license));
+            out.push_str(&format!("license = {}\n", quoted(&self.project.license)));
         }
         if let Some(output) = &self.project.output {
-            out.push_str(&format!("output = \"{output}\"\n"));
+            out.push_str(&format!("output = {}\n", quoted(output)));
+        }
+        if let Some(entry) = &self.project.entry {
+            out.push_str(&format!("entry = {}\n", quoted(entry)));
+        }
+        if self.project.enforce_format {
+            out.push_str("enforce-format = true\n");
+        }
+        if let Some(level) = &self.project.comptime_io {
+            out.push_str(&format!("comptime-io = {}\n", quoted(level)));
+        }
+        if !self.project.ffi {
+            out.push_str("ffi = false\n");
         }
         if !self.dependencies.is_empty() {
             out.push_str("\n[dependencies]\n");
             for (id, spec) in &self.dependencies {
+                let module = self.dependency_modules.get(id).map(String::as_str);
                 out.push_str(&format!(
                     "{} = {}\n",
                     render_table_key(id),
-                    render_dependency(spec)
+                    render_dependency(spec, module)
                 ));
             }
         }
         if !self.registries.is_empty() {
             out.push_str("\n[registries]\n");
             for (prefix, url) in &self.registries {
-                out.push_str(&format!("\"{prefix}\" = \"{url}\"\n"));
+                out.push_str(&format!("{} = {}\n", quoted(prefix), quoted(url)));
             }
         }
         if !self.trusted_publishers.is_empty() {
             out.push_str("\n[trusted-publishers]\n");
             for (id, public_key) in &self.trusted_publishers {
-                out.push_str(&format!("\"{id}\" = \"{public_key}\"\n"));
+                out.push_str(&format!("{} = {}\n", quoted(id), quoted(public_key)));
             }
         }
         if !self.rust_bindings.is_empty() {
@@ -607,8 +635,34 @@ impl Manifest {
                 out.push_str(&format!("{name} = {}\n", render_rust_binding(spec)));
             }
         }
+        for bin in &self.bins {
+            out.push_str(&format!("\n[[bin]]\nname = {}\n", quoted(&bin.name)));
+            if let Some(path) = &bin.path {
+                out.push_str(&format!("path = {}\n", quoted(path)));
+            }
+        }
+        if let Some(lib) = &self.lib {
+            out.push_str("\n[lib]\n");
+            if let Some(name) = &lib.name {
+                out.push_str(&format!("name = {}\n", quoted(name)));
+            }
+            if let Some(path) = &lib.path {
+                out.push_str(&format!("path = {}\n", quoted(path)));
+            }
+        }
         out
     }
+}
+
+/// `text` as a TOML basic string, with its quotes and backslashes escaped.
+fn quoted(text: &str) -> String {
+    toml::Value::String(text.to_string()).to_string()
+}
+
+/// `items` as a TOML array of strings.
+fn quoted_list(items: &[String]) -> String {
+    let listed: Vec<String> = items.iter().map(|item| quoted(item)).collect();
+    format!("[{}]", listed.join(", "))
 }
 
 fn render_rust_binding(spec: &RustBindingSpec) -> String {
@@ -621,9 +675,9 @@ fn render_rust_binding(spec: &RustBindingSpec) -> String {
             default_features,
         } => {
             if let Some(v) = version {
-                parts.push(format!("version = \"{v}\""));
+                parts.push(format!("version = {}", quoted(&v.to_string())));
             }
-            parts.push(format!("path = \"{path}\""));
+            parts.push(format!("path = {}", quoted(path)));
             push_features(&mut parts, features, *default_features);
         }
         RustBindingSpec::Git {
@@ -634,14 +688,14 @@ fn render_rust_binding(spec: &RustBindingSpec) -> String {
             default_features,
         } => {
             if let Some(v) = version {
-                parts.push(format!("version = \"{v}\""));
+                parts.push(format!("version = {}", quoted(&v.to_string())));
             }
-            parts.push(format!("git = \"{url}\""));
+            parts.push(format!("git = {}", quoted(url)));
             if let Some(r) = reference {
                 match r {
-                    GitRef::Branch(b) => parts.push(format!("branch = \"{b}\"")),
-                    GitRef::Tag(t) => parts.push(format!("tag = \"{t}\"")),
-                    GitRef::Rev(r) => parts.push(format!("rev = \"{r}\"")),
+                    GitRef::Branch(b) => parts.push(format!("branch = {}", quoted(b))),
+                    GitRef::Tag(t) => parts.push(format!("tag = {}", quoted(t))),
+                    GitRef::Rev(r) => parts.push(format!("rev = {}", quoted(r))),
                 }
             }
             push_features(&mut parts, features, *default_features);
@@ -651,13 +705,13 @@ fn render_rust_binding(spec: &RustBindingSpec) -> String {
             features,
             default_features,
         } => {
-            parts.push(format!("version = \"{version}\""));
+            parts.push(format!("version = {}", quoted(&version.to_string())));
             push_features(&mut parts, features, *default_features);
         }
         RustBindingSpec::Src { src, deps } => {
-            parts.push(format!("src = \"{src}\""));
+            parts.push(format!("src = {}", quoted(src)));
             if !deps.is_empty() {
-                parts.push(format!("deps = \"{}\"", deps.replace('"', "\\\"")));
+                parts.push(format!("deps = {}", quoted(deps)));
             }
         }
     }
@@ -666,8 +720,7 @@ fn render_rust_binding(spec: &RustBindingSpec) -> String {
 
 fn push_features(parts: &mut Vec<String>, features: &[String], default_features: bool) {
     if !features.is_empty() {
-        let listed: Vec<String> = features.iter().map(|f| format!("\"{f}\"")).collect();
-        parts.push(format!("features = [{}]", listed.join(", ")));
+        parts.push(format!("features = {}", quoted_list(features)));
     }
     if !default_features {
         parts.push("default-features = false".to_string());
@@ -870,11 +923,7 @@ fn render_table_key(key: &str) -> String {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
         && !key.chars().next().is_some_and(|c| c.is_ascii_digit());
-    if bare {
-        key.to_string()
-    } else {
-        format!("\"{key}\"")
-    }
+    if bare { key.to_string() } else { quoted(key) }
 }
 
 fn parse_dependency_toml(value: &toml::Value, key: &str) -> Result<DependencySpec, ManifestError> {
@@ -1081,19 +1130,29 @@ fn is_valid_binding_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-fn render_dependency(spec: &DependencySpec) -> String {
-    match spec {
-        DependencySpec::Registry(requirement) => format!("\"{requirement}\""),
+fn render_dependency(spec: &DependencySpec, module: Option<&str>) -> String {
+    let mut parts = match spec {
+        DependencySpec::Registry(requirement) => return quoted(&requirement.to_string()),
         DependencySpec::Inline(InlineDependency::Git { url, reference }) => {
-            format!("{{ git = \"{url}\", tag = \"{reference}\" }}")
+            vec![
+                format!("git = {}", quoted(url)),
+                format!("tag = {}", quoted(reference)),
+            ]
         }
         DependencySpec::Inline(InlineDependency::Path { path }) => {
-            format!("{{ path = \"{path}\" }}")
+            vec![format!("path = {}", quoted(path))]
         }
         DependencySpec::Inline(InlineDependency::Tarball { url, sha256 }) => {
-            format!("{{ tarball = \"{url}\", sha256 = \"{sha256}\" }}")
+            vec![
+                format!("tarball = {}", quoted(url)),
+                format!("sha256 = {}", quoted(sha256)),
+            ]
         }
+    };
+    if let Some(module) = module {
+        parts.push(format!("module = {}", quoted(module)));
     }
+    format!("{{ {} }}", parts.join(", "))
 }
 
 #[cfg(test)]
@@ -1237,5 +1296,68 @@ mod gossamer_version_tests {
                 new: "gossamer-version"
             }
         ));
+    }
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+
+    const FULL: &str = r#"[project]
+id = "example.com/app"
+version = "0.1.0"
+gossamer-version = "^v0.55.0"
+authors = ["Ada \"A\" Lovelace <ada@example.com>"]
+license = "MIT"
+output = "bin\\app"
+entry = "src/app.gos"
+enforce-format = true
+comptime-io = "confined"
+ffi = true
+
+[dependencies]
+"example.com/near" = { path = "..\\near", module = "near_lib" }
+"example.org/far" = "^1.2.3"
+"example.org/pinned" = { git = "https://git.example.org/pinned.git", tag = "v2.0.0" }
+
+[registries]
+"example.org" = "https://registry.example.org/v1"
+
+[rust-bindings]
+native = { path = "native", features = ["fast"], default-features = false }
+
+[[bin]]
+name = "app"
+path = "src/app.gos"
+
+[[bin]]
+name = "helper"
+
+[lib]
+name = "applib"
+path = "src/lib.gos"
+"#;
+
+    #[test]
+    fn rendering_a_manifest_keeps_every_key_it_parsed() {
+        let parsed = Manifest::parse(FULL).unwrap();
+        assert_eq!(Manifest::parse(&parsed.render()).unwrap(), parsed);
+    }
+
+    #[test]
+    fn ffi_reads_as_true_unless_stated() {
+        let base = "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n";
+        assert!(Manifest::parse(base).unwrap().project.ffi);
+        let allowed = format!("{base}ffi = true\n");
+        assert!(Manifest::parse(&allowed).unwrap().project.ffi);
+        let denied = format!("{base}ffi = false\n");
+        assert!(!Manifest::parse(&denied).unwrap().project.ffi);
+    }
+
+    #[test]
+    fn ffi_must_be_a_boolean() {
+        let text = "[project]\nid = \"example.com/app\"\nversion = \"0.1.0\"\n\
+                    ffi = \"yes\"\n";
+        assert!(Manifest::parse(text).is_err());
     }
 }

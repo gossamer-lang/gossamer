@@ -89,6 +89,7 @@ fn main() {
         total += round()
     }
     println("hot: {}", total)
+    println("field store: {}", store_rounds(40))
 }
 
 /// One tuple read and one struct pop, in a body called often enough for
@@ -104,4 +105,38 @@ fn round() -> i64 {
         sum += c.n
     }
     sum
+}
+
+struct Addr {
+    word: u64
+}
+
+struct Frame {
+    a: u32
+    at: Addr
+    c: u32
+}
+
+/// A one-field struct answered by a body the JIT leaves on the bytecode
+/// tier, so it reaches the compiled caller by the address of its word.
+fn addr_of(n: u64) -> Addr {
+    if n == 0 {
+        println("zero")
+    }
+    Addr { word: n }
+}
+
+/// Stores that one-field struct into a field of a struct copied out of an
+/// array, in a loop the JIT compiles.
+fn store_rounds(n: u64) -> u64 {
+    let at = addr_of(n)
+    let mut total = 0u64
+    for _ in 0..2 {
+        let staged = [Frame { a: 1, at: Addr { word: 0 }, c: 3 }]
+        let mut current: Frame = staged[0]
+        current.at = at
+        current.c = 64
+        total += current.at.word
+    }
+    total + at.word
 }

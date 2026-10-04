@@ -120,10 +120,7 @@ fn main() {
         check_dispatch_parity(&workspace_root);
     }
 
-    // Honour CARGO_TARGET_DIR if set, otherwise default to
-    // <workspace>/target - the same logic cargo uses internally.
-    let target_dir = env::var_os("CARGO_TARGET_DIR")
-        .map_or_else(|| workspace_root.join("target"), PathBuf::from);
+    let target_dir = cargo_target_dir();
 
     let profile = env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
     let lib_dir = target_dir.join(&profile);
@@ -571,4 +568,29 @@ fn extract_referenced_symbols(src: &str) -> BTreeSet<String> {
 
 fn is_ident_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// The target directory this build writes to, absolute.
+///
+/// `OUT_DIR` is `<target>[/<triple>]/<profile>/build/<pkg>-<hash>/out` and
+/// always absolute, while `CARGO_TARGET_DIR` may be relative to wherever
+/// cargo was invoked, which a build script cannot see.
+fn cargo_target_dir() -> PathBuf {
+    let out_dir = PathBuf::from(env::var_os("OUT_DIR").expect("cargo sets OUT_DIR"));
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .expect("OUT_DIR has a profile directory");
+    let parent = profile_dir
+        .parent()
+        .expect("profile directory has a parent");
+    let target = env::var_os("TARGET").expect("cargo sets TARGET for build scripts");
+    if parent.file_name() == Some(target.as_os_str()) {
+        parent
+            .parent()
+            .expect("triple directory has a parent")
+            .to_path_buf()
+    } else {
+        parent.to_path_buf()
+    }
 }

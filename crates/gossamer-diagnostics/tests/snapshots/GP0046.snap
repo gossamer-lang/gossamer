@@ -3,9 +3,9 @@ source: crates/gossamer-diagnostics/tests/snapshots.rs
 expression: rendered
 ---
 --- plain ---
-error[GP0046]: `unsafe` was written. No operation is withheld outside an `unsafe` - here
+error[GP0046]: `unsafe fn`, `unsafe impl`, or `unsafe trait` was written. None of - here
 --- framed ---
-error[GP0046]: `unsafe` was written. No operation is withheld outside an `unsafe`
+error[GP0046]: `unsafe fn`, `unsafe impl`, or `unsafe trait` was written. None of
   --> snap.gos:2:5
      2 |     let x = 1
        |     ^^^^^

@@ -1,0 +1,12 @@
+---
+source: crates/gossamer-diagnostics/tests/snapshots.rs
+expression: rendered
+---
+--- plain ---
+error[GT0101]: A function declared in an `unsafe extern "C"` block is active when - here
+--- framed ---
+error[GT0101]: A function declared in an `unsafe extern "C"` block is active when
+  --> snap.gos:2:5
+     2 |     let x = 1
+       |     ^^^^^
+     error: here

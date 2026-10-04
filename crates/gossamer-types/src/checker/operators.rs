@@ -1755,7 +1755,7 @@ impl TypeChecker<'_> {
     /// closure that captures the root. The callee would observe the referent
     /// through an alias the `&mut` does not account for.
     pub(super) fn check_overlapping_mutable_call_args(&mut self, args: &[Expr]) {
-        let mut roots = HashSet::new();
+        let mut borrowed: Vec<PlacePath> = Vec::new();
         let mut windows: std::collections::HashMap<String, Option<String>> =
             std::collections::HashMap::new();
         for arg in args {
@@ -1766,9 +1766,10 @@ impl TypeChecker<'_> {
             else {
                 continue;
             };
-            let Some(root) = Self::place_root_name(operand) else {
+            let Some(place) = PlacePath::of(operand) else {
                 continue;
             };
+            let root = place.root.clone();
             // Windows of one place may share a call: their ranges are checked
             // disjoint before it runs.
             let window = window_place_key(operand);
@@ -1776,7 +1777,9 @@ impl TypeChecker<'_> {
                 .entry(root.clone())
                 .or_insert_with(|| window.clone());
             let joins_windows = window.is_some() && *first_window == window;
-            if !roots.insert(root.clone()) && !joins_windows {
+            let overlaps = borrowed.iter().any(|earlier| earlier.overlaps(&place));
+            borrowed.push(place);
+            if overlaps && !joins_windows {
                 self.emit(
                     TypeError::MutableReferenceConflict {
                         root,
@@ -1786,6 +1789,7 @@ impl TypeChecker<'_> {
                 );
             }
         }
+        let roots: HashSet<String> = borrowed.into_iter().map(|place| place.root).collect();
         for arg in args {
             if let Some((root, borrower)) = self.closure_alias_of(arg, &roots) {
                 self.emit(
@@ -1796,24 +1800,27 @@ impl TypeChecker<'_> {
         }
     }
 
-    /// Rejects a by-value argument that reads storage under the root of a
-    /// `&mut` argument of the same call: the callee would read the caller's
-    /// storage through that value while it writes the same storage through
-    /// the reference. Runs once the arguments carry their types.
+    /// Rejects a by-value argument that reads storage a `&mut` argument of
+    /// the same call reaches - the same place, a place inside it, or one it
+    /// sits inside: the callee would read the caller's storage through that
+    /// value while it writes the same storage through the reference.
+    /// Sibling fields of one root are disjoint. Runs once the arguments
+    /// carry their types.
     pub(super) fn check_by_value_argument_aliases(&mut self, args: &[Expr]) {
-        let roots: HashSet<String> = args
+        let borrowed: Vec<PlacePath> = args
             .iter()
             .filter_map(|arg| match &arg.kind {
                 ExprKind::Unary {
                     op: UnaryOp::RefMut,
                     operand,
-                } => Self::place_root_name(operand),
+                } => PlacePath::of(operand),
                 _ => None,
             })
             .collect();
-        if roots.is_empty() {
+        if borrowed.is_empty() {
             return;
         }
+        let roots: HashSet<String> = borrowed.iter().map(|place| place.root.clone()).collect();
         for arg in args {
             if !matches!(
                 arg.kind,
@@ -1822,7 +1829,7 @@ impl TypeChecker<'_> {
             {
                 continue;
             }
-            if let Some((root, borrower)) = self.by_value_storage_alias(arg, &roots) {
+            if let Some((root, borrower)) = self.by_value_storage_alias(arg, &borrowed) {
                 self.emit(
                     TypeError::MutableReferenceConflict { root, borrower },
                     arg.span,
@@ -1865,12 +1872,13 @@ impl TypeChecker<'_> {
     fn by_value_storage_alias(
         &mut self,
         arg: &Expr,
-        roots: &HashSet<String>,
+        borrowed: &[PlacePath],
     ) -> Option<(String, String)> {
-        let root = Self::place_root_name(arg)?;
-        if !roots.contains(&root) {
+        let place = PlacePath::of(arg)?;
+        if !borrowed.iter().any(|mutable| mutable.overlaps(&place)) {
             return None;
         }
+        let root = place.root;
         let recorded = self.table.get(arg.id)?;
         let ty = self.peel_refs(recorded);
         let scalar = matches!(
@@ -2328,6 +2336,7 @@ impl TypeChecker<'_> {
         let place_ty = self.check_expr(place);
         self.suppressed.borrow_read_conflict = previous_suppression;
         self.check_place_writable(place);
+        self.check_ffi_field_write(place);
         let place_resolved = self.infer.resolve(self.tcx, place_ty);
         let place_is_reference = matches!(self.tcx.kind(place_resolved), Some(TyKind::Ref { .. }));
         // A reference binding must be rebound with another reference. Do not
@@ -2458,12 +2467,19 @@ impl TypeChecker<'_> {
         if let ExprKind::Block(block) | ExprKind::Unsafe(block) = &expr.kind
             && let Some(tail) = &block.tail
         {
+            let unsafe_block = matches!(expr.kind, ExprKind::Unsafe(_));
+            if unsafe_block {
+                self.unsafe_depth += 1;
+            }
             self.push_scope();
             for stmt in &block.stmts {
                 self.check_stmt(stmt);
             }
             self.check_discarded_expr(tail);
             self.pop_scope();
+            if unsafe_block {
+                self.unsafe_depth -= 1;
+            }
             let unit = self.tcx.unit();
             return self.record(expr.id, unit);
         }
@@ -2758,6 +2774,58 @@ impl TypeChecker<'_> {
 /// The place a `base[lo..hi]` window names, as a key two windows of one place
 /// share: a binding reached through fields and indexes that are bindings or
 /// literals, which evaluating again names the same place.
+/// A place as its root binding and the steps below it, for deciding whether
+/// two call arguments reach the same storage.
+struct PlacePath {
+    root: String,
+    steps: Vec<PlaceStep>,
+}
+
+/// One step from a place to a place inside it.
+#[derive(PartialEq)]
+enum PlaceStep {
+    Field(String),
+    /// An element by index or range; any two may be the same element.
+    Element,
+}
+
+impl PlacePath {
+    fn of(place: &Expr) -> Option<Self> {
+        match &place.kind {
+            ExprKind::Path(path) => Some(Self {
+                root: path.segments.first()?.name.name.clone(),
+                steps: Vec::new(),
+            }),
+            ExprKind::FieldAccess { receiver, field } => {
+                let mut path = Self::of(receiver)?;
+                path.steps.push(PlaceStep::Field(match field {
+                    gossamer_ast::FieldSelector::Named(name) => name.name.clone(),
+                    gossamer_ast::FieldSelector::Index(index) => index.to_string(),
+                }));
+                Some(path)
+            }
+            ExprKind::Index { base, .. } => {
+                let mut path = Self::of(base)?;
+                path.steps.push(PlaceStep::Element);
+                Some(path)
+            }
+            ExprKind::Unary { operand, .. } => Self::of(operand),
+            _ => None,
+        }
+    }
+
+    /// Whether the two places share storage: one is the other or lies
+    /// inside it.
+    fn overlaps(&self, other: &Self) -> bool {
+        self.root == other.root
+            && self
+                .steps
+                .iter()
+                .zip(&other.steps)
+                .all(|(left, right)| left == right)
+    }
+}
+
 fn window_place_key(operand: &Expr) -> Option<String> {
     let ExprKind::Index { base, index } = &operand.kind else {
         return None;

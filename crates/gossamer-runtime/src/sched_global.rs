@@ -878,6 +878,8 @@ pub fn try_spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid> {
         arena: crate::c_abi::rc::ArenaState::empty(),
         isolated_faults: false,
         joinable: false,
+        ffi_errno: 0,
+        started: false,
     })
 }
 
@@ -892,6 +894,8 @@ pub fn try_spawn_service(task: Box<dyn FnOnce() + Send + 'static>) -> Option<Gid
         arena: crate::c_abi::rc::ArenaState::empty(),
         isolated_faults: false,
         joinable: false,
+        ffi_errno: 0,
+        started: false,
     })
 }
 
@@ -911,6 +915,8 @@ pub fn spawn(task: Box<dyn FnOnce() + Send + 'static>) -> Gid {
         arena: crate::c_abi::rc::ArenaState::empty(),
         isolated_faults: false,
         joinable: false,
+        ffi_errno: 0,
+        started: false,
     })
 }
 
@@ -932,10 +938,20 @@ struct GoroutineTask {
     /// parked, since several goroutines take turns on one worker.
     isolated_faults: bool,
     joinable: bool,
+    /// The `errno` this goroutine's last foreign call left.
+    ffi_errno: i64,
+    /// Whether the coroutine has been resumed; until then it may start on
+    /// any worker.
+    started: bool,
 }
 
 impl crate::sched::Task for GoroutineTask {
+    fn started(&self) -> bool {
+        self.started
+    }
+
     fn step(&mut self) -> Step {
+        self.started = true;
         crate::c_abi::rc::install_arena_state(std::mem::replace(
             &mut self.arena,
             crate::c_abi::rc::ArenaState::empty(),
@@ -949,9 +965,11 @@ impl crate::sched::Task for GoroutineTask {
         }
         let worker_faults = crate::c_abi::panic::swap_isolated_faults(self.isolated_faults);
         let worker_joinable = gossamer_coro::swap_joinable_spawn(self.joinable);
+        let worker_errno = crate::c_abi::ffi::swap_ffi_errno(self.ffi_errno);
         let done = self.coro.resume();
         self.isolated_faults = crate::c_abi::panic::swap_isolated_faults(worker_faults);
         self.joinable = gossamer_coro::swap_joinable_spawn(worker_joinable);
+        self.ffi_errno = crate::c_abi::ffi::swap_ffi_errno(worker_errno);
         self.arena = crate::c_abi::rc::take_arena_state();
         gossamer_coro::clear_current_yielder();
         if done { Step::Done } else { Step::Yield }

@@ -511,6 +511,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
@@ -823,6 +825,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../language/unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2322,7 +2352,7 @@
 <tr>
 <td><code>Notifier</code></td>
 <td><code>type Notifier</code></td>
-<td>Returned by <code>on(sig)</code>; supports wait / try_wait.</td>
+<td>Returned by <code>on(sig)</code>; supports wait / try_wait / stop.</td>
 </tr>
 <tr>
 <td><code>on</code></td>
@@ -2331,13 +2361,63 @@
 </tr>
 <tr>
 <td><code>wait</code></td>
-<td><code>fn wait(notifier: os::signal::Notifier) -&gt; ()</code></td>
-<td>Blocks the calling goroutine until the subscribed signal fires.</td>
+<td><code>fn wait(notifier: os::signal::Notifier) -&gt; bool</code></td>
+<td><code>wait() -&gt; bool</code>: blocks the calling goroutine until the subscribed signal fires (<code>true</code>) or its cohort is cancelled (<code>false</code>), without holding a scheduler worker. On wasm32, which delivers no signals, it answers <code>false</code> at once.</td>
 </tr>
 <tr>
 <td><code>try_wait</code></td>
 <td><code>fn try_wait(notifier: os::signal::Notifier) -&gt; bool</code></td>
 <td>Non-blocking poll: returns true if the subscribed signal has fired.</td>
+</tr>
+<tr>
+<td><code>stop</code></td>
+<td><code>fn stop(notifier: os::signal::Notifier) -&gt; ()</code></td>
+<td><code>stop()</code>: the notifier delivers nothing more, so its waits answer <code>false</code>; once no notifier subscribes to the signal it takes its default disposition again. Go's <code>signal.Stop</code>.</td>
+</tr>
+<tr>
+<td><code>SIGHUP</code></td>
+<td><code>const SIGHUP</code></td>
+<td>Hangup: the controlling terminal closed (1).</td>
+</tr>
+<tr>
+<td><code>SIGINT</code></td>
+<td><code>const SIGINT</code></td>
+<td>Interrupt, Ctrl-C (2).</td>
+</tr>
+<tr>
+<td><code>SIGQUIT</code></td>
+<td><code>const SIGQUIT</code></td>
+<td>Quit, Ctrl-\ (3); also renders the goroutine dump.</td>
+</tr>
+<tr>
+<td><code>SIGTERM</code></td>
+<td><code>const SIGTERM</code></td>
+<td>Termination request (15).</td>
+</tr>
+<tr>
+<td><code>SIGUSR1</code></td>
+<td><code>const SIGUSR1</code></td>
+<td>User signal 1 (10 on Linux, 30 on macOS).</td>
+</tr>
+<tr>
+<td><code>SIGUSR2</code></td>
+<td><code>const SIGUSR2</code></td>
+<td>User signal 2 (12 on Linux, 31 on macOS).</td>
+</tr>
+<tr>
+<td><code>SIGWINCH</code></td>
+<td><code>const SIGWINCH</code></td>
+<td>The terminal window changed size (28). Never delivered on Windows.</td>
+</tr>
+<tr>
+<td><code>SIGTSTP</code></td>
+<td><code>const SIGTSTP</code></td>
+<td>Terminal stop, Ctrl-Z (20 on Linux, 18 on macOS). Subscribing replaces the default stop, so the program stops itself. Never delivered on Windows.</td>
+</tr>
+<tr>
+<td><code>SIGCONT</code></td>
+<td><code>const SIGCONT</code></td>
+<td>Continue after a stop (18 on Linux, 19 on macOS). Never delivered on Windows.</td>
 </tr>
 </tbody>
 </table>

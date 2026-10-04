@@ -511,6 +511,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
@@ -823,6 +825,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../language/unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2327,6 +2357,11 @@
 <td><code>run_in</code></td>
 <td><code>fn run_in(program: String, args: Vec&lt;String&gt;, dir: String, env: Vec&lt;(String, String)&gt;) -&gt; Result&lt;process::Output, errors::Error&gt;</code></td>
 <td>run_in(program, args, dir, env): the same one-shot run with the child's working directory and environment supplied. An empty dir inherits the caller's; the env pairs override the inherited environment rather than replacing it, so a caller sets the two variables it cares about without restating PATH.</td>
+</tr>
+<tr>
+<td><code>run_inherit</code></td>
+<td><code>fn run_inherit(program: String, args: Vec&lt;String&gt;) -&gt; Result&lt;i64, errors::Error&gt;</code></td>
+<td><code>run_inherit(program, args) -&gt; Result&lt;i64, errors::Error&gt;</code>: runs the program on this process's own standard input, output, and error - a terminal included - and answers its exit code once it ends (128 plus the signal number for one a signal ended on Unix). The goroutine parks meanwhile. Go's <code>exec.Cmd.Run</code> with <code>os.Stdin</code>, <code>os.Stdout</code>, and <code>os.Stderr</code> attached.</td>
 </tr>
 <tr>
 <td><code>spawn</code></td>

@@ -26,6 +26,10 @@ pub fn public_type_name(name: &str) -> std::borrow::Cow<'_, str> {
     let Some(rest) = name.strip_prefix("__gos_") else {
         return std::borrow::Cow::Borrowed(name);
     };
+    // C type names are lowercase, so the split below cannot find them.
+    if let Some(c_type) = rest.strip_prefix("ffi_c_") {
+        return std::borrow::Cow::Owned(format!("ffi::c_{c_type}"));
+    }
     let split = rest
         .char_indices()
         .find(|&(i, c)| c == '_' && rest[i + 1..].starts_with(|n: char| n.is_ascii_uppercase()));

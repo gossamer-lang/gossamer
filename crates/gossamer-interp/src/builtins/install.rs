@@ -542,6 +542,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("arena_pop", builtin_runtime_region_noop),
             ("scheduler_stats_json", builtin_runtime_scheduler_stats_json),
             ("set_panic_hook", builtin_runtime_set_panic_hook),
+            ("at_exit", builtin_runtime_at_exit),
         ],
         globals,
     );
@@ -580,6 +581,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         &[
             ("run", builtin_exec_run),
             ("run_in", builtin_exec_run_in),
+            ("run_inherit", builtin_exec_run_inherit),
             ("spawn", builtin_exec_spawn),
             ("spawn_piped", builtin_exec_spawn_piped),
             ("kill", builtin_exec_kill),
@@ -612,6 +614,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("on", builtin_signal_on),
             ("wait", builtin_signal_wait),
             ("try_wait", builtin_signal_try_wait),
+            ("stop", builtin_signal_stop),
         ],
         globals,
     );
@@ -621,6 +624,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
             ("on", builtin_signal_on),
             ("wait", builtin_signal_wait),
             ("try_wait", builtin_signal_try_wait),
+            ("stop", builtin_signal_stop),
         ],
         globals,
     );
@@ -629,6 +633,7 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
         "signal_try_wait",
         builtin("signal_try_wait", builtin_signal_try_wait),
     ));
+    globals.push(("signal_stop", builtin("signal_stop", builtin_signal_stop)));
     globals.push(("walk_dir", native("walk_dir", native_fs_walk_dir)));
     globals.push(("fs::walk_dir", native("fs::walk_dir", native_fs_walk_dir)));
     // Leaf intrinsics the injected `DirInfo` and `Output` wrappers fold.
@@ -639,6 +644,36 @@ fn install_module_builtins(globals: &mut Vec<(&'static str, Value)>) {
     ));
     globals.push(("__gos_par_run", native("__gos_par_run", native_par_run)));
     globals.push(("__gos_par_chunks", native("__gos_par_chunks", native_par_chunks)));
+    globals.push(("__gos_fd_wait_raw", builtin("__gos_fd_wait_raw", builtin_fd_wait_raw)));
+    globals.push(("ffi::last_errno", builtin("ffi::last_errno", builtin_ffi_last_errno)));
+    globals.push((
+        gossamer_hir::FOREIGN_DISPATCHER,
+        native(gossamer_hir::FOREIGN_DISPATCHER, crate::ffi_call::native_ffi_call),
+    ));
+    globals.push((
+        gossamer_hir::FFI_CALLBACK,
+        native(gossamer_hir::FFI_CALLBACK, crate::ffi_call::callbacks::native_ffi_callback),
+    ));
+    globals.push((
+        gossamer_hir::FFI_NULL_RESULT,
+        builtin(gossamer_hir::FFI_NULL_RESULT, crate::ffi_call::builtin_ffi_null_result),
+    ));
+    globals.push((
+        gossamer_hir::FFI_HANDLE_PIN,
+        builtin(gossamer_hir::FFI_HANDLE_PIN, crate::ffi_call::handles::builtin_pin),
+    ));
+    globals.push((
+        gossamer_hir::FFI_HANDLE_CELL,
+        builtin(gossamer_hir::FFI_HANDLE_CELL, crate::ffi_call::handles::builtin_cell),
+    ));
+    globals.push((
+        gossamer_hir::FFI_HANDLE_STORE,
+        builtin(gossamer_hir::FFI_HANDLE_STORE, crate::ffi_call::handles::builtin_store),
+    ));
+    globals.push((
+        gossamer_hir::FFI_HANDLE_RELEASE,
+        builtin(gossamer_hir::FFI_HANDLE_RELEASE, crate::ffi_call::handles::builtin_release),
+    ));
     globals.push((
         "__gos_windows_disjoint",
         builtin("__gos_windows_disjoint", builtin_windows_disjoint),

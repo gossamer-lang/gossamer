@@ -422,11 +422,15 @@ impl Vm {
     /// afterwards must clone before calling.
     pub fn load(
         &mut self,
-        program: &HirProgram,
+        source: &HirProgram,
         tcx: TyCtxt,
         enable_inlining: bool,
     ) -> RuntimeResult<()> {
         let mut tcx = tcx;
+        // Every tier calls a foreign function through the one dispatcher
+        // name: bytecode reaches the native builtin, MIR an intrinsic.
+        let routed = gossamer_hir::route_foreign_calls(source, &mut tcx);
+        let program = routed.as_ref().unwrap_or(source);
         self.param_dispatch = Arc::new(crate::compile::ParamDispatch::build(program, &mut tcx));
         // Prepass: collect struct field orderings so `__struct`
         // can place literal fields in declaration order and the

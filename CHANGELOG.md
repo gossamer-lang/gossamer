@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.66.0 - Foreign functions and a terminal-ready standard library
+
+- `unsafe extern "C" { fn strlen(text: [u8]) -> usize }` declares C functions a program calls inside `unsafe { }` (GT0097), on the bytecode VM, the JIT, and native builds alike; `#[link(name = "lib")]` adds a library to the native link and to the VM's lookup, `#[link_name = "sym"]` names a different C symbol, and `#[cfg]` selects declarations per platform.
+- A foreign parameter is a scalar (integers up to 64 bits, `bool`, `f32`, `f64`), a slice of scalars, or a `#[repr(C)]` plain-data struct, each also as `&mut` with its writes returned; slices pass windows and fixed arrays, structs cross in their C layout, and a result is a scalar, `()`, or a pointer (below). Any other type is GT0098.
+- Every foreign call records `errno` (`GetLastError` on Windows) for the calling goroutine, read with `ffi::last_errno()`, and a call that blocks lets another worker start the goroutines waiting behind it.
+- A foreign call is foreign and unsafe whatever it does: an effect attribute on its declaration is GT0099, a parallel callback may not make one (GT0090), and compile-time evaluation makes one only at `--comptime-io=full`. A foreign function used as a value is GT0100, and a declaration active for wasm32 is GT0101.
+- A project refuses native code with `ffi = false` in the `[project]` table of `project.toml` (the key defaults to `true`); every library that then declares foreign functions, the project or any dependency, is reported as GT0102 with a label at each declaration in its file, and `gos check`, `run`, `test`, and `build` stop. A dependency's own `ffi` key does not override the root's, and the standard library's own declarations are never refused.
+- `type Name` inside an `unsafe extern` block declares a C type whose layout stays in the library, reached only as `ffi::Ptr<Name>`; constructing one or passing it by value is GT0104.
+- `ffi::Ptr<T>` is a C pointer and `Option<ffi::Ptr<T>>` one that may be NULL, as parameters, results, and `#[repr(C)]` fields; a `Ptr` result that comes back NULL raises GX0013. A pointee without a C layout is GT0105, and a `Ptr` or `Handle` in a `comptime` result or a serialized value is GT0106.
+- `&mut` a scalar, a `Ptr`, or an `Option<Ptr>` is an out-parameter (`int *`, `T **`) whose value C writes back.
+- `ffi::read`, `read_at`, `write`, `write_at`, `read_bytes`, `read_cstr`, `write_bytes`, `alloc`, `free`, `to_c_bytes`, and `size_of` reach foreign memory by copy inside `unsafe` (GT0103 outside it); `p.cast`, `p.address`, and `Ptr::from_address` convert pointers.
+- A C function pointer parameter is written `Fn(A..) -> R` and filled with a named function on every tier; it runs on the thread whose foreign call invokes it, a panic inside it is raised when that call returns, and a callback a library runs on a thread of its own is GX0015. A closure or a mismatched function is GT0108, and a callback type with no C form is GT0107.
+- `ffi::Handle` keeps a value alive under an integer C can hold as callback context (`new`, `as_ptr`, `from_ptr`, `get`, `set`, `update`, `take`, `release`); a released handle is GX0014.
+- `ffi::fn_from_ptr::<Fn(..) -> R>(p)` calls a native function through an address such as a `dlsym` result.
+- `#[link(name = "x", search = "dir")]` searches a directory relative to the declaring package for a vendored library, for `gos run` and `gos build`; a Linux release build that links a library of its own links dynamically.
+- `unsafe { }` blocks no longer report GP0046; any `extern` form other than `unsafe extern "C"` remains GP0016.
+- `std::ffi` names the C types for the target (`c_int`, `c_long`, `size_t`, ...) and converts strings with `cstring` and `from_cstr`.
+- `std::term`, written in Gossamer over foreign calls: `is_terminal`, `size`, `enter_raw` (restored by `RawMode::restore` and on every way the program ends), `read_input(timeout_ms)`, and `resized`, on Linux, macOS, and Windows.
+- `std::os::fd::wait_readable` and `wait_writable` wait for a descriptor (a handle on Windows) without holding a scheduler worker, and answer `false` when the goroutine's cohort is cancelled, so `term::read_input(-1)` ends with its cohort.
+- `signal::Notifier::wait` answers `true` when the signal arrives and `false` when its cohort is cancelled or the notifier is stopped, and parks the goroutine instead of holding a scheduler worker; it waited forever, keeping its cohort from joining.
+- `signal::Notifier::stop()` ends a subscription; once no notifier subscribes to a signal, the signal takes its default disposition again.
+- `process::run_inherit(program, args)` runs a child on the program's own standard streams, a terminal included, and answers its exit code.
+- `process::wait_timeout` waits in the kernel (a process descriptor on Linux, `kqueue` on macOS) rather than polling every 25 ms, and parks the goroutine.
+- `fs::File::fd()` answers the file's OS descriptor (a handle on Windows), and `term::size`, `enter_raw`, `read_input`, and `resized` take an optional descriptor, so a program whose standard input is piped reads keys from an opened `/dev/tty` or `CONIN$`. On Windows `enter_raw` no longer fails when standard output is redirected.
+- `std::os::signal` spells the signal numbers for the target (`SIGWINCH`, `SIGTSTP`, `SIGCONT`, `SIGINT`, ...), and `signal::on` on the bytecode VM delivers any signal number as native builds do, where it delivered only six.
+- `runtime::at_exit(f)` runs `f` when the program ends by returning from `main`, by `process::exit`, or by a fatal panic, last registered first and before the panic's report.
+- `unicode::char_width` and `unicode::str_width` give the terminal columns a character or string occupies.
+- `image::from_rgba_bytes` and `image::to_rgba_bytes` move an image's pixels to and from RGBA8 bytes.
+- `gos check --target TRIPLE` checks a program as it builds for another platform; its result is cached per target.
+- `#[cfg(target_os / target_arch / target_family / unix / windows)]` resolves for the target `gos build --target` names rather than the host, and knows riscv64.
+- Two `#[cfg]` variants of one item (`#[cfg(unix)] fn f` beside `#[cfg(windows)] fn f`, or two variants of a struct) no longer collide with GR0003, and the derived helpers of the inactive one are not generated.
+- A goroutine that has not started no longer waits behind a scheduler worker blocked in a system call; another worker starts it.
+- `Type::<A>::function(..)` instantiates the type's parameters with `A` where no argument names them; the type arguments were ignored, so the call answered a type of any instantiation.
+- A one-field struct stored into a field of another struct in a JIT-compiled body stored the address of its word rather than the word.
+- A call that takes one field by value and a sibling field by `&mut` (`n.update(self.hidden, &mut self.total)`), or `&mut` two sibling fields, is accepted; GT0043 compared only the root binding and rejected disjoint fields.
+- A closure written as a field of a generic struct literal (`Cmd { run: || 42 }` for `struct Cmd<M> { run: Fn() -> M }`) builds natively; `gos build` stopped with an internal compiler error.
+- `gos add`, `gos remove`, and `gos tidy` keep every key of the manifest they rewrite (`entry`, `enforce-format`, `comptime-io`, `[[bin]]`, `[lib]`, a dependency's `module`), which they dropped, and escape quotes and backslashes, so a Windows dependency path stays readable.
+- A cohort join on the bytecode VM no longer reports a deadlock while a child its cancellation woke is still leaving a channel wait; a fail-fast cohort under load could exit 101 instead of answering its failure.
+- Building the toolchain from source with a relative `CARGO_TARGET_DIR` finds the runtime archive it builds alongside `gos`.
+
 ## 0.65.2 - Mutable windows, parallel chunks, and reference soundness
 
 - `&mut xs[lo..hi]` over a `Vec`, fixed array, or slice is a mutable window: a `&mut [T]` whose writes land in `xs`, passed to a `&mut [T]` parameter, narrowed again inside a callee, or named for a scope with `let w = &mut xs[lo..hi]`, on every tier. Its bounds clamp as a range read's do, and it cannot resize.

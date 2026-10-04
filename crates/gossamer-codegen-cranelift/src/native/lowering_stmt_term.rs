@@ -792,6 +792,30 @@ pub(super) fn local_flows_to_return(body: &Body, local: Local) -> bool {
     (local.0 as usize) < n && in_return[local.0 as usize]
 }
 
+/// Whether storing `rvalue` into the projected `place` stores a whole
+/// one-slot inline aggregate whose lowered value is the address of its word:
+/// a copy of a local or place of that aggregate type, or a construction of
+/// one.
+fn one_slot_aggregate_source(
+    tcx: &TyCtxt,
+    body: &Body,
+    place: &gossamer_mir::Place,
+    rvalue: &Rvalue,
+) -> bool {
+    let leaf = resolve_place_ty(tcx, body, place);
+    if type_slot_count(tcx, leaf) != 1 || !super::lowering_place::is_inline_aggregate(tcx, leaf) {
+        return false;
+    }
+    match rvalue {
+        Rvalue::Use(Operand::Copy(src)) => {
+            let source = resolve_place_ty(tcx, body, src);
+            super::lowering_place::is_inline_aggregate(tcx, source)
+        }
+        Rvalue::Aggregate { .. } | Rvalue::Repeat { .. } => true,
+        _ => false,
+    }
+}
+
 pub(super) fn lower_statement(
     module: &mut dyn Module,
     builder: &mut FunctionBuilder<'_>,
@@ -1138,6 +1162,19 @@ pub(super) fn lower_statement(
                     module,
                     elem_hint.or(Some(value_type(value, builder))),
                 );
+                // A whole one-slot aggregate (a one-field struct, a 1-tuple, a
+                // one-element array) is held by the address of its word, like
+                // any inline aggregate; the field it is stored into takes the
+                // word itself.
+                let value = if one_slot_aggregate_source(tcx, body, place, rvalue) {
+                    let ptr_ty = module.target_config().pointer_type();
+                    let src = coerce_arg_to(builder, value, ptr_ty).unwrap_or(value);
+                    builder
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), src, 0)
+                } else {
+                    value
+                };
                 lower_place_store(
                     module, builder, locals, body, tcx, place, value, leaf_ty, intrinsics,
                 )?;

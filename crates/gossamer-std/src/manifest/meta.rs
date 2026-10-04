@@ -104,6 +104,11 @@ pub const RUNTIME: StdModule = StdModule {
             doc: "Installs a hook invoked with the message on panic.",
         },
         StdItem {
+            name: "at_exit",
+            kind: StdItemKind::Function,
+            doc: "Runs a closure when the program ends: returning from `main`, `process::exit`, or an uncaught panic. Hooks run last registered first.",
+        },
+        StdItem {
             name: "cohort_push",
             kind: StdItemKind::Function,
             doc: "Opens a cohort on the running goroutine. Written `cohort { }` in source; the block desugars to this plus `cohort_join` and a deferred `cohort_pop`.",
@@ -359,6 +364,16 @@ pub const IMAGE: StdModule = StdModule {
             name: "set_pixel",
             kind: StdItemKind::Function,
             doc: "Sets a packed 0xRRGGBBAA pixel and reports whether it was in bounds.",
+        },
+        StdItem {
+            name: "from_rgba_bytes",
+            kind: StdItemKind::Function,
+            doc: "Builds an image from width * height RGBA8 pixels, row by row; returns zero when the byte count does not match.",
+        },
+        StdItem {
+            name: "to_rgba_bytes",
+            kind: StdItemKind::Function,
+            doc: "Returns the pixels as RGBA8 bytes, row by row; empty for an invalid handle.",
         },
         StdItem {
             name: "encode_png_base64",

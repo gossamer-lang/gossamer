@@ -735,6 +735,19 @@ struct TypeChecker<'a> {
     /// A call that hands such a closure beside a `&mut` argument aliases the
     /// referent when the closure captures its root.
     closure_captures: Vec<HashMap<Box<str>, HashSet<String>>>,
+    /// Functions declared in an `unsafe extern "C"` block, with their names.
+    foreign_fns: HashMap<DefId, String>,
+    /// Structs declared `#[repr(C)]`, which may cross the C boundary.
+    repr_c_structs: HashSet<DefId>,
+    /// Foreign types declared `type Name` in an extern block, which have no
+    /// Gossamer value and are reached only through `ffi::Ptr`.
+    opaque_types: HashSet<DefId>,
+    /// `ffi` memory operations whose pointee is checked once the enclosing
+    /// body's inference has settled: `(operation, report name, span, argument
+    /// types, result type)`.
+    pending_ffi_types: Vec<(&'static str, &'static str, gossamer_lex::Span, Vec<Ty>, Ty)>,
+    /// How many `unsafe { }` blocks enclose the expression being checked.
+    unsafe_depth: u32,
     /// Read checks paused for the current context.
     suppressed: SuppressedReadChecks,
     /// Owned local types that may only reveal a nested reference after
@@ -1216,6 +1229,11 @@ impl<'a> TypeChecker<'a> {
             shared_borrows: vec![HashMap::new()],
             reference_origins: vec![HashMap::new()],
             closure_captures: vec![HashMap::new()],
+            pending_ffi_types: Vec::new(),
+            opaque_types: HashSet::new(),
+            foreign_fns: HashMap::new(),
+            repr_c_structs: HashSet::new(),
+            unsafe_depth: 0,
             suppressed: SuppressedReadChecks::default(),
             deferred_reference_storage: Vec::new(),
             struct_fields: checker_struct_fields,
@@ -4852,6 +4870,7 @@ fn render_ast_type(ty: &gossamer_ast::Type) -> String {
 // The checker's methods, by responsibility.
 mod calls;
 mod deferred;
+mod foreign;
 mod items;
 mod methods;
 mod operators;

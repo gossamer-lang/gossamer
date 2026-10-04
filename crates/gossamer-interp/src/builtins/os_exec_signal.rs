@@ -125,9 +125,18 @@ fn builtin_os_arch(_args: &[Value]) -> RuntimeResult<Value> {
 fn builtin_os_exit(args: &[Value]) -> RuntimeResult<Value> {
     let code = i32::try_from(args.first().and_then(value_to_int).unwrap_or(0)).unwrap_or(0);
     if gossamer_runtime::platform::CAN_END_PROCESS {
+        crate::run_exit_hooks();
         std::process::exit(code);
     }
     Err(RuntimeError::Exit(code))
+}
+
+/// `runtime::at_exit(f)`: runs `f` when the program ends.
+fn builtin_runtime_at_exit(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(hook) = args.first() {
+        crate::register_exit_hook(hook.clone());
+    }
+    Ok(Value::Unit)
 }
 
 fn builtin_os_read_file(args: &[Value]) -> RuntimeResult<Value> {
@@ -617,6 +626,25 @@ fn output_value(stdout: String, stderr: String, code: i64, shape: OutputShape) -
 /// The cwd-and-environment shape of `process::run`: an empty `dir`
 /// inherits the caller's working directory, and each `env` pair
 /// overrides the inherited environment rather than replacing it.
+/// `process::run_inherit(prog, args) -> Result<i64, errors::Error>`.
+fn builtin_exec_run_inherit(args: &[Value]) -> RuntimeResult<Value> {
+    let Some(prog) = args.first().and_then(as_str) else {
+        return Ok(err_variant(
+            "process::run_inherit: program argument must be a string",
+        ));
+    };
+    let mut child_args = Vec::new();
+    if let Some(Value::Array(arr)) = args.get(1) {
+        child_args.extend(arr.iter().filter_map(as_str).map(str::to_owned));
+    }
+    Ok(
+        match gossamer_runtime::c_abi::exec::run_inherit(prog, child_args) {
+            Ok(code) => ok_variant(Value::Int(code)),
+            Err(message) => err_variant(message),
+        },
+    )
+}
+
 fn builtin_exec_run_in(args: &[Value]) -> RuntimeResult<Value> {
     exec_run_in_with(args, OutputShape::Struct)
 }
@@ -1017,51 +1045,38 @@ fn run_pipeline_stages(stages: Vec<Vec<String>>) -> Result<(String, String, i64)
 // signal::on / Notifier::wait / Notifier::try_wait
 // ---------------------------------------------------------------
 
-fn signal_notifier_table() -> &'static parking_lot::Mutex<Vec<signal_std::Notifier>> {
-    static TABLE: std::sync::OnceLock<parking_lot::Mutex<Vec<signal_std::Notifier>>> =
-        std::sync::OnceLock::new();
-    TABLE.get_or_init(|| parking_lot::Mutex::new(Vec::new()))
-}
-
-fn raw_to_signal(raw: i64) -> signal_std::Signal {
-    match raw {
-        2 => signal_std::sigs::SIGINT,
-        15 => signal_std::sigs::SIGTERM,
-        1 => signal_std::sigs::SIGHUP,
-        10 => signal_std::sigs::SIGUSR1,
-        12 => signal_std::sigs::SIGUSR2,
-        3 => signal_std::sigs::SIGQUIT,
-        _ => signal_std::Signal("SIGOTHER"),
-    }
-}
-
-/// `signal::on(sig_raw) -> i64` - registers a notifier and returns
-/// an opaque handle for use with `signal_wait` / `signal_try_wait`.
+/// `signal::on(sig_raw) -> i64` - registers a notifier for any signal number
+/// and returns an opaque handle for `signal_wait` / `signal_try_wait`. The
+/// runtime's notifier table is the one compiled code registers in, so every
+/// tier delivers the same signals.
 fn builtin_signal_on(args: &[Value]) -> RuntimeResult<Value> {
     let raw = match args.first() {
         Some(Value::Int(n)) => *n,
         _ => return Ok(Value::Int(-1)),
     };
-    let sig = raw_to_signal(raw);
-    let notifier = signal_std::on(sig);
-    let mut table = signal_notifier_table().lock();
-    let handle = i64::try_from(table.len()).unwrap_or(-1);
-    table.push(notifier);
-    Ok(Value::Int(handle))
+    let Ok(raw) = i32::try_from(raw) else {
+        return Ok(Value::Int(-1));
+    };
+    Ok(Value::Int(gossamer_runtime::c_abi::signal::gos_rt_signal_on(raw)))
 }
 
-/// `signal_wait(handle)` - blocks until the registered signal fires.
+/// `signal_wait(handle) -> bool` - blocks until the registered signal fires
+/// (`true`) or the caller's cohort is cancelled (`false`).
 fn builtin_signal_wait(args: &[Value]) -> RuntimeResult<Value> {
     let Some(Value::Int(handle)) = args.first() else {
-        return Ok(Value::Unit);
+        return Ok(Value::Bool(false));
     };
-    let table = signal_notifier_table().lock();
-    let Some(notifier) = table.get(*handle as usize) else {
-        return Ok(Value::Unit);
-    };
-    let notifier = notifier.clone();
-    drop(table);
-    notifier.wait();
+    Ok(Value::Bool(gossamer_runtime::c_abi::signal::wait_until(
+        *handle,
+        crate::stdlib_builtins::cohort::current_is_cancelled,
+    )))
+}
+
+/// `signal_stop(handle)` - the notifier delivers nothing more.
+fn builtin_signal_stop(args: &[Value]) -> RuntimeResult<Value> {
+    if let Some(Value::Int(handle)) = args.first() {
+        gossamer_runtime::c_abi::signal::gos_rt_signal_stop(*handle);
+    }
     Ok(Value::Unit)
 }
 
@@ -1070,13 +1085,9 @@ fn builtin_signal_try_wait(args: &[Value]) -> RuntimeResult<Value> {
     let Some(Value::Int(handle)) = args.first() else {
         return Ok(Value::Bool(false));
     };
-    let table = signal_notifier_table().lock();
-    let Some(notifier) = table.get(*handle as usize) else {
-        return Ok(Value::Bool(false));
-    };
-    let notifier = notifier.clone();
-    drop(table);
-    Ok(Value::Bool(notifier.try_wait()))
+    Ok(Value::Bool(
+        gossamer_runtime::c_abi::signal::gos_rt_signal_try_wait(*handle) == 1,
+    ))
 }
 
 /// `fs::read_dir(path: String) -> Result<[DirInfo], String>` - direct-children
@@ -1565,3 +1576,32 @@ mod blocking_file_tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
+
+/// `std::ffi::last_errno()`: the `errno` (on Windows, `GetLastError`) the
+/// goroutine's most recent foreign call left.
+fn builtin_ffi_last_errno(_args: &[Value]) -> RuntimeResult<Value> {
+    Ok(Value::Int(gossamer_runtime::c_abi::ffi::ffi_errno()))
+}
+
+/// `__gos_fd_wait_raw(fd, writable, timeout_ms)`: `Ok(1)` when the
+/// descriptor is ready, `Ok(0)` at the timeout.
+fn builtin_fd_wait_raw(args: &[Value]) -> RuntimeResult<Value> {
+    let int = |index: usize| match args.get(index) {
+        Some(Value::Int(n)) => *n,
+        Some(Value::Uint(n)) => *n as i64,
+        Some(Value::Bool(b)) => i64::from(*b),
+        _ => 0,
+    };
+    Ok(
+        match gossamer_runtime::c_abi::fd::wait(
+            int(0),
+            int(1) != 0,
+            int(2),
+            crate::stdlib_builtins::cohort::current_is_cancelled,
+        ) {
+            Ok(ready) => ok_variant(Value::Int(i64::from(ready))),
+            Err(message) => err_variant(message),
+        },
+    )
+}
+

@@ -1512,6 +1512,11 @@ impl<'a> Builder<'a> {
             "__gos_time_add_date_raw" => {
                 ("gos_rt_time_add_date_raw", self.result_i64_error_adt_ty())
             }
+            "__gos_fd_wait_raw" => ("gos_rt_fd_wait_raw", self.result_i64_error_adt_ty()),
+            "ffi::last_errno" | "std::ffi::last_errno" => (
+                "gos_rt_ffi_last_errno",
+                self.tcx.int_ty(gossamer_types::IntTy::I64),
+            ),
             "time::format_rfc3339" => {
                 let s = self.tcx.string_ty();
                 let substs = gossamer_types::Substs::from_types([s, s]);
@@ -2092,6 +2097,7 @@ impl<'a> Builder<'a> {
             // Bare `fn(String)` only: the hook is a raw code pointer the
             // runtime calls with the rendered message.
             "runtime::set_panic_hook" => ("gos_rt_set_panic_hook", self.tcx.unit()),
+            "runtime::at_exit" => ("gos_rt_at_exit", self.tcx.unit()),
             "runtime::arena_push" => {
                 // Locals created after this point (until the matching pop)
                 // are region-owned; the drop pass skips their release.
@@ -2158,6 +2164,14 @@ impl<'a> Builder<'a> {
             "image::height" => ("gos_rt_image_height", i64_ty),
             "image::pixel" => ("gos_rt_image_pixel", i64_ty),
             "image::set_pixel" => ("gos_rt_image_set_pixel", self.tcx.bool_ty()),
+            "image::from_rgba_bytes" => ("gos_rt_image_from_rgba_bytes", i64_ty),
+            "image::to_rgba_bytes" => {
+                let u8_ty = self.tcx.int_ty(gossamer_types::IntTy::U8);
+                (
+                    "gos_rt_image_to_rgba_bytes",
+                    self.tcx.intern(gossamer_types::TyKind::Vec(u8_ty)),
+                )
+            }
             "image::encode_png_base64" => ("gos_rt_image_encode_png_base64", self.tcx.string_ty()),
             "image::encode_jpeg_base64" => {
                 ("gos_rt_image_encode_jpeg_base64", self.tcx.string_ty())

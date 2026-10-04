@@ -78,6 +78,7 @@ nav:
       - Interpolated strings: language/interpolated_string.md
       - Triple-quoted strings: language/triple_quoted_string.md
       - Tuples: language/tuples.md
+      - Foreign functions: language/unsafe_extern.md
   - Memory model: memory.md
   - Parallel collection adapters: parallel.md
   - Writing libraries: libraries.md
@@ -142,6 +143,7 @@ not_in_nav: |
   !/language/interpolated_string.md
   !/language/triple_quoted_string.md
   !/language/tuples.md
+  !/language/unsafe_extern.md
 
 markdown_extensions:
   - admonition

@@ -341,9 +341,17 @@ Discover signatures with `hover` / `gos doc std::<module>`. Areas:
   `get`/`at`/`as_i64`.
 - Web: `net`, `http` (client `http::get`, server `http::serve(addr,
   handler)`, `http::router`), `http::websocket`, `html`, `mime`.
+- Terminal: `term` (`is_terminal`, `size`, `enter_raw`, `read_input`,
+  `resized`; each takes an optional descriptor, e.g. `fs::File::fd()` of
+  `/dev/tty` when stdin is piped), `os::fd` (`wait_readable`), `os::signal`
+  (`on(signal::SIGWINCH)`; `n.wait()` answers false once its cohort is
+  cancelled or `n.stop()` runs), `process::run_inherit` (hand the terminal
+  to a child), `unicode::char_width` / `str_width`. Restore state with
+  `runtime::at_exit(f)`.
 - Also: `sort`, `math`, `crypto::{sha256, hmac, aead, ed25519, password,
   rand}`, `hash`, `uuid`, `jwt`, `compress`, `archive`, `metrics`, `slog`,
-  `testing`, `runtime`, `pprof`, `database::sql` (drivers via bindings).
+  `testing`, `runtime`, `pprof`, `database::sql` (drivers via bindings),
+  `ffi` (C types and strings for foreign calls).
 
 ```gossamer
 use std::http
@@ -390,8 +398,22 @@ tests/          # integration tests
 
 - Versions: `x.y.z` pins, `^x.y.z` accepts it or later. The entry file may
   hold top-level statements instead of `fn main`.
-- Native Rust only through `[rust-bindings]` crates (`gos new ID --template
-  binding`, `#[gos_module("name")]`).
+- C functions through `unsafe extern "C" { fn strlen(s: [u8]) -> usize }`
+  blocks, called inside `unsafe { }`; `type Handle` declares an opaque C
+  type, reached as `ffi::Ptr<Handle>` (`Option<Ptr<..>>` where C may answer
+  NULL). Parameters are scalars, pointers, out-parameters (`&mut i32`,
+  `&mut Option<Ptr<T>>` for `T **`), callbacks `Fn(..) -> R` filled with a
+  named `fn`, `[T]` / `&mut [T]` of scalars, and `#[repr(C)]` structs.
+  Memory through a `Ptr` is copied inside `unsafe`: `ffi::read`, `write`,
+  `read_at`, `read_bytes`, `read_cstr`, `alloc` / `free`. Callback context is
+  an `ffi::Handle::new(value)` passed as `h.as_ptr()`. `#[link(name = "z",
+  search = "dir")]`, `#[link_name = "sym"]`, and `#[cfg]` per platform;
+  `ffi::last_errno()`; `gos check --target TRIPLE` checks another platform's
+  declarations. Native code is allowed by default; `ffi = false` under
+  `[project]` refuses it, and GT0102 then lists every library and file
+  that declares one.
+- Rust crates through `[rust-bindings]` (`gos new ID --template binding`,
+  `#[gos_module("name")]`).
 - `gos run FILE [ARGS]`, `gos build [--release] [-g]`, `gos test`,
   `gos fmt`, `gos lint`, `gos doc`, `gos new/init/add/fetch/publish`,
   `gos keygen`, `gos registry serve`, `gos env`, `gos repl`

@@ -932,6 +932,8 @@ impl<'a> Lowerer<'a> {
                 }
                 .to_string());
             }
+            RawIntrinsic::Foreign => return self.lower_foreign_call(name, args, dest_local),
+            RawIntrinsic::ForeignCallback => return self.lower_foreign_callback(name, dest_local),
             RawIntrinsic::Runtime => {
                 // Generic runtime-call intrinsic: emit a regular
                 // call against the named runtime symbol. Mirrors

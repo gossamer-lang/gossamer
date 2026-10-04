@@ -1121,6 +1121,7 @@ pub(crate) const DIRECT_BYTECODE_CALL_DEPTH: usize = 128;
 pub const VM_THREAD_STACK_BYTES: usize = 16 * 1024 * 1024;
 
 mod call_dispatch;
+pub(crate) use call_dispatch::with_active_vm;
 pub(crate) mod goroutine;
 mod lifecycle;
 mod native_dispatch;
@@ -1219,7 +1220,7 @@ pub(crate) fn sequence_index(idx: &Value) -> RuntimeResult<usize> {
         .map_err(|_| RuntimeError::Arithmetic("negative index into sequence".to_string()))
 }
 
-fn index_get(base: &Value, idx: &Value) -> RuntimeResult<Value> {
+pub(crate) fn index_get(base: &Value, idx: &Value) -> RuntimeResult<Value> {
     let raw = match idx {
         Value::Int(_) | Value::Uint(_) => index_value(idx)?,
         Value::LazyIter(id) => {

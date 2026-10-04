@@ -8,6 +8,8 @@ Unicode general-category predicates, casing, normalization, and segmentation.
 
 | Item | Signature | Description |
 |---|---|---|
+| `char_width` | `fn char_width(r: char) -> i64` | Terminal columns r occupies: 2 for wide and fullwidth characters, 0 for combining marks, zero-width, and control characters, otherwise 1. |
+| `str_width` | `fn str_width(s: String) -> i64` | Terminal columns s occupies, reading emoji and variation sequences as the clusters a terminal draws. |
 | `is_letter` | `fn is_letter(rune: char) -> bool` | True if r is in general-category group L. |
 | `is_digit` | `fn is_digit(rune: char) -> bool` | True if r is a decimal digit (category Nd). |
 | `is_number` | `fn is_number(rune: char) -> bool` | True if r is any numeric (Nd\|Nl\|No). |

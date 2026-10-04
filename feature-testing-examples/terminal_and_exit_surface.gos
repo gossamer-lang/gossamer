@@ -1,0 +1,32 @@
+// Cross-tier check for the 0.66 standard library surface written over the
+// foreign-call layer and the new runtime primitives: `std::term` with no
+// terminal attached, `std::os::fd` readiness, the `std::os::signal`
+// numbers, `std::unicode` widths, the `std::image` byte bridge, and
+// `runtime::at_exit` hooks, which print after `main` returns, last
+// registered first.
+
+use std::image
+use std::os::fd
+use std::os::signal
+use std::runtime
+use std::term
+use std::unicode
+
+fn main() {
+    println(f"stdout is a terminal: {term::is_terminal(term::STDOUT)}")
+    println(f"size without a terminal fails: {term::size().is_err()}")
+    println(f"raw mode without a terminal fails: {term::enter_raw().is_err()}")
+    println(f"resized: {term::resized()}")
+    println(f"stdout writable: {fd::wait_writable(1, 0).unwrap()}")
+    println(f"SIGWINCH: {signal::SIGWINCH} SIGINT: {signal::SIGINT}")
+    println(f"widths: {unicode::char_width('a')} {unicode::char_width('中')} {unicode::str_width("日本 go")}")
+
+    let img = image::from_rgba_bytes(2, 1, #[1u8, 2, 3, 4, 5, 6, 7, 8])
+    image::set_pixel(img, 1, 0, 0x0a0b0c0d)
+    println(f"rgba: {image::to_rgba_bytes(img)} bad length: {image::from_rgba_bytes(2, 2, #[1u8])}")
+
+    let label = "first"
+    runtime::at_exit(|| println(f"exit hook {label}"))
+    runtime::at_exit(|| println("exit hook second"))
+    println("main returns")
+}

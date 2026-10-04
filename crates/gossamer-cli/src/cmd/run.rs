@@ -105,10 +105,27 @@ fn run_source_on_vm(
     // which reports the host's frames through this window.
     let r = vm.with_active_trace(|| vm.call("main", Vec::new()));
     profile_rss_stage("execution_complete");
+    // The call stack a fault reports is read before an exit hook runs on it.
+    let fault_trace = r
+        .as_ref()
+        .err()
+        .map(|_| crate::cmd::traceback::render_call_stack(&vm.call_stack_frames()));
     vm.release_jit_prelude();
     gossamer_interp::close_root_cohort();
     gossamer_interp::join_outstanding_goroutines();
     gossamer_interp::flush_runtime_stdout();
+    // A stack overflow is a fault, not a failed command: the compiled tiers
+    // raise it through the same path as a panic and exit 101, so the VM does
+    // too rather than reporting it as a non-zero command result. As there,
+    // a panic hook sees the fault before the exit hooks run.
+    let fault = r.as_ref().err().filter(|err| {
+        gossamer_interp::is_panic_error(err)
+            || gossamer_interp::is_stack_overflow(err)
+            || gossamer_interp::is_foreign_fault(err)
+    });
+    let hooked =
+        fault.is_some_and(|err| vm.invoke_panic_hook(&gossamer_interp::panic_message(err)));
+    vm.with_active_trace(gossamer_interp::run_exit_hooks);
     match r {
         Ok(val) => {
             // An entry point returning `Err(e)` - an explicit `fn main() ->
@@ -128,16 +145,14 @@ fn run_source_on_vm(
             Ok(())
         }
         Err(err) => {
-            let trace = crate::cmd::traceback::render_call_stack(&vm.call_stack_frames());
-            // A stack overflow is a fault, not a failed command: the
-            // compiled tiers raise it through the same path as a panic and
-            // exit 101, so the VM does too rather than reporting it as a
-            // non-zero command result.
-            if gossamer_interp::is_panic_error(&err) || gossamer_interp::is_stack_overflow(&err) {
+            let trace = fault_trace.unwrap_or_default();
+            if gossamer_interp::is_panic_error(&err)
+                || gossamer_interp::is_stack_overflow(&err)
+                || gossamer_interp::is_foreign_fault(&err)
+            {
                 // A user hook replaces the default report; either way a
                 // main-goroutine panic exits with the pinned code 101
                 // (Rust parity - scripts depend on it).
-                let hooked = vm.invoke_panic_hook(&gossamer_interp::panic_message(&err));
                 if !hooked {
                     // Everything the program printed belongs ahead of the
                     // report, and the report itself opens with the code, the

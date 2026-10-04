@@ -746,7 +746,7 @@ impl TypeChecker<'_> {
             ("fs::File", "write_at") => (vec![bytes, i64_ty], self.fallible(i64_ty)),
             ("fs::File", "seek") => (vec![i64_ty, i64_ty], self.fallible(i64_ty)),
             ("fs::File", "set_len") => (vec![i64_ty], self.fallible(unit)),
-            ("fs::File", "len") => (vec![], self.fallible(i64_ty)),
+            ("fs::File", "len" | "fd") => (vec![], self.fallible(i64_ty)),
             ("fs::File", "flush" | "sync_all" | "sync_data") => (vec![], self.fallible(unit)),
             ("fs::File", "try_lock_range") => {
                 (vec![i64_ty, i64_ty, bool_ty], self.fallible(bool_ty))
@@ -1602,8 +1602,8 @@ impl TypeChecker<'_> {
                     substs: crate::Substs::new(),
                 }))
             }
-            "wait" => Some(self.tcx.unit()),
-            "try_wait" => Some(self.tcx.bool_ty()),
+            "wait" | "try_wait" => Some(self.tcx.bool_ty()),
+            "stop" => Some(self.tcx.unit()),
             _ => None,
         }
     }
@@ -1833,6 +1833,9 @@ impl TypeChecker<'_> {
             }
             "render" | "encode" => {
                 self.reject_json_enum_arg(last, callee, args, arg_tys);
+                if let (Some(arg), Some(arg_ty)) = (args.first(), arg_tys.first()) {
+                    self.reject_native_address(*arg_ty, "outside this process", arg.span);
+                }
                 Some(self.tcx.string_ty())
             }
             "at" | "identity" | "set" => Some(self.tcx.json_value_ty()),

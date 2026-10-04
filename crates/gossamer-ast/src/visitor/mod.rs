@@ -313,6 +313,7 @@ mod tests {
             ret: None,
             where_clause: WhereClause::default(),
             body: Some(Box::new(body)),
+            extern_abi: None,
         };
         let item = Item::new(
             NodeId::DUMMY,

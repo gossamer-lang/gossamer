@@ -511,6 +511,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
@@ -823,6 +825,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../language/unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2359,6 +2389,16 @@
 <td><code>set_pixel</code></td>
 <td><code>fn set_pixel(image: i64, x: i64, y: i64, rgba: i64) -&gt; bool</code></td>
 <td>Sets a packed 0xRRGGBBAA pixel and reports whether it was in bounds.</td>
+</tr>
+<tr>
+<td><code>from_rgba_bytes</code></td>
+<td><code>fn from_rgba_bytes(width: i64, height: i64, bytes: [u8]) -&gt; i64</code></td>
+<td>Builds an image from width * height RGBA8 pixels, row by row; returns zero when the byte count does not match.</td>
+</tr>
+<tr>
+<td><code>to_rgba_bytes</code></td>
+<td><code>fn to_rgba_bytes(image: i64) -&gt; Vec&lt;u8&gt;</code></td>
+<td>Returns the pixels as RGBA8 bytes, row by row; empty for an invalid handle.</td>
 </tr>
 <tr>
 <td><code>encode_png_base64</code></td>

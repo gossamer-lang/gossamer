@@ -1102,14 +1102,9 @@ impl Parser<'_> {
     }
 
     fn parse_contextual_block(&mut self) -> Option<ExprKind> {
-        // `unsafe` grants nothing: there is no operation the language refuses
-        // outside it, so the keyword marked a boundary that does not exist.
-        // It stays reserved, and the block it opened is an ordinary one.
+        // An `unsafe` block is where a foreign function may be called.
         if self.at_keyword(Keyword::Unsafe) {
-            let span = self.peek_span();
             self.bump();
-            let span = self.through_trailing_space(span);
-            self.record(ParseError::UnsafeGrantsNothing, span);
             self.expect_punct(Punct::LBrace, "to open the block");
             return Some(ExprKind::Unsafe(self.parse_block_body()));
         }

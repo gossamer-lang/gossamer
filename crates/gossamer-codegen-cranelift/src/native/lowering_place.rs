@@ -533,6 +533,11 @@ pub(super) fn lower_place_read(
 
 /// Whether a place's leaf holds its words inline, so a store replaces the
 /// whole block rather than one handle-shaped word.
+/// Whether `ty` is an inline aggregate a place holds as a block of words.
+pub(super) fn is_inline_aggregate(tcx: &TyCtxt, ty: Ty) -> bool {
+    inline_aggregate_leaf(tcx, ty)
+}
+
 fn inline_aggregate_leaf(tcx: &TyCtxt, ty: Ty) -> bool {
     if is_inline_two_word_ty(tcx, ty) {
         return false;

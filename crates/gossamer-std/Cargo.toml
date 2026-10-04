@@ -91,6 +91,7 @@ mime_guess = "2"
 unicode-properties = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
 
 # Native-only dependencies. These link C (ring, bzip2, zstd), require
 # OS sockets/signals/poll/fs primitives (mio, socket2, signal-hook,

@@ -226,6 +226,25 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
                 return;
             }
         }
+        if n >= 3 && head3 == Some("ffi") {
+            let public_type = path.segments[n - 2].name.name.as_str();
+            if let Some(mangled) = match public_type {
+                "Ptr" => Some("__gos_ffi_Ptr"),
+                "Handle" => Some("__gos_ffi_Handle"),
+                _ => None,
+            } {
+                // `ffi::Handle::<T>::from_ptr` names the handle's type on the
+                // type segment, which the collapsed path keeps.
+                let mut owner = gossamer_ast::PathSegment::new(mangled);
+                owner.generics = std::mem::take(&mut path.segments[n - 2].generics);
+                let member = std::mem::replace(
+                    &mut path.segments[n - 1],
+                    gossamer_ast::PathSegment::new(""),
+                );
+                path.segments = vec![owner, member];
+                return;
+            }
+        }
         if n >= 3
             && matches!(head3, Some("csrf" | "form"))
             && collapse_http_security_path(path)
@@ -294,6 +313,14 @@ pub fn rewrite_stdlib_struct_surface(sf: &mut SourceFile) {
                 let mut seg = gossamer_ast::PathSegment::new(*mangled);
                 seg.generics = std::mem::take(&mut path.segments[0].generics);
                 path.segments = vec![seg];
+            }
+            // `Ptr::from_address(..)` after `use std::ffi::Ptr`: an associated
+            // function of an imported injected type.
+            if let ExprKind::Path(path) = &mut expr.kind
+                && path.segments.len() == 2
+                && let Some(mangled) = self.imported.get(path.segments[0].name.name.as_str())
+            {
+                path.segments[0].name.name = (*mangled).to_string();
             }
         }
 
@@ -1082,6 +1109,22 @@ pub fn inject_synthetic_uses(sf: &mut SourceFile, file: FileId) {
                 dummy_span,
                 UseTarget::Module(ModulePath::from_names(segs.iter().copied())),
             ));
+        }
+    }
+    // The `__gos_term_*` wrappers restore the terminal through
+    // `runtime::at_exit` and report `ffi::last_errno`.
+    let has_term = sf.items.iter().any(|item| {
+        matches!(&item.kind, ItemKind::Fn(decl) if decl.name.name.starts_with("__gos_term_"))
+    });
+    if has_term {
+        for segs in [&["std", "runtime"][..], &["std", "ffi"][..]] {
+            if !already_imports(&sf.uses, segs) {
+                sf.uses.push(UseDecl::simple(
+                    NodeId::DUMMY,
+                    dummy_span,
+                    UseTarget::Module(ModulePath::from_names(segs.iter().copied())),
+                ));
+            }
         }
     }
     // The `__gos_http_*` request/response-security wrappers compose http,

@@ -83,12 +83,23 @@ pub(crate) fn fold_diagnostic(
 /// failing there.
 fn install_level(uri: &str) {
     use gossamer_runtime::comptime_policy::{self, ComptimeIo};
-    let from_manifest = document_path(uri)
+    let from_manifest = manifest_comptime_io(uri).and_then(|text| ComptimeIo::parse(&text));
+    comptime_policy::set_level(comptime_policy::resolve(None, from_manifest));
+}
+
+/// The `project.comptime-io` of the nearest manifest above the document.
+#[cfg(not(target_arch = "wasm32"))]
+fn manifest_comptime_io(uri: &str) -> Option<String> {
+    document_path(uri)
         .and_then(|path| nearest_manifest(&path))
         .and_then(|text| gossamer_pkg::Manifest::parse(&text).ok())
-        .and_then(|manifest| manifest.project.comptime_io.clone())
-        .and_then(|text| ComptimeIo::parse(&text));
-    comptime_policy::set_level(comptime_policy::resolve(None, from_manifest));
+        .and_then(|manifest| manifest.project.comptime_io)
+}
+
+/// The browser editor has no project on disk.
+#[cfg(target_arch = "wasm32")]
+fn manifest_comptime_io(_uri: &str) -> Option<String> {
+    None
 }
 
 /// Filesystem path a `file://` document URI names.
@@ -98,6 +109,7 @@ fn document_path(uri: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Text of the nearest `project.toml` at or above `path`.
+#[cfg(not(target_arch = "wasm32"))]
 fn nearest_manifest(path: &std::path::Path) -> Option<String> {
     let mut dir = path.parent()?;
     loop {

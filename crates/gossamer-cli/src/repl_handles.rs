@@ -397,6 +397,11 @@ pub const HANDLE_SIGNATURES: &[(&str, &str, &str)] = &[
     ),
     (
         "File",
+        "fd",
+        "fn fd(self: fs::File) -> Result<i64, errors::Error>",
+    ),
+    (
+        "File",
         "flush",
         "fn flush(self: fs::File) -> Result<(), errors::Error>",
     ),

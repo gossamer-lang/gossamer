@@ -1346,6 +1346,7 @@ fn start_workers_for_blocked_syscalls(shared: &Arc<Shared>, now_micros: u64) {
             && !slot.handed_off.swap(true, Ordering::AcqRel)
         {
             added += 1;
+            release_unstarted(slot, shared);
         }
     }
     drop(workers);
@@ -1357,6 +1358,32 @@ fn start_workers_for_blocked_syscalls(shared: &Arc<Shared>, now_micros: u64) {
                 Some(n.saturating_add(added).min(cap))
             });
         crate::sched_global::scheduler().reconcile_workers();
+    }
+}
+
+/// Moves the goroutines placed on `slot` that have not started yet to the
+/// shared injector, where the worker started in its place finds them. A
+/// started goroutine stays: its stack may hold state bound to this worker's
+/// thread. Runs under the `workers` lock, as pushes to an inbox must.
+#[cfg_attr(miri, allow(dead_code))]
+fn release_unstarted(slot: &WorkerSlot, shared: &Shared) {
+    let mut kept = Vec::new();
+    loop {
+        match slot.inbox.steal() {
+            Steal::Success(mut task) => {
+                if task.started() {
+                    kept.push(task);
+                } else {
+                    task.release_placement();
+                    shared.injector.push(task);
+                }
+            }
+            Steal::Empty => break,
+            Steal::Retry => {}
+        }
+    }
+    for task in kept {
+        slot.inbox.push(task);
     }
 }
 
@@ -1609,6 +1636,16 @@ impl<T> Drop for GidStamped<T> {
 }
 
 impl<T: Task> Task for GidStamped<T> {
+    fn started(&self) -> bool {
+        self.inner.started()
+    }
+
+    fn release_placement(&mut self) {
+        if let Some(homed) = self.homed.take() {
+            homed.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
     fn step(&mut self) -> Step {
         crate::race::set_current_gid(self.gid.as_u32());
         crate::sched_global::set_current_gid(self.gid);

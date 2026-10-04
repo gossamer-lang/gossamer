@@ -52,7 +52,7 @@ pub fn parse_source_file(source: &str, file: FileId) -> (SourceFile, Vec<ParseDi
     while !parser.at_eof_public() {
         let before = parser.checkpoint_public();
         if crate::recovery::is_item_start(&parser) {
-            items.push(parser.parse_item());
+            items.extend(parser.parse_item_group());
         } else {
             // At file scope a non-item token begins a bare statement: the
             // entry file is implicitly `fn main`, so its top-level code is

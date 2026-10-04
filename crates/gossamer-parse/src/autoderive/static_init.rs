@@ -244,6 +244,7 @@ fn add_module_init_fn(
         ret: None,
         where_clause: gossamer_ast::WhereClause::default(),
         body: Some(Box::new(body)),
+        extern_abi: None,
     };
     target.push(Item {
         id: id(),

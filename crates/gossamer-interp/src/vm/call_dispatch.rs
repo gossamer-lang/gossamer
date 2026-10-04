@@ -59,11 +59,8 @@ impl Vm {
     /// that reached it. Restores the previous value, which is what keeps a
     /// nested run (a goroutine, a REPL replay) from clearing an outer one.
     pub fn with_active_trace<R>(&self, body: impl FnOnce() -> R) -> R {
-        install_trace_hook();
-        let previous = ACTIVE_VM.with(|slot| slot.replace(std::ptr::from_ref(self).cast()));
-        let out = body();
-        ACTIVE_VM.with(|slot| slot.set(previous));
-        out
+        let _active = ActiveVm::enter(self);
+        body()
     }
 
     /// A JIT frame found on the machine stack, placed in the source.
@@ -523,7 +520,7 @@ impl Vm {
     /// shape (one program per process) does not.
     fn spawn_on_pool<F>(&self, origin: GoroutineOrigin, task: F)
     where
-        F: FnOnce(&mut Vm) + Send + 'static,
+        F: FnOnce(&Vm) + Send + 'static,
     {
         // Every goroutine is published to the process-wide diagnostic
         // registry, so `pprof::goroutine_profile` and the goroutine dump
@@ -620,7 +617,10 @@ impl Vm {
                     let _confinement = comptime_root
                         .clone()
                         .map(gossamer_runtime::comptime_policy::Confined::at_root);
-                    task(vm);
+                    // The task runs as the thread's active VM, so a fault
+                    // or an exit inside compiled code reaches it.
+                    let running: &Vm = vm;
+                    running.with_active_trace(|| task(running));
                     vm.reset_after_task();
                 });
             }),
@@ -931,6 +931,36 @@ mod tests {
 thread_local! {
     /// The VM whose frames a compiled-code fault reports. Null outside a run.
     static ACTIVE_VM: std::cell::Cell<*const Vm> = const { std::cell::Cell::new(std::ptr::null()) };
+}
+
+/// Marks a VM as the one running on this thread until dropped, restoring
+/// the previous one, which is what keeps a nested run (a goroutine, a REPL
+/// replay) from clearing an outer one.
+struct ActiveVm(*const Vm);
+
+impl ActiveVm {
+    fn enter(vm: &Vm) -> Self {
+        install_trace_hook();
+        Self(ACTIVE_VM.with(|slot| slot.replace(std::ptr::from_ref(vm))))
+    }
+}
+
+impl Drop for ActiveVm {
+    fn drop(&mut self) {
+        ACTIVE_VM.with(|slot| slot.set(self.0));
+    }
+}
+
+/// Runs `body` with the VM active on this thread, or answers `None` when no
+/// VM is running here.
+pub(crate) fn with_active_vm<R>(body: impl FnOnce(&Vm) -> R) -> Option<R> {
+    let ptr = ACTIVE_VM.with(std::cell::Cell::get);
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the slot holds a borrow of a VM live for the whole of
+    // `with_active_trace`, and is cleared before that borrow ends.
+    Some(body(unsafe { &*ptr }))
 }
 
 /// Registers [`render_active_vm_trace`] with the runtime once per process.

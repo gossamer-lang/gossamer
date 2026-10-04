@@ -7,8 +7,9 @@
 //! - `#[cfg(all(a, b, …))]` - logical and.
 //! - `#[cfg(any(a, b, …))]` - logical or.
 //!
-//! The active flags and key/value pairs come from the compilation
-//! host; `test` is never considered active from `gos check` /
+//! The active flags and key/value pairs describe the build's target: the
+//! host running the toolchain, or the `--target` a cross build names
+//! ([`set_cfg_target_triple`]); `test` is never considered active from `gos check` /
 //! `gos` / `gos build` (there is no separate test build path in
 //! the toolchain today, so `#[cfg(test)]` items are dropped).
 //!
@@ -17,7 +18,7 @@
 
 #![forbid(unsafe_code)]
 
-use gossamer_ast::Attrs;
+use crate::Attrs;
 
 /// Returns `true` when every `#[cfg(…)]` on `attrs` evaluates to
 /// `true` under the current compilation target. Items that evaluate
@@ -55,17 +56,91 @@ enum CfgExpr {
     Any(Vec<CfgExpr>),
 }
 
-/// Static table of active cfg flags and key/value pairs. The
-/// compile-time `cfg!` macro in the toolchain host populates these
-/// so resolution matches the platform running `gos`.
-fn platform_flags() -> &'static [&'static str] {
-    #[cfg(unix)]
-    const ACTIVE: &[&str] = &["unix"];
-    #[cfg(windows)]
-    const ACTIVE: &[&str] = &["windows"];
-    #[cfg(not(any(unix, windows)))]
-    const ACTIVE: &[&str] = &[];
-    ACTIVE
+/// The platform `#[cfg(...)]` items are resolved for: its OS, family, and
+/// architecture, spelled as Rust's `target_os`, `target_family`, and
+/// `target_arch` values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CfgTarget {
+    os: String,
+    family: String,
+    arch: String,
+}
+
+impl CfgTarget {
+    /// The platform running the toolchain.
+    fn host() -> Self {
+        Self {
+            os: std::env::consts::OS.to_string(),
+            family: std::env::consts::FAMILY.to_string(),
+            arch: std::env::consts::ARCH.to_string(),
+        }
+    }
+
+    /// The platform a target triple names (`aarch64-unknown-linux-musl`,
+    /// `x86_64-pc-windows-msvc`, `aarch64-apple-darwin`).
+    fn from_triple(triple: &str) -> Self {
+        let mut parts = triple.split('-');
+        let arch = match parts.next().unwrap_or_default() {
+            "arm64" => "aarch64",
+            a if a.starts_with("riscv64") => "riscv64",
+            a if a.starts_with("riscv32") => "riscv32",
+            a if a.starts_with("armv7") || a.starts_with("thumbv7") => "arm",
+            a if a == "i686" || a == "i586" => "x86",
+            a => a,
+        }
+        .to_string();
+        let rest: Vec<&str> = parts.collect();
+        let os = if rest.contains(&"windows") {
+            "windows"
+        } else if rest.contains(&"darwin") || rest.contains(&"apple") || rest.contains(&"macos") {
+            "macos"
+        } else if rest.contains(&"linux") {
+            "linux"
+        } else if rest.contains(&"freebsd") {
+            "freebsd"
+        } else if rest.contains(&"wasi") || triple.starts_with("wasm") {
+            "unknown"
+        } else {
+            rest.get(1).copied().unwrap_or("unknown")
+        }
+        .to_string();
+        let family = match os.as_str() {
+            "windows" => "windows",
+            "unknown" if triple.starts_with("wasm") => "wasm",
+            _ => "unix",
+        }
+        .to_string();
+        Self { os, family, arch }
+    }
+}
+
+static CFG_TARGET: std::sync::OnceLock<CfgTarget> = std::sync::OnceLock::new();
+
+/// Resolves `#[cfg(...)]` for the target a build produces rather than the
+/// host running the toolchain, so a cross build keeps the items written for
+/// its target. Set once, before the first source is resolved; a later call
+/// has no effect.
+pub fn set_cfg_target_triple(triple: &str) {
+    let _ = CFG_TARGET.set(CfgTarget::from_triple(triple));
+}
+
+fn cfg_target() -> &'static CfgTarget {
+    CFG_TARGET.get_or_init(CfgTarget::host)
+}
+
+/// The platform the current build resolves `#[cfg]` against, as one
+/// `os/family/arch` string for keys that must change when it does.
+#[must_use]
+pub fn cfg_target_key() -> String {
+    let target = cfg_target();
+    format!("{}/{}/{}", target.os, target.family, target.arch)
+}
+
+/// The `target_family` the current build resolves `#[cfg]` against:
+/// `unix`, `windows`, or `wasm`.
+#[must_use]
+pub fn cfg_target_family() -> &'static str {
+    &cfg_target().family
 }
 
 /// `source` with every item inactive under the current cfg removed, at any
@@ -75,9 +150,7 @@ fn platform_flags() -> &'static [&'static str] {
 /// items after it reads this view: an item it would otherwise see has no
 /// resolutions, and checking it reports names and bindings as missing.
 #[must_use]
-pub fn without_inactive_items(
-    source: &gossamer_ast::SourceFile,
-) -> Option<gossamer_ast::SourceFile> {
+pub fn without_inactive_items(source: &crate::SourceFile) -> Option<crate::SourceFile> {
     if !any_inactive(&source.items) {
         return None;
     }
@@ -86,22 +159,22 @@ pub fn without_inactive_items(
     Some(stripped)
 }
 
-fn any_inactive(items: &[gossamer_ast::Item]) -> bool {
+fn any_inactive(items: &[crate::Item]) -> bool {
     items.iter().any(|item| {
         !item_is_active(&item.attrs)
             || matches!(
                 &item.kind,
-                gossamer_ast::ItemKind::Mod(decl)
-                    if matches!(&decl.body, gossamer_ast::ModBody::Inline(inner) if any_inactive(inner))
+                crate::ItemKind::Mod(decl)
+                    if matches!(&decl.body, crate::ModBody::Inline(inner) if any_inactive(inner))
             )
     })
 }
 
-fn retain_active(items: &mut Vec<gossamer_ast::Item>) {
+fn retain_active(items: &mut Vec<crate::Item>) {
     items.retain(|item| item_is_active(&item.attrs));
     for item in items {
-        if let gossamer_ast::ItemKind::Mod(decl) = &mut item.kind
-            && let gossamer_ast::ModBody::Inline(inner) = &mut decl.body
+        if let crate::ItemKind::Mod(decl) = &mut item.kind
+            && let crate::ModBody::Inline(inner) = &mut decl.body
         {
             retain_active(inner);
         }
@@ -129,7 +202,7 @@ pub fn test_cfg_enabled() -> bool {
 }
 
 fn flag_is_active(name: &str) -> bool {
-    if platform_flags().contains(&name) {
+    if matches!(name, "unix" | "windows") && cfg_target().family == name {
         return true;
     }
     if name == "test" && TEST_CFG_ENABLED.load(Ordering::Relaxed) {
@@ -139,53 +212,11 @@ fn flag_is_active(name: &str) -> bool {
 }
 
 fn active_key_value(key: &str) -> Option<&'static str> {
+    let target = cfg_target();
     match key {
-        "target_os" => {
-            #[cfg(target_os = "linux")]
-            {
-                Some("linux")
-            }
-            #[cfg(target_os = "macos")]
-            {
-                Some("macos")
-            }
-            #[cfg(target_os = "windows")]
-            {
-                Some("windows")
-            }
-            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
-            {
-                None
-            }
-        }
-        "target_family" => {
-            #[cfg(unix)]
-            {
-                Some("unix")
-            }
-            #[cfg(windows)]
-            {
-                Some("windows")
-            }
-            #[cfg(not(any(unix, windows)))]
-            {
-                None
-            }
-        }
-        "target_arch" => {
-            #[cfg(target_arch = "x86_64")]
-            {
-                Some("x86_64")
-            }
-            #[cfg(target_arch = "aarch64")]
-            {
-                Some("aarch64")
-            }
-            #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
-            {
-                None
-            }
-        }
+        "target_os" => Some(target.os.as_str()),
+        "target_family" => Some(target.family.as_str()),
+        "target_arch" => Some(target.arch.as_str()),
         _ => None,
     }
 }
@@ -323,6 +354,41 @@ impl<'src> CfgParser<'src> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn target(os: &str, family: &str, arch: &str) -> CfgTarget {
+        CfgTarget {
+            os: os.to_string(),
+            family: family.to_string(),
+            arch: arch.to_string(),
+        }
+    }
+
+    #[test]
+    fn a_cross_triple_names_its_own_platform() {
+        assert_eq!(
+            CfgTarget::from_triple("aarch64-unknown-linux-musl"),
+            target("linux", "unix", "aarch64")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("riscv64gc-unknown-linux-gnu"),
+            target("linux", "unix", "riscv64")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("x86_64-pc-windows-msvc"),
+            target("windows", "windows", "x86_64")
+        );
+        assert_eq!(
+            CfgTarget::from_triple("arm64-apple-darwin"),
+            target("macos", "unix", "aarch64")
+        );
+    }
+
+    #[test]
+    fn the_host_target_matches_the_toolchain_platform() {
+        let host = CfgTarget::host();
+        assert_eq!(host.os, std::env::consts::OS);
+        assert_eq!(host.arch, std::env::consts::ARCH);
+    }
 
     #[test]
     fn flag_matches_active_flag() {

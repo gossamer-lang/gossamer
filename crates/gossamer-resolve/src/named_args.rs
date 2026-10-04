@@ -88,7 +88,7 @@ pub fn resolve_named_arguments(
     for item in sf
         .items
         .iter()
-        .filter(|item| crate::cfg::item_is_active(&item.attrs))
+        .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
     {
         signatures.collect_item(item, resolutions);
     }
@@ -96,7 +96,7 @@ pub fn resolve_named_arguments(
     for item in sf
         .items
         .iter()
-        .filter(|item| crate::cfg::item_is_active(&item.attrs))
+        .filter(|item| gossamer_ast::cfg::item_is_active(&item.attrs))
     {
         check_defaults(item, &mut diagnostics);
     }
@@ -157,7 +157,7 @@ impl SignatureTable {
                 if let ModBody::Inline(items) = &decl.body {
                     for inner in items
                         .iter()
-                        .filter(|i| crate::cfg::item_is_active(&i.attrs))
+                        .filter(|i| gossamer_ast::cfg::item_is_active(&i.attrs))
                     {
                         self.collect_item(inner, resolutions);
                     }
@@ -225,7 +225,7 @@ impl VisitorMut for Rewrite<'_> {
     // The resolver leaves an inactive item unresolved, so its calls have no
     // callee to match a label against.
     fn visit_item(&mut self, item: &mut Item) {
-        if crate::cfg::item_is_active(&item.attrs) {
+        if gossamer_ast::cfg::item_is_active(&item.attrs) {
             walk_item_mut(self, item);
         }
     }
@@ -524,7 +524,7 @@ fn check_defaults(item: &Item, out: &mut Vec<ResolveDiagnostic>) {
             if let ModBody::Inline(items) = &decl.body {
                 for inner in items
                     .iter()
-                    .filter(|i| crate::cfg::item_is_active(&i.attrs))
+                    .filter(|i| gossamer_ast::cfg::item_is_active(&i.attrs))
                 {
                     check_defaults(inner, out);
                 }

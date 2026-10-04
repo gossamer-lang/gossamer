@@ -45,6 +45,61 @@ pub struct CheckedFrontend {
     pub tcx: TyCtxt,
 }
 
+/// The native libraries a program's active foreign declarations name.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ForeignLinks {
+    /// What `#[link(name = "..")]` names, in the order first seen, for the
+    /// native link line.
+    pub libraries: Vec<String>,
+    /// Each `#[link(search = "..")]` directory as written, with the
+    /// dependency that declares it (`None` for the program's own project),
+    /// whose root it is relative to.
+    pub search: Vec<(Option<String>, String)>,
+}
+
+/// The libraries and search directories `#[link(..)]` names on the
+/// program's active foreign function declarations.
+#[must_use]
+pub fn foreign_link_libraries(sf: &SourceFile) -> ForeignLinks {
+    fn walk(items: &[gossamer_ast::Item], dependency: Option<&str>, out: &mut ForeignLinks) {
+        for item in items {
+            if !gossamer_resolve::item_is_active(&item.attrs) {
+                continue;
+            }
+            match &item.kind {
+                gossamer_ast::ItemKind::Fn(decl) if decl.extern_abi.is_some() => {
+                    if let Some(library) = item.attrs.link_library()
+                        && !out.libraries.contains(&library)
+                    {
+                        out.libraries.push(library);
+                    }
+                    if let Some(dir) = item.attrs.link_search() {
+                        let entry = (dependency.map(str::to_string), dir);
+                        if !out.search.contains(&entry) {
+                            out.search.push(entry);
+                        }
+                    }
+                }
+                gossamer_ast::ItemKind::Mod(gossamer_ast::ModDecl {
+                    body: gossamer_ast::ModBody::Inline(inner),
+                    ..
+                }) => {
+                    let declared = item
+                        .attrs
+                        .outer
+                        .iter()
+                        .find_map(|attr| attr.string_argument("dependency"));
+                    walk(inner, declared.or(dependency), out);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut out = ForeignLinks::default();
+    walk(&sf.items, None, &mut out);
+    out
+}
+
 /// Compiles `source` into a native object file suitable for linking
 /// with `cc`. Returns `Err` only on lower-level failures (generic-ABI
 /// enforcement, cranelift module emission); the MIR lowerer itself
@@ -276,6 +331,7 @@ fn lower_to_mir_reporting_prune(
     let started = Instant::now();
     let hir = lower_source_file(&sf, &resolutions, &table, &mut tcx);
     let hir = lift_closures(hir, &mut tcx);
+    let hir = gossamer_hir::route_foreign_calls(&hir, &mut tcx).unwrap_or(hir);
     phases.hir = started.elapsed();
     let started = Instant::now();
     let mut bodies = lower_program(&hir, &mut tcx);

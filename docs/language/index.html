@@ -517,6 +517,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
 
 
@@ -829,6 +831,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2432,7 +2462,11 @@
 </tr>
 <tr>
 <td><a href="cfg/"><code>lang::cfg</code></a></td>
-<td>Conditional compilation attribute.</td>
+<td>Conditional compilation attribute, resolved for the target a build produces (<code>gos build --target</code>, <code>gos check --target</code>) rather than the host.</td>
+</tr>
+<tr>
+<td><a href="unsafe_extern/"><code>lang::unsafe_extern</code></a></td>
+<td><code>unsafe extern "C" { fn strlen(text: [u8]) -&gt; usize }</code> declares C functions, called inside <code>unsafe { }</code> (GT0097), and <code>type Name</code> declares a C type reached only as <code>ffi::Ptr&lt;Name&gt;</code> (GT0104). Parameters are scalars, <code>ffi::Ptr</code> and <code>Option&lt;ffi::Ptr&gt;</code>, out-parameters (<code>&amp;mut</code> a scalar or pointer), C function pointers written <code>Fn(..) -&gt; R</code> and filled with a named function, slices of scalars, and <code>#[repr(C)]</code> structs; results are scalars and pointers (GT0098). <code>std::ffi</code> reads and writes foreign memory by copy inside <code>unsafe</code> (GT0103), allocates from the C allocator, and holds callback context in <code>ffi::Handle</code>. Every call is foreign and unsafe whatever it does, captures <code>errno</code> for <code>ffi::last_errno()</code>, and when it blocks lets another worker start the goroutines waiting on its own; <code>#[link(name, search)]</code>, <code>#[link_name]</code>, and <code>#[cfg]</code> choose the library, symbol, and platform. A project refuses native code with <code>ffi = false</code> in <code>project.toml</code> (the default is <code>true</code>), and then a declaration in the project or a dependency is GT0102.</td>
 </tr>
 <tr>
 <td><a href="attribute/"><code>lang::attribute</code></a></td>

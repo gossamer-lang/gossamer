@@ -390,12 +390,13 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GP0016",
-        "The `extern` keyword is reserved but has no\n\
-                     source-level item form. Gossamer's FFI surface is the\n\
-                     `[rust-bindings]` section of `project.toml` plus the\n\
-                     `gossamer-binding` crate (see https://gossamer-lang.org/docs/libraries/).\n\
-                     Remove the `extern \"C\" { ... }` block or rewrite the\n\
-                     binding as a Rust crate consumed via `[rust-bindings]`.",
+        "Foreign functions are declared at module level in an\n\
+                     `unsafe extern \"C\" { fn name(params) -> ret }` block (or\n\
+                     `\"system\"`) and called inside `unsafe { }`. Any other\n\
+                     `extern` form is rejected: an extern block without `unsafe`,\n\
+                     an item in it that is not a bodyless, non-generic `fn`, an\n\
+                     exported `extern \"C\" fn` with a body, or another ABI.\n\
+                     Rust crates are still reached through `[rust-bindings]`.",
     ),
     (
         "GP0017",
@@ -564,10 +565,10 @@ pub const REGISTRY: &[(&str, &str)] = &[
     ),
     (
         "GP0046",
-        "`unsafe` was written. No operation is withheld outside an `unsafe`\n\
-            block or from a safe `fn`, so the keyword marked a boundary the\n\
-            language does not draw. It stays reserved for a future raw-FFI\n\
-            story. `--fix` drops it.",
+        "`unsafe fn`, `unsafe impl`, or `unsafe trait` was written. None of\n\
+            them withholds anything: the one operation `unsafe` permits,\n\
+            calling a function declared in an `unsafe extern \"C\"` block, is\n\
+            written inside an `unsafe { }` block. `--fix` drops the keyword.",
     ),
     (
         "GP0047",
@@ -1571,6 +1572,106 @@ pub const REGISTRY: &[(&str, &str)] = &[
             between them.",
     ),
     (
+        "GT0097",
+        "A function declared in an `unsafe extern \"C\"` block is called\n\
+            outside an `unsafe { }` block. The compiler cannot see what a\n\
+            native function does with its arguments, so the call site states\n\
+            that its author vouches for the call: `unsafe { strlen(s) }`.",
+    ),
+    (
+        "GT0098",
+        "A parameter or return type of a foreign function has no C\n\
+            representation. A parameter is a scalar (an integer up to 64 bits,\n\
+            `bool`, `f32`, `f64`), a slice `[T]` of scalars (a pointer to the\n\
+            first element, read-only), `&mut [T]` (a pointer whose writes come\n\
+            back), a `#[repr(C)]` plain-data struct (a pointer to a read-only\n\
+            C-layout copy), or `&mut` such a struct (a pointer whose writes come\n\
+            back). A return type is a scalar or `()`.",
+    ),
+    (
+        "GT0099",
+        "An effect-looking attribute (`#[pure]`, `#[readonly]`, `#[effect]`,\n\
+            `#[blocking]`, `#[nonblocking]`) is written on a foreign function.\n\
+            Every foreign call is `unsafe` and has the foreign effect, whatever\n\
+            the native function does, and the scheduler hands a worker off when\n\
+            a foreign call blocks, so no declaration says either. Drop the\n\
+            attribute.",
+    ),
+    (
+        "GT0100",
+        "A function declared in an `unsafe extern \"C\"` block is named as a\n\
+            value: stored, passed, or returned rather than called. A foreign\n\
+            function has no Gossamer body to point at; wrap the call in a\n\
+            Gossamer function and pass that instead.",
+    ),
+    (
+        "GT0101",
+        "A function declared in an `unsafe extern \"C\"` block is active when\n\
+            building for wasm32, where no native library exists to call into.\n\
+            Gate the declaration with `#[cfg(not(target_family = \"wasm\"))]`\n\
+            and give wasm32 a Gossamer implementation.",
+    ),
+    (
+        "GT0102",
+        "A library in the build declares functions in an `unsafe extern \"C\"`\n\
+            block, and the root project's `project.toml` refuses native code\n\
+            with `ffi = false`. Each library that does - the project, or a\n\
+            dependency by its id - is reported once, with a label at every\n\
+            declaration in the file that holds it. Remove `ffi = false` from\n\
+            the root project's `[project]` table (or set it to `true`) after\n\
+            reviewing what the declarations call; a dependency's own `ffi` key\n\
+            does not count. Without the key a project allows native code, and\n\
+            the standard library's own native calls are never refused.",
+    ),
+    (
+        "GT0103",
+        "An `std::ffi` operation that touches or forges native memory -\n\
+            `ffi::read`, `read_at`, `write`, `write_at`, `alloc`, `free`,\n\
+            `read_bytes`, `read_cstr`, `write_bytes`, `to_c_bytes`,\n\
+            `fn_from_ptr`, `Ptr::from_address`, `Handle::from_ptr`, or\n\
+            building a `Ptr` or `Handle` from an integer - is outside an\n\
+            `unsafe { }` block. The compiler cannot check what the address\n\
+            points at, so the call site says it vouches for it.",
+    ),
+    (
+        "GT0104",
+        "A foreign type, declared `type Name` in an `unsafe extern` block, is\n\
+            used as a value: constructed, read or written through\n\
+            `ffi::read`, or taken or answered by value by a foreign\n\
+            function. Its layout belongs to the native library; reach it\n\
+            only as `ffi::Ptr<Name>`, or `Option<ffi::Ptr<Name>>` where the\n\
+            API allows NULL.",
+    ),
+    (
+        "GT0105",
+        "`ffi::Ptr<T>`, or an `ffi` memory operation over `T`, names a type\n\
+            with no C layout, such as `String` or `Vec<u8>`. A pointee is a\n\
+            scalar, an `ffi::Ptr`, `ffi::c_void`, a foreign type, or a\n\
+            `#[repr(C)]` struct of plain data.",
+    ),
+    (
+        "GT0106",
+        "A value holding an `ffi::Ptr` or `ffi::Handle` is the answer of a\n\
+            `comptime` block or is serialized. A native address means\n\
+            nothing after compilation or in another process. Keep the\n\
+            pointer at run time and store or send the data it points at.",
+    ),
+    (
+        "GT0107",
+        "A C function pointer parameter, written `Fn(..) -> R` in an\n\
+            `unsafe extern` block, has a parameter or result with no C form.\n\
+            A callback takes and answers scalars, `ffi::Ptr`, and\n\
+            `Option<ffi::Ptr>`.",
+    ),
+    (
+        "GT0108",
+        "The argument for a C function pointer is a closure, or a function\n\
+            whose signature differs from the declared one. Native code calls\n\
+            a callback with no environment, so it is a top-level `fn` with\n\
+            exactly the declared signature, passed by name; state it needs\n\
+            travels through its `void *` argument as an `ffi::Handle`.",
+    ),
+    (
         "GX0001",
         "An operation received a value of an incompatible type. The\n\
                      diagnostic names the type that was required and the type\n\
@@ -1659,6 +1760,28 @@ pub const REGISTRY: &[(&str, &str)] = &[
                      its own to end, so the browser playground stops the run and\n\
                      reports the status the program asked for. Native builds end the\n\
                      process and never raise this.",
+    ),
+    (
+        "GX0013",
+        "A foreign function declared to answer `ffi::Ptr` answered NULL, or\n\
+            native code stored NULL through an out-parameter declared\n\
+            `&mut Ptr`. Declare the result or out-parameter\n\
+            `Option<ffi::Ptr<..>>` when the C API can produce NULL.",
+    ),
+    (
+        "GX0014",
+        "An `ffi::Handle` was used after `release` or `take`, or a pointer\n\
+            native code handed back is not a live handle. The handle's value\n\
+            is gone, so the program stops rather than reading freed memory.",
+    ),
+    (
+        "GX0015",
+        "Native code called back into the program on a thread that is not\n\
+            running one of the program's foreign calls: a thread the library\n\
+            started, or a callback kept and run after the call that registered\n\
+            it on another thread. A callback runs only on the thread whose\n\
+            foreign call invokes it, so the program stops without running\n\
+            it.",
     ),
 ];
 

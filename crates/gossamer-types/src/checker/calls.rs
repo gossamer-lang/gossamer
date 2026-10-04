@@ -1105,6 +1105,25 @@ impl TypeChecker<'_> {
             Some(receiver) if receiver_form => self.receiver_type_args(def, *receiver),
             _ => Vec::new(),
         };
+        // `Type::<A>::function(..)` names the block's arguments on the type
+        // segment.
+        let owner_args: Vec<Option<Ty>> = match path
+            .segments
+            .len()
+            .checked_sub(2)
+            .and_then(|i| path.segments.get(i))
+        {
+            Some(owner) => owner
+                .generics
+                .clone()
+                .iter()
+                .map(|arg| match arg {
+                    gossamer_ast::GenericArg::Type(t) => Some(self.type_from_ast(t)),
+                    gossamer_ast::GenericArg::Const(_) => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         let vars: Vec<Ty> = (0..slots)
             .map(|i| {
                 if const_mask.get(i).copied().unwrap_or(false) {
@@ -1114,6 +1133,7 @@ impl TypeChecker<'_> {
                         .get(i)
                         .copied()
                         .flatten()
+                        .or_else(|| owner_args.get(i).copied().flatten())
                         .unwrap_or_else(|| self.fresh())
                 }
             })

@@ -505,6 +505,33 @@ fn note_main_wait(op: Option<&'static str>) {
 /// Threads currently suspended inside a channel wait.
 static CHANNEL_WAITERS: AtomicUsize = AtomicUsize::new(0);
 
+/// The cohort of each thread inside a channel wait, one entry per waiter.
+/// Cancelling a cohort wakes its waiters, and each leaves its wait with
+/// `None`; until it runs it is still counted among the waiters, so a waiter
+/// whose cohort is cancelled marks a program that can still move.
+static WAITING_COHORTS: parking_lot::Mutex<Vec<i64>> = parking_lot::Mutex::new(Vec::new());
+
+/// Whether a thread inside a channel wait belongs to a cancelled cohort, and
+/// so is about to leave it.
+fn a_waiter_is_cancelled() -> bool {
+    any_cancelled(&WAITING_COHORTS.lock())
+}
+
+/// Whether any of `cohorts` is cancelled, directly or through an enclosing
+/// cohort.
+fn any_cancelled(cohorts: &[i64]) -> bool {
+    cohorts
+        .iter()
+        .any(|&id| id != 0 && crate::stdlib_builtins::cohort::chain_is_cancelled(id))
+}
+
+fn forget_waiting_cohort(id: i64) {
+    let mut waiting = WAITING_COHORTS.lock();
+    if let Some(at) = waiting.iter().position(|&entry| entry == id) {
+        waiting.swap_remove(at);
+    }
+}
+
 /// Threads currently suspended joining a cohort's children. A joiner waits
 /// on other participants just as a channel waiter does, so it counts toward
 /// the waits a deadlock needs.
@@ -559,6 +586,8 @@ fn reads_as_terminal(
 pub(crate) struct ChannelWait {
     /// Whether this wait was counted among the waits nothing can satisfy.
     stuck: bool,
+    /// The waiting thread's cohort, as recorded in [`WAITING_COHORTS`].
+    cohort: i64,
 }
 
 impl ChannelWait {
@@ -596,6 +625,8 @@ impl ChannelWait {
         // this reading again at the end and stands only on a window nothing
         // moved in.
         let epoch = PROGRESS_EPOCH.load(Ordering::Acquire);
+        let cohort = crate::stdlib_builtins::cohort::current_cohort();
+        WAITING_COHORTS.lock().push(cohort);
         let waiting = CHANNEL_WAITERS.fetch_add(1, Ordering::AcqRel)
             + 1
             + JOIN_WAITERS.load(Ordering::Acquire);
@@ -605,7 +636,9 @@ impl ChannelWait {
         // value, so waiting longer cannot change the answer.
         let main_returned = MAIN_RETURNED.load(Ordering::Acquire);
         let participants = outstanding_goroutines() + u64::from(!main_returned);
-        let stuck = reads_as_terminal(waiting as u64, participants, epoch, can_progress);
+        let stuck = reads_as_terminal(waiting as u64, participants, epoch, || {
+            a_waiter_is_cancelled() || can_progress()
+        });
         // Past `main`, the remaining goroutines are abandoned rather than
         // reported: a compiled binary exits the same way, with the same
         // status and the same output.
@@ -614,10 +647,14 @@ impl ChannelWait {
             if let Some(pool) = POOL.get() {
                 pool.notify_drain();
             }
-            return Some(Self { stuck: true });
+            return Some(Self {
+                stuck: true,
+                cohort,
+            });
         }
         if stuck {
             note_main_wait(None);
+            forget_waiting_cohort(cohort);
             CHANNEL_WAITERS.fetch_sub(1, Ordering::AcqRel);
             // A deadlock is a property of the whole program, not of the
             // goroutine that happens to notice. Ending only this goroutine
@@ -629,7 +666,10 @@ impl ChannelWait {
             }
             return None;
         }
-        Some(Self { stuck: false })
+        Some(Self {
+            stuck: false,
+            cohort,
+        })
     }
 }
 
@@ -639,6 +679,7 @@ fn report_fatal_deadlock(op: &str) -> ! {
     use std::io::Write as _;
     let op = MAIN_WAIT_OP.lock().unwrap_or(op);
     let mut err = std::io::stderr();
+    crate::run_exit_hooks();
     let _ = writeln!(
         err,
         "error[GX0005]: panic: all goroutines are asleep - deadlock! ({op} can never complete)"
@@ -671,7 +712,9 @@ impl JoinWait {
         let participants = outstanding_goroutines() + u64::from(!main_returned);
         // Past `main`, leftover goroutines are abandoned rather than reported,
         // as a compiled binary leaves them.
-        if !main_returned && reads_as_terminal(waiting as u64, participants, epoch, || false) {
+        if !main_returned
+            && reads_as_terminal(waiting as u64, participants, epoch, a_waiter_is_cancelled)
+        {
             note_main_wait(None);
             JOIN_WAITERS.fetch_sub(1, Ordering::AcqRel);
             note_progress();
@@ -695,6 +738,7 @@ impl Drop for JoinWait {
 impl Drop for ChannelWait {
     fn drop(&mut self) {
         note_main_wait(None);
+        forget_waiting_cohort(self.cohort);
         if self.stuck {
             STUCK_WAITERS.fetch_sub(1, Ordering::AcqRel);
         }
@@ -710,6 +754,14 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use std::sync::mpsc;
     use std::time::Duration;
+
+    #[test]
+    fn a_waiter_in_a_cancelled_cohort_marks_a_program_that_can_move() {
+        let open = crate::stdlib_builtins::cohort::cohort_for_test(false);
+        let cancelled = crate::stdlib_builtins::cohort::cohort_for_test(true);
+        assert!(!any_cancelled(&[0, open]));
+        assert!(any_cancelled(&[open, cancelled]));
+    }
 
     /// A deadline past every timeout these tests set, so a drain that
     /// returns did so because the work finished.

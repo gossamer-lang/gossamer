@@ -406,6 +406,18 @@ const SPECS: &[Spec] = &[
     // Running sums in counted loops, which release builds prove in range by
     // the loop's trip count, and one whose terms overflow it.
     spec("feature-testing-examples/bounded_sums.gos"),
+    // Two `#[cfg]` variants of one function declare it once per target.
+    spec("feature-testing-examples/cfg_platform_variants.gos"),
+    // `unsafe extern "C"` calls: scalars, slices, windows, arrays, errno.
+    spec("feature-testing-examples/ffi_calls.gos"),
+    // `#[repr(C)]` struct parameters copied through their C layout.
+    spec("feature-testing-examples/ffi_structs.gos"),
+    // Pointers, out-parameters, foreign memory, a C callback, and a handle,
+    // over the platform C library.
+    spec("feature-testing-examples/ffi_pointers_callbacks.gos"),
+    // `std::term`, `std::os::fd`, signal numbers, widths, the image byte
+    // bridge, and `runtime::at_exit`.
+    spec("feature-testing-examples/terminal_and_exit_surface.gos"),
     Spec {
         allow_nonzero: true,
         ..spec("feature-testing-examples/bounded_sum_overflow.gos")
@@ -1318,6 +1330,10 @@ const SPECS: &[Spec] = &[
     spec("feature-testing-examples/vec_literal_rendering.gos"),
     spec("feature-testing-examples/container_in_aggregate_rendering.gos"),
     spec("feature-testing-examples/single_slot_aggregate_elements.gos"),
+    spec("feature-testing-examples/generic_struct_callable_field.gos"),
+    spec("feature-testing-examples/signal_wait_stop_and_cancel.gos"),
+    spec("feature-testing-examples/process_run_inherit.gos"),
+    spec("feature-testing-examples/sibling_field_call_arguments.gos"),
     spec("feature-testing-examples/process_run_in.gos"),
     spec("feature-testing-examples/path_split.gos"),
     spec("feature-testing-examples/path_value.gos"),

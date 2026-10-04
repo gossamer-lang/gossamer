@@ -1,0 +1,3087 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+
+        <meta name="description" content="A fast-compiling language with Rust-flavoured syntax and automatic, pause-free memory management.">
+
+
+        <meta name="author" content="Gossamer contributors">
+
+
+        <link rel="canonical" href="https://gossamer-lang.org/docs/language/unsafe_extern/">
+
+
+        <link rel="prev" href="../tuples/">
+
+
+        <link rel="next" href="../../memory/">
+
+
+
+
+
+      <link rel="icon" href="../../img/GossamerLogo.png">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+
+
+
+        <title>Foreign functions - Gossamer</title>
+
+
+
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+
+
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+
+
+
+
+
+
+
+
+
+
+
+
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Inter:300,300i,400,400i,700,700i%7CJetBrains+Mono:400,400i,700,700i&display=fallback">
+        <style>:root{--md-text-font:"Inter";--md-code-font:"JetBrains Mono"}</style>
+
+
+
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+
+
+
+
+
+  </head>
+
+
+
+
+
+
+
+
+
+    <body dir="ltr" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="cyan">
+
+
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+
+
+        <a href="#langunsafe_extern" class="md-skip">
+          Skip to content
+        </a>
+
+    </div>
+    <div data-md-component="announce">
+
+    </div>
+
+
+
+
+
+
+<header class="md-header md-header--shadow" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="Gossamer" class="md-header__button md-logo" aria-label="Gossamer" data-md-component="logo">
+
+  <img src="../../img/GossamerLogo.png" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            Gossamer
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+
+              Foreign functions
+
+          </span>
+        </div>
+      </div>
+    </div>
+
+
+        <form class="md-header__option" data-md-component="palette">
+
+
+
+
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="cyan"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_0">
+
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+
+
+
+
+
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="cyan"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_1">
+
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+
+
+</form>
+
+
+
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+
+
+
+
+
+        <label class="md-header__button md-icon" for="__search">
+
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+
+        <div class="md-search__suggest" data-md-component="search-suggest"></div>
+
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+
+
+      <div class="md-header__source">
+        <a href="https://github.com/gossamer-lang/gossamer" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gossamer-lang/gossamer
+  </div>
+</a>
+      </div>
+
+  </nav>
+
+</header>
+
+    <div class="md-container" data-md-component="container">
+
+
+
+
+
+
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+
+
+
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+
+
+
+
+<nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="Gossamer" class="md-nav__button md-logo" aria-label="Gossamer" data-md-component="logo">
+
+  <img src="../../img/GossamerLogo.png" alt="logo">
+
+    </a>
+    Gossamer
+  </label>
+
+    <div class="md-nav__source">
+      <a href="https://github.com/gossamer-lang/gossamer" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M173.9 397.4c0 2-2.3 3.6-5.2 3.6-3.3.3-5.6-1.3-5.6-3.6 0-2 2.3-3.6 5.2-3.6 3-.3 5.6 1.3 5.6 3.6m-31.1-4.5c-.7 2 1.3 4.3 4.3 4.9 2.6 1 5.6 0 6.2-2s-1.3-4.3-4.3-5.2c-2.6-.7-5.5.3-6.2 2.3m44.2-1.7c-2.9.7-4.9 2.6-4.6 4.9.3 2 2.9 3.3 5.9 2.6 2.9-.7 4.9-2.6 4.6-4.6-.3-1.9-3-3.2-5.9-2.9M252.8 8C114.1 8 8 113.3 8 252c0 110.9 69.8 205.8 169.5 239.2 12.8 2.3 17.3-5.6 17.3-12.1 0-6.2-.3-40.4-.3-61.4 0 0-70 15-84.7-29.8 0 0-11.4-29.1-27.8-36.6 0 0-22.9-15.7 1.6-15.4 0 0 24.9 2 38.6 25.8 21.9 38.6 58.6 27.5 72.9 20.9 2.3-16 8.8-27.1 16-33.7-55.9-6.2-112.3-14.3-112.3-110.5 0-27.5 7.6-41.3 23.6-58.9-2.6-6.5-11.1-33.3 2.6-67.9 20.9-6.5 69 27 69 27 20-5.6 41.5-8.5 62.8-8.5s42.8 2.9 62.8 8.5c0 0 48.1-33.6 69-27 13.7 34.7 5.2 61.4 2.6 67.9 16 17.7 25.8 31.5 25.8 58.9 0 96.5-58.9 104.2-114.8 110.5 9.2 7.9 17 22.9 17 46.4 0 33.7-.3 75.4-.3 83.6 0 6.5 4.6 14.4 17.3 12.1C436.2 457.8 504 362.9 504 252 504 113.3 391.5 8 252.8 8M105.2 352.9c-1.3 1-1 3.3.7 5.2 1.6 1.6 3.9 2.3 5.2 1 1.3-1 1-3.3-.7-5.2-1.6-1.6-3.9-2.3-5.2-1m-10.8-8.1c-.7 1.3.3 2.9 2.3 3.9 1.6 1 3.6.7 4.3-.7.7-1.3-.3-2.9-2.3-3.9-2-.6-3.6-.3-4.3.7m32.4 35.6c-1.6 1.3-1 4.3 1.3 6.2 2.3 2.3 5.2 2.6 6.5 1 1.3-1.3.7-4.3-1.3-6.2-2.2-2.3-5.2-2.6-6.5-1m-11.4-14.7c-1.6 1-1.6 3.6 0 5.9s4.3 3.3 5.6 2.3c1.6-1.3 1.6-3.9 0-6.2-1.4-2.3-4-3.3-5.6-2"/></svg>
+  </div>
+  <div class="md-source__repository">
+    gossamer-lang/gossamer
+  </div>
+</a>
+    </div>
+
+  <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Home
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../install/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Install
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../running/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Running
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../debugging/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Debugging
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../supported_targets/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Supported targets
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../wasm/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    WebAssembly
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../syntax/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Syntax
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../collection_literals/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Collection literals
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+
+
+
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_9" checked>
+
+
+          <div class="md-nav__link md-nav__container">
+            <a href="../" class="md-nav__link ">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Language
+
+
+
+  </span>
+
+
+
+            </a>
+
+
+              <label class="md-nav__link " for="__nav_9" id="__nav_9_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+
+          </div>
+
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_9_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_9">
+            <span class="md-nav__icon md-icon"></span>
+
+
+    Language
+
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../top_level_statements/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Top-level statements
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../arena/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Arena blocks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../builtin_traits/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Built-in traits
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../cohort/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Cohorts
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../comptime/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Comptime
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../keyword_arguments/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Keyword arguments
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../opaque_nominal_alias/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Opaque nominal aliases
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../interpolated_string/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Interpolated strings
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../triple_quoted_string/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Triple-quoted strings
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../tuples/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item md-nav__item--active">
+
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+
+
+
+
+
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
+
+
+
+  </span>
+
+
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+
+      <a href="./" class="md-nav__link md-nav__link--active">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
+
+
+
+  </span>
+
+
+
+      </a>
+
+
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+
+
+
+
+
+
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+        <li class="md-nav__item">
+  <a href="#declaring-and-calling" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Declaring and calling
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#refusing-native-code" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Refusing native code
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#what-crosses" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        What crosses
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#foreign-types-and-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Foreign types and pointers
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#foreign-memory" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Foreign memory
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#callbacks" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Callbacks
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#handles" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Handles
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#function-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Function pointers
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#linking-a-library" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Linking a library
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#not-supported" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Not supported
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#errno-and-blocking" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        errno and blocking
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#rules-the-checker-enforces" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Rules the checker enforces
+
+    </span>
+  </a>
+
+</li>
+
+    </ul>
+
+</nav>
+
+    </li>
+
+
+
+
+          </ul>
+        </nav>
+
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../memory/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Memory model
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../parallel/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Parallel collection adapters
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../libraries/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Writing libraries
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../rust_bindings/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Calling Rust
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+
+
+
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_14" >
+
+
+          <div class="md-nav__link md-nav__container">
+            <a href="../../stdlib/" class="md-nav__link ">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Standard library
+
+
+
+  </span>
+
+
+
+            </a>
+
+
+              <label class="md-nav__link " for="__nav_14" id="__nav_14_label" tabindex="">
+                <span class="md-nav__icon md-icon"></span>
+              </label>
+
+          </div>
+
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_14_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_14">
+            <span class="md-nav__icon md-icon"></span>
+
+
+    Standard library
+
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../stdlib/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Overview
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../prelude/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Prelude (no imports)
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../method_support/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Methods by type
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../stdlib/collection_patterns/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Collection patterns
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../stdlib_coverage/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Coverage matrix
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+          </ul>
+        </nav>
+
+    </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+
+
+
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_15" >
+
+
+          <label class="md-nav__link" for="__nav_15" id="__nav_15_label" tabindex="">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Toolchain
+
+
+
+  </span>
+
+
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_15_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_15">
+            <span class="md-nav__icon md-icon"></span>
+
+
+    Toolchain
+
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../toolchain/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Overview
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../misc/tooling_faithful_fmt/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Formatter behavior
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../toolchain/lints/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Lints
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../toolchain/diagnostics/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Diagnostics
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../toolchain/zig/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Building with Zig
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+          </ul>
+        </nav>
+
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../examples/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Examples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+
+
+
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_17" >
+
+
+          <label class="md-nav__link" for="__nav_17" id="__nav_17_label" tabindex="">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Production
+
+
+
+  </span>
+
+
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_17_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_17">
+            <span class="md-nav__icon md-icon"></span>
+
+
+    Production
+
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../deployment/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Deployment
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../codegen_abi/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Codegen ABI
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+          </ul>
+        </nav>
+
+    </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+
+
+
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_18" >
+
+
+          <label class="md-nav__link" for="__nav_18" id="__nav_18_label" tabindex="">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Migrating
+
+
+
+  </span>
+
+
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_18_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_18">
+            <span class="md-nav__icon md-icon"></span>
+
+
+    Migrating
+
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../migration/rust/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    From Rust
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../migration/go/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    From Go
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../migration/python/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    From Python
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../migration/fsharp/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    From F#
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../migration/kotlin/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    From Kotlin
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+          </ul>
+        </nav>
+
+    </li>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item md-nav__item--section md-nav__item--nested">
+
+
+
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_19" >
+
+
+          <label class="md-nav__link" for="__nav_19" id="__nav_19_label" tabindex="">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Design notes
+
+
+
+  </span>
+
+
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_19_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_19">
+            <span class="md-nav__icon md-icon"></span>
+
+
+    Design notes
+
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/sequence_reference_safety/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Sequence and reference safety
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/diagnostics/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Diagnostics style
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/stdlib_api/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Standard library API
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/incremental/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Incremental front end
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/packages/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Package format
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/lazy_iterators/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Lazy iterators
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/tiers/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Where semantics live
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/runtime/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Runtime internals
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/jit_native_memory_ownership/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    JIT native-memory ownership
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/memory_model/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Memory model
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/goroutine_stacks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Goroutine stack model
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../design/selfhosting/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Self-hosting study
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+          </ul>
+        </nav>
+
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../compatibility/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Compatibility
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../security/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Security
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../../contributing/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Contributing
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+
+
+
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+
+
+
+
+
+
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+        <li class="md-nav__item">
+  <a href="#declaring-and-calling" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Declaring and calling
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#refusing-native-code" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Refusing native code
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#what-crosses" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        What crosses
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#foreign-types-and-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Foreign types and pointers
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#foreign-memory" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Foreign memory
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#callbacks" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Callbacks
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#handles" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Handles
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#function-pointers" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Function pointers
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#linking-a-library" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Linking a library
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#not-supported" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Not supported
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#errno-and-blocking" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        errno and blocking
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#rules-the-checker-enforces" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Rules the checker enforces
+
+    </span>
+  </a>
+
+</li>
+
+    </ul>
+
+</nav>
+                  </div>
+                </div>
+              </div>
+
+
+
+            <div class="md-content" data-md-component="content">
+
+              <article class="md-content__inner md-typeset">
+
+
+
+
+
+<h1 id="langunsafe_extern"><code>lang::unsafe_extern</code><a class="headerlink" href="#langunsafe_extern" title="Permanent link">&para;</a></h1>
+<p><code>unsafe extern "C" { fn strlen(text: [u8]) -&gt; usize }</code> declares C functions, called inside <code>unsafe { }</code> (GT0097), and <code>type Name</code> declares a C type reached only as <code>ffi::Ptr&lt;Name&gt;</code> (GT0104). Parameters are scalars, <code>ffi::Ptr</code> and <code>Option&lt;ffi::Ptr&gt;</code>, out-parameters (<code>&amp;mut</code> a scalar or pointer), C function pointers written <code>Fn(..) -&gt; R</code> and filled with a named function, slices of scalars, and <code>#[repr(C)]</code> structs; results are scalars and pointers (GT0098). <code>std::ffi</code> reads and writes foreign memory by copy inside <code>unsafe</code> (GT0103), allocates from the C allocator, and holds callback context in <code>ffi::Handle</code>. Every call is foreign and unsafe whatever it does, captures <code>errno</code> for <code>ffi::last_errno()</code>, and when it blocks lets another worker start the goroutines waiting on its own; <code>#[link(name, search)]</code>, <code>#[link_name]</code>, and <code>#[cfg]</code> choose the library, symbol, and platform. A project refuses native code with <code>ffi = false</code> in <code>project.toml</code> (the default is <code>true</code>), and then a declaration in the project or a dependency is GT0102.</p>
+<!-- hand-maintained from here: preserved by `gos doc --emit-stdlib` -->
+
+<h2 id="declaring-and-calling">Declaring and calling<a class="headerlink" href="#declaring-and-calling" title="Permanent link">&para;</a></h2>
+<p>A block of <code>fn</code> declarations marked <code>unsafe extern "C"</code> names C functions the
+program calls. Each call sits in an <code>unsafe { }</code> block, which is where the
+program says it vouches for what native code does with its arguments.</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">abs</span><span class="p">(</span><span class="n">x</span>: <span class="nc">ffi</span>::<span class="n">c_int</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">strlen</span><span class="p">(</span><span class="n">text</span>: <span class="p">[</span><span class="kt">u8</span><span class="p">])</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">size_t</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="p">}</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">text</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">cstring</span><span class="p">(</span><span class="s">&quot;hello&quot;</span><span class="p">).</span><span class="n">unwrap</span><span class="p">()</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="s">f&quot;</span><span class="si">{</span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">abs</span><span class="p">(</span><span class="o">-</span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="si">}</span><span class="s"> </span><span class="si">{</span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">strlen</span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="si">}</span><span class="s">&quot;</span><span class="p">)</span><span class="w">  </span><span class="c1">// 3 5</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="p">}</span>
+</code></pre></div>
+<p>The platform C library is always available, and on Windows <code>kernel32</code> too.
+Another library is named on the block:</p>
+<!-- fragment -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="cp">#[link(name = </span><span class="s">&quot;z&quot;</span><span class="cp">)]</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">zlibVersion</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="kt">usize</span>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="p">}</span>
+</code></pre></div>
+<p><code>#[link_name = "symbol"]</code> calls a C symbol under another Gossamer name, and
+<code>#[cfg(...)]</code> gives each platform its own declarations. <code>gos check --target
+aarch64-apple-darwin</code> checks the macOS ones from any host.</p>
+<h2 id="refusing-native-code">Refusing native code<a class="headerlink" href="#refusing-native-code" title="Permanent link">&para;</a></h2>
+<p>Native code runs outside everything Gossamer checks. A project allows it by
+default and can refuse it in the <code>[project]</code> table of <code>project.toml</code>:</p>
+<div class="language-toml highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">[project]</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;example.com/tool&quot;</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">version</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s2">&quot;0.1.0&quot;</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="n">ffi</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="kc">false</span>
+</code></pre></div>
+<p>With <code>ffi = false</code>, every foreign declaration the program reaches is <code>GT0102</code>,
+whether it sits in the project's own sources or in a dependency's, and
+<code>gos check</code>, <code>gos run</code>, <code>gos test</code>, and <code>gos build</code> stop. The report lists
+every library and file involved, one error per library:</p>
+<div class="language-text highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>error[GT0102]: the project `example.com/app` declares foreign functions (`abs`, `labs`), but `app/project.toml` refuses native code
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>  --&gt; src/main.gos:6:5
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>     6 |     fn abs(x: i32) -&gt; i32
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>       |     ^^^^^^^^^^^^^^^^^^^^^
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>  ::&gt; app/src/util.gos:2:5
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>     2 |     fn labs(x: i64) -&gt; i64
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>       |     ^^^^^^^^^^^^^^^^^^^^^^
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>     note: `labs` is declared here
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>error[GT0102]: the dependency `example.com/beta` declares foreign functions (`labs`, `llabs`), but `app/project.toml` refuses native code
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>  --&gt; beta/src/lib.gos:2:5
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>  ::&gt; beta/src/helpers.gos:2:5
+</code></pre></div>
+<p>The root project's manifest decides for the whole program, a dependency's own
+<code>ffi</code> key included, so a project that refuses native code cannot have a
+dependency bring it in. A file run outside any project is not governed, and
+the standard library's own declarations (<code>std::term</code>) are never refused.</p>
+<h2 id="what-crosses">What crosses<a class="headerlink" href="#what-crosses" title="Permanent link">&para;</a></h2>
+<table>
+<thead>
+<tr>
+<th>Gossamer parameter</th>
+<th>C sees</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>i8</code> .. <code>u64</code>, <code>isize</code>, <code>usize</code>, <code>bool</code>, <code>f32</code>, <code>f64</code></td>
+<td>the scalar</td>
+</tr>
+<tr>
+<td><code>ffi::Ptr&lt;T&gt;</code></td>
+<td>a non-null <code>T *</code></td>
+</tr>
+<tr>
+<td><code>Option&lt;ffi::Ptr&lt;T&gt;&gt;</code></td>
+<td>a <code>T *</code> that may be <code>NULL</code> (<code>None</code>)</td>
+</tr>
+<tr>
+<td><code>&amp;mut</code> a scalar, a <code>Ptr</code>, or an <code>Option&lt;Ptr&gt;</code></td>
+<td>an out-parameter: <code>int *</code>, <code>T **</code>, written back</td>
+</tr>
+<tr>
+<td><code>Fn(A..) -&gt; R</code></td>
+<td>a C function pointer, filled with a named function</td>
+</tr>
+<tr>
+<td><code>[T]</code> of scalars (a <code>Vec</code>, a fixed array, a window)</td>
+<td>a pointer to the first element, read-only</td>
+</tr>
+<tr>
+<td><code>&amp;mut [T]</code></td>
+<td>a pointer whose writes come back</td>
+</tr>
+<tr>
+<td>a <code>#[repr(C)]</code> struct of plain data</td>
+<td>a pointer to a read-only copy in C layout</td>
+</tr>
+<tr>
+<td><code>&amp;mut</code> such a struct</td>
+<td>a pointer whose writes come back</td>
+</tr>
+</tbody>
+</table>
+<p>A result is a scalar, <code>()</code>, <code>Ptr&lt;T&gt;</code>, or <code>Option&lt;Ptr&lt;T&gt;&gt;</code>. A <code>Ptr</code> result that
+comes back <code>NULL</code> raises GX0013, so declare <code>Option&lt;Ptr&lt;T&gt;&gt;</code> wherever the C API
+can answer <code>NULL</code>. A pointer a Gossamer argument crosses as is valid for the
+call only.</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">memset</span><span class="p">(</span><span class="n">dst</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="kt">u8</span><span class="p">],</span><span class="w"> </span><span class="n">c</span>: <span class="kt">i32</span><span class="p">,</span><span class="w"> </span><span class="n">n</span>: <span class="kt">usize</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">usize</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="p">}</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">buf</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">#[0u8; 6]</span>
+<a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">memset</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">buf</span><span class="p">[</span><span class="mi">1</span><span class="o">..</span><span class="mi">4</span><span class="p">],</span><span class="w"> </span><span class="mi">7</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">buf</span><span class="p">)</span><span class="w">  </span><span class="c1">// #[0, 7, 7, 7, 0, 0]</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="p">}</span>
+</code></pre></div>
+<p><code>std::ffi</code> names the C types for the target (<code>c_int</code>, <code>c_long</code> - 32 bits on
+Windows, 64 elsewhere - <code>size_t</code>, ...), and turns strings into C strings and
+back with <code>cstring</code> and <code>from_cstr</code>.</p>
+<h2 id="foreign-types-and-pointers">Foreign types and pointers<a class="headerlink" href="#foreign-types-and-pointers" title="Permanent link">&para;</a></h2>
+<p>A C library hands out handles whose layout it keeps to itself. Declare one with
+<code>type Name</code> inside the extern block and reach it through <code>ffi::Ptr</code>:</p>
+<!-- fragment -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>::<span class="n">Ptr</span>
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="cp">#[link(name = </span><span class="s">&quot;sqlite3&quot;</span><span class="cp">)]</span>
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="w">    </span><span class="k">type</span> <span class="nc">Sqlite3</span>
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">    </span><span class="k">type</span> <span class="nc">Stmt</span>
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">sqlite3_open</span><span class="p">(</span><span class="n">path</span>: <span class="p">[</span><span class="kt">u8</span><span class="p">],</span><span class="w"> </span><span class="n">db</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">Sqlite3</span><span class="o">&gt;&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">sqlite3_prepare_v2</span><span class="p">(</span><span class="n">db</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">Sqlite3</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">sql</span>: <span class="p">[</span><span class="kt">u8</span><span class="p">],</span><span class="w"> </span><span class="n">len</span>: <span class="nc">ffi</span>::<span class="n">c_int</span><span class="p">,</span><span class="w"> </span><span class="n">stmt</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">Stmt</span><span class="o">&gt;&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">tail</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">sqlite3_step</span><span class="p">(</span><span class="n">stmt</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">Stmt</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">sqlite3_column_text</span><span class="p">(</span><span class="n">stmt</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">Stmt</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">col</span>: <span class="nc">ffi</span>::<span class="n">c_int</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;&gt;</span>
+<a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">sqlite3_finalize</span><span class="p">(</span><span class="n">stmt</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">Stmt</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">sqlite3_close</span><span class="p">(</span><span class="n">db</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">Sqlite3</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-5-15" name="__codelineno-5-15" href="#__codelineno-5-15"></a><span class="p">}</span>
+<a id="__codelineno-5-16" name="__codelineno-5-16" href="#__codelineno-5-16"></a>
+<a id="__codelineno-5-17" name="__codelineno-5-17" href="#__codelineno-5-17"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-18" name="__codelineno-5-18" href="#__codelineno-5-18"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">opened</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">Sqlite3</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">None</span>
+<a id="__codelineno-5-19" name="__codelineno-5-19" href="#__codelineno-5-19"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sqlite3_open</span><span class="p">(</span><span class="n">ffi</span>::<span class="n">cstring</span><span class="p">(</span><span class="s">&quot;:memory:&quot;</span><span class="p">).</span><span class="n">unwrap</span><span class="p">(),</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">opened</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-20" name="__codelineno-5-20" href="#__codelineno-5-20"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">db</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">opened</span><span class="p">.</span><span class="n">unwrap</span><span class="p">()</span>
+<a id="__codelineno-5-21" name="__codelineno-5-21" href="#__codelineno-5-21"></a><span class="w">    </span><span class="n">defer</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sqlite3_close</span><span class="p">(</span><span class="n">db</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-22" name="__codelineno-5-22" href="#__codelineno-5-22"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">stmt</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">Stmt</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">None</span>
+<a id="__codelineno-5-23" name="__codelineno-5-23" href="#__codelineno-5-23"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">tail</span>: <span class="nb">Option</span><span class="o">&lt;</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="kt">u8</span><span class="o">&gt;&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="nb">None</span>
+<a id="__codelineno-5-24" name="__codelineno-5-24" href="#__codelineno-5-24"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">sql</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">cstring</span><span class="p">(</span><span class="s">&quot;select &#39;hello&#39;&quot;</span><span class="p">).</span><span class="n">unwrap</span><span class="p">()</span>
+<a id="__codelineno-5-25" name="__codelineno-5-25" href="#__codelineno-5-25"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sqlite3_prepare_v2</span><span class="p">(</span><span class="n">db</span><span class="p">,</span><span class="w"> </span><span class="n">sql</span><span class="p">,</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">stmt</span><span class="p">,</span><span class="w"> </span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">tail</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-26" name="__codelineno-5-26" href="#__codelineno-5-26"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">stmt</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">stmt</span><span class="p">.</span><span class="n">unwrap</span><span class="p">()</span>
+<a id="__codelineno-5-27" name="__codelineno-5-27" href="#__codelineno-5-27"></a><span class="w">    </span><span class="k">while</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sqlite3_step</span><span class="p">(</span><span class="n">stmt</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">==</span><span class="w"> </span><span class="mi">100</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-5-28" name="__codelineno-5-28" href="#__codelineno-5-28"></a><span class="w">        </span><span class="kd">let</span><span class="w"> </span><span class="n">text</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sqlite3_column_text</span><span class="p">(</span><span class="n">stmt</span><span class="p">,</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="p">}.</span><span class="n">unwrap</span><span class="p">()</span>
+<a id="__codelineno-5-29" name="__codelineno-5-29" href="#__codelineno-5-29"></a><span class="w">        </span><span class="n">println</span><span class="p">(</span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read_cstr</span><span class="p">(</span><span class="n">text</span><span class="p">)</span><span class="w"> </span><span class="p">}.</span><span class="n">unwrap</span><span class="p">())</span>
+<a id="__codelineno-5-30" name="__codelineno-5-30" href="#__codelineno-5-30"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-5-31" name="__codelineno-5-31" href="#__codelineno-5-31"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">sqlite3_finalize</span><span class="p">(</span><span class="n">stmt</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-5-32" name="__codelineno-5-32" href="#__codelineno-5-32"></a><span class="p">}</span>
+</code></pre></div>
+<p>A foreign type has no Gossamer value: it is never constructed, read, or passed
+by value (GT0104). <code>ffi::c_void</code> is the pointee of a <code>void *</code>, and
+<code>p.cast::&lt;U&gt;()</code> converts between pointer types.</p>
+<p>A <code>Ptr</code> is an ordinary value. It can sit in a struct field or a collection, be
+compared, and be sent through a channel to another goroutine; what native code
+allows a pointer to be used for is the library's rule to follow. Everything
+that reaches memory through it is <code>unsafe</code>.</p>
+<h2 id="foreign-memory">Foreign memory<a class="headerlink" href="#foreign-memory" title="Permanent link">&para;</a></h2>
+<p>Each of these copies, so a Gossamer value never points into memory C may free:</p>
+<table>
+<thead>
+<tr>
+<th>Operation</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>ffi::read::&lt;T&gt;(p)</code>, <code>ffi::read_at::&lt;T&gt;(p, i)</code></td>
+<td>copy a <code>T</code> (a scalar, a <code>Ptr</code>, or a <code>#[repr(C)]</code> struct) out of <code>*p</code> or <code>p[i]</code></td>
+</tr>
+<tr>
+<td><code>ffi::write(p, v)</code>, <code>ffi::write_at(p, i, v)</code></td>
+<td>copy <code>v</code> into <code>*p</code> or <code>p[i]</code></td>
+</tr>
+<tr>
+<td><code>ffi::read_bytes(p, n)</code>, <code>ffi::read_cstr(p)</code></td>
+<td>copy <code>n</code> bytes, or a NUL-terminated string, into a <code>Vec&lt;u8&gt;</code> or <code>String</code></td>
+</tr>
+<tr>
+<td><code>ffi::write_bytes(p, bytes)</code></td>
+<td>copy bytes into C memory</td>
+</tr>
+<tr>
+<td><code>ffi::alloc::&lt;T&gt;(n)</code>, <code>ffi::free(p)</code></td>
+<td>zeroed memory from, and back to, the platform C allocator</td>
+</tr>
+<tr>
+<td><code>ffi::to_c_bytes(bytes)</code></td>
+<td>a C-allocated copy, for C to keep or take over</td>
+</tr>
+<tr>
+<td><code>ffi::size_of::&lt;T&gt;()</code></td>
+<td>the C size of <code>T</code></td>
+</tr>
+</tbody>
+</table>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>::<span class="n">Ptr</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">words</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="kt">i64</span><span class="o">&gt;</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">alloc</span><span class="p">(</span><span class="mi">3</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">    </span><span class="n">defer</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">free</span><span class="p">(</span><span class="n">words</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">write_at</span><span class="p">(</span><span class="n">words</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">42</span><span class="k">i64</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">last</span>: <span class="kt">i64</span> <span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read_at</span><span class="p">(</span><span class="n">words</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">last</span><span class="p">)</span><span class="w">  </span><span class="c1">// 42</span>
+<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="p">}</span>
+</code></pre></div>
+<p>Nothing is freed automatically. Memory the library allocates goes back through
+the library's own free function; memory the program allocates and hands over
+belongs to the library from then on; memory the program allocates and keeps it
+frees with <code>ffi::free</code>. A struct the library fills (an out-struct with pointer
+fields) lives in C memory: allocate it with <code>ffi::alloc</code>, pass the <code>Ptr</code>, and
+<code>ffi::read</code> it back. A <code>Ptr</code> read out of C memory carries whatever address C
+stored, <code>NULL</code> included; <code>p.address() == 0</code> tests for it.</p>
+<h2 id="callbacks">Callbacks<a class="headerlink" href="#callbacks" title="Permanent link">&para;</a></h2>
+<p>A C function pointer parameter is written <code>Fn(A..) -&gt; R</code> with scalar and
+pointer types. Pass a top-level function of exactly that signature by name;
+state it needs travels through the library's <code>void *</code> argument as an
+<code>ffi::Handle</code>:</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>::<span class="n">Ptr</span>
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">qsort</span><span class="p">(</span><span class="n">base</span>: <span class="kp">&amp;</span><span class="nc">mut</span><span class="w"> </span><span class="p">[</span><span class="kt">i32</span><span class="p">],</span><span class="w"> </span><span class="n">count</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">size</span>: <span class="kt">usize</span><span class="p">,</span><span class="w"> </span><span class="n">compare</span>: <span class="nb">Fn</span><span class="p">(</span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="p">)</span>
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="p">}</span>
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="k">fn</span> <span class="nf">ascending</span><span class="p">(</span><span class="n">a</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">,</span><span class="w"> </span><span class="n">b</span>: <span class="nc">Ptr</span><span class="o">&lt;</span><span class="n">ffi</span>::<span class="n">c_void</span><span class="o">&gt;</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">x</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read</span><span class="p">(</span><span class="n">a</span><span class="p">.</span><span class="n">cast</span><span class="p">())</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="n">y</span>: <span class="kt">i32</span> <span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">read</span><span class="p">(</span><span class="n">b</span><span class="p">.</span><span class="n">cast</span><span class="p">())</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="o">-</span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="k">if</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="n">y</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="k">else</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="p">}</span>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-7-15" name="__codelineno-7-15" href="#__codelineno-7-15"></a><span class="w">    </span><span class="kd">let</span><span class="w"> </span><span class="k">mut</span><span class="w"> </span><span class="n">xs</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="cp">#[5i32, 1, 4]</span>
+<a id="__codelineno-7-16" name="__codelineno-7-16" href="#__codelineno-7-16"></a><span class="w">    </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">qsort</span><span class="p">(</span><span class="o">&amp;</span><span class="k">mut</span><span class="w"> </span><span class="n">xs</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">,</span><span class="w"> </span><span class="mi">4</span><span class="p">,</span><span class="w"> </span><span class="n">ascending</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-7-17" name="__codelineno-7-17" href="#__codelineno-7-17"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">xs</span><span class="p">)</span><span class="w">  </span><span class="c1">// #[1, 4, 5]</span>
+<a id="__codelineno-7-18" name="__codelineno-7-18" href="#__codelineno-7-18"></a><span class="p">}</span>
+</code></pre></div>
+<ul>
+<li>A callback runs on the thread whose foreign call invokes it: during that call
+  (<code>qsort</code>, <code>sqlite3_exec</code>), or during a later call that runs one the library
+  stored (<code>glfwPollEvents</code>, <code>gtk_main</code>, <code>DispatchMessage</code>). A callback a library
+  runs on a thread of its own ends the program with GX0015, without running.</li>
+<li>A panic inside a callback is held until the foreign call that ran it returns,
+  then raised there; it never unwinds through C frames. Meanwhile the callback
+  answers zero.</li>
+<li>A callback may allocate, call foreign functions, and block. It spawns only
+  inside a <code>cohort</code>.</li>
+<li>A closure is not a C function pointer (GT0108): C cannot keep its captures
+  alive. A handle can.</li>
+</ul>
+<h2 id="handles">Handles<a class="headerlink" href="#handles" title="Permanent link">&para;</a></h2>
+<p><code>ffi::Handle::new(value)</code> keeps a Gossamer value alive under an integer native
+code can hold:</p>
+<table>
+<thead>
+<tr>
+<th>Call</th>
+<th>Does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>h.as_ptr()</code></td>
+<td>the <code>void *</code> to hand to C</td>
+</tr>
+<tr>
+<td><code>unsafe { ffi::Handle::&lt;T&gt;::from_ptr(p) }</code></td>
+<td>the handle back, in a callback</td>
+</tr>
+<tr>
+<td><code>h.get()</code>, <code>h.set(v)</code>, <code>h.update(f)</code></td>
+<td>read, replace, or change the value (<code>f</code> takes <code>&amp;mut T</code>)</td>
+</tr>
+<tr>
+<td><code>h.take()</code>, <code>h.release()</code></td>
+<td>answer and drop it, or just drop it</td>
+</tr>
+</tbody>
+</table>
+<p>A released or unknown handle raises GX0014 rather than reading freed memory. A
+handle does not synchronize: goroutines that change one value guard it with
+<code>std::sync</code>.</p>
+<h2 id="function-pointers">Function pointers<a class="headerlink" href="#function-pointers" title="Permanent link">&para;</a></h2>
+<p>A native function a library hands back (<code>dlsym</code>, <code>GetProcAddress</code>) becomes a
+callable with its C signature:</p>
+<!-- fragment -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="kd">let</span><span class="w"> </span><span class="n">doubler</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">ffi</span>::<span class="n">fn_from_ptr</span>::<span class="o">&lt;</span><span class="nb">Fn</span><span class="p">(</span><span class="n">ffi</span>::<span class="n">c_int</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span><span class="o">&gt;</span><span class="p">(</span><span class="n">address</span><span class="p">)</span><span class="w"> </span><span class="p">}</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">println</span><span class="p">(</span><span class="n">doubler</span><span class="p">(</span><span class="mi">21</span><span class="p">))</span>
+</code></pre></div>
+<h2 id="linking-a-library">Linking a library<a class="headerlink" href="#linking-a-library" title="Permanent link">&para;</a></h2>
+<p><code>#[link(name = "z")]</code> links <code>libz</code> (on Windows <code>z.lib</code>, loading <code>z.dll</code>). A
+library vendored with the project names its directory, relative to the root of
+the package that declares it:</p>
+<!-- fragment -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="cp">#[link(name = </span><span class="s">&quot;engine&quot;</span><span class="cp">, search = </span><span class="s">&quot;native&quot;</span><span class="cp">)]</span>
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">engine_version</span><span class="p">()</span><span class="w"> </span>-&gt; <span class="nc">ffi</span>::<span class="n">c_int</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="p">}</span>
+</code></pre></div>
+<p><code>gos run</code> loads it from there, and <code>gos build</code> links it from there; a built
+program finds a shared library the way the platform does (<code>LD_LIBRARY_PATH</code>,
+<code>DYLD_LIBRARY_PATH</code>, or beside the <code>.exe</code>). On Linux, a release build of a
+program that links a library of its own links dynamically, since a static musl
+binary cannot load the platform's glibc libraries.</p>
+<h2 id="not-supported">Not supported<a class="headerlink" href="#not-supported" title="Permanent link">&para;</a></h2>
+<p>Pointer arithmetic (<code>read_at</code> and <code>write_at</code> index arrays), a separate
+<code>const T *</code> type, the address of a Gossamer value beyond one call, closures as
+C function pointers, ownership annotations, unions and bitfields (a byte-array
+field read with <code>read_at</code> models them), variadic functions (a fixed-arity C
+shim calls them), struct results by value, Gossamer code on a thread a library
+starts, and C++.</p>
+<h2 id="errno-and-blocking">errno and blocking<a class="headerlink" href="#errno-and-blocking" title="Permanent link">&para;</a></h2>
+<p>Every call captures <code>errno</code> (on Windows, <code>GetLastError</code>) before anything else
+runs, into the calling goroutine's own slot:</p>
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="k">use</span><span class="w"> </span><span class="n">std</span>::<span class="n">ffi</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="cp">#[cfg(unix)]</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">close</span><span class="p">(</span><span class="n">fd</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="p">}</span>
+<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a>
+<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="cp">#[cfg(unix)]</span>
+<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a><span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="k">unsafe</span><span class="w"> </span><span class="p">{</span><span class="w"> </span><span class="n">close</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span><span class="w"> </span><span class="p">}</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="w">        </span><span class="n">println</span><span class="p">(</span><span class="s">f&quot;errno </span><span class="si">{</span><span class="n">ffi</span>::<span class="n">last_errno</span><span class="p">()</span><span class="si">}</span><span class="s">&quot;</span><span class="p">)</span><span class="w">  </span><span class="c1">// errno 9</span>
+<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="w">    </span><span class="p">}</span>
+<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="p">}</span>
+<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a>
+<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="cp">#[cfg(windows)]</span>
+<a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{}</span>
+</code></pre></div>
+<p>A call that blocks needs no annotation. Its worker is marked as inside a system
+call, and once the call has lasted a millisecond while goroutines wait, another
+worker starts to run every goroutine that has not yet started.</p>
+<h2 id="rules-the-checker-enforces">Rules the checker enforces<a class="headerlink" href="#rules-the-checker-enforces" title="Permanent link">&para;</a></h2>
+<ul>
+<li>A call outside <code>unsafe { }</code> is <code>GT0097</code>.</li>
+<li>A type with no C form is <code>GT0098</code>.</li>
+<li>An effect claim on a declaration (<code>#[pure]</code>, <code>#[readonly]</code>, <code>#[effect]</code>,
+  <code>#[blocking]</code>, <code>#[nonblocking]</code>) is <code>GT0099</code>: every foreign call is unsafe and
+  foreign, and a parallel callback or a compile-time block may not make one.</li>
+<li>A foreign function used as a value is <code>GT0100</code>.</li>
+<li>A declaration active on wasm32 is <code>GT0101</code>.</li>
+<li>A declaration in a project whose manifest sets <code>ffi = false</code> is <code>GT0102</code>,
+  reported once per library with a label at each declaration.</li>
+<li>A memory operation, <code>Ptr::from_address</code>, or <code>Handle::from_ptr</code> outside
+  <code>unsafe { }</code> is <code>GT0103</code>.</li>
+<li>A foreign type used by value is <code>GT0104</code>.</li>
+<li>A pointee without a C layout (<code>Ptr&lt;String&gt;</code>) is <code>GT0105</code>.</li>
+<li>A <code>Ptr</code> or <code>Handle</code> in a <code>comptime</code> result or a serialized value is <code>GT0106</code>.</li>
+<li>A callback type with a parameter or result that has no C form is <code>GT0107</code>.</li>
+<li>A closure, or a function of another signature, passed as a callback is
+  <code>GT0108</code>.</li>
+<li>Any other <code>extern</code> form is <code>GP0016</code>.</li>
+</ul>
+<!-- compile_fail GT0097 -->
+<div class="language-gossamer highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="k">unsafe</span><span class="w"> </span><span class="k">extern</span><span class="w"> </span><span class="s">&quot;C&quot;</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="w">    </span><span class="k">fn</span> <span class="nf">abs</span><span class="p">(</span><span class="n">x</span>: <span class="kt">i32</span><span class="p">)</span><span class="w"> </span>-&gt; <span class="kt">i32</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="p">}</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="k">fn</span> <span class="nf">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="w">    </span><span class="n">println</span><span class="p">(</span><span class="n">abs</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">))</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="p">}</span>
+</code></pre></div>
+
+
+
+
+
+
+
+
+
+
+
+
+
+              </article>
+            </div>
+
+
+  <script>var tabs=__md_get("__tabs");if(Array.isArray(tabs))e:for(var set of document.querySelectorAll(".tabbed-set")){var labels=set.querySelector(".tabbed-labels");for(var tab of tabs)for(var label of labels.getElementsByTagName("label"))if(label.innerText.trim()===tab){var input=document.getElementById(label.htmlFor);input.checked=!0;continue e}}</script>
+
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+
+      </main>
+
+        <footer class="md-footer">
+
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+
+
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+
+</div>
+
+    </div>
+  </div>
+</footer>
+
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+
+
+
+
+
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.instant", "navigation.tracking", "navigation.top", "navigation.sections", "navigation.indexes", "toc.follow", "search.suggest", "search.highlight", "content.code.copy", "content.code.annotate", "content.tabs.link"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+
+
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+
+        <script src="../../js/repo_button.js"></script>
+
+        <script src="../../js/scroll_top.js"></script>
+
+        <script src="../../js/hljs_gossamer.js"></script>
+
+
+  </body>
+</html>

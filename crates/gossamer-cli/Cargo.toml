@@ -108,6 +108,14 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 webpki-roots = "1"
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
+# The terminal tests drive a program through a pseudo-terminal.
+# The FFI suite compiles its C fixture library with the platform compiler.
+[target.'cfg(windows)'.dev-dependencies]
+cc = "1"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
 [features]
 # Opt-in flag the integration suites consult to enable their full
 # walks. Default `cargo test` runs minimal smoke variants so the

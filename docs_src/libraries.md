@@ -38,6 +38,10 @@ version = "0.1.0"
 gossamer-version = "^v0.55.0"
 authors = ["Leslie Tungsten <ltungsten@example.com>"]
 license = "Apache-2.0"
+# Whether the program may call C through `unsafe extern "C"` declarations,
+# its own or a dependency's. Absent reads as `true`; `false` makes any
+# such declaration GT0102 (see Foreign code below).
+ffi = false
 
 [dependencies]
 # A bare version pins; `^1.2.3` accepts 1.2.3 or anything later.
@@ -268,8 +272,11 @@ use native
 fn main() { println("{}", native::shout("hello")) }
 ```
 
-This is the only FFI surface - a source-level `extern "C"` item form
-is rejected (`GP0016`) and `extern` stays reserved. [Calling
+C functions need no crate: an `unsafe extern "C"` block declares them
+directly ([Foreign functions](language/unsafe_extern.md)); a project
+refuses them with `ffi = false` under `[project]`. The switch covers
+dependencies too: a library that declares C functions fails to build
+inside a project that refuses native code (GT0102). [Calling
 Rust](rust_bindings.md) has the full instructions: the type
 vocabulary, errors, opaque handles, blocking work, wrapping a crate
 that knows nothing about Gossamer, and the tier and ABI rules.

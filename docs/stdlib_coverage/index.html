@@ -515,6 +515,8 @@
 
 
 
+
+
     <li class="md-nav__item md-nav__item--section md-nav__item--nested">
 
 
@@ -827,6 +829,34 @@
 
 
     Tuples
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../language/unsafe_extern/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Foreign functions
 
 
 
@@ -2493,11 +2523,38 @@ evidence visible.</p>
 <tr>
 <td><code>std::os::signal</code></td>
 <td>experimental</td>
-<td style="text-align: right;">5</td>
+<td style="text-align: right;">15</td>
 <td>module-only</td>
 <td>module-only</td>
 <td>module-only</td>
 <td>on(signum) + Notifier::wait/try_wait. Wired through interp builtins, MIR lower, and C ABI.</td>
+</tr>
+<tr>
+<td><code>std::os::fd</code></td>
+<td>experimental</td>
+<td style="text-align: right;">2</td>
+<td>none</td>
+<td>none</td>
+<td>none</td>
+<td>No module-level evidence record.</td>
+</tr>
+<tr>
+<td><code>std::ffi</code></td>
+<td>experimental</td>
+<td style="text-align: right;">33</td>
+<td>none</td>
+<td>none</td>
+<td>none</td>
+<td>No module-level evidence record.</td>
+</tr>
+<tr>
+<td><code>std::term</code></td>
+<td>experimental</td>
+<td style="text-align: right;">9</td>
+<td>none</td>
+<td>none</td>
+<td>none</td>
+<td>No module-level evidence record.</td>
 </tr>
 <tr>
 <td><code>std::env</code></td>
@@ -2511,7 +2568,7 @@ evidence visible.</p>
 <tr>
 <td><code>std::process</code></td>
 <td>shipped</td>
-<td style="text-align: right;">13</td>
+<td style="text-align: right;">14</td>
 <td>none</td>
 <td>none</td>
 <td>none</td>
@@ -2790,7 +2847,7 @@ evidence visible.</p>
 <tr>
 <td><code>std::image</code></td>
 <td>experimental</td>
-<td style="text-align: right;">9</td>
+<td style="text-align: right;">11</td>
 <td>none</td>
 <td>none</td>
 <td>none</td>
@@ -2799,7 +2856,7 @@ evidence visible.</p>
 <tr>
 <td><code>std::runtime</code></td>
 <td>experimental</td>
-<td style="text-align: right;">13</td>
+<td style="text-align: right;">14</td>
 <td>module-only</td>
 <td>module-only</td>
 <td>module-only</td>
@@ -2952,7 +3009,7 @@ evidence visible.</p>
 <tr>
 <td><code>std::unicode</code></td>
 <td>experimental</td>
-<td style="text-align: right;">37</td>
+<td style="text-align: right;">39</td>
 <td>none</td>
 <td>none</td>
 <td>none</td>
@@ -4572,37 +4629,235 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>std::errors::Error</code></td>
 <td>Type</td>
 <td>experimental</td>
-<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
+<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
 </tr>
 <tr>
 <td><code>std::errors::is</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
+<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
 </tr>
 <tr>
 <td><code>std::errors::join</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
+<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
 </tr>
 <tr>
 <td><code>std::errors::new</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
+<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
 </tr>
 <tr>
 <td><code>std::errors::newf</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
+<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
 </tr>
 <tr>
 <td><code>std::errors::wrap</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
+<td><code>examples/errors.gos</code>, <code>examples/file_io.gos</code>, <code>examples/grep.gos</code>, <code>examples/json_derive_test.gos</code>, <code>examples/json_structs.gos</code>, <code>examples/list_dir.gos</code>, <code>examples/structured_concurrency.gos</code>, <code>examples/testing.gos</code>, <code>examples/toml_demo.gos</code>, <code>feature-testing-examples/autoderive_int_widths.gos</code>, <code>feature-testing-examples/binary_offset_accessors.gos</code>, <code>feature-testing-examples/by_value_param_owns_its_fields.gos</code>, <code>feature-testing-examples/byte_vec_i64_model.gos</code>, <code>feature-testing-examples/callable_carrier_return.gos</code>, <code>feature-testing-examples/carrier_at_odd_slot_offset.gos</code>, <code>feature-testing-examples/carrier_combinator_payloads.gos</code>, <code>feature-testing-examples/carrier_return_tiers.gos</code>, <code>feature-testing-examples/carrier_unwrap_or_else.gos</code>, <code>feature-testing-examples/closure_payload_typing.gos</code>, <code>feature-testing-examples/cohort_basics.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_header_settings.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/combinator_sweep.gos</code>, <code>feature-testing-examples/container_element_reads.gos</code>, <code>feature-testing-examples/container_handle_reads.gos</code>, <code>feature-testing-examples/crypto_compress_kat.gos</code>, <code>feature-testing-examples/debugfmt_nested_adts.gos</code>, <code>feature-testing-examples/entry_result_err.gos</code>, <code>feature-testing-examples/entry_toplevel_err.gos</code>, <code>feature-testing-examples/error_cell_ownership.gos</code>, <code>feature-testing-examples/error_chain_inspection.gos</code>, <code>feature-testing-examples/format_spec_matrix.gos</code>, <code>feature-testing-examples/from_json_infer.gos</code>, <code>feature-testing-examples/fs_file_positional_io.gos</code>, <code>feature-testing-examples/fs_temp_file_lifecycle.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_request_cohort_arena.gos</code>, <code>feature-testing-examples/http_request_context.gos</code>, <code>feature-testing-examples/http_request_query_pairs.gos</code>, <code>feature-testing-examples/http_response_stream.gos</code>, <code>feature-testing-examples/http_server_object.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/httptest_record_and_clock.gos</code>, <code>feature-testing-examples/jit_admission_shapes.gos</code>, <code>feature-testing-examples/json_parse_jit.gos</code>, <code>feature-testing-examples/lifecycle_readiness_shutdown.gos</code>, <code>feature-testing-examples/map_in_carrier_ownership.gos</code>, <code>feature-testing-examples/method_name_collision.gos</code>, <code>feature-testing-examples/nested_struct_variant_payload.gos</code>, <code>feature-testing-examples/operator_overloads.gos</code>, <code>feature-testing-examples/option_unwrap_chain.gos</code>, <code>feature-testing-examples/p7_deref_format.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/question_mark_error_conversion.gos</code>, <code>feature-testing-examples/result_struct_payload.gos</code>, <code>feature-testing-examples/router_closure_route.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/slice_methods.gos</code>, <code>feature-testing-examples/sql_driverless.gos</code>, <code>feature-testing-examples/sql_native_driver.gos</code>, <code>feature-testing-examples/sql_native_driver_stateful.gos</code>, <code>feature-testing-examples/stdlib_env_portable.gos</code>, <code>feature-testing-examples/stdlib_errors_chain.gos</code>, <code>feature-testing-examples/stdlib_expansion.gos</code>, <code>feature-testing-examples/stdlib_fs_portable.gos</code>, <code>feature-testing-examples/stdlib_io_read_all.gos</code>, <code>feature-testing-examples/stdlib_leaf_calls_and_json_queries.gos</code>, <code>feature-testing-examples/struct_copy_followups.gos</code>, <code>feature-testing-examples/top_level_question.gos</code>, <code>feature-testing-examples/try_err_conversion.gos</code>, <code>feature-testing-examples/unwrap_or_aggregate_payload.gos</code>, <code>feature-testing-examples/winb2_parse_u64.gos</code>, <code>feature-testing-examples/winb_coll_optres.gos</code>, <code>feature-testing-examples/write_file_bytes.gos</code>, <code>feature-testing-examples/yaml_autoderive.gos</code>, <code>feature-testing-examples/yaml_parse_json_accessors.gos</code>, <code>feature-testing-examples/yaml_wide_integers.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::Handle</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::Ptr</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::alloc</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_char</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_double</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_float</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_int</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_long</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_longlong</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_schar</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_short</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_uchar</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_uint</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_ulong</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_ulonglong</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_ushort</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::c_void</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::cstring</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::fn_from_ptr</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::free</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::from_cstr</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::last_errno</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::read</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::read_at</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::read_bytes</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::read_cstr</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::size_of</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::size_t</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::ssize_t</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::to_c_bytes</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::write</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::write_at</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
+</tr>
+<tr>
+<td><code>std::ffi::write_bytes</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/ffi_calls.gos</code>, <code>feature-testing-examples/ffi_pointers_callbacks.gos</code></td>
 </tr>
 <tr>
 <td><code>std::flag::Error</code></td>
@@ -5754,55 +6009,67 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>std::image::decode_base64</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::encode_jpeg_base64</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::encode_png_base64</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::filled</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::image::from_rgba_bytes</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::height</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::new</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::pixel</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::set_pixel</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::image::to_rgba_bytes</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::image::width</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/image_pixels.gos</code></td>
+<td><code>feature-testing-examples/image_pixels.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::io::BufReader</code></td>
@@ -7272,7 +7539,7 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>std::os::arch</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/os_user_demo.gos</code>, <code>feature-testing-examples/exec_pipeline.gos</code>, <code>feature-testing-examples/exec_signal_group.gos</code>, <code>feature-testing-examples/exec_wait_timeout.gos</code>, <code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_pipe.gos</code>, <code>feature-testing-examples/stdlib_os_introspection.gos</code>, <code>feature-testing-examples/winb_sys_misc.gos</code></td>
+<td><code>examples/os_user_demo.gos</code>, <code>feature-testing-examples/exec_pipeline.gos</code>, <code>feature-testing-examples/exec_signal_group.gos</code>, <code>feature-testing-examples/exec_wait_timeout.gos</code>, <code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_pipe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/stdlib_os_introspection.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/winb_sys_misc.gos</code></td>
 </tr>
 <tr>
 <td><code>std::os::exec::Child</code></td>
@@ -7350,37 +7617,109 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>std::os::family</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/os_user_demo.gos</code>, <code>feature-testing-examples/exec_pipeline.gos</code>, <code>feature-testing-examples/exec_signal_group.gos</code>, <code>feature-testing-examples/exec_wait_timeout.gos</code>, <code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_pipe.gos</code>, <code>feature-testing-examples/stdlib_os_introspection.gos</code>, <code>feature-testing-examples/winb_sys_misc.gos</code></td>
+<td><code>examples/os_user_demo.gos</code>, <code>feature-testing-examples/exec_pipeline.gos</code>, <code>feature-testing-examples/exec_signal_group.gos</code>, <code>feature-testing-examples/exec_wait_timeout.gos</code>, <code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_pipe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/stdlib_os_introspection.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/winb_sys_misc.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::fd::wait_readable</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::fd::wait_writable</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::os::signal::Notifier</code></td>
 <td>Type</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/os_signal_subscribe.gos</code></td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGCONT</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGHUP</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGINT</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGQUIT</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGTERM</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGTSTP</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGUSR1</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGUSR2</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::SIGWINCH</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::os::signal::Signal</code></td>
 <td>Type</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/os_signal_subscribe.gos</code></td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::os::signal::on</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/os_signal_subscribe.gos</code></td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::os::signal::stop</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::os::signal::try_wait</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/os_signal_subscribe.gos</code></td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::os::signal::wait</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/os_signal_subscribe.gos</code></td>
+<td><code>feature-testing-examples/os_signal_subscribe.gos</code>, <code>feature-testing-examples/signal_wait_stop_and_cancel.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
 </tr>
 <tr>
 <td><code>std::os::user::current_gid</code></td>
@@ -7560,79 +7899,85 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>std::process::Child</code></td>
 <td>Type</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::abort</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::exit</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::id</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::kill</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::kill_group</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::pipeline_run</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::run</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::run_in</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+</tr>
+<tr>
+<td><code>std::process::run_inherit</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::signal</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::spawn</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::spawn_piped</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::process::wait_timeout</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
+<td><code>examples/grep.gos</code>, <code>feature-testing-examples/http_bare_aliases.gos</code>, <code>feature-testing-examples/http_bare_handler.gos</code>, <code>feature-testing-examples/http_client_cookie_jar.gos</code>, <code>feature-testing-examples/http_client_verbs.gos</code>, <code>feature-testing-examples/http_form_file.gos</code>, <code>feature-testing-examples/http_handler_closure_params.gos</code>, <code>feature-testing-examples/http_middleware_bearer.gos</code>, <code>feature-testing-examples/http_middleware_compose.gos</code>, <code>feature-testing-examples/http_middleware_controls.gos</code>, <code>feature-testing-examples/http_middleware_ws.gos</code>, <code>feature-testing-examples/http_next_chunk.gos</code>, <code>feature-testing-examples/http_plain_fn_handler.gos</code>, <code>feature-testing-examples/http_proxy_stream.gos</code>, <code>feature-testing-examples/http_raw_bytes.gos</code>, <code>feature-testing-examples/http_redirect_policy.gos</code>, <code>feature-testing-examples/http_request_form_auth.gos</code>, <code>feature-testing-examples/http_request_headers.gos</code>, <code>feature-testing-examples/http_request_values.gos</code>, <code>feature-testing-examples/http_response_headers.gos</code>, <code>feature-testing-examples/http_roundtrip.gos</code>, <code>feature-testing-examples/http_router_chain.gos</code>, <code>feature-testing-examples/http_router_params.gos</code>, <code>feature-testing-examples/http_router_typed_params.gos</code>, <code>feature-testing-examples/http_serve_tls_roundtrip.gos</code>, <code>feature-testing-examples/http_server_headers.gos</code>, <code>feature-testing-examples/http_static_file.gos</code>, <code>feature-testing-examples/http_static_range.gos</code>, <code>feature-testing-examples/http_status_reason.gos</code>, <code>feature-testing-examples/http_websocket_accept.gos</code>, <code>feature-testing-examples/net_read_into.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/process_run_in.gos</code>, <code>feature-testing-examples/process_run_inherit.gos</code>, <code>feature-testing-examples/process_spawn_piped.gos</code>, <code>feature-testing-examples/stdlib_alias_wiring.gos</code>, <code>feature-testing-examples/stdlib_http_middleware_stack.gos</code>, <code>feature-testing-examples/stdlib_process.gos</code>, <code>feature-testing-examples/top_level_exit_code.gos</code>, <code>feature-testing-examples/websocket_echo.gos</code></td>
 </tr>
 <tr>
 <td><code>std::regex::Pattern</code></td>
@@ -7770,79 +8115,85 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>std::runtime::arena_pop</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::arena_push</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+</tr>
+<tr>
+<td><code>std::runtime::at_exit</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::cohort_cancel</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::cohort_cancelled</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::cohort_join</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::cohort_pop</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::cohort_push</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::cohorts</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::collect_cycles</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::cycle_collection_supported</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::root</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::scheduler_stats_json</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::runtime::set_panic_hook</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
+<td><code>feature-testing-examples/arena_regions.gos</code>, <code>feature-testing-examples/cohort_cancel.gos</code>, <code>feature-testing-examples/cohort_enumeration.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/cycle_collector.gos</code>, <code>feature-testing-examples/cycle_reclaim.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/panic_hook.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/weak_into_strong_cycle.gos</code></td>
 </tr>
 <tr>
 <td><code>std::slog::Field</code></td>
@@ -8337,6 +8688,60 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>examples/concurrency.gos</code>, <code>feature-testing-examples/atomic_bool.gos</code>, <code>feature-testing-examples/bounded_channel.gos</code>, <code>feature-testing-examples/btreemap_goroutine_shared.gos</code>, <code>feature-testing-examples/chan_carrier_elements.gos</code>, <code>feature-testing-examples/chan_select_struct_payload.gos</code>, <code>feature-testing-examples/chan_struct_local_recv.gos</code>, <code>feature-testing-examples/chan_struct_owned_fields.gos</code>, <code>feature-testing-examples/chan_struct_payload.gos</code>, <code>feature-testing-examples/channel_close_drain.gos</code>, <code>feature-testing-examples/channel_fan_in.gos</code>, <code>feature-testing-examples/channel_progress_not_deadlock.gos</code>, <code>feature-testing-examples/channel_semantics_conformance.gos</code>, <code>feature-testing-examples/closure_goroutine.gos</code>, <code>feature-testing-examples/cohort_join_outcome.gos</code>, <code>feature-testing-examples/cohort_library_combinators.gos</code>, <code>feature-testing-examples/concurrency_stress_shapes.gos</code>, <code>feature-testing-examples/concurrent_atomic.gos</code>, <code>feature-testing-examples/context_aware_waits.gos</code>, <code>feature-testing-examples/context_lifecycle.gos</code>, <code>feature-testing-examples/contextual_keywords.gos</code>, <code>feature-testing-examples/cycle_shared_goroutines.gos</code>, <code>feature-testing-examples/fs_positional_io_goroutines.gos</code>, <code>feature-testing-examples/generic_channel_payload.gos</code>, <code>feature-testing-examples/go_stdlib_spawn.gos</code>, <code>feature-testing-examples/goroutine_deque_handle.gos</code>, <code>feature-testing-examples/goroutine_panic_isolation.gos</code>, <code>feature-testing-examples/goroutine_set_handle.gos</code>, <code>feature-testing-examples/goroutine_shared_map.gos</code>, <code>feature-testing-examples/http_channel_pool.gos</code>, <code>feature-testing-examples/map_channel_ownership.gos</code>, <code>feature-testing-examples/mutex_poison_recovery.gos</code>, <code>feature-testing-examples/mutex_vs_channel_counter.gos</code>, <code>feature-testing-examples/net_smtp_send.gos</code>, <code>feature-testing-examples/net_tcp_echo.gos</code>, <code>feature-testing-examples/net_tls_client.gos</code>, <code>feature-testing-examples/net_tls_client_modes.gos</code>, <code>feature-testing-examples/net_unix_echo.gos</code>, <code>feature-testing-examples/os_signal_handler.gos</code>, <code>feature-testing-examples/packed_struct_layout.gos</code>, <code>feature-testing-examples/preempt_tight_loop.gos</code>, <code>feature-testing-examples/runtime_handles_typed.gos</code>, <code>feature-testing-examples/scheduler_drain.gos</code>, <code>feature-testing-examples/select_closed_chan_ready.gos</code>, <code>feature-testing-examples/select_default_timing.gos</code>, <code>feature-testing-examples/select_multiplex.gos</code>, <code>feature-testing-examples/shared_across_goroutines.gos</code>, <code>feature-testing-examples/shared_struct_captures.gos</code>, <code>feature-testing-examples/spawn_operand_order.gos</code>, <code>feature-testing-examples/sync_extra.gos</code>, <code>feature-testing-examples/sync_handles_typed.gos</code>, <code>feature-testing-examples/sync_map_demo.gos</code>, <code>feature-testing-examples/sync_rwlock.gos</code>, <code>feature-testing-examples/tw_go_block.gos</code>, <code>feature-testing-examples/unit_main_goroutine_drain.gos</code>, <code>feature-testing-examples/waitgroup_many_waiters.gos</code></td>
 </tr>
 <tr>
+<td><code>std::term::RawMode</code></td>
+<td>Type</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::STDERR</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::STDIN</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::STDOUT</code></td>
+<td>Const</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::enter_raw</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::is_terminal</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::read_input</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::resized</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
+<td><code>std::term::size</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/terminal_and_exit_surface.gos</code></td>
+</tr>
+<tr>
 <td><code>std::testing::Runner</code></td>
 <td>Type</td>
 <td>experimental</td>
@@ -8589,226 +8994,238 @@ evidence is linked to that canonical item path yet.</p>
 <td><code>feature-testing-examples/runtime_handles_typed.gos</code>, <code>feature-testing-examples/trace_observability.gos</code></td>
 </tr>
 <tr>
+<td><code>std::unicode::char_width</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+</tr>
+<tr>
 <td><code>std::unicode::combining_class</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::fold_case</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::grapheme_count</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::graphemes</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_assigned</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_control</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_digit</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_graphic</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_letter</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_lower</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_mark</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_nfc</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_nfd</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_nfkc</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_nfkd</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_number</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_print</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_punct</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_space</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_symbol</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_title</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::is_upper</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::nfc</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::nfd</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::nfkc</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::nfkd</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::sentence_count</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::sentences</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::simple_fold</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+</tr>
+<tr>
+<td><code>std::unicode::str_width</code></td>
+<td>Function</td>
+<td>experimental</td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::to_lower</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::to_lower_str</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::to_title</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::to_upper</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::to_upper_str</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::word_bounds</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::word_count</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::unicode::words</code></td>
 <td>Function</td>
 <td>experimental</td>
-<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
+<td><code>feature-testing-examples/stdlib_unicode_norm.gos</code>, <code>feature-testing-examples/terminal_and_exit_surface.gos</code>, <code>feature-testing-examples/unicode_full.gos</code>, <code>feature-testing-examples/winb_text_unicode.gos</code></td>
 </tr>
 <tr>
 <td><code>std::utf16::decode_surrogate_pair</code></td>

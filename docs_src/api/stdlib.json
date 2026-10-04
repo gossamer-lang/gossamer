@@ -3650,6 +3650,633 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-ffi-Handle",
+      "name": "std::ffi::Handle",
+      "kind": "type",
+      "signature": null,
+      "description": "`Handle<T>`: a value handed to native code as `void *` context and read back in a callback. `Handle::new(value)`, `h.as_ptr()`, `unsafe { Handle::<T>::from_ptr(p) }`, `h.get()`, `h.set(value)`, `h.update(|v| ..)`, `h.take()`, `h.release()`; a released or unknown handle is GX0014, never a read of freed memory.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-Ptr",
+      "name": "std::ffi::Ptr",
+      "kind": "type",
+      "signature": null,
+      "description": "`Ptr<T>`: a non-null address of a `T` in memory Gossamer does not manage, as a foreign function takes or answers it; `Option<Ptr<T>>` is the nullable form. Holding, copying, comparing, storing, and sending one is safe; every access through it is `unsafe`. `p.cast::<U>()`, `p.address()`, and `unsafe { Ptr::from_address(n) }` (`None` for 0).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-alloc",
+      "name": "std::ffi::alloc",
+      "kind": "function",
+      "signature": "fn alloc<T>(count: i64) -> ffi::Ptr<T>",
+      "description": "`unsafe { alloc::<T>(count) }`: zeroed room for `count` values of `T` from the platform C allocator, freed with `free` or by a library that takes it over.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-char",
+      "name": "std::ffi::c_char",
+      "kind": "type",
+      "signature": null,
+      "description": "C `char`: `i8`, or `u8` on Linux aarch64 and riscv64.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-double",
+      "name": "std::ffi::c_double",
+      "kind": "type",
+      "signature": null,
+      "description": "C `double`: `f64`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-float",
+      "name": "std::ffi::c_float",
+      "kind": "type",
+      "signature": null,
+      "description": "C `float`: `f32`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-int",
+      "name": "std::ffi::c_int",
+      "kind": "type",
+      "signature": null,
+      "description": "C `int`: `i32`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-long",
+      "name": "std::ffi::c_long",
+      "kind": "type",
+      "signature": null,
+      "description": "C `long`: `i64`, or `i32` on Windows.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-longlong",
+      "name": "std::ffi::c_longlong",
+      "kind": "type",
+      "signature": null,
+      "description": "C `long long`: `i64`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-schar",
+      "name": "std::ffi::c_schar",
+      "kind": "type",
+      "signature": null,
+      "description": "C `signed char`: `i8`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-short",
+      "name": "std::ffi::c_short",
+      "kind": "type",
+      "signature": null,
+      "description": "C `short`: `i16`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-uchar",
+      "name": "std::ffi::c_uchar",
+      "kind": "type",
+      "signature": null,
+      "description": "C `unsigned char`: `u8`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-uint",
+      "name": "std::ffi::c_uint",
+      "kind": "type",
+      "signature": null,
+      "description": "C `unsigned int`: `u32`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-ulong",
+      "name": "std::ffi::c_ulong",
+      "kind": "type",
+      "signature": null,
+      "description": "C `unsigned long`: `u64`, or `u32` on Windows.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-ulonglong",
+      "name": "std::ffi::c_ulonglong",
+      "kind": "type",
+      "signature": null,
+      "description": "C `unsigned long long`: `u64`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-ushort",
+      "name": "std::ffi::c_ushort",
+      "kind": "type",
+      "signature": null,
+      "description": "C `unsigned short`: `u16`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-c-void",
+      "name": "std::ffi::c_void",
+      "kind": "type",
+      "signature": null,
+      "description": "C `void`, as the pointee of `Ptr<c_void>` (`void *`): an opaque type with no value of its own.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-cstring",
+      "name": "std::ffi::cstring",
+      "kind": "function",
+      "signature": "fn cstring(text: String) -> Result<Vec<u8>, errors::Error>",
+      "description": "`cstring(text) -> Result<Vec<u8>, errors::Error>`: the bytes of `text` with a terminating NUL, to pass as `[u8]`; an error when `text` holds a NUL.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-fn-from-ptr",
+      "name": "std::ffi::fn_from_ptr",
+      "kind": "function",
+      "signature": "fn fn_from_ptr<F>(p: ffi::Ptr<ffi::c_void>) -> F",
+      "description": "`unsafe { fn_from_ptr::<Fn(A..) -> R>(p) }`: a callable that calls the native function at `p` (a `dlsym` or `GetProcAddress` result) with that C signature.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-free",
+      "name": "std::ffi::free",
+      "kind": "function",
+      "signature": "fn free<T>(p: ffi::Ptr<T>)",
+      "description": "`unsafe { free(p) }`: frees memory the platform C allocator handed out (`alloc`, `to_c_bytes`, or a library's `malloc`).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-from-cstr",
+      "name": "std::ffi::from_cstr",
+      "kind": "function",
+      "signature": "fn from_cstr(bytes: [u8]) -> Result<String, errors::Error>",
+      "description": "`from_cstr(bytes) -> Result<String, errors::Error>`: the UTF-8 text before the first NUL in `bytes`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-last-errno",
+      "name": "std::ffi::last_errno",
+      "kind": "function",
+      "signature": "fn last_errno() -> i64",
+      "description": "`last_errno() -> i64`: the `errno` (on Windows, `GetLastError`) the goroutine's most recent foreign call left, captured before anything else could change it.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-read",
+      "name": "std::ffi::read",
+      "kind": "function",
+      "signature": "fn read<T>(p: ffi::Ptr<T>) -> T",
+      "description": "`unsafe { read::<T>(p) }`: a copy of the `T` at `p`, for a scalar, a `Ptr`, or a `#[repr(C)]` plain-data struct.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-read-at",
+      "name": "std::ffi::read_at",
+      "kind": "function",
+      "signature": "fn read_at<T>(p: ffi::Ptr<T>, index: i64) -> T",
+      "description": "`unsafe { read_at::<T>(p, i) }`: a copy of element `i` of the array of `T` at `p`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-read-bytes",
+      "name": "std::ffi::read_bytes",
+      "kind": "function",
+      "signature": "fn read_bytes(p: ffi::Ptr<u8>, len: i64) -> Vec<u8>",
+      "description": "`unsafe { read_bytes(p, len) }`: a `Vec<u8>` copy of the `len` bytes at `p`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-read-cstr",
+      "name": "std::ffi::read_cstr",
+      "kind": "function",
+      "signature": "fn read_cstr(p: ffi::Ptr<u8>) -> Result<String, errors::Error>",
+      "description": "`unsafe { read_cstr(p) } -> Result<String, errors::Error>`: the NUL-terminated text at `p`, copied into a `String`; an error when it is not UTF-8.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-size-of",
+      "name": "std::ffi::size_of",
+      "kind": "function",
+      "signature": "fn size_of<T>() -> i64",
+      "description": "`size_of::<T>() -> i64`: the bytes a `T` occupies in C layout.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-size-t",
+      "name": "std::ffi::size_t",
+      "kind": "type",
+      "signature": null,
+      "description": "C `size_t`: `usize`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-ssize-t",
+      "name": "std::ffi::ssize_t",
+      "kind": "type",
+      "signature": null,
+      "description": "C `ssize_t`: `isize`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-to-c-bytes",
+      "name": "std::ffi::to_c_bytes",
+      "kind": "function",
+      "signature": "fn to_c_bytes(bytes: [u8]) -> ffi::Ptr<u8>",
+      "description": "`unsafe { to_c_bytes(bytes) }`: a C-allocated copy of `bytes`, for native code to keep; free it or hand it to a library that takes it over.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-write",
+      "name": "std::ffi::write",
+      "kind": "function",
+      "signature": "fn write<T>(p: ffi::Ptr<T>, value: T)",
+      "description": "`unsafe { write(p, value) }`: stores `value` at `p`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-write-at",
+      "name": "std::ffi::write_at",
+      "kind": "function",
+      "signature": "fn write_at<T>(p: ffi::Ptr<T>, index: i64, value: T)",
+      "description": "`unsafe { write_at(p, i, value) }`: stores `value` as element `i` of the array of `T` at `p`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-ffi-write-bytes",
+      "name": "std::ffi::write_bytes",
+      "kind": "function",
+      "signature": "fn write_bytes(p: ffi::Ptr<u8>, bytes: [u8])",
+      "description": "`unsafe { write_bytes(p, bytes) }`: copies `bytes` to the memory at `p`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdffi",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-flag-Error",
       "name": "std::flag::Error",
       "kind": "type",
@@ -3958,7 +4585,7 @@
       "name": "std::fs::File",
       "kind": "type",
       "signature": null,
-      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family.",
+      "description": "Streaming file handle. Reads and writes at the handle's own cursor (read, read_to_string, write, write_bytes, seek), positionally (read_at, read_at_into, write_at), and reports size (len, set_len). Durability is sync_all / sync_data; multi-process safety is the try_lock_* / unlock family. `fd()` answers the OS descriptor (a handle on Windows) for the calls that take one, such as `std::term` on an opened `/dev/tty` or `CONIN$`.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -7355,6 +7982,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-image-from-rgba-bytes",
+      "name": "std::image::from_rgba_bytes",
+      "kind": "function",
+      "signature": "fn from_rgba_bytes(width: i64, height: i64, bytes: [u8]) -> i64",
+      "description": "Builds an image from width * height RGBA8 pixels, row by row; returns zero when the byte count does not match.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdimage",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-image-height",
       "name": "std::image::height",
       "kind": "function",
@@ -7417,6 +8063,25 @@
       "kind": "function",
       "signature": "fn set_pixel(image: i64, x: i64, y: i64, rgba: i64) -> bool",
       "description": "Sets a packed 0xRRGGBBAA pixel and reports whether it was in bounds.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdimage",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-image-to-rgba-bytes",
+      "name": "std::image::to_rgba_bytes",
+      "kind": "function",
+      "signature": "fn to_rgba_bytes(image: i64) -> Vec<u8>",
+      "description": "Returns the pixels as RGBA8 bytes, row by row; empty for an invalid handle.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -12352,11 +13017,220 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-os-fd-wait-readable",
+      "name": "std::os::fd::wait_readable",
+      "kind": "function",
+      "signature": "fn wait_readable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+      "description": "`wait_readable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` has input (or reached end of input) within `timeout_ms` milliseconds; a negative timeout waits indefinitely. False at the timeout or when the goroutine's cohort is cancelled. The goroutine parks; other goroutines keep running.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdosfd",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-fd-wait-writable",
+      "name": "std::os::fd::wait_writable",
+      "kind": "function",
+      "signature": "fn wait_writable(fd: i64, timeout_ms: i64) -> Result<bool, errors::Error>",
+      "description": "`wait_writable(fd, timeout_ms) -> Result<bool, errors::Error>`: true when `fd` accepts a write within the timeout. Windows handles always do.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdosfd",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-os-signal-Notifier",
       "name": "std::os::signal::Notifier",
       "kind": "type",
       "signature": null,
-      "description": "Returned by `on(sig)`; supports wait / try_wait.",
+      "description": "Returned by `on(sig)`; supports wait / try_wait / stop.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGCONT",
+      "name": "std::os::signal::SIGCONT",
+      "kind": "const",
+      "signature": null,
+      "description": "Continue after a stop (18 on Linux, 19 on macOS). Never delivered on Windows.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGHUP",
+      "name": "std::os::signal::SIGHUP",
+      "kind": "const",
+      "signature": null,
+      "description": "Hangup: the controlling terminal closed (1).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGINT",
+      "name": "std::os::signal::SIGINT",
+      "kind": "const",
+      "signature": null,
+      "description": "Interrupt, Ctrl-C (2).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGQUIT",
+      "name": "std::os::signal::SIGQUIT",
+      "kind": "const",
+      "signature": null,
+      "description": "Quit, Ctrl-\\ (3); also renders the goroutine dump.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGTERM",
+      "name": "std::os::signal::SIGTERM",
+      "kind": "const",
+      "signature": null,
+      "description": "Termination request (15).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGTSTP",
+      "name": "std::os::signal::SIGTSTP",
+      "kind": "const",
+      "signature": null,
+      "description": "Terminal stop, Ctrl-Z (20 on Linux, 18 on macOS). Subscribing replaces the default stop, so the program stops itself. Never delivered on Windows.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGUSR1",
+      "name": "std::os::signal::SIGUSR1",
+      "kind": "const",
+      "signature": null,
+      "description": "User signal 1 (10 on Linux, 30 on macOS).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGUSR2",
+      "name": "std::os::signal::SIGUSR2",
+      "kind": "const",
+      "signature": null,
+      "description": "User signal 2 (12 on Linux, 31 on macOS).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-os-signal-SIGWINCH",
+      "name": "std::os::signal::SIGWINCH",
+      "kind": "const",
+      "signature": null,
+      "description": "The terminal window changed size (28). Never delivered on Windows.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -12409,6 +13283,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-os-signal-stop",
+      "name": "std::os::signal::stop",
+      "kind": "function",
+      "signature": "fn stop(notifier: os::signal::Notifier) -> ()",
+      "description": "`stop()`: the notifier delivers nothing more, so its waits answer `false`; once no notifier subscribes to the signal it takes its default disposition again. Go's `signal.Stop`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdossignal",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-os-signal-try-wait",
       "name": "std::os::signal::try_wait",
       "kind": "function",
@@ -12431,8 +13324,8 @@
       "id": "std-os-signal-wait",
       "name": "std::os::signal::wait",
       "kind": "function",
-      "signature": "fn wait(notifier: os::signal::Notifier) -> ()",
-      "description": "Blocks the calling goroutine until the subscribed signal fires.",
+      "signature": "fn wait(notifier: os::signal::Notifier) -> bool",
+      "description": "`wait() -> bool`: blocks the calling goroutine until the subscribed signal fires (`true`) or its cohort is cancelled (`false`), without holding a scheduler worker. On wasm32, which delivers no signals, it answers `false` at once.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -13169,6 +14062,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-process-run-inherit",
+      "name": "std::process::run_inherit",
+      "kind": "function",
+      "signature": "fn run_inherit(program: String, args: Vec<String>) -> Result<i64, errors::Error>",
+      "description": "`run_inherit(program, args) -> Result<i64, errors::Error>`: runs the program on this process's own standard input, output, and error - a terminal included - and answers its exit code once it ends (128 plus the signal number for one a signal ended on Unix). The goroutine parks meanwhile. Go's `exec.Cmd.Run` with `os.Stdin`, `os.Stdout`, and `os.Stderr` attached.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdprocess",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-process-signal",
       "name": "std::process::signal",
       "kind": "function",
@@ -13687,6 +14599,25 @@
       "kind": "function",
       "signature": "fn arena_push() -> ()",
       "description": "Opens an arena region for bump allocation.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdruntime",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-runtime-at-exit",
+      "name": "std::runtime::at_exit",
+      "kind": "function",
+      "signature": "fn at_exit(hook: Fn() -> ()) -> ()",
+      "description": "Runs a closure when the program ends: returning from `main`, `process::exit`, or an uncaught panic. Hooks run last registered first.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",
@@ -15468,6 +16399,177 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-term-RawMode",
+      "name": "std::term::RawMode",
+      "kind": "type",
+      "signature": null,
+      "description": "Returned by `enter_raw`; `restore()` puts the terminal back. Restoration also runs when the program ends, by any path.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-STDERR",
+      "name": "std::term::STDERR",
+      "kind": "const",
+      "signature": null,
+      "description": "Standard error's descriptor (2).",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-STDIN",
+      "name": "std::term::STDIN",
+      "kind": "const",
+      "signature": null,
+      "description": "Standard input's descriptor (0), the default for `enter_raw` and `read_input`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-STDOUT",
+      "name": "std::term::STDOUT",
+      "kind": "const",
+      "signature": null,
+      "description": "Standard output's descriptor (1), the default for `size` and `resized`.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-enter-raw",
+      "name": "std::term::enter_raw",
+      "kind": "function",
+      "signature": "fn enter_raw(fd: i64 = term::STDIN) -> Result<term::RawMode, errors::Error>",
+      "description": "`enter_raw(fd = STDIN) -> Result<RawMode, errors::Error>`: input on `fd` arrives byte by byte without echo or line editing, and output is not translated; the mode is restored when the program ends.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-is-terminal",
+      "name": "std::term::is_terminal",
+      "kind": "function",
+      "signature": "fn is_terminal(fd: i64) -> bool",
+      "description": "`is_terminal(fd) -> bool`: whether the descriptor (a handle on Windows; 0, 1, and 2 name the standard streams) is a terminal.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-read-input",
+      "name": "std::term::read_input",
+      "kind": "function",
+      "signature": "fn read_input(timeout_ms: i64, fd: i64 = term::STDIN) -> Result<Vec<u8>, errors::Error>",
+      "description": "`read_input(timeout_ms, fd = STDIN) -> Result<Vec<u8>, errors::Error>`: the bytes of input available on `fd` within `timeout_ms` milliseconds (negative waits indefinitely), empty at the timeout or when the goroutine's cohort is cancelled. The goroutine parks while it waits.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-resized",
+      "name": "std::term::resized",
+      "kind": "function",
+      "signature": "fn resized(fd: i64 = term::STDOUT) -> bool",
+      "description": "`resized(fd = STDOUT) -> bool`: whether the size changed since the last call; the first call answers false.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-term-size",
+      "name": "std::term::size",
+      "kind": "function",
+      "signature": "fn size(fd: i64 = term::STDOUT) -> Result<(i64, i64), errors::Error>",
+      "description": "`size(fd = STDOUT) -> Result<(i64, i64), errors::Error>`: the terminal's columns and rows. A standard stream that is not a terminal falls back to the other two.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdterm",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-testing-Runner",
       "name": "std::testing::Runner",
       "kind": "type",
@@ -16266,6 +17368,25 @@
       "reference_status": "catalog_only"
     },
     {
+      "id": "std-unicode-char-width",
+      "name": "std::unicode::char_width",
+      "kind": "function",
+      "signature": "fn char_width(r: char) -> i64",
+      "description": "Terminal columns r occupies: 2 for wide and fullwidth characters, 0 for combining marks, zero-width, and control characters, otherwise 1.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdunicode",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
       "id": "std-unicode-combining-class",
       "name": "std::unicode::combining_class",
       "kind": "function",
@@ -16803,6 +17924,25 @@
       "kind": "function",
       "signature": "fn simple_fold(rune: char) -> char",
       "description": "Next rune in Unicode case-folding cycle.",
+      "lifecycle": "experimental",
+      "tier_support": [
+        "not_audited",
+        "not_audited",
+        "not_audited"
+      ],
+      "platform_support": "not_audited",
+      "limits": [],
+      "cookbook_tags": [],
+      "doc_anchor": "docs_src/stdlib.md#stdunicode",
+      "example_id": null,
+      "reference_status": "catalog_only"
+    },
+    {
+      "id": "std-unicode-str-width",
+      "name": "std::unicode::str_width",
+      "kind": "function",
+      "signature": "fn str_width(s: String) -> i64",
+      "description": "Terminal columns s occupies, reading emoji and variation sequences as the clusters a terminal draws.",
       "lifecycle": "experimental",
       "tier_support": [
         "not_audited",

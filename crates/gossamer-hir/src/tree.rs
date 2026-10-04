@@ -81,6 +81,12 @@ pub struct HirFn {
     pub has_self: bool,
     /// Where the declaration came from.
     pub origin: FnOrigin,
+    /// The library a foreign function's `#[link(name = "...")]` names, when
+    /// it is not in the platform C library.
+    pub foreign_link: Option<String>,
+    /// The C symbol a foreign function's `#[link_name = "..."]` names, when
+    /// it differs from the function's own name.
+    pub foreign_symbol: Option<String>,
 }
 
 /// Whether a function was written as a `fn` item or synthesized from a
@@ -93,6 +99,21 @@ pub enum FnOrigin {
     /// when a sequence combinator drives it, so it is a candidate for an
     /// invocation-scoped automatic region.
     LiftedClosure,
+    /// Declared in an `unsafe extern "C"` block: a native function with no
+    /// Gossamer body, reached through the C calling convention.
+    Foreign,
+}
+
+impl FnOrigin {
+    /// The origin of the source declaration `decl`.
+    #[must_use]
+    pub fn of(decl: &gossamer_ast::FnDecl) -> Self {
+        if decl.extern_abi.is_some() {
+            Self::Foreign
+        } else {
+            Self::Declared
+        }
+    }
 }
 
 /// Lowered parameter.

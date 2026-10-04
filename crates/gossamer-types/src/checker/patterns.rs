@@ -1496,6 +1496,15 @@ impl TypeChecker<'_> {
         let Some(resolution) = self.resolutions.get(node) else {
             return self.check_std_path_value(node, path, span);
         };
+        if let Resolution::Def { def, .. } = resolution
+            && !self.callee_path_nodes.contains(&node)
+            && let Some(name) = self.foreign_fns.get(&def).cloned()
+        {
+            self.emit(
+                TypeError::Foreign(crate::ForeignError::AsValue { name }),
+                span,
+            );
+        }
         match resolution {
             Resolution::Local(binding_id) => {
                 if !self.suppressed.consumed_iterator_read

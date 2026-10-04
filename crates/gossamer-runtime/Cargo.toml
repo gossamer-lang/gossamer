@@ -90,6 +90,7 @@ chrono-tz.workspace = true
 unicode-properties = { workspace = true }
 unicode-normalization = { workspace = true }
 unicode-segmentation = { workspace = true }
+unicode-width = { workspace = true }
 
 # User-facing TOML (`std::encoding::toml` compiled-tier helpers).
 toml = { workspace = true }
@@ -226,6 +227,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Console",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_IO",
+    "Win32_System_LibraryLoader",
     "Win32_System_Kernel",
     "Win32_System_Memory",
     "Win32_System_SystemInformation",

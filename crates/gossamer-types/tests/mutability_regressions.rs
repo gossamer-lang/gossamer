@@ -302,6 +302,41 @@ fn mutable_call_arguments_reject_aliases_through_captures_and_values() {
 }
 
 #[test]
+fn sibling_fields_of_one_root_are_disjoint_call_arguments() {
+    let network = "struct Neuron { weight: i64 }\n\
+                   impl Neuron { fn update(&mut self, inputs: Vec<Neuron>, total: &mut i64) { *total += inputs.len()\n self.weight += 1 } }\n\
+                   struct Net { hidden: Vec<Neuron>, output: Vec<Neuron>, total: i64 }\n";
+    assert_accepted(
+        "a by-value field beside a mutable sibling field",
+        &format!(
+            "{network}impl Net {{ fn train(&mut self) {{ for i in 0..self.output.len() {{ self.output[i].update(self.hidden, &mut self.total) }} }} }}\n\
+             fn main() {{ let mut net = Net {{ hidden: #[Neuron {{ weight: 1 }}], output: #[Neuron {{ weight: 2 }}], total: 0 }}\n net.train()\n println(net.total) }}"
+        ),
+    );
+    assert_accepted(
+        "two mutable sibling fields",
+        "struct P { a: i64, b: i64 }\nfn swap(x: &mut i64, y: &mut i64) { let t = *x\n *x = *y\n *y = t }\nfn main() { let mut p = P { a: 1, b: 2 }\n swap(&mut p.a, &mut p.b)\n println(p.a) }",
+    );
+    let overlapping = [
+        (
+            "a by-value field inside the mutable field",
+            "struct In { xs: Vec<i64> }\nstruct Out { inner: In }\nfn both(o: &mut In, xs: Vec<i64>) -> i64 { xs[0] }\nfn main() { let mut out = Out { inner: In { xs: #[1] } }\n let _ = both(&mut out.inner, out.inner.xs) }",
+        ),
+        (
+            "the whole root beside one of its fields",
+            "struct P { xs: Vec<i64>, n: i64 }\nfn both(n: &mut i64, p: P) -> i64 { p.n }\nfn main() { let mut p = P { xs: #[1], n: 0 }\n let _ = both(&mut p.n, p) }",
+        ),
+        (
+            "the same mutable field twice",
+            "struct P { a: i64 }\nfn swap(x: &mut i64, y: &mut i64) {}\nfn main() { let mut p = P { a: 1 }\n swap(&mut p.a, &mut p.a) }",
+        ),
+    ];
+    for (name, source) in overlapping {
+        assert_rejected(name, source, ExpectedError::MutableReferenceConflict);
+    }
+}
+
+#[test]
 fn mutable_windows_borrow_part_of_a_sequence() {
     assert_accepted(
         "window arguments, nested windows, receivers, and named windows",
@@ -350,12 +385,12 @@ fn windows_of_one_place_share_a_call_and_chunks_write_in_parallel() {
          v.par_chunks_mut(2, row)\n\
          v.par_chunks_mut(2, |i, c| c.fill(i))\n println(\"{}\", v) }",
     );
+    assert_accepted(
+        "windows of two sibling fields",
+        "struct G { a: Vec<i64>, b: Vec<i64> }\nfn merge(a: &mut [i64], b: &mut [i64]) {}\n\
+         fn main() { let mut g = G { a: #[1], b: #[2] }\n merge(&mut g.a[0..1], &mut g.b[0..1]) }",
+    );
     for (name, source) in [
-        (
-            "windows of two different places under one root",
-            "struct G { a: Vec<i64>, b: Vec<i64> }\nfn merge(a: &mut [i64], b: &mut [i64]) {}\n\
-             fn main() { let mut g = G { a: #[1], b: #[2] }\n merge(&mut g.a[0..1], &mut g.b[0..1]) }",
-        ),
         (
             "a window beside the whole sequence",
             "fn both(a: &mut [i64], b: &mut Vec<i64>) {}\n\
