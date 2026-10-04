@@ -3,7 +3,8 @@
 // terminal attached, `std::os::fd` readiness, the `std::os::signal`
 // numbers, `std::unicode` widths, the `std::image` byte bridge, and
 // `runtime::at_exit` hooks, which print after `main` returns, last
-// registered first.
+// registered first. The polling and width loops are plain functions the
+// compiled tiers run themselves on every platform.
 
 use std::image
 use std::os::fd
@@ -12,7 +13,26 @@ use std::runtime
 use std::term
 use std::unicode
 
+fn writable_polls(polls: i64) -> i64 {
+    let mut ready = 0
+    for _ in 0..polls {
+        if fd::wait_writable(1, 0).unwrap() && !term::is_terminal(term::STDOUT) {
+            ready += 1
+        }
+    }
+    ready
+}
+
+fn columns(text: String) -> i64 {
+    let mut total = 0
+    for c in text {
+        total += unicode::char_width(c)
+    }
+    total
+}
+
 fn main() {
+    println(f"writable polls: {writable_polls(3)} columns: {columns("日本 go")}")
     println(f"stdout is a terminal: {term::is_terminal(term::STDOUT)}")
     println(f"size without a terminal fails: {term::size().is_err()}")
     println(f"raw mode without a terminal fails: {term::enter_raw().is_err()}")

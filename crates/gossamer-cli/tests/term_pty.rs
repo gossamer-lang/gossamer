@@ -41,20 +41,22 @@ fn gos() -> PathBuf {
 fn open_pty() -> (OwnedFd, OwnedFd) {
     let mut master = -1;
     let mut slave = -1;
-    let size = libc::winsize {
+    let mut size = libc::winsize {
         ws_row: 33,
         ws_col: 101,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // macOS declares the termios and size arguments `*mut`, Linux `*const`;
+    // a `*mut` argument fits both.
     // SAFETY: both out-pointers are valid; the name and termios are optional.
     let rc = unsafe {
         libc::openpty(
             &raw mut master,
             &raw mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &raw const size,
+            std::ptr::null_mut(),
+            &raw mut size,
         )
     };
     assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
